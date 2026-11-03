@@ -1171,6 +1171,16 @@ describe("node detail reports a guidance block's installed file only from eviden
       declaredTarget: "CLAUDE.md", effectiveTarget: path.join(cwd, "AGENTS.md") });
   });
 
+  it("follows a Pi seat's recorded guidance file in its agent folder, not the repository AGENTS.md (#875)", () => {
+    const agentFile = path.join(cwd, "pi-state", "dev-impl@test-rig", "agent", "AGENTS.md");
+    fs.mkdirSync(path.dirname(agentFile), { recursive: true });
+    fs.writeFileSync(agentFile, block("role"));
+    fs.writeFileSync(path.join(cwd, "AGENTS.md"), block("role")); // a stale repository copy isn't evidence for this seat
+    seedStartupContext(db, "node-1", { runtime: "pi", projectionEntries: [guidance("AGENTS.md")] });
+    db.prepare("UPDATE node_startup_context SET guidance_file = ? WHERE node_id = 'node-1'").run(agentFile);
+    expect(getNodeDetail(db, "rig-1", "dev.impl")!.installedResources[0]).toMatchObject({ targetPath: agentFile, effectiveTarget: agentFile });
+  });
+
   it("claims nothing for a runtime with no known guidance file, a merge that writes nothing, or a half-written block", () => {
     fs.writeFileSync(path.join(cwd, "AGENTS.md"), block("role"));
     expect(installed("synth")[0]).toEqual({ id: "role", category: "guidance", targetPath: "", declaredTarget: "AGENTS.md" });

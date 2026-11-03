@@ -776,6 +776,25 @@ describe("StartupOrchestrator", () => {
     expect(read()).toEqual(before);
   });
 
+  // #875 direction 2: a launch decides once where its managed guidance goes and records it; a restore passes the saved
+  // choice (null for an older snapshot), so the adapter isn't asked again and an old seat isn't silently repointed.
+  it("records the adapter's chosen guidance file at launch, and uses a restore's saved choice without asking again", async () => {
+    const seed = seedSession(); const orch = createOrchestrator();
+    const chosen = "/openrig-home/state/pi/r01-impl/agent/AGENTS.md";
+    const guidanceFileFor = vi.fn(() => ({ file: chosen }));
+    const adapter = mockAdapter({ runtime: "pi", guidanceFileFor } as never);
+    const recorded = () => (db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { guidance_file: string | null }).guidance_file;
+    expect((await orch.startNode(makeInput(seed, { adapter }))).ok).toBe(true);
+    expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).toMatchObject({ guidanceFile: chosen });
+    expect(vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1]).toMatchObject({ guidanceFile: chosen });
+    expect(recorded()).toBe(chosen);
+    guidanceFileFor.mockClear();
+    const restored = await orch.startNode(makeInput(seed, { adapter, isRestore: true, binding: { ...makeBinding(), guidanceFile: null } }));
+    expect(restored.ok).toBe(true);
+    expect(guidanceFileFor).not.toHaveBeenCalled();
+    expect(recorded()).toBeNull();
+  });
+
   it("exact resume retains configured fresh context while sending no replay", async () => {
     const seed = seedSession(); const orch = createOrchestrator();
     const action = makeAction({ type: "send_text", value: "configured context" });
