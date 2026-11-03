@@ -36,13 +36,13 @@ it("the whose command chooses whose queue the Feed reads, and the Feed says who 
 
   view.dispatch(parseCommand("attention")); await refresh();
   expect(views.at(-1)).toBe("default");
-  expect(title()).toBe("FEED · Viewing mike@external · you act as mike@external · whose all shows everyone");
+  expect(title()).toBe("FEED · Viewing mike@external · you act as human@host (unattributed) · whose all shows everyone");
 
   view.dispatch(parseCommand("whose sarah")); await refresh();
   expect(view.get()).toMatchObject({ section: "needs", attentionView: "sarah" });
   expect(views.at(-1)).toBe("sarah");
   // Viewing Sarah is not acting as Sarah.
-  expect(title()).toBe("FEED · Viewing sarah@external · you act as mike@external · whose all shows everyone");
+  expect(title()).toBe("FEED · Viewing sarah@external · you act as human@host (unattributed) · whose all shows everyone");
 
   // Leaving the Feed and coming back keeps the chosen view.
   view.dispatch(parseCommand(":topology")); view.dispatch(parseCommand("attention")); await refresh();
@@ -50,7 +50,7 @@ it("the whose command chooses whose queue the Feed reads, and the Feed says who 
 
   view.dispatch(parseCommand("whose all")); await refresh();
   expect(views.at(-1)).toBe("all");
-  expect(title()).toBe("FEED · Viewing everyone · you act as mike@external");
+  expect(title()).toBe("FEED · Viewing everyone · you act as human@host (unattributed)");
 
   view.dispatch(parseCommand("whose default")); await refresh();
   expect(view.get().attentionView).toBeNull();
@@ -60,9 +60,9 @@ it("the whose command chooses whose queue the Feed reads, and the Feed says who 
 it("the header says when the view names no one, when no default is chosen, and is as before with no one registered", () => {
   const state = createViewState({ instanceId: "perspective" }).get();
   const lines = (r: AttentionRead) => attentionLines({ ...state, section: "needs" }, { ...emptySnapshot(), attentionRead: r }, 120).map(l => l.text);
-  expect(lines(read({ ...perspective(null, "unknown"), requested: "ana" }))[0]).toBe('FEED · Viewing no registered person "ana" · you act as mike@external');
+  expect(lines(read({ ...perspective(null, "unknown"), requested: "ana" }))[0]).toBe('FEED · Viewing no registered person "ana" · you act as human@host (unattributed)');
   expect(lines(read(perspective(null, "all", "none"))).slice(0, 2)).toEqual([
-    "FEED · Viewing everyone · you act as the primary user",
+    "FEED · Viewing everyone · you act as human@host (unattributed)",
     "No default person is chosen: rig gateway default <id> chooses one.",
   ]);
   expect(lines(read())[0]).toBe("FEED · Instance / All humans");
@@ -90,11 +90,11 @@ it("an act on someone else's ask says who acts and whose ask it is, and carries 
   const state = { ...createViewState({ instanceId: "perspective" }).get(), section: "needs", attentionOpen: item.id };
   const approve = (snap: FleetSnapshot) => attentionLines(state, snap, 160).find(l => l.action?.type === "act")!;
   const viewingSarah = approve(served(perspective("sarah@external", "chosen-here")));
-  expect(viewingSarah.text).toContain("Approve as mike@external on sarah@external's ask");
+  expect(viewingSarah.text).toContain("Approve as human@host (unattributed) on sarah@external's ask");
   expect(answerRequest(viewingSarah.action as Extract<Action, { type: "act"; act: "answer" }>)).toEqual(
     { verb: "approve", qitemId: "sarahs", actorSession: "sarah@external", authority: "primary-user" });
-  // With no one registered, the label is as before.
-  expect(approve(served()).text).toContain("Approve as sarah@external (closes");
+  // With no one registered, the terminal still names no responder: unattributed too.
+  expect(approve(served()).text).toContain("Approve as human@host (unattributed) (closes");
 });
 
 it("a row parked on someone is resolved with reply, in words, as the primary user", () => {
@@ -104,7 +104,7 @@ it("a row parked on someone is resolved with reply, in words, as the primary use
   const snap: FleetSnapshot = { ...emptySnapshot(), attentionRead: { ...read(perspective("sarah@external", "chosen-here")), items: [item], detail: { item, lines: [], files: [] } } };
   const state = { ...createViewState({ instanceId: "perspective" }).get(), section: "needs", attentionOpen: item.id };
   const text = attentionLines(state, snap, 160).map(l => l.text).join("\n");
-  expect(text).toContain("Resolve it in your own words: reply <your decision>, as mike@external on sarah@external's ask");
+  expect(text).toContain("Resolve it in your own words: reply <your decision>, as human@host (unattributed) on sarah@external's ask");
   const act = replyAct(snap.attentionRead, item.id, "Use the wide layout");
   expect(act).toEqual({ type: "act", act: "answer", qitemId: "parked", verb: "resolve", actorSession: "sarah@external", decision: "Use the wide layout" });
   expect(answerRequest(act as Extract<Action, { type: "act"; act: "answer" }>)).toMatchObject({ verb: "resolve", decision: "Use the wide layout", authority: "primary-user" });

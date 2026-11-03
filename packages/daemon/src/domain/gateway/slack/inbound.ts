@@ -375,7 +375,10 @@ export class InboundRouter {
       const resumedPark = correlated?.state === "in-progress";
       const askOpen = correlated?.state === "pending" || parkOpen;
       const closed = correlated?.state === "done" || correlated?.state === "handed-off";
-      const answerable = !ev.recoveredThreadReply && !asChannel && route.correlationQitemId !== undefined;
+      // A reply routed to another person (a root recorded with a person as its seat) isn't an answer to the asker: it stays
+      // words for whoever it reached.
+      const settles = route.correlationQitemId === undefined || this.deps.queue.routesToAsker?.(route.correlationQitemId, route.destination) !== false;
+      const answerable = !ev.recoveredThreadReply && !asChannel && route.correlationQitemId !== undefined && settles;
       // An absorbed event has its own identity even when the first answer came from a button or Steering.
       const consumedKey = (answerId: string) => `answer-event:${JSON.stringify([eventId, route.correlationQitemId, who.source, answerId])}`;
       // A closed ask can hold several returned answers (one per park). A replay finds the one this event returned, or the
@@ -416,14 +419,14 @@ export class InboundRouter {
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
-          ...(askOpen && !ev.recoveredThreadReply && !asChannel ? { humanAnswer: true, typedReply: true } : {}),
+          ...(askOpen && answerable ? { humanAnswer: true, typedReply: true } : {}),
         });
       } catch (e) {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
         return { landed: false, reason: "create_failed" };
       }
       let replyResolution: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable" | undefined;
-      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && !ev.recoveredThreadReply && !asChannel) {
+      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && answerable) {
         try {
           // Reusing the durable answer consumed this event's words. Record that before close, but
           // keep the raw event unmarked until completion so an interrupted close can still retry.
@@ -579,10 +582,16 @@ export class InboundRouter {
     const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked, clickedTs: action?.action_ts });
     if (!recorded || recorded.status !== "recorded") {
       const reason = recorded?.reason ?? "answers-unavailable";
+      // Another person's committed answer is the answer: a park on the person resumes with it through the resolver.
+      if (recorded?.answeredBy) {
+        try { await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: "", messageTs: action?.action_ts }); }
+        catch (e) { this.deps.log?.(`answer continuation failed qitem=${qitemId}: ${(e as Error).message}`); }
+      }
       // A closed decision holding this person's clicked answer: typically Slack's redelivery of the click that closed
       // it, after that click's own confirmation failed to post. It was recorded, so say that.
       if (live) {
         await acknowledge(recorded?.answerOnRecord ? CLICK_REPLIES.onRecord
+          : recorded?.answeredBy ? escapeSlackText(`${recorded.answeredBy} already answered this, so your choice wasn't recorded.`)
           : recorded?.decidedForThem ? escapeSlackText(redactSecrets(decidedForThemReply(recorded.decidedForThem))) : clickNotRecordedReply(reason));
       }
       return { status: "ignored", reason };
