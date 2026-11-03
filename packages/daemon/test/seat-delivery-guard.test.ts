@@ -27,6 +27,8 @@ import { describe, it, expect, vi } from "vitest";
 import Database from "better-sqlite3";
 import { SeatDeliveryGuard, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
+import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 
@@ -292,6 +294,17 @@ describe("real queue transaction and retained delivery",()=>{
     expect(f.outbox.getById(`wake-intent-${created.qitemId}`)).toBeNull();
     expect(f.outbox.heldForNode("a").total).toBe(100);
     expect(f.writes).toEqual([]);f.db.close();
+  });
+  it("a mission control handoff to a seat whose held quota is full moves the work too, as a queue handoff does",async()=>{
+    const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
+    await f.guard.set("a",true,"person","draft");
+    for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:"sender@test",destinationSession:"worker@test",body:"held"},f.guard.target("a"));
+    const contract=new MissionControlWriteContract({db:f.db,eventBus:f.bus,queueRepo:f.repo,actionLog:new MissionControlActionLog(f.db)});
+    const result=await contract.act({verb:"handoff",qitemId:source.qitemId,actorSession:"human@test",destinationSession:"worker@test"});
+    expect(f.repo.getById(source.qitemId)!.state).toBe("handed-off");
+    expect(f.repo.getById(result.createdQitemId!)).toMatchObject({state:"pending",destinationSession:"worker@test",body:"work",
+      lastNudgeResult:expect.stringMatching(/^failed:wake not retained: Held-message quota is full/)});
+    expect(f.outbox.heldForNode("a").total).toBe(100);f.db.close();
   });
   it("handoff retains one audited intent without duplicate transport record or delivered label",async()=>{
     const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
