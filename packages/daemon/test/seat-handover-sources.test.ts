@@ -466,6 +466,20 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(sendKeys).toHaveBeenLastCalledWith("dev-impl@seat-rig", ["Enter"]);
   });
 
+  it("discovered: a live session OpenRig didn't launch gets no typed notice, and the result still names the held messages (#2431)", async () => {
+    const { node } = seedSeat();
+    db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql);
+    new OutboxHandler(db).retain({ outboxId: "held-1", senderSession: "orch-lead@seat-rig", destinationSession: "dev-impl@seat-rig", body: "Real work for you" },
+      { nodeId: node.id, session: "dev-impl@seat-rig", occupant: null, pane: null });
+    const discovered = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "successor-session", tmuxPane: "%1", tmuxWindow: "0", runtimeHint: "codex", confidence: "high", cwd: "/project" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: `discovered:${discovered.id}` });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true, warnings: [expect.stringContaining("1 held message was kept for this seat and not delivered")] } });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it("a seat-pane discovery row claimed by another node still refuses the handover (#237 holds)", async () => {
     const { rig, node, sessionId } = seedSeat();
     const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex", cwd: "/project" });
