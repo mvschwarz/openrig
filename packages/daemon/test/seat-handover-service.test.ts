@@ -202,8 +202,9 @@ describe("SeatHandoverService", () => {
       },
       sideEffects: {
         departingSessionKilled: false,
+        departingProcess: "not-touched",
         startupContextDelivered: false,
-        provenanceRecordWritten: false,
+        provenanceRecordWritten: true,
       },
     });
     expect(result.result.previousSessionIdsSuperseded).toContain(sessionId);
@@ -845,6 +846,32 @@ describe("SeatHandoverService", () => {
     expect(binding.codexRebuildPermissions).toBeUndefined();
     expect(binding.codexPermissions).toEqual(own);
   });
+
+  it.each(["minted", "mint fails"] as const)("a rebuild handover's receipt reads its lineage record back (%s)", async (mint) => {
+    const { node } = seedSeat();
+    // The tenure mint is best-effort: a failed one is logged and swallowed, and the handover still completes.
+    const failing = mint === "mint fails"
+      ? [vi.spyOn(sessionRegistry, "mintOccupantTenure").mockImplementation(() => { throw new Error("ledger unavailable"); }),
+        vi.spyOn(console, "warn").mockImplementation(() => {})]
+      : [];
+    try {
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { provenanceRecordWritten: mint === "minted" } } });
+      if (mint === "minted") expect(sessionRegistry.currentOccupantTenure(node.id)).toMatchObject({ kind: "handover" });
+    } finally {
+      for (const spy of failing) spy.mockRestore();
+    }
+  });
+
+  it.each([["graceful", "ended-graceful"], ["forced", "ended-forced"]] as const)(
+    "a rebuild handover's receipt says how the departing process ended (%s)", async (exit, reported) => {
+      seedSeat();
+      // The retiree exits on TERM, or only once KILL follows the TERM window.
+      if (exit === "forced") isPaneDead.mockImplementation(async () => signalPaneProcess.mock.calls.some((call) => call[1] === "KILL"));
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { departingSessionKilled: false, departingProcess: reported } } });
+      expect(signalPaneProcess.mock.calls.some((call) => call[1] === "KILL")).toBe(exit === "forced");
+    });
 
   it.each(["observed", "unverified", "changed selection", "cleared selection", "profile change", "older selection"])(
     "rebuild permission result: %s", async state => {
