@@ -8,6 +8,8 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { StartupOrchestrator, isRecoverableStartupFailure, type StartupInput, type StartupResult } from "../src/domain/startup-orchestrator.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile, ProjectionResult, StartupDeliveryResult, ReadinessResult } from "../src/domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
@@ -732,6 +734,7 @@ describe("StartupOrchestrator", () => {
 
   it("tells a seat that starts with held messages, once, and names it in the launch's warnings (#2431)", async () => {
     const seed = seedSession();
+    db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql); // as the guard suites add the held-message store
     new OutboxHandler(db).retain({ outboxId: "held-1", senderSession: "planner@test-rig", destinationSession: "r01-impl", body: "Real work for you" },
       { nodeId: seed.nodeId, session: "r01-impl", occupant: null, pane: null });
     const send = vi.spyOn(SessionTransport.prototype, "send").mockResolvedValue({ ok: true, sent: true } as never);
