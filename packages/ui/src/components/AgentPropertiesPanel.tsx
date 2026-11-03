@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useNodeDetail } from "../hooks/useNodeDetail.js";
+import { useHostSelection } from "../hooks/useHosts.js";
 import { StatusBadge } from "./ui/status-badge.js";
 import { Skeleton } from "./ui/skeleton.js";
 import { EmptyState } from "./ui/empty-state.js";
@@ -23,7 +24,8 @@ function CopyButton({ text, testId }: { text: string; testId: string }) {
       type="button"
       data-testid={testId}
       onClick={async () => {
-        await copyText(text);
+        const ok = await copyText(text);
+        if (!ok) return;
         setCopied(true);
         if (timer.current) clearTimeout(timer.current);
         timer.current = setTimeout(() => setCopied(false), 1500);
@@ -43,6 +45,7 @@ export function AgentPropertiesPanel({
   logicalId: string;
 }) {
   const { data, isLoading, error } = useNodeDetail(rigId, logicalId);
+  const { known: hostKnown, isLocal: hostIsLocal } = useHostSelection();
 
   if (isLoading) {
     return (
@@ -133,7 +136,8 @@ export function AgentPropertiesPanel({
             {qitemCount > 0 ? `${qitemCount} in progress` : "None"}
           </dd>
         </div>
-        {data.tmuxAttachCommand && (
+        {/* tmux attach targets LOCAL sessions only — hide for remote hosts. */}
+        {data.tmuxAttachCommand && (!hostKnown || hostIsLocal) && (
           <div className={ROW_CLASS}>
             <dt className={LABEL_CLASS}>Attach</dt>
             <dd className={`${VALUE_CLASS} font-mono`}>

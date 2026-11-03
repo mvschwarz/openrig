@@ -118,6 +118,46 @@ describe("AgentPropertiesPanel", () => {
     expect(await screen.findByText("Copied")).toBeDefined();
   });
 
+  it("F1: copy button does NOT say Copied when all copy methods fail", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => NODE_DETAIL });
+    // Kill the clipboard API so copyText falls to execCommand; fail that too.
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      value: undefined,
+      configurable: true,
+      writable: true,
+    });
+    // jsdom lacks execCommand: provide it, returning false (all methods fail).
+    Object.defineProperty(globalThis.document, "execCommand", {
+      value: vi.fn().mockReturnValue(false),
+      configurable: true,
+      writable: true,
+    });
+    renderPanel();
+
+    const copyBtn = await screen.findByTestId("agent-properties-copy-attach");
+    fireEvent.click(copyBtn);
+
+    // Flush the async handler (the component awaits copyText), then assert
+    // the FIXED behavior. Buggy code sets Copied unconditionally → RED now;
+    // fixed code leaves Copy → GREEN after the fix.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(copyBtn.textContent).toBe("Copy");
+  });
+
+  it("F2: attach row is hidden when a remote host is selected", async () => {
+    mockFetch.mockImplementation(async (url: unknown) => {
+      if (String(url).includes("/api/hosts")) {
+        return { ok: true, json: async () => ({ selected: "remote-1", hosts: [] }) };
+      }
+      return { ok: true, json: async () => NODE_DETAIL };
+    });
+    renderPanel();
+
+    // Panel loads, but no attach row under a remote selection.
+    await screen.findByText("claude-code");
+    expect(screen.queryByTestId("agent-properties-copy-attach")).toBeNull();
+  });
+
   it("error state shows Couldn't load this agent", async () => {
     mockFetch.mockRejectedValue(new Error("boom"));
     renderPanel();
