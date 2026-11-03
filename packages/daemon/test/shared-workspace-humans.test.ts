@@ -119,7 +119,7 @@ describe("shared-workspace people", () => {
     // One answer per ask on every surface, including a process stopped between a committed answer and the close.
     const ports = () => makeQueuePorts(repo, { loadHumanRegistry: () => loadHumanRegistry(home), sharedChannels: () => [] });
     const slackAnswer = (askId: string, who: string, words: string) => ports().createQitem({ qitemId: `qitem-slack-inbound-${who.split("@")[0]}-${askId}`,
-      source: who, destination: ASKER, summary: words, body: words, inReplyTo: askId, humanAnswer: true, typedReply: true });
+      source: who, destination: ASKER, summary: words, body: words, inReplyTo: askId, humanAnswer: true });
 
     it("Bob's Slack answer committed before Sarah answers in the Feed: Sarah is told Bob answered, and it settles once, as Bob's", async () => {
       register("sarah", "bob");

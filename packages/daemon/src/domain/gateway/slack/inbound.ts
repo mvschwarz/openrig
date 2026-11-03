@@ -419,7 +419,7 @@ export class InboundRouter {
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
-          ...(askOpen && answerable ? { humanAnswer: true, typedReply: true } : {}),
+          ...(askOpen && answerable ? { humanAnswer: true } : {}),
         });
       } catch (e) {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
@@ -563,7 +563,10 @@ export class InboundRouter {
       if (live) await acknowledge(CLICK_REPLIES.unmapped);
       return { status: "ignored", reason: "unmapped-message" };
     }
-    const existing = this.deps.queue.getHumanAnswer?.(qitemId, who.source);
+    // A decision parked on this person takes the current question's answer, as a typed reply does: a re-park gets its own.
+    const parkOpen = this.deps.queue.getQitem?.(qitemId)?.state === "blocked"
+      && this.deps.queue.answersPark?.(qitemId, who.source, action?.action_ts) === true;
+    const existing = parkOpen ? this.deps.queue.getEpisodeAnswer?.(qitemId, who.source) : this.deps.queue.getHumanAnswer?.(qitemId, who.source);
     if (existing) {
       try {
         const resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: humanAnswerText(existing.body), messageTs: action?.action_ts });
