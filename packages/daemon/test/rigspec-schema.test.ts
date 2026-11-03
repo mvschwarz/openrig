@@ -732,4 +732,10 @@ describe("a Claude member's own plugin channels (#2044)", () => {
     }
     expect(errors(withFields(0, { plugin_channels: ["plugin:a@b", "plugin:a@b"] }))).toMatch(/plugin_channels\[1\]: listed twice \("plugin:a@b"\)/);
   });
+
+  it("refuses channels beside claude_mcp: none, which starts Claude without MCP servers; an empty list beside it is fine", () => {
+    expect(errors(withFields(0, { plugin_channels: ["plugin:a@b"], claude_mcp: "none" })))
+      .toMatch(/members\[0\]\.plugin_channels: claude_mcp is "none", which starts Claude without MCP servers \(plugin servers included\), so no channel could register/);
+    expect(RigSpecSchema.validate(withFields(0, { plugin_channels: [], claude_mcp: "none" })).valid).toBe(true);
+  });
 });

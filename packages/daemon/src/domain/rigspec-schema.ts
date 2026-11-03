@@ -1286,6 +1286,11 @@ function validateClaudeAdditions(member: Record<string, unknown>, prefix: string
           errors.push(`${label}: listed twice ("${entry}")`);
         }
       });
+      // `claude_mcp: none` starts Claude with only an empty MCP server set, plugin servers left out too, so no channel
+      // could register.
+      if (channels.length > 0 && member["claude_mcp"] === "none") {
+        errors.push(`${prefix}.plugin_channels: claude_mcp is "none", which starts Claude without MCP servers (plugin servers included), so no channel could register; remove one of the two`);
+      }
     }
   }
   return errors;
