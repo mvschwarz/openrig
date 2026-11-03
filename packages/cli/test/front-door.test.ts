@@ -9,23 +9,15 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { createServer } from "node:net";
+import { closedOwnedHttpPort } from "./helpers/owned-http-fixture.js";
 import { runFrontDoor, resolveTuiPath, probeFrontDoor, type FrontDoorIo } from "../src/front-door.js";
 import { diagnoseRuntimePosture, observeClaudePermission } from "../../daemon/src/domain/permission-drift.js";
 import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 
-// A GUARANTEED-refused local port (bind an ephemeral port, capture it, close → connecting refuses).
-// A REAL socket refusal, not a hand-built error — buys the actual Node/undici rejection shape.
+// A high local port closed before the request, avoiding fetch's own bad-port
+// rejection. A released port cannot be reserved against another process.
 async function refusedPort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = typeof addr === "object" && addr ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
+  return closedOwnedHttpPort();
 }
 
 function io(overrides: Partial<FrontDoorIo> = {}): FrontDoorIo & {

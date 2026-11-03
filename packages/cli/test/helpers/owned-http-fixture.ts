@@ -1,4 +1,4 @@
-import type { Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import { randomInt } from "node:crypto";
 import { allowFetchTarget } from "../fetch-guard.js";
 
@@ -32,5 +32,19 @@ export async function listenOwnedHttpFixture(server: Server, options: { host?: s
     } catch (error) {
       if (!["EADDRINUSE", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "") || attempt === 15) throw error;
     }
+  }
+}
+
+/** Bind a fetch-compatible port and close it before handing it to a refusal test.
+ * As with any released port, this cannot reserve it against another process. */
+export async function closedOwnedHttpPort(): Promise<number> {
+  const server = createServer();
+  try {
+    await listenOwnedHttpFixture(server);
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Owned refusal fixture lacks a TCP address");
+    return address.port;
+  } finally {
+    if (server.listening) await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
   }
 }

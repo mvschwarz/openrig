@@ -1,10 +1,17 @@
 import http from "node:http";
 import { EventEmitter } from "node:events";
 import { afterEach, expect, it } from "vitest";
-import { allowOwnedHttpFixture, listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { allowOwnedHttpFixture, closedOwnedHttpPort, listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { resetFetchAllowlist } from "./fetch-guard.js";
 
 afterEach(resetFetchAllowlist);
+
+it("hands refusal tests a closed high port and observes a real socket refusal",async()=>{
+  const port=await closedOwnedHttpPort();
+  expect(port).toBeGreaterThanOrEqual(49152);expect(port).toBeLessThan(65536);
+  const error=await fetch(`http://127.0.0.1:${port}`).then(()=>null,(failure:unknown)=>failure);
+  expect(error).toMatchObject({cause:{code:"ECONNREFUSED"}});
+});
 
 it("requires a bound server before registering any target", () => {
   expect(() => allowOwnedHttpFixture(http.createServer())).toThrow(/has not bound/);

@@ -1,5 +1,28 @@
 # Native Windows parity: implementation and evidence
 
+## Closed-port refusal fixtures now avoid fetch's bad-port list (2026-11-03)
+
+The two previously identified closed-port helpers in front-door and busy-daemon
+request tests now bind a fetch-compatible high loopback port through the owned
+helper and await its closure before handing out the port. A real regression
+observes `ECONNREFUSED` as fetch's underlying cause, distinguishing actual socket
+refusal from fetch's preconnection `bad port` rejection. As with any released
+port, this is not a reservation against another process; the prior comment's
+unconditional guarantee has been removed.
+
+Four selected files passed 65 tests with one real-PTY skip and no failures; CLI
+typecheck and whitespace checks passed. The skipped public-bin PTY case remains
+unverified and is not counted as acceptance.
+
+The updated structural inventory retains only eight direct port-zero calls:
+seven previously inspected TCP occupancy/ownership/exclusive-bind/IPv6 cases and
+the guard's deliberate OS-port-zero registration case. No imported Hono port-zero
+call remains. This completes the identified HTTP bad-port fixture migration,
+not a proof of all possible listener patterns, a fresh full directory result or
+full native parity. File identity mapping and real provider/terminal acceptance
+remain outstanding. No original team, real-provider/psmux opt-in, exhausted
+desktop-discovery fixture, deployment or public push was exercised.
+
 ## Final manually identified HTTP listeners and guard-test separation (2026-11-03)
 
 Eight real HTTP fixture listeners previously hidden in mixed/dynamic-import or
