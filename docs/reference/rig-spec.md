@@ -1282,7 +1282,7 @@ consumers of the library listing; user specs remain visible. Use
 back to `true` to restore the default. Explicit `show`, `preview`, and launch
 lookups can still find hidden built-ins. When built-ins are hidden and a user
 spec has the same name, the user spec wins the name lookup; use the built-in's
-ID from the explicit listing to select the built-in. With built-ins visible,
+ID from `rig specs ls --include-builtins --json` to select it. With built-ins visible,
 same-name matches remain ambiguous. This is an inventory preference, not an
 access-control boundary; other endpoints and on-disk files can still expose the
 built-ins.
