@@ -1,5 +1,36 @@
 # Native Windows parity: implementation and evidence
 
+## Directory metadata readback and failed access-change recovery (2026-11-03)
+
+Remote directory mode/time application now requires directory observations
+before and after SETSTAT, verifies requested timestamps, and verifies POSIX mode
+bits on POSIX-shaped endpoints. Known Windows endpoints do not claim POSIX
+directory-mode/DACL equivalence. Temporary access borrowing and restoration carry
+an explicit directory type. If the initial access change fails qualification,
+the engine attempts and verifies restoration before returning the error; a
+failed/ineffective restore is explicitly reported as unconfirmed. It does not
+proceed to copy children after that initial failure.
+
+Controlled faults through real owned SFTP subsystems cover ignored timestamps,
+a changed entry type, timestamps installed without requested POSIX mode, and an
+incorrect temporary access change with both successful and ignored restoration.
+Original conflicting file bytes remain intact on staged-directory metadata
+failure. These path observations are not inode-bound atomic operations against
+a hostile directory actor, and directory ownership translation remains incomplete.
+
+Four selected files completed with zero failures: Windows passed 36 with 18
+platform skips; WSL passed 25 with 29 platform skips. On WSL, all five new
+directory-metadata cases and all 13 readonly/staging-mode cases executed and
+passed; Windows executed both applicable new real-subsystem cases. CLI typecheck
+and whitespace checks passed. The WSL run hash-matched six explicitly copied
+public files, using existing dependencies/build; private source was not viewed
+or copied. This is not a complete checkout/build or fresh full-suite checkpoint.
+
+No original team, provider authentication, user-file ownership, deployment or
+public push was changed. SID/DACL mapping, source identity translation, link
+ownership, directory replacement identity and remaining real acceptance gaps
+remain outstanding.
+
 ## Uploaded regular-file metadata completes on the open handle (2026-11-03)
 
 Remote regular uploads now apply final mode/timestamps with FSETSTAT before

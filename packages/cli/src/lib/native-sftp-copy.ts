@@ -122,7 +122,18 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       followsDirectory: async file => { const attrs=await client!.stat(file); return attrs ? kind(attrs) === 0o040000 : undefined; },
       link: file => client!.readlink(file), mkdir: file => client!.mkdir(file), rmdir: file => client!.rmdir(file), remove: file => client!.remove(file), symlink: (target, file) => client!.symlink(target, file),
       read: file => client!.read(file), write: (file, data, ownership, metadata) => client!.write(file, data, ownership, metadata, windowsRemote ? 0o200 : 0o7777),
-      times: (file, attrs) => client!.setTimes(file, attrs), rename: (src, dst, replacing) => client!.rename(src, dst, replacing),
+      times: async (file, attrs) => {
+        if (kind(attrs) === 0o040000 && kind(await client!.lstat(file)) !== 0o040000) throw new Error(`SFTP directory metadata target changed: ${file}`);
+        await client!.setTimes(file, attrs);
+        if (kind(attrs) === 0o040000) {
+          const verified = await client!.lstat(file);
+          if (kind(verified) !== 0o040000
+            || !windowsRemote && attrs.mode !== undefined && (verified!.mode! & 0o7777) !== (attrs.mode & 0o7777)
+            || attrs.atime !== undefined && attrs.mtime !== undefined && (verified?.atime !== attrs.atime || verified.mtime !== attrs.mtime)) {
+            throw new Error(`SFTP directory metadata was not preserved: ${file}`);
+          }
+        }
+      }, rename: (src, dst, replacing) => client!.rename(src, dst, replacing),
       ...(client.extensionVersions.get("lsetstat@openssh.com") === "1"
         ? { linkTimes: (file: string, attrs: SftpAttrs) => client!.setLinkTimes(file, attrs) } : {}),
     };
@@ -181,7 +192,14 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
         }
         const borrowedMode = !plan.dryRun && !(destination === local && process.platform === "win32")
           && existing?.mode !== undefined && names.length && (existing.mode & 0o700) !== 0o700 ? existing.mode & 0o7777 : undefined;
-        if (borrowedMode !== undefined) await destination.times(dst, { mode: borrowedMode | 0o700 });
+        if (borrowedMode !== undefined) {
+          try { await destination.times(dst, { mode: 0o040000 | borrowedMode | 0o700 }); }
+          catch (error) {
+            try { await destination.times(dst, { mode: 0o040000 | borrowedMode }); }
+            catch (restore) { throw new AggregateError([error,restore],`Directory access change failed and original permissions could not be restored: ${dst}`); }
+            throw error;
+          }
+        }
         let childError: unknown;
         try {
           for (const name of names) {
@@ -202,7 +220,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
           if (!plan.dryRun) await destination.times(dst, attrs);
         } catch (error) {
           if (borrowedMode !== undefined) {
-            try { await destination.times(dst, { mode: borrowedMode }); }
+            try { await destination.times(dst, { mode: 0o040000 | borrowedMode }); }
             catch (restore) { throw new AggregateError([childError, error, restore].filter(Boolean), `Directory metadata failed and original permissions could not be restored: ${dst}`); }
           }
           if (childError) throw new AggregateError([childError, error], `Copy and directory metadata finalization failed: ${dst}`);
