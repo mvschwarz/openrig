@@ -207,10 +207,11 @@ const UPLOADS_OFF = [
   "",
 ].join("\n");
 
-/** Each seat gets its own writable dsh home (dsh rewrites its profile there on every start). DSH_HOME, which a rig
- *  spec's env: can set, or OPENRIG_DSH_HOME names one you prepared yourself, which is used as it is. */
+/** Each seat gets its own writable dsh home (dsh rewrites its profile there on every start). DSH_SEAT_HOME, which a rig
+ *  spec's env: can set, or OPENRIG_DSH_HOME names one you prepared yourself, which is used as it is. Not dsh's own
+ *  DSH_HOME: a person's shell startup files can export it, and they run after the seat's env:. */
 function seatHome() {
-  const prepared = process.env.OPENRIG_DSH_HOME || process.env.DSH_HOME;
+  const prepared = process.env.OPENRIG_DSH_HOME || process.env.DSH_SEAT_HOME;
   if (prepared) return prepared;
   const seat = process.env.OPENRIG_NODE_ID || process.env.OPENRIG_SESSION_NAME || "default";
   const home = join(openrigHome(), "state", "dsh", seat, "home");
@@ -220,10 +221,11 @@ function seatHome() {
   return home;
 }
 
-/** dsh's version as its CLI reports it, or null when it can't say. dsh 0.2.1-rc.2's ACP handshake reports 0.0.1. */
+/** dsh's version as its CLI reports it, or null when it can't say. dsh 0.2.1-rc.2's ACP handshake reports 0.0.1.
+ *  SIGKILL at the timeout, because a synchronous call waits for the child to exit, and a child can ignore SIGTERM. */
 function cliVersion(bin, env) {
   try {
-    const out = execFileSync(bin, ["--version"], { encoding: "utf8", env, timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] });
+    const out = execFileSync(bin, ["--version"], { encoding: "utf8", env, timeout: 5_000, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "ignore"] });
     return out.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?/)?.[0] ?? null;
   } catch {
     return null;
@@ -265,8 +267,8 @@ async function main() {
   agentEnv.DSH_PERMISSION_MODE ??= "workspace-write";
   if (agentEnv.DSH_TELEMETRY_DISABLED === undefined && agentEnv.DSH_TELEMETRY_MODE === undefined) agentEnv.DSH_TELEMETRY_DISABLED = "1";
 
-  // DSH_BIN, which a rig spec's env: can set, or OPENRIG_DSH names another dsh binary.
-  const bin = env.OPENRIG_DSH || env.DSH_BIN || "dsh";
+  // DSH_SEAT_BIN, which a rig spec's env: can set, or OPENRIG_DSH names another dsh binary.
+  const bin = env.OPENRIG_DSH || env.DSH_SEAT_BIN || "dsh";
   const version = cliVersion(bin, agentEnv);
   const child = spawn(bin, ["--profile", "acp"], { cwd, env: agentEnv, stdio: ["pipe", "pipe", "inherit"] });
   child.stdin.on("error", () => {});
