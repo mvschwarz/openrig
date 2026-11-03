@@ -1,5 +1,34 @@
 # Native Windows parity: implementation and evidence
 
+## Paired current-source checkpoint at 58e1b42 (2026-11-03)
+
+At `58e1b42a4cf0749e6bc765ff4798182854eb1d45`, the same 25 selected files
+completed with zero failures: Windows passed 652 with five skips; WSL passed 650
+with seven skips. Both checked 4,742 hash-matched public tracked regular files
+before and after. WSL daemon compilation passed and the private dependency's
+normalized Git blob identity matched before/after build and after both test runs;
+its source was neither viewed nor copied. Six documentation links and existing
+untracked/generated files were not reconciled, so this is not complete checkout
+equivalence. Windows used Node 24.14.1 and WSL 24.11.0; no performance inference.
+
+Complete CLI/TUI/UI directory runs then finished on that unchanged source:
+Windows passed 9,520, failed six and skipped 118; WSL passed 9,413, failed zero
+and skipped 230. These are directory-run results, not a full daemon/repository
+gate or real-provider acceptance. Windows failures were three bootstrap HTTP
+connection cases, one MCP queue response parse, one walk-profile exit assertion,
+and the existing exhausted Windows Terminal discovery case. The three newly
+failing bootstrap/MCP/walk files passed in a separate one-worker run without a
+source change; this does not explain or repair the full-run failures. The
+Terminal discovery fixture was not retried. Skipped real native runtime-switch
+and mapped-attachment cases remain unverified.
+
+An owned POSIX SFTP subsystem probe separately returned ATTR_UIDGID (flags 15)
+with uid/gid 1000/1000, while the production client omitted both values. Its
+temporary file and subsystem were removed/stopped. This confirms a client-side
+metadata implementation gap; it does not establish a POSIX-to-Windows identity
+mapping or owner/group preservation. Source mutation remained frozen until both
+full directory processes terminated. No deployment or public push occurred.
+
 ## Client following pins both physical occupants (2026-11-03)
 
 Client following now shares the rename path's physical identity reader. It pins
