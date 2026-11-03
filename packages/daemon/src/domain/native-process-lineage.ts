@@ -637,7 +637,7 @@ export type CodexProcessObservation = NativeProcessObservation;
  *  args…`, so the script's path is its argv[1], or its argv[2] after a single option. */
 function runsFrozenScript(row: NativeProcessRow, selectedExecutable: string): boolean {
   const [, first, second] = tokens(row.command);
-  return first === selectedExecutable || (first?.startsWith("-") === true && second === selectedExecutable, selectedScript);
+  return first === selectedExecutable || (first?.startsWith("-") === true && second === selectedExecutable);
 }
 
 /** A process whose argv[0] is an absolute path named `claude` and whose OS executable path is exactly the frozen file. */
@@ -791,7 +791,7 @@ export type NativeRejection =
 
 export function explainNativeRejection(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime,
   expectedToken: string | null | undefined, requireResume: boolean, rotation?: ClaudeResumeRotation | null, selectedExecutable?: string): NativeRejection {
-  const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable, selectedScript);
+  const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable);
   const chain = runtime === "codex" ? launcherChain(matches, rows) : matches;
   if (!chain || chain.length === 0 || (runtime !== "codex" && chain.length !== 1)) return { kind: "no_single_process" };
   const { process } = chain[0]!;
