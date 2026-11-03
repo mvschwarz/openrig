@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import os from "node:os";
 import fs from "node:fs";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
@@ -175,8 +175,7 @@ describe("Bundle CLI", () => {
         res.end(JSON.stringify({ error: "not found" }));
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 

@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.3.3.19 - rig archive / unarchive CLI surface.
 //
 // Covers AC-6 (running-rig --force guard surfaces a 3-part honest error),
@@ -92,8 +92,7 @@ describe("Archive / Unarchive CLI (OPR.0.3.3.19)", () => {
         res.end(JSON.stringify({ error: "not found" }));
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 

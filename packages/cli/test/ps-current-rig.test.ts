@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -137,8 +137,7 @@ describe("OPR.0.4.0.34 — rig ps current-rig default", () => {
         res.end(JSON.stringify({ error: "not found" }));
       }
     });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 

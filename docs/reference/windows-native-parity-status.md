@@ -1,5 +1,28 @@
 # Native Windows parity: implementation and evidence
 
+## Wildcard-binding HTTP fixture migration (2026-11-03)
+
+The high-port fixture helper now accepts explicit host options while retaining
+its existing IPv4-loopback default. An explicit empty options object preserves
+the omitted host's wildcard bind instead of silently restricting an old fixture
+to IPv4. Forty-five structurally simple sites in 32 files now use this form;
+their immediate bound-origin registration and later request/lifecycle behavior
+are retained. A real helper regression checks wildcard binding, a successful
+loopback fetch and continued refusal of the canonical daemon origin.
+
+The 32 changed files plus the helper regression passed 779 tests with one skip
+and no failures, using two workers; CLI typecheck and whitespace checks passed.
+No fresh full-directory green result is claimed. After this batch, a separate AST
+inventory records 57 remaining direct port-zero calls and 18 calls to the imported
+Hono `serve` function with port zero. The direct calls are structurally categorized
+as 42 HTTP candidates, six mixed HTTP/TCP candidates, eight TCP candidates and one
+manual case; these categories are not completed semantic review or confirmed
+defects. Callback-driven Hono and TCP cases remain outside this migration batch.
+
+This test-fixture work does not complete file ownership mapping or real terminal
+continuity. No original team, real-provider opt-in, exhausted desktop-discovery
+fixture, deployment or public push was exercised.
+
 ## Bounded HTTP-listener fixture inventory and first migration batch (2026-11-03)
 
 An AST inventory of 430 tracked CLI TypeScript test files found 122 actual

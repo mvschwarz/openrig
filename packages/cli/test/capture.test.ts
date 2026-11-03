@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -88,8 +88,7 @@ describe("Capture CLI", () => {
         } else { res.writeHead(404).end(); }
       });
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 

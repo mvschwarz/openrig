@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.3.4.1 — rig start: one-command recovery orchestrator tests.
 // Tests verify composition (slice-02 /api/up called, never private restore),
 // headless flags, honest reporting, kernel invariant, and idempotency.
@@ -130,8 +130,7 @@ describe("rig start (OPR.0.3.4.1)", () => {
         res.writeHead(404).end();
       });
     });
-    await new Promise<void>((r) => { server.listen(0, r); });
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 

@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -102,8 +102,7 @@ describe("rig ask --seat (L1 CLI)", () => {
         res.end(JSON.stringify(payload));
       });
     });
-    await new Promise<void>((r) => server.listen(0, r));
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => server.close());

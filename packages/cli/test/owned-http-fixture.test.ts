@@ -39,6 +39,18 @@ it("binds a fetch-compatible owned loopback listener", async () => {
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
 });
 
+it("preserves an omitted host's wildcard binding while selecting a fetch-compatible port",async()=>{
+  const server=http.createServer((_req,res)=>res.end("wildcard fixture"));
+  try{
+    await listenOwnedHttpFixture(server,{});
+    const address=server.address() as {port:number;address:string};
+    expect(["::","0.0.0.0"]).toContain(address.address);
+    expect(address.port).toBeGreaterThanOrEqual(49152);
+    expect(await (await fetch(`http://127.0.0.1:${address.port}`)).text()).toBe("wildcard fixture");
+    await expect(fetch("http://127.0.0.1:7433/healthz")).rejects.toThrow(/FETCH GUARD/);
+  }finally{server.closeAllConnections();await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));}
+});
+
 it.each(["EADDRINUSE", "EACCES"])("retries %s without retaining error or listening handlers", async code => {
   const server = new EventEmitter();
   const ports: number[] = [];

@@ -214,8 +214,7 @@ describe("Send CLI", () => {
         }
       });
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
     // Use an actual connection refusal: fetch blocks port1 before connecting,
     // without a cause code, so it cannot exercise the coded no-connect branch.

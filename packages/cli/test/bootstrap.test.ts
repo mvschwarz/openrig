@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import nodePath from "node:path";
@@ -108,8 +108,7 @@ describe("Bootstrap CLI", () => {
         res.end(JSON.stringify({ status: "failed", errors: ["server error"] }));
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 
@@ -230,8 +229,7 @@ describe("Bootstrap CLI", () => {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "failed", stages: [], errors: ["internal error"], warnings: [] }));
     });
-    await new Promise<void>((resolve) => { failServer.listen(0, resolve); });
-    allowOwnedHttpFixture(failServer);
+    await listenOwnedHttpFixture(failServer, {});
     const failPort = (failServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -318,8 +316,7 @@ describe("Bootstrap CLI", () => {
         errors: ["brew install failed"], warnings: [],
       }));
     });
-    await new Promise<void>((resolve) => { partialServer.listen(0, resolve); });
-    allowOwnedHttpFixture(partialServer);
+    await listenOwnedHttpFixture(partialServer, {});
     const partialPort = (partialServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -345,8 +342,7 @@ describe("Bootstrap CLI", () => {
         warnings: [],
       }));
     });
-    await new Promise<void>((resolve) => { invalidPlanServer.listen(0, resolve); });
-    allowOwnedHttpFixture(invalidPlanServer);
+    await listenOwnedHttpFixture(invalidPlanServer, {});
     const invalidPort = (invalidPlanServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -380,8 +376,7 @@ describe("Bootstrap CLI", () => {
         warnings: [],
       }));
     });
-    await new Promise<void>((resolve) => { failedApplyServer.listen(0, resolve); });
-    allowOwnedHttpFixture(failedApplyServer);
+    await listenOwnedHttpFixture(failedApplyServer, {});
     const failedPort = (failedApplyServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -419,8 +414,7 @@ describe("Bootstrap CLI", () => {
         }
       });
     });
-    await new Promise<void>((resolve) => { libServer.listen(0, resolve); });
-    allowOwnedHttpFixture(libServer);
+    await listenOwnedHttpFixture(libServer, {});
     const libPort = (libServer.address() as { port: number }).port;
 
     const prog = new Command();

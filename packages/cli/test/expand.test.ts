@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
 import { createProgram } from "../src/index.js";
 import { Command } from "commander";
@@ -97,8 +97,7 @@ describe("rig expand", () => {
         res.end();
       }
     });
-    await new Promise<void>((r) => { server.listen(0, r); });
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 

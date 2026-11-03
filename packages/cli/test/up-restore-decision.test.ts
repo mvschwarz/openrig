@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.3.4.2 — rig up --existing: resume-original default surface.
 // --fresh opt-in forwarding, the awaiting-decision ASK/offer (TTY [y/N] via
 // injected prompt; headless honest machine-status + --fresh hint), and the
@@ -78,8 +78,7 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
         res.writeHead(404).end();
       });
     });
-    await new Promise<void>((r) => { server.listen(0, r); });
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 

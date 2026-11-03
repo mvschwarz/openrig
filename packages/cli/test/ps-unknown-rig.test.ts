@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // `rig ps --rig <name>` with a name no rig has printed "No rigs" (and `--nodes` printed "No nodes") with
 // exit 0, which reads as an empty fleet or a rig without seats. It now says the rig wasn't found and exits 1,
 // as rig chatroom, rig env and rig parked do. --json keeps its empty array.
@@ -49,8 +49,7 @@ describe("rig ps --rig with a name no rig has", () => {
       else if (req.url?.startsWith("/api/rigs/rig-a/nodes")) res.end(JSON.stringify([NODE]));
       else res.end(JSON.stringify([]));
     });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => server.close());

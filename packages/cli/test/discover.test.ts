@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -88,8 +88,7 @@ describe("Discover + Claim CLI", () => {
         res.end(JSON.stringify({ error: "not found" }));
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 
@@ -149,8 +148,7 @@ describe("Discover + Claim CLI", () => {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "tmux boom" }));
     });
-    await new Promise<void>((resolve) => { failServer.listen(0, resolve); });
-    allowOwnedHttpFixture(failServer);
+    await listenOwnedHttpFixture(failServer, {});
     const failPort = (failServer.address() as { port: number }).port;
 
     const prog = new Command();
