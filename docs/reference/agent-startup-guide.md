@@ -553,6 +553,8 @@ The guidance still goes to the repository `AGENTS.md`, as before, when:
   resume puts the guidance back in the repository `AGENTS.md`;
 - the seat is restored, even when the restore starts a new conversation. A restore keeps the guidance file its launch
   recorded, which for Codex is the repository `AGENTS.md`;
+- a handover successor starts (fresh, fork or rebuild). Its launch carries no guidance of its own, so the handover
+  first puts the seat's missing blocks back in the repository `AGENTS.md` from its saved startup context;
 - Codex is older than 0.164.0, or its version is unknown.
 
 A seat's role still arrives as startup text, and the seat-skills line, after the person's yes, still goes to

@@ -259,3 +259,48 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
   }
   return repair;
 }
+
+/** A node's saved startup context, as a snapshot records it, or null when there's none. */
+export function readNodeStartupSnapshot(db: Pick<Database.Database, "prepare">, nodeId: string): NodeStartupSnapshot | null {
+  const row = db.prepare("SELECT projection_entries_json, resolved_files_json, startup_actions_json, runtime, guidance_file FROM node_startup_context WHERE node_id = ?")
+    .get(nodeId) as { projection_entries_json: string; resolved_files_json: string; startup_actions_json: string; runtime: string; guidance_file: string | null } | undefined;
+  if (!row) return null;
+  return {
+    projectionEntries: JSON.parse(row.projection_entries_json),
+    resolvedStartupFiles: JSON.parse(row.resolved_files_json),
+    startupActions: JSON.parse(row.startup_actions_json),
+    runtime: row.runtime,
+    ...(row.guidance_file ? { guidanceFile: row.guidance_file } : {}),
+  };
+}
+
+/** #875: put a seat's missing managed blocks back in its guidance file from its saved startup context, as an exact resume
+ *  does: the seat-skills line only with the person's yes, and nothing through a recorded file that is now a link. A
+ *  successor launch carries no guidance of its own, so a Codex seat whose launch sent it as developer instructions needs
+ *  this before its successor starts. Never throws; returns what it did and what it couldn't. */
+export function putBackSeatGuidance(input: {
+  startupCtx: NodeStartupSnapshot | null;
+  cwd: string | null | undefined;
+  claudeManagedBlockFile: string | null | undefined;
+  seatSkillsLineYes: boolean;
+  fs: ManagedBlockMergeFsOps;
+  linkInfo: LinkInfo;
+}): string[] {
+  let guidance: SeatGuidance | null;
+  try {
+    guidance = seatGuidance(input.startupCtx, input.cwd, input.claudeManagedBlockFile, input.fs.exists, input.fs.readFile);
+  } catch (err) {
+    return [`could not read the saved guidance selection: ${(err as Error).message}`];
+  }
+  if (!guidance) return [];
+  const notes: string[] = [];
+  const rule = applySeatSkillsLineRule(guidance, input.seatSkillsLineYes);
+  guidance = rule.guidance;
+  if (rule.excluded === "linked") notes.push(`the seat-skills line wasn't put back, because ${guidance.targetPath} is a link`);
+  const linked = input.startupCtx?.guidanceFile ? guidanceFileSharedByLink(guidance.targetPath, input.linkInfo) : null;
+  if (linked) return [...notes, `${linked} is now a link, so nothing was put back in ${guidance.targetPath}`];
+  if (guidance.items.length === 0) return notes;
+  const repair = restoreMissingGuidance(guidance, input.fs);
+  if (repair.restored.length > 0) notes.push(`put back missing blocks ${repair.restored.join(", ")} in ${guidance.targetPath} from their current source files`);
+  return [...notes, ...repair.gaps];
+}

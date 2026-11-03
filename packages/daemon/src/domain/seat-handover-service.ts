@@ -16,7 +16,10 @@ import { SeatStatusService, type SeatStatus, type SeatStatusResult } from "./sea
 import { SeatHandoverPlanner, parseHandoverSource, SEAT_HANDOVER_SOURCE_CAPABILITIES, type SeatHandoverPlan, type SeatHandoverSource } from "./seat-handover-planner.js";
 import { discoverResumeToken } from "./agent-images/resume-token-discovery.js";
 import { resolveRebuildArtifacts } from "./session-source-rebuild-resolver.js";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { lstatLinkInfo, putBackSeatGuidance, readNodeStartupSnapshot } from "./restore-guidance.js";
+import { readFootprintAnswer } from "./footprint-choice.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
 import { deriveResumeToken, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 import { validateResumeToken } from "./resume-token-validation.js";
@@ -532,6 +535,9 @@ export class SeatHandoverService {
     const launchAdditionNotes = [
       ...seatAdditions.missing.map((file) => `seat_launch_addition_missing: ${file} is not in this seat's storage; the successor launched without it`),
       ...seatAdditions.refused.map((reason) => `seat_launch_addition_refused: ${reason}; the successor launched without it`),
+      // #875: a Codex seat whose launch sent its guidance as developer instructions left none in its repository AGENTS.md,
+      // and a successor's launch carries none, so the missing blocks go back first, as an exact resume puts them back.
+      ...(node.runtime === "codex" ? this.putBackGuidance(node.id, node.cwd) : []).map((note) => `guidance_put_back: ${note}`),
     ];
     const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, undefined, this.pluginsDir);
     const launch = await this.successorLauncher.createSuccessor({
@@ -709,6 +715,20 @@ export class SeatHandoverService {
       sourceOutcome,
       launchAdditionNotes,
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
+    });
+  }
+
+  /** #875: the seat's missing guidance blocks put back from its saved startup context, as an exact resume does. Returns notes. */
+  private putBackGuidance(nodeId: string, cwd: string | null | undefined): string[] {
+    let seatSkillsLineYes = false;
+    try { seatSkillsLineYes = readFootprintAnswer(new SettingsStore()).state === "yes"; } catch { /* no recorded yes */ }
+    let startupCtx;
+    try { startupCtx = readNodeStartupSnapshot(this.db, nodeId); }
+    catch (err) { return [`could not read the saved startup context: ${(err as Error).message}`]; }
+    return putBackSeatGuidance({
+      startupCtx, cwd, claudeManagedBlockFile: null, seatSkillsLineYes, linkInfo: lstatLinkInfo,
+      fs: { exists: existsSync, readFile: (file) => readFileSync(file, "utf-8"), writeFile: (file, content) => writeFileSync(file, content, "utf-8"),
+        mkdirp: (dir) => mkdirSync(dir, { recursive: true }) },
     });
   }
 

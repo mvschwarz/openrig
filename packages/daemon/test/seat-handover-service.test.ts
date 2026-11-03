@@ -188,6 +188,32 @@ describe("SeatHandoverService", () => {
     expect(db.prepare("SELECT origin FROM sessions WHERE node_id = ? AND status = 'running'").get(node.id)).toEqual({ origin: "launched" });
   });
 
+  // #875: a Codex seat whose launch carried its guidance as developer instructions left none in the repository AGENTS.md,
+  // and a successor's launch carries none. The handover puts the missing blocks back from the saved startup context before
+  // the successor starts, as an exact resume does.
+  it.each(["fresh", "fork:dev-impl@seat-rig", "rebuild"])("a %s Codex successor starts with the seat's guidance in its repository AGENTS.md (#875)", async source => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "handover-guidance-"));
+    try {
+      const { node, sessionId } = seedSeat();
+      sessionRegistry.updateResumeToken(sessionId!, "codex_id", "codex-thread-1", "hook");
+      db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(root, node.id);
+      const culture = path.join(root, "spec", "culture.md");
+      fs.mkdirSync(path.dirname(culture), { recursive: true });
+      fs.writeFileSync(culture, "Team culture.\n");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'codex')")
+        .run(node.id, JSON.stringify([{ category: "guidance", effectiveId: "culture.md", sourceSpec: "base", sourcePath: path.dirname(culture),
+          resourcePath: "culture.md", absolutePath: culture, mergeStrategy: "managed_block", target: "AGENTS.md" }]));
+      const agents = path.join(root, "AGENTS.md");
+      let atLaunch: string | null = null;
+      launchHarness.mockImplementation(async () => {
+        atLaunch = fs.existsSync(agents) ? fs.readFileSync(agents, "utf8") : null;
+        return { ok: true, resumeToken: "codex-launch-tok", resumeType: "codex_id", appliedLaunch: observeCodexSandbox(" -s workspace-write") };
+      });
+      expect(await service.handover({ seatRef: "dev-impl@seat-rig", reason: "replace occupant", source })).toMatchObject({ ok: true });
+      expect(atLaunch).toContain("Team culture.");
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it.each(["stop", "restart", "clean"] as const)("allows %s for a launched handover but refuses discovered and directly adopted occupants", async operation => {
     for (const provenance of ["adopted", "discovered", "launched"] as const) {
       const { node, sessionId } = seedSeat({ rigName: `${operation}-${provenance}` });
