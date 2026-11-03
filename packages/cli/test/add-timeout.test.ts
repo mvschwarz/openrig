@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -66,8 +66,7 @@ describe("rig add request deadline", () => {
       const timer = setTimeout(() => res.end(LAUNCHED), 6_000);
       res.on("close", () => clearTimeout(timer));
     });
-    await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server!);
     const client = new DaemonClient(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
     await addMemberCommand(deps(client)).parseAsync(["node", "rig", "rig-1", "dev", fragment]);
     expect(process.exitCode).toBeUndefined();

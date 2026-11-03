@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.5.3.5 Atom 4d — the CLI pins r1 asked for (4c A3 rec) plus the profile
 // verb. The ROUTING FORK is the one piece of logic that lives ONLY in the CLI:
 // an address carrying '#' goes straight to the daemon's resolver home; a bare
@@ -112,8 +112,7 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
         res.end(JSON.stringify([]));
       }
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
 

@@ -1,5 +1,27 @@
 # Native Windows parity: implementation and evidence
 
+## Bounded HTTP-listener fixture inventory and first migration batch (2026-11-03)
+
+An AST inventory of 430 tracked CLI TypeScript test files found 122 actual
+`.listen(0, ...)` calls. Twenty sites in 18 files had a directly reviewable shape:
+an explicit IPv4 loopback listener, a Promise whose only action waits for listen,
+and immediate registration of the same listener. Those sites now use the existing
+bounded high-port helper, retaining address, subsequent lifecycle and request
+semantics. Other registrations in mixed files remain intact. This includes a
+listener deliberately closed before a refused-connection test; it remains closed.
+
+All 18 changed files passed 240 tests with two workers and no skips. CLI typecheck
+and whitespace checks passed. No new runtime transport or daemon permission was
+introduced. The 102 other direct port-zero sites still require classification:
+some use different callbacks, wildcard bindings, raw TCP or deliberate failure
+setup. This count does not include Hono's separate `serve({port:0})` form and is
+not a claim that every remaining site is an unsafe HTTP fixture. The exhausted
+desktop discovery case and original runtime/team state were not exercised.
+
+This is a test-fixture portability fix, not completion of owner/group mapping,
+the full native parity goal or a fresh full-directory green result. No deployment
+or public push occurred.
+
 ## Fetch-compatible ports for three full-run fixture files (2026-11-03)
 
 The three bootstrap connection failures in the 58e1b42 full run used ports 1719,

@@ -1,5 +1,5 @@
 import { allowFetchTarget } from "./fetch-guard.js";
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { allowOwnedHttpFixture, listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // rig mcp serve --http --grant-service against the daemon's real routes and a fake grant service speaking
 // openrig.grant/v1: each request's key is checked with the grant service for this daemon's self id, every answer but
 // active is refused with no fallback, and an external caller reaches only its own items and the team's questions to it.
@@ -89,8 +89,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
         res.writeHead(status, { "Content-Type": "application/json" }).end(typeof reply === "string" ? reply : JSON.stringify(reply));
       });
     });
-    await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
-    allowOwnedHttpFixture(service);
+    await listenOwnedHttpFixture(service);
     serviceUrl = `http://127.0.0.1:${(service.address() as AddressInfo).port}/api/connector/v1/grant`;
     seat("team-a", "cus-vvmaexample01-caller");
   });

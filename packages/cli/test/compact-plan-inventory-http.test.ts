@@ -3,7 +3,7 @@ import http from "node:http";
 import { compactPlanCommand } from "../src/commands/compact-plan.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE } from "../src/daemon-lifecycle.js";
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 
 let server: http.Server | undefined;
 afterEach(async () => {
@@ -39,8 +39,7 @@ it("marks partial native HTTP inventory while preserving healthy rigs", async ()
     res.writeHead(code, { "Content-Type": "application/json" });
     res.end(JSON.stringify(data));
   });
-  await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
-  allowOwnedHttpFixture(server);
+  await listenOwnedHttpFixture(server!);
   const port = (server.address() as { port: number }).port;
   const deps = { clientFactory: (base: string) => new DaemonClient(base), lifecycleDeps: {
     exists: (p: string) => p === STATE_FILE,

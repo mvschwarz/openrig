@@ -9,7 +9,7 @@ import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
 import { terminalRoutes } from "../../daemon/src/routes/terminal.js";
 import { TerminalService } from "../../daemon/src/domain/terminal/terminal-service.js";
 import type { TerminalProvider } from "../../daemon/src/domain/terminal/terminal-provider.js";
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 
 let server: Server | undefined;
 afterEach(async () => {
@@ -45,8 +45,7 @@ async function fixture(readOnly = false, count = 2) {
   });
   app.route("/api/terminal", terminalRoutes());
   server = createServer(getRequestListener(app.fetch));
-  await new Promise<void>(resolve => server!.listen(0, "127.0.0.1", resolve));
-  allowOwnedHttpFixture(server);
+  await listenOwnedHttpFixture(server!);
   const baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const launch = vi.fn(async (_file: string, _args: string[]) => {});
   const deps: WindowDeps = {

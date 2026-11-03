@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Command } from "commander";
@@ -24,8 +24,7 @@ it.each(cases.flatMap((entry) => [false, true].map((json) => ({ ...entry, json }
       if (req.url === "/api/rigs/summary") res.end(JSON.stringify([{ id: "fixture-id", name: "fixture" }]));
       else { res.statusCode = status; res.end(JSON.stringify(data)); }
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server);
     const address = server.address() as AddressInfo;
     const deps: StatusDeps = {
       lifecycleDeps: {

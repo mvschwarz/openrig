@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -30,8 +30,7 @@ describe("bootstrap error statuses cannot certify readiness", () => {
         res.writeHead(status, { "Content-Type": "application/json" });
         res.end(JSON.stringify(body));
       });
-      await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
-      allowOwnedHttpFixture(server);
+      await listenOwnedHttpFixture(server!);
       const port = (server.address() as AddressInfo).port;
       const deps: StatusDeps = {
         lifecycleDeps: {
