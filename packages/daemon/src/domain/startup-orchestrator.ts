@@ -31,7 +31,7 @@ import { join } from "node:path";
 import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode } from "./seat-launch-additions.js";
-import { OutboxHandler } from "./outbox-handler.js";
+import { heldMessagesNotice } from "./outbox-handler.js";
 
 // Why a startup prompt's submission could not be confirmed, as told to the operator when the
 // proof line is held back.
@@ -1023,13 +1023,10 @@ export class StartupOrchestrator {
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId, ...(submission ? { submission } : {}) });
 
     // Held messages are never replayed, so a seat that starts with some is told once, as the launch is (#2431).
-    let heldMessages = 0;
-    try { heldMessages = new OutboxHandler(this.db).retentionUsage(input.nodeId).count; } catch { /* no held-message store: nothing to tell */ }
-    if (heldMessages && input.binding.tmuxSession) {
-      const seat = input.sessionName ?? input.binding.tmuxSession;
-      const notice = `${heldMessages} held message${heldMessages === 1 ? " was" : "s were"} kept for this seat and not delivered: read ${heldMessages === 1 ? "it" : "them"} with rig seat held-messages ${seat}.`;
-      warnings.push(notice);
-      await this.sessionTransport.send(input.binding.tmuxSession, notice, { openrigNotice: true }).catch(() => undefined);
+    const heldNotice = input.binding.tmuxSession ? heldMessagesNotice(this.db, input.nodeId, input.sessionName ?? input.binding.tmuxSession) : null;
+    if (heldNotice) {
+      warnings.push(heldNotice);
+      await this.sessionTransport.send(input.binding.tmuxSession!, heldNotice, { openrigNotice: true }).catch(() => undefined);
     }
 
     return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}), ...(routerLine ? { routerLine } : {}), ...(resumedProcess ? { resumedProcess } : {}) };
