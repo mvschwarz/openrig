@@ -71,14 +71,17 @@ interface DiscoveryPlacementContextValue {
 }
 
 
-// Accessible names for the mobile button that opens the Explorer panel.
-const MOBILE_EXPLORER_LABEL: Partial<Record<ExplorerSurface, string>> = {
-  "for-you": "Show inbox filters",
-  project: "Show project tree",
-  specs: "Show library",
-  settings: "Show settings sections",
-  topology: "Show rig tree",
+// Accessible names for the mobile button that toggles the Explorer panel.
+const MOBILE_EXPLORER_NOUN: Partial<Record<ExplorerSurface, string>> = {
+  "for-you": "inbox filters",
+  project: "project tree",
+  specs: "library",
+  settings: "settings sections",
+  topology: "rig tree",
 };
+function mobileExplorerLabel(surface: ExplorerSurface, open: boolean): string {
+  return `${open ? "Hide" : "Show"} ${MOBILE_EXPLORER_NOUN[surface] ?? "side panel"}`;
+}
 
 export const DrawerSelectionContext = createContext<DrawerSelectionContextValue>({
   selection: null,
@@ -357,7 +360,7 @@ function AppShellInner({ children }: AppShellProps) {
                 <button
                   type="button"
                   data-testid="mobile-explorer-toggle"
-                  aria-label={MOBILE_EXPLORER_LABEL[surface] ?? "Show side panel"}
+                  aria-label={mobileExplorerLabel(surface, mobileExplorerOpen)}
                   aria-expanded={mobileExplorerOpen}
                   onClick={() => {
                     setExplorerOpen(false);
@@ -403,6 +406,7 @@ function AppShellInner({ children }: AppShellProps) {
                   )}
                   <div
                     data-testid="mobile-rail-tray"
+                    inert={!explorerOpen}
                     className={cn(
                       "fixed top-12 left-0 bottom-0 z-30 bg-background transition-transform duration-200 ease-tactical lg:hidden",
                       "w-72 max-w-[80vw] flex flex-col pb-[calc(3.5rem+env(safe-area-inset-bottom))]",
@@ -435,7 +439,7 @@ function AppShellInner({ children }: AppShellProps) {
                   onClose={() => setMobileExplorerOpen(false)}
                   selection={selectionState}
                   onSelect={setSelection}
-                  desktopMode={desktopExplorerOpen ? "full" : "hidden"}
+                  desktopMode={desktopExplorerOpen || !isWideLayout ? "full" : "hidden"}
                   surface={surface}
                   onDesktopToggle={() => setDesktopExplorerOpen((open) => !open)}
                   overlayMode={isTopologyOverlay ? "overlay" : "opaque"}

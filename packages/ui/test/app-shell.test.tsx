@@ -287,6 +287,9 @@ describe("AppShell — Phase 2 chrome", () => {
       fireEvent.click(panelToggle);
       expect(tray().className).toContain("-translate-x-full");
       expect(explorer().className).not.toContain("-translate-x-full");
+      expect(panelToggle.getAttribute("aria-label")).toBe("Hide inbox filters");
+      // A closed tray leaves the tab order.
+      expect(tray().hasAttribute("inert")).toBe(true);
     });
 
     // C06 sidebar: nav items keep a >=44px tap target on mobile
