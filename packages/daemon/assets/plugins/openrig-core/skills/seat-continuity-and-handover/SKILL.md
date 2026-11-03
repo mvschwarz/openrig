@@ -73,6 +73,14 @@ This is the system's truth-source for "how did the current occupant get
 there." Without it, the control plane shows the current occupant but
 not the legitimacy of the transition.
 
+`rig seat handover`'s receipt reports it under `sideEffects`:
+`provenanceRecordWritten` says whether this handover's lineage record (its
+occupant tenure) exists, and `departingProcess` says how the old process
+ended (`ended-graceful`, `ended-forced`, or `not-touched` for a discovered
+successor). If `provenanceRecordWritten` is false, the seat is already bound
+to the successor: read the daemon log for why the record is missing, and
+don't run the handover again, which would replace the occupant a second time.
+
 ## State models — independent
 
 ### Occupant-creation state (per candidate)

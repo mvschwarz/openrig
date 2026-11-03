@@ -78,9 +78,14 @@ export interface SeatHandoverMutationResult {
   handoverAt: string;
   eventSeq: number;
   sideEffects: {
+    /** The departing tmux session is kept: a successor respawns into its pane, and a discovered one runs in its own. */
     departingSessionKilled: false;
+    /** How the previous occupant's process ended: it exited on TERM, or was killed after the TERM window, before the
+     *  successor started in its pane. A discovered successor leaves it alone. */
+    departingProcess: "ended-graceful" | "ended-forced" | "not-touched";
     startupContextDelivered: boolean;
-    provenanceRecordWritten: false;
+    /** This handover's lineage record (its occupant tenure) exists. Its write is best-effort, so it's read back. */
+    provenanceRecordWritten: boolean;
   };
   restorePacket?: { status: "unconfirmed"; reason: string };
   /** OPR.0.5.5.5 — per-source execution outcome. fork: the resolved fork origin;
@@ -430,6 +435,7 @@ export class SeatHandoverService {
         reason,
         operator,
         contextDelivered: false,
+        departingProcess: "not-touched",
         launchToken: null,
         occupantGeneration: null,
         appliedLaunch: null,
@@ -693,6 +699,7 @@ export class SeatHandoverService {
       reason,
       operator,
       contextDelivered,
+      departingProcess: launch.retireeExit === "forced" ? "ended-forced" : "ended-graceful",
       restorePacket,
       // B2 (launched/fresh): the launch-scraped resume token captured by the
       // successor launcher is persisted atomically at commit (provenance scrape).
@@ -722,6 +729,7 @@ export class SeatHandoverService {
     reason: string;
     operator: string | null;
     contextDelivered: boolean;
+    departingProcess: SeatHandoverMutationResult["sideEffects"]["departingProcess"];
     restorePacket?: SeatHandoverMutationResult["restorePacket"];
     /** Launch-scraped resume token for a fresh successor (persisted at commit). */
     launchToken: { token: string; resumeType?: string } | null;
@@ -831,6 +839,7 @@ export class SeatHandoverService {
       operator: input.operator,
       discovered,
       contextDelivered: input.contextDelivered,
+      departingProcess: input.departingProcess,
       restorePacket: input.restorePacket,
       launchToken: input.launchToken,
       occupantGeneration: input.occupantGeneration,
@@ -1140,6 +1149,7 @@ export class SeatHandoverService {
     operator: string | null;
     discovered: ReturnType<DiscoveryRepository["getDiscoveredSession"]> & NonNullable<unknown>;
     contextDelivered: boolean;
+    departingProcess: SeatHandoverMutationResult["sideEffects"]["departingProcess"];
     restorePacket?: SeatHandoverMutationResult["restorePacket"];
     launchToken: { token: string; resumeType?: string } | null;
     occupantGeneration: string | null;
@@ -1171,6 +1181,7 @@ export class SeatHandoverService {
       // (the name is reused), so this is the only point the retiree's generation is resolvable.
       const retiringGeneration =
         this.sessionRegistry.currentOccupantGenerationForSession(input.latestSession.session_name) ?? undefined;
+      const tenureBefore = this.readOccupantTenure(input.node.id);
       // atom-B: a seat handover mints a HANDOVER-kind occupant generation (not the default 'adopt').
       const newSession = this.sessionRegistry.registerClaimedSession(
         input.node.id,
@@ -1178,6 +1189,10 @@ export class SeatHandoverService {
         "handover",
         input.occupantGeneration,
       );
+      // The receipt's lineage record: that mint is best-effort (a failure is logged and swallowed), so read it back.
+      const tenure = this.readOccupantTenure(input.node.id);
+      const provenanceRecordWritten = tenure !== null && tenure.kind === "handover" && tenure.id !== tenureBefore?.id
+        && (input.occupantGeneration === null || tenure.generationUuid === input.occupantGeneration);
       // W3: registerClaimedSession mints the successor generation. Only now may
       // the exact adapter-returned launch effect be attached to that tenure.
       // The store is best-effort, so observation persistence can never make an
@@ -1248,10 +1263,10 @@ export class SeatHandoverService {
         ...(input.sourceOutcome ? { sourceOutcome: input.sourceOutcome } : {}),
         ...(input.launchAdditionNotes?.length ? { launchAdditionNotes: input.launchAdditionNotes } : {}),
       });
-      return { newSessionId: newSession.id, previousSessionIdsSuperseded, event };
+      return { newSessionId: newSession.id, previousSessionIdsSuperseded, event, provenanceRecordWritten };
     });
 
-    let committed: { newSessionId: string; previousSessionIdsSuperseded: string[]; event: PersistedEvent };
+    let committed: { newSessionId: string; previousSessionIdsSuperseded: string[]; event: PersistedEvent; provenanceRecordWritten: boolean };
     try {
       committed = tx();
       // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
@@ -1328,11 +1343,17 @@ export class SeatHandoverService {
         ...(input.restorePacket ? { restorePacket: input.restorePacket } : {}),
         sideEffects: {
           departingSessionKilled: false,
+          departingProcess: input.departingProcess,
           startupContextDelivered: input.contextDelivered,
-          provenanceRecordWritten: false,
+          provenanceRecordWritten: committed.provenanceRecordWritten,
         },
       },
     };
+  }
+
+  /** The node's current occupant tenure, or null when the ledger can't be read (then nothing proves a write). */
+  private readOccupantTenure(nodeId: string): ReturnType<SessionRegistry["currentOccupantTenure"]> {
+    try { return this.sessionRegistry.currentOccupantTenure(nodeId); } catch { return null; }
   }
 
   private upsertBinding(nodeId: string, fields: { tmuxSession: string; tmuxWindow: string | null; tmuxPane: string | null }): void {
