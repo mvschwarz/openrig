@@ -799,7 +799,6 @@ describe("supported seat and queue integration", () => {
       { mode: "draft-aware", holdSeconds: 60, reason: "obsolete" }, { mode: "hold" }]) {
       expect((await f.post("/api/seat/set-typing-guard/worker@test", body)).status).toBe(400);
     }
-    expect((await f.post("/api/seat/set-typing-guard/worker@test", { mode: "hold", reason: "draft", actor: "spoof" }, "")).status).toBe(400);
   });
 
   it("hold keeps messages indefinitely while a sibling still receives sends", async () => {

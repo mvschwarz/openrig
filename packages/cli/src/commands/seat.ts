@@ -460,6 +460,11 @@ when the current input contains a draft or cannot be read. It returns the exact
 reason and held message ID immediately, without automatic retry.
 Off (--enabled false) permits new automatic sends.
 
+This works from an ordinary terminal as well as from a seat's shell. From a
+managed seat's shell (OPENRIG_SESSION_NAME set), the change is recorded under
+that seat. From a terminal with no seat identity, it applies the same way and is
+recorded as "unattributed (no seat identity)".
+
 Between off (always interrupt) and hold (full quiet):
   openrig-urgent  OpenRig's own messages (watchdogs, scheduled wakes, notices) and
                   anything marked urgent type; other agents' messages are held.
