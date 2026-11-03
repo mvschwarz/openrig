@@ -1546,7 +1546,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   /** The `-c developer_instructions` argument for a fresh launch, from the blocks its startup queued (#875). The value is a
-   *  TOML basic string (JSON's escapes, with DEL escaped too). Codex gives developer instructions more weight than AGENTS.md,
+   *  TOML basic string (JSON's escapes, with DEL escaped too). Codex can give developer instructions more weight than AGENTS.md,
    *  so the text asks it to keep the person's AGENTS.md guidance first. */
   private developerInstructionsArg(tmuxSession: string): string {
     const blocks = this.launchInstructions.get(tmuxSession);
@@ -1560,7 +1560,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    *  repository AGENTS.md: Codex 0.164.0 or later (where `developer_instructions` is a declared key), and no visible config
    *  layer sets one, since the launch value would replace it. Anything else, or anything unreadable, keeps AGENTS.md. */
   guidanceFileFor(binding: NodeBinding, opts?: { resuming?: boolean }): GuidanceChoice | Promise<GuidanceChoice> {
-    // A resume or fork answers at once: an await here would move a startup continuation's claim of its pending attempt.
+    // A resume or fork (untested with developer instructions) and a startup continuation (it launches nothing) keep the
+    // repository path, answered at once.
     if (opts?.resuming || !binding.tmuxSession) return { file: null };
     return this.freshGuidanceChoice(binding);
   }
