@@ -232,3 +232,28 @@ it.each(["unchanged", "missing-source", "changed", "added", "removed", "stale-de
   else { expect(restored).toBe(false); expect(restoredNode?.status).not.toBe("resumed"); }
   expect(textInput).not.toHaveBeenCalled();
 });
+
+// No provider or native binary: use the real contained adapter and launch journal.
+it.each(["unavailable", "different-generation", "stopped", "ready-at-shell"])("contained readiness observes the selected guest, not the connect process: %s", async kind => {
+  const f = await fixture(); await f.startup.launch(f.binding, {}, f.tmux);
+  const row = f.db.prepare("SELECT receipt_json FROM environment_operations WHERE kind='launch'").get() as { receipt_json: string };
+  const native = JSON.parse(row.receipt_json);
+  f.guest.mockImplementation(async () => {
+    if (kind === "unavailable") throw new Error("guest identity unavailable");
+    return { ...native, generation: kind === "different-generation" ? "other" : native.generation, running: kind !== "stopped", ok: true };
+  });
+  const adapter = new CommunityHarnessRuntimeAdapter("openshell-claude", { environmentStartup: f.startup,
+    tmux: { ...f.tmux, hasSession: async () => true, getPaneCommand: async () => kind === "ready-at-shell" ? "bash" : "node" } });
+  expect((await adapter.checkReady(f.binding)).ready).toBe(kind === "ready-at-shell");
+});
+it("passes generated first input through verified guest files and execs the short viewer command", async () => {
+  const f = await fixture();
+  const opts = { firstInputText: "Selected identity; read projected role.md. Literal $(not-a-host-command)." };
+  const result = await f.startup.launch(f.binding, opts, f.tmux);
+  expect(result.firstInput).toMatchObject({ submission: "unconfirmed" });
+  const descriptor = JSON.parse(f.files.get("/sandbox/openrig/control/launch.pending.json")!.toString());
+  expect(descriptor.firstInput).toMatchObject({ path: "control/first-input.txt", sha256: sha256(opts.firstInputText) });
+  expect(f.files.get("/sandbox/openrig/control/first-input.txt")!.toString()).toBe(opts.firstInputText);
+  const command = f.tmux.sendShellCommand.mock.calls[0] as unknown as [string, string];
+  expect(command[1]).toMatch(/^exec /); expect(command[1]).not.toContain("Selected identity");
+});
