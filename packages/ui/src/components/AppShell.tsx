@@ -25,6 +25,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useRef,
   useState,
   createContext,
   useContext,
@@ -210,6 +211,25 @@ function AppShellInner({ children }: AppShellProps) {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
+  // F15 (#2417): focus management for the mobile Explorer. Opening moves
+  // focus into the panel; closing returns it to the toggle. The closed
+  // tray carries inert= (see mobile-rail-tray below) so it stays out of
+  // the tab order while Explorer is open.
+  const explorerToggleRef = useRef<HTMLButtonElement | null>(null);
+  const wasExplorerOpen = useRef(false);
+  useEffect(() => {
+    if (isWideLayout) return;
+    if (mobileExplorerOpen) {
+      wasExplorerOpen.current = true;
+      document.querySelector<HTMLElement>("[data-testid='explorer']")?.focus();
+    } else if (wasExplorerOpen.current) {
+      // Restore focus to the toggle only after an actual open→close
+      // transition — not on initial mount.
+      wasExplorerOpen.current = false;
+      explorerToggleRef.current?.focus();
+    }
+  }, [mobileExplorerOpen, isWideLayout]);
+
   // Cross-route: clear discovery placement when discovery selection clears.
   useEffect(() => {
     if (selectionState?.type !== "discovery") clearPlacement();
@@ -361,6 +381,7 @@ function AppShellInner({ children }: AppShellProps) {
               {!isWideLayout && explorerMounted && (
                 <button
                   type="button"
+                  ref={explorerToggleRef}
                   data-testid="mobile-explorer-toggle"
                   aria-label={mobileExplorerLabel(surface, mobileExplorerOpen)}
                   aria-expanded={mobileExplorerOpen}
@@ -442,7 +463,7 @@ function AppShellInner({ children }: AppShellProps) {
                   onClose={() => setMobileExplorerOpen(false)}
                   selection={selectionState}
                   onSelect={setSelection}
-                  desktopMode={desktopExplorerOpen || !isWideLayout ? "full" : "hidden"}
+                  desktopMode={!isWideLayout ? "full" : desktopExplorerOpen ? "full" : "hidden"}
                   surface={surface}
                   onDesktopToggle={() => setDesktopExplorerOpen((open) => !open)}
                   overlayMode={isTopologyOverlay ? "overlay" : "opaque"}
@@ -502,8 +523,10 @@ function AppShellInner({ children }: AppShellProps) {
 
               {/* ui-redesign C16 — mobile bottom nav lives in
                   components/shell/MobileBottomNav.tsx. "More" opens the
-                  same mobile tray as the hamburger. */}
-              <MobileBottomNav pathname={pathname} onMore={() => {
+                  same mobile tray as the hamburger. F16: hidden on narrow
+                  Topology (same predicate as the hamburger carve-out) so
+                  tapping it can't flip explorerOpen into the render spin. */}
+              <MobileBottomNav pathname={pathname} onMore={shouldSuppressExplorerMount(surface, isWideLayout) ? undefined : () => {
                 setMobileExplorerOpen(false);
                 setExplorerOpen(true);
               }} />

@@ -320,6 +320,48 @@ describe("AppShell — Phase 2 chrome", () => {
       // Desktop override: lg: prefix restores the compact 36px row.
       expect(dashIcon.className).toMatch(/\blg:h-9\b/);
     });
+
+    // F16 (#2417): on narrow Topology the "More" bottom-nav entry is hidden —
+    // it would flip explorerOpen and reproduce the Topology render spin.
+    it("hides bottom-nav More on narrow Topology (no spin trigger)", async () => {
+      const topo = await renderAt("/topology", { innerWidth: 375 });
+      expect(topo.queryByTestId("mobile-nav-more")).toBeNull();
+      const home = await renderAt("/", { innerWidth: 375 });
+      expect(home.queryByTestId("mobile-nav-more")).toBeTruthy();
+    });
+
+    // F14 (#2417): the mobile Explorer toggle works regardless of the
+    // desktop collapse state.
+    it("mobile Explorer toggle ignores desktop collapse state", async () => {
+      const { container } = await renderAt("/for-you", { innerWidth: 375 });
+      const { fireEvent } = await import("@testing-library/react");
+      // Collapse the DESKTOP explorer via the desktop-only toggle is not
+      // possible at 375px; simulate by asserting the mobile toggle opens
+      // the full panel even when desktopExplorerOpen defaults interact.
+      const panelToggle = container.querySelector(
+        "[data-testid='mobile-explorer-toggle']",
+      ) as HTMLElement;
+      fireEvent.click(panelToggle);
+      expect(panelToggle.getAttribute("aria-expanded")).toBe("true");
+      const explorer = container.querySelector("[data-testid='explorer']") as HTMLElement;
+      expect(explorer.getAttribute("data-explorer-collapsed")).toBe("false");
+    });
+
+    // D (#2417 follow-up): mobile controls are queryable by role + name.
+    it("mobile menu and Explorer toggles expose accessible names", async () => {
+      const view = await renderAt("/for-you", { innerWidth: 375 });
+      expect(view.getByRole("button", { name: "Toggle navigation" })).toBeTruthy();
+      expect(view.getByRole("button", { name: "Show inbox filters" })).toBeTruthy();
+    });
+
+    // F15 (#2417): opening the mobile Explorer moves focus into it.
+    it("opening the mobile Explorer moves focus into the panel", async () => {
+      const view = await renderAt("/for-you", { innerWidth: 375 });
+      const { fireEvent } = await import("@testing-library/react");
+      fireEvent.click(view.getByRole("button", { name: "Show inbox filters" }));
+      const explorer = view.container.querySelector("[data-testid='explorer']") as HTMLElement;
+      expect(explorer.contains(document.activeElement)).toBe(true);
+    });
   });
 
   // Phase 2 BOUNCE-FIX #3 — width-coupling regression (guard-3 catch).

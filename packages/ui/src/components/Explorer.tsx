@@ -330,6 +330,7 @@ export function Explorer({
       data-surface={surface}
       data-explorer-mode={overlayMode}
       data-explorer-collapsed="false"
+      tabIndex={-1}
       className={cn(
         // V1 border weight doctrine (universal-shell.md L39–L48):
         // 1px outline-variant ghost line for inter-region edges.
@@ -374,7 +375,10 @@ export function Explorer({
         "lg:absolute lg:top-0 lg:bottom-0 lg:left-[var(--sidebar-current-width)] lg:w-72 lg:max-w-none lg:translate-x-0",
       )}
     >
-      <div className="relative flex h-full w-full flex-col">
+      {/* F12 (#2417): narrow-viewport bottom padding keeps the last rows
+          above the fixed MobileBottomNav (h-14 + safe-area). Desktop (lg:)
+          keeps zero bottom padding. */}
+      <div className="relative flex h-full w-full flex-col pb-[calc(env(safe-area-inset-bottom)+3.5rem)] lg:pb-0">
         <button
           type="button"
           data-testid="explorer-edge-toggle"

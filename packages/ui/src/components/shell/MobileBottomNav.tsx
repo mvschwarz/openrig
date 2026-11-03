@@ -13,7 +13,9 @@ import { useFeedSubscriptions } from "../../hooks/useFeedSubscriptions.js";
 
 export interface MobileBottomNavProps {
   pathname: string;
-  onMore: () => void;
+  // F16: optional — omitted on narrow Topology where opening the tray
+  // would flip explorerOpen and reproduce the Topology render spin.
+  onMore?: () => void;
 }
 
 interface BottomNavSlot {
@@ -70,16 +72,18 @@ export function MobileBottomNav({ pathname, onMore }: MobileBottomNavProps) {
           </Link>
         );
       })}
-      <button
-        type="button"
-        data-testid="mobile-nav-more"
-        aria-label="More navigation options"
-        onClick={onMore}
-        className="flex-1 flex flex-col items-center justify-center gap-0.5 h-14 text-[11px] text-on-surface-variant hover:text-on-surface"
-      >
-        <Menu className="h-5 w-5" strokeWidth={1.75} aria-hidden="true" />
-        <span>More</span>
-      </button>
+      {onMore && (
+        <button
+          type="button"
+          data-testid="mobile-nav-more"
+          aria-label="More navigation options"
+          onClick={onMore}
+          className="flex-1 flex flex-col items-center justify-center gap-0.5 h-14 text-[11px] text-on-surface-variant hover:text-on-surface"
+        >
+          <Menu className="h-5 w-5" strokeWidth={1.75} aria-hidden="true" />
+          <span>More</span>
+        </button>
+      )}
     </nav>
   );
 }

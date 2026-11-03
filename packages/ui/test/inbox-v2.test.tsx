@@ -259,4 +259,44 @@ describe("Inbox v2 (C11)", () => {
     expect(view.queryByTestId("feed-card-actions-queue.enqueued-42")).toBeNull();
     expect(actions.className).toContain("opacity-0");
   });
+
+  // F17 (#2417): a multiline event body shows the first line plus a
+  // Show more toggle that reveals the full text.
+  it("multiline event body expands via Show more", async () => {
+    const card = {
+      id: "watchdog.note-901",
+      kind: "observation",
+      title: "Watchdog note",
+      body: "first line\nsecond line\nthird line",
+      receivedAt: 1234567890,
+      createdAt: new Date(1234567890 * 1000).toISOString(),
+      source: { seq: 901, type: "watchdog.note", payload: {} },
+    } as unknown as FeedCardModel;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const rootRoute = createRootRoute({ component: () => <Outlet /> });
+    const indexRoute = createRoute({
+      getParentRoute: () => rootRoute,
+      path: "/",
+      component: () => (
+        <DrawerSelectionContext.Provider value={{ selection: null, setSelection: vi.fn() }}>
+          <FeedCard card={card} queueItem={undefined} />
+        </DrawerSelectionContext.Provider>
+      ),
+    });
+    const router = createRouter({
+      routeTree: rootRoute.addChildren([indexRoute]),
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    const toggle = await view.findByTestId("feed-card-expand-body-watchdog.note-901");
+    expect(toggle.textContent).toBe("Show more");
+    const { fireEvent } = await import("@testing-library/react");
+    fireEvent.click(toggle);
+    expect(toggle.textContent).toBe("Show less");
+    expect(toggle.parentElement?.textContent).toContain("third line");
+  });
 });

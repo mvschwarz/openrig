@@ -369,6 +369,8 @@ export function FeedCard({
   const [selectedScreenshot, setSelectedScreenshot] = useState<string | null>(null);
   // CORRECTIVE §7.1 — CHAT quick-action state (the shared terminal, per BR-12).
   const [chatOpen, setChatOpen] = useState(false);
+  // F17 (#2417) — expand multiline event bodies beyond the one-line preview.
+  const [bodyExpanded, setBodyExpanded] = useState(false);
   const dragStateRef = useRef<{ startX: number; pointerId: number; isTouch: boolean } | null>(null);
 
   const handleKeyDown: React.KeyboardEventHandler<HTMLElement> = (event) => {
@@ -461,10 +463,23 @@ export function FeedCard({
             {card.title}
           </h3>
           {body ? (
-            // Muted one-line body preview.
-            <p className="mt-0.5 truncate text-sm text-on-surface-variant">
-              {body.split("\n")[0]}
-            </p>
+            <>
+              {/* Muted one-line body preview; expandable when multiline. */}
+              <p className={`mt-0.5 text-sm text-on-surface-variant${bodyExpanded ? "" : " truncate"}`}>
+                {bodyExpanded ? body : body.split("\n")[0]}
+              </p>
+              {body.includes("\n") && (
+                <button
+                  type="button"
+                  data-testid={`feed-card-expand-body-${card.id}`}
+                  aria-expanded={bodyExpanded}
+                  onClick={() => setBodyExpanded((v) => !v)}
+                  className="text-xs text-on-surface underline hover:text-on-surface-variant"
+                >
+                  {bodyExpanded ? "Show less" : "Show more"}
+                </button>
+              )}
+            </>
           ) : null}
           <div className="mt-1 flex min-w-0 items-center gap-2">
             {/* Author session in mono. */}
