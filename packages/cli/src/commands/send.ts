@@ -686,12 +686,17 @@ async function classifyDeliveryEffect(
   const probe = await detectStagedAtPrompt(client, session, identity);
   if (probe.state === "unchecked") return { checked: false, why: probe.why };
   if (probe.state === "not-staged") return { checked: true, state: "no-staged-residual" };
-  const enter = await client.post<Record<string, unknown>>("/api/transport/send", {
-    session,
-    submitOnly: true,
-    expectedStagedText: identity.expectedStagedText,
-    expectedStagedLineCount: identity.expectedLines,
-  }, transportRequestOptions(waitForIdleMs));
+  let enter: { status: number; data: Record<string, unknown> };
+  try {
+    enter = await client.post<Record<string, unknown>>("/api/transport/send", {
+      session,
+      submitOnly: true,
+      expectedStagedText: identity.expectedStagedText,
+      expectedStagedLineCount: identity.expectedLines,
+    }, transportRequestOptions(waitForIdleMs));
+  } catch (err) {
+    return { checked: true, state: "staged", remedy: "submit-unconfirmed", detail: (err as Error).message };
+  }
   if (enter.status >= 400) {
     return { checked: true, state: "staged", remedy: "submit-refused", detail: (enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}` };
   }
@@ -710,7 +715,7 @@ function effectHumanLines(effect: EffectCheck, session: string): string[] {
   }
   if (effect.state === "no-staged-residual") return [];
   if (effect.remedy === "submit-unconfirmed") return [
-    `Delivery: submission unconfirmed — the text was staged before one guarded Enter, but the recheck failed (${effect.detail}). Inspect with: rig capture ${session}`,
+    `Delivery: submission unconfirmed — the text was staged before one guarded Enter attempt, but the result could not be confirmed (${effect.detail}). Inspect with: rig capture ${session}`,
   ];
   const out = ["Delivery: staged, not consumed (checked: post-send pane capture; observed: the sent text is still at the prompt — typed, never submitted)"];
   if (effect.remedy === "submitted-cleared") {
@@ -1102,7 +1107,7 @@ async function runFanOutSend(params: {
     const rawResults = (res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string }> | undefined) ?? [];
     const encodedResults = rawResults.map((r) =>
       effectUnresolved(effectBySeat.get(r.sessionName))
-        ? { ...r, ok: false, verified: false, outcome: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission-unconfirmed" : "staged-not-consumed", error: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission unconfirmed; the post-submit recheck was unavailable" : "staged, not consumed (pane effect); the one guarded submit did not clear it" }
+        ? { ...r, ok: false, verified: false, outcome: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission-unconfirmed" : "staged-not-consumed", error: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission unconfirmed; the guarded Enter result or recheck was unavailable" : "staged, not consumed (pane effect); the one guarded submit did not clear it" }
         : r
     );
     // Round-3 (r2 row 00fb3a68): the machine-readable AGGREGATE derives from

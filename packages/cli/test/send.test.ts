@@ -318,6 +318,29 @@ describe("Send CLI", () => {
     expect(exitCode).toBe(1);
   });
 
+  it.each([false, true])("reports a lost guarded Enter response as unconfirmed (json: %s)", async json => {
+    let captures = 0, submits = 0;
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/capture") { captures++; return { status: 200, data: { content: "❯ make test" } }; }
+        if (body["submitOnly"]) { submits++; throw new Error("Enter response lost"); }
+        return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "infra-ui@term-rig", "make test", "--verify", ...(json ? ["--json"] : []),
+      ]);
+    });
+    expect(submits).toBe(1);
+    expect(captures).toBe(1);
+    expect(exitCode).toBe(1);
+    if (json) {
+      const result = JSON.parse(logs.find(line => line.trim().startsWith("{")) ?? "{}");
+      expect(result).toMatchObject({ verified: false, outcome: "submission-unconfirmed", effectCheck: { remedy: "submit-unconfirmed" } });
+    } else expect(logs.join("\n")).toContain("submission unconfirmed");
+  });
+
   it("reports an unconfirmed post-submit recheck per recipient in fan-out JSON", async () => {
     let captures = 0, submits = 0;
     const client = {
