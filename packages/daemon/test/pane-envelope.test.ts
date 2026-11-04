@@ -22,6 +22,26 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
     expect(out).toContain('↩ Reply: rig send driver-3@my-rig "..."');
   });
 
+  it.each(["human@kernel", "human@host", "human-alice@kernel", "human-alice@host"])(
+    "gives %s a queue update reply with the existing human-route fields",
+    (sender) => {
+      const body = "Please check this.\nKeep the actor unchanged.";
+      const out = wrapPaneEnvelope(sender, "driver@rig", body, { replyToQitem: "qitem-original" });
+      expect(out).toContain(`From: ${sender}\nTo: driver@rig\n`);
+      expect(out.split("\n---\n")[1]).toBe(body);
+      expect(out.split("\n").at(-1)).toBe(`↩ Reply if needed: rig queue create --destination ${sender} --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`);
+      expect(out).not.toContain(`rig send ${sender}`);
+      expect(out).not.toContain("--reply-to"); // Slack-thread guidance belongs to registered external addresses.
+    },
+  );
+
+  it("keeps similarly named real seats on the ordinary reply route", () => {
+    for (const sender of ["human@my-rig", "humanity@kernel", "dev-human@host", "dev-human@rig@origin-host"]) {
+      expect(wrapPaneEnvelope(sender, "driver@rig", "hi").split("\n").at(-1))
+        .toBe(`↩ Reply: rig send ${sender} "..."`);
+    }
+  });
+
   it("routes an external sender's reply through the durable human queue", () => {
     const out = wrapPaneEnvelope("decision-maker@external", "driver@rig", "Decision received.");
     expect(out).toContain("From: decision-maker@external");
