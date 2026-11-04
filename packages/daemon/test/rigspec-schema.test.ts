@@ -733,9 +733,23 @@ describe("a Claude member's own plugin channels (#2044)", () => {
     expect(errors(withFields(0, { plugin_channels: ["plugin:a@b", "plugin:a@b"] }))).toMatch(/plugin_channels\[1\]: listed twice \("plugin:a@b"\)/);
   });
 
-  it("refuses channels beside claude_mcp: none, which starts Claude without MCP servers; an empty list beside it is fine", () => {
-    expect(errors(withFields(0, { plugin_channels: ["plugin:a@b"], claude_mcp: "none" })))
-      .toMatch(/members\[0\]\.plugin_channels: claude_mcp is "none", which starts Claude without MCP servers \(plugin servers included\), so no channel could register/);
-    expect(RigSpecSchema.validate(withFields(0, { plugin_channels: [], claude_mcp: "none" })).valid).toBe(true);
+  it("warns about channels beside claude_mcp: none, keeps both settings, and accepts the spec", () => {
+    const rig = withFields(0, { plugin_channels: ["plugin:a@b"], claude_mcp: "none" });
+    const before = structuredClone(rig);
+    expect(RigSpecSchema.validate(rig)).toEqual({ valid: true, errors: [], advisories: [
+      'pods[0].members[0].plugin_channels: claude_mcp is "none", which starts Claude without MCP servers (plugin servers included), so no channel could register; remove claude_mcp: none to use the channels, or remove plugin_channels to keep the MCP opt-out',
+    ] });
+    expect(rig).toEqual(before);
+    expect(RigSpecSchema.normalize(rig).pods[0]!.members[0]).toMatchObject({ pluginChannels: ["plugin:a@b"], claudeMcp: "none" });
+  });
+
+  it.each([
+    { plugin_channels: [], claude_mcp: "none" },
+    { claude_mcp: "none" },
+    { plugin_channels: ["plugin:a@b"] },
+  ])("does not warn when channels and the MCP opt-out do not conflict: %j", fields => {
+    const result = RigSpecSchema.validate(withFields(0, fields));
+    expect(result).toMatchObject({ valid: true, errors: [] });
+    expect(result.advisories ?? []).toEqual([]);
   });
 });

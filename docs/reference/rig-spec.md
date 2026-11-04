@@ -837,11 +837,13 @@ no rig-wide or environment default.
 
 Each entry is `plugin:<name>@<marketplace>`, both names made of letters, digits,
 `.`, `_` and `-`, starting with a letter or digit. `server:` entries and Claude's
-`--dangerously-load-development-channels` aren't supported. A member can't
-combine the field with `claude_mcp: none`, which starts Claude without MCP
-servers (plugin servers included), so no channel could register. OpenRig doesn't
-install plugins or marketplaces, or change the settings that admit a channel:
-whether each channel registers is Claude's decision (the plugin installed, and
+`--dangerously-load-development-channels` aren't supported. Combining a non-empty
+channel list with `claude_mcp: none` produces a validation warning: that setting
+starts Claude without MCP servers (plugin servers included), so no channel could
+register. OpenRig keeps both settings and launches the member normally. Remove
+`claude_mcp: none` to use the channels, or remove `plugin_channels` to keep the MCP
+opt-out. OpenRig doesn't install plugins or marketplaces, or change the settings
+that admit a channel: whether each channel registers is Claude's decision (the plugin installed, and
 admitted by your organisation's channel settings or Claude's approved list).
 
 Selecting a channel for one agent doesn't isolate what the plugin shares with

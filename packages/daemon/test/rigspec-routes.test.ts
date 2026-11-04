@@ -144,7 +144,7 @@ describe("Rigspec export routes", () => {
     }
   });
 
-  it("carries a seat's plugin channels into the exported member, and doesn't name it as not carried (#2044)", async () => {
+  it.each([undefined, "none"] as const)("carries a seat's plugin channels into the exported member with claude_mcp=%s (#2044)", async claudeMcp => {
     const home = fs.mkdtempSync(nodePath.join(os.tmpdir(), "export-channels-"));
     const saved = process.env["OPENRIG_HOME"];
     try {
@@ -152,7 +152,7 @@ describe("Rigspec export routes", () => {
       const rig = rigRepo.createRig("r98");
       const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
       const member = { podId: pod.id, agentRef: "local:agents/impl", profile: "default", cwd: "/workspace" };
-      rigRepo.addNode(rig.id, "dev.impl", { ...member, runtime: "claude-code" });
+      rigRepo.addNode(rig.id, "dev.impl", { ...member, runtime: "claude-code", claudeMcp });
       rigRepo.addNode(rig.id, "dev.plain", { ...member, runtime: "claude-code" });
       const channels = ["plugin:example-channel@example", "plugin:second@example"];
       expect(prepareSeatLaunchAdditions(seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "claude-code" }), { pluginChannels: channels }).ok).toBe(true);
@@ -162,7 +162,9 @@ describe("Rigspec export routes", () => {
       expect(PodRigSpecSchema.validate(parsed)).toMatchObject({ valid: true });
       const members = PodRigSpecSchema.normalize(parsed as Record<string, unknown>).pods[0]!.members;
       expect(members.find((m) => m.id === "impl")?.pluginChannels).toEqual(channels);
+      expect(members.find((m) => m.id === "impl")?.claudeMcp).toBe(claudeMcp);
       expect(members.find((m) => m.id === "plain")?.pluginChannels).toBeUndefined();
+      expect(members.find((m) => m.id === "plain")?.claudeMcp).toBeUndefined();
     } finally {
       if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
       fs.rmSync(home, { recursive: true, force: true });

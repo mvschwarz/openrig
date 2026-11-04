@@ -606,7 +606,7 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   }
 
   if (member["env"] !== undefined) errors.push(...validateSeatEnv(member["env"], `${prefix}.env`));
-  errors.push(...validateClaudeAdditions(member, prefix));
+  errors.push(...validateClaudeAdditions(member, prefix, advisories));
 
   // Terminal sentinel validation: exact triple required
   const isTerminalRuntime = member["runtime"] === "terminal";
@@ -1235,7 +1235,7 @@ function normalizeSessionSource(raw: unknown): import("./types.js").SessionSourc
 
 /** OPR.0.7.0.9 — a Claude member's own agent file, appended prompt file and plugin folders: paths beside the spec.
  *  #2044 — and its plugin channels, passed as Claude's `--channels`. */
-function validateClaudeAdditions(member: Record<string, unknown>, prefix: string): string[] {
+function validateClaudeAdditions(member: Record<string, unknown>, prefix: string, advisories: string[]): string[] {
   const errors: string[] = [];
   for (const key of ["agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels"]) {
     if (member[key] !== undefined && member["runtime"] !== "claude-code") {
@@ -1289,7 +1289,7 @@ function validateClaudeAdditions(member: Record<string, unknown>, prefix: string
       // `claude_mcp: none` starts Claude with only an empty MCP server set, plugin servers left out too, so no channel
       // could register.
       if (channels.length > 0 && member["claude_mcp"] === "none") {
-        errors.push(`${prefix}.plugin_channels: claude_mcp is "none", which starts Claude without MCP servers (plugin servers included), so no channel could register; remove one of the two`);
+        advisories.push(`${prefix}.plugin_channels: claude_mcp is "none", which starts Claude without MCP servers (plugin servers included), so no channel could register; remove claude_mcp: none to use the channels, or remove plugin_channels to keep the MCP opt-out`);
       }
     }
   }

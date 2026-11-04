@@ -99,11 +99,10 @@ describe("bundle-local skills", () => {
   }
 
   it.each([undefined, "none"] as const)("carries Claude additions and MCP selection (%s) into the installed spec", async claudeMcp => {
-    // Plugin channels need MCP servers, so they're declared only beside Claude's normal MCP loading (#2044).
-    const channels = claudeMcp ? undefined : ["plugin:example-channel@example", "plugin:second@example"];
+    const channels = ["plugin:example-channel@example", "plugin:second@example"];
     write("source/rig.yaml", rigYaml.replace("runtime: pi", "runtime: claude-code\n        agent_file: claude/reviewer.md\n"
       + "        append_system_prompt_file: claude/house.md\n        plugin_dirs: [claude/plugins/review]"
-      + (channels ? `\n        plugin_channels: [${channels.join(", ")}]` : "")
+      + `\n        plugin_channels: [${channels.join(", ")}]`
       + (claudeMcp ? `\n        claude_mcp: ${claudeMcp}` : "")));
     write("source/agents/worker/agent.yaml", `name: worker\nversion: "1.0"\nprofiles:\n  default:\n    uses: {}\n`);
     write("source/claude/reviewer.md", "---\nname: reviewer\ndescription: Reviews\n---\nReview carefully.\n");
@@ -126,8 +125,8 @@ describe("bundle-local skills", () => {
     const seat = seatSkillPaths({ rigId: "rig-installed", logicalId: "dev.worker", runtime: "claude-code" }, path.join(root, "home"));
     const beside = (rel: string) => path.resolve(installed, rel);
     const prepared = prepareSeatLaunchAdditions(seat, { agentFile: beside(member.agentFile!),
-      appendSystemPromptFile: beside(member.appendSystemPromptFile!), pluginDirs: member.pluginDirs!.map(beside), ...(channels ? { pluginChannels: member.pluginChannels! } : {}) });
-    expect(prepared, JSON.stringify(prepared)).toMatchObject({ ok: true, additions: { agent: "openrig:reviewer", ...(channels ? { pluginChannels: channels } : {}) } });
+      appendSystemPromptFile: beside(member.appendSystemPromptFile!), pluginDirs: member.pluginDirs!.map(beside), pluginChannels: member.pluginChannels! });
+    expect(prepared, JSON.stringify(prepared)).toMatchObject({ ok: true, additions: { agent: "openrig:reviewer", pluginChannels: channels } });
     const additions = prepared.ok ? prepared.additions : undefined;
     expect(fs.readFileSync(additions!.appendSystemPromptFile!, "utf8")).toBe("House rules.\n");
     expect(fs.existsSync(path.join(additions!.pluginDirs[0]!, "skills/check/SKILL.md"))).toBe(true);
