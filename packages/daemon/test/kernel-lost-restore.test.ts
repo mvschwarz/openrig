@@ -218,6 +218,7 @@ describe("daemon start with an existing kernel rig", () => {
 
   it("a kernel stopped with `rig down kernel` stays stopped across daemon restarts", async () => {
     const h = host();
+    h.rigRepo.setKernelVariant(h.rig.id, "rig-claude-only.yaml");
     const down = await h.down();
     expect(down.errors).toEqual([]);
     expect(h.statuses()).toEqual(["exited", "exited"]);
@@ -225,7 +226,9 @@ describe("daemon start with an existing kernel rig", () => {
     for (let restart = 0; restart < 3; restart++) {
       if (restart === 1) h.reboot();
       const tracker = await h.daemonStart(restore);
-      expect(tracker.getStatus()).toMatchObject({ kernelState: "skipped", detail: "kernel rig already managed" });
+      expect(tracker.getStatus()).toMatchObject({
+        kernelState: "skipped", detail: "kernel rig already managed", variant: "rig-claude-only.yaml",
+      });
     }
     expect(restore).not.toHaveBeenCalled();
     expect(h.bootstrap.bootstrap).not.toHaveBeenCalled();
@@ -278,10 +281,21 @@ describe("daemon start with an existing kernel rig", () => {
 
   it("a running kernel is left alone and reported from its seats", async () => {
     const h = host();
+    // Its current seats are Claude-only, but the original selection is still the dual-runtime template.
+    h.rigRepo.setKernelVariant(h.rig.id, "rig.yaml");
     const restore = vi.fn(async () => ({ errors: [] }));
     const tracker = await h.daemonStart(restore);
     expect(restore).not.toHaveBeenCalled();
-    expect(tracker.getStatus()).toMatchObject({ kernelState: "ready", detail: "kernel rig already managed" });
+    expect(tracker.getStatus()).toMatchObject({ kernelState: "ready", detail: "kernel rig already managed", variant: "rig.yaml" });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("kernelBootTracker" as never, tracker); await next(); });
+    app.route("/api/kernel", kernelStatusRoutes);
+    const response = await app.request("/api/kernel/status");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      variant: "rig.yaml",
+      agents: h.nodes.map(({ name }) => expect.objectContaining({ session_name: name, runtime: "claude-code" })),
+    });
   });
 
   it("a running kernel with no seat ready stays skipped rather than reporting a new failure", async () => {

@@ -1,5 +1,6 @@
 import { isShellForeground } from "./shell-classifier.js";
 import { EMPTY_CLAUDE_MCP_CONFIG } from "./claude-mcp.js";
+import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { readNativeProcessArguments } from "./native-process-arguments.js";
@@ -284,6 +285,23 @@ export function claudePathBounds(path: string): boolean {
   return parts.length > 0 && parts.join(" ") === path.trim() && !parts[0]!.startsWith("-") && !parts.some(opensSpan);
 }
 
+// #2044: a seat's plugin channels, read the same way by both selectors. Claude's `--channels` is variadic: it takes
+// every following value up to the next option, and OpenRig passes one or more `plugin:<name>@<marketplace>` entries
+// there. Every value must be such an entry, so a bare word or a `server:` entry after the option is no proof;
+// `--channels=<entry>` carries one entry. Returns the index of the last value; null when there is none or one isn't an
+// entry; undefined when the argument isn't the option.
+function claudeChannelsValueEnd(args: string[], index: number): number | null | undefined {
+  const arg = args[index]!;
+  if (arg.startsWith("--channels=")) return isClaudePluginChannel(arg.slice("--channels=".length)) ? index : null;
+  if (arg !== "--channels") return undefined;
+  let end = index;
+  while (end + 1 < args.length && !args[end + 1]!.startsWith("-")) {
+    if (!isClaudePluginChannel(args[end + 1])) return null;
+    end += 1;
+  }
+  return end > index ? end : null;
+}
+
 /** The conversation a parsed Claude argv names. A fork's --resume names its parent, so with
  *  --fork-session only the fork's own --session-id names it, and both must be present. Without
  *  --fork-session one identity names it and two prove nothing. undefined: no positive proof. */
@@ -323,6 +341,9 @@ function claudeSessionToken(args: string[]): string | null {
     const additionEnd = claudeAdditionValueEnd(args, index);
     if (additionEnd === null) return null;
     if (additionEnd !== undefined) { index = additionEnd; continue; }
+    const channelsEnd = claudeChannelsValueEnd(args, index);
+    if (channelsEnd === null) return null;
+    if (channelsEnd !== undefined) { index = channelsEnd; continue; }
     if (arg === "--fork-session") { fork = true; continue; }
     const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);
     if (!identity) return null; // Unknown argv is not positive identity proof.
@@ -366,6 +387,9 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
     const additionEnd = claudeAdditionValueEnd(args, index);
     if (additionEnd === null) return unparsed;
     if (additionEnd !== undefined) { index = additionEnd; continue; }
+    const channelsEnd = claudeChannelsValueEnd(args, index);
+    if (channelsEnd === null) return unparsed;
+    if (channelsEnd !== undefined) { index = channelsEnd; continue; }
     if (arg === "--fork-session") { fork = true; continue; }
     const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);
     if (!identity) return unparsed; // Unknown argv is not positive identity proof.

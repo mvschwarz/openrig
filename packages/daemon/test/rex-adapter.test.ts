@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { blankShellArgv } from "../src/domain/terminal/login-shell.js";
 import {
   RexAdapter,
   REX_PANES_PER_PAGE,
@@ -334,7 +335,7 @@ describe("rex adapter: openView", () => {
     const walk = (node: RexLayoutNode) => ("block" in node ? leaves.push({ label: node.block.label, options: node.block.options }) : (walk(node.split.before), walk(node.split.after)));
     walk(layout);
     expect(leaves).toHaveLength(4);
-    expect(leaves[3]).toEqual({ label: "", options: { command: ["sh"] } });
+    expect(leaves[3]).toEqual({ label: "", options: { command: blankShellArgv() } });
     const checked = requests.filter((r) => r.method === "com.superlogical.terminal.process").map((r) => r.params["block_id"]);
     expect(checked).toEqual(["w1/b0", "w1/b1", "w1/b2"]);
   });

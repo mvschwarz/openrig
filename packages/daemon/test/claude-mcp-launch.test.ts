@@ -14,6 +14,7 @@ import { claudeCommandSessionToken, verifyClaudePaneProcess, observeClaudeDelive
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 const EMPTY = '{"mcpServers":{}}';
+const CHANNELS = ["plugin:example-channel@example", "plugin:second@example"];
 const fsOps = { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} };
 function rows(args: string[]): NativeProcessRow[] {
   return [
@@ -58,12 +59,13 @@ function fixture(managed: boolean) {
 }
 
 describe("Claude MCP launch and identity", () => {
-  for (const managed of [false, true]) for (const selection of [undefined, "none"] as const) {
-    it.skipIf(process.platform === "win32").each(["fresh", "resume", "fork", "legacy"])(`executes %s argv (managed=${managed}, claude_mcp=${selection ?? "omitted"})`, async mode => {
-      const f = fixture(managed), binding = { ...f.binding, claudeMcp: selection };
+  for (const managed of [false, true]) for (const selection of [undefined, "none"] as const) for (const channels of [undefined, CHANNELS]) {
+    it.skipIf(process.platform === "win32").each(["fresh", "resume", "fork", "legacy"])(`executes %s argv (managed=${managed}, claude_mcp=${selection ?? "omitted"}, channels=${channels ? "selected" : "omitted"})`, async mode => {
+      const f = fixture(managed), binding = { ...f.binding, claudeMcp: selection,
+        ...(channels ? { launchAdditions: { pluginDirs: [], pluginChannels: channels } } : {}) };
       const result = mode === "legacy"
         ? await f.resume.resume("seat", "claude_id", "history-id", binding.cwd, undefined, undefined, binding.permissionMode, "node",
-          undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, selection)
+          undefined, undefined, undefined, undefined, undefined, binding.launchAdditions, undefined, undefined, undefined, selection)
         : await f.adapter.launchHarness(binding, { name: "seat", ...(mode === "resume" ? { resumeToken: "history-id" } : {}),
           ...(mode === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-id" } } : {}) });
       expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
@@ -71,6 +73,8 @@ describe("Claude MCP launch and identity", () => {
       expect(args.filter(arg => arg === "--strict-mcp-config")).toHaveLength(selection ? 1 : 0);
       expect(args.filter(arg => arg === "--mcp-config")).toHaveLength(selection ? 1 : 0);
       if (selection) expect(args[args.indexOf("--mcp-config") + 1]).toBe(EMPTY);
+      expect(args.filter(arg => arg === "--channels")).toHaveLength(channels ? 1 : 0);
+      if (channels) expect(args.slice(args.indexOf("--channels") + 1, args.indexOf("--channels") + 1 + channels.length)).toEqual(channels);
       const expectedToken = mode === "fresh" || mode === "fork" ? "fresh-id" : "history-id";
       expect(claudeCommandSessionToken(`claude ${args.join(" ")}`)).toBe(expectedToken);
     });

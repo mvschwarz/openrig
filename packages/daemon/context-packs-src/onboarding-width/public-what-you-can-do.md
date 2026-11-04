@@ -537,7 +537,9 @@ not have to tear one down to change it, and you rarely have to start from nothin
 - **A Claude member can bring its own setup** in the rig spec: `agent_file`,
   `append_system_prompt_file`, `plugin_dirs` and `advisor` (an Advisor model). They're copied into
   that seat's own storage, never the project, so one seat in a shared repository can have its own
-  persona, prompt or plugins. A bundle's before-install view lists them.
+  persona, prompt or plugins. A bundle's before-install view lists them. `plugin_channels`
+  (`plugin:<name>@<marketplace>` entries) registers that seat alone for those plugins' channel
+  notifications, through Claude's `--channels`.
 - **A new Claude member can name a prepared subscription token** with
   `claude_token: {label: name, file: /abs/token}` beside its `env.CLAUDE_CONFIG_DIR`; the seat stores
   the file reference and reads it at launch. A missing/unreadable token uses the existing fallback

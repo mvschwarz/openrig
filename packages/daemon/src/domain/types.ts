@@ -1254,6 +1254,8 @@ export interface RigSpecPodMember {
   agentFile?: string;
   appendSystemPromptFile?: string;
   pluginDirs?: string[];
+  /** #2044 — Claude members only: `plugin:<name>@<marketplace>` entries, passed as one `--channels` on every launch. */
+  pluginChannels?: string[];
   /** Non-secret launch environment for this seat; overrides the rig-level `env`. */
   env?: Record<string, string>;
   cwd: string;

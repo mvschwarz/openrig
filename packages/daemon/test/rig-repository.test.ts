@@ -4,7 +4,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
-import { rigKernelVariantSchema } from "../src/db/migrations/148_rig_kernel_variant.js";
+import { rigKernelVariantSchema } from "../src/db/migrations/147_rig_kernel_variant.js";
 import Sqlite from "better-sqlite3";
 
 function setupDb(): Database.Database {

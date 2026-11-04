@@ -2,7 +2,7 @@ import { activityGrantsSchema } from "../../src/db/migrations/143_activity_grant
 import { environmentBindingsSchema } from "../../src/db/migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "../../src/db/migrations/145_node_permissions_to.js";
 import { nodeStartupGuidanceFileSchema } from "../../src/db/migrations/146_node_startup_guidance_file.js";
-import { rigKernelVariantSchema } from "../../src/db/migrations/148_rig_kernel_variant.js";
+import { rigKernelVariantSchema } from "../../src/db/migrations/147_rig_kernel_variant.js";
 import { nodeAccountHomeSchema } from "../../src/db/migrations/141_node_account_home.js";
 import { escalationTargetRefsSchema } from "../../src/db/migrations/126_escalation_target_refs.js";
 import { nodeClaudePermissionsSchema } from "../../src/db/migrations/139_node_claude_permissions.js";

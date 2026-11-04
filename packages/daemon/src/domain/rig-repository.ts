@@ -178,6 +178,8 @@ function isStoredRigSpec(value: unknown): value is NodeLaunchRecipe["rigSpec"] {
         && (entry.appendSystemPromptFile === undefined || typeof entry.appendSystemPromptFile === "string")
         && (entry.pluginDirs === undefined
           || (Array.isArray(entry.pluginDirs) && entry.pluginDirs.every((dir) => typeof dir === "string")))
+        && (entry.pluginChannels === undefined
+          || (Array.isArray(entry.pluginChannels) && entry.pluginChannels.every((channel) => typeof channel === "string")))
         && (entry.permissionPolicy === undefined || typeof entry.permissionPolicy === "string")
         && (entry.env === undefined || isStringRecord(entry.env))
         && (entry.restorePolicy === undefined || typeof entry.restorePolicy === "string")
