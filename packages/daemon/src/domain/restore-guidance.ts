@@ -152,6 +152,42 @@ export function seatGuidance(
   return { targetPath, items: [...items.values()] };
 }
 
+/** A `send_text` startup file a fresh start delivers to a seat's new conversation. */
+export interface SeatStartupTextFile {
+  absolutePath: string;
+  required: boolean;
+  /** Whether the file is on disk now. */
+  present: boolean;
+  /** The seat's own role. */
+  role: boolean;
+}
+
+/** #2456: the `send_text` startup files a fresh start delivers to a seat's new conversation, from its saved startup context:
+ *  each file that applies on `fresh_start` and resolves to `send_text`, as at a start, the seat's role first. A handover's
+ *  fresh or rebuild successor is a new conversation no start delivered to, so its first turn points to these. */
+export function seatStartupTextFiles(
+  startupCtx: NodeStartupSnapshot | null,
+  exists: (path: string) => boolean,
+  readFile: (path: string) => string,
+): SeatStartupTextFile[] {
+  if (!startupCtx) return [];
+  const files = startupCtx.resolvedStartupFiles.flatMap((saved): SeatStartupTextFile[] => {
+    if (!saved.appliesOn.includes("fresh_start")) return [];
+    const f = reanchorBuiltinStartupFile(saved, undefined, undefined, exists);
+    const present = exists(f.absolutePath);
+    let hint: string = f.deliveryHint;
+    if (hint === "auto") {
+      // Classified from its content, as at a start; one that can't be read is classified from its path alone.
+      let content = "";
+      try { if (present) content = readFile(f.absolutePath); } catch { /* as a start's own read */ }
+      hint = resolveConcreteHint(f.path, content, f.orientation);
+    }
+    if (hint !== "send_text") return [];
+    return [{ absolutePath: f.absolutePath, required: f.required, present, role: isPerSeatRoleStartupFile(f.path, f.orientation) }];
+  });
+  return [...files.filter((f) => f.role), ...files.filter((f) => !f.role)];
+}
+
 /** The seat-skills line's own rule, as at a start: its block belongs in the guidance only with the person's yes, and never
  *  through a linked file. Without it, the block is left out (so it's neither put back nor reported missing), and
  *  `excluded` says why. */
