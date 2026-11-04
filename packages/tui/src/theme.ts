@@ -57,7 +57,7 @@ const PALETTE: Record<Token, [[number, number, number], number, number]> = {
   bright: [[232, 234, 240], 254, 97],
   // S19 MR5b: one-step contrast bump (founder: 'a little more noticeable')
   chrome: [[78, 105, 145], 60, 90],
-  selection: [[34, 52, 82], 236, 40],
+  selection: [[34, 52, 82], 236, 30], // black, painted as background 40
   actActive: [[152, 195, 121], 108, 32],
   actIdle: [[110, 142, 170], 109, 34],
   actDetached: [[109, 116, 128], 243, 90],
