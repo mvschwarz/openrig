@@ -152,10 +152,14 @@ export async function callWebApi(
 }
 
 /** A transport error's message can quote the request's Authorization header (Node's fetch does for an invalid value),
- *  so the token, and each line of it, is removed before the message goes anywhere. */
+ *  so the token, and each line of it, is removed before the message goes anywhere. A line shorter than 6 characters is
+ *  left: removing it everywhere would garble the rest of the message. One pass, so a marker is never rescanned. */
 function withoutToken(message: string, token: string): string {
-  const parts = [token, ...token.split(/[\r\n]+/)].filter((part) => part.length > 0).sort((a, b) => b.length - a.length);
-  return parts.reduce((text, part) => text.split(part).join("[redacted]"), message);
+  const parts = [token, ...token.split(/[\r\n]+/).filter((part) => part.length >= 6)].filter((part) => part.length > 0)
+    .sort((a, b) => b.length - a.length);
+  if (parts.length === 0) return message;
+  const pattern = new RegExp(parts.map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+  return message.replace(pattern, "[redacted]");
 }
 
 /** Item 5: read the ACTUAL granted scopes from the response header (configured != granted). */
@@ -258,7 +262,7 @@ export async function downloadPrivateFile(
       return { ok: true as const, bytes };
     });
   } catch (e) {
-    return { ok: false, error: (e as Error).message || "download failed" };
+    return { ok: false, error: withoutToken((e as Error).message, token) || "download failed" };
   }
 }
 
