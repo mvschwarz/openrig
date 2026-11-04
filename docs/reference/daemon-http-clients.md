@@ -1,0 +1,112 @@
+# Writing a daemon client
+
+What a program that talks to the OpenRig daemon over HTTP needs and can't read from `rig --help`: how to find the
+daemon, its health route, which bearer token each route family checks, the event streams, and some route
+details. It describes the daemon as it is. It adds no promise beyond what each section says, and route shapes not
+listed here can change.
+
+## Finding the daemon
+
+`rig status --json` is the discovery surface. Its `daemon` object gives `state`, `reachable`, `pid` and `port`.
+`reachable` is `true` when the daemon answered its health probe, `false` when it is positively down, and `null`
+when that isn't confirmed (see `rig status` in [the command reference](../as-built/cli-reference.md#status)).
+It reads the recorded state and probes; it never starts a daemon.
+
+The CLI itself finds the daemon in two different orders:
+
+- **Data commands** (everything that sends a request): `OPENRIG_URL` (or the legacy `RIGGED_URL`); else
+  `$OPENRIG_HOME/daemon.json` when it holds a valid `pid` and `port`; else the config keys `daemon.host` and
+  `daemon.port` (environment `OPENRIG_HOST` and `OPENRIG_PORT`), which default to `127.0.0.1:7433`.
+- **Lifecycle commands** (`rig daemon start`, `stop`, `status`): `$OPENRIG_HOME/daemon.json`, then the legacy
+  `~/.rigged/daemon.json`.
+
+`daemon.json` holds `pid`, `port`, `host`, `db` and `startedAt`. `rig daemon start` writes it only after the
+daemon's health check passes, so while a start is still pending the file doesn't exist yet. It is the CLI's own
+state file, not a published contract: prefer `rig status --json`.
+
+## `GET /healthz`
+
+The liveness and identity read. It always returns `status: "ok"` and `pid`. Every other field is present only
+in the case named:
+
+| Field | When it is present |
+| --- | --- |
+| `euid` | On platforms with effective user ids. A self-report for the CLI's owner check, not authentication. |
+| `databaseWarnings` | When the daemon opened its database with warnings. |
+| `semver`, `commit`, `dirty`, `builtAt` | On a stamped (released) build; a development run has none. |
+| `selfHostId`, `selfHostIdSource` | After the boot reconcile has set this host's id. |
+| `eventLoop` | When the event-loop monitor runs: `lagMeanMs`, `lagP99Ms`, `utilization` (0 to 1), `lastTickAgeMs` and `healthy`. |
+| `routeTimings` | With `eventLoop`. |
+| `slowOperations` | When the slow-operation recorder runs. |
+| `bind` | The bind plan: `mode` (`explicit` or `default`), `hosts` (the addresses bound), `tailscaleDetected`, and `ignoredRoutingHost` when a routing value was ignored. |
+| `stuckSweep`, `wakeLadder` | The heartbeats of the stuck sweep and the wake ladder, when they run. |
+
+## Bearer tokens
+
+The daemon reads two tokens from its environment at start:
+
+- **`OPENRIG_AUTH_BEARER_TOKEN`** checks Mission Control's write routes (`POST /api/mission-control/action` and
+  `/notifications/test`), the `/api/hosts` writes (`add`, `update`, `remove`, `pair`), and the `/api/rig-mode`
+  binding writes. `rig host pair` hands this token to the paired machine, so a daemon that will be paired with
+  needs it set (see `rig host pair` in [the command reference](../as-built/cli-reference.md)).
+- **`OPENRIG_TERMINAL_BEARER_TOKEN`** checks every `/api/transport` and `/api/compaction` route, `POST
+  /api/terminal/follow` and `/viewer/ensure`, and every `GET /api/terminal/<name>` route, the terminal websocket
+  included. When the daemon is bound to an explicit address (`rig daemon start --host`) that isn't loopback or a
+  tailnet address, and this token isn't set, these routes check `OPENRIG_AUTH_BEARER_TOKEN` instead.
+
+A route whose token isn't set lets every request through. Send a token as `Authorization: Bearer <token>`; the
+`GET /api/terminal/<name>` routes, the websocket included, also take `?token=<token>`. The CLI sends the terminal token from `OPENRIG_TERMINAL_BEARER_TOKEN`,
+or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; the daemon doesn't create it.
+
+A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
+and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
+The `GET /api/terminal/<name>` routes, the websocket included, answer `{ "error": "unauthorized", "hint" }`. A token
+doesn't get past the browser boundary's 403 refusals, which [Browser access](browser-access.md) describes.
+
+## Event streams
+
+All three are server-sent events (`text/event-stream`):
+
+- **`GET /api/events`**: the daemon's event log. `?rigId=` limits it to one rig. Each event carries `id: <seq>`.
+  Without `Last-Event-ID`, `?replay=<n>` first sends the newest `n` stored events (`0`: none, live events only);
+  `?replay=all`, no `replay`, or any other value sends the whole log first. A `Last-Event-ID` header (what
+  `EventSource` sends when it reconnects) sends the events after that id instead, whatever `replay` says.
+  Live events that arrive during the replay follow it, without duplicates.
+- **`GET /api/activity/events`**: live only, no replay or ids. Each message is named after its event type:
+  `seat.activity_changed`, `seat.rung_health`, `proof.judged` or `proof.sources_changed`. It tells a view to read
+  again; it carries no derived state.
+- **`GET /api/queue/sse`** (alias `/api/queue/watch`): live only, with `id: <seq>`, for `queue.created`,
+  `queue.handed_off`, `queue.claimed`, `queue.unclaimed`, `qitem.fallback_routed`, `qitem.closure_overdue`,
+  `inbox.absorbed` and `inbox.denied`.
+
+## Route details
+
+- **`GET /api/queue/recent-transitions`** returns at most 20 rows: `limit` is clamped to 1–20, and defaults to 20.
+- **`POST /api/transport/send`** takes `urgent: true`, the same as `rig send --urgent`. The daemon records who
+  marked it from the sender identity, not from the body.
+- **`POST /api/scope/approve`** is what `rig scope slice approve` and `rig scope mission approve` call. The body
+  takes `scopeTier` (`slice` or `mission`), `scopePath`, and optionally `approvalScope` (`spec` or `delivery`, the
+  default), `missionsRoot`, `onBehalfOf`, `reApprove`, `reason` and `lockedArtifacts`. The approver is the
+  request's sender identity (`actorSession` in the body is recorded beside it, and a different value is
+  superseded). Success is 201 with `scopeTier`, `scopeId`, `scopePath`, `approvalScope`, `approvedBy`,
+  `approvedAt`, `onBehalfOf`, `actionId`, `freezeFired` and `reApproved`. Refusals are 404 `scope_not_found`,
+  409 `already_approved` or `nothing_to_reapprove`, 503 `workspace_not_configured`, 500 `audit_write_failed`, or
+  400 for the rest.
+- **`POST /api/proof/judge`** is what `rig proof judge` calls. The body takes `scope`, `item`, `verdict`
+  (`accept`, `reject` or `withdraw`), `reason`, `expectedRevision` and `expectedPrevious` (a judgment id or
+  `null`), and optionally `evidence`, `expectedEvidence`, `subject`, `operationId`, `replace`, `project` and
+  `projectRoot`. The judge is the request's sender identity. The response is `judgment`, the slice's `readiness`,
+  `replayed` and `notification`: 201 for a new judgment, 200 when an `operationId` replays an earlier one.
+- **`POST /api/workflow/instantiate`** requires `specPath`, `rootObjective` and `createdBySession`, and takes
+  `entryOwnerSession`, `targetRig` and `scope` (see [Project workspace](project-workspace.md) for `scope`).
+  Success is 201 with `instance`, `spec`, `entryQitemId` and `entryOwnerSession`, any `advisories`, and
+  `scopeIgnored` when a scope wasn't applied.
+- **`GET /api/provider/usage`** returns `{ hostUsage }`, this host's usage rows (`host: "local"`, a `provider`
+  and a `state`). A row's `windows`
+  lists each seat's reading separately (each carries `seatSession`), so an account's weekly window appears once
+  for every seat that reported it; group by `window` and `resetsAt` to show it once.
+- **Slices are found by folder name alone.** `GET /api/slices/:name`, `/:name/doc/*`, `/:name/proof-asset/*` and
+  `GET /api/review/slice/:name` take only the name; the detail route reads `?mission` only together with
+  `?project`. When two missions have a slice folder of the same name, the daemon keeps the first one it finds:
+  that one is listed and served, and the other doesn't appear in `GET /api/slices` at all. Keep slice names unique
+  across missions, as [Project workspace](project-workspace.md) says.
