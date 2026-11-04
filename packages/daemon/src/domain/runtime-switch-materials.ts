@@ -203,12 +203,15 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
       }
       const projected = await adapter.project(plan, binding);
       if (projected.failed.length) throw new Error(projected.failed.map((failure) => `${failure.effectiveId}: ${failure.error}`).join("; "));
+      // #2456: a kept guidance block is named, as at a start, so the switch's result and the successor's first turn say so.
+      notes.push(...(projected.warnings ?? []));
       if (runtime === "codex") {
         const catalog = writeSeatSkillCatalog(seatSkills);
         if (catalog.kept) notes.push(seatCatalogKeptNote(catalog));
       }
       const delivered = await adapter.deliverStartup(preLaunch, binding);
       if (delivered.failed.length) throw new Error(delivered.failed.map((failure) => `${failure.path}: ${failure.error}`).join("; "));
+      notes.push(...(delivered.warnings ?? []));
       return notes;
     },
   };

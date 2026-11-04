@@ -24,7 +24,8 @@ import type {
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
-import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
+import { isPerSeatRoleGuidance, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
+import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import {
   stubSeatSidecarPath, buildStubRunnerCommand, parseStubRunnerState,
   type StubRunnerState,
@@ -56,6 +57,9 @@ export interface StubRuntimeAdapterDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Launch-attempt id minting (tests inject; defaults to randomUUID). */
   newLaunchId?: () => string;
+  /** #2456: with it, every guidance block this adapter writes is checked against the record and recorded; absent, the
+   *  plain merge, as before. */
+  managedBlockRecords?: ManagedBlockRecords;
 }
 
 /** In-memory launch record: the readiness fallback for the hermetic path (no
@@ -74,8 +78,10 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
   private sleep: (ms: number) => Promise<void>;
   private newLaunchId: () => string;
   private readonly launchRecords = new Map<string, StubLaunchRecord>();
+  private managedBlockRecords: ManagedBlockRecords | undefined;
 
   constructor(deps: StubRuntimeAdapterDeps) {
+    this.managedBlockRecords = deps.managedBlockRecords;
     this.tmux = deps.tmux;
     this.fsOps = deps.fsOps;
     this.runtime = deps.runtime ?? "stub";
@@ -329,10 +335,10 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
       if (warning) warnings.push(warning);
       return false;
     }
-    mergeManagedBlock(this.fsOps, targetPath, blockId, content, {
-      warnings,
+    // #2456: a block a person edited since OpenRig wrote it is kept and named, not counted as merged.
+    return writeManagedGuidanceBlock(this.fsOps, targetPath, blockId, content, {
+      records: this.managedBlockRecords, sourcePath, warnings,
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
     });
-    return true;
   }
 }

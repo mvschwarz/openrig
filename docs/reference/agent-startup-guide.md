@@ -367,9 +367,15 @@ Each startup file and action specifies when it applies:
 - `restore` — delivered when a seat is restored without its earlier conversation: a restore whose resume falls back to a fresh conversation, or a retried start
 - Default: `[fresh_start, restore]` (both)
 
-**An exact resume delivers neither.** When a restore reopens the seat's saved conversation (`rig up <rig> --existing` with a resume token), OpenRig types no startup actions and delivers no startup files, `restore` ones included: the conversation already has them, and typing them again would add turns to it. The one exception: a managed guidance block missing from the guidance file is put back before the harness starts.
+**An exact resume delivers neither.** When a restore reopens the seat's saved conversation (`rig up <rig> --existing` with a resume token), OpenRig types no startup actions and delivers no startup files, `restore` ones included: the conversation already has them, and typing them again would add turns to it. The one exception: the guidance file's managed blocks are brought up to date before the harness starts. A missing block is put back, and a stale one is refreshed (see below).
 
-**A seat handover does the same put-back.** Before a fresh, fork or rebuild successor starts, the handover puts the seat's missing managed guidance blocks back in its guidance file from the saved startup context. That's the rig's Claude file (`CLAUDE.md`, or `CLAUDE.local.md` when the rig uses it) for Claude, and `AGENTS.md` for Codex, Pi and omp. So a seat rebuilt into a new working directory keeps its guidance. Blocks already in the file are left as they are.
+**A seat handover does the same put-back.** Before a fresh, fork or rebuild successor starts, the handover puts the seat's missing managed guidance blocks back in its guidance file from the saved startup context. That's the rig's Claude file (`CLAUDE.md`, or `CLAUDE.local.md` when the rig uses it) for Claude, and `AGENTS.md` for Codex, Pi and omp. So a seat rebuilt into a new working directory keeps its guidance.
+
+**A block you edited by hand is never overwritten.** OpenRig records what it last wrote in each managed block, so a launch, an exact resume, a handover or a runtime switch can refresh a block whose source file changed since. The record follows the file itself, so two links to one file share it. A block you've edited since OpenRig wrote it is left as you wrote it. The start's result names it (`guidance_block_edited`), and the seat is told in one line once it's ready, or in a handover's packet. A block OpenRig has no record of writing (any block written before these records were kept) that differs from its source works like this:
+- a launch replaces it, as launches always did, and names it (`guidance_block_refreshed_unrecorded`);
+- an exact resume or a handover leaves it, and names it as possibly stale (`guidance_block_may_be_stale`).
+
+An exact resume doesn't type anything into the resumed conversation. So there, the restore result names the block (`guidanceNotes`), but the seat isn't told.
 
 Use this to avoid re-sending context that a fresh conversation doesn't need twice. For example, a one-time project briefing might only apply on `fresh_start`, while identity grounding should apply on both, so a seat that comes back fresh gets it again.
 
@@ -561,6 +567,10 @@ The guidance still goes to the repository `AGENTS.md`, as before, when:
 
 A seat's role still arrives as startup text, and the seat-skills line, after the person's yes, still goes to
 `AGENTS.md`.
+
+A launch that carries developer instructions writes no new blocks to the repository `AGENTS.md`. But blocks an earlier
+handover or resume left there are refreshed from their sources, by the same rule as every other managed block. That
+matters because the launch text asks Codex to follow `AGENTS.md` where the two differ.
 
 **If your shell sets `CODEX_HOME`.** When neither the seat nor the daemon declares a `CODEX_HOME`, a seat's pane keeps
 its own, and OpenRig reads `~/.codex`. A `CODEX_HOME` that only your shell startup sets (in `~/.zshrc`, for example),

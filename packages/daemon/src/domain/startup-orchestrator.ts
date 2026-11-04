@@ -32,6 +32,7 @@ import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSk
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode } from "./seat-launch-additions.js";
 import { heldMessagesNotice } from "./outbox-handler.js";
+import { keptGuidanceSeatLine } from "./restore-guidance.js";
 
 // Why a startup prompt's submission could not be confirmed, as told to the operator when the
 // proof line is held back.
@@ -588,6 +589,15 @@ export class StartupOrchestrator {
       }
     } catch (error) {
       return this.fail(input, "failed", [`Startup context persistence failed: ${String(error)}`], undefined, false, undefined, false, "persistence", true);
+    }
+
+    // #2456: the seat is told, in one line after it's ready, which managed blocks the adapter's guidance writes left as they
+    // are (named in this start's warnings). The line is this start's own: it's added after the startup context is saved,
+    // so a later replay doesn't send it again. A resume types nothing into the resumed conversation; its result names them.
+    const guidanceSeatLine = input.resumeToken ? undefined : keptGuidanceSeatLine(warnings);
+    if (guidanceSeatLine) {
+      input = { ...input, startupActions: [...input.startupActions, { type: "send_text", value: guidanceSeatLine, phase: "after_ready", appliesOn: [context], idempotent: true }] };
+      deliveryInput.startupActions = input.startupActions;
     }
 
     const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
