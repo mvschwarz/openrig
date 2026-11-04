@@ -69,6 +69,7 @@ Keys:
   topology.root          the topology tree root (instance altitude at its top; default $OPENRIG_HOME/topology)
   context.root           addressable context library for 'rig context add' (default $OPENRIG_HOME/context)
   context.system_world   default System World, replacement manifest path, or disabled
+  specs.builtins_visible show built-ins in spec inventory (default true)
   skills.root            versioned skill catalog (default $OPENRIG_HOME/skills)
   skills.router_line.enabled  the person's yes to the seat-skills line (one line plus OpenRig's markers) in AGENTS.md / CLAUDE.md (default false)
   onboarding.default_pack.enabled  deliver the two-part fresh-seat mental-model pack (default on)
@@ -96,8 +97,10 @@ Keys:
                          wake_retry_interval_seconds, wake_retry_cap, wake_unconfirmed_window_minutes,
                          wake_swap_grace_seconds (S01 wake-or-escalate ladder),
                          wake_human_rung (always | explicit-only — post agent-to-agent escalations to a person;
-                           under explicit-only, an ask that needs a person must be addressed to the person;
-                           without a human registry, explicit-only posts everything, as always does)
+                           explicit-only posts rows addressed to a person; other agent work stays visible,
+                           permission prompts still reach a person,
+                           choice prompts follow this setting; unavailable human delivery stays a visible row;
+                           an unreadable registry does not suppress eligibility; delivery still needs a ready route)
   retention.*            enabled, transitions_days, watchdog_days,
                          watchdog_keep_per_job, batch_size
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)

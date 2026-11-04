@@ -132,6 +132,9 @@ export interface ActivityEvidence {
   /** How often the source promises to report while idle. A durable idle boundary holds for two of these, then lapses to
    *  unknown: a runner that died without saying so stops reading idle. Absent: the boundary holds until the next. */
   livenessSeconds?: number;
+  /** A counted working beat from a runner (the runner contract §4): how long it counts as working, 5-60 s, in place of
+   *  the hook window a bare working post has. */
+  workingLivenessSeconds?: number;
   activity?: ActivityValue;
   needsInput?: NeedsInput;
   permissionRequest?: { id: string; hookAgentId?: string | null };

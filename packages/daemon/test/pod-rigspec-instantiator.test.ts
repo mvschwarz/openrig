@@ -140,6 +140,23 @@ describe("PodRigInstantiator", () => {
     } finally { db.close(); }
   });
 
+  it("#1631 bootstrap instantiate retains the member-only startup root for export", async () => {
+    const { db, rigRepo, sessionRegistry, inst } = setup({ [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl") });
+    try {
+      const spec = makeRigSpec();
+      spec.pods[0]!.members[0]!.startup = { files: [{ path: "member.md", deliveryHint: "auto", required: false, appliesOn: ["fresh_start", "restore"] }], actions: [] };
+      const result = await inst.instantiate(RigSpecCodec.serialize(spec), nodePath.resolve(RIG_ROOT));
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(rigRepo.getRigStartupLayers(result.result.rigId)?.root).toBe(nodePath.resolve(RIG_ROOT));
+      const { RigSpecExporter } = await import("../src/domain/rigspec-exporter.js");
+      const exporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo: new PodRepository(db) });
+      const exported = exporter.exportRig(result.result.rigId) as RigSpec;
+      expect(exported.pods[0]!.members[0]!.startup?.files[0]?.path).toBe("member.md");
+      expect(exporter.memberStartupNotCarried(result.result.rigId)).toEqual([]);
+    } finally { db.close(); }
+  });
+
   it("#1631 bootstrap instantiate preserves action-only pod startup for export", async () => {
     const root = nodePath.resolve(RIG_ROOT);
     const { db, rigRepo, sessionRegistry, inst } = setup({ [nodePath.resolve(root, "agents/impl/agent.yaml")]: agentYaml("impl") });
@@ -533,14 +550,15 @@ profiles:
       db = fixture.db;
       const member = { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: project };
       const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
-        { ...member, agentFile: "claude/reviewer.md", appendSystemPromptFile: "claude/prompts/house.md", pluginDirs: ["claude/plugins/review"] },
+        { ...member, agentFile: "claude/reviewer.md", appendSystemPromptFile: "claude/prompts/house.md", pluginDirs: ["claude/plugins/review"],
+          pluginChannels: ["plugin:example-channel@example"] },
         { ...member, id: "qa", agentFile: "claude/missing.md" },
       ] }] } as never);
       const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
       expect(result.ok, JSON.stringify(result)).toBe(true);
       if (!result.ok) return;
       const additions = seatLaunchAdditions(seatSkillPaths({ rigId: result.result.rigId, logicalId: "dev.impl", runtime: "claude-code" }));
-      expect(additions).toMatchObject({ agent: "openrig:reviewer", pluginDirs: [expect.stringContaining("review")] });
+      expect(additions).toMatchObject({ agent: "openrig:reviewer", pluginDirs: [expect.stringContaining("review")], pluginChannels: ["plugin:example-channel@example"] });
       expect(fs.readFileSync(additions!.appendSystemPromptFile!, "utf8")).toBe("House rules.\n"); // the seat's own copy
       const qa = result.result.nodes.find((n) => n.logicalId === "dev.qa");
       expect(JSON.stringify(qa)).toMatch(/addition_missing: .*claude\/missing\.md/);

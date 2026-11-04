@@ -218,9 +218,10 @@ describe("source order", () => {
     for (const type of ["agent_end", "agent_start"]) core.handlePiLine(JSON.stringify({ type }));
     const sent = posts.filter((p) => typeof p.hookEvent === "string" && p.eventFamily === undefined);
     const newest = sent.at(-1)!;
-    expect([sent.at(-2)!.hookEvent, newest.hookEvent, newest.sequence]).toEqual(["Stop", "active", 36]);
-    await f.deliver(newest); // the next turn's start arrives first, then all 35 older posts, the Stop last
-    for (const older of sent.slice(0, -1)) await f.deliver(older);
+    // Each run opens with its accepted turn (contract section 4), so the next turn's start is two posts.
+    expect([sent.at(-3)!.hookEvent, sent.at(-2)!.hookEvent, newest.hookEvent, newest.sequence]).toEqual(["Stop", "UserPromptSubmit", "active", 38]);
+    for (const next of sent.slice(-2)) await f.deliver(next); // the next turn's start arrives first, then all 36 older posts, the Stop last
+    for (const older of sent.slice(0, -2)) await f.deliver(older);
     expect(f.state().activity).toBe("working");
     await f.restart(); // restoring uses the same order: the newest start, not the late Stop
     expect(f.state().activity).toBe("working");

@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { resolveCurrentSessionAddress } from "./session-registry.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
+import { verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
 
 export interface HookReviewObservation {
   destination: string;
@@ -14,7 +15,8 @@ export interface HookReviewObservation {
  * startup error, generic attention flag or scrollback can start an alert. */
 export function makeKernelHookReviewReader(deps: {
   db: Database.Database;
-  tmux: Pick<TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen">;
+  tmux: Pick<TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen" | "getPanePid">;
+  listProcesses?: NativeProcessLister;
   now?: () => Date;
 }): () => Promise<HookReviewObservation[]> {
   return async () => {
@@ -39,17 +41,24 @@ export function makeKernelHookReviewReader(deps: {
         if (before.some(p => p.id === row.pane)) {
           const process = (await deps.tmux.readAllPaneProcesses())?.get(row.pane);
           pid = process?.pid ?? null;
-          if (!pid || process?.dead !== false || process.command !== "codex") throw new Error("native pane is not positively live Codex");
+          if (!pid || process?.dead !== false) throw new Error("native pane is not positively live Codex");
+          const proofInput = { target: row.pane, tmux: deps.tmux, listProcesses: deps.listProcesses };
+          const native = process.command === "codex" ? null : await verifyCodexPaneProcess(proofInput);
+          if (process.command !== "codex" && native?.panePid !== pid) throw new Error("native pane is not positively live Codex");
           const screen = await deps.tmux.capturePaneScreen(row.pane);
+          // A stable launcher PID alone cannot exclude a replaced Codex child during capture.
+          const currentNative = native ? await verifyCodexPaneProcess(proofInput) : null;
           const after = await deps.tmux.listPanes(row.destination, true);
           const current = deps.db.prepare("SELECT id, tmux_session, tmux_pane FROM bindings WHERE node_id = ?").get(row.nodeId) as
             { id: string; tmux_session: string; tmux_pane: string } | undefined;
           const session = resolveCurrentSessionAddress(deps.db, row.destination);
           const currentProcess = (await deps.tmux.readAllPaneProcesses())?.get(row.pane);
-          if (currentProcess?.pid === pid && currentProcess.dead === false && currentProcess.command === "codex" && after.some(p => p.id === row.pane)
+          if (currentProcess?.pid === pid && currentProcess.dead === false && currentProcess.command === process.command
+            && (!native || (currentNative?.panePid === pid && currentNative.fingerprint === native.fingerprint)) && after.some(p => p.id === row.pane)
             && current?.id === row.bindingId && current.tmux_session === row.destination && current.tmux_pane === row.pane
             && session?.sessionId === row.sessionId && session.nodeId === row.nodeId && screen !== null) {
-            const probe = assessNativeResumeProbe({ runtime: "codex", paneCommand: currentProcess.command, paneContent: screen });
+            const probe = assessNativeResumeProbe({ runtime: "codex", paneCommand: currentProcess.command, paneContent: screen,
+              codexProcessVerified: native !== null });
             state = probe.code === "hook_trust_gate" ? "blocked" : probe.status === "resumed" ? "clear" : "unknown";
           }
         }

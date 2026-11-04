@@ -30,6 +30,13 @@ export function resolveSeatEffort(node: { effort?: string | null; effortChoice?:
 
 /** The seat's resolution from its node row. null: no such node. A database older than the
  *  effort_choice column resolves from nodes.effort alone, as launches did before it existed. */
+/** The effort a launch selected, and why: the effort a provider switch asked it to keep, the seat's explicit choice,
+ *  or its saved resolution (the snapshot's authored effort, or the runtime default when `effort` is null). */
+export interface LaunchEffortSelection {
+  effort: string | null;
+  source: "kept" | "seat_choice" | "saved";
+}
+
 export function readSeatEffort(db: Database.Database, nodeId: string): EffortResolution | null {
   try {
     const row = db.prepare("SELECT effort, effort_choice FROM nodes WHERE id = ?").get(nodeId) as

@@ -85,6 +85,21 @@ describe("resolveIdentityVerifiedClaudeRecord — canonical occupant identity", 
     }
   });
 
+  it("a shell root that only names claude in its arguments isn't counted beside the verified Claude child", async () => {
+    // The shell stays while its second command runs, and its argv still holds the first command's conversation.
+    const wrapped: ProcessRow[] = [
+      { pid: 10, ppid: 1, command: `bash -c claude --resume ${reserveId}; claude --resume ${canonicalId}; wait` },
+      { pid: 20, ppid: 10, command: `claude --resume ${canonicalId} --name ${canonicalSession}` },
+    ];
+    const base = input(`/tmp/${canonicalId}.jsonl`);
+    const out = await resolveIdentityVerifiedClaudeRecord(
+      { ...base, identity: { ...base.identity, evidence: { registeredPane: "%156", observedPid: 20, observedPanePid: 10 } } },
+      { getPanePid: async (target) => target === "%156" ? 10 : null, listProcesses: async () => wrapped, readThreadIdByPid: () => undefined },
+      () => true,
+    );
+    expect(out).toMatchObject({ ok: true, id: canonicalId });
+  });
+
   it("missing, stale, changed, or ambiguous pane identity is explicit and never transcript-recency-selected", async () => {
     const readable = () => true;
     const base = input(`/tmp/${canonicalId}.jsonl`);
@@ -154,6 +169,20 @@ const deps = {
 describe("paneClaudeSessionIdArgument (a CANDIDATE source, never the answer alone)", () => {
   it("reads the launch-argument session uuid (the specimen shape)", async () => {
     const out = await paneClaudeSessionIdArgument("dev-planner@r", deps);
+    expect(out).toEqual({ ok: true, id: "daaeb7b4-841b-45cb-8a33-b062e0ce8296" });
+  });
+
+  it("finds a claude that IS the pane process (exec'd at launch), not only one under a shell", async () => {
+    const out = await paneClaudeSessionIdArgument("s", { ...deps, listProcesses: async () => [
+      { pid: 10, ppid: 1, command: "claude --resume daaeb7b4-841b-45cb-8a33-b062e0ce8296" },
+    ] });
+    expect(out).toEqual({ ok: true, id: "daaeb7b4-841b-45cb-8a33-b062e0ce8296" });
+  });
+
+  it("finds a native install's Claude, whose process runs as its versioned path, not as claude", async () => {
+    const out = await paneClaudeSessionIdArgument("s", { ...deps, listProcesses: async () => [
+      { pid: 10, ppid: 1, command: "/home/u/.local/share/claude/versions/2.1.316 --resume daaeb7b4-841b-45cb-8a33-b062e0ce8296" },
+    ] });
     expect(out).toEqual({ ok: true, id: "daaeb7b4-841b-45cb-8a33-b062e0ce8296" });
   });
 

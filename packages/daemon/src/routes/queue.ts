@@ -706,6 +706,7 @@ export function queueRoutes(): Hono {
       classificationBinding?: unknown;
       state?: QueueState;
       reopen?: boolean;
+      closureRequiredAt?: string;
       transitionNote?: string;
       closureReason?: string;
       closureTarget?: string;
@@ -733,6 +734,7 @@ export function queueRoutes(): Hono {
         actorSession,
         state: body.state,
         reopen: body.reopen,
+        closureRequiredAt: body.closureRequiredAt,
         transitionNote: body.transitionNote,
         closureReason: body.closureReason,
         closureTarget: body.closureTarget,
@@ -1179,6 +1181,7 @@ export function queueRoutes(): Hono {
         activeOnly,
         handedOffFrom,
         updatedSince,
+        sortByUpdated: c.req.query("sort") === "updated",
       });
       return c.json(items);
     }
@@ -1337,6 +1340,8 @@ export function queueRoutes(): Hono {
     const closing = repo.closingTransition(qitemId, item.state);
     return c.json({
       ...item,
+      // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
+      decisionRevision: repo.decisionRevision(item),
       // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
       ...(closing ? { closingTransition: {
         transitionId: closing.transitionId,

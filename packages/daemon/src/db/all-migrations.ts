@@ -1,6 +1,9 @@
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
-import { streamIntakeCursorSchema } from "./migrations/145_stream_intake_cursor.js";
+import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
+import { nodeStartupGuidanceFileSchema } from "./migrations/146_node_startup_guidance_file.js";
+import { managedBlockWritesSchema } from "./migrations/147_managed_block_writes.js";
+import { streamIntakeCursorSchema } from "./migrations/148_stream_intake_cursor.js";
 import { nodeAccountHomeSchema } from "./migrations/141_node_account_home.js";
 import { escalationTargetRefsSchema } from "./migrations/126_escalation_target_refs.js";
 import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_readings.js";
@@ -292,5 +295,8 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeClaudeMcpSchema,
   activityGrantsSchema,
   environmentBindingsSchema,
+  nodePermissionsToSchema,
+  nodeStartupGuidanceFileSchema,
+  managedBlockWritesSchema,
   streamIntakeCursorSchema,
 ];

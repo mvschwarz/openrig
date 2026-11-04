@@ -13,6 +13,7 @@ import {
 // truth at ~/.openrig/config.json. Resolution stays env > file > default.
 
 export interface RiggedConfig {
+  specs: { builtinsVisible: boolean };
   launch: { nonInterruptive: boolean };
   daemon: { port: number; host: string; dbConflict?: "warn" | "stop" };
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer.
@@ -287,6 +288,7 @@ const DEFAULTS = {
   topology: { root: getDefaultOpenRigPath("topology") },
   // OPR.0.5.9.5 Wave B — canonical addressable context library.
   context: { root: getDefaultOpenRigPath("context"), systemWorld: "default" },
+  specs: { builtinsVisible: true },
   skills: { root: getDefaultOpenRigPath("skills"), routerLine: { enabled: false } },
   onboarding: { defaultPack: { enabled: true } },
   health: { contextPressure: { warningPercent: 95, criticalPercent: 99 } },
@@ -462,6 +464,7 @@ export const VALID_KEYS = [
   // OPR.0.5.9.5 Wave B — canonical context library; old key is refused.
   "context.root",
   "context.system_world",
+  "specs.builtins_visible",
   "skills.root",
   // OPR.0.7.0.13 (router): the person's recorded yes to OpenRig's one-line seat-skills bootstrap in AGENTS.md / CLAUDE.md.
   "skills.router_line.enabled",
@@ -590,6 +593,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   "context.root": { primary: "OPENRIG_CONTEXT_ROOT" },
   "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
+  "specs.builtins_visible": { primary: "OPENRIG_SPECS_BUILTINS_VISIBLE" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "skills.router_line.enabled": { primary: "OPENRIG_SKILLS_ROUTER_LINE_ENABLED" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
@@ -698,6 +702,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "topology.root": ["topology", "root"],
   "context.root": ["context", "root"],
   "context.system_world": ["context", "systemWorld"],
+  "specs.builtins_visible": ["specs", "builtinsVisible"],
   "skills.root": ["skills", "root"],
   "skills.router_line.enabled": ["skills", "routerLine", "enabled"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
@@ -1276,6 +1281,7 @@ export class ConfigStore {
         root: v("context.root") as string,
         systemWorld: v("context.system_world") as string,
       },
+      specs: { builtinsVisible: v("specs.builtins_visible") as boolean },
       skills: {
         root: v("skills.root") as string,
         routerLine: { enabled: v("skills.router_line.enabled") as boolean },

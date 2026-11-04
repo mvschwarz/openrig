@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import { PassThrough } from "node:stream";
 import type { QueueDeps } from "../src/commands/queue.js";
-import { resolveQueueBody, previewBody, waitForDeliveryOutcome } from "../src/commands/queue.js";
+import { resolveQueueBody, previewBody, previewCutMarker, waitForDeliveryOutcome } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
 
 /**
@@ -1204,6 +1204,17 @@ describe("rig queue CLI", () => {
     });
   });
 
+  it("update forwards an explicitly accepted closure deadline without a state change", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "queue", "update", "qitem-estimate", "--closure-required-at", "2026-11-04T10:00:00.000Z", "--note", "Coordinator accepted the revised estimate", "--json"]);
+    expect(calls.find(c => c.path === "/api/queue/qitem-estimate/update")?.body).toMatchObject({
+      closureRequiredAt: "2026-11-04T10:00:00.000Z", transitionNote: "Coordinator accepted the revised estimate",
+    });
+    expect(calls.find(c => c.path === "/api/queue/qitem-estimate/update")?.body).toHaveProperty("state", undefined);
+  });
+
   it("update forwards explicit reopen acknowledgment", async () => {
     const { deps, calls } = makeDeps();
     const program = createProgram({ queueDeps: deps });
@@ -1849,7 +1860,8 @@ describe("rig queue CLI", () => {
       const printed = JSON.parse(logs[0]);
       expect(printed.bodyTruncated).toBe(true);
       expect(printed.bodyBytes).toBe(1000);
-      expect(Array.from(printed.body).length).toBe(512);
+      // Keep the first 512 code points, then mark the cut inside the body.
+      expect(printed.body).toBe(`${"A".repeat(512)}…[cut at 512 of 1000 chars; rig queue show 'qitem-1' --full]`);
       // #1806: stdout is the record alone and parses as JSON; the marker line, with the honest total byte size, is on stderr
       expect(JSON.parse(logs.join("\n"))).toMatchObject({ qitemId: "qitem-1", bodyTruncated: true });
       expect(errors.join("\n")).toContain("bounded preview — complete body is 1000 bytes; full record");
@@ -1892,7 +1904,24 @@ describe("rig queue CLI", () => {
       const printed = JSON.parse(logs[0]);
       expect(printed.bodyTruncated).toBe(true);
       expect(printed.bodyBytes).toBe(1000);
-      expect(Array.from(printed.body).length).toBe(PREVIEW_MAX_CODEPOINTS);
+      const marker = "…[cut at 512 of 1000 chars; rig queue show 'qitem-1' --full]";
+      expect(printed.body.endsWith(marker)).toBe(true);
+      expect(Array.from(printed.body.slice(0, -marker.length)).length).toBe(PREVIEW_MAX_CODEPOINTS);
+    });
+
+    it("show default: a multibyte body's marker counts code points, not bytes", async () => {
+      const full = "😀".repeat(600); // 600 code points, 2400 bytes
+      const { deps } = showRoute({ qitemId: "qitem-1", body: full });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "show", "qitem-1", "--json"]);
+      const printed = JSON.parse(logs[0]);
+      expect(printed.bodyBytes).toBe(2400);
+      expect(printed.body).toBe(`${"😀".repeat(512)}…[cut at 512 of 600 chars; rig queue show 'qitem-1' --full]`);
+    });
+
+    it("previewCutMarker quotes the row id for the shell", () => {
+      expect(previewCutMarker("qitem-it's", 512, 3983)).toBe(`…[cut at 512 of 3983 chars; rig queue show 'qitem-it'\\''s' --full]`);
     });
 
     it("show --full --json: byte-identical COMPLETE item body (compatibility contract — no preview fields)", async () => {

@@ -357,10 +357,16 @@ export class InboundRouter {
       if (!isCurrent()) return { landed: false, reason: "inactive" };
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
-      const { summary, body, attachmentsChars } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
+      const { summary, body: incomingBody, attachmentsChars } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
+      // Keep guidance in the attribution footer, not the person's answer (which is extracted above it).
+      // Apply it on replay too, so the durable answer's event footer remains identical.
+      const guidance = "Read the person's words; closing the decision does not mean approval.";
+      const body = !asChannel && correlated?.humanIntent === "decision" && correlated.humanQuestions?.length
+        ? `${incomingBody}\n${guidance}`
+        : incomingBody;
       // A question parked on the person it asked takes their reply after its current question as the answer, as a click.
       const parkOpen = correlated?.state === "blocked" && route.correlationQitemId !== undefined
         && this.deps.queue.answersPark?.(route.correlationQitemId, who.source, ev.ts) === true;
@@ -369,16 +375,24 @@ export class InboundRouter {
       const resumedPark = correlated?.state === "in-progress";
       const askOpen = correlated?.state === "pending" || parkOpen;
       const closed = correlated?.state === "done" || correlated?.state === "handed-off";
-      const answerable = !ev.recoveredThreadReply && !asChannel && route.correlationQitemId !== undefined;
+      // A reply routed to another person (a root recorded with a person as its seat) isn't an answer to the asker: it stays
+      // words for whoever it reached.
+      const settles = route.correlationQitemId === undefined || this.deps.queue.routesToAsker?.(route.correlationQitemId, route.destination) !== false;
+      const answerable = !ev.recoveredThreadReply && !asChannel && route.correlationQitemId !== undefined && settles;
       // An absorbed event has its own identity even when the first answer came from a button or Steering.
       const consumedKey = (answerId: string) => `answer-event:${JSON.stringify([eventId, route.correlationQitemId, who.source, answerId])}`;
       // A closed ask can hold several returned answers (one per park). A replay finds the one this event returned, or the
       // one it was absorbed into.
-      const footerAt = body.lastIndexOf("\n\n---\n");
+      const footerAt = incomingBody.lastIndexOf("\n\n---\n");
+      const matchesEventFooter = (savedBody: string) => {
+        if (footerAt < 0) return false;
+        const footer = incomingBody.slice(footerAt);
+        return savedBody.endsWith(footer) || savedBody.endsWith(`${footer}\n${guidance}`);
+      };
       const ownClosedAnswer = () => {
         const answers = this.deps.queue.listHumanAnswers?.(route.correlationQitemId!, who.source) ?? [];
         const seen = this.deps.seen.load();
-        return answers.find((answer) => footerAt >= 0 && answer.body.endsWith(body.slice(footerAt)))
+        return answers.find((answer) => matchesEventFooter(answer.body))
           ?? answers.find((answer) => seen.has(consumedKey(answer.qitemId))) ?? null;
       };
       const committedAnswer = !answerable ? null
@@ -388,7 +402,7 @@ export class InboundRouter {
       const absorbedEventKey = committedAnswer ? consumedKey(committedAnswer.qitemId) : null;
       // The footer covers the original typed answer; the marker covers a later event absorbed before close.
       const replayedAnswer = (closed || resumedPark) && committedAnswer && (
-        committedAnswer.body.endsWith(body.slice(body.lastIndexOf("\n\n---\n"))) ||
+        matchesEventFooter(committedAnswer.body) ||
         (absorbedEventKey && this.deps.seen.load().has(absorbedEventKey))
       ) ? committedAnswer : null;
       // A different event after close remains conversation; only the pending ask coalesces other retries.
@@ -405,14 +419,14 @@ export class InboundRouter {
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
-          ...(askOpen && !ev.recoveredThreadReply && !asChannel ? { humanAnswer: true, typedReply: true } : {}),
+          ...(askOpen && answerable ? { humanAnswer: true } : {}),
         });
       } catch (e) {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
         return { landed: false, reason: "create_failed" };
       }
       let replyResolution: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable" | undefined;
-      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && !ev.recoveredThreadReply && !asChannel) {
+      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && answerable) {
         try {
           // Reusing the durable answer consumed this event's words. Record that before close, but
           // keep the raw event unmarked until completion so an interrupted close can still retry.
@@ -549,7 +563,10 @@ export class InboundRouter {
       if (live) await acknowledge(CLICK_REPLIES.unmapped);
       return { status: "ignored", reason: "unmapped-message" };
     }
-    const existing = this.deps.queue.getHumanAnswer?.(qitemId, who.source);
+    // A decision parked on this person takes the current question's answer, as a typed reply does: a re-park gets its own.
+    const parkOpen = this.deps.queue.getQitem?.(qitemId)?.state === "blocked"
+      && this.deps.queue.answersPark?.(qitemId, who.source, action?.action_ts) === true;
+    const existing = parkOpen ? this.deps.queue.getEpisodeAnswer?.(qitemId, who.source) : this.deps.queue.getHumanAnswer?.(qitemId, who.source);
     if (existing) {
       try {
         const resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: humanAnswerText(existing.body), messageTs: action?.action_ts });
@@ -568,10 +585,16 @@ export class InboundRouter {
     const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked, clickedTs: action?.action_ts });
     if (!recorded || recorded.status !== "recorded") {
       const reason = recorded?.reason ?? "answers-unavailable";
+      // Another person's committed answer is the answer: a park on the person resumes with it through the resolver.
+      if (recorded?.answeredBy) {
+        try { await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: "", messageTs: action?.action_ts }); }
+        catch (e) { this.deps.log?.(`answer continuation failed qitem=${qitemId}: ${(e as Error).message}`); }
+      }
       // A closed decision holding this person's clicked answer: typically Slack's redelivery of the click that closed
       // it, after that click's own confirmation failed to post. It was recorded, so say that.
       if (live) {
         await acknowledge(recorded?.answerOnRecord ? CLICK_REPLIES.onRecord
+          : recorded?.answeredBy ? escapeSlackText(`${recorded.answeredBy} already answered this, so your choice wasn't recorded.`)
           : recorded?.decidedForThem ? escapeSlackText(redactSecrets(decidedForThemReply(recorded.decidedForThem))) : clickNotRecordedReply(reason));
       }
       return { status: "ignored", reason };

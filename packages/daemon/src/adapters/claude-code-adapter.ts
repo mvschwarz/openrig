@@ -19,16 +19,18 @@ import { assessNativeResumeProbe, hasClaudeDrawnInput } from "../domain/native-r
 import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
-import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
+import { isPerSeatRoleGuidance, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
+import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
-import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH, parseManagedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
+import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, parseManagedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
+import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
 import { isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
-import { seatLaunchAdditionArgs } from "../domain/seat-launch-additions.js";
+import { seatLaunchAdditionArgs, seatLaunchAdditionShellArgs } from "../domain/seat-launch-additions.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
 
 export interface ClaudeAdapterFsOps {
@@ -98,6 +100,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /** P20 — called after a projected file is written to a target, so the manifest
    *  records what we last wrote (→ operator-vs-stale discrimination). No-op by default. */
   private recordProjection: (targetPath: string, content: string) => void;
+  /** #2456: OpenRig's record of what it last wrote in each managed guidance block (startup wires the daemon's). */
+  private managedBlockRecords: ManagedBlockRecords | undefined;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -124,6 +128,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     /** P20 — record-at-apply hook (startup wires it to the projection manifest store).
      *  Absent → no-op (the manifest stays empty → discrimination safe-degrades to P17). */
     recordProjection?: (targetPath: string, content: string) => void;
+    /** #2456: with it, every guidance block this adapter writes is checked against the record and recorded; absent, the
+     *  plain merge, as before. */
+    managedBlockRecords?: ManagedBlockRecords;
   }) {
     this.tmux = deps.tmux;
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
@@ -141,6 +148,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.activityRelayPath = deps.activityRelayPath ?? null;
     this.claudeHooksManifestPath = deps.claudeHooksManifestPath ?? null;
     this.recordProjection = deps.recordProjection ?? (() => {});
+    this.managedBlockRecords = deps.managedBlockRecords;
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -377,7 +385,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const mcpArg = mcpArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     // OPR.0.7.0.9: the seat's own additions, after the model, effort and Advisor and before the identity options.
     const additionArgs = seatLaunchAdditionArgs(binding.launchAdditions);
-    const additionArg = additionArgs.map((arg, index) => ` ${index % 2 === 0 ? arg : shellQuote(arg)}`).join(""); // flag, value pairs
+    const additionArg = seatLaunchAdditionShellArgs(binding.launchAdditions, shellQuote); // each flag bare, each value quoted
 
     // Fork branch: `claude --resume <parent> --fork-session --session-id <fork> --name <seat>`
     // (Claude Code 2.0.73 or later). The fork's own id is chosen here, like a fresh launch's,
@@ -645,7 +653,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const launch = this.autoLaunches.get(binding.nodeId);
     if (!binding.tmuxPane || !launch) return looksReady ? "another" : "unknown";
     let rows: Awaited<ReturnType<NativeProcessLister>>;
-    try { rows = await (this.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: launch.scriptLaunch === true })))(); } catch { return "unknown"; }
+    try { rows = await (this.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: launch.scriptLaunch === true, frozenExecutable: launch.executable })))(); } catch { return "unknown"; }
     if (looksReady) return "another";
     const observation = { target: binding.tmuxPane, tmux: this.tmux, listProcesses: () => rows, selectedExecutable: launch.executable,
       scriptLaunch: launch.scriptLaunch };
@@ -1017,11 +1025,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (warning) warnings.push(warning);
       return false;
     }
-    mergeManagedBlock(this.fs, targetPath, blockId, content, {
-      warnings,
+    // #2456: a block a person edited since OpenRig wrote it is kept and named, not counted as merged.
+    return writeManagedGuidanceBlock(this.fs, targetPath, blockId, content, {
+      records: this.managedBlockRecords, sourcePath, warnings,
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
     });
-    return true;
   }
 
   private detectDeliveryHint(path: string, content: string, orientation?: string): "guidance_merge" | "skill_install" | "send_text" {
@@ -1248,22 +1256,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     // 1. Strip OpenRig-owned relay entries (EXACT node-command shape) from all events;
     //    prune emptied groups + events. User-authored hooks are untouched.
-    let changed = false;
-    for (const event of Object.keys(hooks)) {
-      const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : null;
-      if (!groups) continue;
-      const keptGroups: unknown[] = [];
-      for (const group of groups) {
-        if (!isPlainObject(group) || !Array.isArray(group["hooks"])) { keptGroups.push(group); continue; }
-        const groupHooks = group["hooks"] as unknown[];
-        const keptHooks = groupHooks.filter((h) => !isOwnedRelayCommand(hookCommand(h)));
-        if (keptHooks.length !== groupHooks.length) changed = true;
-        if (keptHooks.length === 0) continue; // prune emptied group
-        keptGroups.push({ ...group, hooks: keptHooks });
-      }
-      if (keptGroups.length === 0) delete hooks[event]; // prune emptied event
-      else hooks[event] = keptGroups;
-    }
+    let changed = stripOwnedRelayHooks(hooks);
 
     // 2. Deliverable enable: copy the relay asset + upsert the owned entry for each
     //    PREVALIDATED relay event (derived from the canonical manifest above).
@@ -1309,47 +1302,11 @@ interface ActivityHookOutcome {
   settingsUnparseable: boolean;
 }
 
-// OpenRig-owned relay path suffix. Ownership is the generated Node command whose single
-// argument ends with this path — a changed prefix still matches (replace, not duplicate); a
-// user command that merely contains the path (echo, or node with extra args) does NOT.
-const LEGACY_OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
-
 function managedClaudeNodeCommand(executable: string, ...args: string[]): string {
   const quotedArgs = args.map(shellQuote).join(" ");
   const pinned = `${shellQuote(executable)} ${quotedArgs}`;
   // Keep legacy PATH resolution if this runtime's name is outside our ownership grammar.
   return parseManagedClaudeNodeCommand(pinned) ? pinned : `node ${quotedArgs}`;
-}
-
-function hookCommand(hook: unknown): string | undefined {
-  return isPlainObject(hook) && typeof hook["command"] === "string" ? (hook["command"] as string) : undefined;
-}
-
-// OpenRig-owned collectors use canonical POSIX-quoted paths. Recognise older unquoted
-// three/four-token commands too, but preserve commands composed with shell operators or
-// extra arguments. Old unquoted paths containing spaces cannot be identified unambiguously.
-const OWNED_COLLECTOR_SUFFIX = nodePath.sep + nodePath.join(".openrig", "context-collector.cjs");
-
-function isOwnedCollectorCommand(cmd: string): boolean {
-  if (/[\r\n]/.test(cmd)) return false;
-  const parsed = parseManagedClaudeNodeCommand(cmd);
-  if (parsed && (parsed.args.length === 2 || parsed.args.length === 3)) {
-    return parsed.args[0]!.endsWith(OWNED_COLLECTOR_SUFFIX);
-  }
-  const tokens = cmd.trim().split(/\s+/);
-  if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;
-  if (tokens.some((token) => /[;&|<>`$()'"\\]/.test(token))) return false;
-  return tokens[1]!.endsWith(OWNED_COLLECTOR_SUFFIX);
-}
-
-function isOwnedRelayCommand(cmd: string | undefined): boolean {
-  if (!cmd) return false;
-  const parsed = parseManagedClaudeNodeCommand(cmd);
-  if (!parsed || parsed.args.length !== 1) return false;
-  const relay = parsed.args[0]!;
-  return relay.endsWith("/plugins/openrig-core/hooks/scripts/activity-relay.cjs")
-    || relay.endsWith(LEGACY_OWNED_RELAY_SUFFIX)
-    || relay.endsWith(`/${CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH}`);
 }
 
 function hashContent(content: string): string {

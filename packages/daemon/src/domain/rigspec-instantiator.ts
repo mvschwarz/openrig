@@ -2245,8 +2245,9 @@ export class PodRigInstantiator {
       if (pod.startup?.actions.length) podStartupActions[pod.id] = pod.startup.actions;
     }
     const hasPodFiles = Object.keys(podStartupFiles).length > 0;
+    const hasMemberStartupFiles = rigSpec.pods.some(pod => pod.members.some(member => (member.startup?.files.length ?? 0) > 0));
     const hasPodActions = Object.keys(podStartupActions).length > 0;
-    if (!rigSpec.cultureFile && !rigSpec.startup && !hasPodFiles && !hasPodActions) return;
+    if (!rigSpec.cultureFile && !rigSpec.startup && !hasPodFiles && !hasPodActions && !hasMemberStartupFiles) return;
     this.deps.rigRepo.setRigStartupLayers(rigId, {
       root: nodePath.resolve(rigRoot),
       cultureFile: rigSpec.cultureFile,
@@ -2304,17 +2305,25 @@ export class PodRigInstantiator {
     return (rigLayers.podStartupFiles?.[pod.id] ?? []).map((f) => ({ ...f, absolutePath: nodePath.resolve(rigLayers.root, f.path), ownerRoot: rigLayers.root }));
   }
 
-  /** The rig culture file and rig startup block a seat launches with, and the root they resolve against: the spec's
-   *  own when it declares them, else those stored when the rig was created. Expand, add-member and first-start retry
-   *  launch from a synthetic spec that declares neither, so an added seat gets the rig's layers as an original seat did. */
+  /** The rig culture file and rig startup block a seat launches with, and the root they resolve against. The two are
+   *  decided as a pair: a spec that declares either one supplies both (an undeclared one is absent), resolved against
+   *  the spec's root; a spec that declares neither gets both as stored when the rig was created, against that root.
+   *  Expand, add-member and first-start retry launch from a synthetic spec that declares neither, so an added seat gets
+   *  the rig's layers as an original seat did. */
   private rigStartupLayers(rigSpec: PodRigSpec, rigRoot: string, rigId: string): RigStartupLayers {
     if (rigSpec.cultureFile || rigSpec.startup) return { root: rigRoot, cultureFile: rigSpec.cultureFile, startup: rigSpec.startup };
     return this.deps.rigRepo.getRigStartupLayers(rigId) ?? { root: rigRoot };
   }
 
-  /** The spec as the startup layering sees it: carrying the rig layers the seat launches with. */
+  /** The spec as the startup layering sees it: carrying the rig layers the seat launches with, and only those there
+   *  are (#2454: a missing layer is no key, not a key whose value is undefined). */
   private withRigStartupLayers(rigSpec: PodRigSpec, layers: RigStartupLayers): PodRigSpec {
-    return { ...rigSpec, cultureFile: layers.cultureFile, startup: layers.startup };
+    const spec: PodRigSpec = { ...rigSpec };
+    delete spec.cultureFile;
+    delete spec.startup;
+    if (layers.cultureFile !== undefined) spec.cultureFile = layers.cultureFile;
+    if (layers.startup !== undefined) spec.startup = layers.startup;
+    return spec;
   }
 
   /** Seam B Guard-F2: the STRICT materialize/add-member persist — provenance here is
@@ -2425,18 +2434,20 @@ export class PodRigInstantiator {
       keptSkillWarnings.push(...ensureSeatSkillPlugin(seatSkills));
       // OPR.0.7.0.9 — the member's own agent, prompt file and plugin folders, copied into the seat's storage. Asking for
       // none removes an earlier request. A missing or refused source fails this seat by name; the rest still launch.
+      // #2044 — its plugin channels are recorded beside them (names only, nothing copied).
       const beside = (path: string) => nodePath.resolve(input.rigRoot, path);
       const prepared = input.keepRecordedAdditions ? { ok: true as const, notes: [] } : prepareSeatLaunchAdditions(seatSkills, {
         ...(input.member.agentFile ? { agentFile: beside(input.member.agentFile) } : {}),
         ...(input.member.appendSystemPromptFile ? { appendSystemPromptFile: beside(input.member.appendSystemPromptFile) } : {}),
         ...(input.member.pluginDirs?.length ? { pluginDirs: input.member.pluginDirs.map(beside) } : {}),
+        ...(input.member.pluginChannels?.length ? { pluginChannels: input.member.pluginChannels } : {}),
       });
       // A linked seat-storage ancestor: the seat starts without its additions, each named; nothing goes through the link.
       // A missing or refused source still fails the seat.
       const linked = !prepared.ok && prepared.code === "seat_storage_refused" ? seatSkillLocation(seatSkills).refuseMutation?.() : undefined;
       if (!prepared.ok && !linked) return { status: "failed", error: prepared.message, sessionName: canonicalSessionName };
       if (linked) {
-        const asked = [input.member.agentFile, input.member.appendSystemPromptFile, ...(input.member.pluginDirs ?? [])].filter((ref): ref is string => !!ref);
+        const asked = [input.member.agentFile, input.member.appendSystemPromptFile, ...(input.member.pluginDirs ?? []), ...(input.member.pluginChannels ?? [])].filter((ref): ref is string => !!ref);
         for (const ref of asked) keptSkillWarnings.push(`seat_launch_addition_not_delivered: ${ref}: ${linked}; the seat starts without it`);
       }
       keptSkillWarnings.push(...(prepared.ok ? prepared.notes ?? [] : []));

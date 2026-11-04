@@ -17,6 +17,12 @@ export interface NodeBinding extends Binding {
   /** Claude-only, session-scoped Advisor model. */
   advisor?: string;
   codexConfigProfile?: string;
+  /** #875: the file this launch merges its managed guidance blocks into, chosen once at a fresh launch
+   *  (`guidanceFileFor`) or carried from a restore's saved startup context. Null means the rule's file in `cwd`;
+   *  undefined means not chosen yet. */
+  guidanceFile?: string | null;
+  /** #875: this fresh launch carries its managed guidance as launch developer instructions (Codex), not in a file. */
+  guidanceLaunchInstructions?: boolean;
   /** A staged account-home selection; null explicitly returns to configured defaults before commit. */
   accountHome?: string | null;
   accountToken?: import("./claude-seat-token.js").ClaudeSeatTokenRef | null;
@@ -222,9 +228,13 @@ export interface ForkSource {
  * Startup action execution is NOT part of this contract — that belongs
  * to the startup orchestrator after checkReady().
  */
+/** Where a launch's managed guidance goes (#875): a file (null: the rule's file in the working directory), or, with
+ *  `launchInstructions`, the launch's own developer instructions and no file at all. */
+export interface GuidanceChoice { file: string | null; note?: string; launchInstructions?: true }
+
 export interface RuntimeAdapter {
   /** Optional environment-driver v1 operations. Absence means unsupported; the host launch path is unchanged. */
-  readonly environment?: Pick<import("./environment-platform.js").EnvironmentPlatform, "protocolVersion" | "create" | "attach" | "project" | "validate">;
+  readonly environment?: Pick<import("./environment-platform.js").EnvironmentPlatform, "protocolVersion" | "create" | "attach" | "project" | "validate" | "forNode">;
   preflightEnvironmentStartup?(binding: NodeBinding, opts: { resumeToken?: string; resumeType?: string; forkSource?: unknown }): Promise<void>;
   prepareEnvironmentStartup?(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult>;
   /** Claude's managed capability/launch seam, shared with seat selection. */
@@ -234,6 +244,9 @@ export interface RuntimeAdapter {
    *  the Claude project tree, for "already in place" detection. Absent = the
    *  instantiator's default target. */
   skillTargetPath?(tmuxSession: string | null, effectiveId: string): string | null;
+  /** #875: where this seat's managed guidance should go, decided at a fresh launch and recorded with its startup context.
+   *  Absent, or a null file, keeps the rule's file in the working directory; a note says why the seat's own file wasn't used. */
+  guidanceFileFor?(binding: NodeBinding, opts?: { resuming?: boolean }): GuidanceChoice | Promise<GuidanceChoice>;
 
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;

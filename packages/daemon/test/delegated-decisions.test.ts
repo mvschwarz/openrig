@@ -196,7 +196,7 @@ describe("refused: nothing is decided for the person", () => {
 });
 
 describe("the person's own answers stay theirs", () => {
-  it("recordHumanAnswer still refuses anyone but the asked person", async () => {
+  it("recordHumanAnswer still refuses an agent seat, and takes the asked person's choice", async () => {
     const f = fixture();
     const row = await f.ask();
     expect(f.repo.recordHumanAnswer({ qitemId: row.qitemId, actorSession: "designer@rig", questionId: "design", optionId: "a" }))

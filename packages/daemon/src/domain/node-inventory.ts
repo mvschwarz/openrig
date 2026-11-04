@@ -848,7 +848,26 @@ function buildInventoryEntry(
     // never observed; carries evidence on mismatch/missing.
     identityVerdict,
     heldReason: deriveHeldReason(db, row.rig_id, row.node_id, sessionStatus),
+    ...(row.handover_at ? startedWithoutRequired(db, row.node_id, row.session_id) : {}),
   };
+}
+
+/** #2456: the required startup files the seat's current occupant started without, as its handover recorded them. Only
+ *  the handover whose successor session is still the current one counts, so a later launch or handover clears it. Read
+ *  only for a seat that has had a handover. */
+function startedWithoutRequired(db: Database.Database, nodeId: string, sessionId: string | null): { startedWithoutRequired?: string[] } {
+  if (!sessionId) return {};
+  const row = db.prepare(
+    "SELECT payload FROM events WHERE node_id = ? AND type = 'seat.handover_completed' ORDER BY seq DESC LIMIT 1"
+  ).get(nodeId) as { payload: string } | undefined;
+  if (!row) return {};
+  try {
+    const event = JSON.parse(row.payload) as { startedWithoutRequired?: unknown; successorSessionId?: unknown };
+    const files = Array.isArray(event.startedWithoutRequired) ? event.startedWithoutRequired.filter((f): f is string => typeof f === "string") : [];
+    return event.successorSessionId === sessionId && files.length > 0 ? { startedWithoutRequired: files } : {};
+  } catch {
+    return {};
+  }
 }
 
 /** FS-1 W1.2 — all-rigs batched form of `readRigWorkspaceJson`: one query,
@@ -994,7 +1013,8 @@ export function getNodeDetail(
   // The seat's guidance file as its runtime resolves it now, and what it holds, read once for the guidance entries.
   const guidanceEvidence = (): { file: string | null; content: string | null } => {
     const runtime = (ctxRow as { runtime?: string | null } | undefined)?.runtime ?? entry.runtime;
-    const file = entry.cwd ? seatGuidanceFile(runtime, entry.cwd, new RigRepository(db).getRigClaudeManagedBlockFile(rigId)) : null;
+    const recorded = (ctxRow as { guidance_file?: string | null } | undefined)?.guidance_file;
+    const file = entry.cwd ? seatGuidanceFile(runtime, entry.cwd, new RigRepository(db).getRigClaudeManagedBlockFile(rigId), recorded) : null;
     let content: string | null = null;
     if (file) {
       try { content = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null; } catch { content = null; }
@@ -1216,6 +1236,7 @@ const NEEDS_INPUT_RUNGS: readonly EvidenceRungId[] = ["needs-input-chrome", "lif
  *     and the seat row must not disagree about the same seat.
  *   - a held seat (`heldReason` present)
  *   - a recorded startup error (`latestError` present)
+ *   - an occupant a handover started without a required startup file (`startedWithoutRequired`, #2456)
  */
 export function seatNeedsAttention(
   entry: NodeInventoryEntry,
@@ -1227,7 +1248,8 @@ export function seatNeedsAttention(
     || entry.startupStatus === "failed"
     || (arbitratedNeedsInput ?? activity?.state === "needs_input")
     || entry.heldReason != null
-    || entry.latestError != null;
+    || entry.latestError != null
+    || (entry.startedWithoutRequired?.length ?? 0) > 0;
 }
 
 /**

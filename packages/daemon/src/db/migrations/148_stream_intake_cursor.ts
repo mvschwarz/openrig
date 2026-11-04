@@ -2,7 +2,7 @@ import type { Migration } from "../migrate.js";
 
 /** Stream intake cursor table tracking the last processed stream sort key. */
 export const streamIntakeCursorSchema: Migration = {
-  name: "145_stream_intake_cursor.sql",
+  name: "148_stream_intake_cursor.sql",
   sql: `
     CREATE TABLE IF NOT EXISTS stream_intake_cursor (
       id INTEGER PRIMARY KEY CHECK (id = 1),

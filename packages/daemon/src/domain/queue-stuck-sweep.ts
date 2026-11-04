@@ -933,8 +933,16 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
       const dedupTag = findingDedupTag(c.kind, c.row.qitemId);
       const shared = findQueueRecovery(deps.db, c.row.qitemId);
-      if (shared) {
-        const existingTags = deps.queueRepo.getById(shared.qitemId)?.tags ?? [];
+      const sharedRow = shared ? deps.queueRepo.getById(shared.qitemId) : null;
+      // A later accepted deadline can expire after the previous finding closed.
+      // Its newer time is fresh evidence even when the pickup candidate wins this row.
+      // An OPEN recovery still owns custody.
+      const renewedDeadline = c.row.state === "in-progress" && sharedRow
+        && Date.parse(c.row.closureRequiredAt ?? "") <= now.getTime()
+        && !["pending", "in-progress", "blocked"].includes(sharedRow.state)
+        && evidenceIsNewer(c.row.closureRequiredAt ?? "", sharedRow.tsUpdated);
+      if (shared && !renewedDeadline) {
+        const existingTags = sharedRow?.tags ?? [];
         for (const tag of existingTags) if (tag.startsWith("stuck-sweep:")) liveDedupTags.add(tag);
         if (["pending", "in-progress", "blocked"].includes(shared.state)) findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: shared.qitemId, action: "refreshed" });
         continue;
@@ -957,9 +965,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (existing && existingIsOpen) {
         // Age is derived at read time; an unchanged scan is not a transition.
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: existing.qitem_id, action: "refreshed" });
-      } else if (!existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated)) {
+      } else if (renewedDeadline || !existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated)) {
         const input = {
-          qitemId: recoveryId(deps.db, c.row.qitemId),
+          qitemId: recoveryId(deps.db, c.row.qitemId, renewedDeadline ? c.row.closureRequiredAt! : undefined),
           // The detector is machinery, not a seat: the obligation's own creator is the
           // finding's source (the workflow-exception precedent).
           sourceSession: c.row.sourceSession,

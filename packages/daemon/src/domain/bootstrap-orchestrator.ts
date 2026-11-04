@@ -186,6 +186,7 @@ export class BootstrapOrchestrator {
         try {
           const podSource = await this.deps.podBundleSourceResolver.resolve(sourceRef);
           podBundleTempDir = podSource.tempDir;
+          warnings.push(...(podSource.warnings ?? []).filter(w => !warnings.includes(w)));
           try {
             const sourceYaml = this.deps.fsOps.readFile(podSource.specPath);
             const sharedProject = rigNameComposeProjectConflict(sourceYaml, opts.rigName);
@@ -309,6 +310,7 @@ export class BootstrapOrchestrator {
       try {
         bundleSource = await this.deps.bundleSourceResolver.resolve(sourceRef);
         bundleTempDir = bundleSource.tempDir;
+        warnings.push(...(bundleSource.warnings ?? []).filter(w => !warnings.includes(w)));
         specDir = nodePath.dirname(bundleSource.specPath);
         const rawYaml = withRigName(this.deps.fsOps.readFile(bundleSource.specPath), opts.rigName);
         const raw = RigSpecCodec.parse(rawYaml);
@@ -780,7 +782,7 @@ export class BootstrapOrchestrator {
           }
           const failureWarnings = routingFailureWarnings(bundleRouting);
           stages.push({ stage: "route_bundle_contents", status: failureWarnings.length > 0 ? "failed" : "ok", detail: bundleRouting });
-          warnings.push(...failureWarnings);
+          warnings.push(...(bundleRouting.warnings ?? []).filter(w => !warnings.includes(w)), ...failureWarnings);
           return { ok: true };
         }
       : undefined;

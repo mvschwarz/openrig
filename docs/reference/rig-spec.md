@@ -755,6 +755,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `agent_file` | string | no | — | Claude members only. A Claude agent definition (a `.md` file with `name` in its frontmatter) for this seat. It's copied into the seat's own storage and launched as `--agent openrig:<name>`. A path beside the spec: no `..`, not absolute. |
 | `append_system_prompt_file` | string | no | — | Claude members only. A prompt file appended to Claude's system prompt for this seat. It's copied into the seat's own storage and passed as `--append-system-prompt-file`. A path beside the spec. |
 | `plugin_dirs` | list | no | — | Claude members only. Claude plugin folders for this seat, each copied into the seat's own storage and loaded through `CLAUDE_CODE_PLUGIN_DIRS`. Paths beside the spec. Each is copied under its folder name, so two folders with the same name are refused; an empty list is none. A missing file or folder fails that seat's launch by name. `rig bundle create` carries all three; `rig export` names a seat whose additions it doesn't carry. |
+| `plugin_channels` | list | no | — | Claude members only. Plugin channels this agent registers for, as `plugin:<name>@<marketplace>` entries, passed as one `--channels` on every launch; see [Claude plugin channels](#claude-plugin-channels-runtime-claude-code). |
 | `role` | string | no | — | The seat's role, letters, digits, `_`, `.` and `-`. Not valid on terminal members. |
 | `restore_policy` | string | no | the AgentSpec's | Restore behavior. One of: `resume_if_possible`, `relaunch_fresh`, `checkpoint_only`. The default comes from the AgentSpec's `defaults.lifecycle` (else `resume_if_possible`) as narrowed by its profile; a member value may only narrow it further, in that order. |
 | `compaction_strategy` | string | no | — | `default-compaction`, `managed-compaction`, `handover` or `apprentice-handover`; `harness_native` and `pod_continuity` are accepted as deprecated aliases, and `custom_prompt` is refused. `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing). |
@@ -809,6 +810,52 @@ This opt-out is incompatible with an active enterprise `managed-mcp.json`:
 OpenRig keeps the requested opt-out flags, so startup and resume remain subject
 to that native refusal; it does not fall back to loading servers. Use a host
 without that managed configuration, or omit the opt-out to use the managed set.
+
+### Claude plugin channels (`runtime: claude-code`)
+
+Set `plugin_channels` on a Claude member to register that agent for channel
+notifications (messages a plugin's MCP server pushes into the session):
+
+```yaml
+members:
+  - id: support
+    agent_ref: local:agents/support
+    profile: default
+    runtime: claude-code
+    cwd: .
+    plugin_channels:
+      - plugin:example-channel@example-marketplace
+```
+
+OpenRig passes `--channels plugin:example-channel@example-marketplace` to this
+agent's Claude on every launch, resume, fork, restore and handover. Several
+entries follow one `--channels`, space-separated, and OpenRig's own session
+options come after them. Claude Code 2.1.316 hides `--channels` from
+`claude --help`, so it isn't listed there. An agent without the field gets no
+`--channels`, and nothing is added for other agents or other runtimes; there is
+no rig-wide or environment default.
+
+Each entry is `plugin:<name>@<marketplace>`, both names made of letters, digits,
+`.`, `_` and `-`, starting with a letter or digit. `server:` entries and Claude's
+`--dangerously-load-development-channels` aren't supported. Combining a non-empty
+channel list with `claude_mcp: none` produces a validation warning: that setting
+starts Claude without MCP servers (plugin servers included), so no channel could
+register. OpenRig keeps both settings and launches the member normally. Remove
+`claude_mcp: none` to use the channels, or remove `plugin_channels` to keep the MCP
+opt-out. OpenRig doesn't install plugins or marketplaces, or change the settings
+that admit a channel: whether each channel registers is Claude's decision (the plugin installed, and
+admitted by your organisation's channel settings or Claude's approved list).
+
+Selecting a channel for one agent doesn't isolate what the plugin shares with
+other agents. A token or other credential the plugin keeps in its own
+configuration is the same for every agent that loads that plugin.
+
+The selection is saved with the seat's other launch additions when the seat
+starts from the spec, and starting it from a spec without the field removes it.
+`rig seat launch --plan` and `rig skill loadout --seat` list it, a fork keeps it,
+and `rig bundle create` and `rig export` carry it in the member; a bundle's
+before-install view names each channel as a need. A running Claude process is
+unaffected.
 
 ### Claude Advisor (`runtime: claude-code`)
 
@@ -999,6 +1046,8 @@ the modified topology, run `rig snapshot <rig-id>` and use its returned ID with
 
 Startup blocks can appear at three levels: rig, pod, and member. They are merged additively via the startup layering model (see [the layering model](agent-startup-guide.md#the-layering-model)). The rig's `culture_file` joins as a required file with the `auto` hint in the culture layer, on both fresh start and restore.
 
+For member `startup:`, export uses that seat's retained launch recipe (or its pre-launch materialization) rather than guessing from projected files. If that source is unavailable or a member's files came from a different rig root, the YAML names the member's omitted startup; JSON export names omissions in the `X-OpenRig-Export-Warnings` response header. An older seat without a recipe may have had no member startup or an unretained one: inspect its source before re-importing. When member startup files are present in the export, `rig export` checks required paths against the output folder and warns for missing files. The export does not copy member startup files.
+
 `rig export` includes the rig's saved culture file and startup block, and writes
 saved pod startup files and actions under their pod. The file and action order,
 delivery hints, required flags, orientation and `applies_on` selections are retained.
@@ -1010,9 +1059,8 @@ are inherited when a seat is added later.
 
 File paths remain relative to the exported spec's folder. When exporting to a
 different folder, supply the referenced startup files there or import with the
-original `--rig-root`. The CLI warns once per missing required rig or pod file;
-missing optional files do not trigger that warning. Member startup blocks remain
-outside this export; keep the source spec when you need those declarations.
+original `--rig-root`. The CLI warns once per missing required rig, pod or member
+file; missing optional files do not trigger that warning.
 
 ### Files
 
@@ -1273,3 +1321,15 @@ These are the built-in specs shipped with OpenRig. Read them as worked examples.
 Also shipped, in the same tree: `launch/kernel`, OpenRig's own team, which starts automatically. `first-project` is
 starter's old name and still resolves to it. `workshop`, the four-agent middle team, is a rig bundle rather than a
 built-in. List the built-ins with `rig specs ls --kind rig`.
+
+To omit built-in rigs, agents and workflows from the shared spec inventory, run
+`rig config set specs.builtins_visible false`. This changes the CLI, TUI and other
+consumers of the library listing; user specs remain visible. Use
+`rig specs ls --include-builtins` to list them deliberately, and set the value
+back to `true` to restore the default. Explicit `show`, `preview`, and launch
+lookups can still find hidden built-ins. When built-ins are hidden and a user
+spec has the same name, the user spec wins the name lookup; use the built-in's
+ID from `rig specs ls --include-builtins --json` to select it. With built-ins visible,
+same-name matches remain ambiguous. This is an inventory preference, not an
+access-control boundary; other endpoints and on-disk files can still expose the
+built-ins.

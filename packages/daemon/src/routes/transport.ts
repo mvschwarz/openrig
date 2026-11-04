@@ -16,6 +16,9 @@ import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 const UNKNOWN_SENDER_NOTICE =
   "Delivered without sender identity: this request carried no X-OpenRig-Session header, so your recipient has no way of knowing who sent it. Follow up and sign it: from a seat shell the header stamps automatically; from anywhere else, send it as a declared sender, `rig queue create --source <you>@external --destination <seat> --summary \"<one line>\" --body-file <file>` (recorded as declared; a registered human gets a reply route), or join this shell to a seat, `eval \"$(rig attach --self --rig <rigId> --node <logicalId> --print-env)\"`, so its sends carry that seat's name (`rig attach --help` covers adding a new member).";
 
+// A fan-out where every recipient holds the text hasn't delivered yet, but the text still arrives unsigned.
+const UNKNOWN_SENDER_HELD_NOTICE = UNKNOWN_SENDER_NOTICE.replace(/^Delivered/, "Held for delivery");
+
 // The unknown-sender From: marker, DERIVED from the canonical envelope wrapper
 // (pane-envelope.ts SENDER_FALLBACK is unexported and its literal is
 // canonicity-guarded to exactly two twin sites) — deriving at module load keeps
@@ -428,9 +431,10 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
 
     // S2 (OPR.0.5.4.3) sender-side honesty: an unattributed fan-out's response carries the
-    // sign-it notice for the CLI renderers to surface. Attributed fan-outs are unchanged.
-    if (!derivedActor) {
-      return c.json({ ...result, warning: UNKNOWN_SENDER_NOTICE });
+    // sign-it notice for the CLI renderers to surface. Attributed fan-outs are unchanged. A fan-out that reached nobody
+    // (an unknown rig, every send refused) doesn't carry it, but a retained send is typed later and is still unsigned.
+    if (!derivedActor && result.sent + (result.retained ?? 0) > 0) {
+      return c.json({ ...result, warning: result.sent > 0 ? UNKNOWN_SENDER_NOTICE : UNKNOWN_SENDER_HELD_NOTICE });
     }
     return c.json(result);
   });

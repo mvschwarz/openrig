@@ -22,7 +22,9 @@ import type {
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
-import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
+import { isPerSeatRoleGuidance, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
+import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
+import { guidanceFileSharedByLink } from "../domain/restore-guidance.js";
 import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permission-drift.js";
 import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
@@ -40,6 +42,8 @@ export interface PiAdapterFsOps {
   listFiles?(dirPath: string): string[];
   statMode?(path: string): number;
   chmod?(path: string, mode: number): void;
+  /** Whether a path is a symlink and its hard-link count, or null when it doesn't exist (an lstat). */
+  linkInfo?(path: string): { link: boolean; nlink: number } | null;
 }
 
 export interface PiRuntimeAdapterDeps {
@@ -63,6 +67,9 @@ export interface PiRuntimeAdapterDeps {
   usageFactsEnabled?: () => boolean;
   /** OPR.0.7.0.2 K4: whether usage.pi_openrouter_charge is on, read at each launch (absent = off). */
   openRouterChargeEnabled?: () => boolean;
+  /** #2456: with it, every guidance block this adapter writes is checked against the record and recorded; absent, the
+   *  plain merge, as before. */
+  managedBlockRecords?: ManagedBlockRecords;
 }
 
 export class PiRuntimeAdapter implements RuntimeAdapter {
@@ -77,8 +84,10 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   private newLaunchId: () => string;
   private usageFactsEnabled: () => boolean;
   private openRouterChargeEnabled: () => boolean;
+  private managedBlockRecords: ManagedBlockRecords | undefined;
 
   constructor(deps: PiRuntimeAdapterDeps) {
+    this.managedBlockRecords = deps.managedBlockRecords;
     this.usageFactsEnabled = deps.usageFactsEnabled ?? (() => false);
     this.openRouterChargeEnabled = deps.openRouterChargeEnabled ?? (() => false);
     this.tmux = deps.tmux;
@@ -182,9 +191,10 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
         switch (hint) {
           case "guidance_merge": {
             // ADDITIVE context-file merge (Omnigent best-practice: never
-            // replace Pi's default system prompt). Pi reads AGENTS.md from
-            // the managed cwd as a project context file.
-            const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
+            // replace Pi's default system prompt). Pi reads AGENTS.md from its
+            // agent folder and from the managed cwd as context files.
+            const targetPath = this.guidanceTarget(binding, warnings);
+            if (!targetPath) continue; // not written through a link: not counted as delivered
             const merged = this.mergeGuidance(targetPath, file.path, content, warnings);
             if (!merged) continue; // rig-role skip: do not count as delivered
             break;
@@ -440,9 +450,32 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     };
   }
 
+  /** #875: a Pi seat's managed guidance goes into its own agent folder's AGENTS.md, which Pi loads before the repository's
+   *  (PI_CODING_AGENT_DIR is that folder), so the person's tracked repository AGENTS.md is never written. The repository
+   *  file stays when there's no session yet, or when the folder or its AGENTS.md is a link: through a link, other sessions
+   *  (a person's own Pi home, a shared file) would read this rig's guidance. */
+  guidanceFileFor(binding: NodeBinding): { file: string | null; note?: string } {
+    if (!binding.tmuxSession) return { file: null };
+    const file = nodePath.join(piSeatPaths(this.stateRoot, binding.tmuxSession).agentDir, "AGENTS.md");
+    const linked = guidanceFileSharedByLink(file, (path) => this.fs.linkInfo?.(path) ?? null);
+    return linked ? { file: null, note: `${this.runtime}: ${linked} is a link, so this seat's managed guidance stays in its repository AGENTS.md` } : { file };
+  }
+
+  /** The file this launch merges guidance into: the one its startup chose (guidanceFileFor, or a restore's saved choice),
+   *  else the repository AGENTS.md in the managed cwd. Null when a chosen file has since become a link (#2432): nothing is
+   *  written through it, and nothing falls back to the repository file. */
+  private guidanceTarget(binding: NodeBinding, warnings: string[]): string | null {
+    if (!binding.guidanceFile) return nodePath.join(binding.cwd, "AGENTS.md");
+    const linked = guidanceFileSharedByLink(binding.guidanceFile, (path) => this.fs.linkInfo?.(path) ?? null);
+    if (!linked) return binding.guidanceFile;
+    warnings.push(`${this.runtime}: ${linked} is now a link, so this seat's managed guidance wasn't written to ${binding.guidanceFile}, which other sessions could read`);
+    return null;
+  }
+
   private projectEntry(entry: ProjectionEntry, binding: NodeBinding, warnings: string[]): boolean {
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
-      const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
+      const targetPath = this.guidanceTarget(binding, warnings);
+      if (!targetPath) return false;
       const content = this.fs.readFile(entry.absolutePath);
       return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings, entry.absolutePath);
     }
@@ -500,10 +533,10 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       if (warning) warnings.push(warning);
       return false;
     }
-    mergeManagedBlock(this.fs, targetPath, blockId, content, {
-      warnings,
+    // #2456: a block a person edited since OpenRig wrote it is kept and named, not counted as merged.
+    return writeManagedGuidanceBlock(this.fs, targetPath, blockId, content, {
+      records: this.managedBlockRecords, sourcePath, warnings,
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
     });
-    return true;
   }
 }

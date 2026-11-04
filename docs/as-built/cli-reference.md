@@ -25,7 +25,7 @@ below `rig` (including groups and the hidden `restore apply` command), and
 **1,304 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
-These are counts for that source snapshot, not a claim about a deployed release. The provider-switch and set-runtime rows include the later account-home options; those additions are not included in the snapshot counts.
+These are counts for that source snapshot, not a claim about a deployed release. The provider-switch and set-runtime rows include the later account-home options; those additions are not included in the snapshot counts. The `environment` section and the `host edit`, `host remove` and `terminal attach` rows were added later from source at `522d635c`, and aren't in the snapshot counts either. With `environment`, main registers 91 top-level commands.
 
 ## Reading this reference
 
@@ -350,6 +350,8 @@ the sections that were not read are `null`.
 | `rig host add` | — | `--id <id>` **required**<br>`--transport <transport>` **required**<br>`--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--bearer-env <name>`<br>`--bearer-file <path>`<br>`--notes <text>`<br>`--json` |
 | `rig host select <id>` | — | `--json` |
 | `rig host rename <name>` | — | `--json` |
+| `rig host edit <id>` | — | `--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--notes <text>`<br>`--json` |
+| `rig host remove <id>` | — | `--json` |
 | `rig host pair <url>` | — | `--id <id>`<br>`--timeout <seconds>`<br>`--human <address>`<br>`--json` |
 | `rig host list` | `ls` | `--json` |
 | `rig host doctor <id>` | — | `--posture <profile>`<br>`--public-addr <ip>`<br>`--json` |
@@ -377,7 +379,7 @@ do not establish connectivity to a live peer.
 |---|---|---|
 | `rig ps` | — | `--json`<br>`--no-cleanup`<br>`--resources`<br>`--nodes`<br>`--full`<br>`--verbose`<br>`--limit <n>`<br>`--fields <list>`<br>`--summary`<br>`--filter <key=value>`<br>`--active`<br>`--running`<br>`-A, --all-rigs`<br>`--rig <name>`<br>`--session <name>`<br>`--include-archived`<br>`--host <id>`<br>`--all-hosts`<br>`--hosts <ids>` |
 
-- `--nodes --json` — each seat carries the daemon's served `needsAttention` flag; the CLI doesn't re-derive it, and it is absent when an older daemon doesn't serve it. `arbitratedNeedsInput` and `needsInputEvidence` (`{ rung, observedAt }` or null) come with `--full`, or by name through `--fields`.
+- `--nodes --json` — each seat carries the daemon's served `needsAttention` flag; the CLI doesn't re-derive it, and it is absent when an older daemon doesn't serve it. `arbitratedNeedsInput` and `needsInputEvidence` (`{ rung, observedAt }` or null) come with `--full`, or by name through `--fields`. `startedWithoutRequired` lists the required startup files a handover's successor started without, and the compact read keeps it.
 
 ### roster
 
@@ -461,7 +463,7 @@ do not establish connectivity to a live peer.
 | `rig queue create` | — | `--source <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--body-context <ref>`<br>`--mission <id>`<br>`--slice <id>`<br>`--gate <role>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--expires-at <iso>`<br>`--id <qitemId>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--human-intent <intent>`<br>`--alert`<br>`--human-detail-file <path>`<br>`--reply-to <qitemId>`<br>`--human-questions-file <path>`<br>`--evidence-ref <path>`<br>`--host <id>`<br>`--no-nudge`<br>`--verify`<br>`--full`<br>`--json` |
 | `rig queue claim <qitemId>` | — | `--destination <session>`<br>`--full`<br>`--json` |
 | `rig queue unclaim <qitemId>` | — | `--destination <session>`<br>`--reason <text>`<br>`--full`<br>`--json` |
-| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--full`<br>`--json` |
+| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--closure-required-at <iso>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--full`<br>`--json` |
 | `rig queue block <qitemId>` | — | `--on <blocker>` **required**<br>`--actor <session>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--continuation <text>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--full`<br>`--json` |
 | `rig queue resolve <qitemId>` | — | `--decision <text>` **required**<br>`--actor <session>`<br>`--bearer <token>`<br>`--no-notify`<br>`--json` |
 | `rig queue handoff <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
@@ -541,6 +543,7 @@ do not establish connectivity to a live peer.
 | `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
 | `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--json` |
+| `rig terminal attach <session>` | — | `--read-only` |
 
 See [named terminal sessions](../reference/terminal-sessions.md) to select a
 Herdr session per request, including session-bound previews and window reuse.
@@ -628,7 +631,7 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig specs` | — | — |
-| `rig specs ls` | — | `--kind <kind>`<br>`--json` |
+| `rig specs ls` | — | `--kind <kind>`<br>`--include-builtins`<br>`--json` |
 | `rig specs show <name-or-id>` | — | `--kind <kind>`<br>`--json` |
 | `rig specs preview <name-or-id>` | — | `--kind <kind>`<br>`--json` |
 | `rig specs add <path>` | — | `--json` |
@@ -696,6 +699,24 @@ Only Claude and Codex tenures can be woken.
 |---|---|---|
 | `rig community-harness` | — | — |
 | `rig community-harness list` | — | `--json` |
+
+### environment
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig environment` | — | — |
+| `rig environment setup` | — | `--directory <path>` **required**<br>`--binding <id>`<br>`--seat <address>`<br>`--rig <name>`<br>`--mcp-url <url>`<br>`--guest-base-url <origin>`<br>`--artifact-root <path>`<br>`--json` |
+| `rig environment create <binding>` | — | `--seat <address>` **required**<br>`--node <id>`<br>`--gateway <ref>` **required**<br>`--workspace <ref>` **required**<br>`--name <name>` **required**<br>`--image <digest>` **required**<br>`--provider <ref>` **required**<br>`--policy <path>` **required**<br>`--guest-base-url <origin>` **required**<br>`--operation <id>`<br>`--json` |
+| `rig environment attach <binding>` | — | `--seat <address>` **required**<br>`--node <id>`<br>`--gateway <ref>` **required**<br>`--workspace <ref>` **required**<br>`--name <name>` **required**<br>`--image <digest>` **required**<br>`--provider <ref>` **required**<br>`--policy <path>` **required**<br>`--guest-base-url <origin>` **required**<br>`--operation <id>`<br>`--json`<br>`--resource-id <id>` **required**<br>`--fingerprint <value>` |
+| `rig environment inspect <binding>` | — | `--live`<br>`--json` |
+| `rig environment connect <binding>` | — | `--generation <id>` **required** |
+| `rig environment export <binding>` | — | `--request <path>` **required**<br>`--json` |
+| `rig environment checkpoint <binding>` | — | `--generation <id>` **required**<br>`--operation <id>` **required**<br>`--json` |
+| `rig environment recreate <binding>` | — | `--request <path>` **required**<br>`--json` |
+| `rig environment completion <binding>` | — | `--request <path>` **required**<br>`--json` |
+| `rig environment effect <binding>` | — | `--effect <name>` **required**<br>`--generation <id>`<br>`--resource-id <id>`<br>`--operation <id>` **required**<br>`--engine-socket <path>`<br>`--json` |
+
+It drives the maintained OpenShell reference; see the [OpenShell example](../reference/community-harness-examples/openshell/README.md).
 
 ### fork
 
@@ -984,6 +1005,7 @@ for input and receipt examples, rollback, and snapshot behavior.
 | `rig seat set-terminal-policy <seat>` | — | `--preset <preset>` **required**<br>`--helper <addresses...>`<br>`--rig-default`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json`<br>`--peer-compaction <decision>`<br>`--peer-model <decision>`<br>`--self-compaction <decision>`<br>`--self-model <decision>`<br>`--openrig-compaction <decision>`<br>`--openrig-model <decision>` |
 | `rig seat set-permissions <seat>` | — | `--mode <mode>`<br>`--rules <file>`<br>`--codex-permissions <file>`<br>`--codex-profile <name>`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-effort <seat>` | — | `--effort <level>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat set-permissions-to <seat>` | — | `--to <person>`<br>`--clear`<br>`--deny`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat effort <seat>` | — | `--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-runtime <seat>` | — | `--runtime <runtime>`<br>`--reason <text>`<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--token-file <path>`<br>`--account-label <label>`<br>`--permission-mode <mode>`<br>`--confirm-timeout <seconds>`<br>`--dry-run`<br>`--confirm <switch-id>`<br>`--note <text>`<br>`--recover`<br>`--json` |

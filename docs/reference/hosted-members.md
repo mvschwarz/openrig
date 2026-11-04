@@ -107,6 +107,38 @@ OpenRig doesn't observe a hosted member between its calls, so it never reads idl
 
 `rig mcp token revoke grok` refuses its next request. The rows it worked, and their answers, stay.
 
+## Assistants connected through a grant service
+
+With `rig mcp serve --http --grant-service <url>`, an outside service answers each connection's key with its grant
+(`openrig.grant/v1`): the seat it acts as, its rigs, and the object/action pairs it may use. Each pair offers one tool,
+and nothing else is offered:
+
+| Pair | Tool |
+|---|---|
+| `queue`/`create`, `queue`/`show`, `queue`/`list` | `rig_queue_create`, `rig_queue_show`, `rig_queue_list` |
+| `queue`/`claim`, `queue`/`update` | `rig_queue_claim`, `rig_queue_update` |
+| `team`/`list` | `rig_team` |
+| `artifact`/`read` | `rig_artifact_read` |
+
+- **One seat per connected assistant:** the service gives each connection its own seat and keeps it across that
+  connection's reconnects. The seat must be one of the rig's nodes; a node created without a launch is enough. The caller
+  is exactly that seat.
+- **What it reaches:**
+  - It hands work to its rigs' other seats, never to a person or another host's seat.
+  - It reads the items it sent and the items addressed to it from those seats, never the team's internal items.
+  - With `queue`/`claim` and `queue`/`update`, it claims and closes only items addressed to its own seat that it can read,
+    and waits (blocked) only on an item it names and can read. Its answers hide what reading the item hides.
+- **Two assistants together:** a grant with `team`/`list` sees its rigs' seats with `rig_team`, and may address and hear from
+  another connected assistant's seat. A grant without it never reaches a seat in the service's caller form
+  (`cus-<id>-<connection>@<rig>`), so an existing connection keeps the reach it had.
+- **Messages are items:** a message is an item the receiver reads and closes, and a reply is an item back to its sender.
+- **What the sender can tell, from the item it reads:**
+  - **Queued:** the item exists and is `pending` with no claim.
+  - **Picked up:** the receiver's claim (`in-progress`).
+  - **Answered:** closed `done`, with the answer in `resolution`.
+  - Reading or listing an item records nothing, and nothing wakes an assistant, so an item stays queued until its receiver
+    claims it.
+
 ## Limits today
 
 - **Webhook triggers only:** OpenRig rings a webhook. Email and other triggers aren't supported yet. A member without a trigger

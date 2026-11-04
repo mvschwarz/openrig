@@ -15,6 +15,8 @@ import { periodicCarryIsCurrent, snapshotLaunchOutcome } from "../domain/restore
 import type { SessionRegistry } from "../domain/session-registry.js";
 import { resolveActiveSnapshotSession } from "../domain/active-occupant.js";
 import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
+import { processArgv, verifyClaudePaneRuntime, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { emittedEffortFromArgv, readSeatEffort, type LaunchEffortSelection } from "../domain/seat-effort.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
 import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
@@ -99,22 +101,40 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       }
       return { snapshotId: snapshot.id, resumes: true, automatic: true, conversation: carried.resumeToken ?? null };
     },
+    effortChange: async (nodeId, pane) => {
+      const tmux = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
+      const saved = readSeatEffort(rigRepo.db, nodeId);
+      if (!tmux || !saved) return null;
+      const listProcesses = c.get("listProcesses" as never) as NativeProcessLister | undefined;
+      const running = await verifyClaudePaneRuntime({ target: pane, tmux, ...(listProcesses ? { listProcesses } : {}) });
+      if (!running) return null;
+      const emitted = emittedEffortFromArgv("claude-code", processArgv(running.process.command));
+      // A switch's relaunch is restore's resume from a snapshot taken now: its effort is the seat's explicit choice, else
+      // its saved resolution (restore's latest-wins precedence on the same two values).
+      return { running: emitted.flag === "present" ? emitted.value : null, relaunch: saved.effective, relaunchIsSeatChoice: saved.source === "seat_choice" };
+    },
     exclusive: (nodeId, fn) => {
       const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
       return guard ? guard.lifecycle([nodeId], fn) : fn();
     },
-    relaunchInPane: async (rigId, logicalId, snapshotId) => {
+    relaunchInPane: async (rigId, logicalId, snapshotId, relaunchOpts) => {
       const restore = c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined;
       if (!restore) return { ok: false, effect: "none", code: "restore_unavailable", message: "This daemon has no restore orchestrator." };
       const adapters = (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? {};
-      const result = await restore.launchSingleNode(rigId, logicalId, { snapshotId, adapters, fsOps: { exists: (p: string) => fs.existsSync(p) }, keepPane: true });
+      // The effort restore's launch selected, and why, heard on every relaunch.
+      const heard: { effort?: LaunchEffortSelection } = {};
+      const result = await restore.launchSingleNode(rigId, logicalId, { snapshotId, adapters, fsOps: { exists: (p: string) => fs.existsSync(p) }, keepPane: true,
+        onLaunchEffort: (selected: LaunchEffortSelection) => { heard.effort = selected; },
+        ...(relaunchOpts?.effort ? { keepEffort: relaunchOpts.effort } : {}) });
+      const effort = heard.effort ? { effort: heard.effort } : {};
       // A refusal of the whole launch (no usable snapshot, no such seat) comes before anything is touched.
       if (!result.ok) return { ok: false, effect: "none", code: result.code ?? "launch_failed", message: result.message ?? "The seat wasn't launched from the snapshot." };
       const node = result.launched?.find((n) => n.logicalId === logicalId);
-      if (node?.status === "resumed") return { ok: true, status: "resumed", warnings: result.warnings ?? [] };
-      // Restore stops for a decision, or leaves an attached CLI alone, before it touches the seat.
-      const untouched = !node?.launchStarted && (node?.status === "awaiting-decision" || node?.status === "left_attached");
-      return { ok: false, effect: untouched ? "none" : "unknown", code: node?.status ?? "not_launched", message: node?.error ?? "The seat wasn't launched from the snapshot." };
+      if (node?.status === "resumed") return { ok: true, status: "resumed", warnings: result.warnings ?? [], ...effort };
+      // Restore stops for a decision, or leaves an attached CLI alone, before it touches the seat; a launch that failed
+      // before its takeover stopped anything left it as this attempt found it too.
+      const untouched = node?.nothingStopped === true || (!node?.launchStarted && (node?.status === "awaiting-decision" || node?.status === "left_attached"));
+      return { ok: false, effect: untouched ? "none" : "unknown", code: node?.status ?? "not_launched", message: node?.error ?? "The seat wasn't launched from the snapshot.", ...effort };
     },
   };
 }

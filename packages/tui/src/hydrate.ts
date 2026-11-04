@@ -511,8 +511,10 @@ export async function hydrateSnapshot(
   const broadReads = !readingOnly && !focusedTopology && !wantsConnections;
   // Seat rows (Q / WORK / NOW) join these four lists: only a seat's page and the drilled table tab show them.
   const seatQueueReads = broadReads || (focusedTopology && (topologyLeaf?.kind === "agent" || (!!topologyLeaf && viewContext?.viewTab === "table")));
-  // A seat's page also lists that seat's RECENTLY FINISHED items; the drilled table tab shows none.
-  const recentlyFinishedReads = broadReads || (focusedTopology && topologyLeaf?.kind === "agent");
+  // Pulse's JUST FINISHED reads the whole instance. A seat's page reads its own RECENTLY FINISHED once
+  // the inventory names its session, below; the drilled table tab shows none.
+  const recentlyFinishedReads = broadReads;
+  const seatFinishedReads = focusedTopology && topologyLeaf?.kind === "agent";
   // render.ts draws healthSummaryLine on the instance Table and on the rig/pod Table and Overview; those focused pages must load health too.
   const rendersHealthSummary = topologyLeaf?.kind === "agent"
     || (topologyLeaf?.kind === "host" && viewContext?.viewTab === "table")
@@ -528,7 +530,7 @@ export async function hydrateSnapshot(
     ?? null;
   const seatEffortRef = topologyLeaf?.kind === "agent" && drillRig ? `${topologyLeaf.name}@${drillRig}` : null;
 
-  const [instanceHealth, healthProjection, agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead, sliceDetailRead, connectionsRead, seatEffortRead, hostsRead] = await Promise.all([
+  const [instanceHealth, healthProjection, agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, instanceFinished, scopesRead, executionRead, sliceDetailRead, connectionsRead, seatEffortRead, hostsRead] = await Promise.all([
     safe<InstanceHealthRead>("health", () => client.health()),
     !healthRequested ? Promise.resolve(null) : safe<HealthProjectionRead>("health-findings", () => client.healthFindings()),
     !broadReads ? Promise.resolve(null) : safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
@@ -666,6 +668,10 @@ export async function hydrateSnapshot(
       if (spec.name) rigSpecRefs.set(spec.name, refs);
     }
   }
+  const seatSession = seatFinishedReads ? seatActivity.find((seat) => seat.logicalId === topologyLeaf?.name)?.session : undefined;
+  const seatFinished = seatSession
+    ? await safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished(20, seatSession))
+    : null;
   const aggHosts = agg?.hosts ?? [];
   const ownName = typeof hostsRead?.ownName === "string" ? sanitizeHostDisplayName(hostsRead.ownName) : undefined;
   const localHost: HostNode = {
@@ -863,7 +869,7 @@ export async function hydrateSnapshot(
     inProgress: (inProgress ?? []).map(toQueueRead),
     seatActivity,
     pending: (pending ?? []).map(toQueueRead),
-    recentlyFinished: (recentlyFinished ?? []).map(toQueueRead),
+    recentlyFinished: (seatFinished ?? instanceFinished ?? []).map(toQueueRead),
     hydratedAt: new Date().toISOString(),
     hostsDown,
     stream: (streamItems ?? []).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),

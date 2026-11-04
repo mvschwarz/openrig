@@ -11,7 +11,7 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
-async function fixture(attached = false, automatic = true) {
+async function fixture(attached = false, automatic = true, beforeGeneration = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "environment-lifecycle-"))); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const db = createFullTestDb(); cleanup.push(() => db.close());
   const resource = { id: "compute-one", name: "worker-one", workspace: "workspace", phase: "Ready", operationId: "create-one" };
@@ -40,16 +40,82 @@ async function fixture(attached = false, automatic = true) {
   const rig = f.rigRepo.createRig("lifecycle"), node = f.rigRepo.addNode(rig.id, "worker", { runtime: "openshell-claude", cwd: root });
   const request = async (path: string, body?: unknown) => { const res = await f.app.request(`/api/environments${path}`, { method: body ? "POST" : "GET", headers: { "content-type": "application/json", "x-openrig-session": "coordinator@lifecycle" }, ...(body ? { body: JSON.stringify(body) } : {}) }); return { status: res.status, body: await res.json() as Record<string, any> }; };
   const policy = join(root, "policy.yaml"); writeFileSync(policy, "version: 1\n");
-  const input = { version: 1, bindingId: "binding-one", operationId: "create-one", nodeId: node.id, seat: "worker@lifecycle", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://guest.test:7433", placement: { gateway: "gateway", workspace: "workspace", name: "worker-one", image: `image@sha256:${"a".repeat(64)}`, provider: "provider", policy } };
+  const input = { version: 1, bindingId: "binding-one", operationId: "create-one", nodeId: beforeGeneration ? undefined : node.id, seat: "worker@lifecycle", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://guest.test:7433", placement: { gateway: "gateway", workspace: "workspace", name: "worker-one", image: `image@sha256:${"a".repeat(64)}`, provider: "provider", policy } };
   const created = await request(attached ? "/attach" : "/create", { ...input, ...(attached ? { resourceId: resource.id } : {}) }); expect(created.status, JSON.stringify(created.body)).toBeLessThan(300);
+  if (!beforeGeneration) {
   db.prepare("UPDATE environment_bindings SET generation='generation-one' WHERE binding_id='binding-one'").run();
   const receipt = { version: 1, bindingId: "binding-one", nodeId: node.id, resourceId: resource.id, ...native, activityGrantId: "grant-one" };
   db.prepare("INSERT INTO environment_operations(operation_id,binding_id,kind,request_json,state,receipt_json) VALUES ('launch-generation-one','binding-one','launch',?,'confirmed',?)").run(JSON.stringify(receipt), JSON.stringify(receipt));
+  }
   const effect = (name: string, operationId = "effect-one") => request("/binding-one/effect", { operationId, generation: "generation-one", effect: name });
   const lifecycle = new EnvironmentLifecycle(new EnvironmentPlatform(db, driver), queue, join(root, "retained"));
   return { root, db, driver, queue, lifecycle, request, effect, resource, native, files, history, capture: () => f.snapshotCapture.captureSnapshot(rig.id, "manual"), disappear: () => { present = false; }, counts: () => ({ stopCalls, deleteCalls, creates }), loseStop: () => { loseStop = true; }, unavailable: () => { unavailable = true; }, dirtyCleanup: () => { dependents.volumes = true; } };
 }
 describe("owned and attached environment effects", () => {
+  async function failedProjection(attached = false) {
+    const f = await fixture(attached, true, true), platform = new EnvironmentPlatform(f.db, f.driver);
+    vi.spyOn(f.driver, "read").mockRejectedValueOnce(new Error("guest root read denied"));
+    const source = join(f.root, "policy.yaml");
+    await expect(platform.project("binding-one", { operationId: "projection-failed", generation: "not-established", files: [
+      { path: "work/role.md", source, sha256: sha256(readFileSync(source)), required: true },
+    ] })).rejects.toThrow("guest root read denied");
+    expect(platform.get("binding-one")).toMatchObject({ generation: null, resource: { id: f.resource.id } });
+    expect(platform.get("binding-one")!.nodeId).toBeUndefined();
+    return { ...f, cleanup: () => f.request("/binding-one/effect", { operationId: "cleanup-failed-create", effect: "delete-owned", generation: null, resourceId: f.resource.id }) };
+  }
+  it("cleans the exact owned create after projection fails before node and generation binding", async () => {
+    const f = await failedProjection(), result = await f.cleanup();
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+    expect(result.body).toMatchObject({ state: "confirmed", generation: null, resourceId: "compute-one", effect: "delete-owned" });
+    expect(f.counts()).toMatchObject({ creates: 1, deleteCalls: 1, stopCalls: 0 });
+    expect((await f.cleanup()).body).toEqual(result.body); expect(f.counts().deleteCalls).toBe(1);
+  });
+  it("reconciles uncertain pre-generation cleanup without another provider delete", async () => {
+    const f = await failedProjection();
+    let observe = false;
+    vi.spyOn(f.driver, "deleteEnvironment").mockImplementationOnce(async () => { f.disappear(); throw new Error("lost delete reply"); });
+    const original = f.driver.cleanupState;
+    vi.spyOn(f.driver, "cleanupState").mockImplementation(async () => { if (!observe) throw new Error("engine unavailable"); return original(); });
+    expect((await f.cleanup()).body.state).toBe("unconfirmed");
+    observe = true;
+    expect((await f.cleanup()).body.state).toBe("confirmed");
+    expect(f.driver.deleteEnvironment).toHaveBeenCalledTimes(1);
+  });
+  it("preserves an attached resource after projection fails before a generation exists", async () => {
+    const f = await failedProjection(true), result = await f.cleanup();
+    expect(result.status).toBe(409); expect(result.body.code).toBe("environment_attached_preserved");
+    expect(f.counts()).toMatchObject({ creates: 0, deleteCalls: 0, stopCalls: 0 });
+  });
+
+  it("requires the exact resource for pre-generation cleanup and never infers a native generation", async () => {
+    const f = await failedProjection();
+    for (const body of [
+      { effect: "delete-owned", generation: null },
+      { effect: "delete-owned", generation: null, resourceId: "another-resource" },
+      { effect: "stop-compute", generation: null, resourceId: f.resource.id },
+    ]) {
+      const result = await f.request("/binding-one/effect", { operationId: "bad-selection", ...body });
+      expect(result.status).toBeGreaterThanOrEqual(400);
+    }
+    expect(f.counts()).toMatchObject({ deleteCalls: 0, stopCalls: 0 });
+  });
+  it("refuses generation-free cleanup once a generation exists", async () => {
+    const f = await fixture();
+    const result = await f.request("/binding-one/effect", { operationId: "bad-selection", effect: "delete-owned", generation: null, resourceId: f.resource.id });
+    expect(result.status).toBe(409); expect(result.body.code).toBe("environment_generation_changed");
+    expect(f.counts().deleteCalls).toBe(0);
+  });
+  it("does not dispatch pre-generation deletion if projection establishes a generation during observation", async () => {
+    const f = await failedProjection(), list = f.driver.list;
+    vi.spyOn(f.driver, "list").mockImplementationOnce(async () => {
+      const result = await list();
+      f.db.prepare("UPDATE environment_bindings SET generation='new-generation' WHERE binding_id='binding-one'").run();
+      return result;
+    });
+    const result = await f.cleanup();
+    expect(result.status).toBe(409); expect(result.body.code).toBe("environment_generation_changed");
+    expect(f.counts().deleteCalls).toBe(0);
+  });
   it("stops only the selected native and reconciles a lost acknowledgement without a second signal", async () => {
     const f = await fixture(); f.loseStop();
     const first = await f.effect("stop-native"); expect(first.body.state).toBe("confirmed");
@@ -200,4 +266,28 @@ describe("finite completion is selected work plus a verified actual export", () 
     clock += 60_001; await f.lifecycle.checkCompletions(); expect(inspections).toBeGreaterThan(first); expect(signals).toBe(1);
   });
 
+});
+
+it.each(["provider-list", "cleanup-inventory"])("reports the actual pre-dispatch stage and error without claiming a delete: %s", async stage => {
+  const f = await fixture(); const error = Object.assign(new Error("fixture engine connection refused"), { code: "ECONNREFUSED" });
+  if (stage === "provider-list") vi.spyOn(f.driver, "list").mockRejectedValue(error);
+  else Object.assign(f.driver, { captureCleanup: async () => { throw error; } });
+  const request = { effect: "delete-owned", operationId: "delete-before-dispatch", generation: "generation-one", engineSocket: "/fixture/engine.sock" };
+  for (let observation = 0; observation < 2; observation++) {
+    const result = await f.request("/binding-one/effect", request);
+    expect(result.body).toMatchObject({ state: "unconfirmed", stage, dispatched: false, error: { code: "ECONNREFUSED", message: "fixture engine connection refused" } });
+    expect(f.counts().deleteCalls).toBe(0);
+    const row = f.db.prepare("SELECT state FROM environment_operations WHERE operation_id=?").get(request.operationId) as { state: string };
+    expect(row.state).toBe("intent");
+  }
+});
+
+it("keeps an uncertain delete requested and reconciles the same operation without another mutation", async () => {
+  const f = await fixture(); const deletion = vi.spyOn(f.driver, "deleteEnvironment").mockRejectedValue(new Error("fixture reply lost at delete boundary"));
+  const request = { effect: "delete-owned", operationId: "delete-uncertain", generation: "generation-one" };
+  const first = await f.request("/binding-one/effect", request);
+  expect(first.body).toMatchObject({ state: "unconfirmed", stage: "delete-dispatch", dispatched: "unknown", error: { message: "fixture reply lost at delete boundary" } });
+  expect((f.db.prepare("SELECT state FROM environment_operations WHERE operation_id=?").get(request.operationId) as { state: string }).state).toBe("requested");
+  await f.request("/binding-one/effect", request);
+  expect(deletion).toHaveBeenCalledTimes(1);
 });

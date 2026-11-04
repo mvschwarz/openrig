@@ -160,7 +160,7 @@ const FIXTURES: Record<string, unknown> = {
   "/api/queue/list?state=in-progress": [],
   // PULSE ○ UP NEXT + ✓ JUST FINISHED lane sources (increment 3) — same /list route
   "/api/queue/list?state=pending&limit=50": [],
-  "/api/queue/list?state=done,handed-off&limit=20": [],
+  "/api/queue/list?state=done,handed-off&sort=updated&limit=20": [],
   "/api/queue/recent-transitions?scope=rig&rig=myrig&limit=20": [],
 };
 
@@ -372,7 +372,10 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
   });
   it("hydrates the seat's recently finished items on an agent page so RECENTLY FINISHED can fill", async () => {
     const row = (qitemId: string, state: string, destinationSession: string) => ({ qitemId, state, destinationSession, blockedOn: null, handedOffTo: null, tier: null, tags: [], summary: `work ${qitemId}`, body: "", claimedAt: null, tsUpdated: "2026-09-12T10:00:00.000Z" });
-    const finished = { "/api/queue/list?state=done,handed-off&limit=20": [row("qd1", "done", "dev-impl@myrig"), row("qd2", "done", "dev-qa@myrig")] };
+    const seatRead = "/api/queue/list?state=done,handed-off&sort=updated&limit=20&destinationSession=dev-impl%40myrig";
+    const instanceRead = "/api/queue/list?state=done,handed-off&sort=updated&limit=20";
+    // The instance window holds only another seat's finishes, as it does once 20 of them follow this seat's.
+    const finished = { [seatRead]: [row("qd1", "done", "dev-impl@myrig")], [instanceRead]: [row("qd2", "done", "dev-qa@myrig")] };
     const page = async (drill: Record<string, unknown>, tab: "table" | "graph" = "table") => {
       const calls: string[] = [];
       const full = await hydrateSnapshot(fixtureClient());
@@ -384,15 +387,17 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       return { calls, snap, text: renderScreen(view.get(), snap, { cols: 220, rows: 120 }).lines.join("\n") };
     };
     const agent = await page({ resource: "agent", name: "dev.impl", target: { host: "mm2-openrig1", rig: "myrig", pod: "dev" } });
-    expect(agent.calls).toContain("/api/queue/list?state=done,handed-off&limit=20");
-    expect(agent.snap.recentlyFinished.map((q) => q.qitemId)).toEqual(["qd1", "qd2"]);
+    expect(agent.calls).toContain(seatRead);
+    expect(agent.calls).not.toContain(instanceRead);
+    expect(agent.snap.recentlyFinished.map((q) => q.qitemId)).toEqual(["qd1"]);
     expect(agent.text).toContain("RECENTLY FINISHED · bounded window");
     expect(agent.text).toContain("qd1 · done");
     expect(agent.text).not.toContain("qd2");
     // The rig table and graph draw no finished items, so they keep that read off.
     for (const tab of ["table", "graph"] as const) {
       const rig = await page({ resource: "rig", name: "myrig", target: { host: "mm2-openrig1" } }, tab);
-      expect(rig.calls).not.toContain("/api/queue/list?state=done,handed-off&limit=20");
+      expect(rig.calls).not.toContain(instanceRead);
+      expect(rig.calls).not.toContain(seatRead);
     }
   });
   it("marks health unavailable when the selected health view read fails", async () => {
@@ -814,7 +819,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     ];
     const snap = await hydrateSnapshot(fixtureClient({}, {
       "/api/queue/list?state=pending&limit=50": pending,
-      "/api/queue/list?state=done,handed-off&limit=20": finished,
+      "/api/queue/list?state=done,handed-off&sort=updated&limit=20": finished,
     }));
     expect(snap.pending.map((q) => q.qitemId)).toEqual(["qp1"]);
     expect(snap.recentlyFinished.map((q) => q.qitemId)).toEqual(["qf1", "qf2"]);

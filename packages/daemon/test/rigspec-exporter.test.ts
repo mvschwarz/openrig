@@ -383,6 +383,68 @@ describe("RigSpecExporter (pod-aware)", () => {
     expect(devPod.edges[0]!.to).toBe("qa");
   });
 
+  it("#1631 round-trips exact member startup from its node recipe and keeps siblings unchanged", () => {
+    const { rig, n1, n2 } = seedPodRig();
+    const startup: import("../src/domain/types.js").StartupBlock = {
+      files: [{ kind: "file", path: "guidance/member.md", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }],
+      actions: [{ type: "send_text", value: "prepare", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true }],
+    };
+    const source = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    source.pods.find(p => p.id === "dev")!.members.find(m => m.id === "impl")!.startup = startup;
+    rigRepo.setRigStartupLayers(rig.id, { root: "/fixtures/original" });
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify({ version: 1, rigRoot: "/fixtures/original", rigSpec: source }), n1.id);
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const parsed = PodRigSpecCodec.parse(PodRigSpecCodec.serialize(exported));
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const normalized = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    expect(normalized.pods.find(p => p.id === "dev")!.members.find(m => m.id === "impl")!.startup).toEqual(startup);
+    expect(normalized.pods.find(p => p.id === "dev")!.members.find(m => m.id === "qa")!.startup).toBeUndefined();
+    expect(rigRepo.getNodeLaunchRecipe(n2.id)).toBeNull();
+  });
+
+  it("#1631 retains matching materialized member declarations before the first launch", () => {
+    const { rig, n1 } = seedPodRig();
+    const startup: import("../src/domain/types.js").StartupBlock = { files: [], actions: [{
+      type: "send_text", value: "orientation", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true,
+    }] };
+    const source = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    source.pods.find(p => p.id === "dev")!.members.find(m => m.id === "impl")!.startup = startup;
+    rigRepo.setRigStartupLayers(rig.id, { root: "/fixtures/rig-root", materializedSources: [{ root: "/fixtures/rig-root", spec: source, nodeIds: [n1.id] }] });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    expect(exported.pods.find(p => p.id === "dev")!.members.find(m => m.id === "impl")!.startup).toEqual(startup);
+    expect(exporter.memberStartupNotCarried(rig.id)).not.toContainEqual(expect.objectContaining({ logicalId: "dev.impl" }));
+  });
+
+  it.each(["different root", "source missing", "wrong member", "malformed recipe", "ambiguous materializations"])("#1631 reports member startup provenance that cannot be represented: %s", (mode) => {
+    const { rig, n1 } = seedPodRig();
+    const source = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    source.pods.find(p => p.id === "dev")!.members.find(m => m.id === "impl")!.startup = {
+      files: [{ kind: "file", path: "guidance/member.md", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }], actions: [],
+    };
+    if (mode === "wrong member") source.pods.find(p => p.id === "dev")!.members = source.pods.find(p => p.id === "dev")!.members.filter(m => m.id !== "impl");
+    rigRepo.setRigStartupLayers(rig.id, { root: "/fixtures/first", ...(mode === "ambiguous materializations" ? { materializedSources: [
+      { root: "/fixtures/first", spec: source, nodeIds: [n1.id] }, { root: "/fixtures/first", spec: source, nodeIds: [n1.id] },
+    ] } : {}) });
+    if (mode !== "source missing" && mode !== "ambiguous materializations") db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(
+      mode === "malformed recipe" ? "{invalid" : JSON.stringify({ version: 1, rigRoot: mode === "different root" ? "/fixtures/second" : "/fixtures/first", rigSpec: source }), n1.id);
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    expect(exported.pods.find(p => p.id === "dev")!.members.find(m => m.id === "impl")!.startup).toBeUndefined();
+    expect(exporter.memberStartupNotCarried(rig.id)).toContainEqual({ logicalId: "dev.impl", reason: mode === "different root" ? "different source root" : "source unavailable" });
+  });
+
+  it("#1631 reports a member-only legacy file when no export root was stored", () => {
+    const { rig, n1 } = seedPodRig();
+    const source = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    source.pods.find(p => p.id === "dev")!.members.find(m => m.id === "impl")!.startup = {
+      files: [{ kind: "file", path: "guidance/member.md", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }], actions: [],
+    };
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify({ version: 1, rigRoot: "/fixtures/member", rigSpec: source }), n1.id);
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    expect(exported.pods.find(p => p.id === "dev")!.members.find(m => m.id === "impl")!.startup).toBeUndefined();
+    expect(rigRepo.getRigStartupLayers(rig.id)).toBeNull();
+    expect(exporter.memberStartupNotCarried(rig.id)).toContainEqual({ logicalId: "dev.impl", reason: "different source root" });
+  });
+
   it("exports saved pod startup files by namespace, preserving their declared options", () => {
     const { rig } = seedPodRig();
     const plainPod = podRepo.createPod(rig.id, "hasOwnProperty", "No startup");

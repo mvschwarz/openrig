@@ -2,6 +2,7 @@ version: "0.2"
 name: openshell-example
 pods:
   - id: team
+    label: Team
     members:
       - id: coordinator
         agent_ref: local:agents/coordinator
@@ -13,7 +14,7 @@ pods:
         runtime: openshell-claude
         profile: default
         cwd: .
-edges:
-  - kind: delegates_to
-    from: team.coordinator
-    to: team.worker
+    edges:
+      - kind: delegates_to
+        from: coordinator
+        to: worker

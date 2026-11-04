@@ -540,7 +540,7 @@ Before you start, two honest constraints:
 | registry | `host` | add/list/select/rename isolated entries that resolve to fixture endpoints. Pairing needs two container daemons. |
 | coordination | `parked` | An owed item with a stopped worker is reported. A held worker with a live wake is distinguished. |
 | coordination | `stream` | emit/list/show/archive an exact item. A restart and a bounded watch keep the order with no duplicates. |
-| coordination | `queue` | (partial) Next: handoff, block, resolve and unclaim, each with exact items and destinations. |
+| coordination | `queue` | (partial) handoff → successor owned by `--to` and source asserted closed (`handed-off`), block → parked blocked, resolve → unpark to in-progress (owner nudge suppressed), unclaim → pending with destination kept — each with exact items and destinations asserted via `expect queue` (`rig queue list --json --full --all`) in `queue-transitions-reach-exact-states.yaml`; baton restart coverage stays in `queue-baton-survives-restart.yaml`. |
 | coordination | `project` | Acquire a lease, classify one item twice, read one projection. The wrong holder cannot act. |
 | coordination | `view` | Register a view over known items. list/show return the exact filtered result after a mutation. |
 | coordination | `watchdog` | Register one short wake, see one response, stop it, prove no further deliveries. |

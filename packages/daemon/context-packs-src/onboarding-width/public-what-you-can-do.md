@@ -349,11 +349,17 @@ your context, your compaction and your replacement — and it is the only thing 
   `rig config set queue.wake_human_rung explicit-only` (default `always`) keeps that post
   for rows addressed to a person (an `@external` address or a registered human); the rest stop at
   `rig view show escalations`. A seat stuck at a prompt only a person can clear still reaches one,
-  and an unreadable human registry posts everything. A seat held at a choice prompt that no hook
+  and an unreadable human registry keeps every row eligible for that last step; it does not
+  establish that a channel can deliver. A seat held at a choice prompt that no hook
   announces (a usage-limit dialog, say) escalates once the refusal has held for one retry interval
   (`queue.wake_retry_interval_seconds`, 300 seconds by default). Choice-prompt alerts follow this
   setting and reach a person one at a time per machine; later ones wait as rows while the first
-  seat stays blocked.
+  seat stays blocked. Escalations aren't posted while the person's channel can't take them. They stay visible
+  as rows with a reason and are tried again later. The configured escalation route still runs first.
+  An older, unaccepted alert addressed to a person is kept on the same row and rerouted locally;
+  a delivery already accepted by the gateway keeps its existing route. Findings about an undelivered
+  wake-escalation notice stay visible without creating another wake escalation. Scheduling notices
+  are sent by OpenRig; their member rows keep their original senders and obligations.
 - **`rig queue inbox-drop` / `inbox-pending` / `inbox-absorb` / `inbox-deny`** — put something in
   front of a seat that it can *refuse*. Mail, not assignment.
 - **`rig queue outbox-record` / `outbox-list`** — what you dispatched, in a record that survives
@@ -531,7 +537,9 @@ not have to tear one down to change it, and you rarely have to start from nothin
 - **A Claude member can bring its own setup** in the rig spec: `agent_file`,
   `append_system_prompt_file`, `plugin_dirs` and `advisor` (an Advisor model). They're copied into
   that seat's own storage, never the project, so one seat in a shared repository can have its own
-  persona, prompt or plugins. A bundle's before-install view lists them.
+  persona, prompt or plugins. A bundle's before-install view lists them. `plugin_channels`
+  (`plugin:<name>@<marketplace>` entries) registers that seat alone for those plugins' channel
+  notifications, through Claude's `--channels`.
 - **A new Claude member can name a prepared subscription token** with
   `claude_token: {label: name, file: /abs/token}` beside its `env.CLAUDE_CONFIG_DIR`; the seat stores
   the file reference and reads it at launch. A missing/unreadable token uses the existing fallback
@@ -1066,8 +1074,9 @@ reaching them is ordinary work rather than an escalation.
   transitions before retrying. `rig send` remains agent-terminal delivery only.
   `--human-questions-file` adds clickable decision questions. On an unparked ask, a typed Slack
   reply is kept in `humanAnswers` under the first unanswered question. On a question parked on
-  its own person, a typed reply resumes it but isn't recorded as the answer; the owner receives
-  it as a message instead. Buttons work in both cases. Closing isn't approval.
+  its own person, that person's typed reply resumes it and is kept the same way, in the same
+  transaction; a reply whose order against the posted question can't be confirmed resumes it
+  with the words in context and isn't recorded. Buttons work in both cases. Closing isn't approval.
 - **When project policy calls for human judgment or an update, load `messaging-the-human`.**
   Use `rig context get skills/core/messaging-the-human/SKILL.md` for a complete decision brief,
   related supplemental detail and explicit quiet-update intent. An FYI creates no approval
@@ -1445,6 +1454,6 @@ deliberate writing.
 
 **`rig --help`**, then `rig <verb> --help`.
 
-Ninety verbs ship, and this page named most of them once. **You will not remember which — you
+Ninety-one verbs ship, and this page named most of them once. **You will not remember which — you
 are meant to remember only that the list is long enough to be worth reading before you build
 anything.** The question is never *how do I write this*; it is **does this already exist**.

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -153,7 +153,7 @@ describe.skipIf(!supportsControlMode(version))("tmux control mode against a real
     const off = new TmuxAdapter(async () => "", undefined, execArgvCommand);
     expect((await off.listSessions()).map((s) => s.name).sort()).toEqual(["renamed", "seat@rig"]);
     expect((await off.listClients()).map((c) => c.session)).toEqual(["renamed"]);
-    // The daemon's stop ends its client, and tmux destroys its session with it, whatever its name.
+    // The daemon's stop ends its client, and tmux kills its session once the client has gone, whatever its name.
     await control.close();
     await vi.waitFor(() => expect(sessions()).toEqual(["seat@rig"]), { timeout: 5000, interval: 50 });
   });
@@ -221,6 +221,43 @@ describe.skipIf(!supportsControlMode(version))("tmux control mode against a real
     }
   });
 
+  it("keeps the server up when two daemons' clients end at once (#2304)", async () => {
+    // With destroy-unattached, tmux before 3.8 took one session from under its client while that client was still
+    // leaving, and crashed on it as the other client left: nearly every round.
+    for (let round = 0; round < 5; round++) {
+      const first = tmuxControlExec(execArgvCommand);
+      const second = tmuxControlExec(execArgvCommand);
+      try {
+        await first(["tmux", "has-session", "-t", "=seat@rig"]);
+        await second(["tmux", "has-session", "-t", "=seat@rig"]);
+        expect(sessions()).toEqual([controlSessionName(first.owner), controlSessionName(second.owner), "seat@rig"].sort());
+      } finally {
+        await Promise.all([first.close(), second.close()]);
+      }
+      await vi.waitFor(() => expect(sessions()).toEqual(["seat@rig"]), { timeout: 5000, interval: 50 });
+    }
+  });
+
+  it("keeps its session when a client of another session leaves after that session is killed", async () => {
+    await control(["tmux", "has-session", "-t", "=seat@rig"]);
+    // tmux runs client-detached for a client whose session is gone with the hooks of the session active last: the
+    // control session, made after the seat.
+    const other = spawn("tmux", ["-C", "new-session", "-s", "other", "-x", "80", "-y", "24"], { stdio: ["pipe", "ignore", "ignore"] });
+    try {
+      await vi.waitFor(() => expect(sessions()).toContain("other"), { timeout: 5000, interval: 50 });
+      const gone = new Promise((resolve) => other.once("exit", resolve));
+      tmux("kill-session", "-t", "=other");
+      await gone;
+      await sleep(300);
+      expect(sessions()).toEqual([controlSessionName(control.owner), "seat@rig"]);
+      const connecting = spawned.length;
+      expect(await control(["tmux", "list-sessions", "-F", "#{session_name}"])).toBe("seat@rig\n");
+      expect(spawned.slice(connecting)).toEqual([]);
+    } finally {
+      other.kill();
+    }
+  });
+
   it("lets the server exit with its last other session, as with spawned clients only, and starts none again", async () => {
     await control(["tmux", "has-session", "-t", "=seat@rig"]);
     expect(sessions()).toEqual([controlSessionName(control.owner), "seat@rig"]);
@@ -262,7 +299,7 @@ describe.skipIf(!supportsControlMode(version))("tmux control mode against a real
     const next = tmuxControlExec(execArgvCommand);
     await next(["tmux", "has-session", "-t", "=seat@rig"]);
     expect(sessions()).toEqual([controlSessionName(next.owner), "seat@rig"]);
-    // A daemon killed outright: its client goes with it, and tmux destroys the session the client was in.
+    // A daemon killed outright: its client goes with it, and tmux kills the session the client was in.
     process.kill(Number(tmux("list-clients", "-F", "#{client_pid}").trim()), "SIGKILL");
     await vi.waitFor(() => expect(sessions()).toEqual(["seat@rig"]), { timeout: 5000, interval: 50 });
     await next.close();

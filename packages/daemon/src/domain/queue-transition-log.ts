@@ -454,6 +454,15 @@ export class QueueTransitionLog {
     return byQitem;
   }
 
+  /** Startup catch-up includes retained terminal rows, unlike active-episode selection. */
+  postedHumanAskIds(): string[] {
+    if (!this.hasOwnerNotificationColumns) return [];
+    return (this.db.prepare(`SELECT DISTINCT qitem_id FROM ${this.historySource}
+      WHERE transition_note LIKE 'slack-owner-notification-posted %'
+        AND qitem_id IN (SELECT qitem_id FROM queue_items)
+        AND instr(' ' || transition_note || ' ', ' kind=human-required ') > 0`).all() as Array<{ qitem_id: string }>).map((r) => r.qitem_id);
+  }
+
   hasOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
     return this.getOwnerNotificationReceipt(qitemId, notificationKey) !== null;
   }

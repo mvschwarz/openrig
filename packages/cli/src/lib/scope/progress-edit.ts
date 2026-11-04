@@ -62,6 +62,31 @@ function bodyStartIndex(lines: string[]): number {
   return 0; // unterminated frontmatter — treat as no frontmatter
 }
 
+/** Keep source indices while hiding code examples from the progress grammar. */
+function progressLines(lines: string[]): string[] {
+  let fence: { marker: string; length: number } | null = null;
+  const start = bodyStartIndex(lines);
+  return lines.map((line, i) => {
+    if (i < start) return "";
+    const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (match) {
+      const marker = match[1]![0]!;
+      const length = match[1]!.length;
+      const tail = match[2]!;
+      if (fence) {
+        if (marker === fence.marker && length >= fence.length && /^[ \t\r]*$/.test(tail)) {
+          fence = null;
+          return line; // A new row may be inserted after the closing fence.
+        }
+      } else if (marker !== "`" || !tail.includes("`")) {
+        fence = { marker, length };
+      }
+      return "";
+    }
+    return fence ? "" : line;
+  });
+}
+
 export interface ProgressEditResult {
   content: string;
   changed: boolean;
@@ -92,32 +117,35 @@ export function addProgressRow(
   const newRow = `- [${statusIndicator(opts.status)}] ${text}`;
   const lines = content.split("\n");
   const start = bodyStartIndex(lines);
+  const visible = progressLines(lines);
 
   // Locate the target section heading.
   let sectionIdx = -1;
   for (let i = start; i < lines.length; i++) {
-    const h = lines[i]!.match(HEADING_RE);
+    const h = visible[i]!.match(HEADING_RE);
     if (h && h[1] === "##" && h[2]!.trim() === section) { sectionIdx = i; break; }
   }
 
   if (sectionIdx === -1) {
     // Create the section, appended after the last existing content.
     let end = lines.length;
-    while (end > start && lines[end - 1]!.trim() === "") end--;
+    while (end > start && visible[end - 1]!.trim() === "") end--;
     const head = lines.slice(0, end);
-    const rebuilt = [...head, "", `## ${section}`, "", newRow, ""].join("\n");
+    const suffix = lines.slice(end);
+    const rebuilt = [...head, "", `## ${section}`, "", newRow, "",
+      ...(suffix.some(line => line.trim() !== "") ? suffix : [])].join("\n");
     return { content: rebuilt, changed: true };
   }
 
   // Section block = [sectionIdx+1, nextHeadingOrEOF).
   let blockEnd = lines.length;
   for (let i = sectionIdx + 1; i < lines.length; i++) {
-    if (HEADING_RE.test(lines[i]!)) { blockEnd = i; break; }
+    if (HEADING_RE.test(visible[i]!)) { blockEnd = i; break; }
   }
 
   // Idempotency / conflict scan within the section.
   for (let i = sectionIdx + 1; i < blockEnd; i++) {
-    const cb = lines[i]!.match(ROW_RE);
+    const cb = visible[i]!.match(ROW_RE);
     if (cb && cb[3]!.trim() === text) {
       const current = indicatorToStatus(cb[2]!);
       if (current === opts.status) return { content, changed: false };
@@ -132,7 +160,7 @@ export function addProgressRow(
   // Insert after the last non-blank line in the section block.
   let insertAt = sectionIdx + 1;
   for (let i = sectionIdx + 1; i < blockEnd; i++) {
-    if (lines[i]!.trim() !== "") insertAt = i + 1;
+    if (visible[i]!.trim() !== "") insertAt = i + 1;
   }
   lines.splice(insertAt, 0, newRow);
   return { content: lines.join("\n"), changed: true };
@@ -155,10 +183,11 @@ export function setProgressRow(
   const text = opts.text.trim();
   const lines = content.split("\n");
   const start = bodyStartIndex(lines);
+  const visible = progressLines(lines);
 
   const matches: number[] = [];
   for (let i = start; i < lines.length; i++) {
-    const cb = lines[i]!.match(ROW_RE);
+    const cb = visible[i]!.match(ROW_RE);
     if (cb && cb[3]!.trim() === text) matches.push(i);
   }
 

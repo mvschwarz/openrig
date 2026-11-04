@@ -9,6 +9,7 @@ import { piPinReadings, piSeatPinReadings, readPiEffectiveModel } from "./effect
 import { piSeatPaths } from "../../adapters/pi-runner-protocol.js";
 import { canonicalModelPin, modelsMatch } from "./model-divergence-monitor.js";
 import { isShellForeground } from "../shell-classifier.js";
+import { commandNamesClaude } from "../native-process-lineage.js";
 
 export interface ProcessRow {
   pid: number;
@@ -57,9 +58,10 @@ export type ClaudeRecordSelection =
   | { ok: true; id: string; path: string; source: "generation-sidecar" | "verified-pane-argument" }
   | { ok: false; reason: string };
 
-/** Descendants of `parentPid` whose command matches `matches`, breadth-first. (Deliberately local:
- *  the two existing walkers are module-private in the codex adapter and the refresher; a shared
- *  extraction is a cleanup for calmer water.) */
+/** `parentPid` itself and its descendants whose command matches `matches`, breadth-first: a runtime exec'd at launch
+ *  IS the pane's process. A shell at the root isn't one, even when its arguments name the runtime: `bash -c` keeps its
+ *  whole script in argv while a later command runs. (Deliberately local: the two existing walkers are module-private in
+ *  the codex adapter and the refresher; a shared extraction is a cleanup for calmer water.) */
 function findDescendants(processes: ProcessRow[], parentPid: number, matches: (command: string) => boolean): number[] {
   const byParent = new Map<number, ProcessRow[]>();
   for (const p of processes) {
@@ -67,7 +69,9 @@ function findDescendants(processes: ProcessRow[], parentPid: number, matches: (c
     list.push(p);
     byParent.set(p.ppid, list);
   }
-  const out: number[] = [];
+  const root = processes.find((p) => p.pid === parentPid);
+  const rootArgv0 = basename((root?.command.trim().split(/\s+/)[0] ?? "").replace(/^-/, "").replace(/^['"]|['"]$/g, ""));
+  const out: number[] = root && !isShellForeground(rootArgv0) && matches(root.command) ? [root.pid] : [];
   const queue = [parentPid];
   while (queue.length > 0) {
     const pid = queue.shift()!;
@@ -96,7 +100,7 @@ export async function paneClaudeSessionIdArgument(
   const panePid = await deps.getPanePid(sessionTarget);
   if (!panePid) return { ok: false, reason: `no live pane pid for ${sessionTarget}` };
   const processes = await deps.listProcesses();
-  const claudePids = findDescendants(processes, panePid, commandBasenameIs("claude"));
+  const claudePids = findDescendants(processes, panePid, commandNamesClaude);
   if (claudePids.length === 0) return { ok: false, reason: `no claude process under the live pane of ${sessionTarget}` };
   const ids = new Set<string>();
   for (const pid of claudePids) {
@@ -161,7 +165,7 @@ export async function resolveIdentityVerifiedClaudeRecord(
   }
 
   const processes = await deps.listProcesses();
-  const claudePids = findDescendants(processes, panePid, commandBasenameIs("claude"));
+  const claudePids = findDescendants(processes, panePid, commandNamesClaude);
   if (claudePids.length === 0) {
     return { ok: false, reason: `no claude process under verified pane ${binding.tmuxPane}` };
   }

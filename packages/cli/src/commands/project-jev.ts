@@ -42,7 +42,7 @@ export function setExperiment(file: string, enabled: boolean, options: Partial<E
   const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
   try {
     const s = fs.fstatSync(fd);
-    if (!s.isFile() || s.nlink !== 1 || s.uid !== process.getuid?.()) throw Error("experiment config must be an owned regular file");
+    if (!s.isFile() || s.nlink !== 1 || (process.getuid !== undefined && s.uid !== process.getuid())) throw Error("experiment config must be an owned regular file");
     fs.ftruncateSync(fd, 0); fs.writeFileSync(fd, JSON.stringify(config, null, 2) + "\n");
   } finally { fs.closeSync(fd); }
   return config;

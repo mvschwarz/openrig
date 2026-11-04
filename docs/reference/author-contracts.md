@@ -1,4 +1,4 @@
-# Integration author contracts — DRAFT, published with 0.7.6
+# Integration author contracts — DRAFT, first published with 0.7.6
 
 OpenRig composes agents into a team. An integration author supplies the pieces that let a new harness participate, or let an existing harness run in a new environment. This guide divides that work into two contracts:
 
@@ -9,16 +9,16 @@ These are draft author responsibilities. Some use implemented OpenRig interfaces
 
 ## Release and support status
 
-This draft was published with **OpenRig 0.7.6** (tag [`v0.7.6`](https://github.com/mvschwarz/openrig/tree/v0.7.6), source `c00c6321`). Its implemented-interface baseline is commit [`b6bd4633`](https://github.com/mvschwarz/openrig/tree/b6bd4633fbd94634a2b4bdef2574a6880f97be63). That base includes the runner declaration and `passes_model` changes. The published 0.7.6 adds release repairs and documentation on top of that base. References below use the immutable base instead of a moving branch.
+This draft was published with **OpenRig 0.7.6** (tag [`v0.7.6`](https://github.com/mvschwarz/openrig/tree/v0.7.6), source `c00c6321`). Its implemented-interface baseline is commit [`b6bd4633`](https://github.com/mvschwarz/openrig/tree/b6bd4633fbd94634a2b4bdef2574a6880f97be63). That base includes the runner declaration and `passes_model` changes. The published 0.7.6 adds release repairs and documentation on top of that base. **OpenRig 0.7.8** adds seat activity grants, OpenRig's side of the answered permission path and the maintained OpenShell reference driver (`rig environment`); the rows below that say 0.7.8 describe it. References below use the immutable base instead of a moving branch, except the community preset reference, which is the in-tree copy.
 
-| Area | Status at this baseline | What the status means |
+| Area | Status | What the status means |
 |---|---|---|
 | Community launcher presets, RigSpec members and AgentSpec role/startup declarations | Implemented interfaces | They compose configuration. A launcher must implement its declared effects; successful parsing does not prove delivery or native behavior. |
 | `runner: true` with `launch_result: true` | Released in 0.7.6 | The declaration is retained at launch, and Core uses the runner identity/activity path. It does not supply a runner executable. |
 | `passes_model: true` | Released in 0.7.6 | Passes the declared model through `OPENRIG_MODEL`. It does not observe or verify the effective native model. Cursor and Hermes examples leave it off pending native qualification. |
-| The dsh/ACP input, cancellation and refusal-first permission recipe | Proposed author implementation | No end-to-end dsh integration is established. Native reopen capabilities and the tools-off case remain implementer questions. |
+| The dsh/ACP input, cancellation and answered permission recipe (a person answers, and the default is permit) | OpenRig's side released in 0.7.8; runner side not qualified | OpenRig asks a person for a runner's permission requests and returns the answer. No end-to-end dsh integration is established, and the native verdict is pending. Native reopen capabilities and the tools-off case remain implementer questions. |
 | Exact native resume via an author launcher | Existing interface; integration-specific evidence | A requested conversation must reopen exactly or fail honestly. One provider/harness result does not establish portability to another. |
-| Environment preparation, projection, artifact export and owned-resource cleanup | Measured in a private wrapper; generic seam proposed | The platform chapter makes the responsibilities reusable. Core does not provide a generic platform driver or `DeploySpec` loader at this baseline. |
+| Environment preparation, projection, artifact export and owned-resource cleanup | OpenShell reference driver released in 0.7.8; generic seam proposed | The platform chapter makes the responsibilities reusable. Core ships one maintained reference driver, OpenShell 0.1.6, as `rig environment`. It doesn't provide a generic platform driver or `DeploySpec` loader. |
 | `HarnessSpec`, `DeploySpec`, generic lifecycle fields and wake-on-demand declarations | Proposed vocabulary or unsupported configuration | They are not new accepted YAML keys. Use existing composition and an explicit author implementation. |
 | Cross-host native resume, provider-wide cancellation or permission support | Unresolved unless qualified by an integration | Unsupported and untested are distinct from observed failure. Publish the actual boundary and version. |
 
@@ -50,7 +50,7 @@ The queue records who owns work. It does not prove that an old provider process 
 
 ## Start from an existing example
 
-For a terminal harness, begin with the pinned [community preset reference](https://github.com/mvschwarz/openrig/blob/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-presets.md) and the [Cursor](https://github.com/mvschwarz/openrig/tree/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-examples/cursor) or [Hermes](https://github.com/mvschwarz/openrig/tree/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-examples/hermes) directory. Their presence is source guidance, not an effective-model or complete integration guarantee.
+For a terminal harness, begin with the [community preset reference](community-harness-presets.md) and the pinned [Cursor](https://github.com/mvschwarz/openrig/tree/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-examples/cursor) or [Hermes](https://github.com/mvschwarz/openrig/tree/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-examples/hermes) directory. Their presence is source guidance, not an effective-model or complete integration guarantee.
 
 For a structured runner, the [runner chapter](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch) supplies a minimal preset, launch record and activity message. The executable named by the preset must still be implemented and installed by its author.
 

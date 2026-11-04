@@ -1,4 +1,5 @@
 import type { ComposedPane } from "./terminal-provider.js";
+import { blankShellArgv } from "./login-shell.js";
 import { buildTileGrid, type TileGrid, type TileNodes } from "./tile-layout.js";
 
 const TERMINAL_FLAVOR = "com.superlogical.terminal.shell";
@@ -22,7 +23,7 @@ const block = (label: string, options: { command: string[]; exit?: { quick_exit_
 /** Rex has no env option for a block, so the composed shell command runs through `sh -c` unchanged. */
 const REX_TILE_NODES: TileNodes<RexLayoutNode> = {
   tile: (pane) => block(pane.label, { command: ["sh", "-c", pane.paneCommand], exit: { quick_exit_threshold_ms: FAILED_TILE_HOLD_MS } }),
-  blank: () => block("", { command: ["sh"] }),
+  blank: () => block("", { command: blankShellArgv() }),
   split: (direction, ratio, before, after) => ({ split: { direction: direction === "across" ? "horizontal" : "vertical", ratio, before, after } }),
 };
 

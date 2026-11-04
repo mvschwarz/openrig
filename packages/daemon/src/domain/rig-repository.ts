@@ -5,7 +5,7 @@ import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import { decodeStoredSnapshotData } from "./snapshot-repository.js";
-import { resolve } from "node:path";
+import { posix, resolve } from "node:path";
 import { ulid } from "ulid";
 import { deriveComposeProjectName } from "./compose-project-name.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
@@ -178,6 +178,8 @@ function isStoredRigSpec(value: unknown): value is NodeLaunchRecipe["rigSpec"] {
         && (entry.appendSystemPromptFile === undefined || typeof entry.appendSystemPromptFile === "string")
         && (entry.pluginDirs === undefined
           || (Array.isArray(entry.pluginDirs) && entry.pluginDirs.every((dir) => typeof dir === "string")))
+        && (entry.pluginChannels === undefined
+          || (Array.isArray(entry.pluginChannels) && entry.pluginChannels.every((channel) => typeof channel === "string")))
         && (entry.permissionPolicy === undefined || typeof entry.permissionPolicy === "string")
         && (entry.env === undefined || isStringRecord(entry.env))
         && (entry.restorePolicy === undefined || typeof entry.restorePolicy === "string")
@@ -363,6 +365,23 @@ export class RigRepository {
     );
     this.onRigCreated?.(rig);
     return rig;
+  }
+
+  /** Original built-in kernel template from the rig's latest rig-spec bootstrap, including partial launches.
+   *  Match the verified specs root supplied by daemon startup, not an arbitrary matching path suffix.
+   *  A custom spec or absent history is unknown; do not infer a selection from today's runtime mix. */
+  getKernelVariantFromBootstrap(rigId: string, builtInSpecsDir: string): string | null {
+    const row = this.db.prepare(
+      "SELECT source_ref FROM bootstrap_runs WHERE rig_id = ? AND source_kind = 'rig_spec' ORDER BY created_at DESC, rowid DESC LIMIT 1"
+    ).get(rigId) as { source_ref: string } | undefined;
+    if (!row) return null;
+    const source = posix.normalize(row.source_ref.replace(/\\/g, "/"));
+    const root = posix.normalize(builtInSpecsDir.replace(/\\/g, "/"));
+    if (!posix.isAbsolute(root) && !/^[A-Za-z]:\//.test(root)) return null;
+    const directory = root.replace(/\/+$/, "") + "/rigs/launch/kernel/";
+    if (!source.startsWith(directory)) return null;
+    const variant = source.slice(directory.length);
+    return /^rig(?:-claude-only|-codex-only)?\.yaml$/.test(variant) ? variant : null;
   }
 
   /** Canonical bundle materialization folder, independent of seats' working directories. */
@@ -825,6 +844,21 @@ export class RigRepository {
     if (!this.hasNodeColumn("effort_choice")) return false;
     return this.db.prepare("UPDATE nodes SET effort_choice = ? WHERE id = ?")
       .run(choice, nodeId).changes > 0;
+  }
+
+  /** Write or clear (null) the registered person who answers this seat's runner permission requests. Returns false when
+   *  the column isn't available or no row matched, so a caller never reports a change from it. */
+  setNodePermissionsTo(nodeId: string, owner: string | null): boolean {
+    if (!this.hasNodeColumn("permissions_to")) return false;
+    return this.db.prepare("UPDATE nodes SET permissions_to = ? WHERE id = ?")
+      .run(owner, nodeId).changes > 0;
+  }
+
+  /** The seat's selected permission answer owner, or null when none is selected or the column isn't available. */
+  getNodePermissionsTo(nodeId: string): string | null {
+    if (!this.hasNodeColumn("permissions_to")) return null;
+    const row = this.db.prepare("SELECT permissions_to FROM nodes WHERE id = ?").get(nodeId) as { permissions_to: string | null } | undefined;
+    return row?.permissions_to ?? null;
   }
 
   clearNodeEffort(nodeId: string): boolean {

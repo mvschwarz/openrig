@@ -13,6 +13,7 @@ import { resolveStartup } from "./startup-resolver.js";
 import { discoverSkillsForRuntime, findNamedSkillsForRuntime, parseSkillFrontmatter, scanCacheFor, type SkillRuntime } from "./skill-discovery.js";
 import { inspectSkillDirectory, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
 import { resolvePluginPath } from "./projection-planner.js";
+import { selectedCorePluginDir, vendoredCorePluginDir } from "./claude-core-plugin-env.js";
 
 // -- Types --
 
@@ -352,9 +353,13 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     const selectedIds = new Set(selectedResult!.skills.map((skill) => skill.effectiveId));
     for (const plugin of selectedResult!.plugins) {
       const resource = plugin.resource as PluginResource;
+      const pluginRoot = resolvePluginPath(resource.source.path, plugin.sourcePath);
+      // Except the vendored openrig-core on a Claude seat: the seat loads that plugin itself, skills included
+      // (CLAUDE_CODE_PLUGIN_DIRS, by seatCorePluginDir's rule), so a loadout copy would load each skill twice.
+      if (runtime === "claude-code" && vendoredCorePluginDir() && selectedCorePluginDir([pluginRoot])) continue;
       const pluginSkills = resolvePluginSkills({
         pluginId: resource.id,
-        pluginRoot: resolvePluginPath(resource.source.path, plugin.sourcePath),
+        pluginRoot,
         runtime,
         pluginType: resource.pluginType,
       });

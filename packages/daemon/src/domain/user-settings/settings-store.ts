@@ -106,6 +106,7 @@ export const SETTINGS_VALID_KEYS = [
   // OPR.0.5.9.5 Wave B — canonical context library; old key is refused.
   "context.root",
   "context.system_world",
+  "specs.builtins_visible",
   "skills.root",
   // OPR.0.7.0.13 (router): the person's recorded yes to OpenRig's one-line seat-skills bootstrap in AGENTS.md / CLAUDE.md.
   "skills.router_line.enabled",
@@ -267,6 +268,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   "context.root": { primary: "OPENRIG_CONTEXT_ROOT" },
   "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
+  "specs.builtins_visible": { primary: "OPENRIG_SPECS_BUILTINS_VISIBLE" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "skills.router_line.enabled": { primary: "OPENRIG_SKILLS_ROUTER_LINE_ENABLED" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
@@ -373,6 +375,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "topology.root": ["topology", "root"],
   "context.root": ["context", "root"],
   "context.system_world": ["context", "systemWorld"],
+  "specs.builtins_visible": ["specs", "builtinsVisible"],
   "skills.root": ["skills", "root"],
   "skills.router_line.enabled": ["skills", "routerLine", "enabled"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
@@ -669,6 +672,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "topology.root": return DEFAULT_TOPOLOGY_ROOT;
     case "context.root": return DEFAULT_CONTEXT_ROOT;
     case "context.system_world": return "default";
+    case "specs.builtins_visible": return true;
     case "skills.root": return DEFAULT_SKILLS_ROOT;
     case "skills.router_line.enabled": return false;
     case "onboarding.default_pack.enabled": return true;

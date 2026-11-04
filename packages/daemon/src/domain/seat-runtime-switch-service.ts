@@ -19,6 +19,7 @@ import { SeatStatusService } from "./seat-status-service.js";
 import { SeatLifecycleService } from "./seat-lifecycle-service.js";
 import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
 import { buildRestorePacket, type PredecessorRecapResolver } from "./seat-handover-service.js";
+import { keptGuidanceSeatLine } from "./restore-guidance.js";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { clearCodexMemberPermissions } from "./codex-member-permissions.js";
@@ -29,6 +30,7 @@ import { SnapshotCapture } from "./snapshot-capture.js";
 import { SnapshotRepository } from "./snapshot-repository.js";
 import { CheckpointStore } from "./checkpoint-store.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
+import { heldMessagesNotice } from "./outbox-handler.js";
 import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
 import { planRuntimeSwitchMaterials, type RuntimeSwitchMaterials, type RuntimeSwitchMaterialsInput, type SwitchRuntime } from "./runtime-switch-materials.js";
 import { terminatePaneInPlace } from "./pane-cutover.js";
@@ -134,6 +136,12 @@ interface SwitchRow {
   confirmation_note: string | null; confirmed_at: string | null; successor_resume_type: string | null; successor_resume_token: string | null;
   committed_at: string | null; outcome: string | null; attention: string | null; created_at: string;
 }
+
+/** What to do about a seat with no pane to switch. */
+const NO_PANE = "it has no bound tmux pane";
+const NO_PANE_GUIDANCE = "If the seat is stopped, start it first, then switch it. If it has never started, there's nothing to switch: "
+  + "declare the other runtime for this member in its rig spec and bring the team up again from that spec. That makes a new "
+  + "generation of the seat, and it doesn't carry this seat's edges, settings or queued work the way a switch does.";
 
 const COSTS = [
   "A new conversation: native history isn't converted; only the handover carries over.",
@@ -245,13 +253,14 @@ export class SeatRuntimeSwitchService {
     }
     const predecessorGeneration = sessionRegistry.currentOccupantTenure(node.id)?.generationUuid;
     const running = sessionRegistry.getSessionsForRig(node.rigId).filter((session) => session.nodeId === node.id && session.status === "running");
-    const unsupported = !sessionName || !binding?.tmuxPane ? "it has no bound tmux pane"
+    const unsupported = !sessionName || !binding?.tmuxPane ? NO_PANE
       : binding.attachmentType && binding.attachmentType !== "tmux" ? `it's attached through ${binding.attachmentType}, not tmux`
       : !predecessorGeneration ? "its current occupant generation isn't recorded"
       : running.length !== 1 || running[0]!.sessionName !== sessionName ? "it doesn't have exactly one running session at its address"
       : !node.cwd || !nodePath.isAbsolute(node.cwd) ? "its working directory isn't an absolute path"
       : null;
-    if (unsupported) return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: ${unsupported}.`);
+    if (unsupported) return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: ${unsupported}.`,
+      unsupported === NO_PANE ? NO_PANE_GUIDANCE : undefined);
     try {
       const [panes, windows] = await Promise.all([tmux.listPanes(sessionName!), tmux.listWindows(sessionName!)]);
       if (windows.length !== 1 || panes.length !== 1 || panes[0]!.id !== binding!.tmuxPane) {
@@ -415,6 +424,8 @@ export class SeatRuntimeSwitchService {
     const packet = [
       `You are ${ctx.seatRef}'s successor on ${target}, staged for runtime switch ${id}. The ${node.runtime} occupant still holds the seat: until OpenRig tells you the switch committed, don't act as the seat (queue changes and sends are refused).`,
       materials.firstTurn,
+      // #2456: a guidance block the preparation kept is named here, as a start tells its seat.
+      keptGuidanceSeatLine(launch.notes ?? []),
       buildRestorePacket({ seatRef: ctx.seatRef, reason: ctx.input.reason, departingSession: sessionName, handoverAt: stamp(), capturedContext: screen ?? "",
         ...(recap && "recap" in recap ? recap : { recapUnavailableReason: recap?.unavailableReason ?? "no provider recap available" }),
         ...(authored ? ("address" in authored ? { authoredRecap: authored } : { authoredRecapAbsentReason: authored.absentReason }) : {}) }),
@@ -483,6 +494,8 @@ export class SeatRuntimeSwitchService {
     // 5. Retire the predecessor and tell the successor it holds the seat. A failure here leaves the switch committed.
     const finished = await this.finishCommitted({ id, node_id: node.id, canonical_session: sessionName, staging_session: row.staging_session,
       to_runtime: target, from_runtime: node.runtime!, successor_generation: successorGeneration });
+    const held = heldMessagesNotice(db, node.id, sessionName);
+    if (held) warnings.push(held);
     return { ok: true, dryRun: false, changed: true, ...ctx.plan, switchId: id, generation: successorGeneration, previousGeneration: ctx.predecessorGeneration,
       claimsMoved: committed.claimsMoved, openRows: queue.length, confirmation, recoveryPending: !finished.ok,
       warnings: finished.ok ? warnings : [...warnings, `The switch committed, but ${finished.message} Finish it with rig seat set-runtime ${ctx.seatRef} --recover.`] };
@@ -597,7 +610,9 @@ export class SeatRuntimeSwitchService {
     if (!env.ok) problems.push(`the seat's session environment couldn't be updated (${env.message})`);
     tmux.finishLaunchBinding(row.staging_session);
     if (retired.ok) {
-      const text = `OpenRig: runtime switch ${row.id} committed. You now hold ${row.canonical_session} on ${row.to_runtime}; the ${row.from_runtime} occupant has retired. Carry on from the handover: the seat's queue rows and claims are yours.`;
+      // Held messages are never replayed, so the activation tells the successor of them, as a started seat is told (#2431).
+      const held = heldMessagesNotice(db, row.node_id, row.canonical_session);
+      const text = `OpenRig: runtime switch ${row.id} committed. You now hold ${row.canonical_session} on ${row.to_runtime}; the ${row.from_runtime} occupant has retired. Carry on from the handover: the seat's queue rows and claims are yours.${held ? ` ${held}` : ""}`;
       const typed = await tmux.sendText(row.canonical_session, text);
       const entered = typed.ok ? (await this.sleep(200), await tmux.sendKeys(row.canonical_session, ["Enter"])) : typed;
       if (!entered.ok) problems.push(`the activation message couldn't be delivered (${entered.message})`);
