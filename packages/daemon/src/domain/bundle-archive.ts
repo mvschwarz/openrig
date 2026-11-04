@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import nodePath from "node:path";
 import * as tar from "tar";
-import { verifyIntegrity, type IntegrityFsOps } from "./bundle-integrity.js";
+import { verifyIntegrity, isHarnessLoginPath, type IntegrityFsOps } from "./bundle-integrity.js";
 // TODO: AS-T12 — migrate to pod-aware bundle types
 import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, normalizeIncludedLoginFiles } from "./bundle-types.js";
 
@@ -124,6 +124,7 @@ export async function unpack(archivePath: string, outputDir: string): Promise<{ 
   }
 
   // Step 3: Extract (safe — pre-scanned and defensively filtered)
+  const fileModes = new Map<string, number>();
   fs.mkdirSync(outputDir, { recursive: true });
   await tar.extract({
     file: archivePath,
@@ -131,7 +132,11 @@ export async function unpack(archivePath: string, outputDir: string): Promise<{ 
     filter: (p, entry) => {
       if ("isSymbolicLink" in entry && typeof entry.isSymbolicLink === "function" && entry.isSymbolicLink()) return false;
       const type = "type" in entry ? (entry as { type?: string }).type : undefined;
-      return unsafeArchiveEntryReason(p, type) === null;
+      if (unsafeArchiveEntryReason(p, type) !== null) return false;
+      if ((type === "File" || type === "OldFile" || type === "ContiguousFile") && typeof entry.mode === "number") {
+        fileModes.set(nodePath.resolve(outputDir, p), entry.mode & 0o777);
+      }
+      return true;
     },
   });
 
@@ -183,6 +188,18 @@ export async function unpack(archivePath: string, outputDir: string): Promise<{ 
         ...result.errors,
       ];
       throw new Error(`Content integrity verification failed: ${details.join("; ")}`);
+    }
+    // Restore ordinary file bits only after verification, including warning success.
+    // Match portable packing's write-bit restriction; known login files keep only
+    // archived owner read/write bits. Custom group/other-write and special bits
+    // are not restored, even from accepted nonportable archives.
+    if (process.platform !== "win32") {
+      for (const [file, mode] of fileModes) {
+        const target = isHarnessLoginPath(nodePath.relative(outputDir, file)) ? mode & 0o600 : mode & ~0o022;
+        const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+        // A later entry may have replaced this file with a directory.
+        if (stat?.isFile() && (stat.mode & 0o7777) !== target) fs.chmodSync(file, target);
+      }
     }
     if (result.warnings) return { warnings: result.warnings };
   }
