@@ -5,7 +5,7 @@ import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import { decodeStoredSnapshotData } from "./snapshot-repository.js";
-import { resolve } from "node:path";
+import { posix, resolve } from "node:path";
 import { ulid } from "ulid";
 import { deriveComposeProjectName } from "./compose-project-name.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
@@ -365,6 +365,23 @@ export class RigRepository {
     );
     this.onRigCreated?.(rig);
     return rig;
+  }
+
+  /** Original built-in kernel template from the rig's latest rig-spec bootstrap, including partial launches.
+   *  Match the verified specs root supplied by daemon startup, not an arbitrary matching path suffix.
+   *  A custom spec or absent history is unknown; do not infer a selection from today's runtime mix. */
+  getKernelVariantFromBootstrap(rigId: string, builtInSpecsDir: string): string | null {
+    const row = this.db.prepare(
+      "SELECT source_ref FROM bootstrap_runs WHERE rig_id = ? AND source_kind = 'rig_spec' ORDER BY created_at DESC, rowid DESC LIMIT 1"
+    ).get(rigId) as { source_ref: string } | undefined;
+    if (!row) return null;
+    const source = posix.normalize(row.source_ref.replace(/\\/g, "/"));
+    const root = posix.normalize(builtInSpecsDir.replace(/\\/g, "/"));
+    if (!posix.isAbsolute(root) && !/^[A-Za-z]:\//.test(root)) return null;
+    const directory = root.replace(/\/+$/, "") + "/rigs/launch/kernel/";
+    if (!source.startsWith(directory)) return null;
+    const variant = source.slice(directory.length);
+    return /^rig(?:-claude-only|-codex-only)?\.yaml$/.test(variant) ? variant : null;
   }
 
   /** Canonical bundle materialization folder, independent of seats' working directories. */

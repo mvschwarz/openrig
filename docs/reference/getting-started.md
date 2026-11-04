@@ -291,6 +291,17 @@ fine; if both accounts are authenticated, the kernel uses both even when your
 later project uses just one. A request to use only one provider for everything
 is a separate choice.
 
+`/api/kernel/status` retains the chosen template (`rig.yaml`,
+`rig-claude-only.yaml` or `rig-codex-only.yaml`) across daemon restarts and
+recovery, including starts with `--no-kernel`. It reads the rig's latest rig-spec
+bootstrap record, including a partial launch, so an older kernel's recorded
+selection is also available. This is the original selection; the rig's live spec
+describes its current configuration. The saved source must match a template under
+the current installation’s built-in specs directory. A custom project path with
+the same directory suffix, an old source path that can no longer be verified
+(for example, after a Node version change moves the global install), or a kernel
+without bootstrap history reports an unknown variant.
+
 **Started is not ready.** Read the `Kernel:` boot state in `rig status` and the
 individual seat state in `rig ps --nodes --rig kernel`. The view may open while
 agents finish starting; describe that state, without claiming they are ready.

@@ -44,6 +44,53 @@ describe("RigRepository", () => {
     expect(node.model).toBe("opus");
   });
 
+  it.each(["rig.yaml", "rig-claude-only.yaml", "rig-codex-only.yaml"])(
+    "does not label a custom project path as the built-in %s", (variant) => {
+      const rig = repo.createRig("kernel");
+      db.prepare("INSERT INTO bootstrap_runs (id, source_kind, source_ref, rig_id) VALUES (?, ?, ?, ?)")
+        .run("custom", "rig_spec", "/workspace/project/rigs/launch/kernel/" + variant, rig.id);
+      expect(repo.getKernelVariantFromBootstrap(rig.id, "/opt/openrig/specs")).toBeNull();
+    }
+  );
+
+  it.each([
+    ["/opt/openrig/specs/rigs/launch/kernel/rig.yaml", "rig.yaml"],
+    ["/opt/openrig/specs/rigs/launch/kernel/rig-claude-only.yaml", "rig-claude-only.yaml"],
+    ["/opt/openrig/specs/rigs/launch/kernel/rig-codex-only.yaml", "rig-codex-only.yaml"],
+    ["C:\\OpenRig\\specs\\rigs\\launch\\kernel\\rig-codex-only.yaml", "rig-codex-only.yaml"],
+    ["rigs/launch/kernel/rig.yaml", null],
+    ["/custom/rig.yaml", null],
+    ["/custom/kernel/rig.yaml", null],
+    ["/opt/openrig/specs/rigs/launch/kernel/custom.yaml", null],
+    ["/opt/openrig/specs/rigs/launch/kernel/rig.yaml.bak", null],
+    ["/opt/openrig/specs/rigs/launch/kernel/../rig.yaml", null],
+    ["/opt/openrig/specs/rigs/launch/kernel/rig.yaml/extra", null],
+  ])("reads only a built-in kernel template from %s", (source, expected) => {
+    const rig = repo.createRig("kernel");
+    db.prepare("INSERT INTO bootstrap_runs (id, source_kind, source_ref, rig_id, status) VALUES (?, ?, ?, ?, ?)")
+      .run("boot", "rig_spec", source, rig.id, "partial");
+    const specsDir = source.startsWith("C:") ? "C:/OpenRig/specs" : "/opt/openrig/specs";
+    expect(repo.getKernelVariantFromBootstrap(rig.id, specsDir)).toBe(expected);
+  });
+
+  it("reads the latest rig-spec history for exactly this rig, without falling back past a custom spec", () => {
+    const rig = repo.createRig("kernel");
+    const other = repo.createRig("other");
+    expect(repo.getKernelVariantFromBootstrap(rig.id, "/opt/openrig/specs")).toBeNull();
+    const insert = db.prepare("INSERT INTO bootstrap_runs (id, source_kind, source_ref, rig_id, created_at) VALUES (?, ?, ?, ?, ?)");
+    const path = "/opt/openrig/specs/rigs/launch/kernel/";
+    insert.run("old", "rig_spec", path + "rig.yaml", rig.id, "2026-01-01");
+    insert.run("new", "rig_spec", path + "rig-codex-only.yaml", rig.id, "2026-01-02");
+    insert.run("other", "rig_spec", path + "rig-claude-only.yaml", other.id, "2026-01-03");
+    insert.run("bundle", "bundle", path + "rig-claude-only.yaml", rig.id, "2026-01-03");
+    insert.run("older-inserted-last", "rig_spec", path + "rig-claude-only.yaml", rig.id, "2026-01-01");
+    expect(repo.getKernelVariantFromBootstrap(rig.id, "/opt/openrig/specs")).toBe("rig-codex-only.yaml");
+    // Match BootstrapRepository's deterministic insertion-order tie breaker.
+    insert.run("custom", "rig_spec", "/custom/rig.yaml", rig.id, "2026-01-02");
+    expect(repo.getKernelVariantFromBootstrap(rig.id, "/opt/openrig/specs")).toBeNull();
+    expect(repo.getKernelVariantFromBootstrap(other.id, "/opt/openrig/specs")).toBe("rig-claude-only.yaml");
+  });
+
   it("addNode to nonexistent rig throws", () => {
     expect(() => repo.addNode("nonexistent", "worker")).toThrow();
   });
