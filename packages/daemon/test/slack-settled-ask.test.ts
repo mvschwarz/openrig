@@ -297,6 +297,26 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(updates).toHaveLength(2);
   });
 
+  it("keeps the earlier answer on a reopened answered ask without inviting a discarded thread reply", async () => {
+    const item = await postAsk();
+    const input = { sourceSession: human, destinationSession: item.sourceSession, summary: "Answer", body: "Ship it",
+      inboundReplyTo: item.qitemId, replyTo: item.qitemId, nudge: false };
+    const answer = await repo.createHumanAnswer(input);
+    expect(repo.getHumanAnswer(item.qitemId, human)?.qitemId).toBe(answer.qitemId);
+    expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: "Ship it" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "pending", reopen: true, transitionNote: "Revisit the decision." });
+    expect(repo.getById(item.qitemId)?.state).toBe("pending");
+    const repeated = await repo.createHumanAnswer({ ...input, body: "A different answer" });
+    expect(repeated.qitemId).toBe(answer.qitemId);
+    expect(repeated.body).toBe("Ship it");
+    await vi.waitFor(() => expect(updates).toHaveLength(2));
+    expect(messages[0]!.text).toMatch(/^Open again/);
+    expect(messages[0]!.text).not.toContain("Reply in this thread to answer");
+    expect(messages[0]!.text).toContain("Earlier answer retained");
+    expect(postCount).toBe(1);
+  });
+
   it.each(["read", "update"] as const)("reconciles a reopen during an awaited %s, instead of acknowledging obsolete Done", async (stage) => {
     const item = await postAsk();
     let entered = false;
