@@ -172,7 +172,7 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
         try { return await receiver.request(String(url), init); }
         finally { setSelfHostId("host-origin"); }
       }) as typeof fetch });
-      const body = "Please check the result.\\nKeep my words.";
+      const body = "Please check the result.\nKeep my words.";
       const response = await post(app, { ...BASE, sourceSession: "human@kernel", body, hostId: "vps-b" });
       expect(response.status).toBe(201);
       expect(forwarded).toHaveLength(1);
@@ -183,10 +183,10 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
       expect(receiverRepo.getById(item.qitemId)).toMatchObject({ sourceSession: "human@kernel@host-origin", body });
       await vi.waitFor(() => expect(sends).toHaveLength(1));
       expect(sends[0]!.session).toBe("dev@rig-b");
-      expect(sends[0]!.text).toContain("From: human@kernel@host-origin\\nTo: dev@rig-b");
+      expect(sends[0]!.text).toContain("From: human@kernel@host-origin\nTo: dev@rig-b");
       expect(sends[0]!.text).toContain("Queue handoff: " + item.qitemId + " - check your queue.");
       expect(sends[0]!.text).not.toContain("human@kernel@host-receiver");
-      expect(sends[0]!.text.split("\\n").at(-1)).toBe('↩ Reply if needed: rig queue create --destination human@kernel@host-origin --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify');
+      expect(sends[0]!.text.split("\n").at(-1)).toBe('↩ Reply if needed: rig queue create --destination human@kernel@host-origin --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify');
     } finally {
       setSelfHostId(null);
       await new Promise<void>(resolve => setImmediate(resolve));
