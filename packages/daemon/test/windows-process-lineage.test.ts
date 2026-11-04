@@ -10,6 +10,14 @@ function rows(): NativeProcessRow[] {
 }
 const verify = (values: NativeProcessRow[], token = "exact-id", foreground = "codex") => verifyCodexPaneProcess({ target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => foreground }, listProcesses: () => values, expectedToken: token, requireResume: true });
 describe("Windows process ancestry without fabricated foreground groups", () => {
+  it("recognizes an npm Node foreground only when its native Codex chain is verified", async () => {
+    expect((await verify(rows(), "exact-id", "node"))?.process.pid).toBe(101);
+    expect(await verify(rows(), "wrong-id", "node")).toBeNull();
+    expect(await verify([rows()[0]!], "exact-id", "node")).toBeNull();
+    const unrelated = rows();
+    unrelated[1]!.ppid = 999;
+    expect(await verify(unrelated, "exact-id", "node")).toBeNull();
+  });
   it("requires two stable kernel console observations before declaring a Windows shell idle", async () => {
     const shell = [rows()[0]!];
     const input = { target: "pane", tmux: { getPanePid: async () => 100 }, listProcesses: () => shell };

@@ -4,6 +4,29 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+/** Non-SSH command runners can own the same kill-on-close Windows job as sshd. */
+export async function windowsDaemonJobNeedsBreakaway(): Promise<boolean> {
+  if (process.platform !== "win32") return false;
+  const script = String.raw`
+$ErrorActionPreference='Stop'
+Add-Type @'
+using System;using System.Runtime.InteropServices;using System.ComponentModel;
+public static class OpenRigDaemonJobProbe {
+ [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool IsProcessInJob(IntPtr p,IntPtr j,out bool result);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr j,int t,byte[] b,uint l,out uint n);
+ public static bool NeedsBreakaway(){bool inside;if(!IsProcessInJob(GetCurrentProcess(),IntPtr.Zero,out inside))throw new Win32Exception();if(!inside)return false;uint n;var b=new byte[144];if(!QueryInformationJobObject(IntPtr.Zero,9,b,144,out n))throw new Win32Exception();return (BitConverter.ToUInt32(b,16)&0x2000)!=0;}
+}
+'@
+if([OpenRigDaemonJobProbe]::NeedsBreakaway()){[Console]::Write('yes')}else{[Console]::Write('no')}
+`;
+  const result = await promisify(execFile)(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+    { encoding: "utf8", windowsHide: true, timeout: 15000 });
+  if (!["yes", "no"].includes(result.stdout.trim())) throw new Error("Windows daemon job probe returned an unknown result");
+  return result.stdout.trim() === "yes";
+}
+
 // A Windows OpenSSH session owns a kill-on-close job. DETACHED_PROCESS alone
 // does not leave that job. Re-exec the finite startup CLI with an explicit,
 // OS-authorized breakaway; its ordinary child/lock/identity checks stay intact.

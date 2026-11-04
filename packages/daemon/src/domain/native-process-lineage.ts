@@ -845,7 +845,10 @@ async function observeNativePaneProcess(input: {
     const rows = await (input.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: input.scriptLaunch === true, frozenExecutable: input.selectedExecutable })))();
     if (rows.find(row => row.pid === pid)?.platform === "win32") {
       const foreground = windowsExecutableName(await input.tmux.getPaneCommand?.(input.target) ?? "");
-      if (!(runtime === "claude-code" ? ["claude", "node"] : ["codex", "codex-code-mode-host"]).includes(foreground)) return null;
+      // The npm launcher can remain the psmux foreground while its native Codex
+      // child owns the console. selectNativeProcess still proves the exact chain;
+      // an arbitrary Node pane is not sufficient runtime identity.
+      if (!(runtime === "claude-code" ? ["claude", "node"] : ["codex", "codex-code-mode-host", "node"]).includes(foreground)) return null;
     }
     return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,
       runtime === "claude-code" ? input.rotation : undefined, input.scriptLaunch, input.requireArgv, input.selectedScript);

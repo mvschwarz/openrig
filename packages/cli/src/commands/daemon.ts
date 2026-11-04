@@ -186,11 +186,13 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
     .option("--wait-for-kernel-ms <ms>", "Override --wait-for-kernel timeout in milliseconds")
     .action(async (opts: { port?: string; host?: string; db?: string; allowDbConflict?: boolean; kernel?: boolean; waitForKernel?: boolean; waitForKernelMs?: string }) => {
       try {
-        if (!depsOverride && process.platform === "win32" && process.env.SSH_CONNECTION && process.env.OPENRIG_DAEMON_BREAKAWAY !== "1") {
-          const { runWindowsBreakawayCommand } = await import("../windows-daemon-detach.js");
-          const result = await runWindowsBreakawayCommand(process.execPath, process.argv.slice(1));
-          process.stdout.write(result.stdout); process.stderr.write(result.stderr);
-          return;
+        if (!depsOverride && process.platform === "win32" && process.env.OPENRIG_DAEMON_BREAKAWAY !== "1") {
+          const { runWindowsBreakawayCommand, windowsDaemonJobNeedsBreakaway } = await import("../windows-daemon-detach.js");
+          if (process.env.SSH_CONNECTION || await windowsDaemonJobNeedsBreakaway()) {
+            const result = await runWindowsBreakawayCommand(process.execPath, process.argv.slice(1));
+            process.stdout.write(result.stdout); process.stderr.write(result.stderr);
+            return;
+          }
         }
         // The marker belongs to this one re-exec, never the daemon or its seats.
         delete process.env.OPENRIG_DAEMON_BREAKAWAY;

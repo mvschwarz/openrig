@@ -22,6 +22,7 @@ import type { NativeExchangeTerminal } from "../domain/native-runtime-switch-jou
 import { NativeNameTransition, type NativePhysicalObservation, type NativePhysicalSession } from "../domain/native-name-transition.js";
 import { readPlatformEnv } from "../domain/platform-env.js";
 import { tmuxFormatLiteral, tmuxSessionNameFormat } from "./tmux-format.js";
+import { observeCodexPaneProcess } from "../domain/native-process-lineage.js";
 const execFileAsync = promisify(execFile);
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -1494,6 +1495,8 @@ export class TmuxAdapter {
       created = true;
       const windowsCommand = this.terminalKind === "psmux" && process.platform === "win32"
         ? (await this.getPaneCommand(target) ?? "").replace(/\.exe$/, "").toLowerCase() : null;
+      const windowsCodex = ["codex", "codex-code-mode-host"].includes(windowsCommand ?? "")
+        || (windowsCommand === "node" && await observeCodexPaneProcess({ target, tmux: this, requireArgv: true }) !== null);
       if (windowsCommand && bracketed && !["pwsh", "powershell"].includes(windowsCommand)) {
         const pid = await this.getPanePid(target);
         if (!pid) throw new Error("Windows pane process unavailable; no payload submitted");
@@ -1505,7 +1508,7 @@ export class TmuxAdapter {
         const powershell = pathJoin(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
         try {
           await execFileAsync(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper,
-            "-TargetPid", String(pid), "-PayloadFile", path, "-Mode", ["codex", "codex-code-mode-host"].includes(windowsCommand) ? "codex" : "bracketed"], { windowsHide: true, timeout: 15000 });
+            "-TargetPid", String(pid), "-PayloadFile", path, "-Mode", windowsCodex ? "codex" : "bracketed"], { windowsHide: true, timeout: 15000 });
         } catch (error) {
           const phase = /failed at (read|compile|attach|open|write);/.exec(String((error as { stderr?: string }).stderr ?? ""))?.[1];
           throw new Error(`Windows console delivery failed${phase ? ` at ${phase}` : ""}; payload consumption unverified`);
