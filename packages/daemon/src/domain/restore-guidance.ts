@@ -136,13 +136,14 @@ export function seatGuidance(
         hint = resolveConcreteHint(f.path, readFile(f.absolutePath), f.orientation);
       } catch {
         if (f.path.endsWith(".md") && !f.path.endsWith("SKILL.md") && !isPerSeatRoleStartupFile(f.path, f.orientation)) {
-          items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath, unresolved: true, required: f.required });
+          items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath, unresolved: true, required: f.required || items.get(f.path)?.required });
         }
         continue;
       }
     }
     if (hint !== "guidance_merge") continue;
-    items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath, required: f.required });
+    // A projected block with the same id stays required: a start fails at projection before this file is delivered.
+    items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath, required: f.required || items.get(f.path)?.required });
   }
   // A seat's own role goes through send_text, never into a shared file (ADR-0006); the adapters skip it too.
   for (const [id, item] of items) if (isPerSeatRoleGuidance(item.blockId, item.sourcePath)) items.delete(id);

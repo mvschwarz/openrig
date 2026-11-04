@@ -710,7 +710,7 @@ export function formatDeclaredModel(model: string | null | undefined): string {
 
 /** #2456: the attention reason for an occupant started without a required startup file. */
 function startedWithoutLine(files: string[]): string {
-  return `started without required file ${files.join(", ")}`;
+  return `missing required ${files.map((file) => file.split("/").pop()).join(", ")}`;
 }
 
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
