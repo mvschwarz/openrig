@@ -7,6 +7,8 @@ export interface SeatLaunchAdditionsView {
   agentPromptReplacesDefault?: boolean;
   appendSystemPromptFile?: string;
   pluginDirs: string[];
+  /** #2044: absent from a daemon before it, and when the seat has none. */
+  pluginChannels?: string[];
   missing: string[];
   refused: string[];
 }
@@ -17,6 +19,7 @@ export function seatLaunchAdditionLines(additions: SeatLaunchAdditionsView | nul
     ...(additions.agent ? [`agent       ${additions.agent} (--agent${additions.agentPromptReplacesDefault ? "; its prompt replaces Claude's default system prompt" : ""})`] : []),
     ...(additions.appendSystemPromptFile ? [`prompt      ${additions.appendSystemPromptFile} (--append-system-prompt-file)`] : []),
     ...additions.pluginDirs.map((dir) => `plugin dir  ${dir} (CLAUDE_CODE_PLUGIN_DIRS)`),
+    ...(additions.pluginChannels ?? []).map((entry) => `channel     ${entry} (--channels)`),
     ...additions.missing.map((file) => `missing     ${file}: not passed to the launch`),
     ...additions.refused.map((reason) => `refused     ${reason}: not passed to the launch`),
   ];

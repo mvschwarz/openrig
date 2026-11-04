@@ -2,6 +2,7 @@ import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { specClaudeTokenRef } from "./claude-seat-token.js";
 import { validateClaudeMcp } from "./claude-mcp.js";
+import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type {
   LegacyRigSpec,
@@ -68,7 +69,7 @@ const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
   "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
-  "agent_file", "append_system_prompt_file", "plugin_dirs",
+  "agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
 
@@ -605,7 +606,7 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   }
 
   if (member["env"] !== undefined) errors.push(...validateSeatEnv(member["env"], `${prefix}.env`));
-  errors.push(...validateClaudeAdditions(member, prefix));
+  errors.push(...validateClaudeAdditions(member, prefix, advisories));
 
   // Terminal sentinel validation: exact triple required
   const isTerminalRuntime = member["runtime"] === "terminal";
@@ -1232,10 +1233,11 @@ function normalizeSessionSource(raw: unknown): import("./types.js").SessionSourc
   return undefined;
 }
 
-/** OPR.0.7.0.9 — a Claude member's own agent file, appended prompt file and plugin folders: paths beside the spec. */
-function validateClaudeAdditions(member: Record<string, unknown>, prefix: string): string[] {
+/** OPR.0.7.0.9 — a Claude member's own agent file, appended prompt file and plugin folders: paths beside the spec.
+ *  #2044 — and its plugin channels, passed as Claude's `--channels`. */
+function validateClaudeAdditions(member: Record<string, unknown>, prefix: string, advisories: string[]): string[] {
   const errors: string[] = [];
-  for (const key of ["agent_file", "append_system_prompt_file", "plugin_dirs"]) {
+  for (const key of ["agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels"]) {
     if (member[key] !== undefined && member["runtime"] !== "claude-code") {
       errors.push(`${prefix}.${key}: only for Claude members (runtime claude-code)`);
     }
@@ -1267,6 +1269,28 @@ function validateClaudeAdditions(member: Record<string, unknown>, prefix: string
         }
         seen.push(here);
       });
+    }
+  }
+  const channels = member["plugin_channels"];
+  if (channels !== undefined) {
+    if (!Array.isArray(channels)) {
+      errors.push(`${prefix}.plugin_channels: must be a list of plugin:<name>@<marketplace> entries`);
+    } else {
+      channels.forEach((entry, i) => {
+        const label = `${prefix}.plugin_channels[${i}]`;
+        if (!isClaudePluginChannel(entry)) {
+          errors.push(typeof entry === "string" && entry.startsWith("server:")
+            ? `${label}: "${entry}" is a server entry; only plugin:<name>@<marketplace> entries are supported`
+            : `${label}: must be plugin:<name>@<marketplace>, each name letters, digits, . _ - (got ${JSON.stringify(entry)})`);
+        } else if (channels.indexOf(entry) !== i) {
+          errors.push(`${label}: listed twice ("${entry}")`);
+        }
+      });
+      // `claude_mcp: none` starts Claude with only an empty MCP server set, plugin servers left out too, so no channel
+      // could register.
+      if (channels.length > 0 && member["claude_mcp"] === "none") {
+        advisories.push(`${prefix}.plugin_channels: claude_mcp is "none", which starts Claude without MCP servers (plugin servers included), so no channel could register; remove claude_mcp: none to use the channels, or remove plugin_channels to keep the MCP opt-out`);
+      }
     }
   }
   return errors;
@@ -1306,6 +1330,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     ...(typeof m["agent_file"] === "string" ? { agentFile: m["agent_file"] } : {}),
     ...(typeof m["append_system_prompt_file"] === "string" ? { appendSystemPromptFile: m["append_system_prompt_file"] } : {}),
     ...(Array.isArray(m["plugin_dirs"]) ? { pluginDirs: m["plugin_dirs"] as string[] } : {}),
+    ...(Array.isArray(m["plugin_channels"]) ? { pluginChannels: m["plugin_channels"] as string[] } : {}),
   }));
 
   const edges = Array.isArray(raw["edges"])
