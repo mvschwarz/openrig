@@ -680,7 +680,11 @@ profiles:
     uses:
       runtime_resources: []`);
     }
-    const files = ref === "local" || ref === "builtin" ? [culture] : ref === "ambiguous" ? [culture, otherCulture] : [];
+    // Launch records the folder it read the agent from as the owner root of the agent's own startup files.
+    const roleOf = (dir: string) => ({ path: "guidance/role.md", absolutePath: path.join(dir, "guidance/role.md"), ownerRoot: dir,
+      orientation: "role", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] });
+    const files = ref === "local" || ref === "builtin" ? [roleOf(specDir), culture]
+      : ref === "ambiguous" ? [roleOf(specDir), culture, roleOf(path.join(root, "other/spec")), otherCulture] : [];
     const f = seed(true, false, "claude-code", true, cwd, ref === "same-name-import" ? [fromImport] : [], files);
     if (specExists) {
       fs.mkdirSync(path.join(specDir, "runtime"), { recursive: true });
@@ -800,12 +804,37 @@ profiles:
     const node = rigs.addNode(rig.id, "impl", { runtime: "claude-code", cwd });
     db.prepare("UPDATE nodes SET agent_ref = ?, profile = ?, resolved_spec_name = ? WHERE id = ?")
       .run("local:../../../agents/development/implementer", "default", "implementer", node.id);
-    const olderRoot = path.join(root, "old-prefix/lib/node_modules/@openrig/cli/daemon/specs/rigs/launch/demo");
+    const olderSpecs = path.join(root, "old-prefix/lib/node_modules/@openrig/cli/daemon/specs");
+    const olderRoot = path.join(olderSpecs, "rigs/launch/demo");
+    const olderAgent = path.join(olderSpecs, "agents/development/implementer");
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', ?, '[]', 'claude-code')")
-      .run(node.id, JSON.stringify([{ path: "CULTURE.md", absolutePath: path.join(olderRoot, "CULTURE.md"), ownerRoot: olderRoot,
-        deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] }]));
+      .run(node.id, JSON.stringify([
+        { path: "guidance/role.md", absolutePath: path.join(olderAgent, "guidance/role.md"), ownerRoot: olderAgent, orientation: "role",
+          deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] },
+        { path: "CULTURE.md", absolutePath: path.join(olderRoot, "CULTURE.md"), ownerRoot: olderRoot,
+          deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] }]));
     const read = createDesiredClaudeActivityHooksReader(db, { exists: fs.existsSync, readFile: (p) => fs.readFileSync(p, "utf8") });
     // The running install's implementer selects shared:claude-activity-hooks in its default profile.
     expect(read(node.id)).toEqual({ status: "known", selected: true });
+  });
+
+  // Launched from rig/ with local:agents/impl, the saved launch records only the agent's own folder. A same-name spec
+  // nested at agents/impl inside it is where the ref lands from that folder, but launch recorded no such folder: unknown.
+  it("a same-name spec nested where the ref lands from the agent's own folder stays unknown", async () => {
+    const { createDesiredClaudeActivityHooksReader } = await import("../src/domain/desired-claude-activity-hooks.js");
+    const agentDir = path.join(root, "rig/agents/impl");
+    for (const dir of [agentDir, path.join(agentDir, "agents/impl")]) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "agent.yaml"), `name: impl\nversion: "1.0.0"\nprofiles:\n  default:\n    uses:\n      runtime_resources: []`);
+    }
+    const rig = rigs.createRig("nested");
+    const node = rigs.addNode(rig.id, "impl", { runtime: "claude-code", cwd });
+    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ?, resolved_spec_name = ? WHERE id = ?")
+      .run("local:agents/impl", "default", "impl", node.id);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', ?, '[]', 'claude-code')")
+      .run(node.id, JSON.stringify([{ path: "guidance/role.md", absolutePath: path.join(agentDir, "guidance/role.md"), ownerRoot: agentDir,
+        orientation: "role", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }]));
+    const read = createDesiredClaudeActivityHooksReader(db, { exists: fs.existsSync, readFile: (p) => fs.readFileSync(p, "utf8") });
+    expect(read(node.id)).toMatchObject({ status: "unknown" });
   });
 });
