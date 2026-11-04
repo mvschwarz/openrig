@@ -35,6 +35,25 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
     },
   );
 
+  it.each(["human@kernel@host-origin", "human-reviewer@host@host-origin", "alex@external@host-origin"])(
+    "a forwarded person %s gets a queue hint retaining the origin host",
+    (sender) => {
+      const body = "Original body\nkept verbatim.";
+      const out = wrapPaneEnvelope(sender, "driver@receiver", body);
+      expect(out).toContain("From: " + sender + "\nTo: driver@receiver\n");
+      expect(out.split("\n---\n")[1]).toBe(body);
+      expect(out.split("\n").at(-1)).toBe("↩ Reply if needed: rig queue create --destination " + sender + ' --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify');
+    },
+  );
+
+  it("keeps host-qualified look-alike seats and malformed human triples on the ordinary hint", () => {
+    for (const sender of ["humanity@kernel@host-origin", "human@real-rig@host-origin", "dev-human@host@host-origin",
+      "human@kernel@", "human@kernel@host-origin@extra"]) {
+      expect(wrapPaneEnvelope(sender, "driver@receiver", "hi").split("\n").at(-1))
+        .toBe("↩ Reply: rig send " + sender + ' "..."');
+    }
+  });
+
   it("keeps similarly named real seats on the ordinary reply route", () => {
     for (const sender of ["human@my-rig", "humanity@kernel", "dev-human@host", "dev-human@rig@origin-host"]) {
       expect(wrapPaneEnvelope(sender, "driver@rig", "hi").split("\n").at(-1))
