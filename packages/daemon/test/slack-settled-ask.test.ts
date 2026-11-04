@@ -174,7 +174,7 @@ describe("posted asks follow settlement outside Slack", () => {
     await vi.waitFor(() => expect(logs.join("\n")).toContain("missing_scope"));
     expect(methods).not.toContain("chat.update");
     expect(repo.listTransitions(item.qitemId).some((t) => t.transitionNote?.startsWith("slack-ask-settled "))).toBe(false);
-    expect(wire.status?.()).toMatchObject({ settlement: { pending: 1, lastFailure: expect.stringContaining("not done") } });
+    expect(wire.status?.()).toMatchObject({ settlement: { pending: 0, lastFailure: expect.stringContaining("not done") } });
     wire.stop(); apiHook = undefined; start();
     await vi.waitFor(() => expect(updates).toHaveLength(1));
     expect(postCount).toBe(1);
@@ -355,5 +355,23 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(updates[0]!.ts).toBe("7.000001");
     expect(failedReads).toHaveLength(6);
     expect(postCount).toBe(7);
+  });
+
+  it("shows a later close's new reason after the same direct ask was reopened", async () => {
+    const item = await postAsk();
+    wire.stop(); vi.useFakeTimers();
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on", transitionNote: "Initial completion." });
+    start(); await vi.advanceTimersByTimeAsync(0);
+    expect(updates).toHaveLength(1);
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "pending", reopen: true, transitionNote: "Need another decision." });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(messages[0]!.text).toMatch(/^Open again/);
+    await vi.advanceTimersByTimeAsync(15_000);
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "superseded", transitionNote: "The later work replaced this ask." });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(updates).toHaveLength(3);
+    expect(messages[0]!.text).toMatch(/^Done · superseded/);
+    expect(messages[0]!.text).toContain("The later work replaced this ask.");
+    expect(postCount).toBe(1);
   });
 });
