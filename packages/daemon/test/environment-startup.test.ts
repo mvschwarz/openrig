@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { mkdtempSync, realpathSync, readFileSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -71,6 +73,41 @@ it("reconciles a lost latch reply without issuing another grant or rewriting an 
   expect((await f.startup.launch(f.binding, {}, f.tmux)).ok).toBe(true);
   expect(f.activity).toHaveBeenCalledTimes(1); expect(f.guest.mock.calls.filter(call => call[1][0] === "--prepare")).toHaveLength(1);
   expect(sha256(f.files.get("/sandbox/openrig/control/launch.pending.json")!)).toBe(before);
+});
+it.each(["old-helper", "transport"])("preserves launch custody and distinguishes %s prepare failure guidance", async failure => {
+  const f = await fixture(), bin = join(f.root, "bin"), calls = join(f.root, "vendor-calls.jsonl");
+  mkdirSync(bin);
+  const stderr = failure === "old-helper"
+    ? "usage: guest.py [-h] [--prepare]\nguest.py: error: unrecognized arguments: --first-input-required\n"
+    : "connection reset by peer\n";
+  // A local stand-in exercises the real driver's execFile error boundary; no vendor/provider runs.
+  writeFileSync(join(bin, "openshell"), `#!${process.execPath}
+const fs = require("node:fs"), args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + "\\n");
+if (args[5] === "get") process.stdout.write(${JSON.stringify(JSON.stringify(f.resource))});
+else if (args.includes("--prepare")) { process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 2; }
+else { process.stderr.write("unexpected stand-in command"); process.exitCode = 9; }
+`, { mode: 0o700 });
+  const realDriver = new OpenShellDriver();
+  Object.assign(f.platform.driver, { guest: realDriver.guest.bind(realDriver) });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  try {
+    const error = await f.startup.launch(f.binding, { firstInputText: "Selected startup input" }, f.tmux).catch(error => error);
+    expect(error).toMatchObject({ code: "openshell_transport_unconfirmed" });
+    expect(f.db.prepare("SELECT state FROM environment_operations WHERE kind='launch'").all()).toEqual([{ state: "requested" }]);
+    expect(f.tmux.sendShellCommand).not.toHaveBeenCalled();
+    const dispatched = readFileSync(calls, "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
+    expect(dispatched.filter(args => args.includes("--prepare"))).toHaveLength(1);
+    expect(dispatched.at(-1)).toContain("--first-input-required");
+    if (failure === "old-helper") {
+      expect(error.message).toContain("predates first input");
+      expect(error.message).toContain("Rebuild");
+      expect(error.message).toContain("README");
+    } else {
+      expect(error.message).toBe("OpenShell did not return a confirmed result; reconcile the saved operation");
+    }
+  } finally { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; }
 });
 it("blocks a changed required source before issuing a grant or preparing native", async () => {
   const f = await fixture(), role = join(f.root, "role.md"); writeFileSync(role, "selected source");
@@ -231,4 +268,52 @@ it.each(["unchanged", "missing-source", "changed", "added", "removed", "stale-de
   if (["unchanged", "changed", "added", "removed"].includes(mode)) { expect(restoredNode?.status, JSON.stringify(result)).toBe("resumed"); expect(restored).toBe(true); }
   else { expect(restored).toBe(false); expect(restoredNode?.status).not.toBe("resumed"); }
   expect(textInput).not.toHaveBeenCalled();
+});
+
+// No provider or native binary: use the real contained adapter and launch journal.
+it.each(["unavailable", "different-generation", "stopped", "ready-at-shell"])("contained readiness observes the selected guest, not the connect process: %s", async kind => {
+  const f = await fixture(); await f.startup.launch(f.binding, {}, f.tmux);
+  const row = f.db.prepare("SELECT receipt_json FROM environment_operations WHERE kind='launch'").get() as { receipt_json: string };
+  const native = JSON.parse(row.receipt_json);
+  f.guest.mockImplementation(async () => {
+    if (kind === "unavailable") throw new Error("guest identity unavailable");
+    return { ...native, generation: kind === "different-generation" ? "other" : native.generation, running: kind !== "stopped", ok: true };
+  });
+  const adapter = new CommunityHarnessRuntimeAdapter("openshell-claude", { environmentStartup: f.startup,
+    tmux: { ...f.tmux, hasSession: async () => true, getPaneCommand: async () => kind === "ready-at-shell" ? "bash" : "node" } });
+  expect((await adapter.checkReady(f.binding)).ready).toBe(kind === "ready-at-shell");
+});
+it("passes generated first input through verified guest files and execs the short viewer command", async () => {
+  const f = await fixture();
+  const opts = { firstInputText: "Selected identity; read projected role.md. Literal $(not-a-host-command)." };
+  const result = await f.startup.launch(f.binding, opts, f.tmux);
+  expect(result.firstInput).toMatchObject({ submission: "unconfirmed" });
+  const descriptor = JSON.parse(f.files.get("/sandbox/openrig/control/launch.pending.json")!.toString());
+  expect(descriptor.firstInput).toMatchObject({ path: "control/first-input.txt", sha256: sha256(opts.firstInputText) });
+  expect(f.files.get("/sandbox/openrig/control/first-input.txt")!.toString()).toBe(opts.firstInputText);
+  const command = f.tmux.sendShellCommand.mock.calls[0] as unknown as [string, string];
+  expect(command[1]).toMatch(/^exec /); expect(command[1]).not.toContain("Selected identity");
+});
+
+it("the real short-command transport leaves no host shell when the environment viewer exits", async () => {
+  const f = await fixture(), bin = join(f.root, "bin"); mkdirSync(bin);
+  writeFileSync(join(bin, "rig"), "#!/bin/sh\nexit 7\n", { mode: 0o700 });
+  const transport = new TmuxAdapter(async () => ""); let invocation = "";
+  vi.spyOn(transport, "sendText").mockImplementation(async (_target, text) => { invocation = text; return { ok: true }; });
+  vi.spyOn(transport, "sendKeys").mockResolvedValue({ ok: true });
+  await f.startup.launch(f.binding, {}, { sendShellCommand: transport.sendShellCommand.bind(transport) });
+  const marker = join(f.root, "host-fell-through");
+  expect(invocation).toContain("environment"); expect(Buffer.byteLength(invocation)).toBeLessThanOrEqual(512);
+  try { execFileSync("/bin/sh", ["-c", `${invocation}\ntouch '${marker}'`], { env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` }, stdio: "ignore" }); } catch {}
+  expect(existsSync(marker)).toBe(false);
+});
+it("a lost prepare reply reconciles the original first input instead of typing it again", async () => {
+  const f = await fixture(); f.losePrepare(); const opts = { firstInputText: "selected immutable input" };
+  await expect(f.startup.launch(f.binding, opts, f.tmux)).rejects.toThrow("Lost preparation reply");
+  const before = sha256(f.files.get("/sandbox/openrig/control/first-input.txt")!);
+  const result = await f.startup.launch(f.binding, opts, f.tmux);
+  expect(result.firstInput).toMatchObject({ path: "/sandbox/openrig/control/first-input.txt", submission: "unconfirmed" });
+  expect(sha256(f.files.get("/sandbox/openrig/control/first-input.txt")!)).toBe(before);
+  expect(f.guest.mock.calls.filter(call => call[1][0] === "--prepare")).toHaveLength(1);
+  expect(f.tmux.sendShellCommand).not.toHaveBeenCalled();
 });

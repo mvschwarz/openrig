@@ -346,7 +346,6 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
           actions: [{ type: "button", block_id: `or-q:${questionId}`, action_id: `or-opt:${optionId}`, value: optionId, action_ts: actionTs }],
         },
       }) });
-      const answerRowId = (qitemId: string) => `qitem-human-answer-${createHash("sha256").update(qitemId).digest("hex").slice(0, 20)}`;
       const resolvedCount = (qitemId: string) => repo.transitionLog.listForQitem(qitemId)
         .filter((t) => t.ownerNotificationKind === "human-decision-resolved").length;
       // The ask posts as root 1.1; its agent then parks it on the person it asked, and that question posts too.
@@ -368,7 +367,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
         click("q2", "no", "991.1");
         await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
         expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: "yes", q2: "no" });
-        expect(repo.getById(answerRowId(ask.qitemId))).toMatchObject({ destinationSession: "author@rig" });
+        expect(humanAnswerRows(ask.qitemId)).toHaveLength(1);
         expect(resolvedCount(ask.qitemId)).toBe(1);
         click("q2", "no", "991.1");
         await new Promise((r) => setTimeout(r, 50));
@@ -485,8 +484,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
         } finally { spy.mockRestore(); }
       });
 
-      // The click path keeps its own rules until its follow-up: only a typed reply stores its words as the answer.
-      it("stores no earlier typed answer under a re-park's question when the person clicks", async () => {
+      it("answers a re-park with the person's click, not their typed answer to the earlier question", async () => {
         const ask = await parkedAsk();
         typed("large", "990.1");
         await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
@@ -495,7 +493,26 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
         await postPendingNotice(ask.qitemId);
         click("q2", "yes", "996.1");
         await vi.waitFor(() => expect(resolvedCount(ask.qitemId)).toBe(2));
-        expect(repo.getById(ask.qitemId)?.humanAnswers?.q2).toBeUndefined();
+        expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: typedAnswer("large", 1), q2: "yes" });
+        expect(humanAnswerRows(ask.qitemId)).toHaveLength(2);
+        expect(posts.some((post) => String(post.text ?? "").startsWith("Already answered"))).toBe(false);
+      });
+
+      it("answers a re-park's click with a new answer to the asker, over the earlier park's complete set", async () => {
+        const ask = await parkedAsk();
+        click("q1", "yes", "990.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: "yes" }));
+        click("q2", "yes", "991.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        repo.update({ qitemId: ask.qitemId, actorSession: "author@rig", state: "blocked", blockedOn: human, summary: "Tell the users after all?",
+          evidenceRef: "/private/proof.md", transitionNote: "parked again on the second question" });
+        await postPendingNotice(ask.qitemId);
+        click("q2", "no", "996.1");
+        await vi.waitFor(() => expect(resolvedCount(ask.qitemId)).toBe(2));
+        expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: "yes", q2: "no" });
+        expect(humanAnswerRows(ask.qitemId)).toHaveLength(2);
+        expect(humanAnswerRows(ask.qitemId).filter((row) => row.body.includes(`"q2":"no"`))).toHaveLength(1);
+        expect(posts.some((post) => String(post.text ?? "").startsWith("Already answered"))).toBe(false);
       });
 
       it("returns nothing again when a re-park's interrupted answer is replayed after the ask closes", async () => {

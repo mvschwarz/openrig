@@ -267,3 +267,27 @@ describe("finite completion is selected work plus a verified actual export", () 
   });
 
 });
+
+it.each(["provider-list", "cleanup-inventory"])("reports the actual pre-dispatch stage and error without claiming a delete: %s", async stage => {
+  const f = await fixture(); const error = Object.assign(new Error("fixture engine connection refused"), { code: "ECONNREFUSED" });
+  if (stage === "provider-list") vi.spyOn(f.driver, "list").mockRejectedValue(error);
+  else Object.assign(f.driver, { captureCleanup: async () => { throw error; } });
+  const request = { effect: "delete-owned", operationId: "delete-before-dispatch", generation: "generation-one", engineSocket: "/fixture/engine.sock" };
+  for (let observation = 0; observation < 2; observation++) {
+    const result = await f.request("/binding-one/effect", request);
+    expect(result.body).toMatchObject({ state: "unconfirmed", stage, dispatched: false, error: { code: "ECONNREFUSED", message: "fixture engine connection refused" } });
+    expect(f.counts().deleteCalls).toBe(0);
+    const row = f.db.prepare("SELECT state FROM environment_operations WHERE operation_id=?").get(request.operationId) as { state: string };
+    expect(row.state).toBe("intent");
+  }
+});
+
+it("keeps an uncertain delete requested and reconciles the same operation without another mutation", async () => {
+  const f = await fixture(); const deletion = vi.spyOn(f.driver, "deleteEnvironment").mockRejectedValue(new Error("fixture reply lost at delete boundary"));
+  const request = { effect: "delete-owned", operationId: "delete-uncertain", generation: "generation-one" };
+  const first = await f.request("/binding-one/effect", request);
+  expect(first.body).toMatchObject({ state: "unconfirmed", stage: "delete-dispatch", dispatched: "unknown", error: { message: "fixture reply lost at delete boundary" } });
+  expect((f.db.prepare("SELECT state FROM environment_operations WHERE operation_id=?").get(request.operationId) as { state: string }).state).toBe("requested");
+  await f.request("/binding-one/effect", request);
+  expect(deletion).toHaveBeenCalledTimes(1);
+});

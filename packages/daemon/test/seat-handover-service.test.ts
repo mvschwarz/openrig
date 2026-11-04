@@ -1,4 +1,5 @@
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { CodexInPlaceRestart } from "../src/domain/seat-restart-in-place.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
@@ -170,6 +171,122 @@ describe("SeatHandoverService", () => {
     ])));
   }
 
+  it.each(["fresh", "fork:dev-impl@seat-rig", "rebuild"])("records a %s successor as launched without changing its handover tenure or lineage", async source => {
+    const { rig, node, sessionId } = seedSeat();
+    sessionRegistry.updateResumeToken(sessionId!, "codex_id", "codex-thread-1", "hook");
+    const previous = db.prepare("SELECT * FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal").all(node.id);
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "replace occupant", source });
+    expect(result).toMatchObject({ ok: true, result: { sideEffects: { provenanceRecordWritten: true } } });
+    const tenures = db.prepare("SELECT * FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal").all(node.id);
+    expect(tenures).toHaveLength(previous.length + 1);
+    expect(tenures.slice(0, -1)).toEqual(previous);
+    expect(tenures.at(-1)).toMatchObject({ kind: "handover", generation_ordinal: 2,
+      generation_uuid: respawnPane.mock.calls[0]![2]!.env.OPENRIG_OCCUPANT_GENERATION });
+    expect(sessionRegistry.getSessionsForRig(rig.id).find(session => session.id === sessionId)?.status).toBe("superseded");
+    const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+    expect(JSON.parse(event.payload)).toMatchObject({ nodeId: node.id, previousOccupant: "dev-impl@seat-rig", currentOccupant: "dev-impl@seat-rig", source });
+    expect(db.prepare("SELECT origin FROM sessions WHERE node_id = ? AND status = 'running'").get(node.id)).toEqual({ origin: "launched" });
+  });
+
+  // #875: a Codex seat whose launch carried its guidance as developer instructions left none in the repository AGENTS.md,
+  // and a successor's launch carries none. The handover puts the missing blocks back from the saved startup context before
+  // the successor starts, as an exact resume does.
+  it.each(["fresh", "fork:dev-impl@seat-rig", "rebuild"])("a %s Codex successor starts with the seat's guidance in its repository AGENTS.md (#875)", async source => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "handover-guidance-"));
+    try {
+      const { node, sessionId } = seedSeat();
+      sessionRegistry.updateResumeToken(sessionId!, "codex_id", "codex-thread-1", "hook");
+      db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(root, node.id);
+      const culture = path.join(root, "spec", "culture.md");
+      fs.mkdirSync(path.dirname(culture), { recursive: true });
+      fs.writeFileSync(culture, "Team culture.\n");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'codex')")
+        .run(node.id, JSON.stringify([{ category: "guidance", effectiveId: "culture.md", sourceSpec: "base", sourcePath: path.dirname(culture),
+          resourcePath: "culture.md", absolutePath: culture, mergeStrategy: "managed_block", target: "AGENTS.md" }]));
+      const agents = path.join(root, "AGENTS.md");
+      let atLaunch: string | null = null;
+      launchHarness.mockImplementation(async () => {
+        atLaunch = fs.existsSync(agents) ? fs.readFileSync(agents, "utf8") : null;
+        return { ok: true, resumeToken: "codex-launch-tok", resumeType: "codex_id", appliedLaunch: observeCodexSandbox(" -s workspace-write") };
+      });
+      expect(await service.handover({ seatRef: "dev-impl@seat-rig", reason: "replace occupant", source })).toMatchObject({ ok: true });
+      expect(atLaunch).toContain("Team culture.");
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // #2456: a Claude successor's launch carries no guidance either, so a rebuild into a working directory without the seat's
+  // blocks (after `rig seat set-cwd`, say) started without them. The handover puts them back in the rig's Claude file first.
+  it.each([
+    ["fresh", "CLAUDE.md"],
+    ["rebuild", "CLAUDE.md"],
+    ["fresh", "CLAUDE.local.md"],
+    ["rebuild", "CLAUDE.local.md"],
+  ] as const)("a %s Claude successor starts with the seat's guidance in the rig's %s (#2456)", async (source, file) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "handover-guidance-claude-"));
+    try {
+      const { rig, node } = seedSeat({ runtime: "claude-code" });
+      if (file !== "CLAUDE.md") rigRepo.setRigClaudeManagedBlockFile(rig.id, file);
+      db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(root, node.id);
+      const culture = path.join(root, "spec", "culture.md");
+      fs.mkdirSync(path.dirname(culture), { recursive: true });
+      fs.writeFileSync(culture, "Team culture.\n");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'claude-code')")
+        .run(node.id, JSON.stringify([{ category: "guidance", effectiveId: "culture.md", sourceSpec: "base", sourcePath: path.dirname(culture),
+          resourcePath: "culture.md", absolutePath: culture, mergeStrategy: "managed_block", target: "CLAUDE.md" }]));
+      const guidance = path.join(root, file);
+      capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
+      let atLaunch: string | null = null;
+      launchHarness.mockImplementation(async () => {
+        atLaunch = fs.existsSync(guidance) ? fs.readFileSync(guidance, "utf8") : null;
+        return { ok: true, resumeToken: "claude-successor", resumeType: "claude_id" };
+      });
+      const claude = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+        tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
+        predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 50, sleep: async () => {} });
+      const result = await claude.handover({ seatRef: "dev-impl@seat-rig", reason: "replace occupant", source });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      expect(atLaunch).toContain("Team culture.");
+      if (file !== "CLAUDE.md") expect(fs.existsSync(path.join(root, "CLAUDE.md"))).toBe(false);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each(["stop", "restart", "clean"] as const)("allows %s for a launched handover but refuses discovered and directly adopted occupants", async operation => {
+    for (const provenance of ["adopted", "discovered", "launched"] as const) {
+      const { node, sessionId } = seedSeat({ rigName: `${operation}-${provenance}` });
+      const seatRef = `dev-impl@${operation}-${provenance}`;
+      if (provenance === "adopted") {
+        sessionRegistry.markSuperseded(sessionId!);
+        sessionRegistry.registerClaimedSession(node.id, seatRef);
+      } else {
+        const source = provenance === "launched" ? "fresh" : `discovered:${seedDiscovery().id}`;
+        expect(await service.handover({ seatRef, reason: "replace occupant", source })).toMatchObject({ ok: true });
+      }
+      const current = sessionRegistry.getBindingForNode(node.id)!;
+      const adapter = Object.assign(tmux(), { probeSession: vi.fn(async () => ({ state: operation === "clean" ? "absent" as const : "present" as const })) });
+      const restartAdapter = Object.assign(codexAdapter(), { buildResumeCommand: vi.fn(), verifyResumeInPane: vi.fn(), sendResumeCommand: vi.fn() });
+      const lifecycle = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: adapter, runtimeAdapters: { codex: restartAdapter } });
+      // The restart engine has its own process/OS fixtures. This cell exercises handover registration
+      // through the real lifecycle eligibility checks, stopping at that engine's native-effect boundary.
+      const restart = vi.spyOn(CodexInPlaceRestart.prototype, "execute").mockResolvedValue({ ok: true } as never);
+      killSession.mockClear();
+      try {
+        const input = { seatRef, reason: "selected lifecycle operation" };
+        const result = operation === "stop" ? await lifecycle.stopSeat(input)
+          : operation === "clean" ? await lifecycle.cleanSeat(input) : await lifecycle.restartInPlace(input);
+        if (provenance === "launched") {
+          expect(result).toMatchObject({ ok: true });
+          if (operation === "stop") expect(killSession).toHaveBeenCalledWith(current.tmuxSession);
+          if (operation === "clean") expect(sessionRegistry.getBindingForNode(node.id)).toBeNull();
+          if (operation === "restart") expect(restart).toHaveBeenCalledWith(expect.objectContaining({ seat: expect.objectContaining({ nodeId: node.id }), sessionName: current.tmuxSession }), expect.anything());
+        } else {
+          expect(result).toMatchObject({ ok: false, code: "claimed_session" });
+          expect(killSession).not.toHaveBeenCalled(); expect(restart).not.toHaveBeenCalled();
+          expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe(current.tmuxSession);
+        }
+      } finally { restart.mockRestore(); }
+    }
+  });
+
   it("binds an active seat to an already-created discovered successor", async () => {
     const { rig, node, sessionId } = seedSeat();
     const discovered = seedDiscovery();
@@ -202,8 +319,9 @@ describe("SeatHandoverService", () => {
       },
       sideEffects: {
         departingSessionKilled: false,
+        departingProcess: "not-touched",
         startupContextDelivered: false,
-        provenanceRecordWritten: false,
+        provenanceRecordWritten: true,
       },
     });
     expect(result.result.previousSessionIdsSuperseded).toContain(sessionId);
@@ -845,6 +963,32 @@ describe("SeatHandoverService", () => {
     expect(binding.codexRebuildPermissions).toBeUndefined();
     expect(binding.codexPermissions).toEqual(own);
   });
+
+  it.each(["minted", "mint fails"] as const)("a rebuild handover's receipt reads its lineage record back (%s)", async (mint) => {
+    const { node } = seedSeat();
+    // The tenure mint is best-effort: a failed one is logged and swallowed, and the handover still completes.
+    const failing = mint === "mint fails"
+      ? [vi.spyOn(sessionRegistry, "mintOccupantTenure").mockImplementation(() => { throw new Error("ledger unavailable"); }),
+        vi.spyOn(console, "warn").mockImplementation(() => {})]
+      : [];
+    try {
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { provenanceRecordWritten: mint === "minted" } } });
+      if (mint === "minted") expect(sessionRegistry.currentOccupantTenure(node.id)).toMatchObject({ kind: "handover" });
+    } finally {
+      for (const spy of failing) spy.mockRestore();
+    }
+  });
+
+  it.each([["graceful", "ended-graceful"], ["forced", "ended-forced"]] as const)(
+    "a rebuild handover's receipt says how the departing process ended (%s)", async (exit, reported) => {
+      seedSeat();
+      // The retiree exits on TERM, or only once KILL follows the TERM window.
+      if (exit === "forced") isPaneDead.mockImplementation(async () => signalPaneProcess.mock.calls.some((call) => call[1] === "KILL"));
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context wall" });
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { departingSessionKilled: false, departingProcess: reported } } });
+      expect(signalPaneProcess.mock.calls.some((call) => call[1] === "KILL")).toBe(exit === "forced");
+    });
 
   it.each(["observed", "unverified", "changed selection", "cleared selection", "profile change", "older selection"])(
     "rebuild permission result: %s", async state => {

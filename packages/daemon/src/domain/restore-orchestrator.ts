@@ -33,7 +33,7 @@ import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-re
 import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
-import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks } from "./restore-guidance.js";
+import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
 import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -1497,6 +1497,12 @@ export class RestoreOrchestrator {
     try { return readFootprintAnswer(this.routerLineSettings ?? new SettingsStore()).state === "yes"; } catch { return false; }
   }
 
+  /** The recorded guidance file follows the snapshot a seat was exactly resumed from (#2432); nothing else in its saved
+   *  startup selection changes. A database from before the column has nothing to record. */
+  private recordRestoredGuidanceFile(nodeId: string, file: string | null): void {
+    try { this.db.prepare("UPDATE node_startup_context SET guidance_file = ? WHERE node_id = ?").run(file, nodeId); } catch { /* no column */ }
+  }
+
   private checkRestoredGuidance(
     result: RestoreNodeResult,
     node: SnapshotData["nodes"][number],
@@ -1780,6 +1786,16 @@ export class RestoreOrchestrator {
         guidance = rule.guidance;
         if (rule.excluded === "linked") warnings?.push(`Restore guidance: ${node.logicalId}: the seat-skills line wasn't put back, because ${guidance.targetPath} is a link.`);
       }
+      // #2432: the record names the file this resumed seat uses, the snapshot's choice, which can be older than the
+      // database's: an older snapshot restored exactly after a newer launch resumes on its repository file.
+      if (startupCtx) this.recordRestoredGuidanceFile(node.id, startupCtx.guidanceFile ?? null);
+      // #2432: a recorded file that became a link after its launch gets nothing put back through it; the check after the
+      // launch reports the blocks it lacks.
+      const linked = startupCtx?.guidanceFile && guidance ? guidanceFileSharedByLink(guidance.targetPath, lstatLinkInfo) : null;
+      if (linked && guidance) {
+        warnings?.push(`Restore guidance: ${node.logicalId}: ${linked} is now a link, so nothing was put back in ${guidance.targetPath}, which other sessions could read.`);
+        guidance = null;
+      }
       if (guidance && guidance.items.length > 0) {
         const repair = restoreMissingGuidance(guidance, {
           exists: existsSync,
@@ -2036,6 +2052,8 @@ export class RestoreOrchestrator {
 
           const binding = {
             ...launchResult.binding,
+            // #875: the guidance file this seat's launch recorded; an older snapshot recorded none, so its file stays the rule's.
+            guidanceFile: startupCtx.guidanceFile ?? null,
             ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
             ...(opts?.claudeExecutable ? { claudeExecutable: opts.claudeExecutable } : {}),
             cwd: launchCwd,

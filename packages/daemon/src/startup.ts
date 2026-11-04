@@ -44,7 +44,7 @@ import { TmuxAdapter } from "./adapters/tmux.js";
 import { setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
 import { selectTmuxServer, type TmuxServerMode } from "./domain/tmux-server-selection.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
-import { execArgvCommand, execCommand } from "./adapters/tmux-exec.js";
+import { execArgvCommand, execCommand, execTmuxCommand } from "./adapters/tmux-exec.js";
 import { tmuxControlExec } from "./adapters/tmux-control.js";
 import { boundedProbeExec } from "./adapters/bounded-probe-exec.js";
 import { execPreflightCommand } from "./adapters/preflight-exec.js";
@@ -204,6 +204,7 @@ import { withCommunityHarnessResolver, withCommunityHarnesses } from "./adapters
 import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl, readActivityEndpointFile } from "./domain/activity-endpoint.js";
 import { recoverSeatSkillAttempts } from "./domain/seat-skill-apply.js";
 import { restoreExistingRigUnattended } from "./domain/existing-rig-restore.js";
+import { lstatLinkInfo } from "./domain/restore-guidance.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -550,7 +551,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // is spawned per command. An injected exec is the test's own, and psmux has no control mode.
   const argvExec = spawnedArgvExec === execArgvCommand && process.platform !== "win32" && process.env.OPENRIG_TMUX_CONTROL === "1"
     ? tmuxControlExec(execArgvCommand, { serverArgs: tmuxSelection?.executionArgs }) : spawnedArgvExec;
-  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec, tmuxSelection?.executionArgs);
+  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? (process.platform === "win32" ? execCommand : execTmuxCommand), undefined, argvExec, tmuxSelection?.executionArgs);
   // Inherit keeps the native execution environment; attachment metadata still names
   // its server for a new terminal. Isolated execution and attachment share a fixed socket.
   setDaemonTmuxServer(tmuxSelection?.serverArgs ?? (opts?.tmuxExec ? [] : tmuxServerArgs(process.env)), tmuxSelection);
@@ -972,7 +973,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   } });
   // OPR.0.4.6.PI1 — the RPC-first Pi adapter (runner-in-a-pane). Same fsOps
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
-  const piAdapter = new PiRuntimeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m) }, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
+  const piAdapter = new PiRuntimeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), linkInfo: lstatLinkInfo }, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
   const ompAdapter = new OmpRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath });
   // OPR.0.5.1.1 — the stub runtime adapter (Pi-shaped node-script runner in a pane).
   // Same fsOps shape as Pi; the compiled runner entry lives in the daemon dist.

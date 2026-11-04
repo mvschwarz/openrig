@@ -50,9 +50,11 @@ describe("A3 human-fragment validation (add-time == load-time)", () => {
     expect(r.ok).toBe(false);
   });
 
-  it("rejects zero connectorBindings (>=1)", () => {
-    const r = validateHumanFragment({ ...fragment(), connectorBindings: [] });
-    expect(r.ok).toBe(false);
+  it("accepts a person with no connector binding, as an empty list or left out, and rejects a value that isn't a list", () => {
+    expect(validateHumanFragment({ ...fragment(), connectorBindings: [] })).toMatchObject({ ok: true, fragment: { connectorBindings: [] } });
+    const { connectorBindings: _none, ...withoutBindings } = fragment();
+    expect(validateHumanFragment(withoutBindings)).toMatchObject({ ok: true, fragment: { connectorBindings: [] } });
+    expect(validateHumanFragment({ ...fragment(), connectorBindings: "slack" as never }).ok).toBe(false);
   });
 
   it("rejects an entity with NO primary binding (exactly-one-primary)", () => {

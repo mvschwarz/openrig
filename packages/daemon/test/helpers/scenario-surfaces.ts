@@ -75,8 +75,10 @@ export async function readSurface(
     case "ps":
       return jsonRig(["ps", "--json"], ctx);
     case "queue":
-      // --full so compact-list does not blank body/summary/evidenceRef.
-      return jsonRig(["queue", "list", "--json", "--full"], ctx);
+      // --full so compact-list does not blank body/summary/evidenceRef; --all so
+      // a closed row (a handoff's handed-off source) is visible to expect — the
+      // matcher is contains-only, so extra open rows stay harmless.
+      return jsonRig(["queue", "list", "--json", "--full", "--all"], ctx);
     case "stream":
       return jsonRig(["stream", "list", "--json"], ctx);
     case "scope": {

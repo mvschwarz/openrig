@@ -173,9 +173,9 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
     .command("add <entityId>")
     .description("Add a human fragment (verb-add-only; the fragment is truth, the registry is a GENERATED projection)")
     .requiredOption("--display-name <name>", "Human-readable display name")
-    .requiredOption(
+    .option(
       "--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>",
-      "Connector binding (repeatable); role primary|secondary, EXACTLY ONE primary. connectorRef and secretsRef are config/vault labels (e.g. for Slack: slack:openrig-personal:file:<env-path>:primary:handle=<id>; tokens come from 'rig slack setup --secrets-env-file', never inline). Optional handle=<platform id> makes the binding inbound-resolvable (unique per kind); omit it for outbound-only.",
+      "Connector binding (repeatable); leave it out for a person with no connector, who's reached in the Feed and Steering only. With bindings, role primary|secondary, EXACTLY ONE primary. connectorRef and secretsRef are config/vault labels (e.g. for Slack: slack:openrig-personal:file:<env-path>:primary:handle=<id>; tokens come from 'rig slack setup --secrets-env-file', never inline). Optional handle=<platform id> makes the binding inbound-resolvable (unique per kind); omit it for outbound-only.",
       (v: string, acc: string[] = []) => { acc.push(v); return acc; },
     )
     .requiredOption("--delivery-class <A|B|C|D>", "Notification loudness class (the notifications register selection)")
@@ -188,7 +188,7 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
     .option("--policy <text>", "Readable policy for agents working with this person (text, not enforced)")
     .option("--policy-file <path>", "Read the policy text from a file")
     .option("--default", "Make this person the default: the one escalations, the notice digest and other unaddressed needs go to")
-    .action(async (entityId: string, opts: { displayName: string; binding: string[]; deliveryClass: string; away?: boolean; replace?: boolean; reason: string; actor?: string; organization?: string; group?: string[]; policy?: string; policyFile?: string; default?: boolean }) => {
+    .action(async (entityId: string, opts: { displayName: string; binding?: string[]; deliveryClass: string; away?: boolean; replace?: boolean; reason: string; actor?: string; organization?: string; group?: string[]; policy?: string; policyFile?: string; default?: boolean }) => {
       // LAZY import the narrow daemon surface at invocation (dep rail 2).
       const registry = await import("@openrig/daemon/gateway-human-registry");
       const { addHumanFragment, parseBindingSpec } = registry as unknown as {
@@ -209,7 +209,7 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
         if (unknownGroup) { console.error(`refused: no group "${unknownGroup}" — create it with rig gateway group set ${unknownGroup} --organization … --name …`); process.exitCode = 1; return; }
       }
       const bindings: Record<string, unknown>[] = [];
-      for (const spec of opts.binding) {
+      for (const spec of opts.binding ?? []) {
         const b = parseBindingSpec(spec);
         if (!b.ok) { console.error(`--binding: ${b.error}`); process.exitCode = 1; return; }
         bindings.push(b.binding);
@@ -284,8 +284,9 @@ Example:
       if (opts.json) { console.log(JSON.stringify({ ok: true, humans })); return; }
       if (res.humans.length === 0) { console.log("no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …"); return; }
       for (const h of humans) {
-        const inbound = h.bindings.inboundResolvable ? "" : "  [outbound-only]";
-        console.log(`${h.entityId}  "${h.displayName}"  class=${h.deliveryClass}  ${h.availability}  bindings=${h.bindings.count} (primary ${h.bindings.primary.kind}:${h.bindings.primary.connectorRef})  delivery=${h.deliveryReadiness.state}${inbound}`);
+        const inbound = h.bindings.inboundResolvable || !h.bindings.primary ? "" : "  [outbound-only]";
+        const primary = h.bindings.primary ? `primary ${h.bindings.primary.kind}:${h.bindings.primary.connectorRef}` : "no connector: Feed and Steering only";
+        console.log(`${h.entityId}  "${h.displayName}"  class=${h.deliveryClass}  ${h.availability}  bindings=${h.bindings.count} (${primary})  delivery=${h.deliveryReadiness.state}${inbound}`);
         if (!h.deliveryReadiness.ready) console.log(`  delivery: ${h.deliveryReadiness.reason}${h.deliveryReadiness.nextAction ? `; next: ${h.deliveryReadiness.nextAction}` : ""}`);
         console.log(`  ${"unknown" in h.quiet ? `quiet: unknown (${h.quiet.unknown})` : describeQuiet(h.quiet)}`);
       }

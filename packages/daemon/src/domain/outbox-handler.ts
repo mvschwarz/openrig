@@ -14,6 +14,8 @@ import type Database from "better-sqlite3";
  * select it. Single source of truth for the drain query only.
  */
 export const WAKE_INTENT_PREFIX = "wake-intent-";
+/** The sender a watchdog's reminders carry; their audit pointer is the job. */
+const WATCHDOG_SENDER = "watchdog@system";
 
 // Outcomes retain unresolved uncertainty. Wake recovery can claim failed/indeterminate
 // work again; it never steals a live sending claim or interprets unknown as unsent.
@@ -216,6 +218,14 @@ export class OutboxHandler {
         }
       } else if (precommitted) {
         throw new OutboxHandlerError("outbox_not_found", "Precommitted delivery is missing; no replacement custody is created.");
+      }
+      // One held reminder per watchdog job: a newer reminder retires the one held before it, so a held seat's quota isn't
+      // filled by repeats of one job (#2430).
+      if (!existing && !precommitted && input.senderSession === WATCHDOG_SENDER && input.auditPointer) {
+        this.db.prepare(`UPDATE outbox_entries SET delivery_state='retired', retired_at=?, retired_by=?, retirement_reason=?
+          WHERE delivery_state='retained' AND sender_session=? AND audit_pointer=? AND json_extract(guard_binding,'$.nodeId')=?`)
+          .run(new Date().toISOString(), WATCHDOG_SENDER, "superseded by a newer reminder from the same watchdog job",
+            WATCHDOG_SENDER, input.auditPointer, binding.nodeId);
       }
       if (!precommitted) this.assertRetentionCapacity(binding.nodeId, input.body);
       if (!existing) this.record(input);
@@ -447,4 +457,12 @@ export class OutboxHandler {
       } : {}),
     };
   }
+}
+
+/** The line a seat's new occupant is told when its seat holds messages (#2431): a started seat, a handover successor and a
+ *  runtime-switch successor alike. Held messages are never replayed; null when there are none or no held-message store. */
+export function heldMessagesNotice(db: Database.Database, nodeId: string, seat: string): string | null {
+  let count = 0;
+  try { count = new OutboxHandler(db).retentionUsage(nodeId).count; } catch { /* no held-message store: nothing to tell */ }
+  return count ? `${count} held message${count === 1 ? " was" : "s were"} kept for this seat and not delivered: read ${count === 1 ? "it" : "them"} with rig seat held-messages ${seat}.` : null;
 }

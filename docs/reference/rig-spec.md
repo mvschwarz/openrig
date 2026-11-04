@@ -1319,3 +1319,15 @@ These are the built-in specs shipped with OpenRig. Read them as worked examples.
 Also shipped, in the same tree: `launch/kernel`, OpenRig's own team, which starts automatically. `first-project` is
 starter's old name and still resolves to it. `workshop`, the four-agent middle team, is a rig bundle rather than a
 built-in. List the built-ins with `rig specs ls --kind rig`.
+
+To omit built-in rigs, agents and workflows from the shared spec inventory, run
+`rig config set specs.builtins_visible false`. This changes the CLI, TUI and other
+consumers of the library listing; user specs remain visible. Use
+`rig specs ls --include-builtins` to list them deliberately, and set the value
+back to `true` to restore the default. Explicit `show`, `preview`, and launch
+lookups can still find hidden built-ins. When built-ins are hidden and a user
+spec has the same name, the user spec wins the name lookup; use the built-in's
+ID from `rig specs ls --include-builtins --json` to select it. With built-ins visible,
+same-name matches remain ambiguous. This is an inventory preference, not an
+access-control boundary; other endpoints and on-disk files can still expose the
+built-ins.

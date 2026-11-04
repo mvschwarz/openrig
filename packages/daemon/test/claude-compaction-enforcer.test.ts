@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { ClaudeCompactionEnforcer as ActualEnforcer, buildPostCompactRestorePrompt } from "../src/domain/claude-compaction-enforcer.js";
-import type { SessionTransport } from "../src/domain/session-transport.js";
+import { CAPTURE_READABLE_BUDGET_MS, type SessionTransport } from "../src/domain/session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -1332,7 +1332,7 @@ describe("ClaudeCompactionEnforcer", () => {
         return { ok: true, activity: { state: "idle" } as any, attempts: 1, waitedMs: 0 };
       };
       await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
-      expect(callOrder).toEqual(["prep", "idle", `compact:${JSON.stringify({ openrigNotice: true, preserveInput: true, waitForIdleMs: 1000, readinessFromPaneOnly: true })}`]);
+      expect(callOrder).toEqual(["prep", "idle", `compact:${JSON.stringify({ openrigNotice: true, preserveInput: true, waitForIdleMs: 1_000 + CAPTURE_READABLE_BUDGET_MS, readinessFromPaneOnly: true })}`]);
     });
 
     it.each([0, 75])("wait-for-idle failure means /compact never landed: the back-half is NOT seeded (preparation delay=%ims)", async (delayMs) => {

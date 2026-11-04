@@ -13,6 +13,8 @@
 // Guidance problems never block the exact resume. What can't be put back is reported.
 
 import nodePath from "node:path";
+import { lstatSync } from "node:fs";
+import type Database from "better-sqlite3";
 import {
   MANAGED_BLOCK_START,
   MANAGED_BLOCK_END,
@@ -46,18 +48,49 @@ export interface SeatGuidance {
   items: GuidanceItem[];
 }
 
-/** The file a seat's runtime merges its managed guidance blocks into, whatever a spec's `target` declares: the rig's
- *  Claude file for Claude, `AGENTS.md` for Codex, Pi and omp, or null for a runtime this doesn't know. Teardown, its
- *  live-file protection, exact resume and node inventory all read the target from here. */
+/** The file a seat's runtime merges its managed guidance blocks into, whatever a spec's `target` declares: the file its
+ *  launch recorded (`recorded`, a Pi seat's agent folder AGENTS.md, #875), else the rig's Claude file for Claude,
+ *  `AGENTS.md` for Codex, Pi and omp, or null for a runtime this doesn't know. Teardown, its live-file protection, exact
+ *  resume and node inventory all read the target from here. */
 export function seatGuidanceFile(
   runtime: string | null | undefined,
   cwd: string,
   claudeManagedBlockFile: string | null | undefined,
+  recorded?: string | null,
 ): string | null {
+  if (recorded) return recorded;
   const fileName = runtime === "claude-code"
     ? (claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
     : runtime === "codex" || runtime === "pi" || runtime === "omp" ? "AGENTS.md" : null;
   return fileName ? nodePath.join(cwd, fileName) : null;
+}
+
+export type LinkInfo = (path: string) => { link: boolean; nlink: number } | null;
+
+/** An lstat of a path: whether it's a symlink and its hard-link count, or null when it doesn't exist. */
+export const lstatLinkInfo: LinkInfo = (path) => {
+  try { const st = lstatSync(path); return { link: st.isSymbolicLink(), nlink: st.nlink }; } catch { return null; }
+};
+
+/** #875: a seat's own guidance file (a Pi seat's `<seat>/agent/AGENTS.md`) is its alone only while neither the file, its
+ *  folder nor that folder's parent is a symlink and the file has one name. Otherwise other sessions (a person's own Pi
+ *  home, a shared file) could read what's written there. Returns the linked path, or null. Checked when a launch chooses
+ *  the file and again wherever a recorded file is written, since a link can be made after the launch recorded it. */
+export function guidanceFileSharedByLink(file: string, linkInfo: LinkInfo): string | null {
+  for (const path of [nodePath.dirname(nodePath.dirname(file)), nodePath.dirname(file), file]) {
+    const info = linkInfo(path);
+    if (info && (info.link || (path === file && info.nlink > 1))) return path;
+  }
+  return null;
+}
+
+/** The guidance file a node's last launch recorded (#875), or null: none recorded, or a database from before the column. */
+export function recordedGuidanceFile(db: Pick<Database.Database, "prepare">, nodeId: string | null | undefined): string | null {
+  if (!nodeId) return null;
+  try {
+    const row = db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id = ?").get(nodeId) as { guidance_file: string | null } | undefined;
+    return row?.guidance_file || null;
+  } catch { return null; }
 }
 
 /** Whether guidance text holds this id's block as it is written: a BEGIN marker followed later by its END, in the
@@ -80,7 +113,7 @@ export function seatGuidance(
   readFile: (path: string) => string,
 ): SeatGuidance | null {
   if (!startupCtx || !cwd) return null;
-  const targetPath = seatGuidanceFile(startupCtx.runtime, cwd, claudeManagedBlockFile);
+  const targetPath = seatGuidanceFile(startupCtx.runtime, cwd, claudeManagedBlockFile, startupCtx.guidanceFile);
   if (!targetPath) return null;
   const items = new Map<string, GuidanceItem>();
   for (const saved of startupCtx.projectionEntries) {
@@ -225,4 +258,49 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
     }
   }
   return repair;
+}
+
+/** A node's saved startup context, as a snapshot records it, or null when there's none. */
+export function readNodeStartupSnapshot(db: Pick<Database.Database, "prepare">, nodeId: string): NodeStartupSnapshot | null {
+  const row = db.prepare("SELECT projection_entries_json, resolved_files_json, startup_actions_json, runtime, guidance_file FROM node_startup_context WHERE node_id = ?")
+    .get(nodeId) as { projection_entries_json: string; resolved_files_json: string; startup_actions_json: string; runtime: string; guidance_file: string | null } | undefined;
+  if (!row) return null;
+  return {
+    projectionEntries: JSON.parse(row.projection_entries_json),
+    resolvedStartupFiles: JSON.parse(row.resolved_files_json),
+    startupActions: JSON.parse(row.startup_actions_json),
+    runtime: row.runtime,
+    ...(row.guidance_file ? { guidanceFile: row.guidance_file } : {}),
+  };
+}
+
+/** #875: put a seat's missing managed blocks back in its guidance file from its saved startup context, as an exact resume
+ *  does: the seat-skills line only with the person's yes, and nothing through a recorded file that is now a link. A
+ *  successor launch carries no guidance of its own, so every seat's handover needs this before its successor starts
+ *  (#2456). Never throws; returns what it did and what it couldn't. */
+export function putBackSeatGuidance(input: {
+  startupCtx: NodeStartupSnapshot | null;
+  cwd: string | null | undefined;
+  claudeManagedBlockFile: string | null | undefined;
+  seatSkillsLineYes: boolean;
+  fs: ManagedBlockMergeFsOps;
+  linkInfo: LinkInfo;
+}): string[] {
+  let guidance: SeatGuidance | null;
+  try {
+    guidance = seatGuidance(input.startupCtx, input.cwd, input.claudeManagedBlockFile, input.fs.exists, input.fs.readFile);
+  } catch (err) {
+    return [`could not read the saved guidance selection: ${(err as Error).message}`];
+  }
+  if (!guidance) return [];
+  const notes: string[] = [];
+  const rule = applySeatSkillsLineRule(guidance, input.seatSkillsLineYes);
+  guidance = rule.guidance;
+  if (rule.excluded === "linked") notes.push(`the seat-skills line wasn't put back, because ${guidance.targetPath} is a link`);
+  const linked = input.startupCtx?.guidanceFile ? guidanceFileSharedByLink(guidance.targetPath, input.linkInfo) : null;
+  if (linked) return [...notes, `${linked} is now a link, so nothing was put back in ${guidance.targetPath}`];
+  if (guidance.items.length === 0) return notes;
+  const repair = restoreMissingGuidance(guidance, input.fs);
+  if (repair.restored.length > 0) notes.push(`put back missing blocks ${repair.restored.join(", ")} in ${guidance.targetPath} from their current source files`);
+  return [...notes, ...repair.gaps];
 }

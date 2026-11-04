@@ -103,6 +103,9 @@ const PROMPT_DRAFT_PATTERNS = [
 // Claude's permission-mode footers: default, accept edits, bypass, auto and plan, optionally after a
 // vim-mode marker such as "-- INSERT --" (#808). A suffix such as "· 1 shell" can follow the mode.
 const CLAUDE_MODE_FOOTER = /^(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass permissions|auto mode) on\b|⏸ plan mode on\b|\? for shortcuts\b)/;
+// Claude Code wraps its input short of the box (#2429). In its native 2.1.296 wrapped frame (test fixtures/input-box) a
+// 118-column box wraps a 112-column row before a word that would still fit, so its text width there is 112 to 117.
+const CLAUDE_WRAP_SLACK = 6;
 
 // Sibling pattern identical to CLAUDE_MODE_FOOTER except that it ends in \? for shortcuts$,
 // keeping unframed-composer and selectionLines checks anchored on the default footer (#808).
@@ -421,7 +424,8 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
       rows.push(line.slice(prefix));
     }
     if (!valid) continue;
-    // A suggestion is a wholly dim suffix beginning at the current cursor.
+    // A suggestion is a dim suffix beginning at the current cursor: every character drawn is dim, while the spaces
+    // between its words may not be, as capture's classifier reads it (#2428).
     // A literal placeholder or text before a moved cursor remains authored input.
     const cursorRow = y - start;
     let ghost: ComposerInput["ghost"];
@@ -438,7 +442,8 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
         text: row.slice(i === 0 ? cursorOffset : 0),
         faint: styled[y + i]!.faintCells.slice(prefix + (i === 0 ? cursorOffset : 0), prefix + row.length),
       }));
-      if (suffix.some(row => row.text.length > 0) && suffix.every(row => row.faint.every(Boolean))) {
+      const drawn = (row: (typeof suffix)[number], dim: boolean) => row.faint.some((faint, i) => faint === dim && /\S/.test(row.text[i]!));
+      if (suffix.some(row => drawn(row, true)) && !suffix.some(row => drawn(row, false))) {
         suggestionRows = suffix.map(row => row.text);
         ghost = { line: y, offset: prefix + cursorOffset, continuationRows: rows.length - cursorRow - 1 };
         rows.splice(cursorRow + 1);
@@ -462,7 +467,7 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
     const stableFooter = prompt.glyph === "❯" && (CLAUDE_MODE_FOOTER.test(footer) || isClaudePasteHint(footer)) ? "claude-composer" : footer;
     const frame = JSON.stringify([prompt.glyph, prefix, width, stableFooter]);
     const nativeCodex = prompt.glyph !== "❯" && codexFooterSeparator(lines) === end;
-    const input: ComposerInput = { state: empty ? "empty" : "text", cursor: { ...snapshot.cursor }, suggestionRows, rows: visible, columns: width - prefix - (nativeCodex ? 1 : 0), cursorAtEnd, collapsedPaste: label, frame,
+    const input: ComposerInput = { state: empty ? "empty" : "text", cursor: { ...snapshot.cursor }, suggestionRows, rows: visible, columns: width - prefix - (nativeCodex ? 1 : 0), ...(prompt.glyph === "❯" ? { wrapSlack: CLAUDE_WRAP_SLACK } : {}), cursorAtEnd, collapsedPaste: label, frame,
       ...(ghost ? { ghost } : {}) };
     // A numbered body is allowed only as this operation's exact text in its
     // previously empty composer. A newly observed menu gains no such authority.
@@ -1864,6 +1869,8 @@ export interface ExistingInput {
 type OverrideInputAudit = { classification: ExistingInput["classification"]; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false };
 
 export interface SendResult {
+  /** #2429: this delivery first submitted a paste OpenRig had left unsubmitted in the seat's input. */
+  ownPasteSubmitted?: true;
   checkedIdentity?: ExpectedConversation;
   identityContract?: 1;
   existingInput?: ExistingInput;
@@ -3283,8 +3290,11 @@ export class SessionTransport {
     if (cancel?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
     const beforePaste = cancel ? () => { opts?.beforeWrite?.(); if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the paste"); } : opts?.beforeWrite;
     const preserveInput = opts?.preserveInput ? async () => {
-      const box = runtime === "claude-code" || runtime === "codex"
-        ? await this.captureInputBox(readTarget, runtime, { remainingMs: INPUT_BOX_READ_DEADLINE_MS }) : null;
+      const readBox = async () => runtime === "claude-code" || runtime === "codex"
+        ? this.captureInputBox(readTarget, runtime, { remainingMs: INPUT_BOX_READ_DEADLINE_MS }) : null;
+      const box = opts?.readinessFromPaneOnly && runtime === "claude-code"
+        ? (await this.readAtReadableSize(sessionName, { width: 120, height: 40 }, { remainingMs: CAPTURE_READABLE_BUDGET_MS }, readBox)).value
+        : await readBox();
       if (bindingChanged()) throw new DeliveryGuardError("draft_input_changed", "The managed input target changed; no input was written.");
       if (box?.status !== "empty" && !(box?.status === "likely-suggestion" && box.confidence === "high")) {
         throw new DeliveryGuardError(box?.status === "typed" ? "draft_input_busy" : "draft_input_unknown",
@@ -3789,7 +3799,7 @@ export class SessionTransport {
       }
     }
 
-    const probe = await probeSessionActivity({
+    const readPane = () => probeSessionActivity({
       communityHarness, communityHarnessSendProbe: true,
       composerSnapshot,
       sessionName: input.sessionName,
@@ -3803,6 +3813,10 @@ export class SessionTransport {
       timerlessStatusIsLive: input.readinessFromPaneOnly === true,
       postCompactTurnBoundary: input.postCompactTurnBoundary === true,
     });
+    // Managed compaction must read a tiled Claude pane at the same size as a readable capture.
+    const probe = input.readinessFromPaneOnly && input.runtime === "claude-code"
+      ? (await this.readAtReadableSize(input.sessionName, { width: 120, height: 40 }, { remainingMs: CAPTURE_READABLE_BUDGET_MS }, readPane)).value
+      : await readPane();
     // A Codex empty-composer placeholder is also on screen while Codex streams with its status
     // row hidden, so a placeholder-only idle verdict must not override a display-fresh (<5min)
     // running/needs_input hook such as UserPromptSubmit: keep it until it ages out. An `unknown`
