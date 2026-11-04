@@ -29,8 +29,9 @@ describe("posted asks follow settlement outside Slack", () => {
   let messages: Message[];
   let updates: Array<Record<string, unknown>>;
   let postCount: number;
-  let apiHook: ((method: string, body: Record<string, unknown>) => Response | undefined) | undefined;
+  let apiHook: ((method: string, body: Record<string, unknown>) => Response | undefined | Promise<Response | undefined>) | undefined;
   let methods: string[];
+  let requests: Array<{ url: string; method: string; body: BodyInit | null | undefined; headers: Record<string, string> }>;
   const logs: string[] = [];
 
   function start() {
@@ -41,7 +42,11 @@ describe("posted asks follow settlement outside Slack", () => {
         const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
         const method = api.pathname.split("/").at(-1)!;
         methods.push(method);
-        const override = apiHook?.(method, body);
+        requests.push({ url, method: init?.method ?? "GET", body: init?.body, headers: init?.headers as Record<string, string> });
+        // Tolerate the old read shape here to isolate reopen/blocker/fairness bugs. The request-shape cell below
+        // independently requires GET, query arguments and no body; this tolerance is not the Slack contract.
+        const params = { ...Object.fromEntries(api.searchParams), ...body };
+        const override = await apiHook?.(method, params);
         if (override) return override;
         if (api.pathname.endsWith("chat.postMessage")) {
           postCount++;
@@ -56,8 +61,8 @@ describe("posted asks follow settlement outside Slack", () => {
           return response({ ok: true, ts: body.ts, channel: body.channel });
         }
         if (api.pathname.endsWith("conversations.history") || api.pathname.endsWith("conversations.replies")) {
-          const ts = api.searchParams.get("latest") ?? api.searchParams.get("oldest") ?? api.searchParams.get("ts");
-          return response({ ok: true, messages: messages.filter((m) => m.channel === api.searchParams.get("channel") && (!ts || m.ts === ts)) });
+          const ts = params.latest ?? params.oldest ?? params.ts;
+          return response({ ok: true, messages: messages.filter((m) => m.channel === params.channel && (!ts || m.ts === ts)) });
         }
         return response({ ok: true, messages: [] });
       },
@@ -72,7 +77,7 @@ describe("posted asks follow settlement outside Slack", () => {
     const secrets = join(home, "fake.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n");
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-ASKS", secretsEnvFile: secrets }, home);
-    messages = []; updates = []; postCount = 0; logs.length = 0; methods = []; apiHook = undefined;
+    messages = []; updates = []; postCount = 0; logs.length = 0; methods = []; requests = []; apiHook = undefined;
     start();
   });
   afterEach(() => { wire.stop(); vi.useRealTimers(); db.close(); rmSync(home, { recursive: true, force: true }); });
@@ -257,5 +262,98 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(methods).toContain("conversations.replies");
     expect(messages[1]!.text).not.toContain("Reply in this thread after this question");
     expect(postCount).toBe(2);
+  });
+
+  it("reads the original with GET query arguments and no body, then writes chat.update as JSON", async () => {
+    const item = await postAsk();
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    const read = requests.find((r) => new URL(r.url).pathname.endsWith("conversations.history"))!;
+    expect(read.method).toBe("GET");
+    expect(read.body).toBeUndefined();
+    expect(read.headers["content-type"]).toBeUndefined();
+    expect(new URL(read.url).searchParams.get("channel")).toBe("C-ASKS");
+    expect(new URL(read.url).searchParams.get("latest")).toBe("1.000001");
+    expect(new URL(read.url).searchParams.get("inclusive")).toBe("true");
+    const write = requests.find((r) => new URL(r.url).pathname.endsWith("chat.update"))!;
+    expect(write.method).toBe("POST");
+    expect(write.headers["content-type"]).toContain("application/json");
+    expect(JSON.parse(String(write.body))).toMatchObject({ channel: "C-ASKS", ts: "1.000001" });
+  });
+
+  it("makes the same direct ask visibly open again after close/edit/reopen, without a new post", async () => {
+    const item = await postAsk();
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(messages[0]!.text).toMatch(/^Done/);
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "pending", reopen: true, transitionNote: "The decision is needed again." });
+    expect(repo.getById(item.qitemId)?.state).toBe("pending");
+    await vi.waitFor(() => expect(messages[0]!.text).toMatch(/^Open again/));
+    expect(messages[0]!.text).toContain("Reply in this thread to answer");
+    expect(postCount).toBe(1);
+    wire.stop(); start();
+    await new Promise((r) => setTimeout(r, 25));
+    expect(messages[0]!.text).toMatch(/^Open again/);
+    expect(updates).toHaveLength(2);
+  });
+
+  it.each(["read", "update"] as const)("reconciles a reopen during an awaited %s, instead of acknowledging obsolete Done", async (stage) => {
+    const item = await postAsk();
+    let entered = false;
+    let release!: (response: Response) => void;
+    const gate = new Promise<Response>((resolve) => { release = resolve; });
+    apiHook = (method, body) => {
+      if (entered || method !== (stage === "read" ? "conversations.history" : "chat.update")) return;
+      entered = true;
+      if (stage === "update") { Object.assign(messages[0]!, body); updates.push(body); }
+      return gate;
+    };
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    await vi.waitFor(() => expect(entered).toBe(true));
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "pending", reopen: true, transitionNote: "Ask is still needed." });
+    expect(repo.getById(item.qitemId)?.state).toBe("pending");
+    release(stage === "read" ? response({ ok: true, messages: [structuredClone(messages[0]!)] })
+      : response({ ok: true, ts: "1.000001", channel: "C-ASKS" }));
+    await vi.waitFor(() => expect(messages[0]!.text).toMatch(/^Open again/));
+    expect(messages[0]!.text).toContain("Reply in this thread to answer");
+    expect(postCount).toBe(1);
+  });
+
+  it("settles a person's park moved to a live queue blocker, keeping a same-person note interactive", async () => {
+    const item = await repo.create({ sourceSession: "author@rig", destinationSession: "worker@rig", summary: "Work", body: "Work", nudge: false });
+    repo.update({ qitemId: item.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: human,
+      summary: "May I proceed?", evidenceRef: "https://example.com/proof" });
+    const [alert] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({});
+    expect(wire.dispatcher.dispatch("post_message", human, alert)).toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(repo.currentHumanRequiredEpisode(item.qitemId)?.receipt?.messageTs).toBe("1.000001"));
+    repo.update({ qitemId: item.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: human, transitionNote: "Still waiting for the same person." });
+    await new Promise((r) => setTimeout(r, 25));
+    expect(updates).toHaveLength(0);
+    const dependency = await repo.create({ sourceSession: "author@rig", destinationSession: "worker@rig", summary: "Dependency", body: "Dependency", nudge: false });
+    repo.update({ qitemId: item.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: dependency.qitemId, transitionNote: "Person's step is complete; waiting on the dependency." });
+    expect(repo.getById(item.qitemId)?.blockedOn).toBe(dependency.qitemId);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(messages[0]!.text).not.toContain("Reply in this thread after this question");
+    expect(postCount).toBe(1);
+  });
+
+  it("does not let six permanent read failures starve an ordinary primary", async () => {
+    const bad = [await postAsk(), await postAsk(), await postAsk(), await postAsk(), await postAsk(), await postAsk()];
+    const good = await postAsk();
+    await new Promise((r) => setTimeout(r, 25)); // every still-open post's observation has drained
+    vi.useFakeTimers();
+    const failedReads: string[] = [];
+    apiHook = (method, params) => {
+      if (method !== "conversations.history" || params.latest === "7.000001") return;
+      failedReads.push(String(params.latest));
+      return response({ ok: false, error: "missing_scope" });
+    };
+    for (const item of [...bad, good]) repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    expect(repo.getById(good.qitemId)?.state).toBe("done");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.ts).toBe("7.000001");
+    expect(failedReads).toHaveLength(6);
+    expect(postCount).toBe(7);
   });
 });
