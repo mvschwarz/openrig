@@ -748,7 +748,7 @@ relative to that directory.
 | `.claude/settings.local.json` fragments and `.mcp.json` | When a profile or spec declares `claude_settings_fragment` or `claude_mcp_fragment`. | Leaves the merged content in place. |
 | `.claude/agents/`, `.claude/plugins/<id>/`, `.claude/extensions/<id>/`; `.agents/<id>.yaml`, `.codex/plugins/<id>/`, `.agents/extensions/<id>/` | When the seat's projection includes subagents, plugins or runtime resources (Claude, then Codex). | Leaves them in place. |
 | `.claude/skills/<id>/`, `.agents/skills/<id>/` | Only for a seat without seat storage. New Claude and Codex seats keep their skills under `$OPENRIG_HOME/state/seats/`, outside the project. | Leaves them in place. |
-| `.openrig/compaction/` (a `.gitignore` of `*`, and `preparation/<session>/<attempt>/RESTORE-MAP.md`) | Managed Claude compaction, unless a preparation root is configured elsewhere. | Leaves it in place. |
+| The managed compaction preparation folder described in [Claude compaction preparation directory](#claude-compaction-preparation-directory), with its `.gitignore` of `*` and each attempt's `RESTORE-MAP.md` | Managed Claude compaction, unless a preparation root is configured elsewhere. | Leaves it in place. |
 | `.rigged-checkpoint.md` | A restore that didn't resume a seat's native conversation (by choice or not) and had a checkpoint to hand it. | Leaves it in place. |
 
 `rig down` leaves a file alone while another seat still uses it: a running seat of the same rig, or any seat of
