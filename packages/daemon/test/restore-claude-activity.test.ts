@@ -101,7 +101,8 @@ describe("contained Claude restore activity resources", () => {
       .map((h: any) => h.command as string).filter(c => c.includes("state/claude-activity-hooks/activity-relay.cjs"));
   }
   function seed(pod: boolean, selected = true, runtime = "claude-code", withStartupContext = true, seedCwd: string | null = cwd,
-    extraEntries: Array<{ category: string; effectiveId: string; absolutePath: string; mergeStrategy: string }> = []) {
+    extraEntries: Array<{ category: string; effectiveId: string; absolutePath: string; mergeStrategy: string }> = [],
+    extraFiles: Array<Record<string, unknown>> = []) {
     const rig = rigs.createRig("restore");
     if (pod) db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod", rig.id, "P");
     const node = rigs.addNode(rig.id, pod ? "p.seat" : "seat", { runtime, ...(seedCwd ? { cwd: seedCwd } : {}), ...(pod ? { podId: "pod" } : {}) });
@@ -110,10 +111,10 @@ describe("contained Claude restore activity resources", () => {
     registry.updateResumeToken(session.id, runtime === "codex" ? "codex_id" : runtime === "pi" ? "pi_session_file" : "claude_id", token);
     const entries = [
       ...(selected ? [activity()] : []),
-      { category: "guidance", effectiveId: "do-not-replay", absolutePath: path.join(root, "missing-guidance.md"), mergeStrategy: "managed_block" },
+      { category: "guidance", effectiveId: "do-not-replay", sourceSpec: "saved", sourcePath: root, absolutePath: path.join(root, "missing-guidance.md"), mergeStrategy: "managed_block" },
       ...extraEntries,
     ];
-    const files = [{ path: "missing.md", absolutePath: path.join(root, "missing.md"), required: true, appliesOn: ["restore"] }];
+    const files = [{ path: "missing.md", absolutePath: path.join(root, "missing.md"), ownerRoot: root, required: true, appliesOn: ["restore"] }, ...extraFiles];
     const actions = [{ type: "send_text", value: "DO NOT REPLAY", phase: "after_ready", appliesOn: ["restore"], idempotent: true }];
     if (withStartupContext) {
       db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
@@ -646,10 +647,45 @@ describe("contained Claude restore activity resources", () => {
 
   // Real current-spec resolution: an agent.yaml on disk, read through the
   // shared reader restore-check uses — no stubbed selection.
-  async function restoreWithRealSpec(selects: boolean, specExists = true) {
+  async function restoreWithRealSpec(selects: boolean, specExists = true,
+    ref: "path" | "local" | "local-unrecorded" | "same-name-import" | "builtin" | "ambiguous" = "path") {
     const { createDesiredClaudeActivityHooksReader } = await import("../src/domain/desired-claude-activity-hooks.js");
-    const f = seed(true, false);
     const specDir = path.join(root, "spec");
+    // A local: ref resolves at launch against the rig root, which a rig, pod or member startup file records as its owner.
+    const rigDir = path.join(root, "rig");
+    const culture = { path: "CULTURE.md", absolutePath: path.join(rigDir, "CULTURE.md"), ownerRoot: rigDir, deliveryHint: "guidance_merge",
+      required: true, appliesOn: ["fresh_start", "restore"] };
+    // A second recorded root that resolves the same ref to another folder holding a spec with the same name.
+    const otherRigDir = path.join(root, "other/rig");
+    const otherCulture = { ...culture, absolutePath: path.join(otherRigDir, "CULTURE.md"), ownerRoot: otherRigDir };
+    if (ref === "ambiguous") {
+      fs.mkdirSync(path.join(root, "other/spec"), { recursive: true });
+      fs.writeFileSync(path.join(root, "other/spec/agent.yaml"), `name: impl
+version: "1.0.0"
+profiles:
+  default:
+    uses:
+      runtime_resources: []`);
+    }
+    // The only saved origin is an import that shares the seat spec's name and selects no hooks.
+    const importDir = path.join(root, "imported");
+    const fromImport = { category: "skill", effectiveId: "impl-skill", sourceSpec: "impl", sourcePath: importDir, resourcePath: "skills/impl",
+      absolutePath: path.join(importDir, "skills/impl"), mergeStrategy: "copy" };
+    if (ref === "same-name-import") {
+      fs.mkdirSync(importDir, { recursive: true });
+      fs.writeFileSync(path.join(importDir, "agent.yaml"), `name: impl
+version: "1.0.0"
+profiles:
+  default:
+    uses:
+      runtime_resources: []`);
+    }
+    // Launch records the folder it read the agent from as the owner root of the agent's own startup files.
+    const roleOf = (dir: string) => ({ path: "guidance/role.md", absolutePath: path.join(dir, "guidance/role.md"), ownerRoot: dir,
+      orientation: "role", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] });
+    const files = ref === "local" || ref === "builtin" ? [roleOf(specDir), culture]
+      : ref === "ambiguous" ? [roleOf(specDir), culture, roleOf(path.join(root, "other/spec")), otherCulture] : [];
+    const f = seed(true, false, "claude-code", true, cwd, ref === "same-name-import" ? [fromImport] : [], files);
     if (specExists) {
       fs.mkdirSync(path.join(specDir, "runtime"), { recursive: true });
       fs.writeFileSync(path.join(specDir, "runtime/claude-activity-hooks.json"), "{}\n");
@@ -668,7 +704,9 @@ profiles:
       skills: []
       runtime_resources: ${selects ? "[claude-activity-hooks]" : "[]"}`);
     }
-    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ? WHERE id = ?").run(`path:${specDir}`, "default", f.node.id);
+    // A local: ref resolves against the rig spec's folder at launch, which nothing keeps; the node holds only the ref.
+    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ?, resolved_spec_name = ? WHERE id = ?")
+      .run(ref === "path" ? `path:${specDir}` : ref === "builtin" ? "builtin:terminal" : "local:../spec", "default", "impl", f.node.id);
     const reader = createDesiredClaudeActivityHooksReader(db, { exists: fs.existsSync, readFile: (p) => fs.readFileSync(p, "utf8") });
     return { f, result: await restore(f, adapter, () => {}, reader) };
   }
@@ -699,5 +737,104 @@ profiles:
     expect(owned()).toEqual([]);
     expect(result.result.warnings.some((w) => w.includes("could not be determined"))).toBe(true);
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // #1530 follow-up: a local: agent (a shipped-spec seat) resolves as at launch, against the rig root its saved launch
+  // recorded, and gets its hooks back like a path: agent.
+  it("re-applies the current selection for a local: agent resolved against its recorded rig root", async () => {
+    const { f, result } = await restoreWithRealSpec(true, true, "local");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.warnings.some((w) => w.includes("could not be determined")), JSON.stringify(result.result.warnings)).toBe(false);
+    expect(owned().length).toBeGreaterThan(0);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toEqual(f.saved);
+  });
+
+  // The control reads unknown because the agent can't be located from the recorded roots, not because the reader failed.
+  it("control: a local: agent its saved launch doesn't locate stays unknown, and nothing is projected", async () => {
+    const { result } = await restoreWithRealSpec(true, true, "local-unrecorded");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("could not be determined") && w.includes("against a rig root its last launch recorded")),
+      JSON.stringify(result.result.warnings)).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // A resource origin can't prove the seat's spec, since an import may share its name. With no recorded rig root, the
+  // selection stays unknown and restore warns, rather than reading the import's selection as the seat's.
+  it("a same-name import as the only saved origin stays unknown and warns", async () => {
+    const { result } = await restoreWithRealSpec(true, true, "same-name-import");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("could not be determined") && w.includes("against a rig root its last launch recorded")),
+      JSON.stringify(result.result.warnings)).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // Two recorded roots resolve the ref to two folders whose specs share the seat's name: ambiguous, so unknown, never a pick.
+  it("a local: agent that resolves to two same-name folders stays unknown and warns", async () => {
+    const { result } = await restoreWithRealSpec(true, true, "ambiguous");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("could not be determined") && w.includes("resolved to more than one folder")),
+      JSON.stringify(result.result.warnings)).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // Launch resolves no builtin: agent ref against a folder, so a recorded rig root proves nothing for one: it stays unknown.
+  it("a builtin: agent ref stays unknown even with a recorded rig root, and nothing is projected", async () => {
+    const { result } = await restoreWithRealSpec(true, true, "builtin");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("could not be determined") && w.includes("no established absolute source location")),
+      JSON.stringify(result.result.warnings)).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // A rig root stored under an older install's shipped specs is re-anchored first, as the runtime switch reads startup
+  // files (#261), so a shipped agent resolves in the running install.
+  it("re-anchors a rig root stored under an older install before resolving a shipped local: agent", async () => {
+    const { createDesiredClaudeActivityHooksReader } = await import("../src/domain/desired-claude-activity-hooks.js");
+    const rig = rigs.createRig("older-install");
+    const node = rigs.addNode(rig.id, "impl", { runtime: "claude-code", cwd });
+    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ?, resolved_spec_name = ? WHERE id = ?")
+      .run("local:../../../agents/development/implementer", "default", "implementer", node.id);
+    const olderSpecs = path.join(root, "old-prefix/lib/node_modules/@openrig/cli/daemon/specs");
+    const olderRoot = path.join(olderSpecs, "rigs/launch/demo");
+    const olderAgent = path.join(olderSpecs, "agents/development/implementer");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', ?, '[]', 'claude-code')")
+      .run(node.id, JSON.stringify([
+        { path: "guidance/role.md", absolutePath: path.join(olderAgent, "guidance/role.md"), ownerRoot: olderAgent, orientation: "role",
+          deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] },
+        { path: "CULTURE.md", absolutePath: path.join(olderRoot, "CULTURE.md"), ownerRoot: olderRoot,
+          deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] }]));
+    const read = createDesiredClaudeActivityHooksReader(db, { exists: fs.existsSync, readFile: (p) => fs.readFileSync(p, "utf8") });
+    // The running install's implementer selects shared:claude-activity-hooks in its default profile.
+    expect(read(node.id)).toEqual({ status: "known", selected: true });
+  });
+
+  // Launched from rig/ with local:agents/impl, the saved launch records only the agent's own folder. A same-name spec
+  // nested at agents/impl inside it is where the ref lands from that folder, but launch recorded no such folder: unknown.
+  it("a same-name spec nested where the ref lands from the agent's own folder stays unknown", async () => {
+    const { createDesiredClaudeActivityHooksReader } = await import("../src/domain/desired-claude-activity-hooks.js");
+    const agentDir = path.join(root, "rig/agents/impl");
+    for (const dir of [agentDir, path.join(agentDir, "agents/impl")]) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "agent.yaml"), `name: impl\nversion: "1.0.0"\nprofiles:\n  default:\n    uses:\n      runtime_resources: []`);
+    }
+    const rig = rigs.createRig("nested");
+    const node = rigs.addNode(rig.id, "impl", { runtime: "claude-code", cwd });
+    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ?, resolved_spec_name = ? WHERE id = ?")
+      .run("local:agents/impl", "default", "impl", node.id);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', ?, '[]', 'claude-code')")
+      .run(node.id, JSON.stringify([{ path: "guidance/role.md", absolutePath: path.join(agentDir, "guidance/role.md"), ownerRoot: agentDir,
+        orientation: "role", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }]));
+    const read = createDesiredClaudeActivityHooksReader(db, { exists: fs.existsSync, readFile: (p) => fs.readFileSync(p, "utf8") });
+    expect(read(node.id)).toMatchObject({ status: "unknown" });
   });
 });
