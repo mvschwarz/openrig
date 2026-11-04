@@ -31,7 +31,10 @@ export type FindingKind =
   // SPEC.md compatibility — a node carrying BOTH authored files. Advisory by
   // construction (low severity never flips the exit code): SPEC.md wins, and the
   // shadowed README.md is a state to notice, never a failure to gate on.
-  | "shadowed_node_file";
+  | "shadowed_node_file"
+  // Another mission has a slice folder of the same name, which the slice list and the name-only routes
+  // hide. Advisory (low severity): renaming is the person's call.
+  | "slice_name_shared";
 
 export interface AuditFinding {
   kind: FindingKind;
