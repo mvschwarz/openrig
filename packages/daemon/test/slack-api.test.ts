@@ -120,6 +120,17 @@ describe("slack-api — a transport error never carries the bot token", () => {
     expect(r.error).not.toContain("xoxb-copied-token");
   });
 
+  it("removes a token line that Node trimmed before quoting it", async () => {
+    // A short first line is left alone, and Node trims the trailing whitespace off the last line before quoting it.
+    const token = "ab\nLONGSECRETTAIL \t";
+    const fetchImpl: FetchImpl = async (_url, init) => { new Headers(init?.headers); return new Response("{}"); };
+    const r = await callWebApi("auth.test", token, {}, fetchImpl);
+    expect(r.error).toContain("invalid header value");
+    for (const line of token.split("\n").map((l) => l.trim())) {
+      for (let i = 0; i + 6 <= line.length; i++) expect(r.error).not.toContain(line.slice(i, i + 6));
+    }
+  });
+
   it("a file download's error doesn't carry the token either", async () => {
     const fetchImpl: FetchImpl = async (_url, init) => { new Headers(init?.headers); return new Response("{}"); };
     const r = await downloadPrivateFile("https://files.slack.com/files-pri/T1-F1/x.txt", "xoxb-copied\nSECRETTAIL", fetchImpl);
