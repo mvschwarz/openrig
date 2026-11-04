@@ -27,19 +27,19 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
   it.each(["human@kernel@host-origin", "human-reviewer@host@host-origin", "alex@external@host-origin"])(
     "a forwarded person %s gets a queue hint retaining the origin host",
     (sender) => {
-      const body = "Original body\\nkept verbatim.";
+      const body = "Original body\nkept verbatim.";
       expect(resolveQueueHostDestination(sender)).toEqual({ ok: true, destination: sender.slice(0, sender.lastIndexOf("@")), hostId: "host-origin" });
       const out = wrapSendBody(sender, "driver@receiver", body);
-      expect(out).toContain("From: " + sender + "\\nTo: driver@receiver\\n");
-      expect(out.split("\\n---\\n")[1]).toBe(body);
-      expect(out.split("\\n").at(-1)).toBe("↩ Reply if needed: rig queue create --destination " + sender + ' --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify');
+      expect(out).toContain("From: " + sender + "\nTo: driver@receiver\n");
+      expect(out.split("\n---\n")[1]).toBe(body);
+      expect(out.split("\n").at(-1)).toBe("↩ Reply if needed: rig queue create --destination " + sender + ' --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify');
     },
   );
 
   it("keeps host-qualified look-alike seats and malformed human triples on the ordinary hint", () => {
     for (const sender of ["humanity@kernel@host-origin", "human@real-rig@host-origin", "dev-human@host@host-origin",
       "human@kernel@", "human@kernel@host-origin@extra"]) {
-      expect(wrapSendBody(sender, "driver@receiver", "hi").split("\\n").at(-1))
+      expect(wrapSendBody(sender, "driver@receiver", "hi").split("\n").at(-1))
         .toBe("↩ Reply: rig send " + sender + ' "..."');
     }
   });
