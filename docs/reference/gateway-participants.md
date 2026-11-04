@@ -15,7 +15,7 @@ A participant is either:
 People and channels share one address space: a channel can't take a person's id.
 
 A registered person is addressed as `<id>@external`, including without Slack: for example,
-`rig gateway human add alex --display-name "Alex"` creates `alex@external`, reached in the Feed and Steering.
+`rig gateway human add alex --display-name "Alex" --delivery-class B` creates `alex@external`, reached in the Feed and Steering.
 `human@host` is the unnamed person at the terminal; `human@kernel` is also accepted as a human/gate address.
 These aliases (including `human-<name>@host` and `human-<name>@kernel`) are not agent sessions: reply with
 `rig queue create --destination human@host --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`,
