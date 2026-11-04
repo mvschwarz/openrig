@@ -48,7 +48,9 @@ export function windowsCodexPluginHooks(source: string): string {
         if (!object(hook) || hook.type !== "command" || typeof hook.command !== "string" || !hook.command.startsWith(prefix)) throw Error("Unsupported Codex hook command");
         const tail = hook.command.slice(prefix.length);
         if (!/^"\$\{PLUGIN_ROOT\}\/hooks\/scripts\/(?:activity-relay|refocus)\.cjs" (?:--from-plugin|--runtime codex)$/.test(tail)) throw Error("Unsupported Codex hook command");
-        hook.command = `"${process.execPath}" -e "${forwarder}" -- ${tail}`;
+        // Bare node is valid in both PowerShell and cmd; a quoted executable
+        // at the start of a PowerShell command string is only a string literal.
+        hook.command = `node -e "${forwarder}" -- ${tail}`;
       }
     }
   }

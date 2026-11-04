@@ -18,10 +18,10 @@ it.runIf(process.platform === "win32")("runs the native Codex plugin command wit
     fs.mkdirSync(path.join(root, "hooks/scripts"), { recursive: true });
     fs.writeFileSync(path.join(root, "hooks/scripts/activity-relay.cjs"), "process.stdout.write(require('fs').readFileSync(0,'utf8'));process.exit(7);");
     const command = native.hooks.SessionStart[0].hooks[0].command.replaceAll("${PLUGIN_ROOT}", root);
-    const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", "& " + command], { env: { ...process.env, OPENRIG_NODE: process.execPath, OPENRIG_SEAT_PROJECT_DIR: root }, input: '{"owned":true}', encoding: "utf8", windowsHide: true });
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", command], { env: { ...process.env, OPENRIG_NODE: process.execPath, OPENRIG_SEAT_PROJECT_DIR: root }, input: '{"owned":true}', encoding: "utf8", windowsHide: true });
     expect(result.stdout).toBe('{"owned":true}');
     // PowerShell needs an explicit exit to propagate a native program's status.
-    const exited = spawnSync("powershell.exe", ["-NoProfile", "-Command", "& " + command + "; exit $LASTEXITCODE"], { env: { ...process.env, OPENRIG_NODE: process.execPath, OPENRIG_SEAT_PROJECT_DIR: root }, input: '{}', encoding: "utf8", windowsHide: true });
+    const exited = spawnSync("powershell.exe", ["-NoProfile", "-Command", command + "; exit $LASTEXITCODE"], { env: { ...process.env, OPENRIG_NODE: process.execPath, OPENRIG_SEAT_PROJECT_DIR: root }, input: '{}', encoding: "utf8", windowsHide: true });
     expect(exited.status).toBe(7);
     expect(Object.keys(native.hooks)).toEqual(Object.keys(JSON.parse(original).hooks));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
