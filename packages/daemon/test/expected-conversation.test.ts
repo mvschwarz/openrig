@@ -169,6 +169,19 @@ it("records a lost paste result as indeterminate without claiming it was not wri
   expect(f.db.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id=?").get("attempted-original"))
     .toEqual({ delivery_state: "indeterminate" });
 });
+
+it("gives an attempted input phase priority over a false sent flag", async () => {
+  const f = fixture();
+  vi.spyOn(f.transport as never, "sendClassifiedInput" as never).mockResolvedValue({
+    ok: false, sessionName: f.expected.sessionName, sent: false, inputPhase: "attempted", reason: "send_failed",
+  } as never);
+  const result = await f.transport.send(f.expected.sessionName, "for A", {
+    expectedIdentity: f.expected, deliveryId: "contradictory-original", waitForIdleMs: 1000,
+  } as never);
+  expect(result).toMatchObject({ ok: false, sent: false, inputPhase: "attempted" });
+  expect(f.db.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id=?").get("contradictory-original"))
+    .toEqual({ delivery_state: "indeterminate" });
+});
 it("retained conditional input keeps its identity through a committed dispatch", async () => {
   const f = fixture(); const guard = new SeatDeliveryGuard(f.db, name => resolveGuardTarget(f.db, name));
   f.tmux.deliveryGuard = guard; await guard.set(f.node.id, true, "test", "hold original");

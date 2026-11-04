@@ -2495,7 +2495,8 @@ export class SessionTransport {
             if (result.ok) {
               if (result.outcome === "rendered-unconfirmed" || (opts?.verify && result.verified !== true)) outbox.markIndeterminate(id);
               else outbox.markDelivered(id);
-            } else if (result.sent === false || result.inputPhase === "not_reached") outbox.markFailed(id);
+            } else if (result.inputPhase === "attempted" || result.inputPhase === "written") outbox.markIndeterminate(id);
+            else if (result.sent === false || result.inputPhase === "not_reached") outbox.markFailed(id);
             else outbox.markIndeterminate(id);
           }
         } catch { result.warning = [result.warning, "Conditional input receipt could not be finalized; inspect before retrying."].filter(Boolean).join(" "); }
