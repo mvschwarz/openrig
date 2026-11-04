@@ -1081,6 +1081,13 @@ export class QueueRepository {
     refreshQueueWaits(this.db, this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db), changedQitem, proofChanged);
   }
 
+  /** Observe committed queue changes; callbacks should schedule work, not perform it inline. */
+  subscribeChanges(onChange: (qitemId: string) => void): () => void {
+    return this.eventBus.subscribe((event) => {
+      if (event.type.startsWith("queue.") && "qitemId" in event && typeof event.qitemId === "string") onChange(event.qitemId);
+    });
+  }
+
   startWaitReminders(): () => void {
     this.reconcileWaitReminders();
     return this.eventBus.subscribe((event) => {

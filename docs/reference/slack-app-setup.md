@@ -366,6 +366,36 @@ Quiet hours hold a person's routine asks while they're on, and post them once th
 
 ## Reconnect recovery and status
 
+When a posted ask is answered, closed, canceled or replaced elsewhere, the connector edits its
+original primary message with the status, time, actor and closure note. Buttons become option
+text and the answer hint disappears; the remaining content and reconciliation marker stay as
+posted. Supplemental messages are unchanged. This adds no post or reaction and needs no agent
+turn. Separate resolution notices retain their existing behavior.
+
+A deliberately reopened direct ask says **Open again**; its options remain as text. If it has
+no committed answer, it tells the person to reply in its thread. Otherwise it says **Earlier
+answer retained**: reopening does not accept a second answer. Earlier replaced parks remain
+historical; **Asked again** does not claim that the later ask has been posted. Edits reconcile
+the current state again after awaited Slack calls, so an obsolete close is not recorded as the
+current result after a reopen.
+
+Edits follow committed queue changes, with a startup catch-up for posted asks on retained queue
+rows. Each primary costs one exact-message read and one `chat.update`. The serial edit worker
+uses the recovery budget helpers (four calls, 100 entries, 15 seconds) and waits for the next
+budget window when exhausted. Slack's per-method `Retry-After` is retained across restarts.
+Only an acknowledged edit gets a success receipt. `rig slack status` shows queued reconciliation
+and the last edit failure. Transient failures retry with increasing waits, capped at an hour,
+behind other queued work. Permanent Slack failures (such as missing scope, a deleted original,
+an archived channel or an uneditable message) remain unfinished and are retried only on the next
+connector start. They do not keep consuming edit capacity. These edit calls have their own
+budget, separate from missed-message scanning below.
+
+The baseline already includes public-channel history access and `chat:write`. Private-channel
+reads may require `groups:history`, which the baseline does not grant; a refused read never
+counts as an edit. An unavailable/deleted original cannot be replaced by a new post. Startup
+catch-up cannot edit rows already removed by queue retention or posts without their original
+notification receipt and channel stamp.
+
 The daemon scans available top-level messages and replies broadcast with **Also send to
 channel** in the channels this machine owns: its default channel and its channel map's, except a
 channel it relays to another machine. It also scans replies in the threads it tracks in those
