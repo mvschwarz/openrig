@@ -152,10 +152,12 @@ export async function callWebApi(
 }
 
 /** A transport error's message can quote the request's Authorization header (Node's fetch does for an invalid value),
- *  so the token, and each line of it, is removed before the message goes anywhere. A line shorter than 6 characters is
- *  left: removing it everywhere would garble the rest of the message. One pass, so a marker is never rescanned. */
+ *  so the token, and each line of it, is removed before the message goes anywhere, as sent and as trimmed (Node trims
+ *  the value before quoting it). A line shorter than 6 characters is left: removing it everywhere would garble the rest
+ *  of the message. One pass, so a marker is never rescanned. */
 function withoutToken(message: string, token: string): string {
-  const parts = [token, ...token.split(/[\r\n]+/).filter((part) => part.length >= 6)].filter((part) => part.length > 0)
+  const lines = token.split(/[\r\n]+/).flatMap((line) => [line, line.trim()]).filter((part) => part.length >= 6);
+  const parts = [...new Set([token, token.trim(), ...lines])].filter((part) => part.length > 0)
     .sort((a, b) => b.length - a.length);
   if (parts.length === 0) return message;
   const pattern = new RegExp(parts.map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
