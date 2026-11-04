@@ -65,6 +65,16 @@ export interface DeliveryOutcome {
   continuityActionCompleted?: boolean;
   /** The text reported by a delivery implementation, without its scheduler header. */
   sentMessage?: string;
+  /** Durable custody of this scheduled occurrence, separate from its recurrence. */
+  occurrenceTracked?: boolean;
+  /** A retained receipt or retry time was checked; no new input attempt happened. */
+  deferred?: boolean;
+  reconciled?: boolean;
+  transportReason?: string;
+  retryAt?: string;
+  nextAction?: string;
+  terminalReason?: string;
+  memberOutcomes?: Record<string, DeliveryOutcome>;
 }
 
 export interface WatchdogDeliverySource {
@@ -75,10 +85,13 @@ export interface WatchdogDeliverySource {
   members?: Array<{ jobId: string; occurrenceId: string }>;
 }
 
-export type DeliveryFn = (
+export type DeliveryFn = ((
   req: DeliveryRequest,
   source: WatchdogDeliverySource,
-) => Promise<DeliveryOutcome>;
+) => Promise<DeliveryOutcome>) & {
+  /** Resolve existing occurrence custody before grouping it with new reminders. */
+  reconcile?: (source: WatchdogDeliverySource) => DeliveryOutcome | null;
+};
 
 export function formatWatchdogDeliveryMessage(
   source: WatchdogDeliverySource,
@@ -576,11 +589,15 @@ export class WatchdogPolicyEngine {
 
     const occurrence = [job.jobId, occupantGeneration, outcome.conditionReceipt ?? (job.policy === "periodic-reminder" ? job.lastFireAt : outcome.message)];
     const recurring = outcome.conditionReceipt === undefined && job.policy !== "periodic-reminder" && job.policy !== "context-usage-threshold";
-    // Identify cadences for digest grouping and history, not transport deduplication.
+    // Identify cadence for grouping/history and durable scheduled-occurrence custody, separate from explicit sends.
     if (recurring && job.lastFireAt !== null) {
       occurrence.push(job.lastFireAt);
     }
     const occurrenceId = createHash("sha256").update(JSON.stringify(occurrence)).digest("hex");
+    const recovered = this.deliver.reconcile?.({ jobId: job.jobId, policy: job.policy, occurrenceId });
+    if (recovered) return this.recordAttempt({ job, outcome, evaluatedAt,
+      deliverySchedule: this.jobsRepo.deliverySchedule(job.jobId), delivery: recovered,
+      isContextUsageThreshold: false, notice: outcome.notice === true });
     // A parked-row reminder due in a scheduler pass waits for the pass's end, when every reminder held for its seat
     // goes in one message. Nothing has changed for it yet, so a pass that stops early leaves it due.
     const digestEntry = job.policy === "periodic-reminder" && !continuityAction
@@ -718,7 +735,7 @@ export class WatchdogPolicyEngine {
       { jobId: digestId, policy: "periodic-reminder", occurrenceId: digestId, members },
     );
     digest.forEach((held, i) => this.recordAttempt({
-      ...held, deliverySchedule: schedules[i]!, delivery, isContextUsageThreshold: false,
+      ...held, deliverySchedule: schedules[i]!, delivery: delivery.memberOutcomes?.[held.job.jobId] ?? delivery, isContextUsageThreshold: false,
       digest: { deliveryId: digestId, size: digest.length, line: lines[i]! },
     }));
   }
@@ -735,7 +752,7 @@ export class WatchdogPolicyEngine {
     this.recordAttempt({ ...held, deliverySchedule: schedule, delivery, isContextUsageThreshold: false, sentMessage: message });
   }
 
-  /** Audit one job's delivery attempt and advance its schedule, wake receipt and actionable state from it. */
+  /** Account for one input attempt or a recovered receipt, then advance only accounted occurrences. */
   private recordAttempt(input: {
     job: WatchdogJob;
     outcome: Extract<PolicyEvaluation, { action: "send" }>;
@@ -751,18 +768,26 @@ export class WatchdogPolicyEngine {
     sentMessage?: string;
   }): EvaluationResult {
     const { job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold, digest, sentMessage } = input;
+    if (delivery.deferred) {
+      this.jobsRepo.deliveryAccounted(job.jobId);
+      return { job: this.jobsRepo.getByIdOrThrow(job.jobId), outcome, history: null, delivery, meaningful: false };
+    }
     const notes = digest
       ? { ...(outcome.notes ?? {}), digestDeliveryId: digest.deliveryId, digestSize: digest.size }
       : outcome.notes;
     const deliveryNotes = delivery.inputPhase === undefined && delivery.code === undefined ? notes
       : { ...(notes ?? {}), ...(delivery.inputPhase === undefined ? {} : { deliveryInputPhase: delivery.inputPhase }),
         ...(delivery.code === undefined ? {} : { deliveryCode: delivery.code }) };
+    const receiptNotes = delivery.retryAt || delivery.nextAction || delivery.occurrenceTracked
+      ? { ...(deliveryNotes ?? {}), ...(delivery.retryAt ? { retryAt: delivery.retryAt } : {}),
+        ...(delivery.nextAction ? { nextAction: delivery.nextAction } : {}),
+        ...(delivery.occurrenceTracked ? { outboxIds: delivery.outboxIds ?? [] } : {}) } : deliveryNotes;
     const history = this.historyLog.record({
       jobId: job.jobId,
       evaluatedAt,
-      outcome: delivery.status === "retained" ? "skipped" : delivery.status === "ok" ? "sent"
+      outcome: delivery.reconciled ? "skipped" : delivery.status === "retained" ? "skipped" : delivery.status === "ok" ? "sent"
         : isRefusedInteractive(delivery.error) ? "refused" : "failed",
-      skipReason: delivery.status === "retained" ? "typing_guard_retained" : null,
+      skipReason: delivery.reconciled ? "delivery_receipt_reconciled" : delivery.status === "retained" ? "typing_guard_retained" : null,
       deliveryTargetSession: outcome.target.session,
       deliveryStatus: delivery.status,
       deliveryMessage: digest?.line ?? delivery.sentMessage ?? sentMessage ?? outcome.message,
@@ -771,16 +796,17 @@ export class WatchdogPolicyEngine {
       // refusal from a generic failure (status alone discards that identity).
       evaluationNotes:
         delivery.error !== undefined
-          ? { ...(deliveryNotes ?? {}), deliveryReason: delivery.error }
-          : delivery.status === "retained" ? { ...(deliveryNotes ?? {}), outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : deliveryNotes ?? null,
+          ? { ...receiptNotes, deliveryReason: delivery.error }
+          : delivery.status === "retained" ? { ...receiptNotes, outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : receiptNotes ?? null,
     });
     // A notice stamps no fire time and leaves the job not actionable, so the active-wake throttle can't hold
     // back the watched condition's own send after it.
     if (input.notice) {
       this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, false);
-    } else if (!isContextUsageThreshold) {
+    } else if (!isContextUsageThreshold && !(delivery.occurrenceTracked && delivery.status === "failed")) {
       this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true, deliverySchedule);
     }
+    if (delivery.terminalReason) this.jobsRepo.markTerminal(job.jobId, delivery.terminalReason);
     // OPR.0.5.8.1 S2 — a policy's condition receipt is banked ONLY on positive
     // delivery. `status` is "ok" | "failed"; anything that is not a definite ok
     // leaves the receipt untouched so the next scan retries. A policy that does
@@ -802,7 +828,8 @@ export class WatchdogPolicyEngine {
     // must not receive its receipt or be backed off as though we sent for it.
     const current = this.jobsRepo.getByIdOrThrow(job.jobId);
     if (current.state === "active" && this.jobsRepo.scheduleUnchanged(current, deliverySchedule)
-      && (isContextUsageThreshold || current.lastEvaluationAt === evaluatedAt)) {
+      && (isContextUsageThreshold || current.lastEvaluationAt === evaluatedAt)
+      && !(delivery.occurrenceTracked && delivery.status === "failed")) {
       this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
     }
     this.jobsRepo.deliveryAccounted(job.jobId);
