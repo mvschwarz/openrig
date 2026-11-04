@@ -333,6 +333,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     expect(result.exitCode).toBe(1);
     expect(w.sends.filter(s => s.path === "/api/transport/send")).toHaveLength(1);
     expect(result.logs.some(l => l.includes('"consumptionVerified":true'))).toBe(false);
+    if (when === "during-send") expect(result.errLogs.join("\n")).toMatch(/delivery is unconfirmed/i);
   });
 
   it("PIN W1 — a typed-but-never-consumed piece FAILS LOUD naming the piece; the next piece is never sent [GREEN — consumption verification]", async () => {
@@ -346,6 +347,31 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     expect(pieceSends).toHaveLength(1);                       // piece 2 never sent
     expect(errLogs.join("\n")).toMatch(/piece 1\/2/);         // names the piece
     expect(errLogs.join("\n")).toMatch(/consum/i);            // names the failure class
+  });
+
+  it("keeps delivery unknown when the send times out and neither record nor pane proves its effect", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [], sendBehavior: () => "throw" };
+    const { errLogs, exitCode } = await captureLogs(() => makeCmd(consumptionDeps(w)).parseAsync(walkArgs));
+    expect(exitCode).toBe(1);
+    expect(w.sends.filter(s => s.path === "/api/transport/send")).toHaveLength(1);
+    expect(errLogs.join("\n")).toMatch(/unconfirmed/i);
+    expect(errLogs.join("\n")).not.toMatch(/delivery lost/i);
+    expect(errLogs.join("\n")).toMatch(/before.*resend/i);
+  });
+
+  it("reports a generation change after the guarded Enter without claiming the piece was lost", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    w.sendBehavior = body => {
+      if (body["text"] !== undefined) w.pane = `❯ ${String(body["text"]).slice(0, 40)}`;
+      else w.record.generationId = "g2";
+      return { status: 200, data: { ok: true } };
+    };
+    const { errLogs, exitCode } = await captureLogs(() => makeCmd(consumptionDeps(w)).parseAsync(walkArgs));
+    expect(exitCode).toBe(1);
+    expect(w.sends.filter(s => s.path === "/api/transport/send" && s.body["submitOnly"] === true)).toHaveLength(1);
+    expect(w.sends.filter(s => s.path === "/api/transport/send" && s.body["text"] !== undefined)).toHaveLength(1);
+    expect(errLogs.join("\n")).toMatch(/generation rolled.*unconfirmed/i);
+    expect(errLogs.join("\n")).not.toMatch(/never entered|delivery lost/i);
   });
 
   it("PIN W2 — staged text detected -> exactly ONE submit retry (bare Enter, never a piece re-send), then consumed -> walk proceeds [GREEN — the retry path]", async () => {

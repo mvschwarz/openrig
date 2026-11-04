@@ -273,7 +273,7 @@ initial record is explicitly reported as unverified delivery.`)
 
             let verdict = await pollConsumed();
             if (verdict === "generation-rolled") {
-              failPiece(i, piece.label, "the seat's generation rolled mid-walk (a re-prime); the walk cannot continue into a different generation.");
+              failPiece(i, piece.label, "the seat's generation rolled mid-walk (a re-prime); delivery is unconfirmed. Inspect the recipient before any resend; the walk cannot continue into a different generation.");
               return;
             }
             if (verdict === "timeout") {
@@ -300,12 +300,16 @@ initial record is explicitly reported as unverified delivery.`)
                   return;
                 }
                 verdict = await pollConsumed();
+                if (verdict === "generation-rolled") {
+                  failPiece(i, piece.label, "the seat's generation rolled after the guarded submit; delivery is unconfirmed. Inspect the recipient before any resend.");
+                  return;
+                }
                 if (verdict !== "consumed") {
-                  failPiece(i, piece.label, `typed and staged, but not consumed even after the single submit retry — the piece never entered the seat's conversation record. Not re-sending (one retry is the contract).`);
+                  failPiece(i, piece.label, "no matching conversation record was observed within the verification window after the single submit retry; delivery is unconfirmed. Inspect the recipient before any resend.");
                   return;
                 }
               } else {
-                failPiece(i, piece.label, `send reported ${sendOutcome === "ok" ? "success" : "a transport error"} but the piece is neither consumed in the generation record nor staged in the pane — delivery lost; consumption verification fails this walk closed.`);
+                failPiece(i, piece.label, `send reported ${sendOutcome === "ok" ? "success" : "a transport error"}, but no matching record or staged input was observed within the verification window. Delivery and consumption are unconfirmed; inspect the recipient before any resend.`);
                 return;
               }
             }
