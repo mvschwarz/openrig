@@ -47,6 +47,7 @@ describe("real automatic kernel restore and manual-up race", () => {
     const setup = createTestApp(db, { tmux, listProcesses, adapters: { "claude-code": adapter } as never });
     const { rigRepo, sessionRegistry, snapshotRepo, snapshotCapture, restoreOrchestrator, eventBus, app } = setup;
     const rig = rigRepo.createRig("kernel");
+    rigRepo.setKernelVariant(rig.id, "rig-claude-only.yaml");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod1078", rig.id, "Kernel");
     const node = rigRepo.addNode(rig.id, "operator.agent", { runtime: "claude-code", cwd: "/tmp", podId: "pod1078" });
     const old = sessionRegistry.registerSession(node.id, name);
@@ -108,6 +109,8 @@ describe("real automatic kernel restore and manual-up race", () => {
       await new Promise<void>(r => setImmediate(r));
       const status = tracker.getStatus();
       expect(status.kernelState).toBe(mode === "manual-first" ? "skipped" : "ready");
+      expect(status.variant).toBe("rig-claude-only.yaml");
+      expect(rigRepo.getRig(rig.id)?.rig.kernelVariant).toBe("rig-claude-only.yaml");
       expect(tmux.createSession).toHaveBeenCalledTimes(mode === "auto-first-fresh" ? 2 : 1);
       expect(sessionRegistry.getSessionsForRig(rig.id).filter(s => s.status === "running")).toHaveLength(1);
       if (mode === "auto-rehydrate") {
