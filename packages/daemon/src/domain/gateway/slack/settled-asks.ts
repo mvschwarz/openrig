@@ -160,7 +160,7 @@ export class SlackAskSettlement {
       || (episode.state === "blocked" && t.state !== "blocked"));
     const replacement = after.find((t) => t.ownerNotificationKind === "human-required");
     if (replacement) return exit && exit.transitionId < replacement.transitionId
-      ? make(exit) : make(replacement, "Asked again in a later post");
+      ? make(exit) : make(replacement, "Asked again");
     const rerouted = after.find((t) => (t.transitionNote ?? "").startsWith("fallback-routed:"));
     if (rerouted) return make(rerouted, "Handled");
     if (terminal.has(item.state)) {
@@ -173,7 +173,10 @@ export class SlackAskSettlement {
       resolveRegisteredHumanAddress(address, registry.entities) === resolveRegisteredHumanAddress(recipient, registry.entities));
     if (episode.state === "pending" && samePerson(item.destinationSession)) {
       const reopened = after.filter((t) => (t.transitionNote ?? "").startsWith("reopen acknowledged:")).at(-1);
-      if (reopened) return make(reopened, "Open again · Reply in this thread to answer");
+      if (reopened) {
+        const answered = this.opts.queue.getHumanAnswer(id, recipient) ?? this.opts.queue.committedAnswerFromAnother(id, recipient);
+        return make(reopened, answered ? "Open again · Earlier answer retained" : "Open again · Reply in this thread to answer");
+      }
     }
     // A reopened work row does not reopen the older park it already left. A new human park has its own episode above.
     if (exit) return make(exit);

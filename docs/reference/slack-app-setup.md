@@ -372,8 +372,10 @@ text and the answer hint disappears; the remaining content and reconciliation ma
 posted. Supplemental messages are unchanged. This adds no post or reaction and needs no agent
 turn. Separate resolution notices retain their existing behavior.
 
-A deliberately reopened direct ask says **Open again** and tells the person to reply in its
-thread; its options remain as text. Earlier replaced parks remain historical. Edits reconcile
+A deliberately reopened direct ask says **Open again**; its options remain as text. If it has
+no committed answer, it tells the person to reply in its thread. Otherwise it says **Earlier
+answer retained**: reopening does not accept a second answer. Earlier replaced parks remain
+historical; **Asked again** does not claim that the later ask has been posted. Edits reconcile
 the current state again after awaited Slack calls, so an obsolete close is not recorded as the
 current result after a reopen.
 
