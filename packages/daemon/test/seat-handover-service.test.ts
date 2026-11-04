@@ -281,6 +281,27 @@ describe("SeatHandoverService", () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  // Round 1: a projected guidance file and an optional startup file can share one block id. The block is still required,
+  // since a start fails at projection before the optional file is delivered.
+  it("keeps a block required when an optional startup file shares its id with a projected one (#2456)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "handover-required-same-id-"));
+    try {
+      const { node } = seedSeat();
+      db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(root, node.id);
+      const projected = path.join(root, "spec", "culture.md");
+      const optional = path.join(root, "startup", "culture.md");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, '[]', 'codex')")
+        .run(node.id,
+          JSON.stringify([{ category: "guidance", effectiveId: "culture.md", sourceSpec: "base", sourcePath: path.dirname(projected),
+            resourcePath: "culture.md", absolutePath: projected, mergeStrategy: "managed_block", target: "AGENTS.md" }]),
+          JSON.stringify([{ path: "culture.md", absolutePath: optional, ownerRoot: root, deliveryHint: "guidance_merge", required: false, appliesOn: ["startup", "restore"] }]));
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "replace occupant", source: "fresh" });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      // The block's put-back source is the later writer's, as at launch; the block stays required.
+      expect((result as unknown as { result: { startedWithoutRequired?: string[] } }).result.startedWithoutRequired).toEqual([optional]);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it.each(["stop", "restart", "clean"] as const)("allows %s for a launched handover but refuses discovered and directly adopted occupants", async operation => {
     for (const provenance of ["adopted", "discovered", "launched"] as const) {
       const { node, sessionId } = seedSeat({ rigName: `${operation}-${provenance}` });
