@@ -646,10 +646,13 @@ describe("contained Claude restore activity resources", () => {
 
   // Real current-spec resolution: an agent.yaml on disk, read through the
   // shared reader restore-check uses — no stubbed selection.
-  async function restoreWithRealSpec(selects: boolean, specExists = true) {
+  async function restoreWithRealSpec(selects: boolean, specExists = true, ref: "path" | "local" | "local-unrecorded" = "path") {
     const { createDesiredClaudeActivityHooksReader } = await import("../src/domain/desired-claude-activity-hooks.js");
-    const f = seed(true, false);
     const specDir = path.join(root, "spec");
+    // A local: agent's own resources record where the last launch read them: here one entry from the agent's folder.
+    const fromAgentFolder = { category: "skill", effectiveId: "impl-skill", sourceSpec: "impl", sourcePath: specDir, resourcePath: "skills/impl",
+      absolutePath: path.join(specDir, "skills/impl"), mergeStrategy: "copy" };
+    const f = seed(true, false, "claude-code", true, cwd, ref === "local" ? [fromAgentFolder] : []);
     if (specExists) {
       fs.mkdirSync(path.join(specDir, "runtime"), { recursive: true });
       fs.writeFileSync(path.join(specDir, "runtime/claude-activity-hooks.json"), "{}\n");
@@ -668,7 +671,9 @@ profiles:
       skills: []
       runtime_resources: ${selects ? "[claude-activity-hooks]" : "[]"}`);
     }
-    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ? WHERE id = ?").run(`path:${specDir}`, "default", f.node.id);
+    // A local: ref resolves against the rig spec's folder at launch, which nothing keeps; the node holds only the ref.
+    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ?, resolved_spec_name = ? WHERE id = ?")
+      .run(ref === "path" ? `path:${specDir}` : "local:agents/impl", "default", "impl", f.node.id);
     const reader = createDesiredClaudeActivityHooksReader(db, { exists: fs.existsSync, readFile: (p) => fs.readFileSync(p, "utf8") });
     return { f, result: await restore(f, adapter, () => {}, reader) };
   }
@@ -694,6 +699,27 @@ profiles:
 
   it("reports unknown when the real agent file is missing", async () => {
     const { result } = await restoreWithRealSpec(true, false);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("could not be determined"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // #1530 follow-up: a local: agent (a shipped-spec seat) is found where its last launch read its resources, by spec name,
+  // as the runtime switch finds it, and gets its hooks back like a path: agent.
+  it("re-applies the current selection for a local: agent found where its last launch read it", async () => {
+    const { f, result } = await restoreWithRealSpec(true, true, "local");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.warnings.some((w) => w.includes("could not be determined")), JSON.stringify(result.result.warnings)).toBe(false);
+    expect(owned().length).toBeGreaterThan(0);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toEqual(f.saved);
+  });
+
+  it("control: a local: agent its saved launch doesn't locate stays unknown, and nothing is projected", async () => {
+    const { result } = await restoreWithRealSpec(true, true, "local-unrecorded");
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(owned()).toEqual([]);
