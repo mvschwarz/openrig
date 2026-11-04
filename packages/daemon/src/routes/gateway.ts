@@ -26,6 +26,7 @@ import { resolveHumanDeliveryReadiness, type HumanDeliveryReadiness } from "../d
 import { requireSenderIdentity } from "./require-sender-identity.js";
 import { runChannelOperation } from "../domain/gateway/channel-operations.js";
 import { buildSlackAppManifest } from "../domain/gateway/slack/manifest.js";
+import { listPublicChannels, listUsers, type FetchImpl } from "../domain/gateway/slack/slack-api.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import type Database from "better-sqlite3";
 import { HumanQuietStore, QuietWindowError, parseDailyRule, resolveUntil } from "../domain/gateway/human-quiet-windows.js";
@@ -50,6 +51,8 @@ export function gatewayRoutes(opts: {
   relayBearerToken?: string | null;
   /** The clock quiet hours are resolved against (tests inject one). */
   now?: () => Date;
+  /** The Slack directory reads' fetch and secret environment (tests inject both). */
+  slack?: { fetchImpl?: FetchImpl; env?: NodeJS.ProcessEnv };
 } = {}): Hono {
   const app = new Hono();
 
@@ -88,6 +91,37 @@ export function gatewayRoutes(opts: {
   });
 
   app.get("/slack/manifest", (c) => c.json(buildSlackAppManifest()));
+
+  // A client fills a channel map or registers a person by choosing from Slack: one live page per request, read with the
+  // configured bot token, which never leaves the daemon. Listing needs a resolvable token, not inbound delivery.
+  for (const kind of ["channels", "users"] as const) {
+    app.get(`/slack/${kind}`, async (c) => {
+      const cfg = loadConfig(opts.home ?? OPENRIG_HOME);
+      const token = resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg.secretsEnvFile ?? undefined, ...(opts.slack?.env ? { env: opts.slack.env } : {}) });
+      if (!token) {
+        return c.json({ error: "slack_not_configured", message: "No Slack bot token is configured. Run rig slack setup, or set SLACK_BOT_TOKEN." }, 503);
+      }
+      const limit = Number.parseInt(c.req.query("limit") ?? "", 10);
+      const page = { cursor: c.req.query("cursor") || undefined, limit: Number.isInteger(limit) && limit > 0 ? Math.min(limit, 200) : 100 };
+      const result = kind === "channels"
+        ? await listPublicChannels(token, page, opts.slack?.fetchImpl)
+        : await listUsers(token, page, opts.slack?.fetchImpl);
+      if (result.ok) return c.json({ ok: true, [kind]: result.items, nextCursor: result.nextCursor });
+      const r = result.result;
+      if (r.error === "missing_scope") {
+        const needed = typeof r.json.needed === "string" ? r.json.needed : null;
+        return c.json({ error: "slack_missing_scope", needed,
+          message: `The Slack app lacks ${needed ?? "a scope"} for this list. Add it to the app and reinstall it.` }, 403);
+      }
+      if (r.status === 429 || r.error === "ratelimited") {
+        if (r.retryAfterSeconds) c.header("Retry-After", String(r.retryAfterSeconds));
+        return c.json({ error: "slack_rate_limited", retryAfterSeconds: r.retryAfterSeconds ?? null }, 429);
+      }
+      // A transport failure's message can quote the request, Authorization header included, so it never goes back.
+      if (r.status === 0) return c.json({ error: "slack_unreachable", message: "Slack couldn't be reached with the configured bot token. Check the token and the network." }, 502);
+      return c.json({ error: "slack_error", slackError: r.error ?? null }, 502);
+    });
+  }
 
   app.get("/human/:entityId/readiness", async (c) => {
     const entityId = c.req.param("entityId");
