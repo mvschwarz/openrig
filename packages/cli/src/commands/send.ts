@@ -765,7 +765,7 @@ async function detectStagedAtPrompt(
   for (let i = lines.length - 1; i >= 0; i--) {
     if (PROMPT_LINE_PATTERN.test(lines[i]!)) { lastPrompt = i; break; }
   }
-  if (lastPrompt === -1) return { state: "not-staged" };
+  if (lastPrompt === -1) return { state: "unchecked", why: "no input prompt was visible in the capture" };
   const inputRegionRaw = lines.slice(lastPrompt).join("\n").replace(PROMPT_LINE_PATTERN, "");
   // IDENTITY FIRST (round-2 F2, desk-binding): the literal-residual match uses
   // the daemon submit-precheck's own normalization (strip ALL whitespace,
@@ -1102,7 +1102,7 @@ async function runFanOutSend(params: {
     const rawResults = (res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string }> | undefined) ?? [];
     const encodedResults = rawResults.map((r) =>
       effectUnresolved(effectBySeat.get(r.sessionName))
-        ? { ...r, ok: false, verified: false, outcome: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission-unconfirmed" : "staged-not-consumed", error: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission unconfirmed; the post-submit capture failed" : "staged, not consumed (pane effect); the one guarded submit did not clear it" }
+        ? { ...r, ok: false, verified: false, outcome: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission-unconfirmed" : "staged-not-consumed", error: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission unconfirmed; the post-submit recheck was unavailable" : "staged, not consumed (pane effect); the one guarded submit did not clear it" }
         : r
     );
     // Round-3 (r2 row 00fb3a68): the machine-readable AGGREGATE derives from

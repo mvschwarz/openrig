@@ -285,14 +285,18 @@ describe("Send CLI", () => {
     expect(output).toContain("Note: sent as exact text, without the From/To envelope, because infra-ui@term-rig is a terminal seat.");
   });
 
-  it.each([false, true])("keeps the send unresolved when the post-submit capture fails (json: %s)", async json => {
+  it.each([
+    { json: false, missingPrompt: false }, { json: true, missingPrompt: false },
+    { json: false, missingPrompt: true }, { json: true, missingPrompt: true },
+  ])("keeps the send unresolved when the post-submit capture is unusable ($json, $missingPrompt)", async ({ json, missingPrompt }) => {
     let captures = 0, submits = 0;
     const client = {
       post: async (path: string, body: Record<string, unknown>) => {
         if (path === "/api/transport/capture") {
           captures++;
           return captures === 1 ? { status: 200, data: { content: "❯ make test" } }
-            : { status: 503, data: { error: "capture unavailable" } };
+            : missingPrompt ? { status: 200, data: { content: "redrawing" } }
+              : { status: 503, data: { error: "capture unavailable" } };
         }
         if (body["submitOnly"]) { submits++; return { status: 200, data: { ok: true } }; }
         return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
