@@ -133,6 +133,11 @@ export class HerdrViewer {
       const id = JSON.stringify([key.hostId, key.nodeId]);
       entry = journal.entries[id];
       let created = false;
+      // A daemon upgrade can change only the tile script (argv[2]); the seat it attaches is the same.
+      if (entry && entry.command !== target.paneCommand && entry.readOnly === target.readOnly
+        && entry.argv.length === target.attachArgv.length && entry.argv.every((word, i) => i === 2 || word === target.attachArgv![i])) {
+        entry.command = target.paneCommand; entry.argv = target.attachArgv; if (provision) save();
+      }
       if (entry && (entry.command !== target.paneCommand || entry.readOnly !== target.readOnly)) {
         return unconfirmed("The seat attachment changed; the existing viewer must be inspected before reprovisioning.");
       }

@@ -58,6 +58,22 @@ function fixture() {
 }
 
 describe("owned Herdr viewer", () => {
+  it("keeps a viewer recorded under an older tile script, but not one for another seat", async () => {
+    const f = fixture(); expect((await f.viewer().ensure(key, f.target)).ok).toBe(true);
+    const file = path.join(f.root, readdirSync(f.root).find(n => n.endsWith(".json"))!);
+    const rewrite = (edit: (e: { command: string; argv: string[] }) => void) => {
+      const journal = JSON.parse(readFileSync(file, "utf8"));
+      for (const e of Object.values<{ command: string; argv: string[] }>(journal.entries)) edit(e);
+      writeFileSync(file, JSON.stringify(journal));
+    };
+    rewrite(e => { e.argv[2] = "older script"; e.command = "older command"; });
+    expect(await f.viewer().lookup(key, f.target)).toMatchObject({ ok: true });
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: false });
+    expect(JSON.parse(readFileSync(file, "utf8")).entries[JSON.stringify([key.hostId, key.nodeId])].command).toBe(f.target.paneCommand);
+    rewrite(e => { e.argv[4] = "other@team"; e.command = "other command"; });
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+  });
   it("creates once, verifies empty pane-run response, and reuses under concurrent requests", async () => {
     const f = fixture(), v = f.viewer();
     const result = await Promise.all([v.ensure(key, f.target), v.ensure(key, f.target), v.ensure(key, f.target)]);
