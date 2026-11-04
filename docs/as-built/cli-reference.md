@@ -379,7 +379,7 @@ do not establish connectivity to a live peer.
 |---|---|---|
 | `rig ps` | — | `--json`<br>`--no-cleanup`<br>`--resources`<br>`--nodes`<br>`--full`<br>`--verbose`<br>`--limit <n>`<br>`--fields <list>`<br>`--summary`<br>`--filter <key=value>`<br>`--active`<br>`--running`<br>`-A, --all-rigs`<br>`--rig <name>`<br>`--session <name>`<br>`--include-archived`<br>`--host <id>`<br>`--all-hosts`<br>`--hosts <ids>` |
 
-- `--nodes --json` — each seat carries the daemon's served `needsAttention` flag; the CLI doesn't re-derive it, and it is absent when an older daemon doesn't serve it. `arbitratedNeedsInput` and `needsInputEvidence` (`{ rung, observedAt }` or null) come with `--full`, or by name through `--fields`.
+- `--nodes --json` — each seat carries the daemon's served `needsAttention` flag; the CLI doesn't re-derive it, and it is absent when an older daemon doesn't serve it. `arbitratedNeedsInput` and `needsInputEvidence` (`{ rung, observedAt }` or null) come with `--full`, or by name through `--fields`. `startedWithoutRequired` lists the required startup files a handover's successor started without, and the compact read keeps it.
 
 ### roster
 

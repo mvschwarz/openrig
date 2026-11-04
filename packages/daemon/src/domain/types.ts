@@ -243,7 +243,10 @@ export type RigEvent =
        *  fork provenance, or rebuild's exact primed set / gaps / empty-chain reason. */
       sourceOutcome?:
         | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-        | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string } }
+        | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
+      /** #2456: the required startup files the successor started without (a start would have failed), and that successor's
+       *  session. The seat list marks the seat while this session is its current one. */
+      startedWithoutRequired?: string[]; successorSessionId?: string }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
@@ -871,6 +874,9 @@ export interface NodeInventoryEntry {
   /** OPR.0.3.4.11 — held reason derived from the latest `node.held` event.
    *  Null when no held event, or superseded by a running session / later launch. */
   heldReason?: string | null;
+  /** #2456: the required startup files this occupant started without, from the latest `seat.handover_completed` event while
+   *  its successor session is the seat's current one. A later launch or handover starts a new session, which clears it. */
+  startedWithoutRequired?: string[];
   /** PL-007: per-node workspace block when the rig declares a workspace.
    *  workspaceRoot mirrors RigSpec.workspace.workspaceRoot. activeRepo is
    *  the repo whose path contains the node's cwd, or RigSpec.workspace.

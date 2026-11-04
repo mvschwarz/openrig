@@ -41,6 +41,8 @@ export interface GuidanceItem {
   /** An older "auto" startup file whose source can't be read, so it can't be classified. If its
    *  block isn't in the file, that's reported as a gap; nothing is written for it. */
   unresolved?: boolean;
+  /** A start fails without it: a projected guidance file, or a startup file marked required. */
+  required?: boolean;
 }
 
 export interface SeatGuidance {
@@ -119,7 +121,7 @@ export function seatGuidance(
   for (const saved of startupCtx.projectionEntries) {
     if (saved.category !== "guidance" || saved.mergeStrategy !== "managed_block") continue;
     const e = reanchorShippedProjectionEntry(saved, undefined, exists);
-    items.set(e.effectiveId, { blockId: e.effectiveId, sourcePath: e.absolutePath });
+    items.set(e.effectiveId, { blockId: e.effectiveId, sourcePath: e.absolutePath, required: true });
   }
   // Every guidance startup file the last launch merged, whatever its appliesOn: a fresh-start-only
   // file (onboarding, an agent starter) was merged at that launch and stayed in the file until
@@ -134,13 +136,13 @@ export function seatGuidance(
         hint = resolveConcreteHint(f.path, readFile(f.absolutePath), f.orientation);
       } catch {
         if (f.path.endsWith(".md") && !f.path.endsWith("SKILL.md") && !isPerSeatRoleStartupFile(f.path, f.orientation)) {
-          items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath, unresolved: true });
+          items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath, unresolved: true, required: f.required });
         }
         continue;
       }
     }
     if (hint !== "guidance_merge") continue;
-    items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath });
+    items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath, required: f.required });
   }
   // A seat's own role goes through send_text, never into a shared file (ADR-0006); the adapters skip it too.
   for (const [id, item] of items) if (isPerSeatRoleGuidance(item.blockId, item.sourcePath)) items.delete(id);
@@ -277,7 +279,8 @@ export function readNodeStartupSnapshot(db: Pick<Database.Database, "prepare">, 
 /** #875: put a seat's missing managed blocks back in its guidance file from its saved startup context, as an exact resume
  *  does: the seat-skills line only with the person's yes, and nothing through a recorded file that is now a link. A
  *  successor launch carries no guidance of its own, so every seat's handover needs this before its successor starts
- *  (#2456). Never throws; returns what it did and what it couldn't. */
+ *  (#2456). Never throws; returns what it did and what it couldn't, and the source of each required file (a start fails
+ *  without it) still missing from the guidance file, which the successor then starts without. */
 export function putBackSeatGuidance(input: {
   startupCtx: NodeStartupSnapshot | null;
   cwd: string | null | undefined;
@@ -285,22 +288,31 @@ export function putBackSeatGuidance(input: {
   seatSkillsLineYes: boolean;
   fs: ManagedBlockMergeFsOps;
   linkInfo: LinkInfo;
-}): string[] {
+}): { notes: string[]; startedWithoutRequired: string[] } {
   let guidance: SeatGuidance | null;
   try {
     guidance = seatGuidance(input.startupCtx, input.cwd, input.claudeManagedBlockFile, input.fs.exists, input.fs.readFile);
   } catch (err) {
-    return [`could not read the saved guidance selection: ${(err as Error).message}`];
+    return { notes: [`could not read the saved guidance selection: ${(err as Error).message}`], startedWithoutRequired: [] };
   }
-  if (!guidance) return [];
+  if (!guidance) return { notes: [], startedWithoutRequired: [] };
   const notes: string[] = [];
   const rule = applySeatSkillsLineRule(guidance, input.seatSkillsLineYes);
   guidance = rule.guidance;
+  const seat = guidance;
+  const withoutRequired = (): string[] => {
+    const required = seat.items.filter((item) => item.required);
+    if (required.length === 0) return [];
+    let missing: Set<string>;
+    // A guidance file that can't be read is one the harness can't read either.
+    try { missing = new Set(missingGuidanceBlocks(seat, input.fs)); } catch { return required.map((item) => item.sourcePath); }
+    return required.filter((item) => missing.has(item.blockId)).map((item) => item.sourcePath);
+  };
   if (rule.excluded === "linked") notes.push(`the seat-skills line wasn't put back, because ${guidance.targetPath} is a link`);
   const linked = input.startupCtx?.guidanceFile ? guidanceFileSharedByLink(guidance.targetPath, input.linkInfo) : null;
-  if (linked) return [...notes, `${linked} is now a link, so nothing was put back in ${guidance.targetPath}`];
-  if (guidance.items.length === 0) return notes;
+  if (linked) return { notes: [...notes, `${linked} is now a link, so nothing was put back in ${guidance.targetPath}`], startedWithoutRequired: withoutRequired() };
+  if (guidance.items.length === 0) return { notes, startedWithoutRequired: [] };
   const repair = restoreMissingGuidance(guidance, input.fs);
   if (repair.restored.length > 0) notes.push(`put back missing blocks ${repair.restored.join(", ")} in ${guidance.targetPath} from their current source files`);
-  return [...notes, ...repair.gaps];
+  return { notes: [...notes, ...repair.gaps], startedWithoutRequired: withoutRequired() };
 }
