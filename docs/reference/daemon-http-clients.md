@@ -7,22 +7,27 @@ listed here can change.
 
 ## Finding the daemon
 
-`rig status --json` is the discovery surface. Its `daemon` object gives `state`, `reachable`, `pid` and `port`.
-`reachable` is `true` when the daemon answered its health probe, `false` when it is positively down, and `null`
-when that isn't confirmed (see `rig status` in [the command reference](../as-built/cli-reference.md#status)).
-It reads the recorded state and probes; it never starts a daemon.
+`rig status --json` is the discovery surface. Its `daemon` object gives `state` and `reachable`, and `pid` and
+`port` when they are known: a stopped daemon's response has no `port`, and a running daemon found through
+`OPENRIG_URL` has no `pid`. `reachable` is `true` when the daemon answered its health probe, `false` when it is
+positively down, and `null` when that isn't confirmed (see `rig status` in
+[the command reference](../as-built/cli-reference.md#status)). It reads the recorded state and probes; it never
+starts a daemon.
 
-The CLI itself finds the daemon in two different orders:
+The CLI itself finds the daemon in these orders:
 
 - **Data commands** (everything that sends a request): `OPENRIG_URL` (or the legacy `RIGGED_URL`); else
   `$OPENRIG_HOME/daemon.json` when it holds a valid `pid` and `port`; else the config keys `daemon.host` and
   `daemon.port` (environment `OPENRIG_HOST` and `OPENRIG_PORT`), which default to `127.0.0.1:7433`.
-- **Lifecycle commands** (`rig daemon start`, `stop`, `status`): `$OPENRIG_HOME/daemon.json`, then the legacy
+- **Status** (`rig status`, `rig daemon status`): `OPENRIG_URL` (or `RIGGED_URL`) first, probed directly; else
+  the state file below.
+- **Start and stop** (`rig daemon start`, `stop`): the state file, `$OPENRIG_HOME/daemon.json`, then the legacy
   `~/.rigged/daemon.json`.
 
-`daemon.json` holds `pid`, `port`, `host`, `db` and `startedAt`. `rig daemon start` writes it only after the
-daemon's health check passes, so while a start is still pending the file doesn't exist yet. It is the CLI's own
-state file, not a published contract: prefer `rig status --json`.
+`daemon.json` holds `pid`, `port`, `host`, `db` and `startedAt`. `rig daemon start` writes a new daemon's record
+only after its health check passes, so while a start is pending, the file holds no record of the new daemon: it
+may be missing, or hold an earlier daemon's stale record. It is the CLI's own state file, not a published
+contract: prefer `rig status --json`.
 
 ## `GET /healthz`
 
@@ -81,7 +86,8 @@ All three are server-sent events (`text/event-stream`):
 
 ## Route details
 
-- **`GET /api/queue/recent-transitions`** returns at most 20 rows: `limit` is clamped to 1–20, and defaults to 20.
+- **`GET /api/queue/recent-transitions`** returns at most 20 rows. A positive `limit` above 20 is capped at 20;
+  a missing, zero, negative or unparseable `limit` means 20.
 - **`POST /api/transport/send`** takes `urgent: true`, the same as `rig send --urgent`. The daemon records who
   marked it from the sender identity, not from the body.
 - **`POST /api/scope/approve`** is what `rig scope slice approve` and `rig scope mission approve` call. The body
@@ -89,9 +95,11 @@ All three are server-sent events (`text/event-stream`):
   default), `missionsRoot`, `onBehalfOf`, `reApprove`, `reason` and `lockedArtifacts`. The approver is the
   request's sender identity (`actorSession` in the body is recorded beside it, and a different value is
   superseded). Success is 201 with `scopeTier`, `scopeId`, `scopePath`, `approvalScope`, `approvedBy`,
-  `approvedAt`, `onBehalfOf`, `actionId`, `freezeFired` and `reApproved`. Refusals are 404 `scope_not_found`,
-  409 `already_approved` or `nothing_to_reapprove`, 503 `workspace_not_configured`, 500 `audit_write_failed`, or
-  400 for the rest.
+  `approvedAt`, `onBehalfOf`, `actionId`, `freezeFired` and `reApproved`. Refusals include 400 for an invalid
+  `scopeTier`, `scopePath` or `approvalScope`, or a missing actor (`actor_required`); 503 `action_log_unavailable`;
+  and, from the approval itself, 404 `scope_not_found`, 409 `already_approved` or `nothing_to_reapprove`, 503
+  `workspace_not_configured`, 500 `audit_write_failed`, and 400 for its other refusals. An unexpected error is 500
+  `internal`.
 - **`POST /api/proof/judge`** is what `rig proof judge` calls. The body takes `scope`, `item`, `verdict`
   (`accept`, `reject` or `withdraw`), `reason`, `expectedRevision` and `expectedPrevious` (a judgment id or
   `null`), and optionally `evidence`, `expectedEvidence`, `subject`, `operationId`, `replace`, `project` and
@@ -102,9 +110,12 @@ All three are server-sent events (`text/event-stream`):
   Success is 201 with `instance`, `spec`, `entryQitemId` and `entryOwnerSession`, any `advisories`, and
   `scopeIgnored` when a scope wasn't applied.
 - **`GET /api/provider/usage`** returns `{ hostUsage }`, this host's usage rows (`host: "local"`, a `provider`
-  and a `state`). A row's `windows`
-  lists each seat's reading separately (each carries `seatSession`), so an account's weekly window appears once
-  for every seat that reported it; group by `window` and `resetsAt` to show it once.
+  and a `state`). A Claude row's `windows` are the seats' status-line readings, one entry per reading, each with
+  its `window`, `usedPercent`, `resetsAt`, `asOf` and `seatSession`. A Codex row has `windows: []`. Treating the
+  readings as one account rests on the deployment assumption the row's `provenance` names (one account per
+  host), not on a measured identity. Readings whose reset times disagree are reported as `anomalies`, and the
+  row's `state` can then be `explicit_unknown`. Show the row's `state`, `anomalies` and each reading's seat and
+  `asOf` as reported, rather than merging readings that happen to match.
 - **Slices are found by folder name alone.** `GET /api/slices/:name`, `/:name/doc/*`, `/:name/proof-asset/*` and
   `GET /api/review/slice/:name` take only the name; the detail route reads `?mission` only together with
   `?project`. When two missions have a slice folder of the same name, the daemon keeps the first one it finds:
