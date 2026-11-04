@@ -26,6 +26,7 @@ import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore, InboundReceiptStore, slackMicros } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
+import { SlackAskSettlement } from "./settled-asks.js";
 import { abortableSleep, subsystemSlackDeliver } from "./slack-delivery.js";
 import { InboundRouter, SLACK_THREAD_ROOT_TAG, handleEnvelope, type SocketEnvelope, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
@@ -1006,6 +1007,11 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // hermeticity rule, same as every monitor in the supervision tree.
   const stops: Array<() => void> = [];
   const starts: Array<() => void> = [];
+  const settlement = outboundReady ? new SlackAskSettlement({ queue: opts.queueRepo, token: bot!, fetchImpl: opts.fetchImpl, log }) : null;
+  if (settlement) {
+    starts.push(() => settlement.start());
+    stops.push(() => settlement.stop());
+  }
   let inboundHandle: SocketInboundHandle | undefined;
   let recovery: SlackRecovery | undefined;
   // Recovery covers the channels this machine owns and the threads tracked in them. The configured
@@ -1200,6 +1206,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       platform: "slack", configurationDigest: channelStateDigest(cfg),
       outboundReady,
       inboundReady,
+      ...(settlement ? { settlement: settlement.status() } : {}),
       inboundRouting,
       recovery: recovery?.status() ?? { state: "unavailable", reason: "inbound-not-configured" },
       inbound: inboundHandle?.status() ?? { state: inboundReady ? "not-started" : "not-configured", generation: 0, reconnects: 0 },

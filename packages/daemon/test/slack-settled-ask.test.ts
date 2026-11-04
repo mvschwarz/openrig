@@ -29,6 +29,8 @@ describe("posted asks follow settlement outside Slack", () => {
   let messages: Message[];
   let updates: Array<Record<string, unknown>>;
   let postCount: number;
+  let apiHook: ((method: string, body: Record<string, unknown>) => Response | undefined) | undefined;
+  let methods: string[];
   const logs: string[] = [];
 
   function start() {
@@ -37,6 +39,10 @@ describe("posted asks follow settlement outside Slack", () => {
       fetchImpl: async (url, init) => {
         const api = new URL(url);
         const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        const method = api.pathname.split("/").at(-1)!;
+        methods.push(method);
+        const override = apiHook?.(method, body);
+        if (override) return override;
         if (api.pathname.endsWith("chat.postMessage")) {
           postCount++;
           const message = { ...body, ts: `${postCount}.000001` } as Message;
@@ -66,29 +72,32 @@ describe("posted asks follow settlement outside Slack", () => {
     const secrets = join(home, "fake.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n");
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-ASKS", secretsEnvFile: secrets }, home);
-    messages = []; updates = []; postCount = 0; logs.length = 0;
+    messages = []; updates = []; postCount = 0; logs.length = 0; methods = []; apiHook = undefined;
     start();
   });
-  afterEach(() => { wire.stop(); db.close(); rmSync(home, { recursive: true, force: true }); });
+  afterEach(() => { wire.stop(); vi.useRealTimers(); db.close(); rmSync(home, { recursive: true, force: true }); });
 
   async function postAsk(detail?: string) {
+    const before = postCount;
     const item = await repo.create({ sourceSession: "author@rig", destinationSession: human,
       summary: "Ship the change?", body: "Original **brief** with its evidence.", humanDetail: detail,
       humanQuestions: [{ id: "ship", question: "Ship now?", options: [{ id: "yes", label: "Ship" }, { id: "hold", label: "Hold" }] }], nudge: false });
     const [alert] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({});
     expect(alert?.qitemId).toBe(item.qitemId);
     expect(wire.dispatcher.dispatch("post_message", human, alert)).toMatchObject({ ok: true });
-    await vi.waitFor(() => expect(repo.currentHumanRequiredEpisode(item.qitemId)?.receipt?.messageTs).toBe("1.000001"));
-    expect(messages[0]!.blocks.some((b) => b.type === "actions")).toBe(true);
-    expect(messages[0]!.text).toContain("Reply in this thread after this question");
+    await vi.waitFor(() => expect(repo.currentHumanRequiredEpisode(item.qitemId)?.receipt?.messageTs).toBe(`${before + 1}.000001`));
+    expect(messages[before]!.blocks.some((b) => b.type === "actions")).toBe(true);
+    expect(messages[before]!.text).toContain("Reply in this thread after this question");
     return item;
   }
 
   it.each(["done", "canceled"] as const)("edits the original primary after a CLI-style %s transition, preserving its content and marker", async (state) => {
     const item = await postAsk();
     const original = structuredClone(messages[0]!);
+    const successor = state === "canceled" ? await repo.create({ sourceSession: "author@rig", destinationSession: "worker@rig",
+      summary: "Replacement work", body: "The successor owns the remaining work.", nudge: false }) : undefined;
     repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state,
-      closureReason: "superseded", transitionNote: "Handled in the pane after the merge." });
+      closureReason: "superseded", ...(successor ? { closureTarget: successor.qitemId } : {}), transitionNote: "Handled in the pane after the merge." });
     const closed = repo.listTransitions(item.qitemId).at(-1)!;
     expect(repo.getById(item.qitemId)?.state).toBe(state);
     await vi.waitFor(() => expect(updates).toHaveLength(1));
@@ -142,5 +151,111 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(updates).toHaveLength(0);
     expect(messages[0]!.blocks.some((b) => b.type === "actions")).toBe(true);
     expect(postCount).toBe(1);
+  });
+
+  it("edits the original on a typed answer and names the answering person", async () => {
+    const item = await postAsk();
+    expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: "Ship it" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]!.text).toContain("Answered");
+    expect(updates[0]!.text).toContain(`by ${human}`);
+    expect(postCount).toBe(1);
+  });
+
+  it("retains a refused private-channel read without claiming the edit, then recovers on restart", async () => {
+    const item = await postAsk();
+    apiHook = (method) => method === "conversations.history" ? response({ ok: false, error: "missing_scope" }) : undefined;
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    await vi.waitFor(() => expect(logs.join("\n")).toContain("missing_scope"));
+    expect(methods).not.toContain("chat.update");
+    expect(repo.listTransitions(item.qitemId).some((t) => t.transitionNote?.startsWith("slack-ask-settled "))).toBe(false);
+    expect(wire.status?.()).toMatchObject({ settlement: { pending: 1, lastFailure: expect.stringContaining("not done") } });
+    wire.stop(); apiHook = undefined; start();
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(postCount).toBe(1);
+  });
+
+  it("honors a chat.update Retry-After, without a success receipt until the retry succeeds", async () => {
+    const item = await postAsk();
+    wire.stop(); vi.useFakeTimers();
+    let limited = true;
+    apiHook = (method) => method === "chat.update" && limited
+      ? new Response(JSON.stringify({ ok: false, error: "ratelimited" }), { status: 429, headers: { "retry-after": "60" } }) : undefined;
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(methods.filter((m) => m === "chat.update")).toHaveLength(1);
+    expect(updates).toHaveLength(0);
+    expect(repo.listTransitions(item.qitemId).some((t) => t.transitionNote?.startsWith("slack-ask-settled "))).toBe(false);
+    wire.stop(); start(); // Retry-After survives the wire, like the posted receipt.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(methods.filter((m) => m === "chat.update")).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(methods.filter((m) => m === "chat.update")).toHaveLength(1);
+    limited = false;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(updates).toHaveLength(1);
+    expect(repo.listTransitions(item.qitemId).some((t) => t.transitionNote?.startsWith("slack-ask-settled "))).toBe(true);
+    expect(postCount).toBe(1);
+  });
+
+  it("replays an edit whose HTTP result was lost without duplicating status or posting anew", async () => {
+    const item = await postAsk();
+    apiHook = (method, body) => {
+      if (method !== "chat.update") return;
+      Object.assign(messages[0]!, body); // Slack applied it, but its answer was lost.
+      throw new Error("response lost");
+    };
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    await vi.waitFor(() => expect(logs.join("\n")).toContain("response lost"));
+    expect(repo.listTransitions(item.qitemId).some((t) => t.transitionNote?.startsWith("slack-ask-settled "))).toBe(false);
+    wire.stop(); apiHook = undefined; start();
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(messages[0]!.blocks.filter((b) => b.block_id === "or-settled")).toHaveLength(1);
+    expect(messages[0]!.text.match(/^Done/gm)).toHaveLength(1);
+    expect(postCount).toBe(1);
+  });
+
+  it("bounds a closure burst to the recovery call budget and drains the remaining primary later", async () => {
+    const items = [await postAsk(), await postAsk(), await postAsk()];
+    wire.stop(); vi.useFakeTimers();
+    for (const item of items) repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(updates).toHaveLength(2);
+    expect(methods.filter((m) => m === "conversations.history")).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(updates).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(updates).toHaveLength(3);
+    expect(new Set(updates.map((m) => m.ts)).size).toBe(3);
+    expect(postCount).toBe(3);
+  });
+
+  it("unparks an answered gate and keeps its next thread-primary interactive until that park ends", async () => {
+    const item = await repo.create({ sourceSession: "author@rig", destinationSession: "worker@rig",
+      summary: "Choose the next step", body: "Original work", nudge: false });
+    const park = () => repo.update({ qitemId: item.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: human,
+      summary: "May I continue?", evidenceRef: "https://example.com/proof", transitionNote: "Need the person's answer." });
+    const send = async (ts: string) => {
+      const [alert] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({});
+      expect(alert?.qitemId).toBe(item.qitemId);
+      expect(wire.dispatcher.dispatch("post_message", human, alert)).toMatchObject({ ok: true });
+      await vi.waitFor(() => expect(repo.currentHumanRequiredEpisode(item.qitemId)?.receipt?.messageTs).toBe(ts));
+    };
+    park(); await send("1.000001");
+    expect(messages[0]!.text).toContain("Reply in this thread after this question");
+    repo.update({ qitemId: item.qitemId, actorSession: "worker@rig", state: "in-progress", transitionNote: "Answered in the pane; continuing." });
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    park(); await send("2.000001");
+    expect(messages[1]!.thread_ts).toBe("1.000001");
+    expect(messages[1]!.text).toContain("Reply in this thread after this question");
+    expect(updates).toHaveLength(1);
+    repo.update({ qitemId: item.qitemId, actorSession: "worker@rig", state: "in-progress", transitionNote: "Second answer received." });
+    await vi.waitFor(() => expect(updates).toHaveLength(2));
+    expect(updates[1]!.ts).toBe("2.000001");
+    expect(methods).toContain("conversations.replies");
+    expect(messages[1]!.text).not.toContain("Reply in this thread after this question");
+    expect(postCount).toBe(2);
   });
 });
