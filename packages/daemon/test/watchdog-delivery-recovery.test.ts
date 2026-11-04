@@ -80,6 +80,7 @@ describe("an undelivered scheduled occurrence remains owed", () => {
     expect(first.jobs.getByIdOrThrow(job.jobId).lastFireAt).toBeNull();
     const saved = first.db.serialize(); first.db.close();
     const resumed = boot(database(saved), send);
+    later(1); // Distinct evaluation times: random ULIDs do not order two records at the same fake instant.
     await resumed.scheduler.runTickNow();
     expect(send).toHaveBeenCalledTimes(1);
     expect(resumed.jobs.getByIdOrThrow(job.jobId).lastFireAt).not.toBeNull();
