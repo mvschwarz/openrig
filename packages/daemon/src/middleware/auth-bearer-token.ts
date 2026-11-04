@@ -257,7 +257,7 @@ export async function assertBindAuthInvariant(opts: {
   if (opts.bearerToken && opts.bearerToken.length > 0) return;
   throw new AuthBearerTokenStartupError(
     `daemon refusing to start: bind host '${opts.host}'${resolvedIp ? ` (resolves to ${resolvedIp})` : ""} is not loopback or tailscale, ` +
-      `and auth.bearerToken (env OPENRIG_AUTH_BEARER_TOKEN) is empty. ` +
+      `and OPENRIG_AUTH_BEARER_TOKEN is empty. ` +
       `Either: (a) bind to 127.0.0.1 / localhost, (b) bind to a tailscale interface (100.64.0.0/10 IPv4 or fd7a:115c:a1e0::/48 IPv6), ` +
       `or (c) set OPENRIG_AUTH_BEARER_TOKEN to a non-empty value before starting the daemon.`,
   );
