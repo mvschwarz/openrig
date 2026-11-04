@@ -204,13 +204,17 @@ export class HerdrViewer {
       // shared attach wrapper may be its parent; no mutable title/agent label.
       const argv = entry.argv;
       const server = argv.slice(6); // tileAttachArgv: sh,-c,script,name,session,tmux,...server
-      const expected = [argv[5]!, ...server, "attach", ...(entry.readOnly ? ["-r"] : ["-f", "ignore-size"]), "-t"];
+      // A writable tile drops ignore-size when its session has no other sizing client (tile-attach).
+      const flags = entry.readOnly ? [["-r"]] : [["-f", "ignore-size"], []];
       const targetName = argv[4]!;
       const verified = info?.foreground_processes?.some(p => {
         const actual = p.argv;
-        return Array.isArray(actual) && expected.every((word, index) => actual[index] === word)
-          && actual.length === expected.length + 1
-          && (actual[expected.length] === `=${targetName}` || actual[expected.length] === binding.sessionId);
+        return Array.isArray(actual) && flags.some(flag => {
+          const expected = [argv[5]!, ...server, "attach", ...flag, "-t"];
+          return expected.every((word, index) => actual[index] === word)
+            && actual.length === expected.length + 1
+            && (actual[expected.length] === `=${targetName}` || actual[expected.length] === binding.sessionId);
+        });
       });
       const afterBinding = await this.inspect(target.attachArgv);
       if (afterBinding.nodeId !== key.nodeId || afterBinding.sessionId !== binding.sessionId) return unconfirmed("The seat binding changed while provisioning its viewer.");
