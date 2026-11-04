@@ -86,6 +86,16 @@ All three are server-sent events (`text/event-stream`):
 
 ## Route details
 
+- **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
+  rig's queue items (any whose source or destination seat is in the rig) updated at or after that time: open items
+  (`pending`, `in-progress`, `blocked`) first, then the rest by latest update. `limit` defaults to 100 and has no
+  upper cap. The list is cut after `limit` rows in that order, so when it comes back full, raise `limit` to read
+  them all. Each item's own history is `GET /api/queue/<qitemId>/transitions`. For live
+  changes, `GET /api/queue/sse` carries each event's sessions, so filter on `@<rig>` yourself.
+- **A rig's messages:** `GET /api/queue/outbox/list?rig=<rig>` returns the messages sent from or to the rig's
+  seats, newest first; `?senderSession=<session>` still returns one sender's. One of the two is required, and
+  `limit` defaults to 100. No event is sent when a message is delivered, so read this list to see delivery
+  states.
 - **`GET /api/queue/recent-transitions`** returns at most 20 rows. A positive `limit` above 20 is capped at 20;
   a missing, zero, negative or unparseable `limit` means 20.
 - **`POST /api/transport/send`** takes `urgent: true`, the same as `rig send --urgent`. The daemon records who

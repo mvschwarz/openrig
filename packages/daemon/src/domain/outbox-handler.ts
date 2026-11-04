@@ -382,6 +382,18 @@ export class OutboxHandler {
     return rows.map((r) => this.rowToEntry(r));
   }
 
+  /** Messages a rig's seats sent or were sent, newest first: sender or destination `<member>@<rig>`. */
+  listForRig(rig: string, limit = 100): OutboxEntry[] {
+    const pattern = `%@${rig.replace(/[\\%_]/g, (ch) => `\\${ch}`)}`;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM outbox_entries WHERE sender_session LIKE ? ESCAPE '\\' OR destination_session LIKE ? ESCAPE '\\'
+         ORDER BY ts_dispatched DESC, rowid DESC LIMIT ?`
+      )
+      .all(pattern, pattern, limit) as OutboxEntryRow[];
+    return rows.map((r) => this.rowToEntry(r));
+  }
+
   /**
    * W1 (transactional closure): list still-`pending` rows whose outbox_id begins
    * with `idPrefix`, oldest first. The drain uses this to recover intents a crash
