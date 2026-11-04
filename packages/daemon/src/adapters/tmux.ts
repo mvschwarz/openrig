@@ -1496,8 +1496,8 @@ export class TmuxAdapter {
       const windowsCommand = this.terminalKind === "psmux" && process.platform === "win32"
         ? (await this.getPaneCommand(target) ?? "").replace(/\.exe$/, "").toLowerCase() : null;
       const windowsCodex = ["codex", "codex-code-mode-host"].includes(windowsCommand ?? "")
-        || (windowsCommand === "node" && await observeCodexPaneProcess({ target, tmux: this, requireArgv: true }) !== null);
-      if (windowsCommand && bracketed && !["pwsh", "powershell"].includes(windowsCommand)) {
+        || (windowsCommand !== null && await observeCodexPaneProcess({ target, tmux: this, requireArgv: true }) !== null);
+      if (windowsCommand && bracketed && (windowsCodex || !["pwsh", "powershell"].includes(windowsCommand))) {
         const pid = await this.getPanePid(target);
         if (!pid) throw new Error("Windows pane process unavailable; no payload submitted");
         if (policy) await policy.beforePaste();

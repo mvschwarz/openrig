@@ -824,6 +824,7 @@ async function observeNativePaneProcess(input: {
   target: string;
   tmux: { getPanePid(target: string): Promise<number | null>; getPaneCommand?(target: string): Promise<string | null> };
   listProcesses?: NativeProcessLister;
+  consoleProcesses?: typeof readWindowsConsoleProcesses;
   expectedToken?: string | null;
   requireResume?: boolean;
   /** Codex only: require exact argv on every chain link without requiring a resume (fresh launches remain eligible). */
@@ -843,15 +844,21 @@ async function observeNativePaneProcess(input: {
     const pid = await input.tmux.getPanePid(input.target);
     if (!pid) return null;
     const rows = await (input.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: input.scriptLaunch === true, frozenExecutable: input.selectedExecutable })))();
+    const selected = selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,
+      runtime === "claude-code" ? input.rotation : undefined, input.scriptLaunch, input.requireArgv, input.selectedScript);
     if (rows.find(row => row.pid === pid)?.platform === "win32") {
       const foreground = windowsExecutableName(await input.tmux.getPaneCommand?.(input.target) ?? "");
       // The npm launcher can remain the psmux foreground while its native Codex
       // child owns the console. selectNativeProcess still proves the exact chain;
       // an arbitrary Node pane is not sufficient runtime identity.
-      if (!(runtime === "claude-code" ? ["claude", "node"] : ["codex", "codex-code-mode-host", "node"]).includes(foreground)) return null;
+      if (!(runtime === "claude-code" ? ["claude", "node"] : ["codex", "codex-code-mode-host", "node"]).includes(foreground)) {
+        // psmux may report an MCP descendant (node_repl, StudioMCP) instead
+        // of the console receiver. Require kernel console membership as well
+        // as the unique, exact Codex ancestry; never accept its name alone.
+        if (runtime !== "codex" || !selected || !(await (input.consoleProcesses ?? readWindowsConsoleProcesses)(pid))?.includes(selected.process.pid)) return null;
+      }
     }
-    return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,
-      runtime === "claude-code" ? input.rotation : undefined, input.scriptLaunch, input.requireArgv, input.selectedScript);
+    return selected;
   } catch { return null; }
 }
 

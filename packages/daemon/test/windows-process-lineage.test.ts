@@ -10,6 +10,13 @@ function rows(): NativeProcessRow[] {
 }
 const verify = (values: NativeProcessRow[], token = "exact-id", foreground = "codex") => verifyCodexPaneProcess({ target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => foreground }, listProcesses: () => values, expectedToken: token, requireResume: true });
 describe("Windows process ancestry without fabricated foreground groups", () => {
+  it("uses kernel console ownership when psmux reports an MCP descendant", async () => {
+    const input = { target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => "node_repl" }, listProcesses: () => rows(), expectedToken: "exact-id", requireResume: true };
+    expect((await verifyCodexPaneProcess({ ...input, consoleProcesses: async () => [100, 101] }))?.process.pid).toBe(101);
+    expect(await verifyCodexPaneProcess({ ...input, consoleProcesses: async () => [100] })).toBeNull();
+    expect(await verifyCodexPaneProcess({ ...input, consoleProcesses: async () => null })).toBeNull();
+    expect(await verifyCodexPaneProcess({ ...input, expectedToken: "wrong", consoleProcesses: async () => [100, 101] })).toBeNull();
+  });
   it("recognizes an npm Node foreground only when its native Codex chain is verified", async () => {
     expect((await verify(rows(), "exact-id", "node"))?.process.pid).toBe(101);
     expect(await verify(rows(), "wrong-id", "node")).toBeNull();
