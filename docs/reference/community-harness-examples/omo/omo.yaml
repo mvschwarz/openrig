@@ -7,6 +7,7 @@ name: omo
 command: omo
 maintainer: Your name or team
 protocol: pi-rpc
+resume: true
 limits:
   - checked with omo 5.1.48 (senpi engine 2026.10.25-2)
   - credentials resolved via omo's agent directory or models.json

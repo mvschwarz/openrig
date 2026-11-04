@@ -865,6 +865,16 @@ describe("--thinking in the runner command and the pi child argv", () => {
     const parsed = parseRunnerArgs(cmd.split(" ").slice(2).map((w) => w.replace(/^'|'$/g, "")));
     expect(buildPiChildArgs({ ...childBase, thinking: parsed.thinking })).toEqual(expect.arrayContaining(["--thinking", "medium"]));
   });
+
+  it("parseRunnerArgs round-trips the command's --command and custom runtime", () => {
+    const cmd = buildPiRunnerCommand({ ...cmdBase, runtime: "omo", command: "omo", thinking: "high" });
+    const argv = cmd.match(/(?:'[^']*'|[^\s]+)/g)!.slice(2).map((arg) => arg.replace(/^'|'$/g, ""));
+    const parsed = parseRunnerArgs(argv);
+    expect(parsed.command).toBe("omo");
+    expect(parsed.runtime).toBe("omo");
+    expect(parsed.thinking).toBe("high");
+    expect(parsed.trust).toBe("approve");
+  });
 });
 
 // ── FR-5: prepareRunnerSidecar + cursor seed (guard re-verdict fold) ─────────

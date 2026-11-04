@@ -114,6 +114,10 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return `${this.runtime}_session_file`;
   }
 
+  protected validateToken(rawToken: unknown): { ok: true; token: string; resumeType?: string } | { ok: false; error: string } {
+    return validateResumeToken(this.runtime, rawToken);
+  }
+
   /** The pi-runner sidecar reader shape resume-token-capture consumes
    *  (deriveResumeToken's piRunnerStateStore dep). */
   readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string } {
@@ -270,7 +274,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
     if (opts.resumeToken) {
       // Validity floor before we type anything into the pane.
-      const validation = validateResumeToken(this.runtime, opts.resumeToken);
+      const validation = this.validateToken(opts.resumeToken);
       if (!validation.ok) {
         return { ok: false, error: `${this.runtime} resume: ${validation.error}` };
       }
@@ -305,7 +309,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
       : observePiResourceTrust(trust);
     const cmd = buildPiRunnerCommand({
-      runtime: this.runtime === "omp" ? "omp" : "pi",
+      runtime: this.runtime === "omp" ? "omp" : (this.runtime === "pi" ? "pi" : this.runtime),
       command: this.commandName,
       runnerEntryPath: this.runnerEntryPath,
       sessionName,
@@ -324,7 +328,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       openRouterCharge: this.runtime === "pi" && this.openRouterChargeEnabled(),
     });
 
-    const command = this.runtime === "pi" && this.seatLaunchEnvironment
+    const command = this.runtime !== "omp" && this.seatLaunchEnvironment
       ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
       : cmd;
     // Stage long commands without leaving a shell above the live runner.
@@ -346,18 +350,18 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     if (!sessionFile) {
       return { ok: false, error: `${this.runtime} launch: the runner became ready but reported no session file` };
     }
-    if (this.runtime === "omp" && opts.resumeToken && sessionFile !== opts.resumeToken) {
-      // An exact OMP resume must continue the requested history; a runner
+    if (opts.resumeToken && sessionFile !== opts.resumeToken) {
+      // An exact resume must continue the requested history; a runner
       // that came up on any other file started a different session. Same
       // contract as the separate resume adapter's verifyResume.
-      return { ok: false, error: "omp resume: the runner is ready but does not report the requested session file" };
+      return { ok: false, error: `${this.runtime} resume: the runner is ready but does not report the requested session file` };
     }
     if (forkRef && sessionFile === forkRef) {
       // The adapter contract requires the NEW post-fork token, never the
       // parent's (runtime-adapter.ts fork rule).
       return { ok: false, error: `${this.runtime} fork: the runner reported the parent session file instead of the post-fork child` };
     }
-    const validation = validateResumeToken(this.runtime, sessionFile);
+    const validation = this.validateToken(sessionFile);
     if (!validation.ok) {
       return { ok: false, error: `${this.runtime} launch: the runner reported a malformed session file (${validation.error})` };
     }

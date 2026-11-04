@@ -13,7 +13,8 @@ import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
 import { nodeExecutorConfirmedStopped } from "../domain/node-inventory.js";
 import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
-import { validateResumeToken } from "../domain/resume-token-validation.js";
+import { validateResumeToken, validateSessionFileFormat } from "../domain/resume-token-validation.js";
+import { loadCommunityHarnessPreset } from "../domain/community-harness-presets.js";
 import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import {
@@ -363,11 +364,27 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
     }
 
+function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string, runtime: string): boolean {
+  if (runtime === "pi" || runtime === "omp" || runtime === "claude-code" || runtime === "codex" || runtime === "terminal") {
+    return false;
+  }
+  const found = loadCommunityHarnessPreset(runtime);
+  if (found.ok && found.preset.protocol === "pi-rpc") return true;
+  if (sessionCommunityRunnerSelect(db) !== "NULL") {
+    const row = db.prepare(`SELECT agent_app, ${sessionCommunityRunnerSelect(db, "s")} AS runner FROM sessions s WHERE s.id = ?`).get(sessionId) as { agent_app?: string; runner?: number } | undefined;
+    if (row?.runner === 1) return true;
+  }
+  return false;
+}
+
     // OPR.0.4.6.PI1 FR-5 — Pi session identity arrives from the pi-runner's
     // RPC get_state (provenance "rpc" on the bus, never scrape). The resume
     // TOKEN for Pi is the session FILE (body.sessionFile), not the session id;
     // it is format-validated before the persist and never echoed on failure.
-    if (runtime === "pi") {
+    // Pi-RPC community harnesses share this protocol, but persist community:<name>.
+    const isPi = runtime === "pi" && resolved.runtime === "pi";
+    const isCommunityPi = !isPi && (resolved.runtime !== null && resolved.runtime !== "omp" && isPiRpcHarness(store.db, resolved.sessionId, resolved.runtime));
+    if (isPi || isCommunityPi) {
       // A delayed get_state from a retired runner must not replace the successor's
       // resume token or publish a current identity. Keep resolution, this check
       // and both effects synchronous so renewal cannot interleave at an await.
@@ -382,26 +399,27 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       } catch {
         return c.json({
           ok: false, code: "generation_resolver_error", tokenPersisted: false,
-          error: "Pi session identity ignored: occupant generation is unavailable.",
+          error: `${isPi ? "Pi" : resolved.runtime} session identity ignored: occupant generation is unavailable.`,
         }, 503);
       }
       if (reason) {
         return c.json({
           ok: false, code: reason, tokenPersisted: false,
-          error: "Pi session identity ignored: emitter is not the registered current occupant.",
+          error: `${isPi ? "Pi" : resolved.runtime} session identity ignored: emitter is not the registered current occupant.`,
         }, 409);
       }
       const sessionFile = stringOrNull(body.sessionFile);
-      const validation = validateResumeToken("pi", sessionFile);
+      const validation = isPi ? validateResumeToken("pi", sessionFile) : validateSessionFileFormat(sessionFile, resolved.runtime ?? "community");
+      const resumeType = isPi ? "pi_session_file" : `community:${resolved.runtime}`;
       if (validation.ok) {
-        sessionRegistry.updateResumeToken(resolved.sessionId, "pi_session_file", validation.token, "hook");
+        sessionRegistry.updateResumeToken(resolved.sessionId, resumeType, validation.token, "hook");
       }
       eventBus.emit({
         type: "agent.session_identity",
         rigId: resolved.rigId,
         nodeId: resolved.nodeId,
         sessionName: resolved.sessionName,
-        runtime: "pi",
+        runtime: resolved.runtime ?? "pi",
         sessionId,
         provenance: "rpc",
       });

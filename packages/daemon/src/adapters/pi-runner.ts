@@ -179,7 +179,7 @@ function piCredentialHint(message: string): string {
     : " For managed Pi, configure this provider in the seat's PI_CODING_AGENT_DIR (auth.json or models.json). Its key is not in OpenRig's Pi environment passthrough map; default Pi logins are not automatically shared.";
 }
 
-function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
+function errorNotice(details: unknown[], runtime: RunnerRuntime | string): string {
   // Empty or control-only fields must not hide a later usable diagnostic.
   const text = details.map(detail => typeof detail === "string"
     ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
@@ -193,7 +193,7 @@ function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
  *  turn normally; OMP repeats the message on turn_end, and either runtime can
  *  announce it again when automatic retries exhaust. The core coalesces the
  *  repeats into one notice per failure. */
-function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime): { errorNotice?: string } {
+function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime | string): { errorNotice?: string } {
   if (event.type === "auto_retry_end") {
     return event.success === false ? { errorNotice: errorNotice([event.finalError, event.error], runtime) } : {};
   }
@@ -204,7 +204,7 @@ function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime
   return {};
 }
 
-export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime = "pi"): MirrorAndActivity {
+export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime | string = "pi"): MirrorAndActivity {
   const type = typeof event.type === "string" ? event.type : "";
   switch (type) {
     case "agent_start":
@@ -426,7 +426,7 @@ export class RunnerCore {
   constructor(
     private io: RunnerIo,
     private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string },
-    private opts: { catchUpSince?: string; runtime?: RunnerRuntime; usageFacts?: boolean; openRouterCharge?: boolean;
+    private opts: { catchUpSince?: string; runtime?: RunnerRuntime | string; usageFacts?: boolean; openRouterCharge?: boolean;
       /** K4: the credential observation taken before Pi was spawned. */
       launchCredentialEvidence?: PiCredentialEvidence } = {},
   ) {
@@ -518,7 +518,7 @@ export class RunnerCore {
     if (reason) this.io.mirrorLine(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
   }
 
-  private get runtime(): RunnerRuntime { return this.opts.runtime ?? "pi"; }
+  private get runtime(): string { return this.opts.runtime ?? "pi"; }
 
   /** One aggregated paste block from pane stdin. */
   handleUserBlock(block: string): void {
@@ -718,7 +718,7 @@ export class RunnerCore {
    *  idle while ready, not mid-turn and not waiting on the operator keeps the verdict honest: a runner that dies
    *  stops beating and the seat goes back to `unknown`. Pi only; the OMP identity handshake has its own retry. */
   heartbeat(): void {
-    if (this.runtime !== "pi" || !this.ready || this.streaming || this.attention) return;
+    if (this.runtime === "omp" || !this.ready || this.streaming || this.attention) return;
     // `streaming` follows only agent_start/agent_end; turn_start, compaction and auto-retry also report the agent
     // working. Beat only when the last thing posted was a Stop (or nothing yet), so a beat never lands mid-turn.
     if (this.lastPostedHook !== null && this.lastPostedHook !== "Stop") return;
@@ -733,13 +733,13 @@ export class RunnerCore {
   }
 
   private handleEvent(event: Record<string, unknown>): void {
-    if ((this.runtime === "omp" || this.runtime === "pi") && event.type === "extension_ui_request") {
+    if (event.type === "extension_ui_request") {
       const method = event.method;
       const dialog = method === "select" || method === "confirm" || method === "input" || method === "editor";
       const detail = [event.title, event.message].filter((text): text is string => typeof text === "string")
         .map(stripVTControlCharacters).join(" — ").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").slice(0, 400);
-      if (this.runtime === "pi" && !dialog) {
-        if (method === "notify") this.io.mirrorLine(`[pi-runner] ${detail}`);
+      if (this.runtime !== "omp" && !dialog) {
+        if (method === "notify") this.io.mirrorLine(`[${this.runtime}-runner] ${detail}`);
         return; // Pi notifications and other fire-and-forget UI requests expect no answer.
       }
       // RPC does not mount an interactive UI. Reply at once; otherwise the
@@ -748,8 +748,8 @@ export class RunnerCore {
         this.io.sendRpc({ type: "extension_ui_response", id: event.id, cancelled: true });
       }
       if (dialog) {
-        this.io.mirrorLine(this.runtime === "pi"
-          ? `[pi-runner] Extension ${method}: ${detail}; cancelled because the managed RPC pane cannot answer it. Operator action required: review the cancelled request and re-send an instruction the extension can complete without a dialog.`
+        this.io.mirrorLine(this.runtime !== "omp"
+          ? `[${this.runtime}-runner] Extension ${method}: ${detail}; cancelled because the managed RPC pane cannot answer it. Operator action required: review the cancelled request and re-send an instruction the extension can complete without a dialog.`
           : "[omp-runner] Approval/input requested; cancelled because the managed RPC pane cannot answer it. Operator action required: review the denied action and re-send a safe instruction, or change the seat permission policy explicitly.");
         this.raiseAttention("permission_prompt");
       }
@@ -889,8 +889,8 @@ export class RunnerCore {
       runtime: this.runtime,
       hookEvent,
       subtype,
-      // A Pi runner's idle report holds only while it keeps beating; the daemon expires it after two missed beats.
-      ...(this.runtime === "pi" && hookEvent === "Stop" && subtype !== "pi_exited" ? { livenessSeconds: IDLE_HEARTBEAT_MS / 1000 } : {}),
+      // A Pi-protocol runner's idle report holds only while it keeps beating; the daemon expires it after two missed beats.
+      ...(this.runtime !== "omp" && hookEvent === "Stop" && subtype !== `${this.runtime}_exited` ? { livenessSeconds: IDLE_HEARTBEAT_MS / 1000 } : {}),
       occurredAt: this.io.now(),
     };
   }
@@ -913,7 +913,7 @@ export class RunnerCore {
 // ── CLI entry ────────────────────────────────────────────────────────────────
 
 interface RunnerArgs {
-  runtime?: RunnerRuntime;
+  runtime?: RunnerRuntime | string;
   command?: string;
   sessionName: string;
   stateRoot: string;
@@ -946,7 +946,7 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       case "--session-name": args.sessionName = next(); break;
       case "--runtime": {
         const runtime = next();
-        if (runtime !== "pi" && runtime !== "omp") throw new Error(`unsupported runtime: ${runtime}`);
+        if (!runtime) throw new Error("runtime must not be empty");
         args.runtime = runtime;
         break;
       }
@@ -1357,7 +1357,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
   }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence });
 
-  let transportUp = runtime === "pi";
+  let transportUp = runtime !== "omp";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
     if (runtime === "omp" && !core.isReady()) {
       try {
@@ -1373,7 +1373,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // Re-deliver OMP identity until the daemon confirms the resume token.
   const identityRetry = runtime === "omp" ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
   identityRetry?.unref();
-  const idleHeartbeat = runtime === "pi" ? setInterval(() => core.heartbeat(), IDLE_HEARTBEAT_TICK_MS) : undefined;
+  const idleHeartbeat = runtime !== "omp" ? setInterval(() => core.heartbeat(), IDLE_HEARTBEAT_TICK_MS) : undefined;
   idleHeartbeat?.unref();
   // The last few stderr lines, so an OMP that exits during startup is
   // reported with its own words in the error, not only above it.
@@ -1400,9 +1400,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   });
   const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block));
 
-  if (runtime === "pi") {
+  if (runtime !== "omp") {
     child.on("error", (err) => {
-      console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn pi: ${err.message}`);
+      console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn ${args.command ?? runtime}: ${err.message}`);
       const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;
       core.handlePiExit(code);
       input.close();

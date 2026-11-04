@@ -210,11 +210,6 @@ export function buildPiChildEnv(
   }
   env.PI_CODING_AGENT_DIR = opts.agentDir;
   env.PI_CODING_AGENT_SESSION_DIR = opts.sessionsDir;
-  if (opts.runtime && opts.runtime !== "pi" && opts.runtime !== "omp") {
-    const prefix = String(opts.runtime).toUpperCase().replace(/[^A-Z0-9]/g, "_");
-    env[`${prefix}_CODING_AGENT_DIR`] = opts.agentDir;
-    env[`${prefix}_CODING_AGENT_SESSION_DIR`] = opts.sessionsDir;
-  }
   const provider = providerFromModel(opts.model);
   const providerVar = provider ? (opts.runtime === "omp" ? OMP_PROVIDER_ENV_VARS : PI_PROVIDER_ENV_VARS)[provider] : undefined;
   if (providerVar && source[providerVar] !== undefined) {
@@ -248,7 +243,7 @@ export function buildPiChildEnv(
 
 export interface PiRunnerLaunchOpts {
   /** Explicit runtime; omitted keeps the original Pi command byte-for-byte. */
-  runtime?: RunnerRuntime;
+  runtime?: RunnerRuntime | string;
   /** Custom executable to spawn inside the runner (e.g. for Pi-fork community harnesses). */
   command?: string;
   /** Absolute path to the compiled runner entry (daemon dist). */
@@ -299,7 +294,9 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
     "--launch-id", shellQuote(opts.launchId),
     ...(opts.runtime === "omp"
       ? ["--runtime", "omp", "--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
-      : [`--${opts.trust}`]),
+      : (opts.runtime && opts.runtime !== "pi"
+        ? ["--runtime", shellQuote(opts.runtime), `--${opts.trust}`]
+        : [`--${opts.trust}`])),
   ];
   if (opts.command) {
     parts.push("--command", shellQuote(opts.command));
@@ -336,7 +333,7 @@ export function buildPiChildArgs(opts: {
   trust: "approve" | "no-approve";
   sessionFile?: string;
   forkRef?: string;
-  runtime?: RunnerRuntime;
+  runtime?: RunnerRuntime | string;
 }): string[] {
   const args = [
     "--mode", "rpc",

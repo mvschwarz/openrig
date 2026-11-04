@@ -269,18 +269,7 @@ export function createCommunityHarnessAdapter(
     if (pi && typeof pi.getCommunityDeps === "function") {
       return PiCommunityRuntimeAdapter.fromPiAdapter(pi, runtime, found.preset);
     }
-    return new PiCommunityRuntimeAdapter(runtime, found.preset, {
-      tmux: deps.tmux as any,
-      seatLaunchEnvironment: deps.seatLaunchEnvironment as any,
-      fsOps: deps.fsOps ?? {
-        readFile: (p: string) => readFileSync(p, "utf-8"),
-        writeFile: (p: string, c: string) => writeFileSync(p, c, "utf-8"),
-        exists: (p: string) => existsSync(p),
-        mkdirp: (p: string) => mkdirSync(p, { recursive: true }),
-      },
-      stateRoot: deps.stateRoot ?? getDefaultOpenRigPath(join("state", "pi")),
-      runnerEntryPath: deps.piRunnerEntryPath ?? getDefaultOpenRigPath(join("adapters", "pi-runner.js")),
-    });
+    throw new Error(`Cannot initialize PiCommunityRuntimeAdapter for "${runtime}": Pi adapter is required`);
   }
   return new CommunityHarnessRuntimeAdapter(runtime, deps);
 }

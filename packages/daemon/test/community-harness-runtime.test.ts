@@ -58,10 +58,19 @@ it.each([true, false])("loads first_input=%s independently from other declaratio
 });
 
 describe("protocol field", () => {
-  it("loads protocol: pi-rpc and defaults resume to true", () => {
+  it("loads protocol: pi-rpc and leaves resume false unless declared", () => {
     const dir = presets({ "synth.yaml": GOOD + "protocol: pi-rpc\n" });
     const found = loadCommunityHarnessPreset("synth", dir);
     expect(found).toMatchObject({
+      ok: true,
+      preset: {
+        name: "synth",
+        protocol: "pi-rpc",
+        resume: false,
+      },
+    });
+    const dirWithResume = presets({ "synth.yaml": GOOD + "protocol: pi-rpc\nresume: true\n" });
+    expect(loadCommunityHarnessPreset("synth", dirWithResume)).toMatchObject({
       ok: true,
       preset: {
         name: "synth",
@@ -72,7 +81,7 @@ describe("protocol field", () => {
   });
 
   it.each([
-    ["an unknown protocol", "protocol: grpc\n", "protocol must be 'screen' or 'pi-rpc'"],
+    ["an unknown protocol", "protocol: grpc\n", "protocol must be 'pi-rpc'"],
     ["protocol: pi-rpc with runner: true", "protocol: pi-rpc\nrunner: true\n", "protocol: pi-rpc and runner: true can't both be set"],
     ["protocol: pi-rpc with launch_result: true", "protocol: pi-rpc\nlaunch_result: true\n", "protocol: pi-rpc manages session identity through the Pi runner"],
     ["protocol: pi-rpc with names_conversation: true", "protocol: pi-rpc\nnames_conversation: true\n", "protocol: pi-rpc manages session identity through the Pi runner"],
@@ -99,7 +108,7 @@ describe("community harness presets", () => {
   it("loads a preset with the fields this format reads", () => {
     const dir = presets({ "synth.yaml": GOOD });
     expect(loadCommunityHarnessPreset("synth", dir)).toEqual({ ok: true, preset: {
-      name: "synth", command: "synth-harness --serve", maintainer: "Example Maintainer", limits: ["resume unsupported"], protocol: "screen", launchResult: false, namesConversation: false, resume: false, startupAssisted: false, firstInput: false, runner: false, passesModel: false, path: join(dir, "synth.yaml") } });
+      name: "synth", command: "synth-harness --serve", maintainer: "Example Maintainer", limits: ["resume unsupported"], launchResult: false, namesConversation: false, resume: false, startupAssisted: false, firstInput: false, runner: false, passesModel: false, path: join(dir, "synth.yaml") } });
   });
 
   it.each([
