@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { BootstrapRepository } from "../src/domain/bootstrap-repository.js";
 import { Reconciler } from "../src/domain/reconciler.js";
 import { bootKernelIfNeeded } from "../src/domain/kernel-boot.js";
 import { restoreExistingRigUnattended } from "../src/domain/existing-rig-restore.js";
@@ -47,7 +48,9 @@ describe("real automatic kernel restore and manual-up race", () => {
     const setup = createTestApp(db, { tmux, listProcesses, adapters: { "claude-code": adapter } as never });
     const { rigRepo, sessionRegistry, snapshotRepo, snapshotCapture, restoreOrchestrator, eventBus, app } = setup;
     const rig = rigRepo.createRig("kernel");
-    rigRepo.setKernelVariant(rig.id, "rig-claude-only.yaml");
+    const history = new BootstrapRepository(db);
+    const run = history.createRun("rig_spec", "/installed/specs/rigs/launch/kernel/rig-claude-only.yaml");
+    history.updateRunStatus(run.id, "completed", { rigId: rig.id });
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod1078", rig.id, "Kernel");
     const node = rigRepo.addNode(rig.id, "operator.agent", { runtime: "claude-code", cwd: "/tmp", podId: "pod1078" });
     const old = sessionRegistry.registerSession(node.id, name);
@@ -110,7 +113,7 @@ describe("real automatic kernel restore and manual-up race", () => {
       const status = tracker.getStatus();
       expect(status.kernelState).toBe(mode === "manual-first" ? "skipped" : "ready");
       expect(status.variant).toBe("rig-claude-only.yaml");
-      expect(rigRepo.getRig(rig.id)?.rig.kernelVariant).toBe("rig-claude-only.yaml");
+      expect(rigRepo.getKernelVariantFromBootstrap(rig.id)).toBe("rig-claude-only.yaml");
       expect(tmux.createSession).toHaveBeenCalledTimes(mode === "auto-first-fresh" ? 2 : 1);
       expect(sessionRegistry.getSessionsForRig(rig.id).filter(s => s.status === "running")).toHaveLength(1);
       if (mode === "auto-rehydrate") {

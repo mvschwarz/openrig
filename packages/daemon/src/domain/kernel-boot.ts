@@ -85,6 +85,10 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
     degradedTimeoutMs: deps.degradedTimeoutMs,
   });
 
+  const kernels = deps.rigRepo.findUnarchivedRigsByName("kernel");
+  const recordedVariant = kernels.length === 1
+    ? deps.rigRepo.getKernelVariantFromBootstrap(kernels[0]!.id) : null;
+
   // 1. --no-kernel opt-out (CLI flag projected via OPENRIG_NO_KERNEL).
   // VITEST env additionally short-circuits the live runtime probe
   // path so daemon-composition tests don't block 5s+ on shelled-out
@@ -98,7 +102,7 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
   if (process.env["OPENRIG_NO_KERNEL"] === "1" || (process.env["VITEST"] === "true" && !probeInjected)) {
     const reason = process.env["OPENRIG_NO_KERNEL"] === "1" ? "OPENRIG_NO_KERNEL=1" : "VITEST=true";
     log("info", `kernel-boot: ${reason} — skipping kernel auto-boot`);
-    tracker.setSkipped(reason);
+    tracker.setSkipped(reason, recordedVariant);
     return tracker;
   }
 
@@ -106,8 +110,6 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
   // (e.g., from a prior boot or operator-migrated substrate kernel),
   // the builtin path stays out of the way.
   if (kernelAlreadyManaged(deps.rigRepo)) {
-    const kernels = deps.rigRepo.findUnarchivedRigsByName("kernel");
-    const recordedVariant = kernels.length === 1 ? kernels[0]!.kernelVariant ?? null : null;
     const managed = classifyManagedKernel(deps.rigRepo, deps.sessionRegistry, deps.detachedAtStart);
     if (managed.kind === "lost" && deps.restoreLostKernel) {
       // Startup reconcile found none of its seats running and marked them detached: a reboot or
@@ -153,9 +155,6 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
     sourceKind: "rig_spec",
     autoApprove: true,
     cwdOverride: prepareNewKernelCwd(deps.cwdOverride, log),
-  }).then((result) => {
-    if (result.rigId) deps.rigRepo.setKernelVariant(result.rigId, variant);
-    return result;
   });
   tracker.startBooting(variant, bootstrapPromise, expectedKernelSeats(specPath));
   return tracker;

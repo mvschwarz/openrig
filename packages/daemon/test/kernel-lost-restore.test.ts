@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { BootstrapRepository } from "../src/domain/bootstrap-repository.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -110,7 +111,9 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 describe("daemon start with an existing kernel rig", () => {
   it("restores a kernel a reboot left down", async () => {
     const h = host();
-    h.rigRepo.setKernelVariant(h.rig.id, "rig-claude-only.yaml");
+    const history = new BootstrapRepository(h.db);
+    const run = history.createRun("rig_spec", "/installed/specs/rigs/launch/kernel/rig-claude-only.yaml");
+    history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     h.reboot();
     const restore = vi.fn(async () => ({ errors: [] }));
     const tracker = await h.daemonStart(restore);
@@ -218,7 +221,9 @@ describe("daemon start with an existing kernel rig", () => {
 
   it("a kernel stopped with `rig down kernel` stays stopped across daemon restarts", async () => {
     const h = host();
-    h.rigRepo.setKernelVariant(h.rig.id, "rig-claude-only.yaml");
+    const history = new BootstrapRepository(h.db);
+    const run = history.createRun("rig_spec", "/installed/specs/rigs/launch/kernel/rig-claude-only.yaml");
+    history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     const down = await h.down();
     expect(down.errors).toEqual([]);
     expect(h.statuses()).toEqual(["exited", "exited"]);
@@ -271,18 +276,23 @@ describe("daemon start with an existing kernel rig", () => {
 
   it("OPENRIG_NO_KERNEL=1 never restores one", async () => {
     const h = host();
+    const history = new BootstrapRepository(h.db);
+    const run = history.createRun("rig_spec", "/installed/specs/rigs/launch/kernel/rig-codex-only.yaml");
+    history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     h.reboot();
     process.env.OPENRIG_NO_KERNEL = "1";
     const restore = vi.fn(async () => ({ errors: [] }));
     const tracker = await h.daemonStart(restore);
-    expect(tracker.getStatus()).toMatchObject({ kernelState: "skipped", detail: "OPENRIG_NO_KERNEL=1" });
+    expect(tracker.getStatus()).toMatchObject({ kernelState: "skipped", detail: "OPENRIG_NO_KERNEL=1", variant: "rig-codex-only.yaml" });
     expect(restore).not.toHaveBeenCalled();
   });
 
   it("a running kernel is left alone and reported from its seats", async () => {
     const h = host();
     // Its current seats are Claude-only, but the original selection is still the dual-runtime template.
-    h.rigRepo.setKernelVariant(h.rig.id, "rig.yaml");
+    const history = new BootstrapRepository(h.db);
+    const run = history.createRun("rig_spec", "/installed/specs/rigs/launch/kernel/rig.yaml");
+    history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     const restore = vi.fn(async () => ({ errors: [] }));
     const tracker = await h.daemonStart(restore);
     expect(restore).not.toHaveBeenCalled();

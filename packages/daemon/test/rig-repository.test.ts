@@ -2,10 +2,6 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
-import { migrate } from "../src/db/migrate.js";
-import { rigKernelVariantSchema } from "../src/db/migrations/147_rig_kernel_variant.js";
-import Sqlite from "better-sqlite3";
 
 function setupDb(): Database.Database {
   return createFullTestDb();
@@ -33,25 +29,6 @@ describe("RigRepository", () => {
     expect(rig.createdAt).toBeDefined();
   });
 
-  it("upgrades existing rigs without inventing a kernel variant, and applies the migration only once", () => {
-    const oldDb = new Sqlite(":memory:");
-    try {
-      migrate(oldDb, ALL_MIGRATIONS.filter(migration => migration !== rigKernelVariantSchema));
-      const oldRepo = new RigRepository(oldDb);
-      const kernel = oldRepo.createRig("kernel");
-      const project = oldRepo.createRig("project");
-      migrate(oldDb, ALL_MIGRATIONS);
-      migrate(oldDb, ALL_MIGRATIONS);
-      expect(oldRepo.getRig(kernel.id)?.rig).toEqual(kernel);
-      expect(oldRepo.getRig(project.id)?.rig).toEqual(project);
-      expect(oldDb.prepare("SELECT kernel_variant FROM rigs").all()).toEqual([
-        { kernel_variant: null }, { kernel_variant: null },
-      ]);
-    } finally {
-      oldDb.close();
-    }
-  });
-
   it("addNode persists with rig FK, returns typed Node", () => {
     const rig = repo.createRig("test-rig");
     const node = repo.addNode(rig.id, "orchestrator", {
@@ -65,6 +42,43 @@ describe("RigRepository", () => {
     expect(node.role).toBe("orchestrator");
     expect(node.runtime).toBe("claude-code");
     expect(node.model).toBe("opus");
+  });
+
+  it.each([
+    ["/opt/openrig/specs/rigs/launch/kernel/rig.yaml", "rig.yaml"],
+    ["/opt/openrig/specs/rigs/launch/kernel/rig-claude-only.yaml", "rig-claude-only.yaml"],
+    ["/opt/openrig/specs/rigs/launch/kernel/rig-codex-only.yaml", "rig-codex-only.yaml"],
+    ["C:\\OpenRig\\specs\\rigs\\launch\\kernel\\rig-codex-only.yaml", "rig-codex-only.yaml"],
+    ["rigs/launch/kernel/rig.yaml", "rig.yaml"],
+    ["/custom/rig.yaml", null],
+    ["/custom/kernel/rig.yaml", null],
+    ["/specs/rigs/launch/kernel/custom.yaml", null],
+    ["/specs/rigs/launch/kernel/rig.yaml.bak", null],
+    ["/specs/rigs/launch/kernel/../rig.yaml", null],
+    ["/specs/rigs/launch/kernel/rig.yaml/extra", null],
+  ])("reads only a built-in kernel template from %s", (source, expected) => {
+    const rig = repo.createRig("kernel");
+    db.prepare("INSERT INTO bootstrap_runs (id, source_kind, source_ref, rig_id, status) VALUES (?, ?, ?, ?, ?)")
+      .run("boot", "rig_spec", source, rig.id, "partial");
+    expect(repo.getKernelVariantFromBootstrap(rig.id)).toBe(expected);
+  });
+
+  it("reads the latest rig-spec history for exactly this rig, without falling back past a custom spec", () => {
+    const rig = repo.createRig("kernel");
+    const other = repo.createRig("other");
+    expect(repo.getKernelVariantFromBootstrap(rig.id)).toBeNull();
+    const insert = db.prepare("INSERT INTO bootstrap_runs (id, source_kind, source_ref, rig_id, created_at) VALUES (?, ?, ?, ?, ?)");
+    const path = "/specs/rigs/launch/kernel/";
+    insert.run("old", "rig_spec", path + "rig.yaml", rig.id, "2026-01-01");
+    insert.run("new", "rig_spec", path + "rig-codex-only.yaml", rig.id, "2026-01-02");
+    insert.run("other", "rig_spec", path + "rig-claude-only.yaml", other.id, "2026-01-03");
+    insert.run("bundle", "bundle", path + "rig-claude-only.yaml", rig.id, "2026-01-03");
+    insert.run("older-inserted-last", "rig_spec", path + "rig-claude-only.yaml", rig.id, "2026-01-01");
+    expect(repo.getKernelVariantFromBootstrap(rig.id)).toBe("rig-codex-only.yaml");
+    // Match BootstrapRepository's deterministic insertion-order tie breaker.
+    insert.run("custom", "rig_spec", "/custom/rig.yaml", rig.id, "2026-01-02");
+    expect(repo.getKernelVariantFromBootstrap(rig.id)).toBeNull();
+    expect(repo.getKernelVariantFromBootstrap(other.id)).toBe("rig-claude-only.yaml");
   });
 
   it("addNode to nonexistent rig throws", () => {

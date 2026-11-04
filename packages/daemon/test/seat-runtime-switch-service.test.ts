@@ -453,6 +453,25 @@ describe("live seat runtime switch", () => {
     expect(handover).toMatch(new RegExp(`rig seat set-runtime dev\\.impl@seat-rig --confirm ${openSwitch()!.id} --note`));
   });
 
+  // #2456: a guidance block the preparation kept is named in the successor's first turn as well as the switch's result, as a
+  // start tells its seat and a handover its packet.
+  it.each([true, false])("the handover names a guidance block the preparation kept (kept: %s), as the result does (#2456)", async (kept) => {
+    const note = "guidance_block_edited: /project/CLAUDE.md: culture.md was edited by hand since OpenRig wrote it, so it wasn't refreshed from /spec/culture.md";
+    const claude = adapter("claude-code");
+    vi.mocked(claude.deliverStartup).mockResolvedValue({ delivered: 0, failed: [], ...(kept ? { warnings: [note] } : {}) } as never);
+    const svc = service({ runtimeAdapters: { codex: adapter("codex"), "claude-code": claude } });
+    successorConfirms(svc);
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "better fit" });
+    const handover = typed.find((t) => t.target.startsWith("openrig-switch-"))!.text;
+    if (kept) {
+      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([note]) });
+      expect(handover).toContain(`OpenRig guidance note: ${note}.`);
+    } else {
+      expect(result).toMatchObject({ ok: true });
+      expect(handover).not.toContain("OpenRig guidance note");
+    }
+  });
+
   it("a Claude Code seat moves to Codex, with an explicit Codex profile", async () => {
     db.prepare("UPDATE nodes SET runtime = 'claude-code', codex_config_profile = NULL, advisor = 'opus' WHERE id = ?").run(nodeId);
     rigRepo.setNodeClaudeMcp(nodeId, "none");

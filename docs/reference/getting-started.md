@@ -291,13 +291,13 @@ fine; if both accounts are authenticated, the kernel uses both even when your
 later project uses just one. A request to use only one provider for everything
 is a separate choice.
 
-Automatic kernel boot records the chosen template (`rig.yaml`,
-`rig-claude-only.yaml` or `rig-codex-only.yaml`) once it finishes, even if some
-seats failed to start. `GET /api/rigs` and `GET /api/rigs/:id` expose it as
-`kernelVariant`, and `/api/kernel/status` retains `variant` across daemon restarts
-and recovery. This records the original selection; the rig's live spec describes
-its current configuration. Older or manually created kernels have no recorded
-selection.
+`/api/kernel/status` retains the chosen template (`rig.yaml`,
+`rig-claude-only.yaml` or `rig-codex-only.yaml`) across daemon restarts and
+recovery, including starts with `--no-kernel`. It reads the rig's latest rig-spec
+bootstrap record, including a partial launch, so an older kernel's recorded
+selection is also available. This is the original selection; the rig's live spec
+describes its current configuration. A kernel without bootstrap history, or built
+from a different spec, reports an unknown variant.
 
 **Started is not ready.** Read the `Kernel:` boot state in `rig status` and the
 individual seat state in `rig ps --nodes --rig kernel`. The view may open while

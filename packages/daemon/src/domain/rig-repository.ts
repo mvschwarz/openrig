@@ -5,7 +5,7 @@ import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import { decodeStoredSnapshotData } from "./snapshot-repository.js";
-import { resolve } from "node:path";
+import { posix, resolve } from "node:path";
 import { ulid } from "ulid";
 import { deriveComposeProjectName } from "./compose-project-name.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
@@ -367,10 +367,15 @@ export class RigRepository {
     return rig;
   }
 
-  /** Preserve automatic boot's selection on exactly the rig its bootstrap returned, including a partial launch. */
-  setKernelVariant(rigId: string, variant: string): void {
-    this.db.prepare("UPDATE rigs SET kernel_variant = ?, updated_at = ? WHERE id = ?")
-      .run(variant, new Date().toISOString(), rigId);
+  /** Original built-in kernel template from the rig's latest rig-spec bootstrap, including partial launches.
+   *  A custom spec or absent history is unknown; do not infer a selection from today's runtime mix. */
+  getKernelVariantFromBootstrap(rigId: string): string | null {
+    const row = this.db.prepare(
+      "SELECT source_ref FROM bootstrap_runs WHERE rig_id = ? AND source_kind = 'rig_spec' ORDER BY created_at DESC, rowid DESC LIMIT 1"
+    ).get(rigId) as { source_ref: string } | undefined;
+    if (!row) return null;
+    const source = posix.normalize(row.source_ref.replace(/\\/g, "/"));
+    return /(?:^|\/)rigs\/launch\/kernel\/(rig(?:-claude-only|-codex-only)?\.yaml)$/.exec(source)?.[1] ?? null;
   }
 
   /** Canonical bundle materialization folder, independent of seats' working directories. */
@@ -1117,7 +1122,6 @@ export class RigRepository {
     return {
       id: row.id,
       name: row.name,
-      ...(row.kernel_variant ? { kernelVariant: row.kernel_variant } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1216,7 +1220,6 @@ export class RigRepository {
 interface RigRow {
   id: string;
   name: string;
-  kernel_variant?: string | null;
   created_at: string;
   updated_at: string;
 }
