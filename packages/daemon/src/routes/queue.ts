@@ -1476,9 +1476,12 @@ export function queueRoutes(): Hono {
 
   app.get("/outbox/list", (c) => {
     const senderSession = c.req.query("senderSession");
-    if (!senderSession) return c.json({ error: "senderSession is required" }, 400);
+    // A rig's messages, sent from or to its seats: the same scope as GET /list?rig=.
+    const rig = c.req.query("rig")?.trim();
+    if (!senderSession && !rig) return c.json({ error: "senderSession or rig is required" }, 400);
     const parsed = queryLimit(c);
     if (!parsed.ok) return parsed.response;
+    if (!senderSession) return c.json(getOutbox(c).listForRig(rig!, parsed.limit));
     const sessions = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
     return c.json(getOutbox(c).listForSender(senderSession, parsed.limit, sessions?.sessionAddresses(senderSession)));
   });

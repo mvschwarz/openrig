@@ -183,6 +183,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "086_classification_fields_and_attempts.sql": "extends 028 (excluded here) and adds the S02 attempt ledger — classifier suites migrate it inline.",
   "087_seat_delivery_guard.sql": "extends outbox_entries (027 is excluded); delivery-guard suites use ALL_MIGRATIONS. Revisit if a core-fixture consumer uses retained delivery.",
   "100_typing_guard_modes.sql": "extends outbox_entries and its typing guard (027 and 087 are excluded); guard-mode and retry suites use ALL_MIGRATIONS.",
+  "148_outbox_dispatched_index.sql": "indexes outbox_entries (027 is excluded); outbox suites migrate it inline.",
   "089_classification_identity_provenance.sql": "extends project_classifications (028 is excluded); classifier fixtures migrate it inline.",
   "129_stream_dispositions.sql": "companion of project_classifications (028 is excluded); stream-disposition suites migrate it inline.",
   "130_stream_subscriptions.sql": "stream reader subscriptions and retention marks; stream suites migrate it inline.",

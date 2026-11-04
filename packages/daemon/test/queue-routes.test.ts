@@ -1573,6 +1573,23 @@ describe("queue routes", () => {
     expect(data[0]!.body).toBe("fyi");
   });
 
+  it("outbox list for a rig returns what its seats sent and what was sent to them, in one read", async () => {
+    for (const [from, to, body] of [["a@r", "b@r", "inside"], ["c@other", "b@r", "into r"], ["c@other", "d@other", "elsewhere"]]) {
+      const record = await app.request("/api/queue/outbox/record", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": from! },
+        body: JSON.stringify({ senderSession: from, destinationSession: to, body }),
+      });
+      expect(record.status).toBe(201);
+    }
+    const list = await app.request("/api/queue/outbox/list?rig=r");
+    expect(list.status).toBe(200);
+    expect(((await list.json()) as Array<{ body: string }>).map((e) => e.body).sort()).toEqual(["inside", "into r"]);
+    // Control: the per-seat read is unchanged, one sender's messages wherever they went.
+    const seat = await app.request("/api/queue/outbox/list?senderSession=c@other");
+    expect(((await seat.json()) as Array<{ body: string }>).map((e) => e.body).sort()).toEqual(["elsewhere", "into r"]);
+    expect((await app.request("/api/queue/outbox/list")).status).toBe(400);
+  });
+
   it("queue, inbox and outbox list refuse only a non-numeric or unbindable limit (#586)", async () => {
     for (const body of ["one", "two", "three"]) {
       const res = await app.request("/api/queue/create", {
