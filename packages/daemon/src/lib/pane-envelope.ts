@@ -19,6 +19,8 @@
 //      output except for the body content
 // If you update this function, update wrapSendBody in lockstep.
 
+import { isHumanSeatSessionRef } from "../domain/session-name.js";
+
 const SENDER_FALLBACK = "<unknown sender>";
 
 /** OpenRig's own sender: the daemon (`daemon@kernel`, the scheduler's existing name) or a subsystem actor (`system:health`).
@@ -126,8 +128,10 @@ export function wrapPaneEnvelope(
   }
   const reply = senderLabel.endsWith("@external")
     ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
-    : isOpenRigSender(senderLabel)
-      ? "↩ Sent by OpenRig itself, not by a seat. Act on the row it names."
-      : `↩ Reply: rig send ${senderLabel} "..."`;
+    : isHumanSeatSessionRef(senderLabel)
+      ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`
+      : isOpenRigSender(senderLabel)
+        ? "↩ Sent by OpenRig itself, not by a seat. Act on the row it names."
+        : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
 }

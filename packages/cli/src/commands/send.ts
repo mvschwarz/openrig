@@ -1,3 +1,4 @@
+import { isHumanSeatSessionRef } from "../session-name.js";
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { DaemonClient, DaemonConnectionError, terminalAuthHeaders } from "../client.js";
@@ -102,7 +103,9 @@ export function wrapSendBody(
   }
   const reply = senderLabel.endsWith("@external")
     ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
-    : `↩ Reply: rig send ${senderLabel} "..."`;
+    : isHumanSeatSessionRef(senderLabel)
+      ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`
+      : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
 }
 
