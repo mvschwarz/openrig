@@ -49,7 +49,7 @@ describe("real automatic kernel restore and manual-up race", () => {
     const { rigRepo, sessionRegistry, snapshotRepo, snapshotCapture, restoreOrchestrator, eventBus, app } = setup;
     const rig = rigRepo.createRig("kernel");
     const history = new BootstrapRepository(db);
-    const run = history.createRun("rig_spec", "/installed/specs/rigs/launch/kernel/rig-claude-only.yaml");
+    const run = history.createRun("rig_spec", "/tmp/rigs/launch/kernel/rig-claude-only.yaml");
     history.updateRunStatus(run.id, "completed", { rigId: rig.id });
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod1078", rig.id, "Kernel");
     const node = rigRepo.addNode(rig.id, "operator.agent", { runtime: "claude-code", cwd: "/tmp", podId: "pod1078" });
@@ -113,7 +113,7 @@ describe("real automatic kernel restore and manual-up race", () => {
       const status = tracker.getStatus();
       expect(status.kernelState).toBe(mode === "manual-first" ? "skipped" : "ready");
       expect(status.variant).toBe("rig-claude-only.yaml");
-      expect(rigRepo.getKernelVariantFromBootstrap(rig.id)).toBe("rig-claude-only.yaml");
+      expect(rigRepo.getKernelVariantFromBootstrap(rig.id, "/tmp")).toBe("rig-claude-only.yaml");
       expect(tmux.createSession).toHaveBeenCalledTimes(mode === "auto-first-fresh" ? 2 : 1);
       expect(sessionRegistry.getSessionsForRig(rig.id).filter(s => s.status === "running")).toHaveLength(1);
       if (mode === "auto-rehydrate") {

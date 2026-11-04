@@ -183,7 +183,7 @@ describe("kernel variant persistence", () => {
       }, tmpSpecsDir));
       await flushPromises();
       tracker.stop();
-      expect(rigRepo.getKernelVariantFromBootstrap(rigId)).toBe(variant);
+      expect(rigRepo.getKernelVariantFromBootstrap(rigId, tmpSpecsDir)).toBe(variant);
       db.close();
       db = new Database(dbPath);
       rigRepo = new RigRepository(db);
@@ -191,7 +191,7 @@ describe("kernel variant persistence", () => {
       const restarted = await bootKernelIfNeeded(makeBaseDeps({ rigRepo, probeRuntimes: probe }, tmpSpecsDir));
       expect(restarted.getStatus().variant).toBe(variant);
       expect(probe).not.toHaveBeenCalled();
-      expect(rigRepo.getKernelVariantFromBootstrap(rigId)).toBe(variant);
+      expect(rigRepo.getKernelVariantFromBootstrap(rigId, tmpSpecsDir)).toBe(variant);
       restarted.stop();
     } finally {
       db.close();
@@ -218,8 +218,8 @@ describe("kernel variant persistence", () => {
       const tracker = await bootKernelIfNeeded(makeBaseDeps({ rigRepo, bootstrapOrchestrator: bootstrap }, tmpSpecsDir));
       await flushPromises();
       expect(tracker.getStatus().kernelState).toBe("bootstrap_failed");
-      expect(rigRepo.getKernelVariantFromBootstrap(rigId)).toBe("rig.yaml");
-      expect(rigRepo.getKernelVariantFromBootstrap(otherId)).toBeNull();
+      expect(rigRepo.getKernelVariantFromBootstrap(rigId, tmpSpecsDir)).toBe("rig.yaml");
+      expect(rigRepo.getKernelVariantFromBootstrap(otherId, tmpSpecsDir)).toBeNull();
       tracker.stop();
     } finally {
       db.close();
@@ -234,7 +234,7 @@ describe("kernel variant persistence", () => {
       const rig = rigRepo.createRig("kernel");
       const tracker = await bootKernelIfNeeded(makeBaseDeps({ rigRepo }, tmpSpecsDir));
       expect(tracker.getStatus().variant).toBeNull();
-      expect(rigRepo.getKernelVariantFromBootstrap(rig.id)).toBeNull();
+      expect(rigRepo.getKernelVariantFromBootstrap(rig.id, tmpSpecsDir)).toBeNull();
       tracker.stop();
     } finally {
       db.close();

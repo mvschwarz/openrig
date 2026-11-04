@@ -87,7 +87,7 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
 
   const kernels = deps.rigRepo.findUnarchivedRigsByName("kernel");
   const recordedVariant = kernels.length === 1
-    ? deps.rigRepo.getKernelVariantFromBootstrap(kernels[0]!.id) : null;
+    ? deps.rigRepo.getKernelVariantFromBootstrap(kernels[0]!.id, deps.specsDir) : null;
 
   // 1. --no-kernel opt-out (CLI flag projected via OPENRIG_NO_KERNEL).
   // VITEST env additionally short-circuits the live runtime probe

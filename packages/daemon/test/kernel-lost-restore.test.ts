@@ -112,7 +112,7 @@ describe("daemon start with an existing kernel rig", () => {
   it("restores a kernel a reboot left down", async () => {
     const h = host();
     const history = new BootstrapRepository(h.db);
-    const run = history.createRun("rig_spec", "/installed/specs/rigs/launch/kernel/rig-claude-only.yaml");
+    const run = history.createRun("rig_spec", join(h.specsDir, "rigs/launch/kernel/rig-claude-only.yaml"));
     history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     h.reboot();
     const restore = vi.fn(async () => ({ errors: [] }));
@@ -222,7 +222,7 @@ describe("daemon start with an existing kernel rig", () => {
   it("a kernel stopped with `rig down kernel` stays stopped across daemon restarts", async () => {
     const h = host();
     const history = new BootstrapRepository(h.db);
-    const run = history.createRun("rig_spec", "/installed/specs/rigs/launch/kernel/rig-claude-only.yaml");
+    const run = history.createRun("rig_spec", join(h.specsDir, "rigs/launch/kernel/rig-claude-only.yaml"));
     history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     const down = await h.down();
     expect(down.errors).toEqual([]);
@@ -277,7 +277,7 @@ describe("daemon start with an existing kernel rig", () => {
   it("OPENRIG_NO_KERNEL=1 never restores one", async () => {
     const h = host();
     const history = new BootstrapRepository(h.db);
-    const run = history.createRun("rig_spec", "/installed/specs/rigs/launch/kernel/rig-codex-only.yaml");
+    const run = history.createRun("rig_spec", join(h.specsDir, "rigs/launch/kernel/rig-codex-only.yaml"));
     history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     h.reboot();
     process.env.OPENRIG_NO_KERNEL = "1";
@@ -291,7 +291,7 @@ describe("daemon start with an existing kernel rig", () => {
     const h = host();
     // Its current seats are Claude-only, but the original selection is still the dual-runtime template.
     const history = new BootstrapRepository(h.db);
-    const run = history.createRun("rig_spec", "/installed/specs/rigs/launch/kernel/rig.yaml");
+    const run = history.createRun("rig_spec", join(h.specsDir, "rigs/launch/kernel/rig.yaml"));
     history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     const restore = vi.fn(async () => ({ errors: [] }));
     const tracker = await h.daemonStart(restore);

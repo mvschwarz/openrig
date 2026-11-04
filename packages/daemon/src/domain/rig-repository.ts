@@ -368,14 +368,20 @@ export class RigRepository {
   }
 
   /** Original built-in kernel template from the rig's latest rig-spec bootstrap, including partial launches.
+   *  Match the verified specs root supplied by daemon startup, not an arbitrary matching path suffix.
    *  A custom spec or absent history is unknown; do not infer a selection from today's runtime mix. */
-  getKernelVariantFromBootstrap(rigId: string): string | null {
+  getKernelVariantFromBootstrap(rigId: string, builtInSpecsDir: string): string | null {
     const row = this.db.prepare(
       "SELECT source_ref FROM bootstrap_runs WHERE rig_id = ? AND source_kind = 'rig_spec' ORDER BY created_at DESC, rowid DESC LIMIT 1"
     ).get(rigId) as { source_ref: string } | undefined;
     if (!row) return null;
     const source = posix.normalize(row.source_ref.replace(/\\/g, "/"));
-    return /(?:^|\/)rigs\/launch\/kernel\/(rig(?:-claude-only|-codex-only)?\.yaml)$/.exec(source)?.[1] ?? null;
+    const root = posix.normalize(builtInSpecsDir.replace(/\\/g, "/"));
+    if (!posix.isAbsolute(root) && !/^[A-Za-z]:\//.test(root)) return null;
+    const directory = root.replace(/\/+$/, "") + "/rigs/launch/kernel/";
+    if (!source.startsWith(directory)) return null;
+    const variant = source.slice(directory.length);
+    return /^rig(?:-claude-only|-codex-only)?\.yaml$/.test(variant) ? variant : null;
   }
 
   /** Canonical bundle materialization folder, independent of seats' working directories. */

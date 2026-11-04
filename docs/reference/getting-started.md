@@ -296,8 +296,10 @@ is a separate choice.
 recovery, including starts with `--no-kernel`. It reads the rig's latest rig-spec
 bootstrap record, including a partial launch, so an older kernel's recorded
 selection is also available. This is the original selection; the rig's live spec
-describes its current configuration. A kernel without bootstrap history, or built
-from a different spec, reports an unknown variant.
+describes its current configuration. The saved source must match a template under
+the current installation’s built-in specs directory. A custom project path with
+the same directory suffix, an old source path that can no longer be verified, or
+a kernel without bootstrap history reports an unknown variant.
 
 **Started is not ready.** Read the `Kernel:` boot state in `rig status` and the
 individual seat state in `rig ps --nodes --rig kernel`. The view may open while
