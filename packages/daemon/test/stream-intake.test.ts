@@ -691,8 +691,8 @@ describe("StreamIntakeCoordinator", () => {
     const outbox = new OutboxHandler(db);
     queueRepo.attachOutbox(outbox);
 
-    // Prevent post-commit delivery by intercepting deliverWakeIntentAfterCommit
-    vi.spyOn(queueRepo, "deliverWakeIntentAfterCommit").mockImplementation(() => {});
+    // Prevent post-commit delivery by intercepting deliverWakeForSuccessor
+    vi.spyOn(queueRepo, "deliverWakeForSuccessor").mockImplementation(async () => {});
 
     const coordinator = new StreamIntakeCoordinator({
       db,
@@ -712,10 +712,12 @@ describe("StreamIntakeCoordinator", () => {
 
       const qitemId = streamIntakeQitemId(item.streamSortKey);
       const queueRow = queueRepo.getById(qitemId);
+      expect(queueRow).not.toBeNull();
       expect(queueRow).toBeDefined();
 
       // Check that wake intent was committed in the same transaction and is pending in outbox
       const intent = outbox.getById(`${WAKE_INTENT_PREFIX}${qitemId}`);
+      expect(intent).not.toBeNull();
       expect(intent).toBeDefined();
       expect(intent?.deliveryState).toBe("pending");
       expect(intent?.destinationSession).toBe("queue.worker");
@@ -915,5 +917,110 @@ describe("StreamIntakeCoordinator", () => {
     } finally {
       coordinator.stop();
     }
+  });
+
+  it("partial catch-up failure keeps held live items behind unfinished backlog, and recovery handles every item in order", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+
+    // 1. Establish initial cursor with coord1
+    const coord1 = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: "queue.worker",
+    });
+    coord1.start();
+    const item0 = streamStore.emit({ sourceSession: "test@s", body: "Initial item 0" });
+    await new Promise((r) => setTimeout(r, 50));
+    coord1.stop();
+
+    // Close the initial intake queue row so subsequent intake items open fresh rows or notes
+    const initialRows = queueRepo.list({ destinationSession: "queue.worker" });
+    expect(initialRows).toHaveLength(1);
+    queueRepo.update({
+      qitemId: initialRows[0]!.qitemId,
+      actorSession: "worker@kernel",
+      state: "done",
+      closureReason: "no-follow-on",
+    });
+
+    // 2. Emit backlog items: item 1 (page 1) and item 2 (page 2) with pageSize: 1
+    const item1 = streamStore.emit({ sourceSession: "test@s", body: "Backlog item 1 (page 1)" });
+    const item2 = streamStore.emit({ sourceSession: "test@s", body: "Backlog item 2 (page 2)" });
+
+    // 3. Inject page 2 query failure
+    const origPrepare = db.prepare.bind(db);
+    let pageQueries = 0;
+    let failPage2 = true;
+    db.prepare = ((sql: string) => {
+      if (failPage2 && sql.includes("SELECT stream_item_id, stream_sort_key FROM stream_items")) {
+        pageQueries++;
+        if (pageQueries === 2) {
+          throw new Error("Simulated page 2 read failure");
+        }
+      }
+      return origPrepare(sql);
+    }) as any;
+
+    const coord2 = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: "queue.worker",
+      pageSize: 1,
+    });
+    coord2.start();
+
+    // Wait for page 1 to process and page 2 to fail
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Emit live item while catch-up is incomplete
+    const liveItem = streamStore.emit({ sourceSession: "test@s", body: "Live item 3 during failure" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Cursor must NOT have moved to liveItem or past item1
+    const cursorMid = db.prepare("SELECT last_sort_key FROM stream_intake_cursor WHERE id = 1").get() as {
+      last_sort_key: string;
+    };
+    expect(cursorMid.last_sort_key).toBe(item1.streamSortKey);
+
+    // Close item1 row so item2 opens its own row and can be cleanly inspected
+    const midRows = queueRepo.list({ destinationSession: "queue.worker", state: "pending" });
+    expect(midRows).toHaveLength(1);
+    expect(midRows[0]!.body).toContain(item1.streamItemId);
+    expect(midRows[0]!.body).not.toContain(item2.streamItemId);
+    expect(midRows[0]!.body).not.toContain(liveItem.streamItemId);
+    queueRepo.update({
+      qitemId: midRows[0]!.qitemId,
+      actorSession: "worker@kernel",
+      state: "done",
+      closureReason: "no-follow-on",
+    });
+
+    // 4. Recover: clear failure and let drain re-run
+    failPage2 = false;
+    // @ts-expect-error accessing private method for controlled recovery test
+    await coord2.drain();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // After recovery, item 2 and liveItem must both have been processed, and cursor advanced to liveItem
+    const cursorAfter = db.prepare("SELECT last_sort_key FROM stream_intake_cursor WHERE id = 1").get() as {
+      last_sort_key: string;
+    };
+    expect(cursorAfter.last_sort_key).toBe(liveItem.streamSortKey);
+
+    // Check that item 2 was handled and then live item was handled in order
+    const afterRows = queueRepo.list({ destinationSession: "queue.worker", state: "pending" });
+    expect(afterRows).toHaveLength(1);
+    expect(afterRows[0]!.body).toContain(item2.streamItemId);
+
+    const transitions = queueRepo.listTransitions(afterRows[0]!.qitemId);
+    const liveNote = transitions.find((t) => t.transitionNote?.includes(liveItem.streamItemId));
+    expect(liveNote).toBeDefined();
+
+    coord2.stop();
+    db.prepare = origPrepare;
   });
 });

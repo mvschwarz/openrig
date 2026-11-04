@@ -5,7 +5,6 @@ import type { PersistedEvent } from "./types.js";
 import type { StreamItem, StreamStore } from "./stream-store.js";
 import type { QueueRepository } from "./queue-repository.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
-import { WAKE_INTENT_PREFIX } from "./outbox-handler.js";
 
 export const STREAM_INTAKE_TAG = "stream-subscription";
 
@@ -23,6 +22,7 @@ export interface StreamIntakeCoordinatorDeps {
   streamStore: StreamStore;
   queueRepo: QueueRepository;
   destination?: string | (() => string); // e.g. "queue.worker" (default) or "off"
+  pageSize?: number;
 }
 
 export class StreamIntakeCoordinator {
@@ -31,11 +31,14 @@ export class StreamIntakeCoordinator {
   private readonly streamStore: StreamStore;
   private readonly queueRepo: QueueRepository;
   private readonly rawDestination?: string | (() => string);
+  private readonly pageSize: number;
   private unsubscribeBus?: () => void;
   private pendingStreamItemIds: string[] = [];
   private pendingStreamItemIdSet = new Set<string>();
   private heldLiveItemIds: string[] = [];
+  private stopped = false;
   private catchingUp = false;
+  private catchUpIncomplete = false;
   private processing = false;
 
   constructor(deps: StreamIntakeCoordinatorDeps) {
@@ -44,6 +47,7 @@ export class StreamIntakeCoordinator {
     this.streamStore = deps.streamStore;
     this.queueRepo = deps.queueRepo;
     this.rawDestination = deps.destination;
+    this.pageSize = deps.pageSize ?? 100;
   }
 
   private getDestinationConfig(): string {
@@ -67,6 +71,7 @@ export class StreamIntakeCoordinator {
   }
 
   start(): void {
+    this.stopped = false;
     this.unsubscribeBus = this.eventBus.subscribe((event: PersistedEvent) => {
       if (event.type === "stream.emitted") {
         try {
@@ -83,6 +88,7 @@ export class StreamIntakeCoordinator {
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.unsubscribeBus) {
       this.unsubscribeBus();
       this.unsubscribeBus = undefined;
@@ -90,8 +96,8 @@ export class StreamIntakeCoordinator {
   }
 
   private enqueue(streamItemId: string): void {
-    if (this.getDestinationConfig() === "off") return;
-    if (this.catchingUp) {
+    if (this.stopped || this.getDestinationConfig() === "off") return;
+    if (this.catchingUp || this.catchUpIncomplete) {
       if (!this.heldLiveItemIds.includes(streamItemId)) {
         this.heldLiveItemIds.push(streamItemId);
       }
@@ -123,7 +129,10 @@ export class StreamIntakeCoordinator {
   }
 
   private async catchUp(): Promise<void> {
+    if (this.stopped || this.catchingUp) return;
     this.catchingUp = true;
+    this.catchUpIncomplete = false;
+    let completed = false;
     try {
       let existingCursor: string | undefined;
       try {
@@ -138,39 +147,44 @@ export class StreamIntakeCoordinator {
         // Record cursor at the newest stream item and do not replay older history.
         try {
           const newest = this.db
-            .prepare(`SELECT stream_sort_key FROM stream_items ORDER BY stream_sort_key DESC LIMIT 1`)
-            .get() as { stream_sort_key: string } | undefined;
+            .prepare(`SELECT MAX(stream_sort_key) AS stream_sort_key FROM stream_items WHERE archived_at IS NULL`)
+            .get() as { stream_sort_key: string | null } | undefined;
           const initialSortKey = newest?.stream_sort_key ?? "";
           this.writeCursor(initialSortKey);
+          completed = true;
         } catch (err) {
           console.error("[stream-intake] failed to initialize cursor on first start:", err);
+          return;
         }
         return;
       }
 
       if (this.getDestinationConfig() === "off") {
+        completed = true;
         return;
       }
 
       // Bound paging at the newest key that existed when catch-up started
       const newestAtStart = this.db
-        .prepare(`SELECT stream_sort_key FROM stream_items ORDER BY stream_sort_key DESC LIMIT 1`)
-        .get() as { stream_sort_key: string } | undefined;
+        .prepare(`SELECT MAX(stream_sort_key) AS stream_sort_key FROM stream_items WHERE archived_at IS NULL`)
+        .get() as { stream_sort_key: string | null } | undefined;
       if (!newestAtStart?.stream_sort_key || newestAtStart.stream_sort_key <= existingCursor) {
+        completed = true;
         return;
       }
       const catchUpBoundKey = newestAtStart.stream_sort_key;
 
       let currentCursor = existingCursor;
-      const PAGE_SIZE = 100;
       while (currentCursor < catchUpBoundKey) {
+        if (this.stopped) return;
+
         const items = this.db
           .prepare(
             `SELECT stream_item_id, stream_sort_key FROM stream_items
              WHERE stream_sort_key > ? AND stream_sort_key <= ? AND archived_at IS NULL
              ORDER BY stream_sort_key ASC LIMIT ?`
           )
-          .all(currentCursor, catchUpBoundKey, PAGE_SIZE) as Array<{ stream_item_id: string; stream_sort_key: string }>;
+          .all(currentCursor, catchUpBoundKey, this.pageSize) as Array<{ stream_item_id: string; stream_sort_key: string }>;
 
         if (items.length === 0) break;
 
@@ -181,40 +195,62 @@ export class StreamIntakeCoordinator {
           }
         }
 
-        currentCursor = items[items.length - 1]!.stream_sort_key;
-
-        // Drain this page completely before fetching the next page
+        // Drain this page completely before advancing currentCursor for the next query
         await this.drain();
 
-        if (items.length < PAGE_SIZE) break;
+        if (this.pendingStreamItemIds.length > 0) {
+          // Page could not be fully drained (e.g. item handler failed). Do not advance to next page.
+          return;
+        }
+
+        currentCursor = this.readCursor() ?? items[items.length - 1]!.stream_sort_key;
+
+        if (items.length < this.pageSize) break;
 
         // Yield between batches so startup work is bounded and does not starve other tasks
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
+
+      completed = true;
     } finally {
       this.catchingUp = false;
-      // Release held live items and drain
-      if (this.heldLiveItemIds.length > 0) {
-        for (const id of this.heldLiveItemIds) {
-          if (!this.pendingStreamItemIdSet.has(id)) {
-            this.pendingStreamItemIdSet.add(id);
-            this.pendingStreamItemIds.push(id);
+      if (completed && !this.stopped) {
+        this.catchUpIncomplete = false;
+        // Release held live items and drain
+        if (this.heldLiveItemIds.length > 0) {
+          for (const id of this.heldLiveItemIds) {
+            if (!this.pendingStreamItemIdSet.has(id)) {
+              this.pendingStreamItemIdSet.add(id);
+              this.pendingStreamItemIds.push(id);
+            }
           }
+          this.heldLiveItemIds = [];
+          void this.drain();
         }
-        this.heldLiveItemIds = [];
-        void this.drain();
+      } else if (!completed) {
+        this.catchUpIncomplete = true;
       }
     }
   }
 
   private async drain(): Promise<void> {
-    if (this.processing || this.pendingStreamItemIds.length === 0) return;
+    if (this.stopped || this.processing) return;
+
+    if (this.catchUpIncomplete && !this.catchingUp) {
+      await this.catchUp();
+      if (this.catchUpIncomplete) {
+        return;
+      }
+    }
+
+    if (this.stopped || this.processing || this.pendingStreamItemIds.length === 0) return;
     this.processing = true;
 
     try {
       if (this.getDestinationConfig() === "off") return;
 
       while (this.pendingStreamItemIds.length > 0) {
+        if (this.stopped) return;
         const streamItemId = this.pendingStreamItemIds[0]!;
         const item = this.streamStore.getById(streamItemId);
         if (!item) {
@@ -250,6 +286,9 @@ export class StreamIntakeCoordinator {
   private async handleStreamItem(item: StreamItem, destination: string): Promise<void> {
     const cursor = this.readCursor();
     if (cursor && cursor !== "" && item.streamSortKey <= cursor) {
+      console.warn(
+        `[stream-intake] skipping stream item ${item.streamItemId} with sort key ${item.streamSortKey} <= cursor ${cursor}`
+      );
       return;
     }
 
@@ -305,7 +344,7 @@ export class StreamIntakeCoordinator {
     const summary = boundText(`1 new stream observation(s) from ${item.sourceSession}`, 200);
 
     let createResult:
-      | { qitemId: string; persistedEvent: PersistedEvent; destinationSession: string; nudge?: boolean; wakeStaged?: boolean }
+      | { qitemId: string; persistedEvent: PersistedEvent; destinationSession: string; nudge: boolean | undefined }
       | undefined;
 
     try {
@@ -319,6 +358,15 @@ export class StreamIntakeCoordinator {
           tags: [STREAM_INTAKE_TAG],
           priority: isUrgent ? "urgent" : "routine",
         });
+
+        this.queueRepo.stageWakeIntent(
+          createResult.qitemId,
+          "daemon@kernel",
+          destination,
+          null,
+          createResult.nudge,
+          "openrig",
+        );
 
         this.writeCursor(item.streamSortKey);
       })();
@@ -336,21 +384,15 @@ export class StreamIntakeCoordinator {
 
     if (createResult) {
       this.eventBus.notifySubscribers(createResult.persistedEvent);
-      if (createResult.wakeStaged) {
-        this.queueRepo.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${createResult.qitemId}`);
-      } else {
-        try {
-          await this.queueRepo.maybeNudge(
-            createResult.qitemId,
-            createResult.destinationSession,
-            createResult.nudge,
-            "daemon@kernel",
-            undefined,
-            undefined
-          );
-        } catch (err) {
-          console.error("[stream-intake] failed to nudge destination for new intake row:", err);
-        }
+      try {
+        await this.queueRepo.deliverWakeForSuccessor(
+          createResult.qitemId,
+          createResult.destinationSession,
+          createResult.nudge,
+          "daemon@kernel",
+        );
+      } catch (err) {
+        console.error("[stream-intake] failed to deliver wake for new intake row:", err);
       }
     }
   }
