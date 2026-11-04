@@ -134,6 +134,23 @@ it("keeps the delivery-history endpoint receipt based and permits closed deliver
   } finally { await f.close(); }
 });
 
+it("reads open human FYIs without a delivery receipt and reports a bounded window", async () => {
+  const f = await fixture();
+  try {
+    f.row("urgent", { priority: "urgent" }); f.row("routine");
+    f.row("closed", { state: "done" }); f.row("agent", { destination: "writer@fixture" });
+    f.row("decision", { intent: "decision" });
+    const before = f.db.serialize();
+    const result = await f.readJson("/api/queue/open-human-updates?limit=1") as { items: Array<{ qitemId: string }>; truncated: boolean };
+    expect(result.items.map(i => i.qitemId)).toEqual(["urgent"]);
+    expect(result.truncated).toBe(true);
+    const all = await f.readJson("/api/queue/open-human-updates?limit=20") as { items: Array<{ qitemId: string }>; truncated: boolean };
+    expect(all.items.map(i => i.qitemId)).toEqual(["urgent", "routine"]);
+    expect(all.truncated).toBe(false);
+    expect(f.db.serialize()).toEqual(before);
+  } finally { await f.close(); }
+});
+
 
 it("ranks older critical updates before urgent and routine rows at the repository limit", async () => {
   const f = await fixture();

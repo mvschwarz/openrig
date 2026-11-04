@@ -1125,6 +1125,17 @@ export function queueRoutes(): Hono {
     return c.json(payload);
   });
 
+  // Open FYIs are distinct from the receipt-based delivery history below.
+  app.get("/open-human-updates", (c) => {
+    const raw = Number(c.req.query("limit") ?? 20);
+    if (!Number.isInteger(raw) || raw < 1 || raw > 100) return c.json({ error: "limit must be an integer from 1 to 100" }, 400);
+    const { perspective, inView } = feedPerspective(getRepo(c), c.req.query("view"));
+    const window = getRepo(c).listOpenHumanUpdates({ limit: perspective ? 1001 : raw + 1 });
+    const rows = window.filter((row) => inView(row.destinationSession));
+    return c.json({ items: rows.slice(0, raw), limit: raw, truncated: rows.length > raw || (perspective !== undefined && window.length > 1000),
+      ...(perspective ? { perspective } : {}) });
+  });
+
   app.get("/human-updates", (c) => {
     const raw = Number(c.req.query("limit") ?? 20);
     if (!Number.isInteger(raw) || raw < 1 || raw > 100) return c.json({ error: "limit must be an integer from 1 to 100" }, 400);
