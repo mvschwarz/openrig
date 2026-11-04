@@ -128,6 +128,34 @@ function shadowedNodeFileFinding(dir: string, level: "mission" | "slice"): Audit
   };
 }
 
+/**
+ * Advisory-only: another mission has a slice folder of the same name. The slice list and the routes that
+ * find a slice by name keep one slice per name, so the others are hidden there with no sign they exist.
+ * Twin of the CLI's finding of the same name.
+ */
+function sharedSliceNameFinding(missionsRoot: string, missionName: string, sliceName: string): {
+  kind: "slice_name_shared"; severity: "low"; path: string; message: string; remediation: string;
+} | null {
+  let others: string[];
+  try {
+    others = fs.readdirSync(missionsRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== missionName
+        && fs.statSync(path.join(missionsRoot, e.name, "slices", sliceName), { throwIfNoEntry: false })?.isDirectory() === true)
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    return null;
+  }
+  if (others.length === 0) return null;
+  return {
+    kind: "slice_name_shared",
+    severity: "low",
+    path: path.join(missionsRoot, missionName, "slices", sliceName),
+    message: `Mission ${others.join(", ")} also ${others.length === 1 ? "has" : "have"} a slice named "${sliceName}". The slice list (GET /api/slices) and the routes that find a slice by name keep one slice per name, so all but one of these slices are hidden there.`,
+    remediation: "Rename one of the slice folders so each slice name is unique across missions. Advisory only — nothing is blocked.",
+  };
+}
+
 export function scopeAuditRoutes(): Hono {
   const app = new Hono();
 
@@ -298,6 +326,8 @@ export function scopeAuditRoutes(): Hono {
       for (const sr of sliceResults) {
         const shadow = shadowedNodeFileFinding(path.join(slicesDir, sr.name), "slice");
         if (shadow) sr.result.findings.push(shadow);
+        const shared = sharedSliceNameFinding(missionsRoot, missionName, sr.name);
+        if (shared) sr.result.findings.push(shared);
       }
 
       const allFindings = [
