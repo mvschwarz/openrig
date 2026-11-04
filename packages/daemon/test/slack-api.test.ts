@@ -100,3 +100,14 @@ describe("Slice-11 slack-api — channel membership + socket (item 5, inbound)",
     expect(r.error).toBe("not_allowed_token_type");
   });
 });
+
+describe("slack-api — a transport error never carries the bot token", () => {
+  it("keeps the error's reason but not the token, for a token copied with a newline", async () => {
+    // Node's own Headers check rejects the value before any connection, quoting the whole Authorization header.
+    const fetchImpl: FetchImpl = async (_url, init) => { new Headers(init?.headers); return new Response("{}"); };
+    const r = await callWebApi("auth.test", "xoxb-copied\nSECRETTAIL", {}, fetchImpl);
+    expect(r).toMatchObject({ ok: false, status: 0 });
+    expect(r.error).toContain("invalid header value");
+    expect(r.error).not.toMatch(/xoxb-copied|SECRETTAIL/);
+  });
+});
