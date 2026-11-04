@@ -147,8 +147,15 @@ export async function callWebApi(
         ...(Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfterSeconds: retryAfter } : {}), error: ok ? undefined : String(json.error ?? `http ${res.status}`) };
     });
   } catch (e) {
-    return { ok: false, status: 0, grantedScopes: [], json: {}, error: `web-api transport: ${(e as Error).message}` };
+    return { ok: false, status: 0, grantedScopes: [], json: {}, error: `web-api transport: ${withoutToken((e as Error).message, token)}` };
   }
+}
+
+/** A transport error's message can quote the request's Authorization header (Node's fetch does for an invalid value),
+ *  so the token, and each line of it, is removed before the message goes anywhere. */
+function withoutToken(message: string, token: string): string {
+  const parts = [token, ...token.split(/[\r\n]+/)].filter((part) => part.length > 0).sort((a, b) => b.length - a.length);
+  return parts.reduce((text, part) => text.split(part).join("[redacted]"), message);
 }
 
 /** Item 5: read the ACTUAL granted scopes from the response header (configured != granted). */
