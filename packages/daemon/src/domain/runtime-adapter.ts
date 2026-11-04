@@ -248,6 +248,9 @@ export interface RuntimeAdapter {
    *  Absent, or a null file, keeps the rule's file in the working directory; a note says why the seat's own file wasn't used. */
   guidanceFileFor?(binding: NodeBinding, opts?: { resuming?: boolean }): GuidanceChoice | Promise<GuidanceChoice>;
 
+  /** Prove operator recovery without submitting a prompt or launching a replacement. */
+  verifyRecovery?(input: import("./runtime-recovery.js").RecoveryVerificationInput): Promise<import("./runtime-recovery.js").RecoveryVerificationResult>;
+
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;
 

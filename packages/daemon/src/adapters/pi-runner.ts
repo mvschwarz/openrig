@@ -19,6 +19,8 @@
 // entry stays runnable as `node <dist>/adapters/pi-runner.js` with no daemon deps.
 
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
+import { startPiRecoveryServer, type RunnerRecoveryReply } from "./pi-recovery-rpc.js";
 import nodePath from "node:path";
 import readline from "node:readline";
 import { PassThrough } from "node:stream";
@@ -445,6 +447,45 @@ export class RunnerCore {
   /** Runner readiness is the sidecar's acknowledged get_state, not RPC transport ready. */
   isReady(): boolean { return this.ready; }
 
+  private recoveryRequests = new Map<string, { sessionFile: string; finish: (reply: RunnerRecoveryReply) => void }>();
+
+  /** A new get_state response and a new daemon acknowledgement, never cached readiness. No prompt is submitted. */
+  verifyRecovery(sessionFile: string): Promise<RunnerRecoveryReply> {
+    if (!this.ready || this.attention) return Promise.resolve({ ok: false, code: "runner_rpc_unavailable", detail: "The runner is not ready or still reports attention." });
+    if (this.sessionFile !== sessionFile) return Promise.resolve({ ok: false, code: "runner_session_mismatch", detail: "The runner's session file differs from the recorded resume token." });
+    if (this.recoveryRequests.size > 0) return Promise.resolve({ ok: false, code: "runner_rpc_unavailable", detail: "A recovery probe is already in progress; retry after it completes." });
+    const id = `recovery-${randomUUID()}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => finish({ ok: false, code: "runner_rpc_unavailable", detail: "The RPC child or daemon did not answer the recovery probe in time." }), 4_000);
+      const finish = (reply: RunnerRecoveryReply) => {
+        if (!this.recoveryRequests.delete(id)) return;
+        clearTimeout(timer); resolve(reply);
+      };
+      this.recoveryRequests.set(id, { sessionFile, finish });
+      try { this.io.sendRpc({ type: "get_state", id }); }
+      catch { finish({ ok: false, code: "runner_rpc_unavailable", detail: "The RPC child could not be reached." }); }
+    });
+  }
+
+  private async finishRecovery(record: Record<string, unknown>, request: { sessionFile: string; finish: (reply: RunnerRecoveryReply) => void }): Promise<void> {
+    if (record.success !== true || record.command !== "get_state") {
+      request.finish({ ok: false, code: "runner_rpc_unavailable", detail: "The RPC child did not return a successful get_state response." }); return;
+    }
+    const data = record.data as { sessionFile?: unknown; sessionId?: unknown } | undefined;
+    if (data?.sessionFile !== request.sessionFile || typeof data?.sessionId !== "string" || !data.sessionId) {
+      request.finish({ ok: false, code: "runner_session_mismatch", detail: "The live RPC response does not identify the recorded session file." }); return;
+    }
+    const ack = await Promise.resolve(this.io.postActivity({
+      eventFamily: "session_identity", sessionName: this.identity.sessionName, nodeId: this.identity.nodeId ?? null,
+      runtime: this.runtime, generation: this.identity.generation ?? null, hookEvent: "SessionStart",
+      sessionFile: data.sessionFile, sessionId: data.sessionId, occurredAt: this.io.now(),
+    })).catch(() => null);
+    if (!this.ready || this.attention || this.sessionFile !== request.sessionFile || ack?.tokenPersisted !== true) {
+      request.finish({ ok: false, code: "runner_identity_unconfirmed", detail: "The daemon did not confirm this runner's current session identity." }); return;
+    }
+    request.finish({ ok: true, sessionFile: request.sessionFile, sessionId: data.sessionId });
+  }
+
   /** Kick off identity capture. Called once pi's RPC stream is up; for OMP, with its `ready` frame. */
   start(ready?: Record<string, unknown>): void {
     // K4: the first credential observation, before Pi can make any request of this runner's.
@@ -563,6 +604,7 @@ export class RunnerCore {
   /** Child process exit — honest, loud, durable. */
   handlePiExit(code: number | null): void {
     this.ready = false;
+    for (const request of this.recoveryRequests.values()) request.finish({ ok: false, code: "runner_rpc_unavailable", detail: "The RPC child exited during recovery verification." });
     this.reportDroppedFrame(this.frameDecoder?.incomplete());
     this.io.mirrorLine(`[${this.runtime}-runner] EXITED ${this.runtime} exited (code ${code ?? "unknown"})`);
     this.writeSidecar({ exited: { code, at: this.io.now() } });
@@ -570,6 +612,11 @@ export class RunnerCore {
   }
 
   private handleResponse(record: Record<string, unknown>): void {
+    const recovery = typeof record.id === "string" ? this.recoveryRequests.get(record.id) : undefined;
+    if (recovery) {
+      void this.finishRecovery(record, recovery).catch(() => recovery.finish({ ok: false, code: "runner_identity_unconfirmed", detail: "Session identity could not be confirmed." }));
+      return;
+    }
     if (record.id === NEGOTIATE_ID && this.v2Limit !== null) {
       if (record.success === true) {
         this.frameDecoder = new OmpFrameDecoder(this.v2Limit);
@@ -1332,11 +1379,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       body: JSON.stringify(payload),
       signal: controller.signal,
     })
-      .then(async (response) => response.ok && runtime === "omp" ? await response.json() as Record<string, unknown> : null)
+      .then(async (response) => response.ok ? await response.json() as Record<string, unknown> : null)
       .catch(() => null)
       .finally(() => clearTimeout(timeout));
   });
 
+  let recoveryPort: number | undefined;
   const io: RunnerIo = {
     sendRpc: (cmd) => {
       try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
@@ -1346,13 +1394,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     postActivity: (payload) => {
       if (!endpoint || typeof fetch !== "function") return;
       const result = postInOrder(payload).catch(() => null);
-      // OMP reads the acknowledgement so identity delivery can retry; null
-      // (transport failure or a non-OK reply) means "not yet persisted".
-      if (runtime === "omp") return result;
+      // Recovery also needs a fresh acknowledgement for Pi.
+      return result;
     },
     writeSidecar: (state) => {
       try {
-        fs.writeFileSync(paths.runnerStatePath, JSON.stringify(state));
+        fs.writeFileSync(paths.runnerStatePath, JSON.stringify({ ...state, ...(recoveryPort && child.pid ? { recovery: { port: recoveryPort, pid: process.pid, childPid: child.pid } } : {}) }));
       } catch { /* best-effort; adapter falls back to pane markers */ }
     },
     now: () => new Date().toISOString(),
@@ -1398,6 +1445,19 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     // Carry the emitting tenure; never infer it from a later daemon read or Pi event.
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
   }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence });
+
+  // A loopback endpoint for a bounded, read-only RPC proof. Failure leaves ordinary launch usable;
+  // recovery then reports that this runner cannot provide the proof.
+  void startPiRecoveryServer(args.launchId, (sessionFile) => core.verifyRecovery(sessionFile)).then((server) => {
+    if (child.exitCode !== null || child.signalCode !== null) { server.close(); return; }
+    recoveryPort = server.port;
+    child.once("exit", () => server.close());
+    child.once("error", () => server.close());
+    try {
+      const state = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
+      if (state?.launchId === args.launchId) io.writeSidecar(state);
+    } catch { /* the next sidecar write publishes it */ }
+  }).catch(() => {});
 
   let transportUp = runtime === "pi";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {

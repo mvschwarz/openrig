@@ -1,3 +1,5 @@
+import { verifyPiRecovery } from "./pi-runtime-recovery.js";
+import type { RecoveryVerificationInput } from "../domain/runtime-recovery.js";
 // OPR.0.4.6.PI1 — the Pi runtime adapter (RPC-first, runner-in-a-pane).
 //
 // The adapter launches the OpenRig-owned pi-runner inside the seat's normal
@@ -346,6 +348,13 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // is real, but until then there is no history to resume after a reboot.
     if (this.runtime === "omp" && !this.fs.exists(validation.token)) return { ok: true, appliedLaunch };
     return { ok: true, resumeToken: validation.token, resumeType: `${this.runtime}_session_file`, appliedLaunch };
+  }
+
+  async verifyRecovery(input: RecoveryVerificationInput) {
+    return verifyPiRecovery(input, {
+      runtime: this.runtime, stateRoot: this.stateRoot, entryPath: this.runnerEntryPath,
+      readState: () => this.readRunnerState(input.sessionName),
+    }).catch(() => ({ ok: false as const, code: "runner_rpc_unavailable" as const, detail: "The runner recovery proof could not be read." }));
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {
