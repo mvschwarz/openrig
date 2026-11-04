@@ -17,7 +17,7 @@ import { SeatHandoverPlanner, parseHandoverSource, SEAT_HANDOVER_SOURCE_CAPABILI
 import { discoverResumeToken } from "./agent-images/resume-token-discovery.js";
 import { resolveRebuildArtifacts } from "./session-source-rebuild-resolver.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { keptGuidanceSeatLine, lstatLinkInfo, putBackSeatGuidance, readNodeStartupSnapshot } from "./restore-guidance.js";
+import { keptGuidanceSeatLine, lstatLinkInfo, putBackSeatGuidance, readNodeStartupSnapshot, seatStartupTextFiles, type SeatStartupTextFile } from "./restore-guidance.js";
 import { managedBlockRecords } from "./managed-block-records.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -545,6 +545,11 @@ export class SeatHandoverService {
     // refreshed; one left as it is (edited, or possibly stale) is named here and in the successor's packet.
     const guidancePutBack = this.putBackGuidance(node.id, node.cwd, statusResult.status.rig_id);
     const guidanceNote = keptGuidanceSeatLine(guidancePutBack.notes);
+    // #2456: a fresh or rebuild successor is a new conversation no start delivered to, so its first turn points to the seat's
+    // send_text startup files, role first. A fork carries its parent's conversation; a discovered successor was prepared.
+    const startupFiles = parsed.source.mode === "fresh" || parsed.source.mode === "rebuild" ? this.startupTextFiles(node.id) : [];
+    const startedWithoutRequired = [...guidancePutBack.startedWithoutRequired,
+      ...startupFiles.filter((file) => file.required && !file.present).map((file) => file.absolutePath)];
     const launchAdditionNotes = [
       ...seatAdditions.missing.map((file) => `seat_launch_addition_missing: ${file} is not in this seat's storage; the successor launched without it`),
       ...seatAdditions.refused.map((reason) => `seat_launch_addition_refused: ${reason}; the successor launched without it`),
@@ -609,6 +614,7 @@ export class SeatHandoverService {
         recapUnavailableReason: resolved ? undefined : (predecessorRecapResolution as { unavailableReason: string }).unavailableReason,
         ...(authoredRecapInfo ?? {}),
         ...(guidanceNote ? { guidanceNote } : {}),
+        startupFiles,
       });
       if (!delivered.ok) {
         // Partial: the successor is live in the preserved pane but the context packet never landed —
@@ -691,6 +697,7 @@ export class SeatHandoverService {
         gaps,
         emptyChainReason,
         ...(guidanceNote ? { guidanceNote } : {}),
+        startupFiles,
       });
       if (!delivered.ok) {
         // Same partial-state contract as the fresh packet: unwind the candidate,
@@ -727,9 +734,15 @@ export class SeatHandoverService {
       appliedLaunch: launch.appliedLaunch ?? null,
       sourceOutcome,
       launchAdditionNotes,
-      startedWithoutRequired: guidancePutBack.startedWithoutRequired,
+      startedWithoutRequired,
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
     });
+  }
+
+  /** #2456: the seat's send_text startup files a fresh start delivers, role first; none when the saved context can't be read. */
+  private startupTextFiles(nodeId: string): SeatStartupTextFile[] {
+    try { return seatStartupTextFiles(readNodeStartupSnapshot(this.db, nodeId), existsSync, (file) => readFileSync(file, "utf-8")); }
+    catch { return []; }
   }
 
   /** #875: the seat's missing guidance blocks put back from its saved startup context, as an exact resume does. Returns
@@ -998,12 +1011,15 @@ export class SeatHandoverService {
       emptyChainReason?: string;
       /** #2456: the line naming managed guidance blocks left as they are. */
       guidanceNote?: string;
+      startupFiles?: SeatStartupTextFile[];
     },
   ): Promise<{ ok: true } | { ok: false; message: string }> {
     const lines = [
       `# Seat rebuild handover — ${info.seatRef}`,
       `You are a REBUILT successor for this seat (reason: ${info.reason}, at ${this.now().toISOString()}). Your predecessor session was ${info.departingSession}; its live context was deliberately NOT carried. Prime yourself from the durable artifacts below, highest trust first.`,
     ];
+    const startup = startupFilesSection(info.startupFiles ?? []);
+    if (startup.length > 0) lines.push("", ...startup);
     if (info.primedArtifacts.length > 0) {
       lines.push("", "Priming artifacts (read each, in order):");
       for (const artifact of info.primedArtifacts) lines.push(`- ${artifact.address} — ${artifact.label}`);
@@ -1048,6 +1064,7 @@ export class SeatHandoverService {
       authoredRecap?: { address: string; chainLength: number };
       authoredRecapAbsentReason?: string;
       guidanceNote?: string;
+      startupFiles?: SeatStartupTextFile[];
     },
   ): Promise<RestorePacketDelivery> {
     const packet = buildRestorePacket({ ...info, handoverAt: this.now().toISOString() });
@@ -1449,6 +1466,18 @@ export class SeatHandoverService {
  *  respawn-pane owns native scrollback on codex seats. Never called "scrollback": the label must
  *  make replay unmistakable, because passing a replayed recap off as native history is the one
  *  thing the requirement cannot survive. Exported for unit test. */
+/** #2456: the first section of a fresh or rebuild successor's turn: the seat's startup files to read, by path, role first.
+ *  A pointer asks the successor to read; it isn't the pasted text a start sends. */
+function startupFilesSection(files: SeatStartupTextFile[]): string[] {
+  if (files.length === 0) return [];
+  return [
+    "--- Your seat's startup files: read each before anything else, in order ---",
+    ...files.map((file) => file.present
+      ? `- ${file.absolutePath}${file.role ? " (your role)" : ""}`
+      : `- MISSING: ${file.absolutePath}${file.required ? " (required; OpenRig couldn't find it, so you start without it)" : ""}`),
+  ];
+}
+
 export function buildRestorePacket(info: {
   seatRef: string;
   reason: string;
@@ -1470,8 +1499,11 @@ export function buildRestorePacket(info: {
   authoredRecapAbsentReason?: string;
   /** #2456: the line naming managed guidance blocks the handover left as they are (edited, or possibly stale). */
   guidanceNote?: string;
+  /** #2456: the seat's send_text startup files, listed first so the successor reads them before the predecessor's context. */
+  startupFiles?: SeatStartupTextFile[];
 }): string {
   const captured = info.capturedContext.trim();
+  const startup = startupFilesSection(info.startupFiles ?? []);
   const lines = [
     "=== OpenRig seat handover — restore context ===",
     `Seat: ${info.seatRef}`,
@@ -1479,6 +1511,7 @@ export function buildRestorePacket(info: {
     `Predecessor session: ${info.departingSession}`,
     `Handover at: ${info.handoverAt}`,
     "",
+    ...(startup.length > 0 ? [...startup, ""] : []),
     "--- Predecessor terminal (captured) ---",
     captured.length > 0 ? captured : "(no capture available)",
   ];

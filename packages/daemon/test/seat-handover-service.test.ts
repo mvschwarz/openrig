@@ -303,6 +303,48 @@ describe("SeatHandoverService", () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  // A fresh or rebuild successor is a new conversation that no start delivered to, so its one first turn points it to each
+  // send_text startup file a fresh start delivers, role first. A required one that's missing marks the seat. A fork carries
+  // its parent's conversation, which already had them, and gets no list.
+  it.each(["fresh", "rebuild", "fork:dev-impl@seat-rig"])("a %s successor's first turn points to the seat's startup files, role first (#2456)", async (source) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "handover-startup-files-"));
+    try {
+      const { node, sessionId } = seedSeat();
+      sessionRegistry.updateResumeToken(sessionId!, "codex_id", "codex-thread-1", "hook");
+      db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(root, node.id);
+      const role = path.join(root, "guidance", "role.md");
+      const context = path.join(root, "startup", "context.md");
+      const missing = path.join(root, "startup", "brief.txt");
+      for (const [file, text] of [[role, "You are the implementer.\n"], [context, "Project context.\n"]] as const) {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, text);
+      }
+      const text = (absolutePath: string, extra: Record<string, unknown> = {}) => ({ path: path.relative(root, absolutePath), absolutePath, ownerRoot: root,
+        deliveryHint: "send_text", required: true, appliesOn: ["fresh_start", "restore"], ...extra });
+      // Saved in the order a spec might list them; the role comes first in the list all the same.
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', ?, '[]', 'codex')")
+        .run(node.id, JSON.stringify([text(context), text(role, { orientation: "role" }), text(missing)]));
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "replace occupant", source });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      const turns = sendText.mock.calls.map((call) => String(call[1]));
+      const listed = turns.find((turn) => turn.includes("Your seat's startup files"));
+      const handed = (result as unknown as { result: { startedWithoutRequired?: string[] } }).result;
+      if (source.startsWith("fork:")) {
+        expect(listed).toBeUndefined();
+        expect(handed.startedWithoutRequired).toBeUndefined();
+        return;
+      }
+      expect(listed, JSON.stringify(turns)).toBeDefined();
+      const at = (needle: string) => listed!.indexOf(needle);
+      expect(at(role)).toBeGreaterThan(at("Your seat's startup files"));
+      expect(at(role)).toBeLessThan(at(context));
+      expect(listed).toContain(`MISSING: ${missing}`);
+      // The list comes before the predecessor's context: its terminal for a fresh successor, its durable chain for a rebuild.
+      expect(at("Your seat's startup files")).toBeLessThan(at(source === "fresh" ? "--- Predecessor terminal" : "The durable chain is EMPTY"));
+      expect(handed.startedWithoutRequired).toEqual([missing]);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   // #2456 part 3: a block already in the guidance file. OpenRig keeps a record of what it last wrote there, so a handover
   // refreshes a block it wrote whose source has changed, keeps a block a person edited and names it, and names a block it
   // has no record of as possibly stale instead of replacing it.
