@@ -68,7 +68,7 @@ function unauthorizedBody(reason: string): {
     why_it_matters:
       "Mission Control write verbs require a bearer token because the daemon may be bound on a non-loopback interface (tailnet) where unauthenticated mutation would be unsafe.",
     what_to_do:
-      "Set the auth.bearerToken field in daemon config (or OPENRIG_AUTH_BEARER_TOKEN env), restart the daemon, and resend the request with `Authorization: Bearer <token>`.",
+      "Set OPENRIG_AUTH_BEARER_TOKEN in the daemon's environment, restart the daemon, and resend the request with `Authorization: Bearer <token>`.",
   };
 }
 
