@@ -24,8 +24,9 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { hostname as osHostname, userInfo } from "node:os";
 import { connect } from "node:net";
+import { execFile } from "node:child_process";
 import { getOpenRigHome } from "../openrig-compat.js";
-import { addHostEntry, updateHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry } from "../host-registry.js";
+import { addHostEntry, updateHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry, type SshHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type CrossHostResult } from "../cross-host-executor.js";
 import { recordHostObservation, loadHostBindings, describeBindingConflict, defaultHostBindingsPath, type HostObservationOutcome } from "../host-bindings.js";
 import { DaemonClient } from "../client.js";
@@ -167,15 +168,35 @@ function defaultDoctorDeps(): DoctorDeps {
   };
 }
 
+/** Where ssh would connect for this host, from `ssh -G`, which reads ssh config without connecting.
+ *  Null when ssh can't resolve the target or a ProxyJump/ProxyCommand sits in between, since no
+ *  direct dial stands for that transport. */
+export function resolveSshEndpoint(host: SshHostEntry, timeoutMs = 1500): Promise<{ hostname: string; port: number } | null> {
+  const args = [...(host.user ? ["-l", host.user] : []), "-G", host.target];
+  return new Promise((resolve) => {
+    execFile("ssh", args, { timeout: timeoutMs }, (error, stdout) => {
+      if (error) return resolve(null);
+      const conf = new Map(stdout.split("\n").map((line) => {
+        const i = line.indexOf(" ");
+        return [line.slice(0, i).toLowerCase(), line.slice(i + 1).trim()] as const;
+      }));
+      const proxied = ["proxyjump", "proxycommand"].some((k) => (conf.get(k) ?? "none") !== "none");
+      const hostname = conf.get("hostname");
+      const port = Number(conf.get("port"));
+      resolve(hostname && Number.isInteger(port) && !proxied ? { hostname, port } : null);
+    });
+  });
+}
+
 /** FR-1 doctor legs — each failing step maps to a DISTINCT actionable error:
  *  "SSH works but daemon is down" ≠ "daemon works but registry is wrong" ≠
  *  "remote rig binary missing/old". */
 /** OPR.0.4.6.MH1 FR-3 — the coarse ls status word: a BOUNDED tcp dial
- *  against the host's transport endpoint (ssh: target:22; http: the
- *  URL's host:port). Coarse by design (the kubectl STATUS / docker
- *  context ls precedent): reachable | unreachable | unknown — never a
- *  hang (hard timeout), never a guess (dial failure = unreachable,
- *  probe error/unparseable endpoint = unknown). */
+ *  against the host's transport endpoint (ssh: the host and port ssh itself
+ *  resolves, see resolveSshEndpoint; http: the URL's host:port). Coarse by
+ *  design (the kubectl STATUS / docker context ls precedent): reachable |
+ *  unreachable | unknown — never a hang (hard timeout), never a guess (dial
+ *  failure = unreachable, probe error/unparseable endpoint = unknown). */
 export async function probeHostStatus(
   host: HostEntry,
   tcpProbe: DoctorDeps["tcpProbe"],
@@ -185,8 +206,9 @@ export async function probeHostStatus(
     let target: string;
     let port: number;
     if (host.transport === "ssh") {
-      target = host.target;
-      port = 22;
+      const endpoint = await resolveSshEndpoint(host, timeoutMs);
+      if (!endpoint) return "unknown";
+      ({ hostname: target, port } = endpoint);
     } else {
       const u = new URL(host.url);
       target = u.hostname.replace(/^\[|\]$/g, "");
