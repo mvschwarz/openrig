@@ -34,8 +34,32 @@ function object(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Codex executes a command string; keep its plugin-root substitution but avoid POSIX shell builtins. */
+export function windowsCodexPluginHooks(source: string): string {
+  const manifest: unknown = JSON.parse(source);
+  if (!object(manifest) || !object(manifest.hooks)) throw Error("Codex hook manifest has no hooks object");
+  const prefix = 'test -n "$OPENRIG_SEAT_PROJECT_DIR" && test -f "$OPENRIG_NODE" && test -x "$OPENRIG_NODE" || exit 0; exec "$OPENRIG_NODE" ';
+  const forwarder = "const fs=require('node:fs'),cp=require('node:child_process'),n=process.env.OPENRIG_NODE;if(!process.env.OPENRIG_SEAT_PROJECT_DIR||!n||!fs.existsSync(n))process.exit(0);const r=cp.spawnSync(n,process.argv.slice(1),{stdio:'inherit',windowsHide:true});process.exit(r.status??1);";
+  for (const groups of Object.values(manifest.hooks)) {
+    if (!Array.isArray(groups)) throw Error("Codex hook groups must be arrays");
+    for (const group of groups) {
+      if (!object(group) || !Array.isArray(group.hooks)) throw Error("Codex hook group has no hooks");
+      for (const hook of group.hooks) {
+        if (!object(hook) || hook.type !== "command" || typeof hook.command !== "string" || !hook.command.startsWith(prefix)) throw Error("Unsupported Codex hook command");
+        const tail = hook.command.slice(prefix.length);
+        if (!/^"\$\{PLUGIN_ROOT\}\/hooks\/scripts\/(?:activity-relay|refocus)\.cjs" (?:--from-plugin|--runtime codex)$/.test(tail)) throw Error("Unsupported Codex hook command");
+        hook.command = `"${process.execPath}" -e "${forwarder}" -- ${tail}`;
+      }
+    }
+  }
+  return JSON.stringify(manifest, null, 2) + "\n";
+}
+
 /** Exact platform projection used by staging and by the shipped-tree comparator. */
 export function platformPluginFile(pluginName: string, relative: string, contents: string): string {
-  return process.platform === "win32" && pluginName === "openrig-core" && relative.replaceAll("\\", "/") === "hooks/claude.json"
-    ? windowsClaudePluginHooks(contents) : contents;
+  if (process.platform !== "win32" || pluginName !== "openrig-core") return contents;
+  const file = relative.replaceAll("\\", "/");
+  if (file === "hooks/claude.json") return windowsClaudePluginHooks(contents);
+  if (file === "hooks/codex.json") return windowsCodexPluginHooks(contents);
+  return contents;
 }

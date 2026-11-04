@@ -23,6 +23,8 @@ import { emittedEffortFromArgv } from "./seat-effort.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
 import { readWindowsProcessFacts } from "./windows-process-facts.js";
 import { pinnedWindowsRecoveryCommand } from "./provider-recovery-command.js";
+import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
+import { readWindowsScopedLoader } from "../adapters/windows-scoped-launch.js";
 
 /**
  * OPR.0.7.0.5 — restart ONE Codex seat in place so it reads its Codex home's current account: the same
@@ -487,8 +489,11 @@ export class CodexInPlaceRestart {
     // Codex runs one sh below the pane's shell. Only that script is accepted between them.
     const between = rows.find((row) => row.pid === top.ppid);
     const viaLaunchScript = !!between && between.ppid === panePid && isStagedLaunchScript(between);
+    const viaWindowsScopedShell = !!root && !!between && between.ppid === panePid
+      && root.platform === "win32" && between.platform === "win32"
+      && isWindowsScopedPaneRoot(root) && isBareWindowsShell(between);
     if (top.pid === panePid) paneShape = "direct_native";
-    else if (root && (top.ppid === panePid || viaLaunchScript) && (isShellForeground(executableBase(root)) || (root.platform === "win32" && isWindowsShellHost(executableBase(root))))) paneShape = "shell_backed";
+    else if (root && (top.ppid === panePid || viaLaunchScript || viaWindowsScopedShell) && (isShellForeground(executableBase(root)) || (root.platform === "win32" && isWindowsShellHost(executableBase(root))))) paneShape = "shell_backed";
     else return { ok: false, code: "pane_shape_unknown", message: "The pane is neither a shell running Codex (directly or through OpenRig's own launch script) nor Codex itself; nothing was stopped.",
       // Report the observed chain from Codex toward the pane, never argv, paths or environment values.
       detail: { panePid, processChain: processChain.map(row => ({ pid: row.pid, ppid: row.ppid, name: row.executableName ?? null })) },
@@ -902,6 +907,20 @@ function executableBase(row: NativeProcessRow): string {
 /** The shells `/bin/sh` can run as. macOS's /bin/sh is a shim that runs bash (or dash or zsh, if so
  *  configured), so the OS names the staged script's process after that shell, not sh. */
 const SH_RUNS_AS = new Set(["sh", "bash", "dash", "zsh"]);
+
+function isBareWindowsShell(row: NativeProcessRow): boolean {
+  const argv = parseWindowsCommandLine(row.command);
+  return ["powershell", "pwsh"].includes(executableBase(row))
+    && argv.slice(1).every(arg => ["-nologo", "-noprofile"].includes(arg.toLowerCase()));
+}
+
+function isWindowsScopedPaneRoot(row: NativeProcessRow): boolean {
+  if (!["powershell", "pwsh"].includes(executableBase(row))) return false;
+  const argv = parseWindowsCommandLine(row.command);
+  if (argv.length !== 5 || argv[1]?.toLowerCase() !== "-nologo" || argv[2]?.toLowerCase() !== "-noprofile"
+    || argv[3]?.toLowerCase() !== "-encodedcommand" || !/^[A-Za-z0-9+/]+={0,2}$/.test(argv[4]!)) return false;
+  return readWindowsScopedLoader(Buffer.from(argv[4]!, "base64").toString("utf16le")) !== null;
+}
 
 /** `/bin/sh <path>` running a launch script that OpenRig's tmux adapter staged, and nothing else. */
 function isStagedLaunchScript(row: NativeProcessRow): boolean {

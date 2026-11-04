@@ -432,7 +432,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const matchesShipped = (dir: string) => ownFiles.every(relative => {
       try {
         const source = fs.readFileSync(nodePath.join(shipped, relative));
-        const expected = process.platform === "win32" && relative.replaceAll("\\", "/") === "hooks/claude.json"
+        const expected = process.platform === "win32" && ["hooks/claude.json", "hooks/codex.json"].includes(relative.replaceAll("\\", "/"))
           ? Buffer.from(platformPluginFile("openrig-core", relative, source.toString("utf8"))) : source;
         return fs.readFileSync(nodePath.join(dir, relative)).equals(expected);
       }

@@ -1630,3 +1630,18 @@ describe('native npm launcher ownership', () => {
     expect(w.calls).toEqual([]); expect(w.launches).toEqual([]);
   });
 });
+import { windowsScopedLaunch } from "../src/adapters/windows-scoped-launch.js";
+import { windowsArguments } from "../src/adapters/windows-argv.js";
+
+it.runIf(process.platform === "win32").each(["owned", "arbitrary-root", "shell-command"])("recognizes only the owned Windows scoped shell during restart (%s)", async kind => {
+  const w = world();
+  const rows = nativeCandidateRows();
+  const launch = windowsScopedLaunch("powershell.exe", "", {}, "C:/fixture/scoped.ps1", true);
+  rows[0]!.command = windowsArguments(launch.argv);
+  if (kind === "arbitrary-root") rows[0]!.command = 'powershell.exe -NoLogo -NoProfile -EncodedCommand ' + Buffer.from("Write-Output 'not a managed loader'", "utf16le").toString("base64");
+  rows[1]!.ppid = 150;
+  rows.splice(1, 0, { ...rows[0]!, pid: 150, ppid: 100, command: kind === "shell-command" ? "powershell.exe -Command Write-Output" : "powershell.exe" });
+  w.setRows(rows);
+  expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject(kind === "owned" ? { ok: true, paneShape: "shell_backed" } : { ok: false, code: "pane_shape_unknown" });
+  expect(w.calls).toEqual([]);
+});

@@ -3,12 +3,29 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { windowsClaudePluginHooks } from "../src/domain/windows-claude-plugin-hooks.js";
+import { windowsClaudePluginHooks, windowsCodexPluginHooks } from "../src/domain/windows-claude-plugin-hooks.js";
 import { PluginVendorService } from "../src/domain/plugin-vendor-service.js";
 import { codexPluginContentHash, shippedCodexPluginContentHash } from "../src/domain/codex-owned-plugin-trust.js";
 
 const manifestPath = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json");
 const source = fs.readFileSync(manifestPath, "utf8");
+
+it.runIf(process.platform === "win32")("runs the native Codex plugin command with stdin and preserves exit status", () => {
+  const original = fs.readFileSync(path.join(path.dirname(manifestPath), "codex.json"), "utf8");
+  const native = JSON.parse(windowsCodexPluginHooks(original));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native codex hook "));
+  try {
+    fs.mkdirSync(path.join(root, "hooks/scripts"), { recursive: true });
+    fs.writeFileSync(path.join(root, "hooks/scripts/activity-relay.cjs"), "process.stdout.write(require('fs').readFileSync(0,'utf8'));process.exit(7);");
+    const command = native.hooks.SessionStart[0].hooks[0].command.replaceAll("${PLUGIN_ROOT}", root);
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", "& " + command], { env: { ...process.env, OPENRIG_NODE: process.execPath, OPENRIG_SEAT_PROJECT_DIR: root }, input: '{"owned":true}', encoding: "utf8", windowsHide: true });
+    expect(result.stdout).toBe('{"owned":true}');
+    // PowerShell needs an explicit exit to propagate a native program's status.
+    const exited = spawnSync("powershell.exe", ["-NoProfile", "-Command", "& " + command + "; exit $LASTEXITCODE"], { env: { ...process.env, OPENRIG_NODE: process.execPath, OPENRIG_SEAT_PROJECT_DIR: root }, input: '{}', encoding: "utf8", windowsHide: true });
+    expect(exited.status).toBe(7);
+    expect(Object.keys(native.hooks)).toEqual(Object.keys(JSON.parse(original).hooks));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 
 it("preserves the complete shipped event/group/metadata vocabulary", () => {
   const original = JSON.parse(source), native = JSON.parse(windowsClaudePluginHooks(source));

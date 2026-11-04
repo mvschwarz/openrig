@@ -53,10 +53,11 @@ function pluginContentHash(root: string, strict: boolean, shipped: boolean): str
       try {
         const opened = fs.fstatSync(fd);
         if (!opened.isFile() || opened.ino !== before.ino || opened.dev !== before.dev) throw new Error("plugin file changed while fingerprinting");
-        if (shipped && process.platform === "win32" && path.relative(root, file).replaceAll("\\", "/") === "hooks/claude.json") {
+        const relative = path.relative(root, file).replaceAll("\\", "/");
+        if (shipped && process.platform === "win32" && ["hooks/claude.json", "hooks/codex.json"].includes(relative)) {
           const original = fs.readFileSync(fd);
           if (original.length !== before.size) throw new Error("plugin file changed while fingerprinting");
-          const projected = Buffer.from(platformPluginFile("openrig-core", "hooks/claude.json", original.toString("utf8")));
+          const projected = Buffer.from(platformPluginFile("openrig-core", relative, original.toString("utf8")));
           length(projected.length); hash.update(projected);
           return;
         }
@@ -107,7 +108,7 @@ export function planOwnedCodexContentApproval(input: {
     // Approve the expected projected source bytes rather than rereading the cache.
     const contentHash = shippedCodexPluginContentHash(input.shipped);
     const declarations: Record<string, string> = {};
-    const manifest = JSON.parse(fs.readFileSync(path.join(input.shipped, "hooks/codex.json"), "utf8"));
+    const manifest = JSON.parse(platformPluginFile("openrig-core", "hooks/codex.json", fs.readFileSync(path.join(input.shipped, "hooks/codex.json"), "utf8")));
     for (const [event, groups] of Object.entries(manifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
       groups.forEach((group, groupIndex) => group.hooks.forEach((handler, handlerIndex) => {
         const { key, hash } = computeCodexHookTrust(event, { ...handler, matcher: group.matcher, timeoutSec: handler.timeout,
