@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   postWebhook,
   callWebApi,
+  downloadPrivateFile,
   verifyScopes,
   verifyChannelMembership,
   openSocketConnection,
@@ -107,6 +108,22 @@ describe("slack-api — a transport error never carries the bot token", () => {
     const fetchImpl: FetchImpl = async (_url, init) => { new Headers(init?.headers); return new Response("{}"); };
     const r = await callWebApi("auth.test", "xoxb-copied\nSECRETTAIL", {}, fetchImpl);
     expect(r).toMatchObject({ ok: false, status: 0 });
+    expect(r.error).toContain("invalid header value");
+    expect(r.error).not.toMatch(/xoxb-copied|SECRETTAIL/);
+  });
+
+  it("keeps the rest of the message whole when a line of the token is very short", async () => {
+    const fetchImpl: FetchImpl = async (_url, init) => { new Headers(init?.headers); return new Response("{}"); };
+    const r = await callWebApi("auth.test", "xoxb-copied-token\na", {}, fetchImpl);
+    expect(r.error).toContain("Headers.append");
+    expect(r.error).toContain("invalid header value");
+    expect(r.error).not.toContain("xoxb-copied-token");
+  });
+
+  it("a file download's error doesn't carry the token either", async () => {
+    const fetchImpl: FetchImpl = async (_url, init) => { new Headers(init?.headers); return new Response("{}"); };
+    const r = await downloadPrivateFile("https://files.slack.com/files-pri/T1-F1/x.txt", "xoxb-copied\nSECRETTAIL", fetchImpl);
+    expect(r.ok).toBe(false);
     expect(r.error).toContain("invalid header value");
     expect(r.error).not.toMatch(/xoxb-copied|SECRETTAIL/);
   });
