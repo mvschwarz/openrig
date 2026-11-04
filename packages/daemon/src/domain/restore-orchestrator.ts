@@ -35,6 +35,7 @@ import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyCl
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
+import { decideManagedBlock, managedBlockRecords } from "./managed-block-records.js";
 import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -1532,16 +1533,37 @@ export class RestoreOrchestrator {
     }
     if (guidance) guidance = applySeatSkillsLineRule(guidance, this.routerLineAnsweredYes()).guidance;
     if (!guidance || guidance.items.length === 0) return result;
+    // #2456: blocks the seat runs as they are although they differ from their source (edited by hand, or with no record of
+    // OpenRig writing them), named on its result. They aren't gaps: the seat has guidance there.
+    const notes = this.keptGuidanceNotes(guidance);
+    const noted = notes.length > 0 ? { ...result, guidanceNotes: notes } : result;
     let missing: string[];
     try {
       missing = missingGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") });
     } catch (err) {
       missing = [`(could not read ${guidance.targetPath}: ${(err as Error).message})`];
     }
-    if (missing.length === 0) return result;
+    if (missing.length === 0) return noted;
     const gap = `${node.logicalId} is running without part of its guidance: ${guidance.targetPath} lacks the OpenRig blocks ${missing.join(", ")}.`;
     warnings?.push(`Restore: ${gap}`);
-    return { ...result, guidanceGaps: missing };
+    return { ...noted, guidanceGaps: missing };
+  }
+
+  /** #2456: a note for each block in the seat's guidance file that differs from its source and isn't OpenRig's last write. */
+  private keptGuidanceNotes(guidance: NonNullable<ReturnType<typeof seatGuidance>>): string[] {
+    let content: string;
+    try { content = existsSync(guidance.targetPath) ? readFileSync(guidance.targetPath, "utf-8") : ""; } catch { return []; }
+    if (!content) return [];
+    const records = managedBlockRecords(this.db);
+    const notes: string[] = [];
+    for (const item of guidance.items) {
+      if (item.unresolved) continue;
+      let source: string;
+      try { source = readFileSync(item.sourcePath, "utf-8"); } catch { continue; }
+      const { note } = decideManagedBlock(content, item.blockId, source, records, guidance.targetPath, { unrecorded: "keep", sourcePath: item.sourcePath });
+      if (note) notes.push(note);
+    }
+    return notes;
   }
 
   /** OPR.0.3.4.2 (B) — roll a just-launched session back to ZERO sessions for
@@ -1799,15 +1821,21 @@ export class RestoreOrchestrator {
         guidance = null;
       }
       if (guidance && guidance.items.length > 0) {
+        // #2456: a block OpenRig wrote whose source changed since is refreshed too; an edited one, or one with no record, is
+        // left as it is and named (the check after the launch carries the names onto the seat's result).
         const repair = restoreMissingGuidance(guidance, {
           exists: existsSync,
           readFile: (path) => readFileSync(path, "utf-8"),
           writeFile: (path, content) => writeFileSync(path, content, "utf-8"),
           mkdirp: (path) => mkdirSync(path, { recursive: true }),
-        });
+        }, managedBlockRecords(this.db));
         if (repair.restored.length > 0) {
           warnings?.push(`Restore guidance: ${node.logicalId}: put back missing blocks ${repair.restored.join(", ")} in ${guidance.targetPath} from their current source files.`);
         }
+        if (repair.refreshed.length > 0) {
+          warnings?.push(`Restore guidance: ${node.logicalId}: refreshed blocks ${repair.refreshed.join(", ")} in ${guidance.targetPath} from their current source files.`);
+        }
+        for (const kept of repair.kept) warnings?.push(`Restore guidance: ${node.logicalId}: ${kept}`);
         for (const gap of repair.gaps) warnings?.push(`Restore guidance: ${node.logicalId}: ${gap}`);
       }
     }

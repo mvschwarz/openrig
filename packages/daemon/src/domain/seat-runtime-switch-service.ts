@@ -19,6 +19,7 @@ import { SeatStatusService } from "./seat-status-service.js";
 import { SeatLifecycleService } from "./seat-lifecycle-service.js";
 import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
 import { buildRestorePacket, type PredecessorRecapResolver } from "./seat-handover-service.js";
+import { keptGuidanceSeatLine } from "./restore-guidance.js";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { clearCodexMemberPermissions } from "./codex-member-permissions.js";
@@ -423,6 +424,8 @@ export class SeatRuntimeSwitchService {
     const packet = [
       `You are ${ctx.seatRef}'s successor on ${target}, staged for runtime switch ${id}. The ${node.runtime} occupant still holds the seat: until OpenRig tells you the switch committed, don't act as the seat (queue changes and sends are refused).`,
       materials.firstTurn,
+      // #2456: a guidance block the preparation kept is named here, as a start tells its seat.
+      keptGuidanceSeatLine(launch.notes ?? []),
       buildRestorePacket({ seatRef: ctx.seatRef, reason: ctx.input.reason, departingSession: sessionName, handoverAt: stamp(), capturedContext: screen ?? "",
         ...(recap && "recap" in recap ? recap : { recapUnavailableReason: recap?.unavailableReason ?? "no provider recap available" }),
         ...(authored ? ("address" in authored ? { authoredRecap: authored } : { authoredRecapAbsentReason: authored.absentReason }) : {}) }),
