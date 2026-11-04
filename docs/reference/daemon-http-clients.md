@@ -128,6 +128,15 @@ All three are server-sent events (`text/event-stream`):
   host), not on a measured identity. Readings whose reset times disagree are reported as `anomalies`, and the
   row's `state` can then be `explicit_unknown`. Show the row's `state`, `anomalies` and each reading's seat and
   `asOf` as reported, rather than merging readings that happen to match.
+- **Slack channels and people:** `GET /api/gateway/slack/channels` and `GET /api/gateway/slack/users` each return
+  one page from Slack, read with the daemon's configured bot token, which never leaves the daemon. Channels are
+  public and unarchived, as `{ id, name, isMember }`; people are `{ id, name, realName, displayName, isBot,
+  deleted }`, with no email. Pass `cursor` (the previous page's `nextCursor`, `null` on the last page) and
+  `limit` (default 100, at most 200). Inbound delivery needn't be enabled. Failures: 503 `slack_not_configured`
+  when no bot token resolves, which is different from an empty list; 403 `slack_missing_scope` with the scope
+  Slack names in `needed` (an older app may lack `users:read`); 429 `slack_rate_limited` with Slack's
+  `Retry-After`; otherwise 502. Each request is a live Slack call, so page through a list when someone opens a
+  chooser rather than polling it. Private channels and direct messages aren't listed.
 - **Slices are found by folder name alone.** `GET /api/slices/:name`, `/:name/doc/*`, `/:name/proof-asset/*` and
   `GET /api/review/slice/:name` take only the name; the detail route reads `?mission` only together with
   `?project`. When two missions have a slice folder of the same name, the daemon keeps the first one it finds:

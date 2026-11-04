@@ -182,6 +182,9 @@ rig slack channel-map list
 rig slack channel-map remove pr@my-rig
 ```
 
+A client can offer the channels to choose from with `GET /api/gateway/slack/channels`, which lists the public
+channels the bot token can see, with their ids ([Writing a daemon client](daemon-http-clients.md#route-details)).
+
 - **Which channel an item posts to.** The item's seat is matched exactly first (`pr@my-rig`),
   then its rig (`my-rig`). Anything unmapped posts to the default channel, so a config
   without a map behaves exactly as before. Aggregate delivery digests have no single seat and

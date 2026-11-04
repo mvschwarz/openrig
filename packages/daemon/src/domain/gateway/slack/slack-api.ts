@@ -289,6 +289,49 @@ export async function verifyChannelMembership(
   return { ok: true, isMember: ch.is_member === true, name: ch.name };
 }
 
+/** One page of a directory read: only the projected fields, never Slack's whole object; on failure, Slack's own result. */
+export type DirectoryPage<T> = { ok: true; items: T[]; nextCursor: string | null } | { ok: false; result: WebApiResult };
+export interface DirectoryChannel { id: string; name: string; isMember: boolean }
+export interface DirectoryUser { id: string; name: string; realName: string | null; displayName: string | null; isBot: boolean; deleted: boolean }
+
+function directoryPage<T>(r: WebApiResult, key: string, project: (raw: Record<string, unknown>) => T): DirectoryPage<T> {
+  if (!r.ok) return { ok: false, result: r };
+  const raw = Array.isArray(r.json[key]) ? (r.json[key] as Record<string, unknown>[]) : [];
+  const next = (r.json.response_metadata as { next_cursor?: unknown } | undefined)?.next_cursor;
+  return { ok: true, items: raw.map(project), nextCursor: typeof next === "string" && next ? next : null };
+}
+
+/** One page of the workspace's public, unarchived channels (conversations.list; channels:read). */
+export async function listPublicChannels(
+  token: string,
+  page: { cursor?: string; limit: number },
+  fetchImpl: FetchImpl = defaultFetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<DirectoryPage<DirectoryChannel>> {
+  const r = await callWebApi("conversations.list", token,
+    { types: "public_channel", exclude_archived: true, limit: page.limit, cursor: page.cursor }, fetchImpl, timeoutMs, "get-query");
+  return directoryPage(r, "channels", (c) => ({ id: String(c.id), name: String(c.name ?? ""), isMember: c.is_member === true }));
+}
+
+/** One page of the workspace's people (users.list; users:read), without email or other profile fields. */
+export async function listUsers(
+  token: string,
+  page: { cursor?: string; limit: number },
+  fetchImpl: FetchImpl = defaultFetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<DirectoryPage<DirectoryUser>> {
+  const r = await callWebApi("users.list", token, { limit: page.limit, cursor: page.cursor }, fetchImpl, timeoutMs, "get-query");
+  return directoryPage(r, "members", (u) => {
+    const profile = (u.profile ?? {}) as { display_name?: unknown };
+    return {
+      id: String(u.id), name: String(u.name ?? ""),
+      realName: typeof u.real_name === "string" ? u.real_name : null,
+      displayName: typeof profile.display_name === "string" && profile.display_name ? profile.display_name : null,
+      isBot: u.is_bot === true, deleted: u.deleted === true,
+    };
+  });
+}
+
 /** Inbound Socket Mode: open a WebSocket URL via apps.connections.open (app-level xapp token). */
 export async function openSocketConnection(
   appToken: string,
