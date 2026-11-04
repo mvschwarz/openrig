@@ -168,7 +168,7 @@ describe("a runtime switch plans the successor from the seat's own agent spec", 
   // OpenRig wrote is refreshed from its changed source, and one a person edited since is kept.
   describe("the preparation and a managed guidance block OpenRig wrote (#2456)", () => {
     const tmux = { sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })), hasSession: vi.fn(async () => true) };
-    async function switchToClaude(edit: boolean): Promise<string> {
+    async function switchToClaude(edit: boolean): Promise<{ after: string; notes: string[] }> {
       const node = seat("codex");
       const culture = nodePath.join(agentDir, "culture.md");
       writeFileSync(culture, "Team culture, revised.\n");
@@ -186,18 +186,22 @@ describe("a runtime switch plans the successor from the seat's own agent spec", 
         exists: (p: string) => existsSync(p), mkdirp: (p: string) => mkdirSync(p, { recursive: true }), copyFile: (a: string, b: string) => copyFileSync(a, b),
         listFiles: (dir: string) => (existsSync(dir) ? readdirSync(dir) : []), homedir: tmp };
       const adapter = new ClaudeCodeAdapter({ tmux, fsOps, sleep: async () => {}, managedBlockRecords: managedBlockRecords(db) } as never);
-      await materials.prepare({ cwd: project, tmuxSession: "dev-impl@seat-rig", ...materials.bindingAdditions() } as NodeBinding, adapter);
-      return readFileSync(guidance, "utf8");
+      const notes = await materials.prepare({ cwd: project, tmuxSession: "dev-impl@seat-rig", ...materials.bindingAdditions() } as NodeBinding, adapter);
+      return { after: readFileSync(guidance, "utf8"), notes };
     }
 
     it("control: a block OpenRig wrote is refreshed from its changed source", async () => {
-      expect(await switchToClaude(false)).toContain("Team culture, revised.");
+      const { after, notes } = await switchToClaude(false);
+      expect(after).toContain("Team culture, revised.");
+      expect(notes.some((note) => note.startsWith("guidance_block_edited:")), JSON.stringify(notes)).toBe(false);
     });
 
     it("a block a person edited since OpenRig wrote it is kept", async () => {
-      const after = await switchToClaude(true);
+      const { after, notes } = await switchToClaude(true);
       expect(after).toContain("Team culture. My own note.");
       expect(after).not.toContain("Team culture, revised.");
+      // Round 2: the switch's notes name the kept block, so its result and the successor's first turn say so.
+      expect(notes.some((note) => note.startsWith("guidance_block_edited:") && note.includes("culture.md")), JSON.stringify(notes)).toBe(true);
     });
   });
 });

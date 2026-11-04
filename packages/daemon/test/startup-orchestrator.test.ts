@@ -518,10 +518,10 @@ describe("StartupOrchestrator", () => {
     });
     afterEach(() => { nodeFs.rmSync(cwd, { recursive: true, force: true }); });
     // Each adapter gets the records the daemon gives it, so its own guidance writes are checked and recorded.
-    function realAdapter(runtime: "codex" | "claude-code", overrides?: Partial<RuntimeAdapter>): RuntimeAdapter {
+    function realAdapter(runtime: "codex" | "claude-code", overrides?: Partial<RuntimeAdapter>, records = managedBlockRecords(db)): RuntimeAdapter {
       const real = runtime === "codex"
-        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [], managedBlockRecords: managedBlockRecords(db) } as never)
-        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, managedBlockRecords: managedBlockRecords(db) } as never);
+        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [], managedBlockRecords: records } as never)
+        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, managedBlockRecords: records } as never);
       // Codex's own projection is what queues launch developer instructions; with an empty plan it does nothing else.
       return mockAdapter({ runtime, ...(real instanceof CodexRuntimeAdapter ? { project: real.project.bind(real) as RuntimeAdapter["project"] } : {}),
         deliverStartup: real.deliverStartup.bind(real) as RuntimeAdapter["deliverStartup"], ...overrides });
@@ -629,6 +629,41 @@ describe("StartupOrchestrator", () => {
       expect(resumed.ok).toBe(true);
       expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
       expect(typed()).toHaveLength(0);
+    });
+
+    // Round 2: the records live in the daemon database, which can fail. Only a schema without the table means "no records";
+    // any other failed read is unknown, so the block is kept and named, and a failed record write is named.
+    const failing = (statement: "SELECT body_sha256" | "INSERT INTO managed_block_writes") => managedBlockRecords({
+      prepare: (sql: string) => {
+        if (sql.trimStart().startsWith(statement)) throw new Error("SQLITE_BUSY: database is locked");
+        return db.prepare(sql);
+      },
+    } as never);
+
+    it("a start keeps a recorded block a person edited when its record can't be read, and names it", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const start = (records?: ReturnType<typeof managedBlockRecords>) => createOrchestrator().startNode(makeInput(seed,
+        { adapter: realAdapter("claude-code", undefined, records), binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      const second = await start(failing("SELECT body_sha256"));
+      expect(second.ok).toBe(true);
+      // Unknown isn't unrecorded: on a build that reads a failed lookup as no record, this start replaces the edit.
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+      expect(read(guidance)).not.toContain("Culture v2.");
+      expect(second.warnings?.some((w) => w.startsWith("guidance_block_record_unreadable:") && w.includes("culture.md")), JSON.stringify(second.warnings)).toBe(true);
+    });
+
+    it("a start names a block whose write record couldn't be saved", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const first = await createOrchestrator().startNode(makeInput(seed,
+        { adapter: realAdapter("claude-code", undefined, failing("INSERT INTO managed_block_writes")), binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect(first.ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1.");
+      expect(first.warnings?.some((w) => w.startsWith("guidance_block_record_not_saved:") && w.includes("culture.md")), JSON.stringify(first.warnings)).toBe(true);
     });
   });
 
