@@ -1312,7 +1312,7 @@ export class QueueRepository {
     });
   }
 
-  private deliverWakeIntentAfterCommit(outboxId: string): void {
+  deliverWakeIntentAfterCommit(outboxId: string): void {
     queueMicrotask(() => {
       void this.deliverWakeIntent(outboxId).catch((err) => {
         console.error(`Queue wake delivery failed for ${outboxId}:`, err);
@@ -1983,16 +1983,30 @@ export class QueueRepository {
     persistedEvent: PersistedEvent;
     destinationSession: string;
     nudge: boolean | undefined;
+    wakeStaged?: boolean;
+    wakeFrom?: string;
   } {
     if (!this.validateRig(input.destinationSession)) {
       throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
     }
     const result = this.createInTransactionalContext(input);
+    let wakeStaged = false;
+    const wakeFrom = input.wakeTrigger === "openrig" && !isOpenRigSender(input.sourceSession) ? OPENRIG_SENDER : input.sourceSession;
+    if (this.outbox && input.nudge !== false) {
+      try {
+        this.db.transaction(() => this.stageWakeIntent(result.qitemId, wakeFrom, input.destinationSession, sideEffectProvenance(input.identityProvenance), input.nudge, input.wakeTrigger))();
+        wakeStaged = true;
+      } catch (err) {
+        this.recordNudgeAttempt(result.qitemId, `failed:wake not retained: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     return {
       qitemId: result.qitemId,
       persistedEvent: result.persistedEvent,
       destinationSession: input.destinationSession,
       nudge: input.nudge,
+      wakeStaged,
+      wakeFrom,
     };
   }
 

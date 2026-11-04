@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { EventBus } from "../src/domain/event-bus.js";
 import { StreamStore } from "../src/domain/stream-store.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { streamIntakeQitemId, StreamIntakeCoordinator, STREAM_INTAKE_TAG } from "../src/domain/stream-intake.js";
+import { OutboxHandler, WAKE_INTENT_PREFIX } from "../src/domain/outbox-handler.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
@@ -563,10 +564,38 @@ describe("StreamIntakeCoordinator", () => {
     }
   });
 
-  it("restart after note stored before notification resolves adds no duplicate note or item (pending and closed batches)", async () => {
+  it("more than one page and a live emit while a notification is held, with and without a restart; each observation appears once and none is skipped", async () => {
     const { db, bus, streamStore, queueRepo } = setup();
 
-    // 1. Pending batch case
+    // 1. Establish initial cursor with a baseline item
+    const baseItem = streamStore.emit({ sourceSession: "test@s", body: "Base item to establish cursor" });
+    const now = new Date().toISOString();
+    db.prepare("INSERT INTO stream_intake_cursor (id, last_sort_key, updated_at) VALUES (1, ?, ?)").run(
+      baseItem.streamSortKey,
+      now,
+    );
+
+    // 2. Seed more than one page of backlog items (> 100 items)
+    const backlogCount = 110;
+    const backlogIds: string[] = [];
+    for (let i = 0; i < backlogCount; i++) {
+      const item = streamStore.emit({ sourceSession: "test@s", body: `Backlog item ${i}` });
+      backlogIds.push(item.streamItemId);
+    }
+
+    // Intercept maybeNudge to hold notifications
+    let holdNudgeResolve: (() => void) | undefined;
+    let holdNudges = true;
+    const originalMaybeNudge = queueRepo.maybeNudge.bind(queueRepo);
+    vi.spyOn(queueRepo, "maybeNudge").mockImplementation(async (...args) => {
+      if (holdNudges) {
+        await new Promise<void>((resolve) => {
+          holdNudgeResolve = resolve;
+        });
+      }
+      return originalMaybeNudge(...args);
+    });
+
     const coord1 = new StreamIntakeCoordinator({
       db,
       eventBus: bus,
@@ -576,24 +605,44 @@ describe("StreamIntakeCoordinator", () => {
     });
     coord1.start();
 
-    // First item creates the initial batch
-    const item1 = streamStore.emit({ sourceSession: "test@s", body: "First batch item" });
-    await new Promise((r) => setTimeout(r, 50));
+    // Allow catch-up to start and hit the held notification on the first batch item
+    await new Promise((r) => setTimeout(r, 60));
 
-    // Second item adds a note to the pending batch and atomically advances the cursor
-    const item2 = streamStore.emit({ sourceSession: "test@s", body: "Second item note", hintUrgency: "critical" });
-    await new Promise((r) => setTimeout(r, 50));
+    // While notification is held, emit a live item
+    const liveItem = streamStore.emit({ sourceSession: "test@s", body: "Live item emitted while notification held" });
 
-    // Stop coordinator immediately (simulating restart after atomic commit of note + cursor)
+    // Release notification so catch-up and live processing finish (without restart path)
+    holdNudges = false;
+    holdNudgeResolve?.();
+
+    // Wait for drain to complete
+    await new Promise((r) => setTimeout(r, 200));
+
     coord1.stop();
 
-    const rowsPending = queueRepo.list({ destinationSession: "queue.worker" });
-    expect(rowsPending).toHaveLength(1);
-    const transBefore = queueRepo.listTransitions(rowsPending[0]!.qitemId);
-    const notesBefore = transBefore.filter((t) => t.transitionNote?.includes(item2.streamItemId));
-    expect(notesBefore).toHaveLength(1);
+    // Verify all observations are accounted for: 1 initial intake item created, and 109 backlog items + 1 live item added as notes
+    const rows = queueRepo.list({ destinationSession: "queue.worker" });
+    expect(rows).toHaveLength(1);
+    const qitem = rows[0]!;
+    const transitions = queueRepo.listTransitions(qitem.qitemId);
 
-    // Restart coordinator and run catch-up
+    // Initial batch contains the first backlog item
+    expect(qitem.body).toContain(backlogIds[0]);
+
+    // Check all remaining backlog items appear in notes
+    for (let i = 1; i < backlogCount; i++) {
+      const found = transitions.some((t) => t.transitionNote?.includes(backlogIds[i]!));
+      expect(found).toBe(true);
+    }
+
+    // Check live item appears in notes
+    const liveFound = transitions.some((t) => t.transitionNote?.includes(liveItem.streamItemId));
+    expect(liveFound).toBe(true);
+
+    // Verify count: exactly 1 create + (backlogCount - 1) notes + 1 live note = 1 + 109 + 1 = 111 transitions
+    expect(transitions).toHaveLength(111);
+
+    // 3. WITH RESTART: test that restarting with closed or pending batches produces no duplicates
     const coord2 = new StreamIntakeCoordinator({
       db,
       eventBus: bus,
@@ -605,23 +654,21 @@ describe("StreamIntakeCoordinator", () => {
     await new Promise((r) => setTimeout(r, 100));
     coord2.stop();
 
-    // Verify pending batch got no duplicate note or second item
+    // Confirm no duplicate notes were added to the pending batch
     const rowsAfterRestart = queueRepo.list({ destinationSession: "queue.worker" });
     expect(rowsAfterRestart).toHaveLength(1);
-    const transAfter = queueRepo.listTransitions(rowsAfterRestart[0]!.qitemId);
-    const notesAfter = transAfter.filter((t) => t.transitionNote?.includes(item2.streamItemId));
-    expect(notesAfter).toHaveLength(1);
+    const transAfterRestart = queueRepo.listTransitions(rowsAfterRestart[0]!.qitemId);
+    expect(transAfterRestart).toHaveLength(111);
 
-    // 2. Closed/claimed batch case
-    // Mark the pending batch as closed
+    // Mark batch as closed/claimed
     queueRepo.update({
-      qitemId: rowsAfterRestart[0]!.qitemId,
+      qitemId: qitem.qitemId,
       actorSession: "worker@kernel",
       state: "done",
       closureReason: "no-follow-on",
     });
 
-    // Restart coordinator again
+    // Restart coordinator again with closed batch
     const coord3 = new StreamIntakeCoordinator({
       db,
       eventBus: bus,
@@ -633,10 +680,110 @@ describe("StreamIntakeCoordinator", () => {
     await new Promise((r) => setTimeout(r, 100));
     coord3.stop();
 
-    // Verify no second intake item was opened for already-processed item2
+    // Confirm no second intake item was opened
     const allRows = queueRepo.list({ destinationSession: "queue.worker" });
     expect(allRows).toHaveLength(1);
     expect(allRows[0]!.state).toBe("done");
+  });
+
+  it("with outbox attached, wake intent is staged in the same transaction and survives stopping before delivery", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+    const outbox = new OutboxHandler(db);
+    queueRepo.attachOutbox(outbox);
+
+    // Prevent post-commit delivery by intercepting deliverWakeIntentAfterCommit
+    vi.spyOn(queueRepo, "deliverWakeIntentAfterCommit").mockImplementation(() => {});
+
+    const coordinator = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: "queue.worker",
+    });
+    coordinator.start();
+
+    try {
+      const item = streamStore.emit({ sourceSession: "test@s", body: "Observation needing durable wake" });
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Stop before delivery
+      coordinator.stop();
+
+      const qitemId = streamIntakeQitemId(item.streamSortKey);
+      const queueRow = queueRepo.getById(qitemId);
+      expect(queueRow).toBeDefined();
+
+      // Check that wake intent was committed in the same transaction and is pending in outbox
+      const intent = outbox.getById(`${WAKE_INTENT_PREFIX}${qitemId}`);
+      expect(intent).toBeDefined();
+      expect(intent?.deliveryState).toBe("pending");
+      expect(intent?.destinationSession).toBe("queue.worker");
+    } finally {
+      coordinator.stop();
+    }
+  });
+
+  it("rollback on cursor write failure keeps note absent and priority routine until retry", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+
+    const coord = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: "queue.worker",
+    });
+    coord.start();
+
+    // Emit first item to establish pending batch
+    streamStore.emit({ sourceSession: "test@s", body: "First batch item" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const rows = queueRepo.list({ destinationSession: "queue.worker" });
+    expect(rows).toHaveLength(1);
+    const qitem = rows[0]!;
+    expect(qitem.priority).toBe("routine");
+
+    const cursorBefore = db.prepare("SELECT last_sort_key FROM stream_intake_cursor WHERE id = 1").get() as {
+      last_sort_key: string;
+    };
+
+    // Temporarily inject a failure in the cursor write during handleStreamItem
+    const origPrepare = db.prepare.bind(db);
+    let failCursorInsert = true;
+    vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+      if (failCursorInsert && sql.includes("INSERT INTO stream_intake_cursor")) {
+        throw new Error("Simulated cursor insert failure");
+      }
+      return origPrepare(sql);
+    });
+
+    // Emit critical item
+    const item2 = streamStore.emit({ sourceSession: "test@s", body: "Urgent item note", hintUrgency: "critical" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Verify transaction rolled back: note absent, priority unchanged, cursor unchanged
+    const transMid = queueRepo.listTransitions(qitem.qitemId);
+    expect(transMid.filter((t) => t.transitionNote?.includes(item2.streamItemId))).toHaveLength(0);
+    const qitemMid = queueRepo.getById(qitem.qitemId)!;
+    expect(qitemMid.priority).toBe("routine");
+    const cursorMid = db.prepare("SELECT last_sort_key FROM stream_intake_cursor WHERE id = 1").get() as {
+      last_sort_key: string;
+    };
+    expect(cursorMid.last_sort_key).toBe(cursorBefore.last_sort_key);
+
+    // Allow retry: clear failure and let drain re-run
+    failCursorInsert = false;
+    // @ts-expect-error accessing private method for controlled retry test
+    await coord.drain();
+
+    const transAfter = queueRepo.listTransitions(qitem.qitemId);
+    expect(transAfter.filter((t) => t.transitionNote?.includes(item2.streamItemId))).toHaveLength(1);
+    const qitemAfter = queueRepo.getById(qitem.qitemId)!;
+    expect(qitemAfter.priority).toBe("urgent");
+
+    coord.stop();
   });
 
   it("preserves checkpoint and does not initialize cursor as fresh install when cursor read fails", async () => {
