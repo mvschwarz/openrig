@@ -26,7 +26,7 @@ import {
   isPerSeatRoleGuidance,
   isPerSeatRoleStartupFile,
 } from "./managed-blocks.js";
-import { decideManagedBlock, type ManagedBlockRecords } from "./managed-block-records.js";
+import { decideManagedBlock, recordManagedBlockWrite, type ManagedBlockRecords } from "./managed-block-records.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type { NodeStartupSnapshot } from "./types.js";
@@ -189,11 +189,12 @@ export interface GuidanceRepair {
   /** #2456: blocks OpenRig wrote whose source changed since, replaced with the source's current text. */
   refreshed: string[];
   /** #2456: blocks left as they are although they differ from their source, each named with the reason
-   *  (`guidance_block_edited` or `guidance_block_may_be_stale`). The seat runs them as they are. */
+   *  (`guidance_block_edited`, `guidance_block_may_be_stale` or `guidance_block_record_unreadable`). The seat runs them as
+   *  they are. A block written whose record wasn't saved is named here too (`guidance_block_record_not_saved`). */
   kept: string[];
 }
 
-const KEPT_GUIDANCE_PREFIXES = ["guidance_block_edited: ", "guidance_block_may_be_stale: "];
+const KEPT_GUIDANCE_PREFIXES = ["guidance_block_edited: ", "guidance_block_may_be_stale: ", "guidance_block_record_unreadable: "];
 
 /** #2456: the one line a seat is told when a managed guidance block was left as it is (edited by hand, or possibly stale),
  *  naming each one, or undefined when none was. */
@@ -249,7 +250,7 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
       // #2456: the same decision every adapter's guidance write makes; an exact resume and a handover keep an unrecorded block.
       const decision = decideManagedBlock(existing ?? "", item.blockId, source, records, guidance.targetPath, { unrecorded: "keep", sourcePath: item.sourcePath });
       if (decision.note) repair.kept.push(decision.note);
-      else if (decision.standing === "current") records.set(guidance.targetPath, item.blockId, source);
+      else if (decision.standing === "current") recordManagedBlockWrite(records, guidance.targetPath, item.blockId, source, repair.kept);
       else if (decision.write) toWrite.push({ blockId: item.blockId, content: source, refresh: true });
       continue;
     }
@@ -283,7 +284,7 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
   for (const block of toWrite) {
     try {
       mergeManagedBlock(fs, guidance.targetPath, block.blockId, block.content);
-      records?.set(guidance.targetPath, block.blockId, block.content);
+      if (records) recordManagedBlockWrite(records, guidance.targetPath, block.blockId, block.content, repair.kept);
       (block.refresh ? repair.refreshed : repair.restored).push(block.blockId);
     } catch (err) {
       repair.gaps.push(`${block.blockId}: ${(err as Error).message}`);
