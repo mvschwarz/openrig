@@ -57,6 +57,18 @@ describe("GET /api/gateway/slack/channels and /users", () => {
     expect(res.headers.get("retry-after")).toBe("30");
   });
 
+  it("never returns the token in a transport failure, even one whose message quotes the request header", async () => {
+    // Node's fetch rejects a token copied with a newline before connecting, quoting the whole header in its message.
+    const fetchImpl = async (_url: string, init?: RequestInit) => {
+      throw new TypeError(`Headers.append: "${(init?.headers as Record<string, string>).authorization}" is an invalid header value.`);
+    };
+    const res = await gatewayRoutes({ home, slack: { fetchImpl, env: { SLACK_BOT_TOKEN: "xoxb-copied\nSECRETTAIL" } } }).request("/slack/channels");
+    expect(res.status).toBe(502);
+    const text = await res.text();
+    expect(text).toContain("slack_unreachable");
+    expect(text).not.toMatch(/xoxb|SECRETTAIL/);
+  });
+
   it("tells an unconfigured bot token apart from an empty directory", async () => {
     saveConfig({ ...DEFAULT_CONFIG, secretsEnvFile: null }, home);
     const unconfigured = await app(() => ({ body: { ok: true, channels: [] } })).request("/slack/channels");
