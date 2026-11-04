@@ -17,10 +17,10 @@ type ResolvedAgent = Extract<ReturnType<typeof resolveAgentRef>, { ok: true }>;
 /** #1530: a `local:` agent ref resolved as at launch. Launch resolves it against the rig root, which isn't kept on its own,
  * but every rig, pod and member startup file records that root as its `ownerRoot`. So the ref is resolved against each
  * saved startup file's owner root (re-anchored to the running install for shipped specs, as the runtime switch reads them,
- * #261), and a folder counts only when it holds an `agent.yaml` with the seat's resolved spec name and exactly one does.
- * A root the ref resolves back to itself is an agent's own folder, not a rig root, and proves nothing. Where the resource
- * origins can't prove which folder is the seat's spec (an import or author folder can share its name), the answer is an
- * error, never a guess. */
+ * #261). Launch also records the folder it read the agent from, as the owner root of the agent's own startup files, so a
+ * folder counts only when the ref lands on a recorded root, holds an `agent.yaml` with the seat's resolved spec name, and
+ * is the only one that does. Where the records can't prove which folder is the seat's spec (an import or author folder can
+ * share its name), the answer is an error, never a guess. */
 function agentResolvedAgainstRecordedRoots(
   agentRef: string,
   resolvedSpecName: string | null,
@@ -29,16 +29,15 @@ function agentResolvedAgainstRecordedRoots(
 ): { ok: true; agent: ResolvedAgent } | { ok: false; error: string } {
   const rel = agentRef.startsWith("local:") ? agentRef.slice("local:".length) : "";
   if (!rel) return { ok: false, error: "Current agent reference/profile has no established absolute source location" };
-  const folders = new Set<string>();
+  const roots = new Set<string>();
   for (const raw of resolvedStartupFiles) {
     if (!raw || typeof raw !== "object") continue;
     const { path, absolutePath, ownerRoot } = raw as Record<string, unknown>;
     if (typeof path !== "string" || typeof absolutePath !== "string" || typeof ownerRoot !== "string") continue;
     const root = reanchorBuiltinStartupFile({ path, absolutePath, ownerRoot }).ownerRoot;
-    if (!isAbsolute(root)) continue;
-    const folder = nodePath.resolve(root, rel);
-    if (folder !== nodePath.resolve(root)) folders.add(folder);
+    if (isAbsolute(root)) roots.add(nodePath.resolve(root));
   }
+  const folders = new Set([...roots].map((root) => nodePath.resolve(root, rel)).filter((folder) => roots.has(folder)));
   const agents = [...folders]
     .filter((folder) => fsOps.exists(nodePath.join(folder, "agent.yaml")))
     .map((folder) => resolveAgentRef(`path:${folder}`, folder, fsOps))
