@@ -117,7 +117,9 @@ export function gatewayRoutes(opts: {
         if (r.retryAfterSeconds) c.header("Retry-After", String(r.retryAfterSeconds));
         return c.json({ error: "slack_rate_limited", retryAfterSeconds: r.retryAfterSeconds ?? null }, 429);
       }
-      return c.json({ error: r.status === 0 ? "slack_unreachable" : "slack_error", slackError: r.error ?? null }, 502);
+      // A transport failure's message can quote the request, Authorization header included, so it never goes back.
+      if (r.status === 0) return c.json({ error: "slack_unreachable", message: "Slack couldn't be reached with the configured bot token. Check the token and the network." }, 502);
+      return c.json({ error: "slack_error", slackError: r.error ?? null }, 502);
     });
   }
 
