@@ -875,6 +875,32 @@ describe("--thinking in the runner command and the pi child argv", () => {
     expect(parsed.thinking).toBe("high");
     expect(parsed.trust).toBe("approve");
   });
+
+  it("custom protocol: pi-rpc harness reporting no sessionFile raises attention (runtime_error)", () => {
+    const f = fakeIo();
+    const core = new RunnerCore(
+      f.io,
+      { sessionName: "omo-worker@rig", nodeId: "omo-node", launchId: "launch-1" },
+      { runtime: "omo" },
+    );
+    core.start();
+    core.handlePiLine(JSON.stringify({
+      type: "response",
+      id: "pi-runner-get-state",
+      data: { sessionId: "omo-session-1", sessionFile: null },
+    }));
+
+    expect(f.lines.join("\n")).toMatch(/\[omo-runner\] ERROR rpc get_state returned no session file/);
+    expect(f.lines.join("\n")).not.toContain("READY");
+    expect(f.sidecars).toEqual([]);
+    expect(f.activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        hookEvent: "Notification",
+        subtype: "runtime_error",
+        runtime: "omo",
+      }),
+    ]));
+  });
 });
 
 // ── FR-5: prepareRunnerSidecar + cursor seed (guard re-verdict fold) ─────────

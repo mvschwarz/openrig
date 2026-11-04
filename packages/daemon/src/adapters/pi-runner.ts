@@ -597,8 +597,15 @@ export class RunnerCore {
       const wasReady = this.ready;
       this.ready = this.runtime === "pi" || !!this.sessionFile;
       if (!this.ready) {
-        this.io.mirrorLine("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
-        this.io.stopChild?.();
+        if (this.runtime === "omp") {
+          this.io.mirrorLine("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
+          this.io.stopChild?.();
+          return;
+        }
+        // For custom protocol: pi-rpc community harnesses, reporting no session file
+        // reads as needing attention rather than stopping the child process.
+        this.io.mirrorLine(`[${this.runtime}-runner] ERROR rpc get_state returned no session file; cannot provide a resume token`);
+        this.raiseAttention("runtime_error");
         return;
       }
       this.writeSidecar({});

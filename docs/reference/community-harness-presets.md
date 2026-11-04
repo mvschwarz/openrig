@@ -205,6 +205,13 @@ limits:
 - **OpenRig runs the harness through its existing Pi runner.** Instead of screen scraping, the harness runs under `pi-runner` inside the seat's pane. The runner provides input buffering, paste framing, prompt/steer RPC queueing, clean transcript mirroring, and typed activity hook reporting to the daemon.
 - **`command` is the executable.** OpenRig resolves `command` (e.g. `omo` or `/usr/local/bin/senpi`) against the seat pane's environment, resolving symlinks and version-manager shims (such as `mise`) safely.
 - **Session identity and resume are native.** Transcripts and sessions are persisted as JSONL files under `$OPENRIG_HOME/state/pi/<session>/sessions/`. Resuming or restoring a seat continues the exact session file via `--session <file>` without needing `launch_result` or `names_conversation`.
+- **Launch arguments a fork must accept.** When spawned under `pi-runner`, the executable named by `command` must accept Pi's core CLI arguments:
+  - `--mode rpc`
+  - `--session-dir <dir>`
+  - `--name <session-name>`
+  - `--approve` or `--no-approve` (depending on seat trust)
+  - And conditionally when configured or resuming/forking: `--model <provider/id>`, `--thinking <level>`, `--session <sessionFile>`, or `--fork <sessionFile>`.
+  Forks that reject these flags cannot currently run with `protocol: pi-rpc`.
 - **Skills, guidance, and model passthrough.** Skills are projected into `<agentDir>/skills/` and managed guidance into `AGENTS.md`. For a fork that reads Pi's variables (`PI_CODING_AGENT_DIR`, etc.), declared models are passed as `--model provider/id` with provider API key allowlisting, and effort is passed as `--thinking <level>`. Usage is not reported for a fork, and extension dialogs are handled as Pi's (cancelled when an extension requests interactive confirmation in a managed pane).
 - **Mutual exclusions:** `protocol: pi-rpc` manages session identity and activity through the Pi runner; it cannot be combined with `runner: true`, `launch_result: true`, `names_conversation: true`, `startup_assisted: true`, or `first_input: true`.
 
