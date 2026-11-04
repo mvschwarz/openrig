@@ -246,6 +246,13 @@ const CLAUDE_STATUS_WARNINGS = [
   // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30) or "Restart to apply".
   /^✔ Update installed · (?:\/restart|Restart) to apply$/,
 ];
+// Claude can draw noninteractive UI rows after its mode footer. They do not
+// replace the composer and should only be skipped when they match a known row.
+const CLAUDE_STATUS_DECORATIONS = [
+  /^\d[\d,]* tokens$/,
+  /^current: \d+(?:\.\d+){2} · latest: \d+(?:\.\d+){2} ✔ Update installed · Restart to update$/,
+  /^\/rc$/,
+];
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
 // While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
@@ -271,7 +278,12 @@ export interface ClassifyPaneOptions {
 /** The current Claude footer follows the input frame; earlier examples are history or draft text. */
 function findClaudeFooterIndex(lines: string[]): number {
   let bar = lines.length - 1;
-  while (bar >= 0 && (!lines[bar]!.trim() || CLAUDE_STATUS_WARNINGS.some(pattern => pattern.test(lines[bar]!.trim())))) bar--;
+  while (bar >= 0) {
+    const row = lines[bar]!.trim();
+    if (row && !CLAUDE_STATUS_WARNINGS.some(pattern => pattern.test(row)) &&
+        !CLAUDE_STATUS_DECORATIONS.some(pattern => pattern.test(row))) break;
+    bar--;
+  }
   return bar;
 }
 
@@ -335,7 +347,7 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
     if (!/^\s/.test(line)) { headSeen = true; break; }
     if (CLAUDE_TASK_ROW.test(line) || !CLAUDE_OUTPUT_ROW.test(line)) outputOnly = false;
   }
-  return { text: prompt.slice(indent.length), bar: lines[bar]!.trim(), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, modeFooter, headSeen, liveStatus, outputOnly };
+  return { text: prompt.slice(indent.length), bar: lines[bar]!.trim(), framed, hasTrailingRows: bar < lines.length - 1, supportedWarningFooter, modeFooter, headSeen, liveStatus, outputOnly };
 }
 
 const unknown = (unknownReason: string, cursor?: ComposerSnapshot["cursor"]): ComposerInput => ({ state: "unknown", rows: [], columns: 0, cursorAtEnd: false, collapsedPaste: null, unknownReason, ...(cursor ? { cursor } : {}) });
@@ -698,7 +710,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     };
   }
 
-  if (claudeComposer?.hasWarnings && claudeComposer.supportedWarningFooter && PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
+  if (claudeComposer?.hasTrailingRows && claudeComposer.supportedWarningFooter && PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
     return { state: "attention", reason: "prompt_draft", evidence: truncateEvidence(claudeComposer.text) };
   }
   if (claudeComposer?.liveStatus) {
@@ -712,7 +724,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const postCompactEmptyBox = options.postCompactTurnBoundary === true && claudeComposer?.framed === true &&
     claudeComposer.modeFooter && claudeComposer.outputOnly && IDLE_PROMPT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text));
   // Unframed status evidence can veto idle, but warnings require a complete input frame to prove it.
-  if (claudeComposer && !postCompactEmptyBox && (!claudeComposer.headSeen || (claudeComposer.hasWarnings && !claudeComposer.framed))) {
+  if (claudeComposer && !postCompactEmptyBox && (!claudeComposer.headSeen || (claudeComposer.hasTrailingRows && !claudeComposer.framed))) {
     return { state: "unknown", reason: "no_activity_signal", evidence: truncateEvidence(lastLine) };
   }
   // An empty prompt row is not an empty box: authored text can start on a continuation row.
@@ -722,9 +734,9 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
       /^\s*❯\s*$/.test(paneContent.split("\n")[inputBox.markerLine - 1]!)) {
     return { state: "unknown", reason: "no_activity_signal", evidence: truncateEvidence(lastLine) };
   }
-  // Below warning rows, any Claude mode footer completes the frame for an EMPTY composer (#808).
+  // Below recognized status rows, any Claude mode footer completes the frame for an EMPTY composer (#808).
   // Drafts keep the narrower check above: attention is needs_input, a send refusal for other modes.
-  if (claudeComposer && (!claudeComposer.hasWarnings || claudeComposer.modeFooter) &&
+  if (claudeComposer && (!claudeComposer.hasTrailingRows || claudeComposer.modeFooter) &&
       IDLE_PROMPT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
     return { state: "agent_idle", reason: idleStatusBarLine ? "idle_status_bar" : "idle_prompt",
       evidence: truncateEvidence(idleStatusBarLine ?? claudeComposer.text) };

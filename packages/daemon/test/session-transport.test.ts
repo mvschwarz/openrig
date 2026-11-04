@@ -32,6 +32,18 @@ import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.
 import { recordRotation, requestedToken, rotatedToken, rotation, rowsWith as claudeRows, seat as claudeSeat } from "./helpers/claude-sweeper-seat.js";
 
 describe("agent pane activity classifier", () => {
+  const currentClaudeUpdateLayout = (prompt: string, lastRow = "/rc", status = "● Ready.") => [
+    status,
+    "",
+    `${"─".repeat(40)} operator-agent@kernel ──`,
+    prompt,
+    "─".repeat(80),
+    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent · 1 feedback draft",
+    "                                                                    911918 tokens",
+    "  current: 2.1.310 · latest: 2.1.311 ✔ Update installed · Restart to update",
+    lastRow,
+  ].join("\n");
+
   it("classifies active Working pane as agent_active", () => {
     const result = classifyPaneActivity("Working on task...\n⠋ Processing files\nesc to interrupt");
 
@@ -223,6 +235,23 @@ describe("agent pane activity classifier", () => {
 
     expect(result.state).toBe("agent_idle");
     expect(result.reason).toBe("idle_status_bar");
+  });
+
+  it("classifies the current Claude update-installed layout with its empty prompt as idle (#1641)", () => {
+    const result = classifyPaneActivity(currentClaudeUpdateLayout("❯ "), { runtime: "claude-code" });
+
+    expect(result).toMatchObject({ state: "agent_idle", reason: "idle_prompt" });
+  });
+
+  it("keeps Claude drafts, active turns, and unknown trailing rows out of the idle state (#1641)", () => {
+    const draft = classifyPaneActivity(currentClaudeUpdateLayout("❯ deploy the release"), { runtime: "claude-code" });
+    expect(draft.state).not.toBe("agent_idle");
+
+    const active = classifyPaneActivity(currentClaudeUpdateLayout("❯ ", "/rc", "✻ Thinking… (2m 38s · ↓ 10.9k tokens · thought for 8s)"), { runtime: "claude-code" });
+    expect(active).toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+
+    const unknown = classifyPaneActivity(currentClaudeUpdateLayout("❯ ", "unrecognized output"), { runtime: "claude-code" });
+    expect(unknown).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
   });
 
   it("classifies typed Claude prompt text above an idle footer as attention, not idle", () => {
