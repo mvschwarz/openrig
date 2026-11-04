@@ -147,8 +147,21 @@ export async function callWebApi(
         ...(Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfterSeconds: retryAfter } : {}), error: ok ? undefined : String(json.error ?? `http ${res.status}`) };
     });
   } catch (e) {
-    return { ok: false, status: 0, grantedScopes: [], json: {}, error: `web-api transport: ${(e as Error).message}` };
+    return { ok: false, status: 0, grantedScopes: [], json: {}, error: `web-api transport: ${withoutToken((e as Error).message, token)}` };
   }
+}
+
+/** A transport error's message can quote the request's Authorization header (Node's fetch does for an invalid value),
+ *  so the token, and each line of it, is removed before the message goes anywhere, as sent and as trimmed (Node trims
+ *  the value before quoting it). A line shorter than 6 characters is left: removing it everywhere would garble the rest
+ *  of the message. One pass, so a marker is never rescanned. */
+function withoutToken(message: string, token: string): string {
+  const lines = token.split(/[\r\n]+/).flatMap((line) => [line, line.trim()]).filter((part) => part.length >= 6);
+  const parts = [...new Set([token, token.trim(), ...lines])].filter((part) => part.length > 0)
+    .sort((a, b) => b.length - a.length);
+  if (parts.length === 0) return message;
+  const pattern = new RegExp(parts.map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+  return message.replace(pattern, "[redacted]");
 }
 
 /** Item 5: read the ACTUAL granted scopes from the response header (configured != granted). */
@@ -251,7 +264,7 @@ export async function downloadPrivateFile(
       return { ok: true as const, bytes };
     });
   } catch (e) {
-    return { ok: false, error: (e as Error).message || "download failed" };
+    return { ok: false, error: withoutToken((e as Error).message, token) || "download failed" };
   }
 }
 
