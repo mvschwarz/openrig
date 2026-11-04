@@ -300,7 +300,7 @@ describe("posted asks follow settlement outside Slack", () => {
   it("keeps the earlier answer on a reopened answered ask without inviting a discarded thread reply", async () => {
     const item = await postAsk();
     const input = { sourceSession: human, destinationSession: item.sourceSession, summary: "Answer", body: "Ship it",
-      inboundReplyTo: item.qitemId, replyTo: item.qitemId, nudge: false };
+      inboundReplyTo: item.qitemId, replyTo: item.qitemId, humanIntent: "update" as const, nudge: false };
     const answer = await repo.createHumanAnswer(input);
     expect(repo.getHumanAnswer(item.qitemId, human)?.qitemId).toBe(answer.qitemId);
     expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: "Ship it" })).toBe(true);
