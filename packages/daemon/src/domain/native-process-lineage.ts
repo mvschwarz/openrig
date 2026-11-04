@@ -687,6 +687,16 @@ function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: 
         || (selectedExecutable && row.executablePath.replace(/\//g, "\\").toLowerCase() !== selectedExecutable.replace(/\//g, "\\").toLowerCase())
         || (parseWindowsCommandLine(row.command)[0] ?? "").replace(/\//g, "\\").toLowerCase() !== row.executablePath.replace(/\//g, "\\").toLowerCase()) continue;
       if (selectedNode && !sameNativeFile((parseWindowsCommandLine(row.command)[1] ?? "").replace(/\//g, "\\"), selectedScript!.replace(/\//g, "\\"))) continue;
+      // A tool may start Codex's stdio app-server below the interactive Codex.
+      // It is not a terminal receiver or an interactive launcher-chain link.
+      if (runtime === "codex") {
+        const args = codexProcessArgv(row)?.slice(1);
+        if (args) {
+          let index = 0;
+          while (index < args.length && args[index] !== "--" && args[index]!.startsWith("-")) index = codexOptionEnd(args, index);
+          if (args[index] === "app-server") continue;
+        }
+      }
       const chain: NativeProcessRow[] = [];
       const visited = new Set<number>();
       let current: NativeProcessRow | undefined = row;

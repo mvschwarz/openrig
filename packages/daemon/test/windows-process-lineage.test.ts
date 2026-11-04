@@ -10,6 +10,15 @@ function rows(): NativeProcessRow[] {
 }
 const verify = (values: NativeProcessRow[], token = "exact-id", foreground = "codex") => verifyCodexPaneProcess({ target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => foreground }, listProcesses: () => values, expectedToken: token, requireResume: true });
 describe("Windows process ancestry without fabricated foreground groups", () => {
+  it("does not replace the interactive Codex with a tool's stdio app-server", async () => {
+    const values = rows();
+    values.push({ ...values[1]!, pid: 102, ppid: 101, startedAt: "2026-10-08T01:00:02Z", command: '"C:\\program space\\codex.exe" -c foo=bar app-server --listen stdio://' });
+    expect((await verify(values))?.process.pid).toBe(101);
+    expect(await verify([values[0]!, { ...values[2]!, ppid: 100 }])).toBeNull();
+    // A prompt containing that word is still an interactive process.
+    values[2]!.command = '"C:\\program space\\codex.exe" -- app-server';
+    expect(await verify(values)).toBeNull();
+  });
   it("uses kernel console ownership when psmux reports an MCP descendant", async () => {
     const input = { target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => "node_repl" }, listProcesses: () => rows(), expectedToken: "exact-id", requireResume: true };
     expect((await verifyCodexPaneProcess({ ...input, consoleProcesses: async () => [100, 101] }))?.process.pid).toBe(101);
