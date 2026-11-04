@@ -793,6 +793,19 @@ describe("rig seat status", () => {
     expect(output).not.toContain("restore packet) was delivered");
   });
 
+  it("handover human output says the successor started without a required file, not a plain complete (#2456)", async () => {
+    const missing = "/project/spec/culture.md";
+    const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT_FRESH, startedWithoutRequired: [missing] } }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "fresh", "--reason", "context-wall"]);
+    });
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined(); // the successor is running, so the handover itself completed
+    expect(logs[0]).toBe("Seat handover complete, degraded: dev-impl@seat-rig");
+    expect(output).toContain(`The successor started without required file ${missing}.`);
+    expect(output).not.toContain("Seat handover complete: dev-impl@seat-rig");
+  });
+
   it("handover surfaces a loud step-named failure (successor_create_failed)", async () => {
     const deps = makeDeps({
       status: 500,

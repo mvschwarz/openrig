@@ -250,6 +250,37 @@ describe("SeatHandoverService", () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  // #2456: a start fails when a required startup file can't be delivered, while a handover's successor starts anyway. So the
+  // handover names each required file its successor started without, on its result and on the event the seat list reads.
+  it("names the required guidance files a successor started without, on the result and the handover event (#2456)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "handover-required-"));
+    try {
+      const { node } = seedSeat();
+      db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(root, node.id);
+      const present = path.join(root, "spec", "present.md");
+      fs.mkdirSync(path.dirname(present), { recursive: true });
+      fs.writeFileSync(present, "Present and required.\n");
+      const projected = path.join(root, "spec", "culture.md");
+      const required = path.join(root, "spec", "sop.md");
+      const optional = path.join(root, "spec", "notes.md");
+      const file = (absolutePath: string, isRequired: boolean) => ({ path: path.basename(absolutePath), absolutePath, ownerRoot: root,
+        deliveryHint: "guidance_merge", required: isRequired, appliesOn: ["startup", "restore"] });
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, '[]', 'codex')")
+        .run(node.id,
+          JSON.stringify([{ category: "guidance", effectiveId: "culture.md", sourceSpec: "base", sourcePath: path.dirname(projected),
+            resourcePath: "culture.md", absolutePath: projected, mergeStrategy: "managed_block", target: "AGENTS.md" }]),
+          JSON.stringify([file(present, true), file(required, true), file(optional, false)]));
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "replace occupant", source: "fresh" });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      const handed = (result as unknown as { result: { startedWithoutRequired?: string[]; newSessionId: string } }).result;
+      // A projected guidance file fails a start when it can't be written, as a required startup file does; an optional one doesn't.
+      expect(handed.startedWithoutRequired).toEqual([projected, required]);
+      const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+      expect(JSON.parse(event.payload)).toMatchObject({ startedWithoutRequired: [projected, required], successorSessionId: handed.newSessionId });
+      expect(fs.readFileSync(path.join(root, "AGENTS.md"), "utf8")).toContain("Present and required.");
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it.each(["stop", "restart", "clean"] as const)("allows %s for a launched handover but refuses discovered and directly adopted occupants", async operation => {
     for (const provenance of ["adopted", "discovered", "launched"] as const) {
       const { node, sessionId } = seedSeat({ rigName: `${operation}-${provenance}` });
