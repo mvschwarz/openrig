@@ -10,7 +10,8 @@ export interface GuardedDeliverySummary {
 }
 
 /** Historical attempts contain outcomes, never executable options or callbacks. */
-interface Receipt { ids: string[]; result?: SendResult; expectedIdentity?: import("./expected-conversation.js").ExpectedConversation }
+interface Receipt { ids: string[]; result?: SendResult; expectedIdentity?: import("./expected-conversation.js").ExpectedConversation;
+  watchdog?: { nextAction?: string } }
 type Deliver = (session: string, text: string, opts: SendOpts) => Promise<SendResult>;
 /** Applicability needs the intended queue row and recipient, not a saved delivery receipt. */
 export type QueueWakeFacts = Pick<OutboxEntry, "outboxId" | "auditPointer" | "destinationSession">;
@@ -34,7 +35,7 @@ export class DraftAwareDelivery {
     const entry = this.outbox.getById(id)!;
     const state = entry.deliveryState === "retained" || entry.deliveryState === "retired" ? "held"
       : entry.deliveryState === "delivered" ? "complete" : entry.deliveryState === "sending" ? "sending" : entry.deliveryState === "failed" ? "failed" : "indeterminate";
-    const reason = entry.deliveryState === "retired" ? "message_retired" : receipt.result?.reason
+    const reason = entry.deliveryState === "retired" ? "message_retired" : receipt.result?.reason ?? receipt.watchdog?.nextAction
       ?? (state === "sending" ? "delivery_in_progress" : state === "complete" ? "delivered" : "interrupted_write");
     return { id: receipt.ids[0]!, state, reason };
   }

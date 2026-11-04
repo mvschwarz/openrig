@@ -479,6 +479,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // db.transaction commits atomically with the close + successor create.
   const outboxHandlerInstance = new OutboxHandler(db);
   queueRepoInstance.attachOutbox(outboxHandlerInstance);
+  outboxHandlerInstance.reconcileAbandonedSending("watchdog-occurrence-");
   // Reconcile only the prior process's claims, before transport/producers/timers can start new sends.
   let reconciledWakeIntents = 0;
   try {
@@ -2292,6 +2293,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       eventBus,
       deliver: makeWatchdogDeliver({
         sessionTransport,
+        outbox: outboxHandlerInstance,
         isTerminalSeat: (sessionName) => isBoundTerminalSeat(db, sessionName),
         hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
         createContinuityAction: (action) => createContinuityCutoverBaton(action, queueRepoInstance).then(() => {}),
@@ -2308,8 +2310,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       resolvePreDeliveryTerminalReason: ({ jobId }) =>
         queueRepoInstance.resolveWatchdogPreDeliveryTerminalReason(jobId),
       resolveQueueWait: (input) => queueRepoInstance.evaluateWaitReminder(input),
-      onWakeAttempt: ({ jobId, deliveryStatus }) => {
-        queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus);
+      onWakeAttempt: ({ jobId, deliveryStatus, retryAt }) => {
+        queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus, retryAt);
       },
       // Due parked-row reminders for one seat in one scheduler pass go as one message.
       resolveDigestEntry: ({ jobId, message }) => queueRepoInstance.parkReminderDigestEntry(jobId, message),

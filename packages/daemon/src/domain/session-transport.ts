@@ -2693,6 +2693,7 @@ export class SessionTransport {
         sessionName,
         reason: "transport_unavailable",
         error: `Session '${sessionName}' is attached as an external CLI node. Inbound tmux transport is unavailable for this target.`,
+        sent: false, inputPhase: "not_reached",
       } };
     }
     const runtime = meta.runtime;
@@ -2737,6 +2738,7 @@ export class SessionTransport {
           sessionName,
           reason: "session_missing",
           error: `Session '${sessionName}' not found: tmux reports no session with this name. No text was sent. Check available sessions with: rig ps --nodes`,
+          sent: false, inputPhase: "not_reached",
         } };
       }
       if (probe.state === "transport_unavailable") {
@@ -2745,6 +2747,7 @@ export class SessionTransport {
           sessionName,
           reason: "tmux_unavailable",
           error: `The tmux server could not be reached (${probe.cause}). Whether session '${sessionName}' exists was not determined. No text was sent.`,
+          sent: false, inputPhase: "not_reached",
         } };
       }
     } catch (err) {
@@ -2753,6 +2756,7 @@ export class SessionTransport {
         sessionName,
         reason: "tmux_unavailable",
         error: `The tmux session probe failed unexpectedly (${err instanceof Error ? err.message : String(err)}). Whether session '${sessionName}' exists was not determined. No text was sent.`,
+        sent: false, inputPhase: "not_reached",
       } };
     }
     const deadlineAt = Date.now() + timeoutMs;
@@ -2870,6 +2874,7 @@ export class SessionTransport {
         sessionName,
         reason: "transport_unavailable",
         error: `Session '${sessionName}' is attached as an external CLI node. Inbound tmux transport is unavailable for this target.`,
+        sent: false, inputPhase: "not_reached",
       };
     }
 
@@ -2923,6 +2928,7 @@ export class SessionTransport {
           sessionName,
           reason: "session_missing",
           error: `Session '${sessionName}' not found: tmux reports no session with this name. No text was sent. Check available sessions with: rig ps --nodes`,
+          sent: false, inputPhase: "not_reached",
         };
       }
       if (probe.state === "transport_unavailable") {
@@ -2931,6 +2937,7 @@ export class SessionTransport {
           sessionName,
           reason: "tmux_unavailable",
           error: `The tmux server could not be reached (${probe.cause}). Whether session '${sessionName}' exists was not determined. No text was sent.`,
+          sent: false, inputPhase: "not_reached",
         };
       }
     } catch (err) {
@@ -2939,6 +2946,7 @@ export class SessionTransport {
         sessionName,
         reason: "tmux_unavailable",
         error: `The tmux session probe failed unexpectedly (${err instanceof Error ? err.message : String(err)}). Whether session '${sessionName}' exists was not determined. No text was sent.`,
+        sent: false, inputPhase: "not_reached",
       };
     }
 
@@ -3227,6 +3235,7 @@ export class SessionTransport {
             ok: false,
             sessionName,
             reason: "target_needs_input",
+            sent: false, inputPhase: "not_reached",
             activity: readiness,
             error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, readiness.reason)} No text was sent.`,
           };
