@@ -14,8 +14,11 @@ function failedAttempt(db: Database.Database, qitemId: string): string | null {
   // the unclaimed baton's retry path.
   return (db.prepare("SELECT last_nudge_attempt AS at FROM queue_items WHERE qitem_id = ? AND (last_nudge_result LIKE 'failed:%' OR last_nudge_result LIKE 'retained:%')").get(qitemId) as { at: string | null } | undefined)?.at ?? null;
 }
-export function recoveryId(db: Database.Database, qitemId: string): string {
-  return `qitem-recovery-${createHash("sha256").update(JSON.stringify([qitemId, lastMeaningfulTransition(db, qitemId)?.id ?? null, failedAttempt(db, qitemId)])).digest("hex").slice(0, 16)}`;
+export function recoveryId(db: Database.Database, qitemId: string, overdueDeadline?: string): string {
+  const evidence: unknown[] = [qitemId, lastMeaningfulTransition(db, qitemId)?.id ?? null, failedAttempt(db, qitemId)];
+  // Keep existing IDs byte-for-byte unless a newer deadline needs its own recovery episode.
+  if (overdueDeadline !== undefined) evidence.push(["overdue-claim", overdueDeadline]);
+  return `qitem-recovery-${createHash("sha256").update(JSON.stringify(evidence)).digest("hex").slice(0, 16)}`;
 }
 /** Rows whose tag text could hold a recovery tag: valid JSON stores a string verbatim or with
  * backslash escapes, so this superset loses no exact match. It repeats the first group of

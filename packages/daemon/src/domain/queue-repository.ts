@@ -417,6 +417,8 @@ export interface QueueUpdateInput {
   qitemId: string;
   actorSession: string;
   state?: QueueState;
+  /** The actor accepts this revised closure deadline without replacing the claim. */
+  closureRequiredAt?: string;
   /** Explicit acknowledgment for a deliberate terminal → active repair. */
   reopen?: boolean;
   /**
@@ -3005,15 +3007,28 @@ export class QueueRepository {
         `qitem ${input.qitemId} not found`
       );
     }
+    const hasReestimate = input.closureRequiredAt !== undefined;
+    let closureRequiredAt: string | undefined;
+    if (hasReestimate) {
+      if (qitem.state !== "in-progress" || (input.state !== undefined && input.state !== "in-progress")) {
+        throw new QueueRepositoryError("qitem_not_in_progress", "a revised closure deadline updates an in-progress item without changing its state; nothing was written");
+      }
+      const deadline = typeof input.closureRequiredAt === "string" ? Date.parse(input.closureRequiredAt) : NaN;
+      if (!Number.isFinite(deadline)) {
+        throw new QueueRepositoryError("note_append_fields_not_admitted", "--closure-required-at needs a valid timestamp; nothing was written");
+      }
+      closureRequiredAt = new Date(deadline).toISOString();
+    }
     const hasNote = typeof input.transitionNote === "string" && input.transitionNote.trim().length > 0;
     const hasValidSummary = typeof input.summary === "string" && input.summary.trim().length > 0;
     const isGuardedTerminal = (["done", "canceled", "handed-off"] as const).includes(
       qitem.state as "done" | "canceled" | "handed-off",
     );
-    const isStatePreservingAppend = input.state === undefined || (isGuardedTerminal && input.state === qitem.state);
+    const isStatePreservingAppend = input.state === undefined || (isGuardedTerminal && input.state === qitem.state)
+      || (hasReestimate && input.state === qitem.state);
 
     if (isStatePreservingAppend) {
-      if (input.state === undefined && !hasNote && !hasValidSummary) {
+      if (input.state === undefined && !hasNote && !hasValidSummary && !hasReestimate) {
         throw new QueueRepositoryError(
           "state_or_note_required",
           "queue update requires --state, a non-empty --note, or a non-empty --summary; nothing was written",
@@ -3056,11 +3071,17 @@ export class QueueRepository {
         this.persistSummary(input.qitemId, input.summary!);
       }
 
-      const note = hasValidSummary
+      let note = hasValidSummary
         ? (hasNote
           ? (input.transitionNote!.includes("(summary updated)") ? input.transitionNote : `${input.transitionNote} (summary updated)`)
           : "summary updated")
         : input.transitionNote;
+
+      if (hasReestimate) {
+        this.db.prepare("UPDATE queue_items SET closure_required_at = ? WHERE qitem_id = ?").run(closureRequiredAt!, input.qitemId);
+        const receipt = `closure deadline re-estimated: ${qitem.closureRequiredAt ?? "(none)"} -> ${closureRequiredAt}; accepted by ${input.actorSession}`;
+        note = hasNote || hasValidSummary ? `${note}\n${receipt}` : receipt;
+      }
 
       this.transitionLog.append({
         qitemId: input.qitemId,

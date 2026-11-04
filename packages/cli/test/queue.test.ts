@@ -1204,6 +1204,17 @@ describe("rig queue CLI", () => {
     });
   });
 
+  it("update forwards an explicitly accepted closure deadline without a state change", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "queue", "update", "qitem-estimate", "--closure-required-at", "2026-11-04T10:00:00.000Z", "--note", "Coordinator accepted the revised estimate", "--json"]);
+    expect(calls.find(c => c.path === "/api/queue/qitem-estimate/update")?.body).toMatchObject({
+      closureRequiredAt: "2026-11-04T10:00:00.000Z", transitionNote: "Coordinator accepted the revised estimate",
+    });
+    expect(calls.find(c => c.path === "/api/queue/qitem-estimate/update")?.body).toHaveProperty("state", undefined);
+  });
+
   it("update forwards explicit reopen acknowledgment", async () => {
     const { deps, calls } = makeDeps();
     const program = createProgram({ queueDeps: deps });
