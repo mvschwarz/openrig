@@ -5,12 +5,12 @@ import type { AgentSpec, Node, RigSpec, RigSpecPod, RigSpecPodMember, StartupAct
 import type { NodeBinding, ResolvedStartupFile, RuntimeAdapter } from "./runtime-adapter.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import type { ParsedStartupContext } from "./seat-lifecycle-service.js";
-import type { AgentResolverFsOps } from "./agent-resolver.js";
+import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, selectedPluginPaths, type ResolutionContext } from "./profile-resolver.js";
 import { claudeConflictTargetPath, filterProtectedProjections, planProjection, projectionConflictWarnings, type ProjectionPlan } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { isKeptPluginSkill, reconcileSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
-import { findSavedAgentSource } from "./saved-agent-source.js";
+import { reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { ensureSeatSkillPlugin, seatCatalogKeptNote, seatSkillLocation, seatSkillPaths, writeSeatSkillCatalog, type SeatSkillPaths } from "./seat-skill-storage.js";
 import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { readSeatEffort } from "./seat-effort.js";
@@ -219,9 +219,21 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
 
 function findAgentSource(node: Node, saved: ParsedStartupContext, fsOps: AgentResolverFsOps) {
   // The rig root isn't recorded, so the agent spec is found where the saved launch read it from.
-  const found = findSavedAgentSource(node, { entries: saved.plan.entries, resolvedStartupFiles: saved.resolvedStartupFiles }, fsOps);
-  if (!found.ok) throw new Error(found.error);
-  return found.source;
+  const candidates = new Set<string>();
+  if (node.agentRef?.startsWith("path:")) candidates.add(node.agentRef.slice("path:".length));
+  for (const entry of saved.plan.entries) candidates.add(reanchorShippedProjectionEntry(entry).sourcePath);
+  for (const file of saved.resolvedStartupFiles) candidates.add(file.ownerRoot);
+  const sources = [...candidates]
+    .filter((root) => nodePath.isAbsolute(root) && fsOps.exists(nodePath.join(root, "agent.yaml")))
+    .map((root) => resolveAgentRef(`path:${root}`, root, fsOps))
+    .flatMap((result) => result.ok && result.resolved.spec.name === node.resolvedSpecName ? [result] : []);
+  const unique = new Map(sources.map((source) => [source.resolved.sourcePath, source]));
+  if (unique.size !== 1) {
+    throw new Error(unique.size === 0
+      ? `The seat's agent spec (${node.resolvedSpecName ?? node.agentRef}) wasn't found where its last launch read it.`
+      : `The seat's agent spec (${node.resolvedSpecName}) was found in more than one place: ${[...unique.keys()].join(", ")}.`);
+  }
+  return [...unique.values()][0]!;
 }
 
 /**
