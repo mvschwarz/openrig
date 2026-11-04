@@ -97,6 +97,7 @@ for (const mask of ["0077", "0022"]) {
 }
 
 test("a real assets copy error stops before recording the substance root", { skip: process.platform === "win32" }, () => {
+  assert.match(script, /^set -euo pipefail$/m, "the real build script must stop on an assets copy error");
   const f = fixture();
   const source = snapshot(f.assets);
   const outside = snapshot(join(f.root, "outside"));
