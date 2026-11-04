@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import net from "node:net";
+import { EventEmitter } from "node:events";
 import { Command } from "commander";
 import { SystemPreflight } from "../src/system-preflight.js";
 import { ConfigStore } from "../src/config-store.js";
@@ -159,6 +160,19 @@ describe("SystemPreflight", () => {
     expect(portCheck!.ok).toBe(false);
     expect(portCheck!.error).toContain(String(port));
     expect(portCheck!.fix).toContain("rig config set daemon.port");
+  });
+
+  it.each(["EPERM", "EACCES"])("does not say a blocked port probe is available (%s)", async (code) => {
+    const socket = Object.assign(new EventEmitter(), {
+      setTimeout: vi.fn(), destroy: vi.fn(),
+      connect() { queueMicrotask(() => socket.emit("error", Object.assign(new Error("blocked"), { code }))); },
+    });
+    const constructor = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as net.Socket);
+    try {
+      const result = await createPreflight().run({ port: 7433 });
+      expect(result.ready).toBe(false);
+      expect(result.checks.find((c) => c.name === "port_available")).toMatchObject({ ok: false, error: expect.stringContaining(code), fix: expect.stringContaining("Do not start another daemon") });
+    } finally { constructor.mockRestore(); }
   });
 
   // Test 6

@@ -6,6 +6,7 @@ import type { ConfigStore, RiggedConfig } from "./config-store.js";
 import type { DaemonStatus } from "./daemon-lifecycle.js";
 import { buildTmuxControlFailure, probeTmuxControlAsync } from "./tmux-health.js";
 import { classifyNodeVersion } from "./node-support.js";
+import { blockedConnectionGuidance, isBlockedConnectionCode } from "./daemon-reachability.js";
 
 export interface PreflightCheck {
   name: string;
@@ -49,22 +50,23 @@ interface WritableHomeCheckDeps {
   checkWritable?: (path: string) => void;
 }
 
-function checkPort(host: string, port: number): Promise<boolean> {
-  if (port <= 0) return Promise.resolve(true); // port 0 is always available
+function checkPort(host: string, port: number): Promise<"available" | "occupied" | { blocked: string }> {
+  if (port <= 0) return Promise.resolve("available"); // port 0 is always available
   return new Promise((resolve) => {
     const socket = new net.Socket();
     socket.setTimeout(1000);
     socket.on("connect", () => {
       socket.destroy();
-      resolve(false); // port is in use
+      resolve("occupied"); // port is in use
     });
-    socket.on("error", () => {
+    socket.on("error", (error) => {
       socket.destroy();
-      resolve(true); // port is available
+      const code = (error as NodeJS.ErrnoException).code;
+      resolve(isBlockedConnectionCode(code) ? { blocked: code } : "available");
     });
     socket.on("timeout", () => {
       socket.destroy();
-      resolve(true); // timeout = nothing listening
+      resolve("available"); // timeout = nothing listening
     });
     socket.connect(port, host);
   });
@@ -181,7 +183,10 @@ export class SystemPreflight {
       checks.push({ name: "port_available", ok: true });
     } else {
       const available = await checkPort(effectiveHost, effectivePort);
-      if (available) {
+      if (typeof available === "object") {
+        const guidance = blockedConnectionGuidance(available.blocked);
+        checks.push({ name: "port_available", ok: false, error: guidance.consequence, fix: guidance.action });
+      } else if (available === "available") {
         checks.push({ name: "port_available", ok: true });
       } else {
         checks.push({

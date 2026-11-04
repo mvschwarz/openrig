@@ -64,6 +64,17 @@ describe("auto-start only for a daemon confirmed down", () => {
       expect(c.requests.length).toBeGreaterThan(0);
     });
 
+    it.each(["EPERM", "EACCES"])(`${name}: a blocked health probe does not start a daemon (%s)`, async (code) => {
+      lifecycle.status = { state: "unverified", host: "127.0.0.1", port: 7433, probeErrorCode: code };
+      const c = client();
+      const cmd = (command as (d: unknown) => import("commander").Command)({ lifecycleDeps: {}, clientFactory: c.factory, preflightExec: async () => "" });
+      cmd.exitOverride();
+      await cmd.parseAsync(argv as unknown as string[]).catch(() => {});
+      expect(lifecycle.startDaemon).not.toHaveBeenCalled();
+      expect(c.requests).toEqual([]);
+      expect(vi.mocked(console.error).mock.calls.flat().join(" ")).toContain("blocked");
+    });
+
   }
 
   it("rig up --plan starts nothing: a stopped daemon is daemon_not_running, a blocked probe keeps its own guidance", async () => {
