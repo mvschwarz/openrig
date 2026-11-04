@@ -2,6 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { migrate } from "../src/db/migrate.js";
+import { rigKernelVariantSchema } from "../src/db/migrations/148_rig_kernel_variant.js";
+import Sqlite from "better-sqlite3";
 
 function setupDb(): Database.Database {
   return createFullTestDb();
@@ -27,6 +31,25 @@ describe("RigRepository", () => {
     expect(rig.id.length).toBeGreaterThan(0);
     expect(rig.name).toBe("test-rig");
     expect(rig.createdAt).toBeDefined();
+  });
+
+  it("upgrades existing rigs without inventing a kernel variant, and applies the migration only once", () => {
+    const oldDb = new Sqlite(":memory:");
+    try {
+      migrate(oldDb, ALL_MIGRATIONS.filter(migration => migration !== rigKernelVariantSchema));
+      const oldRepo = new RigRepository(oldDb);
+      const kernel = oldRepo.createRig("kernel");
+      const project = oldRepo.createRig("project");
+      migrate(oldDb, ALL_MIGRATIONS);
+      migrate(oldDb, ALL_MIGRATIONS);
+      expect(oldRepo.getRig(kernel.id)?.rig).toEqual(kernel);
+      expect(oldRepo.getRig(project.id)?.rig).toEqual(project);
+      expect(oldDb.prepare("SELECT kernel_variant FROM rigs").all()).toEqual([
+        { kernel_variant: null }, { kernel_variant: null },
+      ]);
+    } finally {
+      oldDb.close();
+    }
   });
 
   it("addNode persists with rig FK, returns typed Node", () => {

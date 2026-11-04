@@ -365,6 +365,12 @@ export class RigRepository {
     return rig;
   }
 
+  /** Preserve automatic boot's selection on exactly the rig its bootstrap returned, including a partial launch. */
+  setKernelVariant(rigId: string, variant: string): void {
+    this.db.prepare("UPDATE rigs SET kernel_variant = ?, updated_at = ? WHERE id = ?")
+      .run(variant, new Date().toISOString(), rigId);
+  }
+
   /** Canonical bundle materialization folder, independent of seats' working directories. */
   getRigInstallRoot(rigId: string): string | null {
     const row = this.db.prepare("SELECT * FROM rigs WHERE id = ?").get(rigId) as
@@ -1109,6 +1115,7 @@ export class RigRepository {
     return {
       id: row.id,
       name: row.name,
+      ...(row.kernel_variant ? { kernelVariant: row.kernel_variant } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1207,6 +1214,7 @@ export class RigRepository {
 interface RigRow {
   id: string;
   name: string;
+  kernel_variant?: string | null;
   created_at: string;
   updated_at: string;
 }

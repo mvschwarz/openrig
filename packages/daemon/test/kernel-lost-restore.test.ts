@@ -110,6 +110,7 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 describe("daemon start with an existing kernel rig", () => {
   it("restores a kernel a reboot left down", async () => {
     const h = host();
+    h.rigRepo.setKernelVariant(h.rig.id, "rig-claude-only.yaml");
     h.reboot();
     const restore = vi.fn(async () => ({ errors: [] }));
     const tracker = await h.daemonStart(restore);
@@ -117,6 +118,7 @@ describe("daemon start with an existing kernel rig", () => {
     expect(restore).toHaveBeenCalledTimes(1);
     expect(restore).toHaveBeenCalledWith(h.rig.id);
     expect(tracker.getStatus().kernelState).toBe("booting");
+    expect(tracker.getStatus().variant).toBe("rig-claude-only.yaml");
     expect(h.bootstrap.bootstrap).not.toHaveBeenCalled();
     // An existing kernel comes back where it was created: no new kernel folder, and each seat's directory unchanged.
     expect(h.rigRepo.getRig(h.rig.id)!.nodes.map((node) => node.cwd)).toEqual(["/workspace/stored", "/workspace/stored"]);

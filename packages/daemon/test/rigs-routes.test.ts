@@ -63,6 +63,20 @@ describe("Rig CRUD routes", () => {
     expect(body[0].name).toBeDefined();
   });
 
+  it("exposes the recorded kernel variant through rig reads without labelling other rigs", async () => {
+    const kernel = repo.createRig("kernel");
+    const project = repo.createRig("project");
+    repo.setKernelVariant(kernel.id, "rig-claude-only.yaml");
+    const list = await app.request("/api/rigs");
+    expect(list.status).toBe(200);
+    const rigs = await list.json();
+    expect(rigs.find((rig: { id: string }) => rig.id === kernel.id).kernelVariant).toBe("rig-claude-only.yaml");
+    expect(rigs.find((rig: { id: string }) => rig.id === project.id)).not.toHaveProperty("kernelVariant");
+    const detail = await app.request(`/api/rigs/${kernel.id}`);
+    expect(detail.status).toBe(200);
+    expect((await detail.json()).rig.kernelVariant).toBe("rig-claude-only.yaml");
+  });
+
   it("GET /api/rigs/:id -> full graph with nodes, edges, bindings", async () => {
     const rig = repo.createRig("test-rig");
     const n1 = repo.addNode(rig.id, "orchestrator", { role: "orchestrator" });

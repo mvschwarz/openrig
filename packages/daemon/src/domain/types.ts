@@ -3,6 +3,8 @@ import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.
 export interface Rig {
   id: string;
   name: string;
+  /** Original automatic kernel boot's spec filename; absent when no selection was recorded. */
+  kernelVariant?: string;
   createdAt: string;
   updatedAt: string;
 }

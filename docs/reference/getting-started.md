@@ -291,6 +291,14 @@ fine; if both accounts are authenticated, the kernel uses both even when your
 later project uses just one. A request to use only one provider for everything
 is a separate choice.
 
+Automatic kernel boot records the chosen template (`rig.yaml`,
+`rig-claude-only.yaml` or `rig-codex-only.yaml`) once it finishes, even if some
+seats failed to start. `GET /api/rigs` and `GET /api/rigs/:id` expose it as
+`kernelVariant`, and `/api/kernel/status` retains `variant` across daemon restarts
+and recovery. This records the original selection; the rig's live spec describes
+its current configuration. Older or manually created kernels have no recorded
+selection.
+
 **Started is not ready.** Read the `Kernel:` boot state in `rig status` and the
 individual seat state in `rig ps --nodes --rig kernel`. The view may open while
 agents finish starting; describe that state, without claiming they are ready.

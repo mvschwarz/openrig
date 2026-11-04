@@ -24,7 +24,10 @@ import {
   type KernelBootDeps,
   type RuntimeAuthStatus,
 } from "../src/domain/kernel-boot.js";
-import type { RigRepository } from "../src/domain/rig-repository.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import Database from "better-sqlite3";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { migrate } from "../src/db/migrate.js";
 import type { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator.js";
 import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { EventBus } from "../src/domain/event-bus.js";
@@ -120,6 +123,85 @@ describe("selectVariant — auth-state → variant mapping", () => {
   });
   it("picks rig-codex-only.yaml when only Codex available", () => {
     expect(selectVariant({ claudeCode: "unavailable", codex: "ok" })).toBe("rig-codex-only.yaml");
+  });
+});
+
+describe("kernel variant persistence", () => {
+  it.each([
+    ["ok", "ok", "rig.yaml"],
+    ["ok", "unavailable", "rig-claude-only.yaml"],
+    ["unavailable", "ok", "rig-codex-only.yaml"],
+  ] as const)("keeps the %s/%s selection after reopening the database", async (claudeCode, codex, variant) => {
+    const dbPath = join(tmpSpecsDir, "kernel.db");
+    let db = new Database(dbPath);
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      let rigRepo = new RigRepository(db);
+      const bootstrap = makeBootstrapMock();
+      let rigId = "";
+      vi.mocked(bootstrap.bootstrap).mockImplementationOnce(async () => {
+        rigId = rigRepo.createRig("kernel").id;
+        return { runId: "boot", status: "completed", rigId, stages: [], errors: [], warnings: [] };
+      });
+      const tracker = await bootKernelIfNeeded(makeBaseDeps({
+        rigRepo, bootstrapOrchestrator: bootstrap,
+        probeRuntimes: async () => ({ claudeCode, codex }),
+      }, tmpSpecsDir));
+      await flushPromises();
+      tracker.stop();
+      expect(rigRepo.getRig(rigId)?.rig.kernelVariant).toBe(variant);
+      db.close();
+      db = new Database(dbPath);
+      rigRepo = new RigRepository(db);
+      const probe = vi.fn(async () => ({ claudeCode: "unavailable", codex: "unavailable" } as const));
+      const restarted = await bootKernelIfNeeded(makeBaseDeps({ rigRepo, probeRuntimes: probe }, tmpSpecsDir));
+      expect(restarted.getStatus().variant).toBe(variant);
+      expect(probe).not.toHaveBeenCalled();
+      expect(rigRepo.listRigs().find(rig => rig.id === rigId)?.kernelVariant).toBe(variant);
+      restarted.stop();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("records a partially launched kernel by the bootstrap result's id", async () => {
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      const rigRepo = new RigRepository(db);
+      const bootstrap = makeBootstrapMock();
+      let rigId = "";
+      let otherId = "";
+      vi.mocked(bootstrap.bootstrap).mockImplementationOnce(async () => {
+        otherId = rigRepo.createRig("kernel").id;
+        rigRepo.archiveRig(otherId);
+        rigId = rigRepo.createRig("kernel").id;
+        return { runId: "boot", status: "partial", rigId, stages: [], errors: ["seat failed"], warnings: [] };
+      });
+      const tracker = await bootKernelIfNeeded(makeBaseDeps({ rigRepo, bootstrapOrchestrator: bootstrap }, tmpSpecsDir));
+      await flushPromises();
+      expect(tracker.getStatus().kernelState).toBe("bootstrap_failed");
+      expect(rigRepo.getRig(rigId)?.rig.kernelVariant).toBe("rig.yaml");
+      expect(rigRepo.getRig(otherId)?.rig.kernelVariant).toBeUndefined();
+      tracker.stop();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("leaves an existing kernel without a recorded selection unmarked", async () => {
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      const rigRepo = new RigRepository(db);
+      const rig = rigRepo.createRig("kernel");
+      const tracker = await bootKernelIfNeeded(makeBaseDeps({ rigRepo }, tmpSpecsDir));
+      expect(tracker.getStatus().variant).toBeNull();
+      expect(rigRepo.getRig(rig.id)?.rig.kernelVariant).toBeUndefined();
+      tracker.stop();
+    } finally {
+      db.close();
+    }
   });
 });
 
