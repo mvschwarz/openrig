@@ -94,6 +94,18 @@ it("records a retryable refusal on the parked row without consuming its one-shot
   expect(f.repo.getParkWakeStatus(row.qitemId)).toMatchObject({ phase: "fired", deliveryStatus: "ok", live: false });
 });
 
+it("records exhausted one-shot retries as a failed wake before ending the timer", async () => {
+  const send = vi.fn(async () => absent), f = fixture(send), row = await f.park();
+  later(3600); await f.scheduler.runTickNow();
+  for (let i = 0; i < 3; i++) { later(300); await f.scheduler.runTickNow(); }
+  expect(f.errors).toHaveLength(0); expect(send).toHaveBeenCalledTimes(4);
+  expect(f.repo.getById(row.qitemId)?.state).toBe("blocked");
+  expect(f.repo.getParkWakeStatus(row.qitemId)).toMatchObject({ phase: "fired", deliveryStatus: "failed", live: false, unconsumed: true });
+  expect(f.jobs.getByIdOrThrow(row.jobId).terminalReason).toBe("park_timer_fired_once");
+  expect(f.history.listForJob(row.jobId)[0]?.evaluationNotes?.nextAction).toContain("exhausted");
+  later(7200); await f.scheduler.runTickNow(); expect(send).toHaveBeenCalledTimes(4);
+});
+
 it.each([false, true])("repairs a post-fire accounting crash without duplicate input (digest=%s)", async digest => {
   const send = vi.fn(async () => delivered), f = fixture(send, undefined, digest), rows = [await f.park()];
   if (digest) rows.push(await f.park());

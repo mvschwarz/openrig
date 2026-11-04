@@ -116,13 +116,16 @@ advance the reminder to its next regular cycle. A confirmed send advances the no
 recovery does not replay every elapsed cycle.
 
 `rig watchdog show <jobId> --json` includes the failed attempt, its retained outbox IDs, retry
-time and next action. If input may have reached the recipient, the occurrence stays unconfirmed
-and is not automatically sent again. Inspect that recipient and the exact outbox record before
-deliberately replacing or rescheduling it. A confirmed receipt survives a daemon restart, so
+time and next action. If input may have reached the recipient, that occurrence ends unconfirmed
+and is not automatically sent again. Inspect the recipient and exact outbox record before any
+manual replay. A recurring reminder keeps its next normal cycle under a new occurrence identity. A confirmed receipt survives a daemon restart, so
 finishing its accounting does not type the same occurrence twice.
 
-A permanent transport failure or exhausted retry budget leaves a terminal job with its cause
-and next action. Correct the destination and register a replacement reminder. Deliberately held
+Exhausted retries end only the failed occurrence, with its cause and next action; a recurring
+reminder keeps its next normal cycle. A permanent transport failure leaves a terminal job:
+correct the destination and register a replacement reminder. A one-shot park timer records its
+failed or unconfirmed wake on the parked row before it ends. A retryable failure is recorded
+there while the timer stays armed. Deliberately held
 input keeps its existing retained-message custody. Condition watches and parked-owner policy
 behavior are unchanged. This does not replay failed occurrences recorded by older versions.
 

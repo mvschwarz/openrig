@@ -45,7 +45,7 @@ export function makeWatchdogDeliver(deps: {
       if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted };
       return result.ok
         ? { status: "ok", continuityActionCompleted }
-        : { status: "failed", error: result.error, ...(result.reason ? { transportReason: result.reason } : {}),
+        : { status: "failed", error: result.error, sent: result.sent, ...(result.reason ? { transportReason: result.reason } : {}),
           ...(result.inputPhase ? { inputPhase: result.inputPhase } : {}),
           ...(result.sent === false && result.inputPhase === "not_reached" && result.noInputCode ? { code: result.noInputCode } : {}), continuityActionCompleted };
     } catch (err) {

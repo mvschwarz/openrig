@@ -86,12 +86,12 @@ describe("an undelivered scheduled occurrence remains owed", () => {
     expect(resumed.history.listForJob(job.jobId)[0]?.skipReason).toBe("delivery_receipt_reconciled");
   });
 
-  it("keeps an uncertain input owed across restart without treating it as unsent", async () => {
+  it("ends an uncertain occurrence across restart without treating it as unsent", async () => {
     const send = vi.fn(async () => ({ ok: false, sessionName: seat, inputPhase: "attempted" as const,
       reason: "delivery_indeterminate", error: "Input acknowledgement was lost." }));
     const first = boot(database(), send), job = arm(first);
     await first.scheduler.runTickNow();
-    expect(first.jobs.getByIdOrThrow(job.jobId).lastFireAt).toBeNull();
+    expect(first.jobs.getByIdOrThrow(job.jobId).lastFireAt).toBe("2026-01-01T01:00:00.000Z");
     const id = occurrence(first, job.jobId).outboxId;
     expect(first.outbox.getById(id)?.deliveryState).toBe("indeterminate");
     const saved = first.db.serialize(); first.db.close();
@@ -99,7 +99,7 @@ describe("an undelivered scheduled occurrence remains owed", () => {
     later(600); await resumed.scheduler.runTickNow(); await resumed.scheduler.runTickNow();
     expect(send).toHaveBeenCalledTimes(1);
     expect(resumed.outbox.getById(id)?.deliveryState).toBe("indeterminate");
-    expect(resumed.jobs.getByIdOrThrow(job.jobId).lastFireAt).toBeNull();
+    expect(resumed.jobs.getByIdOrThrow(job.jobId).lastFireAt).toBe("2026-01-01T01:00:00.000Z");
     expect(resumed.history.listForJob(job.jobId)[0]?.evaluationNotes?.nextAction).toContain("unconfirmed");
   });
 
@@ -109,7 +109,7 @@ describe("an undelivered scheduled occurrence remains owed", () => {
     await f.scheduler.runTickNow();
     expect(f.history.listForJob(job.jobId)[0]?.evaluationNotes?.deliveryReason).toContain("external CLI");
     expect(f.jobs.getByIdOrThrow(job.jobId).state).toBe("terminal");
-    expect(f.jobs.getByIdOrThrow(job.jobId).lastFireAt).toBeNull();
+    expect(f.jobs.getByIdOrThrow(job.jobId).lastFireAt).not.toBeNull();
     expect(f.history.listForJob(job.jobId)[0]?.evaluationNotes?.nextAction).toEqual(expect.any(String));
     later(86_400); await f.scheduler.runTickNow();
     expect(send).toHaveBeenCalledTimes(1);
@@ -120,9 +120,9 @@ describe("an undelivered scheduled occurrence remains owed", () => {
     await f.scheduler.runTickNow();
     for (let i = 0; i < 6; i++) { later(300); await f.scheduler.runTickNow(); }
     expect(send).toHaveBeenCalledTimes(4); // Original attempt and the existing three-retry cap.
-    expect(f.jobs.getByIdOrThrow(job.jobId).state).toBe("terminal");
-    expect(f.jobs.getByIdOrThrow(job.jobId).terminalReason).toContain("exhaust");
-    expect(f.jobs.getByIdOrThrow(job.jobId).lastFireAt).toBeNull();
+    expect(f.jobs.getByIdOrThrow(job.jobId).state).toBe("active");
+    expect(f.history.listForJob(job.jobId)[0]?.evaluationNotes?.nextAction).toContain("exhausted");
+    expect(f.jobs.getByIdOrThrow(job.jobId).lastFireAt).not.toBeNull();
   });
 
   it("keeps a successful reminder's selected recurrence unchanged", async () => {
@@ -176,7 +176,7 @@ describe("an undelivered scheduled occurrence remains owed", () => {
       targetSession: seat, intervalSeconds: 1, registeredBySession: "owner@test" });
     later(1); await f.scheduler.runTickNow();
     expect(send).toHaveBeenCalledTimes(4);
-    expect(f.jobs.getByIdOrThrow(old.jobId).state).toBe("terminal");
+    expect(f.jobs.getByIdOrThrow(old.jobId).state).toBe("active");
     expect(f.jobs.getByIdOrThrow(fresh.jobId).state).toBe("active");
     expect(f.jobs.getByIdOrThrow(fresh.jobId).lastFireAt).toBeNull();
     result = delivered; later(300); await f.scheduler.runTickNow();

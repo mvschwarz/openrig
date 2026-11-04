@@ -3756,7 +3756,7 @@ export class QueueRepository {
   /** Called by the watchdog engine after the delivery attempt is durably
    *  audited. The queue transition records that attempt independently of
    *  whether the HELD row's owner consumed it. */
-  recordWatchdogWakeAttempt(jobId: string, deliveryStatus: string): void {
+  recordWatchdogWakeAttempt(jobId: string, deliveryStatus: string, retryAt?: string): void {
     const bindings = this.wakeRepo.findBlockedQitemsByWatchdog(jobId);
     if (bindings.length === 0) return;
     // Both receipt ownership and timer lifecycle follow the current park.
@@ -3766,11 +3766,11 @@ export class QueueRepository {
         qitemId,
         state: "blocked",
         actorSession: "watchdog@system",
-        transitionNote: deliveryStatus === "retained"
+        transitionNote: retryAt ? `park wake failed: watchdog ${jobId}; delivery=${deliveryStatus}; occurrence remains owed; retry at ${retryAt}` : deliveryStatus === "retained"
           ? `park wake retained: watchdog ${jobId}; not delivered; blocked work unchanged`
           : `park wake fired: watchdog ${jobId}; delivery=${deliveryStatus}; awaiting owner consumption`,
       });
-      this.wakeRepo.record({
+      if (!retryAt) this.wakeRepo.record({
         transitionId: transition.transitionId,
         qitemId,
         phase: "fired",
@@ -3803,7 +3803,7 @@ export class QueueRepository {
     const parkGeneratedTimer = this.wakeRepo.findCurrentQitemsByGeneratedTimer(jobId).length > 0;
     const events = this.db.transaction(() => {
       const firedEvents = targets.map(recordFired);
-      if (deliveryStatus === "retained") return firedEvents;
+      if (retryAt || deliveryStatus === "retained") return firedEvents;
       if (usageLimitBlockers.length === 0) {
         const jobsRepo = this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db);
         if (parkGeneratedTimer && !backOffQueueWait(jobsRepo, jobId, deliveryStatus)) {
@@ -3839,7 +3839,9 @@ export class QueueRepository {
       );
       return [...firedEvents, ...resolutionEvents];
     })();
-    for (const event of events) this.eventBus.notifySubscribers(event);
+    for (const event of events) {
+      if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
+    }
   }
 
   /** Close a direct human request and retain its typed answer in the same transaction.

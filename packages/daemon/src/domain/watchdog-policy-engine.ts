@@ -67,6 +67,9 @@ export interface DeliveryOutcome {
   sentMessage?: string;
   /** Durable custody of this scheduled occurrence, separate from its recurrence. */
   occurrenceTracked?: boolean;
+  sent?: boolean;
+  /** Failed occurrence is finished; a recurring job can start its next normal cycle. */
+  occurrenceComplete?: boolean;
   /** A retained receipt or retry time was checked; no new input attempt happened. */
   deferred?: boolean;
   reconciled?: boolean;
@@ -161,7 +164,7 @@ interface WatchdogPolicyEngineDeps {
   /** Queue-side observer for a wake attempt. It appends resume evidence to
    *  every HELD row armed to this job; delivery outcome is preserved. */
   resolveQueueWait?: (input: { jobId: string }) => PolicyEvaluation | null | undefined;
-  onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
+  onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string; retryAt?: string }) => void;
   /** The parked row a due reminder is about, when it may share one message with other reminders due for the same
    *  seat in the same scheduler pass. Null, or absent, keeps the reminder's own send. */
   resolveDigestEntry?: (input: { jobId: string; message: string }) => ParkReminderEntry | null;
@@ -275,7 +278,7 @@ export class WatchdogPolicyEngine {
   private readonly resolveContextUsage?: WatchdogPolicyEngineDeps["resolveContextUsage"];
   private readonly resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
   private readonly resolveQueueWait?: WatchdogPolicyEngineDeps["resolveQueueWait"];
-  private readonly onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
+  private readonly onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string; retryAt?: string }) => void;
   private readonly resolveDigestEntry?: WatchdogPolicyEngineDeps["resolveDigestEntry"];
 
   constructor(deps: WatchdogPolicyEngineDeps) {
@@ -799,14 +802,28 @@ export class WatchdogPolicyEngine {
           ? { ...receiptNotes, deliveryReason: delivery.error }
           : delivery.status === "retained" ? { ...receiptNotes, outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : receiptNotes ?? null,
     });
-    // A notice stamps no fire time and leaves the job not actionable, so the active-wake throttle can't hold
-    // back the watched condition's own send after it.
-    if (input.notice) {
-      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, false);
-    } else if (!isContextUsageThreshold && !(delivery.occurrenceTracked && delivery.status === "failed")) {
-      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true, deliverySchedule);
-    }
-    if (delivery.terminalReason) this.jobsRepo.markTerminal(job.jobId, delivery.terminalReason);
+    const retryPending = delivery.occurrenceTracked && delivery.status === "failed" && !delivery.occurrenceComplete;
+    const accountWake = () => {
+      const current = this.jobsRepo.getByIdOrThrow(job.jobId);
+      if (current.state === "active" && this.jobsRepo.scheduleUnchanged(current, deliverySchedule)
+        && (isContextUsageThreshold || current.lastEvaluationAt === evaluatedAt
+          || (retryPending && current.lastEvaluationAt === deliverySchedule.lastEvaluationAt))) {
+        this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status,
+          ...(retryPending && delivery.retryAt ? { retryAt: delivery.retryAt } : {}) });
+      }
+      if (delivery.terminalReason) this.jobsRepo.markTerminal(job.jobId, delivery.terminalReason);
+    };
+    const account = () => {
+      // The fire stamp and queue wake receipt/one-shot retirement commit together. A crash here leaves
+      // the old occurrence identity, whose durable positive receipt can finish accounting without input.
+      if (input.notice) this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, false);
+      else if (!isContextUsageThreshold && !retryPending) {
+        this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true, deliverySchedule);
+      }
+      if (delivery.occurrenceTracked) accountWake();
+    };
+    if (delivery.occurrenceTracked) this.eventBus.withNotifyEnvelope(account);
+    else account();
     // OPR.0.5.8.1 S2 — a policy's condition receipt is banked ONLY on positive
     // delivery. `status` is "ok" | "failed"; anything that is not a definite ok
     // leaves the receipt untouched so the next scan retries. A policy that does
@@ -824,14 +841,7 @@ export class WatchdogPolicyEngine {
       targetSession: outcome.target.session,
       deliveryStatus: delivery.status,
     });
-    // The history above audits the actual attempt. A newer park/blocker change
-    // must not receive its receipt or be backed off as though we sent for it.
-    const current = this.jobsRepo.getByIdOrThrow(job.jobId);
-    if (current.state === "active" && this.jobsRepo.scheduleUnchanged(current, deliverySchedule)
-      && (isContextUsageThreshold || current.lastEvaluationAt === evaluatedAt)
-      && !(delivery.occurrenceTracked && delivery.status === "failed")) {
-      this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
-    }
+    if (!delivery.occurrenceTracked) accountWake();
     this.jobsRepo.deliveryAccounted(job.jobId);
     return {
       job: this.jobsRepo.getByIdOrThrow(job.jobId),

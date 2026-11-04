@@ -3,7 +3,7 @@ import { resolveWakeRetryCap, resolveWakeRetryIntervalSeconds } from "./queue-wa
 import type { DeliveryFn, DeliveryOutcome, WatchdogDeliverySource } from "./watchdog-policy-engine.js";
 
 const PREFIX = "watchdog-occurrence-";
-type Receipt = { attempts: number; retryAt?: string; message: string; nextAction?: string; terminalReason?: string; heldIds?: string[] };
+type Receipt = { attempts: number; retryAt?: string; message: string; nextAction?: string; terminalReason?: string; ended?: boolean; error?: string; heldIds?: string[] };
 
 /** Occurrence custody uses the existing outbox. The watchdog's own loop is its only retry driver.
  * Condition policies keep their existing receipts; this is for scheduled periodic reminders, including digests. */
@@ -39,19 +39,15 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
       const entry = entries[i];
       if (!entry) continue;
       const receipt = read(selected[i]!.id);
-      if (receipt?.terminalReason) return selected.length > 1 ? { status: "failed", occurrenceTracked: true, deferred: true }
+      if (receipt?.ended || receipt?.terminalReason) return selected.length > 1 ? { status: "failed", occurrenceTracked: true, deferred: true }
         : { status: "failed", occurrenceTracked: true, outboxIds: [entry.outboxId],
-          error: receipt.terminalReason, terminalReason: receipt.terminalReason, nextAction: receipt.nextAction };
+          error: receipt.error ?? receipt.terminalReason, occurrenceComplete: true, terminalReason: receipt.terminalReason, nextAction: receipt.nextAction };
       if (entry.deliveryState === "sending" || entry.deliveryState === "indeterminate") {
         if (selected.length > 1) return { status: "failed", occurrenceTracked: true, deferred: true };
-        const noted = outbox.db.prepare(`SELECT 1 FROM watchdog_history WHERE job_id=?
-          AND json_extract(evaluation_notes,'$.nextAction') IS NOT NULL
-          AND EXISTS (SELECT 1 FROM json_each(json_extract(evaluation_notes,'$.outboxIds')) WHERE value=?) LIMIT 1`)
-          .get(selected[i]!.jobId, entry.outboxId);
-        return { status: "failed", occurrenceTracked: true, deferred: Boolean(noted),
+        return { status: "failed", occurrenceTracked: true, occurrenceComplete: true,
           inputPhase: "attempted", error: "Prior scheduled input is unconfirmed; no replay was attempted.",
           outboxIds: selected.map(m => m.id),
-          nextAction: `Inspect outbox ${entry.outboxId} and the recipient before replacing or rescheduling this reminder; input is unconfirmed.` };
+          nextAction: `Inspect outbox ${entry.outboxId} and the recipient before any manual replay; input is unconfirmed. This occurrence ends; the next regular cycle is a new occurrence.` };
       }
       if (entry.deliveryState === "delivered" || entry.deliveryState === "retained" || entry.deliveryState === "retired"
         || (receipt?.retryAt && Date.parse(receipt.retryAt) > now().getTime())) {
@@ -88,7 +84,7 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
     let result: DeliveryOutcome;
     try { result = await send(request, source); }
     catch (error) { result = { status: "failed", error: (error as Error).message }; }
-    const noInput = result.inputPhase === "not_reached";
+    const noInput = result.sent === false || result.inputPhase === "not_reached";
     const permanent = result.transportReason === "transport_unavailable" || result.code === "terminal_seat"
       || result.code === "retained_quota_full";
     const memberOutcomes: Record<string, DeliveryOutcome> = {};
@@ -103,21 +99,24 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
           nextAction = `Retained by existing input protection; inspect held messages ${(result.outboxIds ?? []).join(", ")}. Nothing was delivered.`;
         }
         if (result.status === "failed") {
-          if (noInput && (permanent || exhausted)) {
-            terminalReason = exhausted ? "watchdog_delivery_retry_exhausted" : "watchdog_delivery_unavailable";
+          if (noInput && permanent) {
+            terminalReason = "watchdog_delivery_unavailable";
             nextAction = `Inspect outbox ${member.id}: ${result.error ?? result.transportReason ?? "delivery failed"}. Fix the destination and register a replacement reminder.`;
+          } else if (noInput && exhausted) {
+            nextAction = `Inspect outbox ${member.id}: retry budget exhausted. This occurrence ends; the next regular cycle is a new occurrence. A one-shot timer records its failed wake and ends.`;
           } else if (noInput) {
             retryAt = new Date(now().getTime() + interval * 1000).toISOString();
             nextAction = `Occurrence remains owed; retry at ${retryAt}. Inspect outbox ${member.id}.`;
           } else {
-            nextAction = `Inspect outbox ${member.id} and the recipient before replacing or rescheduling this reminder; input is unconfirmed.`;
+            nextAction = `Inspect outbox ${member.id} and the recipient before any manual replay; input is unconfirmed. This occurrence ends; the next regular cycle is a new occurrence.`;
           }
         }
+        const ended = result.status === "failed" && (!noInput || permanent || exhausted);
         outbox.finalizeDelivery(member.id, state);
-        save(member.id, { ...receipt, ...(result.status === "retained" ? { heldIds: result.outboxIds ?? [] } : {}),
+        save(member.id, { ...receipt, ...(ended ? { ended: true, error: result.error } : {}), ...(result.status === "retained" ? { heldIds: result.outboxIds ?? [] } : {}),
           ...(retryAt ? { retryAt } : {}), ...(nextAction ? { nextAction } : {}),
           ...(terminalReason ? { terminalReason } : {}) });
-        memberOutcomes[member.jobId] = { ...result, occurrenceTracked: true,
+        memberOutcomes[member.jobId] = { ...result, occurrenceTracked: true, ...(ended ? { occurrenceComplete: true } : {}),
           outboxIds: [...new Set([member.id, ...(result.outboxIds ?? [])])], ...(retryAt ? { retryAt } : {}),
           ...(nextAction ? { nextAction } : {}), ...(terminalReason ? { terminalReason } : {}) };
       }
