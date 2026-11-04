@@ -5,6 +5,12 @@ OpenRig's gateway can register **several people** and **shared channels**, group
 OpenRig doesn't enforce it. This page covers the commands, what the default is for, and what upgrading and rolling back
 do.
 
+For a remote client, `GET /api/gateway/participants` returns the same participant, organization, group, default and
+warning fields as `rig gateway participants --json`. Add `?organization=<id>` to filter the participant list; the default
+and organization and group maps still describe the whole registry. The result names the participant file and reports
+an unreadable side file without treating it as an empty one. If the human registry itself cannot be read, the route
+returns `503` with `error: "human_registry_unavailable"`. The result does not include connector secret pointers.
+
 ## Participants
 
 A participant is either:

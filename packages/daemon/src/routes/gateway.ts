@@ -20,6 +20,7 @@ import { postOpenAsks } from "../domain/gateway/slack/open-asks.js";
 import { DispatchBuffer } from "../domain/gateway/dispatch-buffer.js";
 import { OPENRIG_HOME } from "../openrig-compat.js";
 import { loadHumanRegistry } from "../domain/gateway/human-registry.js";
+import { participantsJsonView } from "../domain/gateway/participants.js";
 import { resolveSecret } from "../domain/gateway/slack/secrets.js";
 import { resolveHumanDeliveryReadiness, type HumanDeliveryReadiness } from "../domain/gateway/human-readiness.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
@@ -72,6 +73,11 @@ export function gatewayRoutes(opts: {
     try { status = subsystem?.status() ?? null; } catch { /* unavailable is preserved */ }
     return c.json(connectionsProjection(opts.home ?? OPENRIG_HOME, status,
       c.get("settingsStore" as never) as SettingsStore | undefined));
+  });
+
+  app.get("/participants", (c) => {
+    const result = participantsJsonView(opts.home ?? OPENRIG_HOME, c.req.query("organization"));
+    return result.ok ? c.json(result) : c.json({ error: "human_registry_unavailable", message: result.error }, 503);
   });
 
   // OPR.0.6.0.5 — read-only: the same manifest `rig slack manifest` prints. No config, no secrets.
