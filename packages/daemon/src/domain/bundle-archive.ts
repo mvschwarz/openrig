@@ -124,7 +124,7 @@ export async function unpack(archivePath: string, outputDir: string): Promise<{ 
   }
 
   // Step 3: Extract (safe — pre-scanned and defensively filtered)
-  const fileModes = new Map<string, number>();
+  const fileModes: Array<{ file: string; mode: number }> = [];
   fs.mkdirSync(outputDir, { recursive: true });
   await tar.extract({
     file: archivePath,
@@ -134,7 +134,7 @@ export async function unpack(archivePath: string, outputDir: string): Promise<{ 
       const type = "type" in entry ? (entry as { type?: string }).type : undefined;
       if (unsafeArchiveEntryReason(p, type) !== null) return false;
       if ((type === "File" || type === "OldFile" || type === "ContiguousFile") && typeof entry.mode === "number") {
-        fileModes.set(nodePath.resolve(outputDir, p), entry.mode & 0o777);
+        fileModes.push({ file: nodePath.resolve(outputDir, p), mode: entry.mode & 0o777 });
       }
       return true;
     },
@@ -189,19 +189,34 @@ export async function unpack(archivePath: string, outputDir: string): Promise<{ 
       ];
       throw new Error(`Content integrity verification failed: ${details.join("; ")}`);
     }
-    // Restore ordinary file bits only after verification, including warning success.
-    // Match portable packing's write-bit restriction; known login files keep only
-    // archived owner read/write bits. Custom group/other-write and special bits
-    // are not restored, even from accepted nonportable archives.
+    const warnings = [...(result.warnings ?? [])];
+    // Keep every header in archive order: aliases and duplicates can interleave.
+    // POSIX device/inode identity groups aliases without folding distinct names
+    // on case-sensitive volumes. Read bigint IDs to avoid number precision loss.
     if (process.platform !== "win32") {
-      for (const [file, mode] of fileModes) {
-        const target = isHarnessLoginPath(nodePath.relative(outputDir, file)) ? mode & 0o600 : mode & ~0o022;
-        const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+      const files = new Map<string, { file: string; mode: number; extracted: number; login: boolean }>();
+      for (const { file, mode } of fileModes) {
+        const stat = fs.lstatSync(file, { throwIfNoEntry: false, bigint: true });
         // A later entry may have replaced this file with a directory.
-        if (stat?.isFile() && (stat.mode & 0o7777) !== target) fs.chmodSync(file, target);
+        if (!stat?.isFile()) continue;
+        const identity = `${stat.dev}:${stat.ino}`;
+        const login = isHarnessLoginPath(nodePath.relative(outputDir, file)) || !!files.get(identity)?.login;
+        files.set(identity, { file, mode, extracted: Number(stat.mode) & 0o7777, login });
+      }
+      for (const { file, mode, extracted, login } of files.values()) {
+        // Restore owner bits only. Keep extracted group/other read/execute bits,
+        // excluding group/other write and all special bits even on external tars.
+        const target = login ? mode & 0o600 : (mode & 0o700) | (extracted & 0o055);
+        if (extracted === target) continue;
+        try {
+          fs.chmodSync(file, target);
+        } catch {
+          const relative = nodePath.relative(outputDir, file);
+          warnings.push(`Bundle mode repair warning: chmod failed for '${relative}' (observed mode ${extracted.toString(8).padStart(4, "0")}). ${login ? "The owner-only login cap could not be applied. " : ""}Extract to a private folder on a filesystem that supports permissions.`);
+        }
       }
     }
-    if (result.warnings) return { warnings: result.warnings };
+    if (warnings.length > 0) return { warnings };
   }
 }
 

@@ -17,6 +17,7 @@ export interface BundleResolvedSource {
   packageRefMap: Record<string, ResolvedPackage>;
   manifest: BundleManifest;
   tempDir: string;
+  warnings?: string[];
 }
 
 /**
@@ -40,7 +41,7 @@ export class LegacyBundleSourceResolver {
 
     try {
       // Extract + verify (archive digest + content integrity)
-      await unpack(bundlePath, tempDir);
+      const unpacked = await unpack(bundlePath, tempDir);
 
       // Parse bundle manifest
       const manifestPath = nodePath.join(tempDir, "bundle.yaml");
@@ -98,7 +99,7 @@ export class LegacyBundleSourceResolver {
         packageRefMap[`./${entry.path}`] = result.resolved;
       }
 
-      return { specPath, resolvedPackages, packageRefMap, manifest, tempDir };
+      return { specPath, resolvedPackages, packageRefMap, manifest, tempDir, warnings: unpacked?.warnings };
     } catch (err) {
       // Clean up on failure
       this.cleanup(tempDir);
@@ -125,6 +126,7 @@ export interface PodBundleResolvedSource {
   specPath: string;
   manifest: PodBundleManifest;
   tempDir: string;
+  warnings?: string[];
 }
 
 /**
@@ -137,7 +139,7 @@ export class PodBundleSourceResolver {
 
     try {
       // Safe unpack with digest/symlink/integrity verification
-      await unpack(bundlePath, tempDir);
+      const unpacked = await unpack(bundlePath, tempDir);
 
       const manifestPath = nodePath.join(tempDir, "bundle.yaml");
       if (!fs.existsSync(manifestPath)) {
@@ -182,7 +184,7 @@ export class PodBundleSourceResolver {
         throw new Error(`Bundle missing rig spec at ${manifest.rigSpec}`);
       }
 
-      return { specPath, manifest, tempDir };
+      return { specPath, manifest, tempDir, warnings: unpacked?.warnings };
     } catch (err) {
       this.cleanup(tempDir);
       throw err;

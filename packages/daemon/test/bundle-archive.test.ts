@@ -67,30 +67,49 @@ describe("Bundle archive", () => {
   }
 
   // Isolate the process-wide umask from Vitest and restore it even on rejection.
-  function runUnpackUnderUmask(archive: string, destination: string, umask: number, failChmodFor = "") {
+  function runUnpackUnderUmask(archive: string, destination: string, umask: number, failChmodFor = "", failMode = 0o700, aliases: string[] = []) {
     const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
       import fs from "node:fs";
+      import path from "node:path";
+      import * as tar from "tar";
       import { unpack } from ${JSON.stringify(new URL("../src/domain/bundle-archive.ts", import.meta.url).href)};
+      // A caller-owned destination must stay traversable when testing a mask
+      // that strips owner execute. Prepare only directories before that mask;
+      // all file creation, modes, bytes and verification still use real unpack.
+      if (Number(process.argv[1]) & 0o100) {
+        fs.mkdirSync(process.argv[3], { recursive: true, mode: 0o700 });
+        await tar.list({ file: process.argv[2], onReadEntry: entry => {
+          const file = path.join(process.argv[3], entry.path);
+          fs.mkdirSync(entry.type === "Directory" ? file : path.dirname(file), { recursive: true, mode: 0o700 });
+        } });
+      }
       const previous = process.umask(Number(process.argv[1]));
       let injected = false;
       const chmod = fs.chmodSync;
+      const lstat = fs.lstatSync;
+      const aliases = JSON.parse(process.argv[6]);
+      // Simulate only final filesystem identity and chmod alias resolution.
+      // Tar extraction and content verification remain real on this filesystem.
+      fs.lstatSync = (file, options) => lstat(aliases.includes(file) ? aliases[0] : file, options);
+      const repairs = [];
       fs.chmodSync = (file, mode) => {
-        if (file === process.argv[4] && mode === 0o644) {
+        repairs.push({ file, mode });
+        if (file === process.argv[4] && mode === Number(process.argv[5])) {
           injected = true;
           throw Object.assign(new Error("synthetic mode repair failure"), { code: "EPERM" });
         }
-        return chmod(file, mode);
+        return chmod(aliases.includes(file) ? aliases[0] : file, mode);
       };
-      try { console.log(JSON.stringify({ result: await unpack(process.argv[2], process.argv[3]) ?? null, injected })); }
+      try { console.log(JSON.stringify({ result: await unpack(process.argv[2], process.argv[3]) ?? null, injected, repairs })); }
       catch (error) {
-        console.log(JSON.stringify({ error: { message: error.message, code: error.code ?? null }, injected }));
+        console.log(JSON.stringify({ error: { message: error.message, code: error.code ?? null }, injected, repairs }));
         process.exitCode = 1;
       }
       finally { process.umask(previous); }
-    `, String(umask), archive, destination, failChmodFor], { encoding: "utf8", timeout: 10_000 });
+    `, String(umask), archive, destination, failChmodFor, String(failMode), JSON.stringify(aliases)], { encoding: "utf8", timeout: 10_000 });
     expect(child.error, child.stderr || String(child.error ?? "Child failed to complete")).toBeUndefined();
     return { status: child.status, stderr: child.stderr, data: JSON.parse(child.stdout) as {
-      result?: { warnings: string[] } | null; error?: { message: string; code: string | null }; injected: boolean;
+      result?: { warnings: string[] } | null; error?: { message: string; code: string | null }; injected: boolean; repairs: Array<{ file: string; mode: number }>;
     } };
   }
 
@@ -105,8 +124,10 @@ describe("Bundle archive", () => {
   }
 
   it.skipIf(process.platform === "win32").each([
-    { label: "0077", umask: 0o077 }, { label: "0022", umask: 0o022 },
-  ])("preserves verified regular-file modes under umask $label", async ({ umask }) => {
+    { label: "0077", umask: 0o077, expected: [0o700, 0o600, 0o600, 0o600] },
+    { label: "0022", umask: 0o022, expected: [0o755, 0o644, 0o640, 0o600] },
+    { label: "0177 strips owner execute", umask: 0o177, expected: [0o700, 0o600, 0o600, 0o600] },
+  ])("restores owner modes and preserves masked group/other access under umask $label", async ({ umask, expected }) => {
     const staging = createStaging();
     const files = [["tool.sh", 0o755], ["shared.txt", 0o644], ["group.txt", 0o640], ["private.txt", 0o600]] as const;
     for (const [name, mode] of files) {
@@ -122,9 +143,9 @@ describe("Bundle archive", () => {
     for (const [name, mode] of files) expect(declared.get(name)! & 0o777).toBe(mode);
     const output = path.join(tmpDir, "modes-extracted");
     expect(unpackUnderUmask(archive, output, umask)).toBeNull();
-    for (const [name, mode] of files) {
+    for (const [index, [name]] of files.entries()) {
       expect(fs.readFileSync(path.join(output, name), "utf8")).toBe(name);
-      expect(fs.statSync(path.join(output, name)).mode & 0o777, name).toBe(mode);
+      expect(fs.statSync(path.join(output, name)).mode & 0o777, name).toBe(expected[index]);
     }
   });
 
@@ -154,7 +175,7 @@ describe("Bundle archive", () => {
     // Directory handling remains tar's existing policy, not the earlier file's mode.
     expect(fs.statSync(path.join(output, "shared")).mode & 0o777).toBe(0o700);
     expect(fs.readFileSync(path.join(output, "shared/tool.sh"), "utf8")).toBe("#!/bin/sh\necho fixture\n");
-    expect(fs.statSync(path.join(output, "shared/tool.sh")).mode & 0o777).toBe(0o755);
+    expect(fs.statSync(path.join(output, "shared/tool.sh")).mode & 0o777).toBe(0o700);
   });
 
   it.skipIf(process.platform === "win32").each([
@@ -179,7 +200,7 @@ describe("Bundle archive", () => {
     expect(result?.warnings).toHaveLength(1);
     expect(result?.warnings[0]).toContain("Credential-bearing bundle includes");
     expect(result?.warnings[0]).not.toContain(MARKER);
-    expect(fs.statSync(path.join(output, "rig.yaml")).mode & 0o7777).toBe(0o644);
+    expect(fs.statSync(path.join(output, "rig.yaml")).mode & 0o7777).toBe(0o600);
     expect(fs.statSync(path.join(output, paths[0]!)).mode & 0o7777).toBe(expected);
     expect(fs.readFileSync(path.join(output, paths[0]!), "utf8")).toBe(MARKER);
   });
@@ -230,7 +251,7 @@ describe("Bundle archive", () => {
     const output = path.join(tmpDir, "duplicates-extracted");
     expect(unpackUnderUmask(archive, output, 0o077)).toBeNull();
     expect(fs.readFileSync(path.join(output, "repeat.txt"), "utf8")).toBe("last verified content");
-    expect(fs.statSync(path.join(output, "repeat.txt")).mode & 0o7777).toBe(last);
+    expect(fs.statSync(path.join(output, "repeat.txt")).mode & 0o7777).toBe(last === 0o755 ? 0o700 : 0o600);
   });
 
   it.skipIf(process.platform === "win32")("removes special bits from a synthetic verified regular-file header", async () => {
@@ -270,19 +291,76 @@ describe("Bundle archive", () => {
     expect(fs.statSync(path.join(output, "rig.yaml")).mode & 0o7777).toBe(0o600);
   });
 
-  it.skipIf(process.platform === "win32")("propagates the exact restoration chmod failure instead of a successful warning", async () => {
-    const paths = ["agents/worker/.codex/auth.json"];
-    const f = await existingArchive(tmpDir, paths, paths);
-    fs.chmodSync(path.join(f.staging, "rig.yaml"), 0o644);
+  it.skipIf(process.platform === "win32").each([
+    { label: "ordinary", failed: "a-tool.sh", later: "z-tool.sh", mask: 0o177, target: 0o700, observed: 0o600 },
+    { label: "login", failed: "agents/worker/.codex/auth.json", later: "agents/worker/.pi/agent/auth.json", mask: 0o022, target: 0o600, observed: 0o755 },
+  ])("warns and repairs later files after a $label chmod failure", async ({ label, failed, later, mask, target, observed }) => {
+    const login = "agents/worker/.codex/auth.json";
+    const paths = [...new Set([failed, later, login])];
+    const f = await existingArchive(tmpDir, paths, paths.filter(file => file.includes("/auth.json")));
+    for (const file of paths) fs.chmodSync(path.join(f.staging, file), 0o755);
     await pack(f.staging, f.archive);
     const output = path.join(tmpDir, "chmod-failure-extracted");
-    const child = runUnpackUnderUmask(f.archive, output, 0o077, path.join(output, "rig.yaml"));
-    expect(child.status).toBe(1);
+    const child = runUnpackUnderUmask(f.archive, output, mask, path.join(output, failed), target);
+    expect(child.status, JSON.stringify(child.data)).toBe(0);
     expect(child.data.injected).toBe(true);
-    expect(child.data.error).toEqual({ code: "EPERM", message: "synthetic mode repair failure" });
-    expect(child.data.result).toBeUndefined();
-    expect(fs.readFileSync(path.join(output, paths[0]!), "utf8")).toBe(MARKER);
-    expect(fs.statSync(path.join(output, "rig.yaml")).mode & 0o7777).toBe(0o600);
+    expect(child.data.error).toBeUndefined();
+    const warnings = child.data.result!.warnings;
+    expect(warnings.some(w => w.includes("Credential-bearing bundle includes"))).toBe(true);
+    const repairs = warnings.filter(w => w.startsWith("Bundle mode repair warning:"));
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0]).toContain(`chmod failed for '${failed}'`);
+    expect(repairs[0]).toContain(`observed mode ${observed.toString(8).padStart(4, "0")}`);
+    expect(repairs[0]).toContain("private folder on a filesystem that supports permissions");
+    expect(repairs[0]!.includes("owner-only login cap could not be applied")).toBe(label === "login");
+    expect(warnings.join("\n")).not.toContain(MARKER);
+    expect(fs.readFileSync(path.join(output, failed), "utf8")).toBe(MARKER);
+    expect(fs.statSync(path.join(output, failed)).mode & 0o7777).toBe(observed);
+    expect(fs.statSync(path.join(output, later)).mode & 0o7777).toBe(target);
+    expect(child.data.repairs.findIndex(r => r.file === path.join(output, later)))
+      .toBeGreaterThan(child.data.repairs.findIndex(r => r.file === path.join(output, failed)));
+  });
+
+  it.skipIf(process.platform === "win32").each([
+    { label: "interleaved ordinary duplicates", lower: "alias.txt", upper: "ALIAS.TXT", modes: [0o600, 0o400, 0o755], expected: 0o700 },
+    { label: "login then executable alias", lower: "agents/worker/.codex/auth.json", upper: "agents/worker/.codex/AUTH.JSON", modes: [0o400, 0o755], expected: 0o600 },
+    { label: "interleaved login duplicates", lower: "agents/worker/.codex/auth.json", upper: "agents/worker/.codex/AUTH.JSON", modes: [0o600, 0o755, 0o400], expected: 0o400 },
+  ])("makes one final mode decision for simulated physical aliases: $label", async ({ lower, upper, modes, expected }) => {
+    const f = await existingArchive(tmpDir, [lower, upper], lower.includes(".codex/") ? [lower] : undefined);
+    const parts: string[] = [];
+    for (const [i, mode] of modes.entries()) {
+      const name = i % 2 === 0 ? lower : upper;
+      fs.chmodSync(path.join(f.staging, name), mode);
+      const part = `part-${i}.tar`;
+      await tar.create({ file: path.join(tmpDir, part), cwd: f.staging }, [name]);
+      parts.push("@" + part);
+    }
+    await tar.create({ file: path.join(tmpDir, "rest.tar"), cwd: f.staging }, realIntegrityFsOps().walkFiles(f.staging).filter(file => file !== lower && file !== upper));
+    await tar.create({ file: f.archive, cwd: tmpDir, gzip: true }, [...parts, "@rest.tar"]);
+    writeArchiveDigest(f.archive);
+    const output = path.join(tmpDir, "aliases-extracted");
+    const aliases = [lower, upper].map(file => path.join(output, file));
+    const child = runUnpackUnderUmask(f.archive, output, 0o177, "", 0o700, aliases);
+    expect(child.status, JSON.stringify(child.data)).toBe(0);
+    expect(fs.readFileSync(aliases[0]!, "utf8")).toBe(MARKER);
+    expect(fs.statSync(aliases[0]!).mode & 0o7777).toBe(expected);
+    expect(child.data.repairs.filter(r => aliases.includes(r.file))).toHaveLength(1);
+    if (lower.includes(".codex/")) expect(child.data.result?.warnings.join("\n")).toContain("Credential-bearing bundle includes");
+  });
+
+  it.skipIf(process.platform === "win32")("keeps distinct case-sensitive files independent", async ({ skip }) => {
+    const f = await existingArchive(tmpDir, ["alias.txt", "ALIAS.TXT"]);
+    const lower = path.join(f.staging, "alias.txt"), upper = path.join(f.staging, "ALIAS.TXT");
+    if (fs.statSync(lower).ino === fs.statSync(upper).ino) { skip(); return; } // This boundary needs a case-sensitive volume.
+    fs.chmodSync(lower, 0o755); fs.chmodSync(upper, 0o400);
+    await tar.create({ file: f.archive, cwd: f.staging, gzip: true, portable: false }, realIntegrityFsOps().walkFiles(f.staging));
+    writeArchiveDigest(f.archive);
+    const output = path.join(tmpDir, "distinct-extracted");
+    expect(unpackUnderUmask(f.archive, output, 0o177)).toBeNull();
+    expect(fs.readFileSync(path.join(output, "alias.txt"), "utf8")).toBe(MARKER);
+    expect(fs.readFileSync(path.join(output, "ALIAS.TXT"), "utf8")).toBe(MARKER);
+    expect(fs.statSync(path.join(output, "alias.txt")).mode & 0o7777).toBe(0o700);
+    expect(fs.statSync(path.join(output, "ALIAS.TXT")).mode & 0o7777).toBe(0o400);
   });
 
   it("pack creates parent directory if it does not exist", async () => {
