@@ -91,6 +91,9 @@ export function wrapSendBody(
   // renders EXACTLY AS RECEIVED — bare member@rig locally (copy-paste reply hint), and a
   // cross-host caller constructs the origin triple at the forwarding boundary before wrapping.
   const senderLabel = sender && sender.trim().length > 0 ? sender : SENDER_FALLBACK;
+  // Only reply classification uses the bare address; From and the destination retain the origin host.
+  const senderParts = senderLabel.split("@");
+  const personAddress = senderParts.length === 3 && senderParts[2] ? senderParts.slice(0, 2).join("@") : senderLabel;
   const header = [`From: ${senderLabel}`, renderToLine(recipient, meta?.scope)];
   if (meta?.stampISO) {
     // GHOST-STAGE (g): the sender's occupant generation rides the Sent: line as a short suffix
@@ -103,7 +106,7 @@ export function wrapSendBody(
   }
   const reply = senderLabel.endsWith("@external")
     ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
-    : isHumanSeatSessionRef(senderLabel)
+    : isHumanSeatSessionRef(personAddress)
       ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`
       : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
