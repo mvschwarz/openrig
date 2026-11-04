@@ -25,7 +25,8 @@ that restores nothing is not itself evidence of accidental loss.
 
 ## Choose the interface the seat actually has
 
-Pi 1.4.0 includes an opt-in selector at `examples/extensions/tools.ts`. Its
+Pi 1.4.0 includes an opt-in selector at
+`packages/coding-agent/examples/extensions/tools.ts` in the Pi repository. Its
 `/tools` command remembers selection per branch and needs Pi's own TUI. Use it
 where that extension and native TUI are available. **Do not send `/tools` to an
 agent OpenRig drives over RPC**: that interface cannot operate the selector.
