@@ -567,8 +567,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // window: 3s per slice 15 README. Per-seat silenceWindowSeconds from
   // AgentSpec.profile.activity is currently inert (the poller uses the
   // global default; per-seat windows are not wired to the live poll).
+  const seatStructuralActivityService = new SeatStructuralActivityService(tmuxAdapter);
   const seatActivityService = new SeatActivityService({
     tmux: tmuxAdapter,
+    structuralActivity: seatStructuralActivityService,
     defaultWindowSeconds: 3,
     permissionPromptReader: async (sessionName, runtime) => {
       if (runtime === "claude-code") {
@@ -602,7 +604,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // 5b82324b — the STRUCTURAL activity cache (sibling of SeatActivityService). Captures pane TEXT once
   // per running seat per tick + classifies motion STRUCTURALLY, so the `rig ps` ACTIVITY column reflects
   // real liveness for hook-less / stale-hook / turn-boundary seats WITHOUT a per-request capture storm.
-  const seatStructuralActivityService = new SeatStructuralActivityService(tmuxAdapter);
   // A confirmed prompt clearing recovers its refused queue wakes immediately, using the same
   // hook/pane resolution as status. No new captures, timer or delivery admission path.
   const retryPromptWakes = (sessionName: string) => {

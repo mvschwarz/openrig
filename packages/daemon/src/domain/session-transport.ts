@@ -4,7 +4,7 @@ import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
-import { CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
+import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { randomUUID } from "node:crypto";
 import { COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
@@ -1284,19 +1284,20 @@ function promptAnswerStaged(pane: string | null, answer: string, runtime: string
 // Codex 0.160 input box: the last prompt line plus indented continuation rows, one blank row, then a footer
 // of at most two rows: the `<model> · <~ or /path>` status line, optionally followed by one known hint row.
 const CODEX_STATUS_LINE = /^ {2}[^\s·][^·]* · [~/]/;
+const CODEX_NATIVE_STATUS_LINE = /^ {2}[^\s·][^·]* · [A-Za-z]:[\\/]/;
 const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$/;
 // Codex shows a long paste as this label until it is submitted. Matched on the normalized body.
 const CODEX_COLLAPSED_PASTE = /^\[PastedContent\d+chars\]$/;
 
 /** The supported status/path + optional hint footer ends at the visible bottom.
  * Share only its boundary: capture's placeholder heuristic is not close authority. */
-function codexFooterSeparator(lines: string[]): number {
+function codexFooterSeparator(lines: string[], allowNativePath = false): number {
   let last = lines.length - 1;
   while (last >= 0 && !lines[last]!.trim()) last--;
   let footerStart = last;
   while (footerStart > 0 && lines[footerStart - 1]!.trim()) footerStart--;
   const footer = lines.slice(footerStart, last + 1);
-  if (last < 0 || footer.length > 2 || !CODEX_STATUS_LINE.test(footer[0]!)
+  if (last < 0 || footer.length > 2 || !(CODEX_STATUS_LINE.test(footer[0]!) || (allowNativePath && CODEX_NATIVE_STATUS_LINE.test(footer[0]!)))
     || !footer.slice(1).every((row) => CODEX_HINT_ROW.test(row))) return -1;
   const separator = footerStart - 1;
   return separator >= 1 && !lines[separator]!.trim() ? separator : -1;
@@ -1305,9 +1306,9 @@ function codexFooterSeparator(lines: string[]): number {
 /** The current Codex input box: its normalized text ("" when empty), its rows as drawn (the prompt glyph removed)
  *  and where its prompt row is, or null when the layout is not the recognized one (another footer, a selector, no
  *  blank separator, an older TUI). */
-function codexInputBox(pane: string): { text: string; rows: string[]; lines: string[]; inputAt: number } | null {
+function codexInputBox(pane: string, allowNativePath = false): { text: string; rows: string[]; lines: string[]; inputAt: number } | null {
   const lines = pane.split("\n");
-  const separator = codexFooterSeparator(lines);
+  const separator = codexFooterSeparator(lines, allowNativePath);
   if (separator < 0) return null;
   const promptClass = composerPromptClassForRuntime("codex");
   const inputAt = findComposerInputLineIndex(lines.slice(0, separator), promptClass);
@@ -1430,6 +1431,36 @@ function codexCurrentSelectionLines(pane: string): string[] | null {
   while (status >= 0 && !box.lines[status]!.trim()) status--;
   if (status < 0 || !CODEX_TURN_STATUS_PATTERN.test(box.lines[status]!)) return null;
   return trimPaneLines(box.lines.slice(status).join("\n"));
+}
+
+/** A working status in the adjacent normal-composer slot, rather than arbitrary pane history. */
+export function isCodexLiveWorkingFrame(pane: string): boolean {
+  if (namesAnotherClientVersion(pane, "codex")) return false;
+  const box = codexInputBox(pane, true);
+  if (!box || box.text) return false;
+  let status = box.inputAt - 1;
+  while (status >= 0 && !box.lines[status]!.trim()) status--;
+  return status >= 0 && CODEX_LIVE_WORKING_FRAME_PATTERN.test(box.lines[status]!);
+}
+
+/** Read the elapsed counter from a working-looking line above a recognized empty Codex composer.
+ * A single reading may be history; only a later advancing reading is positive activity evidence. */
+export function codexWorkingElapsed(pane: string): number | null {
+  if (namesAnotherClientVersion(pane, "codex")) return null;
+  const box = codexInputBox(pane, true);
+  if (!box || box.text) return null;
+  for (let i = box.inputAt - 1; i >= 0; i--) {
+    const line = box.lines[i]!;
+    if (!CODEX_LIVE_WORKING_FRAME_PATTERN.test(line)) continue;
+    const match = line.match(/\(((?:\d+[hms]\s*)+)•\s*esc to interrupt/);
+    if (!match) return null;
+    let seconds = 0;
+    for (const part of match[1]!.matchAll(/(\d+)([hms])/g)) {
+      seconds += Number(part[1]) * (part[2] === "h" ? 3600 : part[2] === "m" ? 60 : 1);
+    }
+    return seconds;
+  }
+  return null;
 }
 
 /** Whether a Claude Code frame shows a running turn: `esc to interrupt` in the footer under its input box, or a
