@@ -99,6 +99,8 @@ interface NodeEntry {
   blockedWorkCount?: number;
   /** OPR.0.3.4.11 — held reason from node.held event. */
   heldReason?: string | null;
+  /** #2456: the required startup files this occupant's handover started it without. */
+  startedWithoutRequired?: string[];
   agentActivity?: {
     state: "running" | "needs_input" | "idle" | "unknown";
     reason: string;
@@ -238,6 +240,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "needsInputEvidence",
   "contextUsage",
   "heldReason",
+  "startedWithoutRequired",
   "storedSessionStatus",
   "identityVerdict",
 ]);
@@ -705,6 +708,11 @@ export function formatDeclaredModel(model: string | null | undefined): string {
   return m.length > 0 ? m : "not-declared";
 }
 
+/** #2456: the attention reason for an occupant started without a required startup file. */
+function startedWithoutLine(files: string[]): string {
+  return `missing required ${files.map((file) => file.split("/").pop()).join(", ")}`;
+}
+
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
   return nodes.map((n) => {
     const keepDiagnostics = n.needsAttention !== false;
@@ -768,6 +776,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
     }
     // held/attention reason (short) when present.
     if (n.heldReason) compact.heldReason = n.heldReason;
+    if (n.startedWithoutRequired?.length) compact.startedWithoutRequired = n.startedWithoutRequired;
     if (keepDiagnostics && n.latestError) {
       compact.latestError = n.latestError;
     }
@@ -926,7 +935,7 @@ intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachC
 resumeCommand, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
 agentActivity, needsAttention, arbitratedNeedsInput, needsInputEvidence,
-contextUsage, heldReason, storedSessionStatus, identityVerdict.
+contextUsage, heldReason, startedWithoutRequired, storedSessionStatus, identityVerdict.
 
 --host runs on a remote host declared in ~/.openrig/hosts.yaml (no current-rig
 default applied; the remote host's rigs are shown).
@@ -1358,7 +1367,8 @@ async function handleNodes(
     console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON", "ATTN"));
     for (const n of humanList as NodeEntry[]) {
       const reason = missingSessionGuidance(n) ?? (n.needsAttention !== false || hasCurrentUsageLimit(n)
-        ? (n.latestError ? truncate(n.latestError, 40) : n.agentActivity?.reason ?? "—")
+        ? (n.latestError ? truncate(n.latestError, 40) : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 40)
+          : n.agentActivity?.reason ?? "—")
         : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—");
       console.log(padCompactNodeRow(
         n.rigName,
@@ -1395,6 +1405,7 @@ async function handleNodes(
         formatContextUsage(n.contextUsage),
         n.restoreOutcome,
         missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}`
+          : n.startedWithoutRequired?.length ? truncate(startedWithoutLine(n.startedWithoutRequired), 30)
           : livenessUnconfirmed(n) ? "liveness unconfirmed" : "—"),
       ));
     }

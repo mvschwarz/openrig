@@ -102,6 +102,9 @@ export interface SeatHandoverMutationResult {
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: CodexPermissionContinuity };
   /** OPR.0.7.0.9: a seat launch addition the successor launched without (missing or refused), named. */
   launchAdditionNotes?: string[];
+  /** #2456: the required startup files the successor started without, where a start would have failed. The seat reads as
+   *  needing attention while this successor is its occupant. */
+  startedWithoutRequired?: string[];
   /** What the successor was told on taking the seat: its held messages, which are never replayed (#2431). */
   warnings?: string[];
 }
@@ -541,11 +544,11 @@ export class SeatHandoverService {
     // or any seat rebuilt into a working directory that doesn't hold them. A block OpenRig wrote whose source changed is
     // refreshed; one left as it is (edited, or possibly stale) is named here and in the successor's packet.
     const guidancePutBack = this.putBackGuidance(node.id, node.cwd, statusResult.status.rig_id);
-    const guidanceNote = keptGuidanceSeatLine(guidancePutBack);
+    const guidanceNote = keptGuidanceSeatLine(guidancePutBack.notes);
     const launchAdditionNotes = [
       ...seatAdditions.missing.map((file) => `seat_launch_addition_missing: ${file} is not in this seat's storage; the successor launched without it`),
       ...seatAdditions.refused.map((reason) => `seat_launch_addition_refused: ${reason}; the successor launched without it`),
-      ...guidancePutBack.map((note) => `guidance_put_back: ${note}`),
+      ...guidancePutBack.notes.map((note) => `guidance_put_back: ${note}`),
     ];
     const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, undefined, this.pluginsDir);
     const launch = await this.successorLauncher.createSuccessor({
@@ -724,17 +727,19 @@ export class SeatHandoverService {
       appliedLaunch: launch.appliedLaunch ?? null,
       sourceOutcome,
       launchAdditionNotes,
+      startedWithoutRequired: guidancePutBack.startedWithoutRequired,
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
     });
   }
 
-  /** #875: the seat's missing guidance blocks put back from its saved startup context, as an exact resume does. Returns notes. */
-  private putBackGuidance(nodeId: string, cwd: string | null | undefined, rigId: string): string[] {
+  /** #875: the seat's missing guidance blocks put back from its saved startup context, as an exact resume does. Returns
+   *  notes, and the required files the successor starts without (#2456). */
+  private putBackGuidance(nodeId: string, cwd: string | null | undefined, rigId: string): ReturnType<typeof putBackSeatGuidance> {
     let seatSkillsLineYes = false;
     try { seatSkillsLineYes = readFootprintAnswer(new SettingsStore()).state === "yes"; } catch { /* no recorded yes */ }
     let startupCtx;
     try { startupCtx = readNodeStartupSnapshot(this.db, nodeId); }
-    catch (err) { return [`could not read the saved startup context: ${(err as Error).message}`]; }
+    catch (err) { return { notes: [`could not read the saved startup context: ${(err as Error).message}`], startedWithoutRequired: [] }; }
     return putBackSeatGuidance({
       startupCtx, cwd, claudeManagedBlockFile: this.rigRepo.getRigClaudeManagedBlockFile(rigId), seatSkillsLineYes, linkInfo: lstatLinkInfo,
       records: managedBlockRecords(this.db),
@@ -771,6 +776,7 @@ export class SeatHandoverService {
     /** OPR.0.5.5.5 — per-source execution outcome, threaded onto the result. */
     sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
     launchAdditionNotes?: string[];
+    startedWithoutRequired?: string[];
     cleanup: (() => Promise<void>) | null;
   }): Promise<SeatHandoverResult> {
     const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
@@ -877,6 +883,7 @@ export class SeatHandoverService {
       appliedLaunch: input.appliedLaunch,
       sourceOutcome: input.sourceOutcome,
       launchAdditionNotes: input.launchAdditionNotes,
+      startedWithoutRequired: input.startedWithoutRequired,
     });
     if (!committed.ok) return fail(committed);
     this.tmuxAdapter.deliveryGuard?.rebindLifecycle(input.node.id);
@@ -1202,6 +1209,7 @@ export class SeatHandoverService {
     appliedLaunch: AppliedLaunchObservation | null;
       sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
       launchAdditionNotes?: string[];
+      startedWithoutRequired?: string[];
   }): SeatHandoverResult {
     const handoverAt = this.now().toISOString();
     const tx = this.db.transaction(() => {
@@ -1312,6 +1320,8 @@ export class SeatHandoverService {
         ...(input.restorePacket ? { restorePacket: input.restorePacket } : {}),
         ...(input.sourceOutcome ? { sourceOutcome: input.sourceOutcome } : {}),
         ...(input.launchAdditionNotes?.length ? { launchAdditionNotes: input.launchAdditionNotes } : {}),
+        // #2456: the seat list reads this while the successor's session is the seat's current one.
+        ...(input.startedWithoutRequired?.length ? { startedWithoutRequired: input.startedWithoutRequired, successorSessionId: newSession.id } : {}),
       });
       return { newSessionId: newSession.id, previousSessionIdsSuperseded, event, provenanceRecordWritten };
     });
@@ -1390,6 +1400,7 @@ export class SeatHandoverService {
         eventSeq: committed.event.seq,
         ...(input.sourceOutcome ? { sourceOutcome: input.sourceOutcome } : {}),
         ...(input.launchAdditionNotes?.length ? { launchAdditionNotes: input.launchAdditionNotes } : {}),
+        ...(input.startedWithoutRequired?.length ? { startedWithoutRequired: input.startedWithoutRequired } : {}),
         ...(input.restorePacket ? { restorePacket: input.restorePacket } : {}),
         sideEffects: {
           departingSessionKilled: false,

@@ -167,6 +167,8 @@ interface SeatHandoverMutationResult {
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string } };
   /** The restore packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
   restorePacket?: { status: "unconfirmed"; reason: string };
+  /** #2456: the required startup files the successor started without, where a start would have failed. */
+  startedWithoutRequired?: string[];
   sideEffects: {
     departingSessionKilled: false;
     /** Absent from an older daemon, whose receipt reported both side effects as a fixed false. */
@@ -325,7 +327,11 @@ function printHumanHandoverPlan(plan: SeatHandoverPlan): void {
 }
 
 function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
-  console.log(`Seat handover complete: ${result.seat.ref}`);
+  // #2456: a successor that started without a required startup file isn't a plain success; a start would have failed.
+  const withoutRequired = result.startedWithoutRequired ?? [];
+  console.log(`Seat handover complete${withoutRequired.length > 0 ? ", degraded" : ""}: ${result.seat.ref}`);
+  for (const file of withoutRequired) console.log(`The successor started without required file ${file}.`);
+  if (withoutRequired.length > 0) console.log("rig ps --nodes shows the seat as needing attention until it's next launched.");
   console.log(`Rig: ${result.seat.rigName}`);
   console.log(`Logical ID: ${result.seat.logicalId}`);
   console.log(`Source: ${result.source.mode}${result.source.ref ? `:${result.source.ref}` : ""}`);

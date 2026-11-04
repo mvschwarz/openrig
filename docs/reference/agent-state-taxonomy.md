@@ -59,6 +59,17 @@ the existing live-hook fallback in effect; lifecycle, startup, held and error si
 can independently raise attention. A false attention flag means no known trigger, not
 proof that an unobserved input box is clear.
 
+A handover whose successor started without a required file the guidance file should
+hold also raises attention. That's a projected guidance file, or a guidance startup file
+marked `required`. The seat serves `startedWithoutRequired` with each file's path, the
+table's reason column names each file, and the handover's own output says it's degraded.
+The mark belongs to that successor's session, so the seat's next launch or handover
+clears it. Time alone never does. Repairing the file in place doesn't clear it either,
+because no route delivers guidance into a running conversation.
+
+A required `send_text` startup file, such as an agent's role, isn't delivered to a
+handover's successor and isn't checked.
+
 The compact human table's ATTN column renders `yes`, `no`, or `?` when the flag is
 unavailable. Compact JSON retains `needsAttention`; use `--full` or
 `--fields needsAttention,arbitratedNeedsInput,needsInputEvidence` with `--json` for the
