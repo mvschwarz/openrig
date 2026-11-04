@@ -160,7 +160,7 @@ export class SlackAskSettlement {
       const messageTs = field(note, "message_ts");
       const stamp = transitions.filter((t) => t.transitionId < receipt.transitionId)
         .map((t) => parsePostedStamp(t.transitionNote ?? ""))
-        .filter((s) => s?.messageTs === messageTs && s.origin === "posted").at(-1);
+        .filter((s) => s !== null && s.messageTs === messageTs && s.origin === "posted").at(-1);
       if (!stamp) continue; // No authoritative channel/timestamp: never guess a replacement post.
       const edited = `${EDITED} notification_key=${key} channel=${stamp.channel} message_ts=${messageTs}`;
       if (transitions.some((t) => t.transitionNote === edited)) continue;
