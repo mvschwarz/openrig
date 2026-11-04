@@ -1,4 +1,5 @@
 import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
+import { blankShellArgv } from "../src/domain/terminal/login-shell.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 // OPR.0.4.6.02 C2 — the terminal-provider ride core commit.
 //
@@ -229,7 +230,7 @@ describe("view-composer partition vectors", () => {
       ["sh", "-c", tileAttachArgv("tmux", [], "operator@rig", false).map(shellQuote).join(" ")],
       ["sh", "-c", tileAttachArgv("tmux", [], "unknown@rig", false).map(shellQuote).join(" ")],
     ]);
-    expect(panes.at(-1)?.command).toEqual(["sh"]);
+    expect(panes.at(-1)?.command).toEqual(blankShellArgv());
   });
 });
 
@@ -388,7 +389,7 @@ describe("herdr layout plan — fresh-tab-on-relaunch (BR-5) + equal auto-grid r
     // Blanks pad the rectangle tail and are inert (no composed attach command).
     for (const leaf of leaves.slice(n)) {
       expect(leaf.label).toBe("");
-      expect(leaf.command).toEqual(["sh"]);
+      expect(leaf.command).toEqual(blankShellArgv());
     }
 
     // Equal-cells geometry: the root combines `rows` down-strips at ratio

@@ -17,7 +17,8 @@ import { SeatHandoverPlanner, parseHandoverSource, SEAT_HANDOVER_SOURCE_CAPABILI
 import { discoverResumeToken } from "./agent-images/resume-token-discovery.js";
 import { resolveRebuildArtifacts } from "./session-source-rebuild-resolver.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { lstatLinkInfo, putBackSeatGuidance, readNodeStartupSnapshot } from "./restore-guidance.js";
+import { keptGuidanceSeatLine, lstatLinkInfo, putBackSeatGuidance, readNodeStartupSnapshot } from "./restore-guidance.js";
+import { managedBlockRecords } from "./managed-block-records.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
@@ -538,14 +539,16 @@ export class SeatHandoverService {
     // copy is named on the result.
     const seatAdditions = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.db, node.id) : { missing: [] as string[], refused: [] as string[] };
     const additionPluginDirs = seatAdditions.additions?.pluginDirs ?? [];
-    const guidance = this.putBackGuidance(node.id, node.cwd, statusResult.status.rig_id);
+    // #875, #2456: a successor's launch carries no guidance of its own, whatever the runtime, so the seat's missing blocks
+    // go back first, as an exact resume puts them back: a Codex seat whose launch sent them as developer instructions,
+    // or any seat rebuilt into a working directory that doesn't hold them. A block OpenRig wrote whose source changed is
+    // refreshed; one left as it is (edited, or possibly stale) is named here and in the successor's packet.
+    const guidancePutBack = this.putBackGuidance(node.id, node.cwd, statusResult.status.rig_id);
+    const guidanceNote = keptGuidanceSeatLine(guidancePutBack.notes);
     const launchAdditionNotes = [
       ...seatAdditions.missing.map((file) => `seat_launch_addition_missing: ${file} is not in this seat's storage; the successor launched without it`),
       ...seatAdditions.refused.map((reason) => `seat_launch_addition_refused: ${reason}; the successor launched without it`),
-      // #875, #2456: a successor's launch carries no guidance of its own, whatever the runtime, so the seat's missing blocks
-      // go back first, as an exact resume puts them back: a Codex seat whose launch sent them as developer instructions,
-      // or any seat rebuilt into a working directory that doesn't hold them.
-      ...guidance.notes.map((note) => `guidance_put_back: ${note}`),
+      ...guidancePutBack.notes.map((note) => `guidance_put_back: ${note}`),
     ];
     const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, undefined, this.pluginsDir);
     const launch = await this.successorLauncher.createSuccessor({
@@ -605,6 +608,7 @@ export class SeatHandoverService {
         recordPath: resolved?.recordPath,
         recapUnavailableReason: resolved ? undefined : (predecessorRecapResolution as { unavailableReason: string }).unavailableReason,
         ...(authoredRecapInfo ?? {}),
+        ...(guidanceNote ? { guidanceNote } : {}),
       });
       if (!delivered.ok) {
         // Partial: the successor is live in the preserved pane but the context packet never landed —
@@ -686,6 +690,7 @@ export class SeatHandoverService {
         primedArtifacts,
         gaps,
         emptyChainReason,
+        ...(guidanceNote ? { guidanceNote } : {}),
       });
       if (!delivered.ok) {
         // Same partial-state contract as the fresh packet: unwind the candidate,
@@ -722,7 +727,7 @@ export class SeatHandoverService {
       appliedLaunch: launch.appliedLaunch ?? null,
       sourceOutcome,
       launchAdditionNotes,
-      startedWithoutRequired: guidance.startedWithoutRequired,
+      startedWithoutRequired: guidancePutBack.startedWithoutRequired,
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
     });
   }
@@ -737,6 +742,7 @@ export class SeatHandoverService {
     catch (err) { return { notes: [`could not read the saved startup context: ${(err as Error).message}`], startedWithoutRequired: [] }; }
     return putBackSeatGuidance({
       startupCtx, cwd, claudeManagedBlockFile: this.rigRepo.getRigClaudeManagedBlockFile(rigId), seatSkillsLineYes, linkInfo: lstatLinkInfo,
+      records: managedBlockRecords(this.db),
       fs: { exists: existsSync, readFile: (file) => readFileSync(file, "utf-8"), writeFile: (file, content) => writeFileSync(file, content, "utf-8"),
         mkdirp: (dir) => mkdirSync(dir, { recursive: true }) },
     });
@@ -990,6 +996,8 @@ export class SeatHandoverService {
       primedArtifacts: Array<{ address: string; label: string }>;
       gaps: string[];
       emptyChainReason?: string;
+      /** #2456: the line naming managed guidance blocks left as they are. */
+      guidanceNote?: string;
     },
   ): Promise<{ ok: true } | { ok: false; message: string }> {
     const lines = [
@@ -1007,6 +1015,7 @@ export class SeatHandoverService {
     if (info.emptyChainReason) {
       lines.push("", `The durable chain is EMPTY: ${info.emptyChainReason}. You start from seat identity alone — say so in your first status report.`);
     }
+    if (info.guidanceNote) lines.push("", info.guidanceNote);
     const sent = await this.tmuxAdapter.sendText(successorSession, lines.join("\n"));
     if (!sent.ok) {
       return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
@@ -1038,6 +1047,7 @@ export class SeatHandoverService {
       recapUnavailableReason?: string;
       authoredRecap?: { address: string; chainLength: number };
       authoredRecapAbsentReason?: string;
+      guidanceNote?: string;
     },
   ): Promise<RestorePacketDelivery> {
     const packet = buildRestorePacket({ ...info, handoverAt: this.now().toISOString() });
@@ -1458,6 +1468,8 @@ export function buildRestorePacket(info: {
   authoredRecap?: { address: string; chainLength: number };
   /** Labeled absence for the authored leg (B16 doctrine — never a silent omission). */
   authoredRecapAbsentReason?: string;
+  /** #2456: the line naming managed guidance blocks the handover left as they are (edited, or possibly stale). */
+  guidanceNote?: string;
 }): string {
   const captured = info.capturedContext.trim();
   const lines = [
@@ -1506,5 +1518,6 @@ export function buildRestorePacket(info: {
       `--- Authored seat recap: ${info.authoredRecapAbsentReason} ---`,
     );
   }
+  if (info.guidanceNote) lines.push("", info.guidanceNote);
   return lines.join("\n");
 }

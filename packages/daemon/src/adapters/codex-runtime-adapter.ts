@@ -37,7 +37,8 @@ import { assessNativeResumeProbe, buildCodexResumeCore, hasCodexUpdateHeader, ty
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE, codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 import { resolveCodexGitAddDirs, type CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
-import { isPerSeatRoleGuidance, managedBlockText, mergeManagedBlock, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
+import { isPerSeatRoleGuidance, managedBlockText, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
+import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
 import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexSeatFolder, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
@@ -199,6 +200,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private codexSystemConfigDir: string;
   /** #875: the managed guidance blocks a fresh launch's startup queued for its developer instructions, per tmux session. */
   private launchInstructions = new Map<string, Map<string, string>>();
+  /** #2456: OpenRig's record of what it last wrote in each managed guidance block (startup wires the daemon's). */
+  private managedBlockRecords: ManagedBlockRecords | undefined;
 
   /** Build the Codex launch adapter with injectable filesystem, process, and CLI seams for isolated checks. */
   constructor(deps: {
@@ -242,7 +245,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     runCodexCli?: CodexCliRunner;
     /** Where Codex's system and legacy managed config files live (default /etc/codex). */
     codexSystemConfigDir?: string;
+    /** #2456: with it, every guidance block this adapter writes is checked against the record and recorded; absent, the
+     *  plain merge, as before. */
+    managedBlockRecords?: ManagedBlockRecords;
   }) {
+    this.managedBlockRecords = deps.managedBlockRecords;
     this.resolveCorePluginDir = deps.resolveCorePluginDir;
     this.resolveCorePluginSelected = deps.resolveCorePluginSelected;
     this.runCodexCli = deps.runCodexCli ?? defaultCodexCli;
@@ -1542,6 +1549,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     if (blockId === "openrig-start.md") queued.delete("using-openrig.md");
     queued.set(blockId, content);
+    // #2456: a block an earlier handover or resume left in AGENTS.md is refreshed by the same rule (the launch text asks
+    // Codex to follow AGENTS.md where the two differ); nothing new is written there.
+    writeManagedGuidanceBlock(this.fs, targetPath, blockId, content, { records: this.managedBlockRecords, onlyIfPresent: true, sourcePath, warnings });
     return true;
   }
 
@@ -1614,11 +1624,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (warning) warnings.push(warning);
       return false;
     }
-    mergeManagedBlock(this.fs, targetPath, blockId, content, {
-      warnings,
+    // #2456: a block a person edited since OpenRig wrote it is kept and named, not counted as merged.
+    return writeManagedGuidanceBlock(this.fs, targetPath, blockId, content, {
+      records: this.managedBlockRecords, sourcePath, warnings,
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
     });
-    return true;
   }
 
   private detectDeliveryHint(path: string, content: string, orientation?: string): "guidance_merge" | "skill_install" | "send_text" {

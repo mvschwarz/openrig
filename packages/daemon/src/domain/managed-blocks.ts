@@ -107,11 +107,40 @@ function managedBlockPattern(blockId: string): RegExp {
   return new RegExp(`${escapeRegex(MANAGED_BLOCK_START(blockId))}([\\s\\S]*?)${escapeRegex(MANAGED_BLOCK_END(blockId))}`, "g");
 }
 
+/** A block body without the writer's own framing: CRLF line endings become LF, and newlines at either end go. */
+export function frameManagedBlockBody(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/^\n+|\n+$/g, "");
+}
+
 /** Whether a block's body still holds `written`: the same bytes, ignoring only the writer's own framing (newlines at either
  *  end, and CRLF line endings). A person's spaces count, so an indented line is an edit. */
 export function managedBlockBodyMatches(body: string, written: string): boolean {
-  const frame = (text: string) => text.replace(/\r\n/g, "\n").replace(/^\n+|\n+$/g, "");
-  return frame(body) === frame(written);
+  return frameManagedBlockBody(body) === frameManagedBlockBody(written);
+}
+
+/** The bodies of every `blockId` block in `content`, in the current or the legacy marker form. */
+export function managedBlockBodies(content: string, blockId: string): string[] {
+  const legacy = new RegExp(`${escapeRegex(LEGACY_BLOCK_START(blockId))}([\\s\\S]*?)${escapeRegex(LEGACY_BLOCK_END(blockId))}`, "g");
+  return [...content.matchAll(managedBlockPattern(blockId)), ...content.matchAll(legacy)].map((m) => m[1]!);
+}
+
+/** #2456: how a block already in a guidance file stands against its current source and OpenRig's record of what it last
+ *  wrote there (a hash of the framed body, `managedBlockBodyHash`):
+ *  - `absent`: the file holds no such block;
+ *  - `current`: it holds the source's text;
+ *  - `stale`: it holds what OpenRig last wrote, and the source has changed since, so it's OpenRig's to refresh;
+ *  - `edited`: it holds something else, which someone wrote by hand;
+ *  - `unrecorded`: it differs from the source and OpenRig has no record of writing it, so which of the two is unknown.
+ *  A block written more than once counts as edited when any copy is. */
+export type ManagedBlockStanding = "absent" | "current" | "stale" | "edited" | "unrecorded";
+
+export function managedBlockStanding(content: string, blockId: string, source: string, recordedHash: string | undefined,
+  hash: (body: string) => string): ManagedBlockStanding {
+  const bodies = managedBlockBodies(content, blockId);
+  if (bodies.length === 0) return "absent";
+  if (bodies.every((body) => managedBlockBodyMatches(body, source))) return "current";
+  if (recordedHash === undefined) return "unrecorded";
+  return bodies.every((body) => hash(body) === recordedHash) ? "stale" : "edited";
 }
 
 /** Whether `content` holds a `blockId` block whose body is anything but `written`: someone edited it. */

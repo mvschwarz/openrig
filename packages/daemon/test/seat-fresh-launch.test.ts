@@ -378,6 +378,11 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(result).toMatchObject({ ok: true, launchAdditions: { appendSystemPromptFile: prepared.additions.appendSystemPromptFile, pluginDirs: [], missing: [], refused: [] } });
       const none = await service.planFresh({ seatRef: "dev-peer@fresh-rig", fresh: true });
       expect(none).toMatchObject({ ok: true, launchAdditions: null });
+      // #2044: the seat's plugin channels are listed too, as the launch will pass them.
+      const channels = prepareSeatLaunchAdditions(paths, { appendSystemPromptFile: path.join(src, "prompt.md"), pluginChannels: ["plugin:example-channel@example"] });
+      if (!channels.ok) throw new Error(channels.message);
+      expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true })).toMatchObject({ ok: true,
+        launchAdditions: { appendSystemPromptFile: channels.additions.appendSystemPromptFile, pluginChannels: ["plugin:example-channel@example"], missing: [], refused: [] } });
     } finally {
       fs.rmSync(src, { recursive: true, force: true });
     }

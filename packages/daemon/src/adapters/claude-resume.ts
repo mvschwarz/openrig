@@ -14,7 +14,7 @@ import { verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProces
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
-import { seatLaunchAdditionArgs, type SeatLaunchAdditions } from "../domain/seat-launch-additions.js";
+import { seatLaunchAdditionArgs, seatLaunchAdditionShellArgs, type SeatLaunchAdditions } from "../domain/seat-launch-additions.js";
 
 export type ResumeResult =
   // `launchedProcess` (Claude): the process this resume's own identity check observed (#1077).
@@ -97,7 +97,7 @@ export class ClaudeResumeAdapter {
     const mcpArgs = claudeMcpArgs(claudeMcp);
     const mcpArg = mcpArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     const additionArgs = seatLaunchAdditionArgs(launchAdditions);
-    const additionArg = additionArgs.map((arg, index) => ` ${index % 2 === 0 ? arg : shellQuote(arg)}`).join(""); // flag, value pairs
+    const additionArg = seatLaunchAdditionShellArgs(launchAdditions, shellQuote); // each flag bare, each value quoted
     let managed: Awaited<ReturnType<ClaudeManagedLaunch["prepare"]>> | undefined;
     if (selectedPermissionMode !== undefined) {
       try {
