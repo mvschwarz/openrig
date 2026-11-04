@@ -10,7 +10,7 @@ Pass `expected` unchanged in the body of the existing `POST /api/seat/stop/:seat
 
 Checked stop requires the delivery guard. It refuses a changed node, latest session, binding or occupant before a terminal effect with HTTP 409 `selection_changed`. A kill failure or a failure to save stop state after a kill reports `stop_uncertain`; inspect the seat before retrying. Success retains the usual `seat`, `sessionName` and `sessionId` fields.
 
-A `selection_changed` or `stop_uncertain` response from a checked stop says how far the stop got in `stopPhase`. The stop detaches the seat's clients, checks the selection again, then kills the session:
+A `selection_changed` or `stop_uncertain` response from a checked stop says how far the stop got in `stopPhase`. A refusal before the stop starts carries neither `stopPhase` nor `partialEffect`, and nothing was sent. The stop detaches the seat's clients, checks the selection again, then kills the session:
 
 | `stopPhase` | What was sent to the seat |
 | --- | --- |
