@@ -761,7 +761,7 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
   cmd
     .command("pair")
     .description("Pair with a remote host from one pasted address — one approval on the target, done (FR-6)")
-    .argument("<url>", "The target daemon's address (http[s]://host:port, or host:port)")
+    .argument("<url>", "The target daemon's address (http[s]://host:port, or host:port); that daemon must run with OPENRIG_AUTH_BEARER_TOKEN set")
     .option("--id <id>", "Registry id for the new host (default: derived from the hostname)")
     .option("--timeout <seconds>", "How long to wait for the target-side approval", "600")
     .option("--human <address>", "Registered @external approval recipient on the target (required when several exist)")

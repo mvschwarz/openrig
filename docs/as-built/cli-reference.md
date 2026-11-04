@@ -356,6 +356,13 @@ the sections that were not read are `null`.
 | `rig host list` | `ls` | `--json` |
 | `rig host doctor <id>` | — | `--posture <profile>`<br>`--public-addr <ip>`<br>`--json` |
 
+`rig host pair` needs the target daemon to run with `OPENRIG_AUTH_BEARER_TOKEN` set,
+even when it is bound to a tailnet address and so starts without one: pairing hands
+over that token. Without it, the target's `POST /api/hosts/pair-request` answers 409
+`pair_target_no_bearer`; it answers 409 `pair_human_required` when no single
+registered person can approve (none, or several with no default; name one with
+`--human`) (`packages/daemon/src/routes/hosts.ts:167-186`).
+
 Registration makes a host visible in topology; remote FEED attention remains opt-in.
 The human-readable success output of `host add` and `host pair` now includes the FEED
 next step alongside the existing `host doctor` suggestion. For an HTTP entry named
