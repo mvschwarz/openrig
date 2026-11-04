@@ -285,6 +285,62 @@ describe("Send CLI", () => {
     expect(output).toContain("Note: sent as exact text, without the From/To envelope, because infra-ui@term-rig is a terminal seat.");
   });
 
+  it.each([false, true])("keeps the send unresolved when the post-submit capture fails (json: %s)", async json => {
+    let captures = 0, submits = 0;
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/capture") {
+          captures++;
+          return captures === 1 ? { status: 200, data: { content: "❯ make test" } }
+            : { status: 503, data: { error: "capture unavailable" } };
+        }
+        if (body["submitOnly"]) { submits++; return { status: 200, data: { ok: true } }; }
+        return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "infra-ui@term-rig", "make test", "--verify", ...(json ? ["--json"] : []),
+      ]);
+    });
+    expect(submits).toBe(1);
+    if (json) {
+      const result = JSON.parse(logs.find(line => line.trim().startsWith("{")) ?? "{}");
+      expect(result).toMatchObject({ verified: false, outcome: "submission-unconfirmed", effectCheck: { state: "staged", remedy: "submit-unconfirmed" } });
+    } else {
+      expect(logs.join("\n")).toContain("submission unconfirmed");
+      expect(logs.join("\n")).not.toContain("staged text left the prompt");
+    }
+    expect(exitCode).toBe(1);
+  });
+
+  it("reports an unconfirmed post-submit recheck per recipient in fan-out JSON", async () => {
+    let captures = 0, submits = 0;
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/broadcast") return { status: 200, data: {
+          total: 1, sent: 1, failed: 0, results: [{ sessionName: "infra-ui@term-rig", ok: true, verified: true, outcome: "delivered" }],
+        } };
+        if (path === "/api/transport/capture") {
+          captures++;
+          return captures === 1 ? { status: 200, data: { content: "❯ make test" } }
+            : { status: 503, data: { error: "capture unavailable" } };
+        }
+        if (body["submitOnly"]) { submits++; return { status: 200, data: { ok: true } }; }
+        throw new Error("unexpected request");
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "--to", "infra-ui@term-rig", "make test", "--verify", "--json",
+      ]);
+    });
+    const result = JSON.parse(logs.find(line => line.trim().startsWith("{")) ?? "{}");
+    expect(submits).toBe(1);
+    expect(result).toMatchObject({ sent: 0, failed: 1, results: [{ ok: false, verified: false, outcome: "submission-unconfirmed" }] });
+    expect(exitCode).toBe(1);
+  });
+
   it("--raw sends no exactText", async () => {
     await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "/help", "--raw"]);
