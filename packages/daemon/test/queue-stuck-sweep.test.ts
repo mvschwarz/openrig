@@ -395,6 +395,37 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
+  // The sweep's reason note is its own bookkeeping, not progress on the recovery: a claimed recovery whose parked-owner
+  // wake failed and whose wake ladder is exhausted stays exhausted when its reason changes.
+  it("a reason change on an exhausted claimed recovery doesn't restart its wake ladder", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep();
+    const recoveryId = (await findingsFor(row.qitemId))[0]!.qitemId;
+    repo.claim({ qitemId: recoveryId, destinationSession: "worker@r" });
+    const mod = await sweepMod();
+    repo.transitionLog.append({ qitemId: recoveryId, state: "in-progress", actorSession: "watchdog@system", transitionNote: "parked-owner wake delivery failed: fixture" });
+    repo.recordNudgeAttempt(recoveryId, "failed:tmux session not found");
+    repo.transitionLog.append({ qitemId: recoveryId, state: "in-progress", actorSession: "wake-ladder@system", transitionNote: `${mod.LADDER_EXHAUSTED_PREFIX} fixture` });
+    db.prepare("UPDATE queue_items SET last_nudge_attempt = ? WHERE qitem_id = ?").run(new Date(Date.now() - 10 * 60_000).toISOString(), recoveryId);
+    const ladder = await import("../src/domain/queue-wake-ladder.js");
+    const wakes: string[] = [];
+    const tick = () => ladder.runWakeLadderTick({
+      db, queueRepo: repo, attemptWake: async (q: string) => { wakes.push(q); return "failed:tmux session not found"; },
+      resolveOrchestrator: () => null, retryIntervalSeconds: 300, retryCap: 3, unconfirmedWindowMinutes: 30, swapGraceSeconds: 180, log: () => {},
+    } as never);
+    await tick();
+    expect(wakes).not.toContain(recoveryId);
+
+    makeOverdue(row.qitemId);
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", transitionNote: "resumed work" });
+    await runSweep();
+    expect(repo.transitionLog.listForQitem(recoveryId).some((t) => t.transitionNote?.startsWith("stuck-sweep reason: overdue-claim"))).toBe(true);
+    await tick();
+    expect(wakes).not.toContain(recoveryId);
+  });
+
   // A dead owner with no delegates_to edge: the orchestrator resolves to nobody and the owner's session is gone. The
   // ladder covers handed-off batons only, so a finding addressed to the dead seat would reach nobody.
   function seedMissingSession(session: string): void {
