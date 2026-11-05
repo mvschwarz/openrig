@@ -306,6 +306,75 @@ describe("StartupOrchestrator", () => {
       latestError: expect.stringMatching(/sign in/i) });
   });
 
+  // #6: a fresh Claude with no login of its own draws its persistent "Not logged in · Run /login" footer and refuses the
+  // first request. The footer alone must not block (a gateway may authenticate); the refusal must reach the node view.
+  it.each([
+    // Claude 2.1.312 with an empty home draws the refusal as a result row under the prompt.
+    ["refused as a result row", "  ⎿  Not logged in · Please run /login\n\n✻ Cogitated for 0s · done 8:46 AM\n"],
+    ["refused as a reply", "● Not logged in · Please run /login\n\n"],
+    ["gateway", "● Ready to work.\n\n"],
+    ["quoted", "● The setup guide says to expect:\n  ● Not logged in · Please run /login\n\n"],
+  ] as const)("a fresh Claude whose first reply is %s reaches the node view honestly", async (kind, reply) => {
+    const seed = seedSession();
+    const files: ResolvedStartupFile[] = ["role.md", "a.md"].map((path) => ({
+      path, absolutePath: `/fixture/${path}`, ownerRoot: "/fixture", deliveryHint: "send_text" as const, required: true,
+      appliesOn: ["fresh_start" as const],
+    }));
+    const read = (path: string) => `Contents of ${nodePath.basename(path)}`;
+    const submitted: string[] = [];
+    let composer = "";
+    const footer = "                                                    Not logged in · Run /login";
+    const frame = () => `${submitted.length ? `❯ ${submitted[0]}\n${reply}` : ""}────────────────────\n❯ ${composer}\n`
+      + `────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)\n${footer}\n`;
+    const t = mockTmux({
+      getPaneCommand: vi.fn(async () => "claude"),
+      capturePaneContent: vi.fn(async () => frame()),
+      sendText: vi.fn(async (_session: string, text: string) => { composer = text; return { ok: true as const }; }),
+      sendKeys: vi.fn(async () => { submitted.push(composer); composer = ""; return { ok: true as const }; }),
+    });
+    const real = new ClaudeCodeAdapter({ tmux: t, sleep: async () => {}, fsOps: {
+      readFile: read, writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {}, listFiles: () => [],
+    } });
+    const adapter = mockAdapter({ deliverStartup: real.deliverStartup.bind(real), checkReady: vi.fn(binding => real.checkReady(binding)) });
+    const result = await createOrchestrator({ tmux: t, readFile: read }).startNode(makeInput(seed, {
+      adapter, resolvedStartupFiles: files, startupActions: [makeIdentityAction()],
+    }));
+
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("rigRepo" as never, rigRepo);
+      c.set("tmuxAdapter" as never, t);
+      await next();
+    });
+    app.route("/api/rigs/:rigId/nodes", nodesRoutes);
+    const served = await (await app.request(`/api/rigs/${seed.rigId}/nodes`)).json();
+    if (!kind.startsWith("refused")) {
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(submitted).toHaveLength(2);
+      expect(served[0]).toMatchObject({ startupStatus: "ready", needsAttention: false });
+      return;
+    }
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+    expect(submitted).toHaveLength(1);
+    const inventory = getNodeInventory(db, seed.rigId)[0];
+    expect(inventory).toMatchObject({ startupStatus: "attention_required", lifecycleState: "attention_required" });
+    expect(inventory?.latestError).toMatch(/logs in/);
+    expect(inventory?.latestError).not.toContain("Readiness timeout");
+    expect(served[0]).toMatchObject({ startupStatus: "attention_required", needsAttention: true,
+      latestError: expect.stringMatching(/logs in/) });
+    expect(compactNodeProjection(served)[0]).toMatchObject({ needsAttention: true, latestError: expect.stringMatching(/logs in/) });
+  });
+
+  it("a Claude that never draws its TUI still ends in the generic readiness timeout", async () => {
+    const seed = seedSession();
+    const t = mockTmux({ getPaneCommand: vi.fn(async () => "node"), capturePaneContent: vi.fn(async () => "") });
+    const real = new ClaudeCodeAdapter({ tmux: t, sleep: async () => {} });
+    const adapter = mockAdapter({ checkReady: vi.fn(binding => real.checkReady(binding)) });
+    const result = await createOrchestrator({ tmux: t }).startNode(makeInput(seed, { adapter, readinessTimeoutMs: 1_000 }));
+    expect(result).toMatchObject({ ok: false, startupStatus: "failed" });
+    expect(getNodeInventory(db, seed.rigId)[0]?.latestError).toContain("Readiness timeout");
+  });
+
   // OPR.0.7.0.13 (router, R1.1): a start replaying a saved context delivers the old seat-skills pointer only with the
   // person's recorded yes. The Codex catalog (same logical name, sent as text) and other guidance are unchanged.
   it.each([
