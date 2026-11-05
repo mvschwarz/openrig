@@ -3,12 +3,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { configCommand } from "../src/commands/config.js";
-import { ConfigStore } from "../src/config-store.js";
+import { ConfigStore, ENV_MAP } from "../src/config-store.js";
 
 let dir: string;
 let configPath: string;
-let savedPort: string | undefined;
-let savedTimeout: string | undefined;
+const savedEnv = new Map<string, string | undefined>();
 
 async function run(args: string[]): Promise<string> {
   const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -26,20 +25,24 @@ describe("rig config reset and set with environment overrides (#2528)", () => {
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "config-reset-env-"));
     configPath = path.join(dir, "config.json");
-    savedPort = process.env["OPENRIG_PORT"];
-    savedTimeout = process.env["OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS"];
-    delete process.env["OPENRIG_PORT"];
-    delete process.env["OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS"];
+    for (const mapping of Object.values(ENV_MAP)) {
+      const names = [
+        mapping.primary,
+        ...(mapping.legacy ? [mapping.legacy] : []),
+      ];
+      for (const name of names) {
+        savedEnv.set(name, process.env[name]);
+        delete process.env[name];
+      }
+    }
   });
 
   afterEach(() => {
-    if (savedPort === undefined) delete process.env["OPENRIG_PORT"];
-    else process.env["OPENRIG_PORT"] = savedPort;
-
-    if (savedTimeout === undefined)
-      delete process.env["OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS"];
-    else
-      process.env["OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS"] = savedTimeout;
+    for (const [name, value] of savedEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    savedEnv.clear();
 
     fs.rmSync(dir, { recursive: true, force: true });
     vi.restoreAllMocks();
