@@ -894,7 +894,7 @@ describe("a Pi seat's managed guidance goes to its own agent folder (#875)", () 
     const fs = memFs({ "/spec/SOP.md": "How work flows here." });
     await adapterWith(fs, mockTmux()).deliverStartup([{ path: "SOP.md", absolutePath: "/spec/SOP.md", ownerRoot: "/spec",
       deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start"] }], { tmuxSession: SESSION, cwd: "/work", guidanceFile: null } as never);
-    expect(fs.files["/work/AGENTS.md"]).toContain("How work flows here.");
+    expect(fs.files[nodePath.join("/work", "AGENTS.md")]).toContain("How work flows here.");
     expect(AGENT_FILE in fs.files).toBe(false);
   });
 

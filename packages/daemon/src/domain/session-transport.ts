@@ -1319,7 +1319,7 @@ function hasTuiPathPrefix(value: string): boolean {
   return /^[~/]/.test(value) || /^[A-Za-z]:[\\/]/.test(value)
     || /^\\\\[^\\\s]+\\[^\\\r\n]+(?:\\|$)/.test(value);
 }
-function codexStatusLine(line: string, allowNativePath = false): boolean {
+function codexStatusLine(line: string, allowNativePath = true): boolean {
   const location = /^ {2}[^\s·][^·]* · (.+)/.exec(line)?.[1];
   return location !== undefined && (/^[~/]/.test(location) || (allowNativePath && hasTuiPathPrefix(location)));
 }
@@ -1329,7 +1329,7 @@ const CODEX_COLLAPSED_PASTE = /^\[PastedContent\d+chars\]$/;
 
 /** The supported status/path + optional hint footer ends at the visible bottom.
  * Share only its boundary: capture's placeholder heuristic is not close authority. */
-function codexFooterSeparator(lines: string[], allowNativePath = false): number {
+function codexFooterSeparator(lines: string[], allowNativePath = true): number {
   let last = lines.length - 1;
   while (last >= 0 && !lines[last]!.trim()) last--;
   let footerStart = last;
@@ -1344,7 +1344,7 @@ function codexFooterSeparator(lines: string[], allowNativePath = false): number 
 /** The current Codex input box: its normalized text ("" when empty), its rows as drawn (the prompt glyph removed)
  *  and where its prompt row is, or null when the layout is not the recognized one (another footer, a selector, no
  *  blank separator, an older TUI). */
-function codexInputBox(pane: string, allowNativePath = false): { text: string; rows: string[]; lines: string[]; inputAt: number } | null {
+function codexInputBox(pane: string, allowNativePath = true): { text: string; rows: string[]; lines: string[]; inputAt: number } | null {
   const lines = pane.split("\n");
   const separator = codexFooterSeparator(lines, allowNativePath);
   if (separator < 0) return null;
