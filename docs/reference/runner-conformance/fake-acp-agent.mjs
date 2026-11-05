@@ -17,7 +17,8 @@
 //   turns            one entry per `session/prompt`, in order (the last one repeats):
 //     holdMs         keep the turn open this long; `session/cancel` ends it early as "cancelled"
 //     silent         send no message chunk for this turn, so a held turn is entirely quiet (a long tool or model call)
-//     ignoreCancel   on `session/cancel`, keep the turn open and end it with stopReason (default end_turn) anyway
+//     ignoreCancel   on `session/cancel`, keep the turn open and end it with stopReason (default end_turn) anyway, when
+//                    holdMs runs out or, with endAfterCancelMs, that long after the first cancel if that's sooner
 //     permission     ask `session/request_permission` first, then carry on whatever the answer. As an object:
 //                      options      the options offered (default: allow-once, allow_once; reject-once, reject_once)
 //                      waitMs       stop waiting for the answer after this long, and end the turn
@@ -90,7 +91,12 @@ async function prompt(id, params) {
   if (spec.holdMs) {
     const cancelled = await new Promise((resolve) => {
       const timer = setTimeout(() => { cancelTurn = null; resolve(false); }, spec.holdMs);
-      cancelTurn = () => { if (spec.ignoreCancel) return; clearTimeout(timer); cancelTurn = null; resolve(true); };
+      cancelTurn = () => {
+        if (!spec.ignoreCancel) { clearTimeout(timer); cancelTurn = null; resolve(true); return; }
+        if (spec.endAfterCancelMs === undefined) return;
+        cancelTurn = null;
+        setTimeout(() => { clearTimeout(timer); resolve(false); }, spec.endAfterCancelMs);
+      };
     });
     if (cancelled) stopReason = "cancelled";
   }

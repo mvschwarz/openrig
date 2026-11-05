@@ -79,6 +79,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["abort-in-block", "2", "a line reading /abort inside a block isn't control"],
     ["no-queue", "2", "a block sent mid-turn waits for the next turn"],
     ["cancelled-always", "2", "cancelled is reported only on the agent's own stop reason"],
+    ["ctrl-c-ignored", "2", "Ctrl-C outside a paste sends session/cancel"],
     ["no-token", "3", "every post uses the hook token"],
     ["no-sequence", "3", "every post carries the contract's fields"],
     ["refuse-on-404", "4", "404: the agent gets its allow_once option"],
@@ -149,6 +150,15 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(code).toBe(0);
   }, 90_000);
 
+  // A busy machine also delays the runner. Case 2 must still pass a runner that handles Ctrl-C late: the agent's turn
+  // stays open until the cancel arrives, so only the runner's own delivery is timed.
+  it("passes case 2 for a runner that keeps the contract when it handles Ctrl-C late", async () => {
+    const { code, report } = await check(["--cases", "2"], " --interrupt-delay 4000");
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["2", "pass"]]);
+    expect(code).toBe(0);
+  }, 90_000);
+
   // The optional working beat (section 4): a runner that beats in a quiet turn keeps 3b's promises, and each way of
   // breaking one is caught by the check that names it. Case 3b's three launches take about 90 s, so it gets a longer bound.
   const CASE_3B_MS = 170_000;
@@ -199,7 +209,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
 
   // --wait-ms is for slow machines: a larger one must stretch the fake agent's own timings with the check's settling times,
   // so a runner that keeps the contract still passes. With fixed fake timings, a factor of 3 outgrows case 1's handshake
-  // delay; case 2's holds would first be outgrown at about a factor of 5.
+  // delay; case 2's holds would first be outgrown at about a factor of 12.
   it("still passes a runner that keeps the contract when --wait-ms triples every bound", async () => {
     const { code, report } = await check(["--cases", "1,2", "--wait-ms", "24000"]);
     expect(failing(report)).toEqual([]);
