@@ -11,6 +11,23 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { claudePostureFlag } from "../src/adapters/yolo-mode.js";
 import { resolveReadinessTimeoutMs } from "../src/domain/readiness-timeout.js";
 import { claudeCommandSessionToken } from "../src/domain/native-process-lineage.js";
+import { parseLiteralLaunchWords, renderWindowsLaunch } from "../src/adapters/windows-launch.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
+
+function launchArgv(command: string): string[] {
+  if (process.platform !== "win32") return execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${command}`], { encoding: "utf8" }).split("\n").slice(0, -1);
+  const words = parseLiteralLaunchWords(command), at = words.indexOf("claude");
+  if (at < 0) throw new Error("The fixture command has no Claude invocation");
+  const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "claude-argv-native-"));
+  try {
+    const entry = nodePath.join(root, "argv.cjs");
+    fs.writeFileSync(entry, "process.stdout.write(JSON.stringify(process.argv.slice(2)));");
+    const launch = "$ProgressPreference='SilentlyContinue';\n" + renderWindowsLaunch([process.execPath, entry, ...words.slice(at + 1)].map(shellQuote).join(" "));
+    return JSON.parse(execFileSync(nodePath.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(launch, "utf16le").toString("base64")],
+      { env: { SystemRoot: process.env.SystemRoot, HOME: root, USERPROFILE: root, TEMP: root, TMP: root }, encoding: "utf8", windowsHide: true, timeout: 10000 }));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+}
 
 const probeEvidence = expect.objectContaining({
   status: expect.any(String), code: expect.any(String),
@@ -34,14 +51,15 @@ function mockTmux(): TmuxAdapter {
 }
 
 function mockFs(files?: Record<string, string>): ClaudeAdapterFsOps {
-  const store: Record<string, string> = { ...files };
+  const key = (value: string) => nodePath.normalize(value).split(nodePath.sep).join("/");
+  const store: Record<string, string> = Object.fromEntries(Object.entries(files ?? {}).map(([file, text]) => [key(file), text]));
   return {
-    readFile: (p: string) => { if (p in store) return store[p]!; throw new Error(`Not found: ${p}`); },
-    writeFile: (p: string, c: string) => { store[p] = c; },
-    exists: (p: string) => p in store,
+    readFile: (p: string) => { if (key(p) in store) return store[key(p)]!; throw new Error(`Not found: ${p}`); },
+    writeFile: (p: string, c: string) => { store[key(p)] = c; },
+    exists: (p: string) => key(p) in store,
     mkdirp: () => {},
     copyFile: () => {},
-    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(dir + "/")).map((k) => k.slice(dir.length + 1)),
+    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(key(dir) + "/")).map((k) => k.slice(key(dir).length + 1)),
     _store: store,
   } as ClaudeAdapterFsOps & { _store: Record<string, string> };
 }
@@ -80,6 +98,13 @@ describe("launchHarness — per-agent --model reaches the claude launch (51-07 A
     const tmux = mockTmux();
     await adapterWith(tmux).launchHarness({ ...makeBinding(), claudeExecutable: "/native tools/claude" }, { name: "seat", resumeToken: "original" });
     expect(lastCmd(tmux)).toContain("exec '/native tools/claude'");
+    expect(lastCmd(tmux)).toContain("--resume 'original'");
+  });
+
+  it("retains the npm script beside its Node interpreter in the classic continuation", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness({ ...makeBinding(), claudeExecutable: "C:/owned/node.exe", claudeScript: "C:/owned tools/cli.js" }, { name: "seat", resumeToken: "original" });
+    expect(lastCmd(tmux)).toContain("exec 'C:/owned/node.exe' 'C:/owned tools/cli.js'");
     expect(lastCmd(tmux)).toContain("--resume 'original'");
   });
 
@@ -219,8 +244,7 @@ describe("launchHarness — the resume token is one shell argument", () => {
     return (calls[calls.length - 1]?.[1] as string) ?? "";
   };
   // Parse the command with a real shell; `claude` is a function that prints its argv, one per line.
-  const argvOf = (cmd: string): string[] =>
-    execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${cmd}`], { encoding: "utf8" }).split("\n").slice(0, -1);
+  const argvOf = launchArgv;
 
   it.each(["tok; echo injected", "$(echo injected)", "two words", "it's"])("keeps %j after --resume as one argument", async (token) => {
     const tmux = mockTmux();
@@ -248,8 +272,7 @@ describe("launchHarness — a seat's launch additions", () => {
     const calls = (tmux.sendText as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     return (calls[calls.length - 1]?.[1] as string) ?? "";
   };
-  const argvOf = (cmd: string): string[] =>
-    execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${cmd}`], { encoding: "utf8" }).split("\n").slice(0, -1);
+  const argvOf = launchArgv;
   const expected = ["--agent", "openrig:reviewer", "--append-system-prompt-file", additions.appendSystemPromptFile];
   const between = (argv: string[], flag: string) => argv.slice(argv.indexOf("--agent"), argv.indexOf(flag));
 
@@ -281,8 +304,7 @@ describe("launchHarness — a seat's launch additions", () => {
 // model `-custom`, a spec effort `-x` or a session name `-dev-impl@demo` still proves the session it launched, as it did
 // before this slice; only `--agent` and `--append-system-prompt-file` use the new value rule.
 describe("launchHarness — existing flags with a dash-led value keep their identity proof", () => {
-  const argvOf = (cmd: string): string[] =>
-    execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${cmd}`], { encoding: "utf8" }).split("\n").slice(0, -1);
+  const argvOf = launchArgv;
   it.each([
     [{ model: "-custom" }, "seat"],
     [{ effort: "-x" }, "seat"],
@@ -1334,7 +1356,7 @@ describe("Claude Code runtime adapter", () => {
     expect(store["/project/CLAUDE.md"]).toBeUndefined();
     expect(own.skipped).toContain("role");
     // A spec saved that way may have had no other route for the role, so the result says what happened.
-    expect(own.warnings).toEqual([expect.stringContaining("role: not merged into /project/CLAUDE.md")]);
+    expect(own.warnings).toEqual([expect.stringContaining(`role: not merged into ${nodePath.join("/project", "CLAUDE.md")}`)]);
     // Guidance that is genuinely shared and happens to be named role still merges.
     const shared = await project("/rig/guidance/team-role.md", "/shared");
     expect(store["/shared/CLAUDE.md"]).toContain("Our team's role");

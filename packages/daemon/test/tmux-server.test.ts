@@ -46,13 +46,18 @@ describe("the daemon's tmux server", () => {
     expect(tmuxServerArgs({ TMUX: "/srv/sockets/team,shared,9,1" }, 501)).toEqual(["-S", "/srv/sockets/team,shared"]);
     expect(tmuxServerArgs({ TMUX: "/tmp/tmux-501/person,123,0" }, 502)).toEqual(["-S", "/tmp/tmux-501/person"]);
   });
+  it("uses platform environment spelling rules in standalone attachment metadata", () => {
+    const socket = join(base, "personal");
+    expect(tmuxServerArgs({ Tmux: `${socket},9,1`, Tmux_Tmpdir: base }, 501))
+      .toEqual(process.platform === "win32" ? ["-S", socket] : []);
+  });
 
-  it("keeps the attach command unchanged on the default server, and adds the server otherwise", () => {
-    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux attach -t dev-build@starter");
+  it("uses an exact attach target and adds the selected server when needed", () => {
+    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux attach -t =dev-build@starter");
     setDaemonTmuxServer(["-L", "person"]);
-    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux -L person attach -t dev-build@starter");
+    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux -L person attach -t =dev-build@starter");
     setDaemonTmuxServer(["-S", "/tmp/my sockets/team"]);
-    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux -S '/tmp/my sockets/team' attach -t dev-build@starter");
+    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux -S '/tmp/my sockets/team' attach -t =dev-build@starter");
   });
 
   it("puts the server into local panes, never into an ssh pane", () => {

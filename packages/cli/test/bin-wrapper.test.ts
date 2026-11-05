@@ -3,9 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { resolveBinEntry, resolveNodeReexecBinary, run } from "../src/bin-wrapper.js";
+import { isDirectRun, resolveBinEntry, resolveNodeReexecBinary, run } from "../src/bin-wrapper.js";
 
 describe("bin-wrapper", () => {
+  it.runIf(process.platform === "win32")("recognizes a case alias of the same native wrapper without merging different files", () => {
+    const source = fileURLToPath(new URL("../src/bin-wrapper.ts", import.meta.url));
+    expect(isDirectRun(source.toUpperCase(), pathToFileURL(source).href)).toBe(true);
+    expect(isDirectRun(fileURLToPath(new URL("../src/index.ts", import.meta.url)), pathToFileURL(source).href)).toBe(false);
+  });
   let tempDir: string | null = null;
 
   afterEach(() => {
@@ -25,16 +30,26 @@ describe("bin-wrapper", () => {
     expect(entry).toBe(path.resolve(path.dirname(wrapperSource), "../dist/index.js"));
   });
 
+  it.runIf(process.platform === "win32")("resolves a native directory alias to the paired package entry", () => {
+    tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-bin-junction-")));
+    const packageRoot = path.join(tempDir, "owned package"), alias = path.join(tempDir, "alias");
+    fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true });
+    const wrapper = path.join(packageRoot, "dist", "bin-wrapper.js");
+    fs.writeFileSync(wrapper, "// owned path fixture, not executed\n");
+    fs.symlinkSync(packageRoot, alias, "junction");
+    expect(resolveBinEntry(path.join(alias, "dist", "bin-wrapper.js"), pathToFileURL(wrapper).href))
+      .toBe(path.join(packageRoot, "dist", "index.js"));
+  });
+
   it("prefers the sibling node next to the invoked rig binary when current node comes from elsewhere", () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-bin-wrapper-"));
     const prefixDir = path.join(tempDir, "prefix");
     const binDir = path.join(prefixDir, "bin");
     fs.mkdirSync(binDir, { recursive: true });
 
-    const wrapperSource = fileURLToPath(new URL("../src/bin-wrapper.ts", import.meta.url));
     const rigPath = path.join(binDir, "rig");
-    const siblingNodePath = path.join(binDir, "node");
-    fs.symlinkSync(wrapperSource, rigPath);
+    const siblingNodePath = path.join(binDir, process.platform === "win32" ? "node.exe" : "node");
+    fs.writeFileSync(rigPath, "");
     fs.writeFileSync(siblingNodePath, "");
 
     const reexecNode = resolveNodeReexecBinary(
@@ -89,10 +104,9 @@ describe("bin-wrapper", () => {
     const binDir = path.join(prefixDir, "bin");
     fs.mkdirSync(binDir, { recursive: true });
 
-    const wrapperSource = fileURLToPath(new URL("../src/bin-wrapper.ts", import.meta.url));
     const rigPath = path.join(binDir, "rig");
-    const siblingNodePath = path.join(binDir, "node");
-    fs.symlinkSync(wrapperSource, rigPath);
+    const siblingNodePath = path.join(binDir, process.platform === "win32" ? "node.exe" : "node");
+    fs.writeFileSync(rigPath, "");
     fs.writeFileSync(siblingNodePath, "");
 
     const reexecNode = resolveNodeReexecBinary(

@@ -1,5 +1,6 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { ChildProcess } from "node:child_process";
 import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
 import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
@@ -216,6 +217,7 @@ export interface StartOptions {
 }
 
 export interface LifecycleDeps {
+  requestStop?: (state: DaemonState) => Promise<void | { requestId: string }>;
   /** Required by startDaemon; read-only lifecycle consumers need no launch capability. */
   acquireStartLock?: () => DaemonStartLock;
   spawn: (cmd: string, args: string[], opts: {
@@ -980,10 +982,12 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   let notBefore = Date.parse(state.startedAt);
   // Only a signalling stop names a request time: this process's clock just before kill, not delivery.
   let requested = "";
+  let requestId: string | undefined;
   if (pidState !== "dead") {
     notBefore = Date.now();
-    requested = `; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
-    deps.kill(state.pid, "SIGTERM");
+    requested = `; ${deps.requestStop ? "graceful stop" : "SIGTERM"} requested at ${new Date(notBefore).toISOString()}`;
+    if (deps.requestStop) requestId = (await deps.requestStop(state))?.requestId;
+    else deps.kill(state.pid, "SIGTERM");
     // One signal. An already-exited target goes straight to the same judgment.
     const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
     while (deps.isProcessAlive(state.pid) && Date.now() < deadline) {
@@ -1000,7 +1004,7 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   if (effect !== "refused") throw new Error(`Daemon stop verification is unverified: ${observation}; state preserved.`);
 
   const { receipt, receiptPath } = readShutdownReceipt(deps, stateFile);
-  if (!receiptMatchesState(receipt, state, notBefore)) {
+  if (requestId ? receipt?.pid !== state.pid || receipt.requestId !== requestId : !receiptMatchesState(receipt, state, notBefore)) {
     throw new Error(`Daemon process stopped; ${observation}; drain completion unverified (no matching shutdown receipt); state preserved. Inspect ${path.join(path.dirname(stateFile), "daemon.log")}.`);
   }
   if (!isCleanShutdown(receipt)) {
@@ -1226,13 +1230,12 @@ export function tailLogs(deps: LifecycleDeps, opts: { follow: boolean }): void {
   const logFile = resolveLifecycleFile(deps, "daemon.log");
   if (!deps.exists(logFile)) return;
 
-  const args = opts.follow ? ["-f", logFile] : [logFile];
-  const child = deps.spawn("tail", args, {
+  const args = [fileURLToPath(new URL("./log-tail.js", import.meta.url)), logFile, ...(opts.follow ? ["--follow"] : [])];
+  deps.spawn(process.execPath, args, {
     env: process.env as Record<string, string>,
     stdio: "inherit" as unknown,
     detached: false,
   });
-  child.unref();
 }
 
 function readDatabaseWarnings(value: unknown): string[] {

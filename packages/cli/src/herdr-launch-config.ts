@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { createPrivateTextFile } from "./lib/private-text-file.js";
 
 /** Herdr config precedence: personal files win; only an absent config gets a private default. */
 export function prepareHerdrLaunchConfig(env: NodeJS.ProcessEnv, socketPath: string, columns?: number): string {
@@ -20,7 +21,7 @@ export function prepareHerdrLaunchConfig(env: NodeJS.ProcessEnv, socketPath: str
   if (target === source) throw new Error("The private Herdr config must differ from the source config.");
   mkdirSync(path.dirname(source), { recursive: true, mode: 0o700 });
   const temporary = `${target}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, bytes, { flag: "wx", mode: 0o600 });
+  createPrivateTextFile(temporary, bytes);
   try { renameSync(temporary, target); }
   catch (error) { unlinkSync(temporary); throw error; }
   return target;

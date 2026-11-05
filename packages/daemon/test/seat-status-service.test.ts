@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import path from "node:path";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -25,6 +25,33 @@ describe("SeatStatusService", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it.runIf(process.platform === "win32")("reports native-cased copied runtime homes without overriding canonical empty selections", () => {
+    const rig = rigRepo.createRig("native-home-status");
+    const home = path.join(tmpdir(), "synthetic-seat-home"), codex = path.join(home, "selected-codex"), claude = path.join(home, "selected-claude");
+    const nodes = ["codex", "claude-code"].map(runtime => rigRepo.addNode(rig.id, runtime, { runtime }));
+    const copied = new SeatStatusService({ rigRepo, env: { home, codex_home: codex, claude_config_dir: claude } });
+    for (const [index, selected] of [codex, claude].entries()) {
+      const result = copied.getStatusByNodeId(nodes[index]!.id);
+      expect(result.ok && result.status.runtime_home).toMatchObject({ home: selected, source: "daemon" });
+    }
+    const canonical = new SeatStatusService({ rigRepo, env: { HOME: home, home: "shadowed", CODEX_HOME: "", codex_home: codex } });
+    const result = canonical.getStatusByNodeId(nodes[0]!.id);
+    expect(result.ok && result.status.runtime_home).toMatchObject({ home: path.join(home, ".codex"), source: "native_default" });
+  });
+
+  it.runIf(process.platform === "win32")("reports the native profile used by startup when shell HOME differs or is missing", () => {
+    const rig = rigRepo.createRig("native-profile-status");
+    const node = rigRepo.addNode(rig.id, "writer", { runtime: "claude-code" });
+    const profile = path.join(tmpdir(), "synthetic-native-profile");
+    for (const shellHome of [undefined, "", "C:/synthetic-msys-home"]) {
+      const result = new SeatStatusService({ rigRepo, env: { HOME: shellHome, userprofile: profile } }).getStatusByNodeId(node.id);
+      expect(result.ok && result.status.runtime_home).toMatchObject({ home: path.join(profile, ".claude"), source: "native_default" });
+    }
+    // Production fallback agrees with startup's OS home, without opening auth files.
+    const actual = new SeatStatusService({ rigRepo }).getStatusByNodeId(node.id);
+    if (!process.env.CLAUDE_CONFIG_DIR) expect(actual.ok && actual.status.runtime_home).toMatchObject({ home: path.join(homedir(), ".claude"), source: "native_default" });
   });
 
   it("shows an owed restore's delivery failure on the same seat status the operator reads", () => {
@@ -63,6 +90,7 @@ describe("SeatStatusService", () => {
   });
 
   it("reports the runtime home a Claude or Codex seat's launches use, and where it comes from", () => {
+    const root = path.join(tmpdir(), "synthetic-status-homes"), ownHome = path.join(root, "own"), daemonHome = path.join(root, "daemon-codex"), home = path.join(root, "operator");
     const rig = rigRepo.createRig("home-rig");
     const nodes = {
       own: rigRepo.addNode(rig.id, "dev.own", { runtime: "codex" }),
@@ -71,18 +99,18 @@ describe("SeatStatusService", () => {
       term: rigRepo.addNode(rig.id, "dev.term", { runtime: "terminal" }),
     };
     for (const [name, node] of Object.entries(nodes)) sessionRegistry.registerSession(node.id, `dev-${name}@home-rig`);
-    db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "/homes/own" }), nodes.own.id);
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: ownHome }), nodes.own.id);
     db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "rel/codex" }), nodes.rel.id);
-    const svc = new SeatStatusService({ rigRepo, env: { HOME: "/users/op", CODEX_HOME: "/daemon/codex" } });
+    const svc = new SeatStatusService({ rigRepo, env: { HOME: home, CODEX_HOME: daemonHome } });
     const status = (ref: string) => {
       const result = svc.getStatus(ref);
       if (!result.ok) throw new Error(result.code);
       return result.status;
     };
-    expect(status("dev-own@home-rig").runtime_home).toEqual({ variable: "CODEX_HOME", home: "/homes/own", source: "member" });
-    expect(status("dev-rel@home-rig").runtime_home).toEqual({ variable: "CODEX_HOME", home: "/daemon/codex", source: "daemon",
+    expect(status("dev-own@home-rig").runtime_home).toEqual({ variable: "CODEX_HOME", home: ownHome, source: "member" });
+    expect(status("dev-rel@home-rig").runtime_home).toEqual({ variable: "CODEX_HOME", home: daemonHome, source: "daemon",
       ignored: { source: "member", value: "rel/codex" } });
-    expect(status("dev-plain@home-rig").runtime_home).toEqual({ variable: "CLAUDE_CONFIG_DIR", home: "/users/op/.claude", source: "native_default" });
+    expect(status("dev-plain@home-rig").runtime_home).toEqual({ variable: "CLAUDE_CONFIG_DIR", home: path.join(home, ".claude"), source: "native_default" });
     expect(status("dev-term@home-rig")).not.toHaveProperty("runtime_home");
   });
 

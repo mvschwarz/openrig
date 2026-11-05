@@ -17,14 +17,14 @@ const fsOps = { exists: fs.existsSync, readFile };
 const roleSpecs = fs.globSync("**/agent.yaml", { cwd: agents })
   .filter((rel) => (parse(readFile(path.join(agents, rel))) as { startup?: { files?: Array<{ path: string }> } })
     .startup?.files?.some((f) => f.path === "guidance/role.md"))
-  .map((rel) => path.dirname(rel))
+  .map((rel) => path.dirname(rel).split(path.sep).join("/"))
   .sort();
 
 /** The same spec without the role marker, as it was before it was marked: exactly one line differs. */
 function unmarked(dir: string): string {
   const text = readFile(path.join(agents, dir, "agent.yaml"));
-  const marker = "      orientation: role\n";
-  expect(text.split(marker)).toHaveLength(2);
+  const marker = /^      orientation: role\r?\n/gm;
+  expect([...text.matchAll(marker)]).toHaveLength(1);
   return text.replace(marker, "");
 }
 

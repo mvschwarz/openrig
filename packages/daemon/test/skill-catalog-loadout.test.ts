@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { reconcileSkillLoadout, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "../src/domain/skill-catalog.js";
+import { denyDirectoryChildren } from "./helpers/directory-permissions.js";
 
 const roots: string[] = [];
 
@@ -473,7 +474,8 @@ describe("managed skill catalog and composable loadouts", () => {
 
     const target = join(f.project, harnessDir, "skills", "executable");
     const helper = join(target, "helper.sh");
-    chmodSync(helper, 0o644);
+    const editedMode = process.platform === "win32" ? 0o444 : 0o644;
+    chmodSync(helper, editedMode);
     const inspection = reconcileSkillLoadout({ loadout: selected.loadout, runtime, cwd: f.project });
 
     const empty = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: [] });
@@ -496,7 +498,7 @@ describe("managed skill catalog and composable loadouts", () => {
       removed: [],
       errorCodes: ["stale_target_modified"],
       targetExists: true,
-      helperMode: 0o644,
+      helperMode: editedMode,
     });
   });
 
@@ -627,7 +629,7 @@ describe("managed skill catalog and composable loadouts", () => {
     const external = join(f.root, "external");
     writeSkill(external, "selected");
     mkdirSync(join(f.project, ".agents", "skills"), { recursive: true });
-    symlinkSync(join(external, "selected"), join(f.project, ".agents", "skills", "selected"));
+    symlinkSync(join(external, "selected"), join(f.project, ".agents", "skills", "selected"), process.platform === "win32" ? "junction" : "dir");
     const linked = reconcileSkillLoadout({ loadout: selected.loadout, runtime: "codex", cwd: f.project, apply: true });
     expect(linked).toMatchObject({ ok: false, applied: false, errors: [{ code: "target_conflict" }] });
 
@@ -663,12 +665,12 @@ describe("managed skill catalog and composable loadouts", () => {
     if (!replacement.ok) return;
 
     const manifestDirectory = join(prior.project, ".openrig", "skill-loadouts");
-    chmodSync(manifestDirectory, 0o555);
+    const restorePermissions = denyDirectoryChildren(manifestDirectory);
     let rolledBack;
     try {
       rolledBack = reconcileSkillLoadout({ loadout: replacement.loadout, runtime: "codex", cwd: prior.project, apply: true });
     } finally {
-      chmodSync(manifestDirectory, 0o755);
+      restorePermissions();
     }
     expect(rolledBack).toMatchObject({ ok: false, applied: false, errors: [{ code: "projection_failed" }] });
     expect(rolledBack.receipts).toMatchObject([

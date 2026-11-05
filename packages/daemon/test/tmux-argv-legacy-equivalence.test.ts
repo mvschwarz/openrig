@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import ts from "typescript";
 import { TmuxAdapter, type TmuxFileOps } from "../src/adapters/tmux.js";
 import type { SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
 
@@ -27,11 +28,21 @@ async function shellWords(cmds: string[]): Promise<string[][]> {
 }
 
 function runSites(): number[] {
-  return readFileSync(SOURCE, "utf8").split("\n")
-    .flatMap((line, i) => /this\.run\(/.test(line) ? [i + 1] : []);
+  const source = ts.createSourceFile(SOURCE, readFileSync(SOURCE, "utf8"), ts.ScriptTarget.Latest, true);
+  const sites: number[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.expression.kind === ts.SyntaxKind.ThisKeyword && node.expression.name.text === "run"
+      && node.arguments.length > 1 && node.arguments[1]!.getText(source) !== "undefined") {
+      sites.push(source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return sites;
 }
 
-interface RunCall { site: number; argv: string[]; legacy: string }
+interface RunCall { site: number; argv: string[]; legacy?: string }
 
 const SESSION = "seat'q a";
 const TARGET = { nodeId: "node-1", session: SESSION, occupant: "occupant-1", pane: "%1" };
@@ -42,7 +53,11 @@ function respond(cmd: string, failing: string[], composer = false): string {
   // #1072's composer snapshot reads a cursor and a screen before its mode check; other calls keep their replies.
   if (composer && sub === "display-message" && cmd.includes("cursor_x")) return "2|0|80|24\n";
   if (composer && sub === "capture-pane") return "❯ \n";
+  if (sub === "new-session" && cmd.includes("session_created")) return "$7 123\n";
   if (sub === "show-options" && cmd.includes("default-shell")) return "/bin/sh\n";
+  if (sub === "show-environment" && cmd.endsWith("'OPENRIG_NODE_ID'")) {
+    return cmd.includes(" -s ") ? 'OPENRIG_NODE_ID="n1\\r"; export OPENRIG_NODE_ID;\n' : "OPENRIG_NODE_ID=n1\\r\n";
+  }
   switch (sub) {
     case "list-sessions": return `${SESSION}\nalpha\n`;
     case "list-panes": return "%1|0|/w|80|24|1\n";
@@ -55,9 +70,11 @@ function respond(cmd: string, failing: string[], composer = false): string {
 }
 
 /** A shell-path adapter whose every run() call records its caller line, its argv and the string exec received. */
-function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean } = {}): TmuxAdapter {
+function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean; psmux?: boolean } = {}): TmuxAdapter {
   const execs: string[] = [];
   const fileOps: TmuxFileOps = {
+    // Commands without environment assignments do not create a private file.
+    privateConfig: async () => { throw new Error("Unexpected private config write in legacy oracle"); },
     writeFile: async () => {},
     unlink: async () => {},
     tmpName: () => "/tmp/a b/it's.txt",
@@ -66,7 +83,11 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
   const adapter = new TmuxAdapter(async (cmd) => {
     execs.push(cmd);
     return respond(cmd, opts.failing ?? [], opts.composer);
-  }, fileOps);
+  }, fileOps, opts.psmux ? async argv => {
+    if (argv.includes("display-message")) return "$7\n";
+    if (argv.includes("has-session")) throw new Error("can't find session: missing");
+    return "";
+  } : undefined, opts.psmux ? "psmux" : "tmux");
   if (opts.guard) {
     adapter.deliveryGuard = {
       maybeTarget: () => TARGET,
@@ -83,13 +104,13 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
       notePasted: async () => {},
     } as unknown as SeatDeliveryGuard;
   }
-  const self = adapter as unknown as { run: (argv: string[], legacy?: string) => Promise<string> };
+  const self = adapter as unknown as { run: (argv: string[], legacy?: string, scope?: string) => Promise<string> };
   const original = self.run.bind(adapter);
-  self.run = async (argv, legacy) => {
+  self.run = async (argv, legacy, scope) => {
     const frame = /src\/adapters\/tmux\.ts:(\d+):\d+/.exec(new Error().stack ?? "");
     const before = execs.length;
     try {
-      return await original(argv, legacy);
+      return await original(argv, legacy, scope);
     } finally {
       calls.push({ site: Number(frame?.[1]), argv, legacy: execs[before]! });
     }
@@ -100,6 +121,8 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
 async function driveEveryMethod(): Promise<RunCall[]> {
   const calls: RunCall[] = [];
   const a = recordingAdapter(calls);
+  await a.createProbeSession("probe'q a", "/w x");
+  await recordingAdapter(calls, { failing: ["list-panes"] }).createProbeSession("failed'q a", "/w x");
   await a.startServer();
   await a.listSessions();
   await a.listWindows(SESSION);
@@ -167,6 +190,15 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   scoped.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: { PATH: "/a b:$HOME", PRIVATE_SYNTHETIC: "it's a\nvalue" } });
   await scoped.createSession(SESSION, "/w x", { OPENRIG_NODE_ID: "n1", Q: "it's" });
   await scoped.respawnPane("%1", "printf '$HOME'", { env: { OPENRIG_NODE_ID: "n1", A: "b c" } });
+  // Native psmux deliberately has no shell-string path. Drive its two kill
+  // call sites too, retaining complete coverage without unquoting an absent string.
+  expect(await recordingAdapter(calls, { psmux: true }).killSession(SESSION)).toEqual({ ok: true });
+  const native = recordingAdapter(calls, { psmux: true });
+  expect(await native.setNativeServerOption(SESSION, "exit-empty", "off")).toEqual({ ok: true });
+  // The advertised native protocol's no-assignment branch forwards unchanged;
+  // it cannot emit a legacy shell invocation, but its override must stay driven.
+  await (native as unknown as { runEnvironmentCommand: (argv: string[], legacy: string) => Promise<string> })
+    .runEnvironmentCommand(["tmux", "new-session", "-d", "-s", SESSION], `tmux new-session -d -s '${SESSION}'`);
   return calls;
 }
 
@@ -177,12 +209,16 @@ describe.skipIf(process.platform === "win32")("tmux argv and legacy shell string
       .toEqual([["tmux", "a b", "#{x}|#{y}", "it's", ";", "-S", "-5"], ["tmux", "-V"]]);
   });
 
-  it("every run() call site hands tmux the same arguments on both paths", async () => {
+  it("every explicit legacy override hands tmux the same arguments on both paths", async () => {
     const calls = await driveEveryMethod();
-    expect([...new Set(calls.map((c) => c.site))].sort((x, y) => x - y)).toEqual(runSites());
-    const words = await shellWords(calls.map((c) => c.legacy));
-    expect(words).toHaveLength(calls.length);
-    calls.forEach((c, i) => {
+    // Native-only commands have no legacy override to unquote. Keep exhaustive
+    // coverage of actual overrides, including nested probe cleanup commands.
+    const required = runSites();
+    expect([...new Set(calls.map((c) => c.site))].filter(site => required.includes(site)).sort((x, y) => x - y)).toEqual(required);
+    const shellCalls = calls.filter((c): c is RunCall & { legacy: string } => c.legacy !== undefined);
+    const words = await shellWords(shellCalls.map((c) => c.legacy));
+    expect(words).toHaveLength(shellCalls.length);
+    shellCalls.forEach((c, i) => {
       expect(words[i], `tmux.ts:${c.site} ${c.legacy}`).toEqual(c.argv);
     });
   });

@@ -1,16 +1,24 @@
 import type Database from "better-sqlite3";
 import type { NodeInventoryEntry } from "./types.js";
 import fs from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import path from "node:path";
+import { assertWindowsPrivateDirectory, openPrivateTextHandle } from "./private-text-file.js";
 import { CaptureObserver, type Observation } from "./capture-observer.js";
 
 export interface ShadowConfig { destination: string; maxRecords: number; maxBytes: number; capacity: number; maxQueuedBytes: number; maxObservationBytes: number }
 export interface ShadowWriter { append(bytes: string): Promise<void>; close(): Promise<void> }
 // Exclusive creation and a private, canonical parent: never append to/overwrite retained evidence.
 async function privateWriter(destination: string): Promise<ShadowWriter> {
-  const parent = path.dirname(destination), actual = await fs.realpath(parent), stat = await fs.stat(parent);
-  if (actual !== parent || !stat.isDirectory() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) throw Error("shadow parent must be canonical, owner-only and owned by this process");
-  const file = await fs.open(destination, "wx", 0o600);
+  const parent = path.dirname(destination);
+  if (process.platform === "win32") {
+    if (realpathSync.native(parent) !== parent) throw Error("shadow parent must be canonical, owner-only and owned by this process");
+    await assertWindowsPrivateDirectory(parent);
+  } else {
+    const actual = await fs.realpath(parent), stat = await fs.stat(parent);
+    if (actual !== parent || !stat.isDirectory() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) throw Error("shadow parent must be canonical, owner-only and owned by this process");
+  }
+  const file = await openPrivateTextHandle(destination);
   return {append: async text => { await file.writeFile(text); }, close: () => file.close()};
 }
 

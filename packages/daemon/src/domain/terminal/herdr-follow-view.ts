@@ -1,8 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { ensureWindowsPrivateDirectory } from "../windows-owned-text.js";
+import { replaceWindowsPrivateTextFile } from "../private-text-file.js";
+import { nativeViewerShellCommand } from "./native-viewer-command.js";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
-import { HerdrViewer, ViewerCreateNotDispatchedError, findAttributedViewerPanes, readHerdrViewerBody as body, parseHerdrViewerPane as pane,
+import { HerdrViewer, ViewerCreateNotDispatchedError, findAttributedViewerPanes, sameViewerCwd, readHerdrViewerBody as body, parseHerdrViewerPane as pane,
   type HerdrViewerRun, type InspectViewerSeat, type ViewerKey, type ViewerMapping, type ViewerPane } from "./herdr-viewer.js";
 import { DEFAULT_FOLLOW_POLICY, planFollowingTiles, type FollowControls, type FollowPolicy, type FollowTile, type FollowingStatus } from "./terminal-follow-policy.js";
 import type { ComposedPane, ComposedView, OpenViewResult } from "./terminal-provider.js";
@@ -43,6 +47,8 @@ export class HerdrFollowView {
     this.pending = result.catch(() => {}); return result;
   }
   private async apply(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>, membershipError?: string): Promise<OpenViewResult> {
+    const platform = this.deps.platform ?? process.platform;
+    const privateDirectory = (directory: string) => platform === "win32" ? ensureWindowsPrivateDirectory(directory) : mkdirSync(directory, {recursive:true,mode:0o700});
     const id = createHash("sha256").update(JSON.stringify([this.deps.socketPath, viewId])).digest("hex");
     const root = path.join(this.deps.root ?? getDefaultOpenRigPath("private/terminal-following/provider"), id);
     const file = path.join(root, "canvas.json"), log = path.join(root, "events.log");
@@ -56,12 +62,18 @@ export class HerdrFollowView {
         tiles: state?.tiles.map(({ key, seat, departedAt }) => ({ key, seat, departedAt })) ?? [], events: state?.events ?? [], overflow: [], ...(nextAt ? { nextAt } : {}) },
     });
     const save = () => {
-      mkdirSync(root, { recursive: true, mode: 0o700 });
-      const temporary = `${file}.${randomUUID()}.tmp`;
-      writeFileSync(temporary, JSON.stringify(state) + "\n", { mode: 0o600 }); renameSync(temporary, file);
+      privateDirectory(root);
+      if (platform === "win32") replaceWindowsPrivateTextFile(file, JSON.stringify(state) + "\n");
+      else {
+        const temporary = `${file}.${randomUUID()}.tmp`;
+        writeFileSync(temporary, JSON.stringify(state) + "\n", { mode: 0o600 }); renameSync(temporary, file);
+      }
       const lines = state!.events.join("\n") + "\n";
       let previous = ""; try { previous = readFileSync(log, "utf8"); } catch { /* initial own strip */ }
-      if (previous !== lines) writeFileSync(log, lines, { mode: 0o600 });
+      if (previous !== lines) {
+        if (platform === "win32") replaceWindowsPrivateTextFile(log, lines);
+        else writeFileSync(log, lines, { mode: 0o600 });
+      }
     };
     const notice = (line: string) => {
       if (state!.events.at(-1) !== line) state!.events = [...state!.events, line].slice(-60);
@@ -86,7 +98,7 @@ export class HerdrFollowView {
         if (state) { notice(message); save(); }
         return result(false, "retained", message);
       }
-      if ((this.deps.platform ?? process.platform) !== "linux") throw new Error("Following is qualified on Linux Herdr 0.9.5/protocol 22 only.");
+      if (platform !== "linux" && platform !== "win32") throw new Error("Following requires Linux or Windows Herdr 0.9.5/protocol 22.");
       const status = body(await this.deps.run(["status", "server", "--json"]));
       if (status.version !== "0.9.5" || status.protocol !== 22 || status.running !== true || status.socket !== this.deps.socketPath) {
         throw new Error("The qualified provider endpoint is unconfirmed; keeping the previous view.");
@@ -95,17 +107,17 @@ export class HerdrFollowView {
       if (!state) {
         state = { version: 1, cwd: path.join(root, "strip"), phase: "creating", policy: { ...DEFAULT_FOLLOW_POLICY, ...(view.task.kind === "slice" || view.task.kind === "mission" ? { maxTiles: 4 } : {}), pins: [], suppressed: {} },
           tiles: [], events: [`Following ${view.task.name}. Opening a tile can change an agent's terminal size.`] };
-        mkdirSync(state.cwd, { recursive: true, mode: 0o700 }); save();
+        privateDirectory(state.cwd); save();
         // Persist first. An uncertain response is enumerated on the next call,
         // never interpreted as permission for another workspace.
         const reply = body(await this.deps.run(["workspace", "create", "--cwd", state.cwd,
           "--label", view.task.name, "--no-focus"]));
         const made = pane(reply.root_pane);
-        if (!made || made.cwd !== state.cwd) throw new Error("Workspace creation returned no attributable pane/terminal pair.");
+        if (!made || !sameViewerCwd(made.cwd, state.cwd, platform)) throw new Error("Workspace creation returned no attributable pane/terminal pair.");
         state.pane = made; state.phase = "created"; save();
       }
       if (!state.pane) {
-        const found = await findAttributedViewerPanes(this.deps.run, state.cwd);
+        const found = await findAttributedViewerPanes(this.deps.run, state.cwd, platform);
         if (found.length !== 1) throw new Error("Uncertain workspace creation has no unique attributed pane; no create was repeated.");
         state.pane = found[0]!; state.phase = "created"; save();
       }
@@ -115,22 +127,30 @@ export class HerdrFollowView {
         if (!current || current.pane_id !== (isStored ? expected.pane_id : expected.paneId)
           || current.terminal_id !== (isStored ? expected.terminal_id : expected.terminalId)
           || current.workspace_id !== (isStored ? expected.workspace_id : expected.workspaceId)
-          || (isStored && current.cwd !== expected.cwd) || typeof current.focused !== "boolean") {
+          || (isStored && !sameViewerCwd(current.cwd, expected.cwd, platform)) || typeof current.focused !== "boolean") {
           throw new Error("Provider generation or pane attribution changed; keeping the previous view.");
         }
         return current;
       };
       await currentPane(state.pane);
+      const stripArgv = platform === "win32"
+        ? [process.execPath, fileURLToPath(new URL("../../../assets/terminal/follow-events.mjs", import.meta.url)), log]
+        : ["/usr/bin/tail", "-n", "30", "-F", log];
       if (state.phase === "created") {
+        let command = `/usr/bin/tail -n 30 -F ${quote(log)}`;
+        if (platform === "win32") {
+          const observed = body(await this.deps.run(["pane", "process-info", "--pane", state.pane.pane_id]));
+          command = nativeViewerShellCommand(stripArgv, observed.process_info, state.cwd);
+        }
         state.phase = "starting"; save();
-        await this.deps.run(["pane", "run", state.pane.pane_id, `/usr/bin/tail -n 30 -F ${quote(log)}`]);
+        await this.deps.run(["pane", "run", state.pane.pane_id, command]);
       }
       let stripReady = false;
       // Bounded process-start observation, not steady membership polling.
       for (let attempt = 0; attempt < 6; attempt++) {
         const strip = body(await this.deps.run(["pane", "process-info", "--pane", state.pane.pane_id]));
         const processes = (strip.process_info as { foreground_processes?: Array<{ argv?: string[] }> } | undefined)?.foreground_processes;
-        stripReady = processes?.some(p => JSON.stringify(p.argv) === JSON.stringify(["/usr/bin/tail", "-n", "30", "-F", log])) ?? false;
+        stripReady = processes?.some(p => JSON.stringify(p.argv) === JSON.stringify(stripArgv)) ?? false;
         if (stripReady) break;
         await new Promise(resolve => setTimeout(resolve, 50));
       }

@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { automaticRestoreOverrides, type AutomaticSeatReplacement } from "./existing-rig-restore.js";
 import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
@@ -7,7 +8,7 @@ import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-i
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { ensureSeatSkillPlugin, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -31,6 +32,8 @@ import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-resume-probe-evidence.js";
 import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
+import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
+import { recognizedWindowsClaudeScript } from "./windows-provider-command.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
@@ -51,7 +54,7 @@ import type {
   RestoreSnapshotSelection,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
-import { isShellForeground } from "./shell-classifier.js";
+import { isShellForeground, isWindowsShellHost } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { validatePreRestore } from "./restore-preconditions.js";
@@ -242,6 +245,7 @@ interface RestoreOrchestratorDeps {
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
+  nativeIdleShell?: (pane: string) => Promise<boolean>;
   /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe. */
   freshLaunch?: (rigId: string, nodeId: string) => Promise<{
     status: "launched" | "failed" | "attention_required";
@@ -276,6 +280,7 @@ export class RestoreOrchestrator {
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
+  private nativeIdleShell: (pane: string) => Promise<boolean>;
   private freshLaunch: RestoreOrchestratorDeps["freshLaunch"];
   private freshLaunchAvailable: RestoreOrchestratorDeps["freshLaunchAvailable"];
   private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
@@ -320,6 +325,7 @@ export class RestoreOrchestrator {
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
     this.listProcesses = deps.listProcesses;
+    this.nativeIdleShell = deps.nativeIdleShell ?? (target => verifyPaneIdleShell({ target, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }));
     this.freshLaunch = deps.freshLaunch;
     this.freshLaunchAvailable = deps.freshLaunchAvailable;
     this.getDesiredClaudeActivityHooks = deps.getDesiredClaudeActivityHooks;
@@ -723,10 +729,11 @@ export class RestoreOrchestrator {
             // Launch needs consistent positive evidence: both samples idle with the same fingerprint, and the
             // bound pane still in this session (a recycled pane id could name another session's shell).
             if (pane && (["claude-code", "codex", "pi", "omp"].includes(runtime ?? "") || communityHarnessOf(session.communityHarness, runtime))
-              && isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? "")
-              && (await this.tmuxAdapter.listPanes(session.sessionName)).some(candidate => candidate.id === pane)
-              && (await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }, { unknownKeepsIdle: false })).state === "idle_shell"
-              && isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? "")) {
+              && (this.tmuxAdapter.isNativeWindows ? isWindowsShellHost(await this.tmuxAdapter.getPaneCommand(pane) ?? "") : isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? ""))
+              && (await listNamedSessionPanes(this.tmuxAdapter, session.sessionName)).some(candidate => candidate.id === pane)
+              && (this.tmuxAdapter.isNativeWindows ? await this.nativeIdleShell(pane)
+                : (await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }, { unknownKeepsIdle: false })).state === "idle_shell")
+              && (this.tmuxAdapter.isNativeWindows ? isWindowsShellHost(await this.tmuxAdapter.getPaneCommand(pane) ?? "") : isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? ""))) {
               idleSession = session.sessionName;
               isLive = false;
               continue;
@@ -1236,7 +1243,7 @@ export class RestoreOrchestrator {
       return { nodeId, logicalId: node.logicalId, status: "failed", error: `${node.logicalId} has no bound tmux pane to keep, so nothing was stopped.` };
     }
     // Read before takeover ends the process. An unavailable witness keeps normal launch resolution unchanged.
-    const claudeExecutable = keptPane && node.runtime === "claude-code" ? await this.claudeContinuationExecutable(keptPane) : undefined;
+    const claudeContinuation = keptPane && node.runtime === "claude-code" ? await this.claudeContinuationExecutable(keptPane) : undefined;
 
     // Clear stale state so NodeLauncher doesn't see already_bound. A kept pane keeps its binding through the takeover: the
     // delivery guard resolves the pane through it.
@@ -1385,24 +1392,29 @@ export class RestoreOrchestrator {
     }
 
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
-      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}) }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps);
+      { ...opts, ...claudeContinuation }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps);
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
       ...(keptPane ? { launchStarted: true as const } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id } : checked;
   }
 
-  private async claudeContinuationExecutable(pane: string): Promise<string | undefined> {
+  private async claudeContinuationExecutable(pane: string): Promise<{ claudeExecutable: string; claudeScript?: string } | undefined> {
     const native = await verifyClaudePaneRuntime({ target: pane, tmux: this.tmuxAdapter,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
     if (!native) return undefined;
-    const argv0 = processArgv(native.process.command)[0];
+    const argv = native.process.platform === "win32" ? parseWindowsCommandLine(native.process.command) : processArgv(native.process.command);
+    const argv0 = argv[0];
     const executable = argv0 && isAbsolute(argv0) ? argv0 : native.process.executablePath
       ?? (await readNativeExecutablePaths([native.process.pid])).get(native.process.pid);
     try {
       if (!executable || !isAbsolute(executable)) return undefined;
       accessSync(executable, constants.X_OK);
-      return statSync(executable).isFile() ? realpathSync(executable) : undefined;
+      if (!statSync(executable).isFile()) return undefined;
+      const claudeScript = native.process.platform === "win32" && /^node\.(exe|com)$/i.test(basename(executable))
+        ? recognizedWindowsClaudeScript(argv[1] ?? "") : null;
+      if (native.process.platform === "win32" && /^node\.(exe|com)$/i.test(basename(executable)) && !claudeScript) return undefined;
+      return { claudeExecutable: realpathSync(executable), ...(claudeScript ? { claudeScript } : {}) };
     } catch { return undefined; }
   }
 
@@ -1637,7 +1649,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; keepPane?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeScript?: string; keepPane?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -1857,7 +1869,7 @@ export class RestoreOrchestrator {
         }
         if (selected && !selected.beforeNative(launchedSessionId, launchResult?.binding.id)) return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: "The selected seat, settings or history changed after shell creation; native resume was not dispatched." };
         const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, launchCwd, this.liveCodexProfile(rigId, node, selected?.nodeId), modelForRestore(), this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor,
-          selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable);
+          selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable, opts?.claudeScript);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
           if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
@@ -2084,6 +2096,7 @@ export class RestoreOrchestrator {
             guidanceFile: startupCtx.guidanceFile ?? null,
             ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
             ...(opts?.claudeExecutable ? { claudeExecutable: opts.claudeExecutable } : {}),
+            ...(opts?.claudeScript ? { claudeScript: opts.claudeScript } : {}),
             cwd: launchCwd,
             codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined,
             // OPR.0.4.8.3 Seam B: the pod-aware restore path binds the restored posture too
@@ -2448,6 +2461,7 @@ export class RestoreOrchestrator {
     advisor?: string | null,
     beforeNative?: () => boolean,
     claudeExecutable?: string,
+    claudeScript?: string,
   ): Promise<
     | { kind: "resumed"; launchedProcess?: ClaudeLaunchedProcess }
     | { kind: "retry_fresh" }
@@ -2492,9 +2506,10 @@ export class RestoreOrchestrator {
       const guardedTail = beforeNative || claudeExecutable ? [...tail, ...Array(Math.max(0, 7 - tail.length)).fill(undefined), beforeNative,
         ...(claudeExecutable ? [claudeExecutable] : [])] : tail;
       const mcpTail = claudeMcp === undefined ? guardedTail : [...guardedTail, ...Array(Math.max(0, 9 - guardedTail.length)).fill(undefined), claudeMcp];
+      const continuationTail = claudeScript ? [...mcpTail, ...Array(Math.max(0, 10 - mcpTail.length)).fill(undefined), claudeScript] : mcpTail;
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId,
-        ...(mcpTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp]));
+        ...(continuationTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, script?: string]));
       if (result.ok) {
         // OPR.0.7.0.9: the resumed conversation's own start, as on the pod-aware path.
         const promptNote = launch.additions?.appendSystemPromptFile && nodeId && resumeToken ? systemPromptPendingNoteForNode(this.db, nodeId, resumeToken) : undefined;
@@ -2555,7 +2570,8 @@ export class RestoreOrchestrator {
     // session file returns retry_fresh, which the caller maps to the
     // awaiting-decision stop-and-ask — never a silent fresh start (BR-6).
     if (this.piResume?.canResume(resumeType, resumeToken)) {
-      const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort);
+      if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
+      const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort, ...(beforeNative ? [beforeNative] : []));
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
@@ -2571,7 +2587,10 @@ export class RestoreOrchestrator {
       return { kind: "failed", message: result.message };
     }
     if (this.ompResume?.canResume(resumeType, resumeToken)) {
-      const result = await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
+      if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
+      const result = beforeNative
+        ? await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, undefined, beforeNative)
+        : await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
@@ -2741,7 +2760,7 @@ export class RestoreOrchestrator {
     // Precondition #4: pane is at a usable/idle state — explicitly NOT a
     // resume-selection prompt and not the "returned to shell" failure mode.
     if (probe.status !== "resumed") {
-      const evidence = await resumeProbeEvidence(probe, paneContent, this.tmuxAdapter, identity.pane);
+      const evidence = await resumeProbeEvidence(probe, paneContent, this.tmuxAdapter, identity.pane, "pane");
       // The label reads as a shell, but the runtime's lineage was just proven in this pane: name a shell only for a proven idle one.
       if (probe.code === "returned_to_shell" && !await verifyPaneIdleShell({ target: identity.pane, tmux: this.tmuxAdapter,
         ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) })) {

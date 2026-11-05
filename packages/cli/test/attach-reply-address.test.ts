@@ -1,13 +1,15 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 // Real Commander commands, DaemonClient, loopback HTTP, daemon routes and SQLite.
 // Only the person's tmux metadata and pane effects are inert.
 import { describe, expect, it, vi } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import { Command } from "commander";
 import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
-import { serve } from "@hono/node-server";
+
 import { attachCommand } from "../src/commands/attach.js";
 import { sendCommand } from "../src/commands/send.js";
 import { whoamiCommand } from "../src/commands/whoami.js";
@@ -29,10 +31,10 @@ import { transportRoutes } from "../../daemon/src/routes/transport.js";
 import { whoamiRoutes } from "../../daemon/src/routes/whoami.js";
 import type { TmuxAdapter } from "../../daemon/src/adapters/tmux.js";
 
-vi.mock("node:child_process", async (actual) => ({ ...await actual<typeof import("node:child_process")>(), execSync: (cmd: string) => {
-  if (!cmd.startsWith("tmux display-message ")) throw new Error(`Unexpected shell command in inert fixture: ${cmd}`);
+vi.mock("node:child_process", async (actual) => ({ ...await actual<typeof import("node:child_process")>(), execFileSync: (file: string, args: string[]) => {
+  if (file !== "tmux" || args[0] !== "display-message") throw new Error(`Unexpected argv command in inert fixture: ${file}`);
   // Render the requested format as real tmux does, which writes a control character as "_".
-  const format = /'([^']*)'\s*$/.exec(cmd)?.[1] ?? /"([^"]*)"\s*$/.exec(cmd)?.[1] ?? "";
+  const format = args.at(-1) ?? "";
   return `${format.replace(/#\{session_name\}/g, process.env.TEST_PHYSICAL_SESSION ?? "").replace(/#\{window_id\}/g, "@12")
     .replace(/#\{pane_id\}/g, "%42").replace(/[\u0000-\u001f]/g, "_")}\n`;
 } }));
@@ -58,10 +60,11 @@ it.each(["0", "person-terminal"])("real attach -> returned env -> actual From ->
   });
   app.get("/healthz", c => c.json({ ok: true }));
   app.route("/api/rigs", rigsRoutes); app.route("/api/transport", transportRoutes()); app.route("/api/whoami", whoamiRoutes());
-  const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
+  const server = await serveOwnedHonoFixture(app.fetch);
   if (!server.listening) await once(server, "listening");
   const address = server.address(); if (!address || typeof address === "string") throw new Error("missing fixture port");
   const url = `http://127.0.0.1:${address.port}`;
+  allowFetchTarget(url);
   const lifecycleDeps = { spawn: vi.fn(), fetch: async () => ({ ok: true }), kill: vi.fn(),
     readFile: (p: string) => p === STATE_FILE ? JSON.stringify({ pid: process.pid, port: address.port, db: "fixture", startedAt: "2026-10-20T00:00:00Z" }) : null,
     exists: (p: string) => p === STATE_FILE, writeFile: vi.fn(), removeFile: vi.fn(), mkdirp: vi.fn(), openForAppend: () => 3, isProcessAlive: () => true,

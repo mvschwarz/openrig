@@ -12,6 +12,7 @@ const notFound = () => Object.assign(new Error("Command failed"), { stderr: "Err
 const SELECTABLE = { actions: [{ name: "session.new" }, { name: "session.select", args: { required: ["session_id"] } }] };
 
 interface Options {
+  platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   callerInstance?: string;
   daemon?: { available: boolean; instanceId?: string; detail?: string };
@@ -26,6 +27,7 @@ interface Options {
 const commandArgs = (args: string[]) => args.slice(args[1] === "-S" ? 3 : 1);
 
 function fixture(o: Options = {}) {
+  const binaryPath = o.platform === "win32" ? "C:\\owned rex\\rex.exe" : REX;
   const pane = { seat: "op@acme", label: "operator", paneCommand: "tmux attach -t 'op@acme'" };
   const get = vi.fn(async (url: string): Promise<{ status: number; data: unknown }> => {
     if (url.startsWith("/api/terminal/status")) {
@@ -43,7 +45,7 @@ function fixture(o: Options = {}) {
       if (o.binary === false) throw new Error("not found");
       return `${REX}\n`;
     }
-    if (file !== REX) throw new Error(`unexpected ${file}`);
+    if (file !== binaryPath) throw new Error(`unexpected ${file}`);
     const rest = commandArgs(args);
     if (rest[0] === "whoami") return JSON.stringify({ instance_id: o.callerInstance ?? "inst-1" });
     const [method, params] = [rest[2], JSON.parse(rest[3] ?? "{}")];
@@ -56,12 +58,28 @@ function fixture(o: Options = {}) {
     if (method === "client.perform") return o.perform ? o.perform() : JSON.stringify({ performed_by: params.client_id });
     throw new Error(`unexpected ${method}`);
   });
-  const deps: WindowDeps = { platform: "darwin", env: o.env ?? IN_REX, exists: () => false, exec, launch: vi.fn(), sleep: vi.fn(), id: () => "unused", herdrConfig: vi.fn(() => "/unused"), columns: async () => 132 };
+  const deps: WindowDeps = { platform: o.platform ?? "darwin", env: o.env ?? IN_REX, exists: file => o.platform === "win32" && o.binary !== false && file === binaryPath, exec, launch: vi.fn(), sleep: vi.fn(), id: () => "unused", herdrConfig: vi.fn(() => "/unused"), columns: async () => 132 };
   const rexCalls = () => exec.mock.calls.filter(([file]) => file === REX).map(([, args]) => commandArgs(args)).map((rest) => rest[0] === "whoami" ? "whoami" : `${rest[2]} ${rest[3]}`);
-  return { client, deps, get, post, exec, rexCalls };
+  return { client, deps, get, post, exec, rexCalls, binaryPath };
 }
 
 describe("rig terminal open --window from Rex", () => {
+  it.each([{ Rex_Bin_Dir: "C:\\owned rex" }, { Path: '"C:\\owned rex"' }])("opens explicit native Rex through the same-server guarded path: %j", async location => {
+    const f = fixture({ platform: "win32", env: { ...location, Rex_Server: "npipe:owned", Rex_Session: "session:here" } });
+    const result = await openTerminalWindow(f.client, "acme", "rex", f.deps, "rex-plan");
+    expect(result).toMatchObject({ provider: "rex", ok: true, space: { id: "session:new" } });
+    expect(f.post).toHaveBeenCalledOnce();
+    expect(f.exec.mock.calls.every(([file, args]) => file === f.binaryPath && args.slice(0, 3).join("|") === "--autostart=false|-S|npipe:owned")).toBe(true);
+    expect(f.deps.launch).not.toHaveBeenCalled();
+    expect(result.notes).toEqual(['The Rex app "laptop" switched to session "acme".']);
+  });
+  it("does not open a native Rex session on another or unconfirmed server", async () => {
+    for (const callerInstance of ["another-instance", ""]) {
+      const f = fixture({ platform: "win32", env: { REX_BIN_DIR: "C:\\owned rex" }, callerInstance });
+      expect(await openTerminalWindow(f.client, "acme", "rex", f.deps)).toMatchObject({ ok: false, provider: "rex", windowAttempted: false });
+      expect(f.post).not.toHaveBeenCalled();
+    }
+  });
   it("opens the view in the caller's own Rex server and switches the app that shows it", async () => {
     const f = fixture();
     const result = await openTerminalWindow(f.client, "acme", undefined, f.deps, "rex-plan");

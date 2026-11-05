@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-const script = fs.readFileSync(new URL("./build-package.sh", import.meta.url), "utf8");
+const script = fs.readFileSync(new URL("./build-package.sh", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const assetsBranch = script.match(/^if \[ -d "\$DAEMON_DIR\/assets" \]; then\n[\s\S]*?^fi$/m)?.[0];
 const inventory = script.match(/^node -e '\n[\s\S]*?^' "\$CLI_DIR\/daemon\/substance-surfaces.json" "\$\{SUBSTANCE_SURFACE_ROOTS\[@\]\}"$/m)?.[0];
 assert.ok(assetsBranch, "actual daemon assets staging branch must exist");

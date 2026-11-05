@@ -24,6 +24,16 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); process.exitCode = undefined; });
 
 // A port forward serves the remote daemon's identity and bindings on loopback.
+it("passes structured executable metadata from terminal status to attachment", async () => {
+  const command = ["C:/owned tools/psmux.exe", "--prefix"];
+  const attachTmux = vi.fn(async () => 0);
+  const client = { baseUrl: "http://127.0.0.1:7433", isLocalInstance: async () => true,
+    get: async () => ({ status: 200, data: { tmux: { mode: "isolated", serverArgs: ["-L", "owned"], command } } }) };
+  const deps: TerminalDeps = { lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], clientFactory: () => client as unknown as DaemonClient, attachTmux };
+  await new Command().addCommand(terminalCommand(deps)).parseAsync(["terminal", "attach", "seat"], { from: "user" });
+  expect(attachTmux).toHaveBeenCalledExactlyOnceWith({ session: "seat", serverArgs: ["-L", "owned"], readOnly: false, command });
+});
+
 // Use the real transport/identity path; only HTTP responses and local launches are inert.
 function forwardedClient(serverArgs: string[], mode: "inherit" | "isolated" | undefined, targetIdentity = "remote-instance") {
   // A pending request must never override the effective mode of surviving seats.

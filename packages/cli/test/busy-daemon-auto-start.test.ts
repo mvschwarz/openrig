@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // `rig up` and `rig start` start a local daemon only when one is confirmed down (stopped or stale), as
 // `rig context` already does. A daemon whose state is unverified (alive but too busy to answer its
 // health check) is sent the real request instead of a start attempt that reports "already running".
@@ -130,7 +131,7 @@ describe("auto-start only for a daemon confirmed down", () => {
   it("rig start: a /healthz that never answers doesn't hold the start past the request bound", async () => {
     const held: http.ServerResponse[] = [];
     const server = http.createServer((req, res) => { held.push(res); });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    await listenOwnedHttpFixture(server);
     try {
       lifecycle.status = { state: "unverified", host: "127.0.0.1", port: (server.address() as AddressInfo).port };
       const c = client();

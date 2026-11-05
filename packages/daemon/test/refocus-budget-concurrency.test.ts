@@ -7,7 +7,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { writeRefocusNpmFixture, writeRefocusBudgetProbe } from "./helpers/refocus-native-fixtures.js";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -23,7 +24,7 @@ afterEach(() => {
   root = undefined;
 });
 
-interface Fixture { home: string; bin: string; log: string }
+interface Fixture { home: string; bin: string; log: string; trace: string }
 
 function fixture(): Fixture {
   root = mkdtempSync(join(tmpdir(), "refocus-budget-"));
@@ -51,7 +52,22 @@ echo "TRACE OK: work and topology"
 `);
   chmodSync(join(bin, "rig"), 0o755);
   chmodSync(join(bin, "trace"), 0o755);
-  return { home, bin, log };
+  let trace = join(bin, "trace");
+  if (process.platform === "win32") {
+    writeRefocusNpmFixture(bin, `
+const fs=require('fs'),args=process.argv.slice(2),env=process.env;
+const log=${JSON.stringify(log)};
+const sleep=ms=>{if(ms)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,Number(ms));};
+if(args[0]!=='stream')fs.appendFileSync(log,'rig '+args.join(' ')+'\\n');
+const verb=args.slice(0,2).join(' ');
+if(verb==='stream emit'){sleep(200);fs.appendFileSync(log,'rig '+args.join(' ')+'\\n');console.log('{}');}
+else if(verb==='queue whoami'){sleep(env.STUB_WHOAMI_MS);console.log(JSON.stringify({role:{state:'no-record',files:[]},currentWorkBasis:'none'}));}
+else if(verb==='context get'){sleep(env.STUB_CONTEXT_MS);console.log('CONFIGURED REFOCUS CONTENT');}
+else console.log('{}');
+`);
+    trace = writeRefocusBudgetProbe(trace);
+  }
+  return { home, bin, log, trace };
 }
 
 interface Run { killed: boolean; ms: number; stdout: string; stderr: string }
@@ -62,10 +78,11 @@ function hook(f: Fixture, event: string, session: string, extra: Record<string, 
   if (!existsSync(transcript)) writeFileSync(transcript, "");
   const started = Date.now();
   return new Promise((done) => {
-    const child = spawn("node", [HOOK, "--runtime", "claude"], {
+    const child = spawn(process.execPath, [HOOK, "--runtime", "claude"], {
       env: {
-        PATH: `${f.bin}:${process.env.PATH}`, HOME: root!, OPENRIG_HOME: f.home, OPENRIG_SESSION_NAME: SEAT,
-        PYTHON: join(f.bin, "trace"), OPENRIG_REFOCUS_WORK_NODE: f.home, OPENRIG_WORKSPACE_ROOT: f.home,
+        PATH: [f.bin, process.env.PATH].join(delimiter), HOME: root!, OPENRIG_HOME: f.home, OPENRIG_SESSION_NAME: SEAT,
+        SystemRoot: process.env.SystemRoot,
+        PYTHON: f.trace, OPENRIG_REFOCUS_WORK_NODE: f.home, OPENRIG_WORKSPACE_ROOT: f.home,
         OPENRIG_TOPOLOGY_ROOT: f.home, ...extra,
       },
     });
@@ -200,12 +217,10 @@ describe("refocus: the time budget", () => {
   }, 60_000);
 });
 
-describe("refocus: overlapping events for one occupant (UNRESOLVED; characterized, not fixed)", () => {
-  // These describe main's behaviour, which this change keeps: two hook runs for one occupant are not serialized, so
-  // overlapping hook processes can lose a just-recorded compaction or deliver one refocus twice. Whether a harness
-  // overlaps these events natively is NOT ESTABLISHED; the gap is open, not shown safe. If a later change serializes
-  // the state, these flip and should then assert the fixed behaviour.
-  it("can lose a PostCompact that lands while an earlier refocus is being delivered", async () => {
+describe("refocus: overlapping events for one occupant", () => {
+  // Windows serializes state through a process-owned named pipe. POSIX retains
+  // the prior race characterization. Actual harness event overlap is not established here.
+  it("preserves a concurrent PostCompact on Windows; characterizes the POSIX gap", async () => {
     const f = fixture();
     await hook(f, "UserPromptSubmit", "s1", { OPENRIG_REFOCUS_NOW: "1" });
     const file = join(f.home, "refocus", `${SEAT}__s1.json`);
@@ -215,19 +230,24 @@ describe("refocus: overlapping events for one occupant (UNRESOLVED; characterize
     await hook(f, "PostCompact", "s1");
     expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
     expect(context(await delivering)).toContain("REFOCUS");
-    // The delivery wrote back the state it read before the PostCompact: the compaction's pending is gone.
-    expect(stateOf(f, "s1")["pendingOn"]).toBeUndefined();
-    expect(context(await hook(f, "UserPromptSubmit", "s1"))).toBe("");
+    // Windows records the later compact after the delivery; POSIX still overwrites it.
+    if (process.platform === "win32") {
+      expect(stateOf(f, "s1")["pendingOn"]).toBe("PostCompact");
+      expect(context(await hook(f, "UserPromptSubmit", "s1"))).toContain("REFOCUS (just compacted");
+    } else {
+      expect(stateOf(f, "s1")["pendingOn"]).toBeUndefined();
+      expect(context(await hook(f, "UserPromptSubmit", "s1"))).toBe("");
+    }
   }, 20_000);
 
-  it("can deliver one pending refocus twice when two prompts overlap", async () => {
+  it("delivers once for overlapping Windows prompts; characterizes the POSIX gap", async () => {
     const f = fixture();
     await hook(f, "PostCompact", "s1");
     const first = hook(f, "UserPromptSubmit", "s1", { STUB_TRACE_MS: "1000" });
     await wait(200);
     const second = hook(f, "UserPromptSubmit", "s1", { STUB_TRACE_MS: "1000" });
     const delivered = (await Promise.all([first, second])).filter((r) => context(r).includes("REFOCUS"));
-    expect(delivered).toHaveLength(2);
+    expect(delivered).toHaveLength(process.platform === "win32" ? 1 : 2);
   }, 20_000);
 
   it("still delivers to each of two occupants of one seat when they overlap", async () => {

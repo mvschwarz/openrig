@@ -22,7 +22,7 @@ export interface FingerprintResult {
 const SHELL_NAMES = new Set(["bash", "zsh", "fish", "sh", "dash", "tcsh", "csh"]);
 
 const CLAUDE_PROCESS_PATTERNS = ["claude", "claude-code", "claude.exe", ".claude-wrapped", ".claude-unwrapped"];
-const CODEX_PROCESS_PATTERNS = ["codex", ".codex-wrapped", ".codex-unwrapped"];
+const CODEX_PROCESS_PATTERNS = ["codex", "codex.exe", ".codex-wrapped", ".codex-unwrapped"];
 // Linux and macOS may report only the first 15 or 16 bytes of these ASCII names.
 function processNameIs(command: string, name: string): boolean {
   return command === name || ((command.length === 15 || command.length === 16) && name.startsWith(command));
@@ -66,7 +66,9 @@ export class SessionFingerprinter {
   /** Pre-fetch cmux agent PIDs for batch use. Call before fingerprinting multiple panes. */
   async refreshCmuxSignals(): Promise<void> {
     const result = await this.cmux.queryAgentPIDs();
-    this.cachedAgentPIDs = result.ok ? result.data : null;
+    // A failed query supplies no positive signal for this batch. The discovery
+    // coordinator refreshes every scan; do not retry an unavailable cmux per pane.
+    this.cachedAgentPIDs = result.ok ? result.data : new Map();
   }
 
   /** Fingerprint a single scanned pane. */
@@ -93,10 +95,12 @@ export class SessionFingerprinter {
 
     // --- Layer 1: Process tree / active command ---
     if (pane.activeCommand) {
-      const cmd = (pane.activeCommand.split("/").pop() ?? pane.activeCommand).toLowerCase();
+      const commandPath = process.platform === "win32" ? pane.activeCommand.replaceAll("\\", "/") : pane.activeCommand;
+      const cmd = (commandPath.split("/").pop() ?? commandPath).toLowerCase();
+      const providerCommand = process.platform === "win32" ? cmd.replace(/^(claude|codex)\.com$/, "$1") : cmd;
 
       for (const pattern of CLAUDE_PROCESS_PATTERNS) {
-        if (processNameIs(cmd, pattern)) {
+        if (processNameIs(providerCommand, pattern)) {
           evidence.layerUsed = 1;
           evidence.processSignal = { command: pane.activeCommand, matched: pattern };
           return { runtimeHint: "claude-code", confidence: "high", evidence };
@@ -104,7 +108,7 @@ export class SessionFingerprinter {
       }
 
       for (const pattern of CODEX_PROCESS_PATTERNS) {
-        if (processNameIs(cmd, pattern)) {
+        if (processNameIs(providerCommand, pattern)) {
           evidence.layerUsed = 1;
           evidence.processSignal = { command: pane.activeCommand, matched: pattern };
           return { runtimeHint: "codex", confidence: "high", evidence };

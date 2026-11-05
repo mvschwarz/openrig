@@ -1,5 +1,5 @@
 import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
-import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
+import { restoreSessionUserHome, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs, type ClaudeMcp } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
@@ -82,6 +82,7 @@ export class ClaudeResumeAdapter {
     beforeNativeDispatch?: () => boolean,
     executable?: string,
     claudeMcp?: ClaudeMcp,
+    script?: string,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Claude resume not available" };
@@ -103,7 +104,7 @@ export class ClaudeResumeAdapter {
       try {
         if (!nodeId || !this.options.claudeManagedLaunch) await unresolvedClaudePermissionModes();
         managed = await this.options.claudeManagedLaunch!.prepare({ nodeId: nodeId!, cwd, session: tmuxSessionName,
-          ...(executable ? { executable } : {}) }, selectedPermissionMode);
+          ...(executable ? { executable } : {}), ...(script ? { script } : {}) }, selectedPermissionMode);
       } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
     }
     // A seat's own subscription token, as on a fresh launch (claude-code-adapter.ts).
@@ -118,13 +119,15 @@ export class ClaudeResumeAdapter {
     const choice = { claudePermissions, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const appliedLaunch = observeClaudePermission(posture);
+    const restorePolicy = this.options.restoreReadPolicy?.() ?? {};
+    const userHome = /^~[\\/]/.test(restorePolicy.extraInstructionFile?.trim() ?? "") ? await restoreSessionUserHome(this.tmux, tmuxSessionName) : undefined;
     const launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {
       openrigHome: this.options.openrigHome, session: tmuxSessionName, cwd, nativeSessionId: resumeToken!,
-      ...(this.options.restoreReadPolicy?.() ?? {}),
+      ...restorePolicy, userHome,
     });
     const permissionMode = posture + launchArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], claudeResumeLaunchEnv(resumeToken!))
-      : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env)}${executable ? `exec ${shellQuote(executable)}` : "claude"} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;
+      : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env)}${executable ? `exec ${shellQuote(executable)}${script ? ` ${shellQuote(script)}` : ""}` : "claude"} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;
 
     const assertSelected = beforeNativeDispatch ? () => { if (!beforeNativeDispatch()) throw new Error("Selected history changed before Claude resume input"); } : undefined;
     const beforeManagedInput = beforeNativeDispatch ? () => { assertSelected?.(); managed?.assertCurrent?.(); } : managed?.assertCurrent;
@@ -162,7 +165,8 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "resume_failed", message: keyResult.message };
     }
 
-    const result = await this.verifyResume(tmuxSessionName, resumeToken!).catch((error): ResumeResult => ({
+    const result = await this.verifyResume(tmuxSessionName, resumeToken!, process.platform === "win32"
+      ? managed ?? (executable ? { executable, selectedScript: script } : undefined) : undefined).catch((error): ResumeResult => ({
       ok: false,
       code: "attention_required",
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
@@ -170,7 +174,7 @@ export class ClaudeResumeAdapter {
     return result.ok ? { ...result, appliedLaunch, ...(tokenWarnings.length ? { warnings: tokenWarnings } : {}) } : result;
   }
 
-  private async verifyResume(tmuxSessionName: string, resumeToken: string): Promise<ResumeResult> {
+  private async verifyResume(tmuxSessionName: string, resumeToken: string, selected?: { executable: string; selectedScript?: string }): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 200;
     const maxWaitMs = this.options.maxWaitMs ?? 5_000;
     const sleepFn = this.options.sleep ?? sleep;
@@ -245,6 +249,8 @@ export class ClaudeResumeAdapter {
         tmux: this.tmux,
         ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}),
         expectedToken: resumeToken,
+        selectedExecutable: selected?.executable,
+        selectedScript: selected?.selectedScript,
       });
       if (identity) {
         const verifiedProbe = assessNativeResumeProbe({

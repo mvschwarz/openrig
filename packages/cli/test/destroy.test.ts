@@ -65,6 +65,18 @@ describe("destroy helpers", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it.each([false, "unknown"] as const)("preserves recovery state after an unconfirmed session stop (%s)", async outcome => {
+    const deps = makeDestroyDeps({ exists: () => true, killTmuxSession: vi.fn(async () => outcome) });
+    const plan = buildDestroyPlan("all", false, { stateRoot: tmpDir, dbPath: join(tmpDir, "db"),
+      transcriptsPath: join(tmpDir, "transcripts"), daemonHost: "localhost", daemonPort: 7433 }, deps);
+    plan.managedTmuxSessions = ["owned|logical", "untouched-sibling"];
+    const result = await executeDestroy(plan, deps);
+    expect(result).toMatchObject({ stateRecreated: false, tmuxKilled: 0, tmuxMissing: 0 });
+    expect(result.warnings.join("\n")).toContain("State was left untouched for recovery");
+    expect(deps.killTmuxSession).toHaveBeenCalledTimes(1);
+    expect(deps.removePath).not.toHaveBeenCalled(); expect(deps.renamePath).not.toHaveBeenCalled(); expect(deps.mkdirp).not.toHaveBeenCalled();
+  });
+
   it("resolves the effective socket before stopping or deleting state and passes it to every session kill", async () => {
     const args = ["-S", join(tmpDir, "selected.sock")];
     writeFileSync(join(tmpDir, "tmux-server.json"), JSON.stringify({ version: 1, home: realpathSync(tmpDir),
@@ -260,7 +272,7 @@ describe("destroy helpers", () => {
       renamePath: (from: string, to: string) => renameSync(from, to),
       mkdirp: (path: string) => mkdirSync(path, { recursive: true }),
       listManagedTmuxSessions: listManagedTmuxSessionsFromDb,
-      killTmuxSession: (sessionName: string) => sessionName !== "dev1-impl@demo",
+      killTmuxSession: (sessionName: string) => sessionName !== "dev1-impl@demo" ? "stopped" : "missing",
       inspectListener: vi.fn()
         .mockResolvedValueOnce({ kind: "openrig" })
         .mockResolvedValueOnce({ kind: "unreachable" })
@@ -393,6 +405,18 @@ describe("destroy helpers", () => {
 });
 
 describe("destroy command", () => {
+  it("returns failure when session cleanup is unknown and state is retained", async () => {
+    const destroyDeps = makeDestroyDeps({ exists: () => true, listManagedTmuxSessions: () => ["owned|logical"], killTmuxSession: async () => "unknown" });
+    const program = new Command().addCommand(destroyCommand({
+      configStore: { resolve: () => ({ daemon: { port: 7433, host: "127.0.0.1" }, db: { path: "/owned/db" }, transcripts: { enabled: true, path: "/owned/tx" } }) },
+      destroyDeps,
+    }));
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "destroy", "--all", "--yes", "--confirm", DESTROY_CONFIRM_TOKEN]);
+    });
+    expect(exitCode).toBe(1); expect(logs.join("\n")).toContain("State was left untouched for recovery");
+    expect(destroyDeps.removePath).not.toHaveBeenCalled();
+  });
   it("requires exactly one destroy scope", async () => {
     const program = new Command();
     program.exitOverride();

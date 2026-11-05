@@ -80,6 +80,29 @@ function writtenState(deps: LifecycleDeps): DaemonState {
   return JSON.parse(call[1] as string) as DaemonState;
 }
 
+it.each(["matching", "different", "missing"])("matches native shutdown by request identity despite cross-process clock skew: %s", async mode => {
+  const previousUrl = process.env.OPENRIG_URL;
+  process.env.OPENRIG_URL = "http://127.0.0.1:7555";
+  const state: DaemonState = { pid: 555, port: 7555, db: "test.db", startedAt: "2026-01-01T00:00:00Z" };
+  const requestId = "a".repeat(32);
+  const callbackTime = new Date(Date.now() - 7).toISOString();
+  const receipt = { schema: "openrig.daemon-shutdown/v1", pid: state.pid, startedAt: callbackTime,
+    completedAt: callbackTime, outcome: "clean", phase: "complete", failures: [],
+    ...(mode === "missing" ? {} : { requestId: mode === "matching" ? requestId : "b".repeat(32) }) };
+  const deps = mockDeps({
+    exists: p => p === STATE_FILE || p.endsWith("daemon-shutdown.json"),
+    readFile: p => p === STATE_FILE ? JSON.stringify(state) : p.endsWith("daemon-shutdown.json") ? JSON.stringify(receipt) : null,
+    isProcessAlive: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
+    requestStop: vi.fn(async () => ({ requestId })),
+    fetch: vi.fn().mockResolvedValueOnce({ ok: true }).mockRejectedValue(Object.assign(new Error("refused"), { code: "ECONNREFUSED" })),
+  });
+  try {
+    if (mode === "matching") { await expect(stopDaemon(deps)).resolves.toBe("stopped"); expect(deps.removeFile).toHaveBeenCalledWith(STATE_FILE); }
+    else { await expect(stopDaemon(deps)).rejects.toThrow("no matching shutdown receipt"); expect(deps.removeFile).not.toHaveBeenCalled(); }
+    expect(deps.kill).not.toHaveBeenCalled();
+  } finally { if (previousUrl === undefined) delete process.env.OPENRIG_URL; else process.env.OPENRIG_URL = previousUrl; }
+});
+
 describe("Daemon Lifecycle", () => {
   // A started child whose own endpoint names its PID and reports `hosts`; `probe` scripts each later
   // request: "ok" answers, any other value throws with that error code.
@@ -187,7 +210,7 @@ describe("Daemon Lifecycle", () => {
     const [cmd, args, opts] = spawnMock.mock.calls[0]!;
     expect(cmd).toBe(process.execPath);
     expect(args[0]).toContain("daemon");
-    expect(args[0]).toContain("dist/index.js");
+    expect(args[0]).toContain(path.join("dist", "index.js"));
     expect(opts.env).toMatchObject({
       OPENRIG_PORT: "7433",
       OPENRIG_DB: "openrig.sqlite",
@@ -940,11 +963,11 @@ describe("Daemon Lifecycle", () => {
 
     tailLogs(deps, { follow: true });
 
-    // Should spawn tail -f on the log file
+    // The installed Node runtime follows logs without a Unix tail dependency.
     expect(spawnFn).toHaveBeenCalledOnce();
     const [cmd, args] = spawnFn.mock.calls[0]!;
-    expect(cmd).toBe("tail");
-    expect(args).toContain("-f");
+    expect(cmd).toBe(process.execPath);
+    expect(args).toContain("--follow");
     expect(args).toContain(LOG_FILE);
   });
 
@@ -1639,10 +1662,10 @@ describe("buildDaemonEnv", () => {
         process.env["OPENRIG_HOME"] = "/Users/example/.openrig-populated";
         const populatedState = getDefaultOpenRigPath("daemon.json");
         const populatedLog = getDefaultOpenRigPath("daemon.log");
-        expect(blankState).toBe("/Users/example/.openrig-blank/daemon.json");
-        expect(populatedState).toBe("/Users/example/.openrig-populated/daemon.json");
-        expect(blankLog).toBe("/Users/example/.openrig-blank/daemon.log");
-        expect(populatedLog).toBe("/Users/example/.openrig-populated/daemon.log");
+        expect(blankState).toBe(path.join("/Users/example/.openrig-blank", "daemon.json"));
+        expect(populatedState).toBe(path.join("/Users/example/.openrig-populated", "daemon.json"));
+        expect(blankLog).toBe(path.join("/Users/example/.openrig-blank", "daemon.log"));
+        expect(populatedLog).toBe(path.join("/Users/example/.openrig-populated", "daemon.log"));
         expect(blankState).not.toBe(populatedState);
         expect(blankLog).not.toBe(populatedLog);
       } finally {
@@ -1658,7 +1681,7 @@ describe("buildDaemonEnv", () => {
       try {
         process.env["OPENRIG_HOME"] = "";
         const result = getOpenRigHome();
-        expect(result).toBe(`${homedir()}/.openrig`);
+        expect(result).toBe(path.join(homedir(), ".openrig"));
       } finally {
         if (saved === undefined) delete process.env["OPENRIG_HOME"];
         else process.env["OPENRIG_HOME"] = saved;
@@ -1701,12 +1724,12 @@ describe("buildDaemonEnv", () => {
         expect(blank.OPENRIG_DIR).not.toBe(populated.OPENRIG_DIR);
 
         // STATE_FILE / LOG_FILE — derived as path.join(OPENRIG_DIR, "daemon.{json,log}")
-        expect(blank.STATE_FILE).toBe("/Users/example/.openrig-vm-blank-fresh/daemon.json");
-        expect(populated.STATE_FILE).toBe("/Users/example/.openrig-vm-populated-fresh/daemon.json");
+        expect(blank.STATE_FILE).toBe(path.join("/Users/example/.openrig-vm-blank-fresh", "daemon.json"));
+        expect(populated.STATE_FILE).toBe(path.join("/Users/example/.openrig-vm-populated-fresh", "daemon.json"));
         expect(blank.STATE_FILE).not.toBe(populated.STATE_FILE);
 
-        expect(blank.LOG_FILE).toBe("/Users/example/.openrig-vm-blank-fresh/daemon.log");
-        expect(populated.LOG_FILE).toBe("/Users/example/.openrig-vm-populated-fresh/daemon.log");
+        expect(blank.LOG_FILE).toBe(path.join("/Users/example/.openrig-vm-blank-fresh", "daemon.log"));
+        expect(populated.LOG_FILE).toBe(path.join("/Users/example/.openrig-vm-populated-fresh", "daemon.log"));
         expect(blank.LOG_FILE).not.toBe(populated.LOG_FILE);
       } finally {
         if (saved === undefined) delete process.env["OPENRIG_HOME"];

@@ -35,6 +35,10 @@ export function fixtureUserHomeEnv(userHome: string, platform: NodeJS.Platform =
   return { HOME: userHome, ...(platform === "win32" ? { USERPROFILE: userHome } : {}) };
 }
 
+export function fixtureTempEnv(tmp: string, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  return { TMPDIR: tmp, ...(platform === "win32" ? { TEMP: tmp, TMP: tmp } : {}) };
+}
+
 // Scrub inherited instance selectors before product modules capture their defaults.
 // Tests can still set explicit overrides after setup; test/provider opt-in flags
 // are not instance selectors and remain untouched.
@@ -88,7 +92,7 @@ const fixtureHome =
         // test.env OPENRIG_TEST_KEEP_TMPDIR=1 in its vitest config and keeps the TMPDIR it was given.
         if (process.env["OPENRIG_TEST_KEEP_TMPDIR"] !== "1") {
           createdTmp = fs.mkdtempSync(path.join(os.tmpdir(), "o-"));
-          process.env["TMPDIR"] = createdTmp;
+          Object.assign(process.env, fixtureTempEnv(createdTmp));
         }
         return h;
       })();
@@ -133,6 +137,10 @@ if (!realCodexTest) {
   const userHome = `${fixtureHome}-user-home`;
   fs.mkdirSync(userHome, { recursive: true });
   Object.assign(process.env, fixtureUserHomeEnv(userHome));
+  if (process.platform === "win32") {
+    process.env["APPDATA"] = path.join(userHome, "AppData", "Roaming");
+    process.env["LOCALAPPDATA"] = path.join(userHome, "AppData", "Local");
+  }
   delete process.env["CODEX_HOME"];
   for (const [key, suffix] of Object.entries({
     XDG_CONFIG_HOME: ".config", XDG_STATE_HOME: ".local/state",

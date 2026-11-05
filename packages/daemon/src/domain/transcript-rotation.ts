@@ -1,3 +1,4 @@
+import { captureNamedSessionContent } from "../adapters/session-pane-lookup.js";
 // V1 pre-release CLI/daemon Item 1 — bounded-trail transcript rotation.
 //
 // Replaces the legacy `tmux pipe-pane` mechanism (infinite-growth file)
@@ -14,6 +15,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import { setImmediate as yieldToLoop } from "node:timers/promises";
 import { CAPTURE_BATCH, type TmuxAdapter } from "../adapters/tmux.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -146,10 +148,10 @@ let pendingCaptures = new Map<TmuxAdapter, Map<number, CaptureRequest[]>>();
 function captureSoon(adapter: TmuxAdapter, sessionName: string, lines: number, isCurrent: () => boolean): Promise<string | null> {
   // The batch lists sessions by name, so pane, window and `session:window` targets read per target.
   if (typeof adapter.capturePanesContent !== "function" || /^[%@$]\d+$/.test(sessionName) || sessionName.includes(":")) {
-    return Promise.resolve().then(() => adapter.capturePaneContent(sessionName, lines));
+    return Promise.resolve().then(() => captureNamedSessionContent(adapter, sessionName, lines));
   }
   if (unlistedSessions.has(sessionName)) {
-    return Promise.resolve().then(() => adapter.capturePaneContent(sessionName, lines)).then((content) => {
+    return Promise.resolve().then(() => captureNamedSessionContent(adapter, sessionName, lines)).then((content) => {
       if (content !== null) unlistedSessions.delete(sessionName);
       return content;
     });
@@ -409,9 +411,25 @@ export function startTranscriptRotation(
       }
 
       fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-      const tmpPath = `${outputPath}.tmp.${process.pid}`;
-      fs.writeFileSync(tmpPath, payload);
-      fs.renameSync(tmpPath, outputPath);
+      // A legal transcript leaf may already approach NTFS's component limit.
+      // Keep native staging independent of the session's filename.
+      const tmpPath = process.platform === "win32"
+        ? path.join(path.dirname(outputPath), `.transcript-${randomUUID()}.tmp`)
+        : `${outputPath}.tmp.${process.pid}`;
+      let staged = false;
+      try {
+        if (process.platform === "win32") {
+          const fd = fs.openSync(tmpPath, "wx");
+          staged = true;
+          try { fs.writeFileSync(fd, payload); } finally { fs.closeSync(fd); }
+        } else {
+          fs.writeFileSync(tmpPath, payload);
+          staged = true;
+        }
+        fs.renameSync(tmpPath, outputPath);
+      } finally {
+        if (staged) try { fs.unlinkSync(tmpPath); } catch { /* renamed, or retained after cleanup refusal */ }
+      }
       // Persistence succeeded — only NOW is the tick healthy, so record liveness.
       // A throw above jumps to the catch and never reaches here, so a failed
       // required write leaves liveness un-advanced and getIngestHealth reads the

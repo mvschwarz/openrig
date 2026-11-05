@@ -28,6 +28,9 @@
 //      string is built ONLY from registry fields (user shape-checked).
 //   Deletion-class flags are UNREACHABLE (property-tested, incl. the
 //   `-s`/--protect-args ABSENCE uniformity pin).
+// Native Windows uses binary SFTP instead of rsync. Its separate path check
+// permits Unicode, spaces and /C:/ drive roots without a remote shell. The
+// rsync builder independently enforces the original shell-inert grammar.
 //
 // DENY WALL (FR-4, arch-endorsed SHORT CLOSED NAMED list — extension = a
 // ruling, never a growing blocklist): local side denies resolved paths under
@@ -44,6 +47,8 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { loadHostRegistry, resolveHost, type SshHostEntry } from "./../host-registry.js";
 import { looksLikePermissionGate } from "./../cross-host-executor.js";
 import { getDefaultOpenRigPath, getOpenRigHome } from "./../openrig-compat.js";
+import { runNativeLocalCopy } from "./native-local-copy.js";
+import { runNativeSftpCopy } from "./native-sftp-copy.js";
 
 // ── grammar ────────────────────────────────────────────────────────────────
 
@@ -70,6 +75,11 @@ export function parseFilePathArg(raw: string, isRegisteredHost: (id: string) => 
       ok: false,
       error: `path operand '${raw}' begins with '-' and could be mistaken for an option. If this is a real local file, address it with the ./ prefix (./${raw}).`,
     };
+  }
+  // Windows drive paths take precedence over host qualifiers on Windows.
+  // Include drive-relative paths (C:notes), UNC and backslash local escapes.
+  if (process.platform === "win32" && (/^[A-Za-z]:/.test(raw) || raw.startsWith("\\") || raw.startsWith(".\\") || raw.startsWith("..\\"))) {
+    return { ok: true, arg: { kind: "local", path: raw } };
   }
   // Local-prefix escapes: these are ALWAYS local, colon or not (N18-1).
   if (raw.startsWith("/") || raw.startsWith("./") || raw.startsWith("../") || raw.startsWith("~")) {
@@ -99,7 +109,7 @@ export function parseFilePathArg(raw: string, isRegisteredHost: (id: string) => 
 
 function expandLocalTilde(p: string): string {
   if (p === "~") return os.homedir();
-  if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+  if (p.startsWith("~/") || (process.platform === "win32" && p.startsWith("~\\"))) return path.join(os.homedir(), p.slice(2));
   return p;
 }
 
@@ -112,7 +122,18 @@ export function checkLocalPath(raw: string): PathCheck {
   const home = os.homedir();
   const activeOpenRigHome = path.resolve(getOpenRigHome());
   const activeHostsRegistry = path.resolve(getDefaultOpenRigPath("hosts.yaml"));
-  if (resolved === activeHostsRegistry) {
+  // Windows paths are case-insensitive; spelling changes must not bypass the wall.
+  const comparable = (p: string) => {
+    if (process.platform !== "win32") return p;
+    // Extended-length spelling names the same filesystem location. Keep the
+    // original path for I/O, but compare the ordinary drive/UNC spelling.
+    const ordinary = /^\\\\\?\\UNC\\/i.test(p) ? "\\\\" + p.slice(8)
+      : /^\\\\\?\\[A-Za-z]:\\/.test(p) ? p.slice(4) : p;
+    return ordinary.toLowerCase();
+  };
+  const within = (candidate: string, root: string) => comparable(candidate) === comparable(root)
+    || comparable(candidate).startsWith(comparable(root.endsWith(path.sep) ? root : root + path.sep));
+  if (comparable(resolved) === comparable(activeHostsRegistry)) {
     return {
       ok: false,
       error: `refused: '${raw}' resolves to the active hosts registry (${activeHostsRegistry}) — the registry itself is not a copy source/target in v0. This is the FR-4 default-deny wall (live OpenRig state; extension requires a ruling).`,
@@ -120,7 +141,7 @@ export function checkLocalPath(raw: string): PathCheck {
   }
   for (const segment of DENIED_SEGMENTS) {
     const deniedRoot = path.join(home, segment);
-    if (resolved === deniedRoot || resolved.startsWith(deniedRoot + path.sep)) {
+    if (within(resolved, deniedRoot)) {
       return {
         ok: false,
         error: `refused: '${raw}' resolves into ${deniedRoot} — ${segment === ".openrig" ? "live OpenRig state (incl. the hosts registry) is not a copy source/target in v0 (crash-safety)" : "credential/agent-home directories are not copy sources/targets"}. This is the FR-4 default-deny wall (a short closed list; extension requires a ruling).`,
@@ -128,8 +149,8 @@ export function checkLocalPath(raw: string): PathCheck {
     }
   }
   if (
-    activeOpenRigHome !== path.join(home, ".openrig") &&
-    (resolved === activeOpenRigHome || resolved.startsWith(activeOpenRigHome + path.sep))
+    comparable(activeOpenRigHome) !== comparable(path.join(home, ".openrig")) &&
+    within(resolved, activeOpenRigHome)
   ) {
     return {
       ok: false,
@@ -137,7 +158,8 @@ export function checkLocalPath(raw: string): PathCheck {
     };
   }
   // rsync distinguishes a directory from its contents by the source's trailing separator.
-  const normalizedPath = raw.endsWith(path.sep) && !resolved.endsWith(path.sep)
+  const trailingSeparator = raw.endsWith(path.sep) || (process.platform === "win32" && raw.endsWith("/"));
+  const normalizedPath = trailingSeparator && !resolved.endsWith(path.sep)
     ? resolved + path.sep : resolved;
   return { ok: true, normalizedPath };
 }
@@ -174,6 +196,25 @@ export function checkRemotePath(raw: string, hostId: string): PathCheck {
         ok: false,
         error: `refused: remote path '${raw}' contains the denied directory segment '${part}' (credential/rig-state class; conservative-over-broad by design — FR-4's short closed list).`,
       };
+    }
+  }
+  return { ok: true, normalizedPath: normalized };
+}
+
+/** Binary SFTP paths are never interpolated into a remote shell command. */
+export function checkRemoteSftpPath(raw: string, hostId: string): PathCheck {
+  if (!raw.startsWith("/") || /[\x00-\x1f\x7f\\]/.test(raw)) {
+    return { ok: false, error: `refused: SFTP path for '${hostId}' must be absolute, slash-separated and contain no control characters` };
+  }
+  // OpenSSH on Windows uses /C:/...; no alternate data streams or drive-relative operands.
+  const withoutDrive = raw.replace(/^\/[A-Za-z]:\//, "/");
+  if (withoutDrive.includes(":")) return { ok: false, error: "refused: colons are allowed only in an absolute /C:/ SFTP drive prefix" };
+  if (raw.split("/").includes("..")) return { ok: false, error: "refused: SFTP path contains a '..' traversal segment" };
+  const normalized = path.posix.normalize(raw);
+  for (const part of normalized.split("/")) {
+    // Also refuse Windows case/Win32 trailing-dot aliases of protected directories.
+    if ((DENIED_SEGMENTS as readonly string[]).includes(part.replace(/[ .]+$/, "").toLowerCase())) {
+      return { ok: false, error: `refused: SFTP path contains denied directory segment '${part}'` };
     }
   }
   return { ok: true, normalizedPath: normalized };
@@ -217,7 +258,7 @@ function resolveRemoteSide(hostId: string, rawPath: string, deps: PlanDeps): { o
   if (resolved.host.user !== undefined && !SSH_USER_SHAPE.test(resolved.host.user)) {
     return { ok: false, error: `registry entry '${hostId}' has a user field outside [A-Za-z0-9._-] — refusing to place it on an ssh command line`, code: "invalid_registry_user" };
   }
-  const pathCheck = checkRemotePath(rawPath, hostId);
+  const pathCheck = process.platform === "win32" ? checkRemoteSftpPath(rawPath, hostId) : checkRemotePath(rawPath, hostId);
   if (!pathCheck.ok) return { ok: false, error: pathCheck.error, code: "denied_path" };
   return { ok: true, side: { kind: "remote", path: pathCheck.normalizedPath, host: resolved.host } };
 }
@@ -269,6 +310,13 @@ function sideOperand(side: CopySide): string {
  *  across GNU rsync and openrsync — the G18-P3 absence pin); `--` ALWAYS
  *  precedes the two path operands; option positions are fixed. */
 export function buildRsyncArgv(plan: CopyPlan): string[] {
+  // SFTP's wider binary path grammar must never leak into rsync's remote shell.
+  for (const side of [plan.src, plan.dst]) {
+    if (side.kind === "remote") {
+      const checked = checkRemotePath(side.path, side.host?.id ?? "remote");
+      if (!checked.ok) throw new Error(checked.error);
+    }
+  }
   const argv = ["--archive", "--itemize-changes", "--stats"];
   if (plan.dryRun) argv.push("--dry-run");
   const remote = plan.src.kind === "remote" ? plan.src : plan.dst.kind === "remote" ? plan.dst : null;
@@ -283,9 +331,10 @@ export function buildRsyncArgv(plan: CopyPlan): string[] {
 
 // ── execution + classification ──────────────────────────────────────────────
 
-export type FileCopyFailedStep = "none" | "rsync-missing" | "permission-gate" | "ssh-unreachable" | "remote-command-failed";
+export type FileCopyFailedStep = "none" | "rsync-missing" | "ssh-missing" | "permission-gate" | "ssh-unreachable" | "remote-command-failed" | "local-copy-failed";
 
 export interface FileCopyResult {
+  transport?: "rsync" | "native-local" | "sftp";
   ok: boolean;
   failedStep: FileCopyFailedStep;
   exitCode: number | null;
@@ -338,6 +387,12 @@ export function classifyRsyncResult(exitCode: number | null, stdout: string, std
 }
 
 export async function runFileCopy(plan: CopyPlan, deps: { spawn?: SpawnFn } = {}): Promise<FileCopyResult> {
+  if (process.platform === "win32" && !deps.spawn && (plan.src.kind === "remote" || plan.dst.kind === "remote")) {
+    return runNativeSftpCopy(plan);
+  }
+  if (process.platform === "win32" && !deps.spawn && plan.src.kind === "local" && plan.dst.kind === "local") {
+    return runNativeLocalCopy(plan);
+  }
   const argv = buildRsyncArgv(plan);
   const spawn = deps.spawn ?? nodeSpawn;
   const child = spawn("rsync", argv, { stdio: ["ignore", "pipe", "pipe"] });

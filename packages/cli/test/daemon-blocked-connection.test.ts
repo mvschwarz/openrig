@@ -10,6 +10,9 @@
 //  (3) ECONNREFUSED keeps today's down guidance, and #495's unknown-write wording is kept;
 //  (4) --json carries the cause code.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { join, resolve, dirname } from "node:path";
+import { tmpdir } from "node:os";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, unlinkSync, rmSync } from "node:fs";
 import { DaemonClient, DaemonConnectionError } from "../src/client.js";
 import { renderDaemonTransportError } from "../src/cli-error.js";
 import {
@@ -120,7 +123,7 @@ describe("transport render: blocked is not down", () => {
     expect(err).toMatch(/#275/);
     expect(err).toMatch(/cannot change its own sandbox/);
     expect(err).toContain("The agent is waiting for permission or can't reach the daemon");
-    expect(err).toMatch(/docs\/reference\/help\.md/);
+    expect(err).toContain(join("docs", "reference", "help.md"));
     expect(err).not.toMatch(DOWN_ADVICE);
     expect(err).not.toMatch(WIDENING);
   });
@@ -221,20 +224,36 @@ describe("status probe keeps the cause; the precheck guard agrees with the trans
 });
 
 describe("offline help guide path (reachable without the daemon)", () => {
+  it.runIf(process.platform === "win32")("keeps an installed native case alias inside its own package", () => {
+    const root = mkdtempSync(join(tmpdir(), "native offline help "));
+    try {
+      const base = join(root, "NODE_MODULES", "@openrig", "cli", "dist");
+      mkdirSync(base, { recursive: true });
+      const bundled = resolve(base, "../daemon/docs/reference/help.md");
+      const outside = resolve(base, "../../../docs/reference/help.md");
+      for (const file of [bundled, outside]) {
+        mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, "synthetic help");
+      }
+      expect(resolveOfflineHelpPath(base, existsSync)).toBe(bundled);
+      unlinkSync(bundled);
+      expect(resolveOfflineHelpPath(base, existsSync)).toBeUndefined();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   it("prefers the source checkout's docs, then the copy bundled in the package", () => {
-    const checkout = "/r/packages/cli/src";
-    expect(resolveOfflineHelpPath(checkout, (p) => p === "/r/docs/reference/help.md" || p === "/r/packages/cli/daemon/docs/reference/help.md"))
-      .toBe("/r/docs/reference/help.md");
-    const installed = "/p/lib/node_modules/@openrig/cli/dist";
-    expect(resolveOfflineHelpPath(installed, (p) => p === "/p/lib/node_modules/@openrig/cli/daemon/docs/reference/help.md"))
-      .toBe("/p/lib/node_modules/@openrig/cli/daemon/docs/reference/help.md");
+    const checkout = resolve("/r/packages/cli/src");
+    const sourceHelp = resolve("/r/docs/reference/help.md");
+    const checkoutBundle = resolve("/r/packages/cli/daemon/docs/reference/help.md");
+    expect(resolveOfflineHelpPath(checkout, (p) => p === sourceHelp || p === checkoutBundle)).toBe(sourceHelp);
+    const installed = resolve("/p/lib/node_modules/@openrig/cli/dist");
+    const bundled = resolve("/p/lib/node_modules/@openrig/cli/daemon/docs/reference/help.md");
+    expect(resolveOfflineHelpPath(installed, (p) => p === bundled)).toBe(bundled);
     expect(resolveOfflineHelpPath(installed, () => false)).toBeUndefined();
   });
 
   it("never resolves outside an installed package, even if a file sits there", () => {
-    const installed = "/p/lib/node_modules/@openrig/cli/dist";
-    const outside = "/p/lib/node_modules/docs/reference/help.md";
-    const bundled = "/p/lib/node_modules/@openrig/cli/daemon/docs/reference/help.md";
+    const installed = resolve("/p/lib/node_modules/@openrig/cli/dist");
+    const outside = resolve("/p/lib/node_modules/docs/reference/help.md");
+    const bundled = resolve("/p/lib/node_modules/@openrig/cli/daemon/docs/reference/help.md");
     expect(resolveOfflineHelpPath(installed, (p) => p === outside || p === bundled)).toBe(bundled);
     expect(resolveOfflineHelpPath(installed, (p) => p === outside)).toBeUndefined();
   });

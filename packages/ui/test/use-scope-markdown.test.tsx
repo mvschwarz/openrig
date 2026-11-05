@@ -37,6 +37,15 @@ afterEach(() => {
 });
 
 describe("resolveScopePathToAllowlist (pure)", () => {
+  it.each([
+    ["C:\\work", "C:/work/missions/release", "missions/release"],
+    ["\\\\host\\share", "\\\\host\\share\\mission", "mission"],
+    ["\\\\?\\C:\\work", "\\\\?\\C:\\work\\mission", "mission"],
+    ["/work", "/work/literal\\name", "literal\\name"],
+  ])("uses the server root syntax for %s", (root, scope, relPath) => {
+    expect(resolveScopePathToAllowlist([{ name: "ws", path: root }], scope)).toEqual({ rootName: "ws", relPath });
+    expect(resolveScopePathToAllowlist([{ name: "ws", path: root }], root)).toEqual({ rootName: "ws", relPath: "" });
+  });
   it("matches the deepest root that prefixes the absolute scope path", () => {
     const roots = [
       { name: "home", path: "/Users/x" },
@@ -59,6 +68,19 @@ describe("resolveScopePathToAllowlist (pure)", () => {
 });
 
 describe("useScopeMarkdown — production wire honors arbitrary filename", () => {
+  it.each(["C:\\work", "\\\\host\\share"])("requests a native scope through its served root: %s", async root => {
+    const reads: string[] = [];
+    fetchSpy.mockImplementation(async (input: string) => {
+      const url = new URL(String(input), "http://fixture");
+      if (url.pathname === "/api/files/roots") return Response.json({ roots: [{ name: "ws", path: root }] });
+      if (url.pathname === "/api/files/read") { reads.push(url.searchParams.get("path")!); return Response.json({ content: "# Native scope", truncated: false }); }
+      throw Error("Unexpected fixture request");
+    });
+    const { result } = renderHook(() => useScopeMarkdown(`${root}\\missions\\release`, "README.md"), { wrapper: makeWrapper() });
+    await waitFor(() => expect(result.current.content).toBe("# Native scope"));
+    expect(reads).toEqual(["missions/release/README.md"]);
+    expect(result.current.resolved).toEqual({ rootName: "ws", relPath: "missions/release" });
+  });
   it("fetches <scopePath>/README.md when filename='README.md' (mission Overview tab path)", async () => {
     fetchSpy.mockImplementation(async (url: string) => {
       if (url.startsWith("/api/files/roots")) {

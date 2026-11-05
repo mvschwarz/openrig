@@ -6,6 +6,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { RunProgramIo } from "./cli-error.js";
+import { serveBuiltRootHelp } from "./root-help.js";
 
 const REEXEC_GUARD_ENV = "OPENRIG_BIN_REEXEC";
 
@@ -23,7 +24,8 @@ export function resolveBinEntry(invokedPath = process.argv[1], moduleUrl = impor
 export function isDirectRun(argv1 = process.argv[1], moduleUrl = import.meta.url): boolean {
   if (!argv1) return false;
   try {
-    return realpathSync(argv1) === realpathSync(fileURLToPath(moduleUrl));
+    const canonical = process.platform === "win32" ? realpathSync.native : realpathSync;
+    return canonical(argv1) === canonical(fileURLToPath(moduleUrl));
   } catch {
     return false;
   }
@@ -117,6 +119,7 @@ export async function run(argv = process.argv, io: RunProgramIo = {}): Promise<v
   }
 
   const entryPath = resolveBinEntry(normalizedArgv[1], import.meta.url);
+  if (serveBuiltRootHelp(normalizedArgv, entryPath, io)) return;
   // A named command loads only its own module (lazy-program.ts), which ships beside the entry.
   if (normalizedArgv.length > 2) {
     const lazyPath = path.join(path.dirname(entryPath), "lazy-program.js");

@@ -69,6 +69,24 @@ test("the content scan executes the named full-mode guard with the artifact boun
   }
 });
 
+test("nested native package roots are scanned while a sibling root is refused without replacing a receipt", () => {
+  withFixture(({ repo, rules, review, receipt }) => {
+    const packageRoot = join(repo, "packages/fixture space");
+    const publicFile = join(packageRoot, "public/guide.md");
+    write(join(packageRoot, "package.json"), JSON.stringify({ name: "nested-fixture", version: "1.0.0", files: ["public"] }));
+    write(publicFile, "Generic product guidance.\n");
+    commitAll(repo, "nested package");
+    const cutSha = gitHead(repo);
+    writeFileSync(review, JSON.stringify({ surfaces: [{ path: "public/guide.md", sha256: sha256(publicFile), verdict: "ship", reason: "Generic guidance.", candidateDispositions: [] }] }));
+    const result = runGate({ repo, rules, review, receipt, cutSha, packageRoot });
+    assert.equal(result.status, 0, result.stderr);
+    const original = readFileSync(receipt, "utf8");
+    const outside = runGate({ repo, rules, review, receipt, cutSha, packageRoot: repo + "-sibling" });
+    assert.equal(outside.status, 1); assert.match(outside.stderr, /package root must be inside/);
+    assert.equal(readFileSync(receipt, "utf8"), original);
+  });
+});
+
 test("the substance gate needs the leak guard's term lists: --rules or the file the environment names", () => {
   withFixture(({ repo, rules, review, receipt }) => {
     const publicFile = join(repo, "public/guide.md");
@@ -420,7 +438,7 @@ function writeGateHarness(root, source, invocationPath) {
   mkdirSync(root, { recursive: true });
   const gate = join(root, "check-substance-gate.mjs");
   writeFileSync(gate, source);
-  for (const module of ["internal-leak-scanner.mjs", "leak-guard-rules.mjs"]) {
+  for (const module of ["internal-leak-scanner.mjs", "leak-guard-rules.mjs", "npm-command.mjs"]) {
     writeFileSync(join(root, module), readFileSync(resolve("scripts", module)));
   }
   writeFileSync(join(root, "check-internal-leak-guard.mjs"), [
@@ -474,11 +492,11 @@ function withFixture(run) {
   }
 }
 
-function runGate({ repo, rules, review, receipt, cutSha, gate = GATE }) {
+function runGate({ repo, rules, review, receipt, cutSha, gate = GATE, packageRoot = repo }) {
   return spawnSync(process.execPath, [
     gate,
     "--repo", repo,
-    "--package-root", repo,
+    "--package-root", packageRoot,
     "--surface-manifest", join(repo, "substance-surfaces.json"),
     "--rules", rules,
     "--review", review,

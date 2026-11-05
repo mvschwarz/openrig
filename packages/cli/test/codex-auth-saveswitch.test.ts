@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveCodexHome, authSave, authSwitch, authList } from "../src/lib/codex-auth.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
 
 const SENTINEL = "SENTINEL_TOKEN_MUST_NEVER_APPEAR_sk-xyz789";
 let home: string;
@@ -28,8 +29,9 @@ describe("authSave (snapshot active auth -> named profile, 0600, no content echo
     expect(JSON.stringify(r)).not.toContain(SENTINEL);
     const saved = path.join(paths.profileDir, "work.json");
     expect(fs.existsSync(saved)).toBe(true);
-    expect((fs.statSync(saved).mode & 0o777).toString(8)).toBe("600");
-    expect((fs.statSync(paths.profileDir).mode & 0o777).toString(8)).toBe("700");
+    expectPrivateFile(saved);
+    if (process.platform === "win32") expectPrivateFile(paths.profileDir);
+    else expect((fs.statSync(paths.profileDir).mode & 0o777).toString(8)).toBe("700");
   });
 
   it("reports not_configured when there is no active auth file", () => {
@@ -60,7 +62,7 @@ describe("authSwitch (activate a saved profile, restart note, no content echo)",
     expect(r).toMatchObject({ ok: true, name: "work", mode: "600" });
     if (r.ok) expect(r.note).toMatch(/restart/i);
     expect(JSON.stringify(r)).not.toContain(SENTINEL);
-    expect((fs.statSync(paths.activeAuth).mode & 0o777).toString(8)).toBe("600");
+    expectPrivateFile(paths.activeAuth);
   });
 
   it("reports missing_profile for an unsaved profile", () => {

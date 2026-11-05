@@ -8,24 +8,16 @@ import { describe, it, expect, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { createServer } from "node:net";
+import { join, resolve } from "node:path";
+import { closedOwnedHttpPort } from "./helpers/owned-http-fixture.js";
 import { runFrontDoor, resolveTuiPath, probeFrontDoor, type FrontDoorIo } from "../src/front-door.js";
 import { diagnoseRuntimePosture, observeClaudePermission } from "../../daemon/src/domain/permission-drift.js";
 import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 
-// A GUARANTEED-refused local port (bind an ephemeral port, capture it, close → connecting refuses).
-// A REAL socket refusal, not a hand-built error — buys the actual Node/undici rejection shape.
+// A high local port closed before the request, avoiding fetch's own bad-port
+// rejection. A released port cannot be reserved against another process.
 async function refusedPort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = typeof addr === "object" && addr ? addr.port : 0;
-      srv.close(() => resolve(port));
-    });
-  });
+  return closedOwnedHttpPort();
 }
 
 function io(overrides: Partial<FrontDoorIo> = {}): FrontDoorIo & {
@@ -425,9 +417,9 @@ describe("front-door probe routing", () => {
 
 describe("resolveTuiPath — monorepo-first, bundled fallback (the daemon resolver pattern)", () => {
   it("prefers the monorepo sibling dist, falls back to the bundled copy, null when neither", () => {
-    const base = "/repo/packages/cli/dist";
-    const mono = join("/repo/packages/cli/dist", "../../tui/dist/main.js");
-    const bundled = join("/repo/packages/cli/dist", "../tui/dist/main.js");
+    const base = resolve("/repo/packages/cli/dist");
+    const mono = resolve(base, "../../tui/dist/main.js");
+    const bundled = resolve(base, "../tui/dist/main.js");
     expect(resolveTuiPath(base, (p) => p === mono)).toBe(mono);
     expect(resolveTuiPath(base, (p) => p === bundled)).toBe(bundled);
     expect(resolveTuiPath(base, () => false)).toBeNull();

@@ -23,7 +23,7 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
-import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
+import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxAttachCommand, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
 
 export interface TerminalDeps extends StatusDeps {
   windowDeps?: WindowDeps;
@@ -235,7 +235,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           if (client.baseUrl && !isLocalTmuxHost(client.baseUrl)) {
             throw new Error("Terminal attachment uses local tmux; run this command on the selected daemon's machine.");
           }
-          const response = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status");
+          const response = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown; command?: unknown } }>("/api/terminal/status");
           if (response.status >= 400) throw new Error(`Cannot read the tmux server (HTTP ${response.status}).`);
           if (response.data.tmux?.serverArgs === undefined) {
             throw new Error("This daemon cannot report its tmux server. Update and restart it before using terminal attach.");
@@ -243,6 +243,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           await assertLocalTmux(client, response.data.tmux.mode);
           process.exitCode = await (deps.attachTmux ?? attachTmux)({
             session, serverArgs: readTmuxServerArgs(response.data.tmux.serverArgs), readOnly: opts.readOnly ?? false,
+            ...(response.data.tmux.command !== undefined ? { command: readTmuxAttachCommand(response.data.tmux.command) } : {}),
           });
         } catch (error) {
           console.error(error instanceof Error ? error.message : String(error));

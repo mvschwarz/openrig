@@ -450,7 +450,9 @@ describe("Bundle API routes", () => {
     expect(body.digestValid).toBe(false);
   });
 
-  it.each([false, true].flatMap(imported => ["missing", "dangling", "unreadable", "unreadable-file"].map(kind => ({ imported, kind }))))("saves a recovery bundle with durable unresolved-skill warnings (imported=$imported, kind=$kind)", async ({ imported, kind }) => {
+  it.for([false, true].flatMap(imported => ["missing", "missing-file-link", "dangling", "unreadable", "unreadable-file"].map(kind => ({ imported, kind }))))("saves a recovery bundle with durable unresolved-skill warnings (imported=$imported, kind=$kind)", async ({ imported, kind }, context) => {
+    // chmod does not remove Windows read access; these cases prove POSIX permissions only.
+    if (process.platform === "win32" && (kind === "unreadable" || kind === "unreadable-file")) context.skip();
     const agentDir = path.join(tmpDir, "agents", "impl");
     const skillAgentDir = imported ? path.join(agentDir, "shared") : agentDir;
     fs.mkdirSync(skillAgentDir, { recursive: true });
@@ -541,17 +543,19 @@ describe("Bundle API routes", () => {
     const previousArchive = fs.readFileSync(outputPath);
     const previousDigest = fs.readFileSync(`${outputPath}.sha256`);
     // The missing-data exception is scoped to declared skills, never unrelated files.
-    fs.unlinkSync(path.join(skillAgentDir, "README.md"));
-    fs.symlinkSync("absent-readme", path.join(skillAgentDir, "README.md"));
-    const unrelated = await app.request("/api/bundles/create", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ specPath, bundleName: "unrelated-error", bundleVersion: "0.1.0", outputPath }),
-    });
-    expect(unrelated.status).toBe(500);
-    expect(fs.readFileSync(outputPath)).toEqual(previousArchive);
-    expect(fs.readFileSync(`${outputPath}.sha256`)).toEqual(previousDigest);
-    fs.unlinkSync(path.join(skillAgentDir, "README.md"));
-    fs.writeFileSync(path.join(skillAgentDir, "README.md"), "# Surviving recovery context");
+    if (kind === "missing-file-link") {
+      fs.unlinkSync(path.join(skillAgentDir, "README.md"));
+      fs.symlinkSync("absent-readme", path.join(skillAgentDir, "README.md"));
+      const unrelated = await app.request("/api/bundles/create", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ specPath, bundleName: "unrelated-error", bundleVersion: "0.1.0", outputPath }),
+      });
+      expect(unrelated.status).toBe(500);
+      expect(fs.readFileSync(outputPath)).toEqual(previousArchive);
+      expect(fs.readFileSync(`${outputPath}.sha256`)).toEqual(previousDigest);
+      fs.unlinkSync(path.join(skillAgentDir, "README.md"));
+      fs.writeFileSync(path.join(skillAgentDir, "README.md"), "# Surviving recovery context");
+    }
     fs.writeFileSync(path.join(agentDir, "agent.yaml"), "invalid: agent");
     const invalid = await app.request("/api/bundles/create", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -1154,7 +1158,7 @@ describe("Bundle API routes", () => {
   // (without unpack's verifyArchiveDigest + tar.list unsafe-entry prescan) must
   // make this test fail — the unsafe symlink would be silently extracted and
   // bootstrap would see an attacker-controlled link target.
-  it("POST /api/bundles/install rejects an archive containing a symlink entry via the safe path (B1 repair)", async () => {
+  it.each(["filesystem", "encoded-header"])("POST /api/bundles/install rejects an archive containing a symlink entry via the safe path (B1 repair, %s)", async (archiveKind) => {
     const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-unsafe-staging-"));
     const bundlePath = path.join(tmpDir, "unsafe-symlink.rigbundle");
     try {
@@ -1169,13 +1173,34 @@ describe("Bundle API routes", () => {
         'packages: []',
       ].join("\n"));
       fs.writeFileSync(path.join(stagingDir, "rig.yaml"), 'schema_version: 1\nname: x\nversion: "1.0"\nnodes: []\nedges: []');
-      fs.symlinkSync("/etc/passwd", path.join(stagingDir, "evil-symlink"));
-
       const tar = await import("tar");
-      await tar.create(
-        { gzip: { level: 9 }, file: bundlePath, cwd: stagingDir, portable: true },
-        ["bundle.yaml", "rig.yaml", "evil-symlink"],
-      );
+      if (archiveKind === "filesystem") {
+        fs.symlinkSync("/etc/passwd", path.join(stagingDir, "evil-symlink"));
+        await tar.create(
+          { gzip: { level: 9 }, file: bundlePath, cwd: stagingDir, portable: true },
+          ["bundle.yaml", "rig.yaml", "evil-symlink"],
+        );
+      } else {
+        // A real tar SymbolicLink entry without requiring host file-symlink privileges.
+        const blocks: Buffer[] = [];
+        for (const file of ["bundle.yaml", "rig.yaml"]) {
+          const contents = fs.readFileSync(path.join(stagingDir, file));
+          const header = new tar.Header({ path: file, type: "File", mode: 0o644, size: contents.length });
+          header.encode();
+          blocks.push(header.block!, contents, Buffer.alloc((512 - contents.length % 512) % 512));
+        }
+        const link = new tar.Header({ path: "evil-symlink", type: "SymbolicLink", linkpath: "/etc/passwd", mode: 0o777, size: 0 });
+        link.encode();
+        blocks.push(link.block!, Buffer.alloc(1024));
+        const { gzipSync } = await import("node:zlib");
+        fs.writeFileSync(bundlePath, gzipSync(Buffer.concat(blocks)));
+      }
+
+      const archiveEntries: Array<{ path: string; type: string; linkpath: string }> = [];
+      await tar.list({ file: bundlePath, onReadEntry: entry => { archiveEntries.push({ path: entry.path, type: entry.type, linkpath: entry.linkpath }); } });
+      const expectedLink = archiveKind === "filesystem"
+        ? fs.readlinkSync(path.join(stagingDir, "evil-symlink")).replaceAll("\\", "/") : "/etc/passwd";
+      expect(archiveEntries).toContainEqual({ path: "evil-symlink", type: "SymbolicLink", linkpath: expectedLink });
 
       // Write a valid sibling .sha256 so digest verification PASSES — proving
       // the prescan is what catches the symlink, not the digest check.
@@ -2289,7 +2314,7 @@ describe("Bundle API routes", () => {
   // that looks lexically contained but symlinks to an outside dir must
   // be rejected. Without realpath validation, cpSync dereference would
   // copy the outside dir tree into the archive.
-  it("POST /api/bundles/create rejects author bundle.yaml plugin that is a symlink targeting outside sourceRoot", async () => {
+  it.each(process.platform === "win32" ? ["dir", "junction"] as const : ["dir"] as const)("POST /api/bundles/create rejects author bundle.yaml plugin that is a %s link targeting outside sourceRoot", async (linkType) => {
     const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "create-symlink-escape-dir-src-"));
     const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-symlink-escape-dir-outside-"));
     const outputPath = path.join(tmpDir, "symlink-escape-dir.rigbundle");
@@ -2313,7 +2338,7 @@ describe("Bundle API routes", () => {
 
       // Symlink inside sourceRoot/plugins → outside dir
       fs.mkdirSync(path.join(sourceRoot, "plugins"), { recursive: true });
-      fs.symlinkSync(outsideDir, path.join(sourceRoot, "plugins/escape"));
+      fs.symlinkSync(outsideDir, path.join(sourceRoot, "plugins/escape"), linkType);
 
       fs.writeFileSync(path.join(sourceRoot, "bundle.yaml"), [
         'plugins:',

@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { homedir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { execArgvCommand } from "../adapters/tmux-exec.js";
 import { tmuxServerArgs } from "../adapters/tmux-server.js";
+import { readPlatformEnv } from "./platform-env.js";
 
 export type TmuxServerMode = "inherit" | "isolated";
 
@@ -50,8 +52,16 @@ interface SelectionOptions {
 }
 
 function canonical(file: string): string {
-  try { return fs.realpathSync(file); }
-  catch { return path.resolve(file); }
+  try { return process.platform === "win32" ? fs.realpathSync.native(file) : fs.realpathSync(file); }
+  catch (error) {
+    const absolute = path.resolve(file), parent = path.dirname(absolute);
+    // New homes still inherit the physical spelling of their existing parent;
+    // otherwise their socket identity changes after the first mkdir.
+    if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "ENOENT" && parent !== absolute) {
+      return path.join(canonical(parent), path.basename(absolute));
+    }
+    return absolute;
+  }
 }
 
 /** TMUX appends two numeric fields; a socket path itself may contain commas. */
@@ -61,16 +71,26 @@ export function inheritedTmuxSocket(env: NodeJS.ProcessEnv, uid: number): string
   return path.join(canonical(env.TMUX_TMPDIR?.trim() || "/tmp"), `tmux-${uid}`, "default");
 }
 
+/** psmux accepts both its legacy TMUX path and a native -S path. */
+export function inheritedPsmuxSocket(env: NodeJS.ProcessEnv): string {
+  const inherited = readPlatformEnv(env, "TMUX", "win32")?.replace(/,\d+,\d+$/, "");
+  if (inherited && (path.isAbsolute(inherited) || path.win32.isAbsolute(inherited))) return inherited;
+  const root = readPlatformEnv(env, "PSMUX_DATA_DIR", "win32") ?? path.join(readPlatformEnv(env, "USERPROFILE", "win32") || homedir(), ".psmux");
+  return path.join(canonical(root || "."), "default");
+}
+
 /** Listing the old server is observation only; it never starts or stops a server. */
-export async function inspectTmuxServer(socket: string): Promise<ServerInspection> {
+export async function inspectTmuxServer(socket: string, execute = execArgvCommand): Promise<ServerInspection> {
   try {
     // Outside tmux, a C locale otherwise sanitizes the tab to '_', losing both
     // the names and their ownership. This is a machine-readable protocol.
-    const output = await execArgvCommand(["tmux", "-u", "-S", socket, "list-sessions", "-F", "#{session_name}\t#{OPENRIG_HOME}"]);
+    // A nonempty suffix preserves an empty owner field in clients that trim lines.
+    const suffix = "\topenrig-owner-v1";
+    const output = await execute(["tmux", "-u", "-S", socket, "list-sessions", "-F", "#{session_name}\t#{OPENRIG_HOME}" + suffix]);
     const lines = output.split(/\r?\n/).filter(Boolean);
-    if (lines.some(line => !line.includes("\t"))) return { state: "unavailable" };
+    if (lines.some(line => !line.endsWith(suffix) || !line.slice(0, -suffix.length).includes("\t"))) return { state: "unavailable" };
     return { state: "available", sessions: lines.map(line => {
-      const [name, ...home] = line.split("\t");
+      const [name, ...home] = line.slice(0, -suffix.length).split("\t");
       const owner = home.join("\t");
       return { name: name!, ...(owner ? { home: owner } : {}) };
     }) };
@@ -94,7 +114,9 @@ function readRecord(file: string, home: string): ServerRecord | null {
   }
   const record = value as Partial<ServerRecord> | null;
   const pinned = record?.pinned === true || record?.mode === "isolated";
-  if (!record || record.version !== 1 || record.home !== home
+  const matchesHome = typeof record?.home === "string" && path.isAbsolute(record.home)
+    && (process.platform === "win32" ? canonical(record.home) === home : record.home === home);
+  if (!record || record.version !== 1 || !matchesHome
     || !["inherit", "isolated"].includes(record.mode ?? "")
     || (record.pinned !== undefined && typeof record.pinned !== "boolean")
     || (record.mode === "isolated" && record.pinned === false)
@@ -151,12 +173,13 @@ function writeRecord(file: string, record: ServerRecord): void {
  */
 export async function selectTmuxServer(options: SelectionOptions): Promise<TmuxServerSelection> {
   const env = options.env ?? process.env;
+  const windows = (options.platform ?? process.platform) === "win32";
   const uid = options.uid ?? process.getuid?.();
-  if ((options.platform ?? process.platform) === "win32" || uid === undefined) {
+  if (!windows && uid === undefined) {
     return {
       requestedMode: options.mode, mode: "inherit", serverArgs: [], executionArgs: [],
       migrationPending: options.mode === "isolated", blockingSessions: [],
-      ...(options.mode === "isolated" ? { note: "Dedicated tmux servers require POSIX tmux; psmux keeps its current server." } : {}),
+      ...(options.mode === "isolated" ? { note: "Cannot select a dedicated tmux server without a user identity." } : {}),
     };
   }
 
@@ -181,10 +204,11 @@ export async function selectTmuxServer(options: SelectionOptions): Promise<TmuxS
     }
     if (marker.error && (!previous || previous.pinned || options.mode === "isolated")) throw marker.error;
   }
-  const inherited = inheritedTmuxSocket(env, uid);
-  const namespace = "openrig-" + createHash("sha256").update(home).digest("hex").slice(0, 20);
+  const inherited = windows ? inheritedPsmuxSocket(env) : inheritedTmuxSocket(env, uid!);
+  const namespace = "openrig-" + createHash("sha256").update(windows ? home.toLowerCase() : home).digest("hex").slice(0, 20);
   const isolated = previous?.isolatedSocketPath
-    ?? path.join(canonical(env.TMUX_TMPDIR?.trim() || "/tmp"), `tmux-${uid}`, namespace);
+    ?? (windows ? path.join(home, namespace)
+      : path.join(canonical(env.TMUX_TMPDIR?.trim() || "/tmp"), `tmux-${uid}`, namespace));
   const desired = options.mode === "isolated" ? isolated : inherited;
   const oldSocket = previous?.socketPath ?? inherited;
   let mode = options.mode;
@@ -215,7 +239,7 @@ export async function selectTmuxServer(options: SelectionOptions): Promise<TmuxS
   }
 
   const executionArgs = mode === "isolated" || migrationPending ? ["-S", socketPath] : [];
-  if (executionArgs.length > 0) {
+  if (executionArgs.length > 0 && !windows) {
     // -S does not create tmux's usual per-user directory. The inherited path
     // keeps tmux's own directory and length handling, as it did before selection.
     const socketLimit = (options.platform ?? process.platform) === "darwin" ? 104 : 108;
@@ -239,7 +263,7 @@ export async function selectTmuxServer(options: SelectionOptions): Promise<TmuxS
   }
   return {
     requestedMode: options.mode, mode, socketPath, executionArgs,
-    serverArgs: executionArgs.length > 0 ? [...executionArgs] : tmuxServerArgs(env, uid),
+    serverArgs: executionArgs.length > 0 ? [...executionArgs] : windows ? ["-S", inherited] : tmuxServerArgs(env, uid),
     migrationPending, blockingSessions, ...(note ? { note } : {}),
   };
 }

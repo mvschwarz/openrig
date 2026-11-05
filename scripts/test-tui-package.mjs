@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { npmCommand } from "./npm-command.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cli = path.join(root, "packages", "cli");
@@ -28,10 +29,14 @@ async function assertDelayedSplits(entry, pkgDir) {
         env: process.env,
       });
       let stderr = "";
+      // Consume rendered frames so the child's piped terminal cannot block.
+      child.stdout.resume();
       child.stderr.on("data", (chunk) => { stderr += chunk; });
       await wait(40);
       child.stdin.write(bytes.subarray(0, split));
-      await wait(80);
+      // A lone Esc intentionally becomes a key after 50 ms. Once the CSI
+      // prefix is recognized, longer transport gaps must retain the sequence.
+      await wait(bytes[split - 1] === 0x1b ? 20 : 80);
       child.stdin.write(bytes.subarray(split));
       await wait(20);
       child.stdin.write("q");
@@ -46,8 +51,8 @@ async function assertDelayedSplits(entry, pkgDir) {
 }
 
 try {
-  execFileSync("npm", ["run", "build:package"], { cwd: root, stdio: "inherit" });
-  const packed = JSON.parse(execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", temp], { cwd: cli, encoding: "utf8" }));
+  execFileSync(...npmCommand(["run", "build:package"]), { cwd: root, stdio: "inherit" });
+  const packed = JSON.parse(execFileSync(...npmCommand(["pack", "--ignore-scripts", "--json", "--pack-destination", temp]), { cwd: cli, encoding: "utf8" }));
   const tarball = path.join(temp, packed[0].filename);
   execFileSync("tar", ["-xzf", tarball, "-C", temp]);
 
@@ -56,9 +61,13 @@ try {
   assert.equal(pkg.bin["openrig-tui"], "tui/dist/main.js");
   const entry = path.join(pkgDir, pkg.bin["openrig-tui"]);
   assert.ok(fs.existsSync(entry), "packed TUI entrypoint is missing");
-  assert.notEqual(fs.statSync(entry).mode & 0o111, 0, "packed TUI entrypoint is not executable");
+  // Windows launches the declared Node entry through npm's shim; POSIX mode
+  // bits do not describe whether that entry can execute on Windows.
+  if (process.platform !== "win32") {
+    assert.notEqual(fs.statSync(entry).mode & 0o111, 0, "packed TUI entrypoint is not executable");
+  }
 
-  fs.symlinkSync(path.join(root, "node_modules"), path.join(pkgDir, "node_modules"), "dir");
+  fs.symlinkSync(path.join(root, "node_modules"), path.join(pkgDir, "node_modules"), process.platform === "win32" ? "junction" : "dir");
   const launched = spawnSync(process.execPath, [entry, "--demo", "--socket", path.join(temp, "tui.sock")], {
     cwd: pkgDir,
     input: "q",

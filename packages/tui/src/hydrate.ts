@@ -340,7 +340,7 @@ function toNeedsItem(item: NeedsYouItemRead): NeedsItem {
 
 function resolveAgentRef(ref: string, agentSpecNames: Set<string>): string {
   if (agentSpecNames.has(ref)) return ref;
-  const basename = ref.replace(/\/+$/, "").split("/").at(-1)?.replace(/\.(?:ya?ml|json)$/, "");
+  const basename = ref.replaceAll("\\", "/").replace(/\/+$/, "").split("/").at(-1)?.replace(/\.(?:ya?ml|json)$/, "");
   return basename && agentSpecNames.has(basename) ? basename : ref;
 }
 

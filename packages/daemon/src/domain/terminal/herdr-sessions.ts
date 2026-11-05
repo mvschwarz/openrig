@@ -4,12 +4,18 @@ import { HerdrAdapter } from "./herdr-adapter.js";
 import { createHerdrSocketRpc, createHerdrSocketTransport, resolveHerdrSocketPath } from "./herdr-transport.js";
 import type { ProviderStatus } from "./terminal-provider.js";
 import { HerdrFollowView, type ReadFollowInput } from "./herdr-follow-view.js";
+import { readPlatformEnv } from "../platform-env.js";
 
 /** Keep the daemon's configured endpoint while selecting explicit sessions per
  * request. No request mutates process.env or another request's transport.
  */
 export function createHerdrProviders(env: NodeJS.ProcessEnv = process.env, input?: ReadFollowInput) {
   env = { ...env };
+  if (process.platform === "win32") for (const name of ["XDG_CONFIG_HOME", "HERDR_SESSION", "HERDR_SOCKET_PATH", "HOME", "APPDATA", "USERPROFILE", "PATH"]) {
+    const value = readPlatformEnv(env, name, "win32");
+    for (const key of Object.keys(env)) if (key.toUpperCase() === name) delete env[key];
+    if (value !== undefined) env[name] = value;
+  }
   if (env.XDG_CONFIG_HOME !== undefined) env.XDG_CONFIG_HOME = path.resolve(env.XDG_CONFIG_HOME);
   const defaultSocket = resolveHerdrSocketPath(env);
   let launch = 0;

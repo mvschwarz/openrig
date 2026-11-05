@@ -17,11 +17,19 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import { PluginVendorService } from "../src/domain/plugin-vendor-service.js";
 
 // Injectable fs ops for test mock
 function mockFs(initialFiles?: Record<string, string>) {
-  const store: Record<string, string> = { ...initialFiles };
+  const bytes: Record<string, string> = Object.fromEntries(Object.entries(initialFiles ?? {}).map(([file, contents]) => [path.resolve(file), contents]));
+  // Tests may inspect/mutate the same virtual file through either spelling.
+  const store = new Proxy(bytes, {
+    get: (target, key) => typeof key === "string" ? target[path.resolve(key)] : Reflect.get(target, key),
+    set: (target, key, value) => { target[path.resolve(String(key))] = value; return true; },
+    has: (target, key) => path.resolve(String(key)) in target,
+    deleteProperty: (target, key) => delete target[path.resolve(String(key))],
+  });
   return {
     readFile: (p: string) => { if (p in store) return store[p]!; throw new Error(`Not found: ${p}`); },
     writeFile: (p: string, c: string) => { store[p] = c; },
@@ -29,12 +37,12 @@ function mockFs(initialFiles?: Record<string, string>) {
       if (dest in store) throw Error(`Recovery path exists: ${dest}`);
       store[dest] = store[src]!;
     },
-    exists: (p: string) => p in store || Object.keys(store).some((k) => k.startsWith(p + "/")),
+    exists: (p: string) => p in store || Object.keys(store).some((k) => k.startsWith(path.resolve(p) + path.sep)),
     mkdirp: () => {},
-    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(dir + "/")).map((k) => k.slice(dir.length + 1)),
+    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(path.resolve(dir) + path.sep)).map((k) => path.relative(path.resolve(dir), k)),
     rmrf: (p: string) => {
       for (const k of Object.keys(store)) {
-        if (k === p || k.startsWith(p + "/")) delete store[k];
+        if (k === path.resolve(p) || k.startsWith(path.resolve(p) + path.sep)) delete store[k];
       }
     },
     _store: store,
@@ -66,7 +74,7 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
     expect(fs._store["/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json"]).toBe('{"name":"openrig-core","version":"0.1.0"}');
     expect(fs._store["/home/test/.openrig/plugins/openrig-core/.codex-plugin/plugin.json"]).toBe('{"name":"openrig-core","version":"0.1.0","description":"v"}');
     expect(fs._store["/home/test/.openrig/plugins/openrig-core/skills/openrig-user/SKILL.md"]).toBe("# openrig-user vendored");
-    expect(fs._store["/home/test/.openrig/plugins/openrig-core/hooks/claude.json"]).toBe('{"hooks":{}}');
+    expect(JSON.parse(fs._store["/home/test/.openrig/plugins/openrig-core/hooks/claude.json"]!)).toEqual({ hooks: {} });
   });
 
   it("ensureVendored is idempotent — re-running with same content does not re-write (hash-skip)", async () => {

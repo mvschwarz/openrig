@@ -36,7 +36,7 @@ it.each(["0", "99999"])("initializes and lists tools over stdio despite daemon p
   ]);
 }, 15_000);
 
-it.each(["eof", "sigterm"])("finishes rig mcp serve after native %s", async (mode) => {
+it.each(["eof", "sigterm"])("observes rig mcp serve closure after native %s", async (mode) => {
   const source = new URL("../src/commands/mcp.ts", import.meta.url).href;
   const script = `import { mcpCommand } from ${JSON.stringify(source)}; console.error("module-ready"); await mcpCommand().parseAsync(["serve", "--port", "7433"], { from: "user" }); console.error("command-closed");`;
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { stdio: ["pipe", "pipe", "pipe"] });
@@ -56,8 +56,16 @@ it.each(["eof", "sigterm"])("finishes rig mcp serve after native %s", async (mod
     stdout += chunk;
     if (mode === "sigterm" && !signaled && stdout.includes('"id":1')) { signaled = true; child.kill("SIGTERM"); }
   });
-  const code = await new Promise<number | null>((resolve, reject) => { child.once("close", resolve); child.once("error", reject); });
+  const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once("close", (code, signal) => resolve({ code, signal })); child.once("error", reject);
+  });
   clearTimeout(timer);
-  expect({ code, ready, timedOut }).toEqual({ code: 0, ready: true, timedOut: false });
-  expect(err).toContain("command-closed");
+  if (process.platform === "win32" && mode === "sigterm") {
+    // Node's Windows SIGTERM is unconditional termination, not a delivered JS signal.
+    expect({ ...exit, ready, timedOut }).toEqual({ code: null, signal: "SIGTERM", ready: true, timedOut: false });
+    expect(err).not.toContain("command-closed");
+  } else {
+    expect({ ...exit, ready, timedOut }).toEqual({ code: 0, signal: null, ready: true, timedOut: false });
+    expect(err).toContain("command-closed");
+  }
 });

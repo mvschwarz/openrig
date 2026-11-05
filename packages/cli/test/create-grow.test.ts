@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse as parseYaml } from "yaml";
+import { resolve } from "node:path";
 import type { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import { createProgram } from "../src/index.js";
@@ -61,6 +62,7 @@ const library = [{
   sourceType: "builtin",
   sourcePath: "/opt/openrig/specs/agents/orchestration/orchestrator/agent.yaml",
 }];
+const workCwd = resolve("/work");
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -95,7 +97,7 @@ describe("rig create", () => {
       "/api/rigs/import",
       expect.any(String),
       "text/yaml",
-      { "X-Rig-Root": "/work", "X-Cwd-Override": "/work" },
+      { "X-Rig-Root": workCwd, "X-Cwd-Override": workCwd },
       { timeoutMs: 120_000 },
     );
     const spec = parseYaml(sentYaml);
@@ -110,13 +112,13 @@ describe("rig create", () => {
           agent_ref: "path:/opt/openrig/specs/agents/orchestration/orchestrator",
           runtime: "claude-code",
           profile: "default",
-          cwd: "/work",
+          cwd: workCwd,
         }],
         edges: [],
       }],
       edges: [],
     });
-    expect(sentHeaders).toEqual({ "X-Rig-Root": "/work", "X-Cwd-Override": "/work" });
+    expect(sentHeaders).toEqual({ "X-Rig-Root": workCwd, "X-Cwd-Override": workCwd });
     expect(JSON.parse(logs.join("\n"))).toMatchObject({
       ok: true,
       rigId: "rig-1",
@@ -205,9 +207,9 @@ describe("rig grow", () => {
           agent_ref: "path:/opt/openrig/specs/agents/orchestration/orchestrator",
           runtime: "claude-code",
           profile: "default",
-          cwd: "/work",
+          cwd: workCwd,
         },
-        rigRoot: "/work",
+        rigRoot: workCwd,
       },
       { timeoutMs: 120_000 },
     );
@@ -347,7 +349,7 @@ describe("rig grow", () => {
           ],
           edges: [],
         },
-        rigRoot: "/work",
+        rigRoot: workCwd,
       }),
       { timeoutMs: 120_000 },
     );

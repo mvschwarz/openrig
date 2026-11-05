@@ -7,7 +7,7 @@
 // presence in lockstep with `full_transcript` summary key).
 //
 // Atomic emission via tempdir-then-rename:
-// 1. Write all files into a sibling tempdir (`<targetDir>.tmp-<rand>/`).
+// 1. Write all files into a uniquely named sibling tempdir.
 // 2. Validate the tempdir's restore-summary.json against the embedded
 //    JSON Schema (RESTORE_SUMMARY_SCHEMA from schema-validator.ts).
 // 3. If valid: rename tempdir → targetDir (single fs.rename; atomic on
@@ -260,7 +260,9 @@ export async function writePacket(opts: WritePacketOptions): Promise<WritePacket
   // unique name. The dirname() must exist and be writable; we don't
   // mkdir the parent for the operator (operator authority bedrock).
   const parentDir = dirname(opts.targetDir);
-  const tempPrefix = `${basename(opts.targetDir)}.tmp-restore-packet-`;
+  const targetName = basename(opts.targetDir);
+  const tempStem = Buffer.byteLength(targetName, "utf8") <= 100 ? targetName : "packet";
+  const tempPrefix = `${tempStem}.tmp-restore-packet-`;
   const tempDir = mkdtempSync(join(parentDir, tempPrefix));
 
   try {

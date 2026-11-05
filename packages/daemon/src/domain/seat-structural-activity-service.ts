@@ -1,3 +1,4 @@
+import { captureNamedSessionContent } from "../adapters/session-pane-lookup.js";
 import type Database from "better-sqlite3";
 import type { PaneCapture, TmuxAdapter } from "../adapters/tmux.js";
 import { communityHarnessPaneActivity, classifyPaneActivity, codexWorkingElapsed, isCodexLiveWorkingFrame, readSeatBeforePaste, type PaneActivityClassification } from "./session-transport.js";
@@ -111,7 +112,7 @@ export class SeatStructuralActivityService {
       observedAt = capture.capturedAt; // the capture's own time, never the end of the sweep (#309 review)
     } else {
       try {
-        content = await this.tmuxAdapter.capturePaneContent(sessionName, this.captureLines);
+        content = await captureNamedSessionContent(this.tmuxAdapter, sessionName, this.captureLines);
       } catch {
         this.latestBySession.delete(sessionName);
         return null;

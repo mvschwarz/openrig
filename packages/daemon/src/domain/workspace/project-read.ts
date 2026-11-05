@@ -90,7 +90,10 @@ export function projectById(c: Pick<ReadContext, "get">, id: string): ProjectRea
 }
 /** Prepared roots may spell the same directory through a symlink or dot segments. */
 export function sameProjectRoot(expected: string, actual: string): boolean {
-  try { return expected === actual || fs.realpathSync(expected) === fs.realpathSync(actual); }
+  try {
+    const realpath = process.platform === "win32" ? fs.realpathSync.native : fs.realpathSync;
+    return expected === actual || realpath(expected) === realpath(actual);
+  }
   catch { return false; } // Distinct unavailable paths cannot confirm project identity.
 }
 export function selectedProject(c: ReadContext): ProjectRead | null {

@@ -20,6 +20,9 @@
 // registry via the injected `resolveHost`.
 
 import { tileAttachArgv } from "./tile-attach.js";
+import { windowsTileAttachArgv, windowsSshTileAttachArgv } from "./windows-tile-attach.js";
+import { powershellQuote } from "../../adapters/windows-launch.js";
+import { bindNativeSessionName } from "./native-session-name.js";
 import type { HostEntry } from "../hosts/hosts-registry-reader.js";
 import type {
   AbsentSeat,
@@ -60,6 +63,8 @@ export interface ViewMemberInput {
 
 /** The composer's only side-channel: read-only host resolution from the registry. */
 export interface ComposeContext {
+  /** Target OS of local tiles; omitted preserves the POSIX composition contract. */
+  localPlatform?: NodeJS.Platform;
   /** Resolve a host id to its registry entry, or null if the id is unknown. */
   resolveHost(id: string): HostEntry | null;
   /** Panes per page for the target provider; defaults to PANES_PER_PAGE. */
@@ -185,7 +190,11 @@ export function composeView(
         ...(m.runtime ? { runtime: m.runtime } : {}),
         label: m.label,
         paneCommand: `ssh -t ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
-        recoveryCommand: `ssh -t ${shellQuote(dest)} ${shellQuote(recoveryCommand)}`,
+        ...(ctx.localPlatform === "win32" ? { attachArgv: windowsSshTileAttachArgv(dest, remoteCommand) } : {}),
+        recoveryCommand: ctx.localPlatform === "win32"
+          ? "& " + ["ssh", "-t", dest, recoveryCommand].map(powershellQuote).join(" ")
+          : `ssh -t ${shellQuote(dest)} ${shellQuote(recoveryCommand)}`,
+        recoveryShell: ctx.localPlatform === "win32" ? "powershell" : "sh",
         readOnly: m.readOnly,
       });
       continue;
@@ -208,13 +217,18 @@ export function composeView(
       });
       continue;
     }
-    const attachArgv = tileAttachArgv(ctx.localTmux ?? "tmux", ctx.localTmuxServer ?? [], m.tmuxSession, m.readOnly);
+    const attachArgv = (ctx.localPlatform === "win32" ? windowsTileAttachArgv : tileAttachArgv)(
+      ctx.localTmux ?? "tmux", ctx.localTmuxServer ?? [], m.tmuxSession, m.readOnly);
     opened.push({
       seat: m.seat,
       ...(m.runtime ? { runtime: m.runtime } : {}),
       label: m.label,
       paneCommand: attachArgv.map(shellQuote).join(" "),
-      recoveryCommand: `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
+      recoveryCommand: ctx.localPlatform === "win32"
+        ? "& " + (bindNativeSessionName(m.tmuxSession).marker ? attachArgv : [ctx.localTmux ?? "tmux", ...(ctx.localTmuxServer ?? []), "attach",
+          ...(m.readOnly ? ["-r"] : ["-f", "ignore-size"]), "-t", m.tmuxSession]).map(powershellQuote).join(" ")
+        : `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
+      recoveryShell: ctx.localPlatform === "win32" ? "powershell" : "sh",
       attachArgv,
       readOnly: m.readOnly,
     });

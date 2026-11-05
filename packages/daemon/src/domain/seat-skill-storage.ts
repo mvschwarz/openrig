@@ -1,10 +1,13 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { resourceDirectoryPath, resourceIdFromDirectoryName } from "./resource-directory-name.js";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { getOpenRigHome } from "../openrig-compat.js";
 import type { ReconcileSkillLoadoutResult, SkillLoadout, SkillLoadoutLocation, SkillRuntime } from "./skill-catalog.js";
 import { parseSkillFrontmatter } from "./skill-discovery.js";
 import { MANAGED_BLOCK_APPEND_SEPARATOR, hasEditedManagedBlock, managedBlockText } from "./managed-blocks.js";
+import { createWindowsPrivateDirectory } from "./private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "./windows-owned-text.js";
 
 // OPR.0.7.0.13 — where a team seat's skills live: storage OpenRig owns, outside the person's project and their own
 // skill folders, so a person's own agent opened in the project sees none of the team's skills.
@@ -133,17 +136,23 @@ function anchored(anchor: string, target: string, kind: "file" | "folder"): bool
   return true;
 }
 
-/** Whether folder `dir` is inside the seat storage at `root`, with no link on the way, itself included. */
+/** Native strict containment; the root itself is not a seat-owned child entry. */
+function seatDescendant(root: string, target: string): boolean {
+  const relative = nodePath.relative(nodePath.resolve(root), nodePath.resolve(target));
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(relative);
+}
+
+/** Whether folder `dir` is inside seat storage, with no link on the way, the folder included. */
 export function insideSeatStorageFolder(root: string, dir: string): boolean {
   const seatRoot = nodePath.resolve(root);
-  if (!nodePath.resolve(dir).startsWith(seatRoot + nodePath.sep)) return false;
+  if (!seatDescendant(seatRoot, dir)) return false;
   return anchored(seatsAnchor(seatRoot), dir, "folder");
 }
 
 /** Whether `file` is inside the seat storage at `root`, with no link on the way from the anchor all seats share. */
 export function insideSeatStorage(root: string, file: string): boolean {
   const seatRoot = nodePath.resolve(root);
-  if (!nodePath.resolve(file).startsWith(seatRoot + nodePath.sep)) return false;
+  if (!seatDescendant(seatRoot, file)) return false;
   return anchored(seatsAnchor(seatRoot), file, "file");
 }
 
@@ -163,7 +172,22 @@ export function writeInsideSeatStorage(root: string, file: string, bytes: string
     try { fs.mkdirSync(current); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
     if (!fs.lstatSync(current).isDirectory()) throw new Error(`${current} is not a folder inside this seat's storage`);
   }
-  const temp = `${file}.openrig-${process.pid}-${Date.now()}`;
+  if (process.platform === "win32" && lexists(file)) {
+    const stagingDirectory = createWindowsPrivateDirectory(nodePath.dirname(file));
+    const temp = nodePath.join(stagingDirectory, "skill.tmp");
+    try {
+      fs.writeFileSync(temp, bytes, { flag: "wx", ...(mode !== undefined ? { mode } : {}) });
+      if (mode !== undefined) fs.chmodSync(temp, mode);
+      replaceWindowsFilePreservingMetadata(file, temp);
+    } finally {
+      try { fs.unlinkSync(temp); } catch {}
+      try { fs.rmdirSync(stagingDirectory); } catch { /* Retain owned staging if cleanup is unavailable. */ }
+    }
+    return;
+  }
+  const temp = process.platform === "win32"
+    ? nodePath.join(nodePath.dirname(file), `.openrig-skill-${randomUUID()}.tmp`)
+    : `${file}.openrig-${process.pid}-${Date.now()}`;
   fs.writeFileSync(temp, bytes, { flag: "wx", ...(mode !== undefined ? { mode } : {}) });
   try {
     if (mode !== undefined) fs.chmodSync(temp, mode);
@@ -387,7 +411,7 @@ export function seatSkillsToKeep(
   const warnings: string[] = [];
   for (const entry of entries) {
     if (entry.category !== "skill") continue;
-    const target = nodePath.join(paths.skillsRoot, entry.effectiveId);
+    const target = resourceDirectoryPath(paths.skillsRoot, entry.effectiveId);
     if (!fs.existsSync(target)) continue;
     if (seatSkillDiffers(entry.absolutePath, target)) {
       warnings.push(`Restore: kept ${target}: it differs from its source ${entry.absolutePath} (an edit is never overwritten)`);
@@ -412,14 +436,23 @@ export function seatSkillReplay(input: {
 }): { skipEntryIds: Set<string>; skipFiles: Set<string>; warnings: string[] } {
   const { paths } = input;
   const notPutBack = [...input.rehydration.missing, ...input.rehydration.refused].map((f) => nodePath.resolve(f));
-  const blocked = (target: string) => notPutBack.some((f) => f === target || f.startsWith(target + nodePath.sep));
+  const blocked = (target: string) => notPutBack.some((f) => nodePath.relative(target, f) === "" || seatDescendant(target, f));
   const kept = seatSkillsToKeep(input.entries, paths);
   const skipEntryIds = new Set(kept.keep);
   const warnings = [...kept.warnings];
   for (const entry of input.entries) {
     if (entry.category !== "skill" || skipEntryIds.has(entry.effectiveId)) continue;
-    const target = nodePath.resolve(paths.skillsRoot, entry.effectiveId);
-    if (blocked(target)) {
+    const target = nodePath.resolve(resourceDirectoryPath(paths.skillsRoot, entry.effectiveId));
+    // A missing legacy directory no longer exists for the live path resolver
+    // to find. Its recorded spelling still identifies the saved resource;
+    // do not replay today's source into a newly encoded canonical directory.
+    const recordedIdentityBlocked = notPutBack.some(file => {
+      const relative = nodePath.relative(paths.skillsRoot, file);
+      if (relative === ".." || relative.startsWith(".." + nodePath.sep) || nodePath.isAbsolute(relative)) return false;
+      const parts = relative.split(nodePath.sep);
+      return parts.length > 1 && resourceIdFromDirectoryName(parts[0]!) === entry.effectiveId;
+    });
+    if (blocked(target) || recordedIdentityBlocked) {
       skipEntryIds.add(entry.effectiveId);
       warnings.push(`Restore: ${target} not projected again: its recorded source is gone or has changed`);
     }
@@ -482,8 +515,8 @@ export function seatAdditionLocations(paths: SeatSkillPaths): string[] {
 /** Every file OpenRig recorded writing into this seat's skills or launch additions: its recorded hash and source. */
 function recordedSeatSkillFiles(paths: SeatSkillPaths): Map<string, { sha256: string; source: string }> {
   const out = new Map<string, { sha256: string; source: string }>();
-  const roots = [paths.skillsRoot, ...seatAdditionLocations(paths)].map((dir) => nodePath.resolve(dir) + nodePath.sep);
-  const inside = (file: string) => roots.some((root) => file.startsWith(root));
+  const roots = [paths.skillsRoot, ...seatAdditionLocations(paths)];
+  const inside = (file: string) => roots.some((root) => seatDescendant(root, file));
   try {
     const manifest = JSON.parse(fs.readFileSync(paths.manifestPath, "utf8")) as { skills?: unknown };
     for (const skill of Array.isArray(manifest.skills) ? manifest.skills as Array<Record<string, unknown>> : []) {
@@ -560,8 +593,10 @@ export function cleanSeatSkills(paths: SeatSkillPaths, opts: { dropRecords?: boo
   }
   for (const dir of [paths.skillsRoot, ...seatAdditionLocations(paths)]) {
     // A linked location is refused above, file by file; nothing is walked through it.
-    if (dir !== paths.skillsRoot && lexists(dir) && !anchored(seatsAnchor(paths.root), dir, "folder")) continue;
-    for (const file of leftovers(dir)) if (!out.kept.includes(file) && !out.refused.includes(file)) out.kept.push(file);
+    if (lexists(dir) && !anchored(seatsAnchor(paths.root), dir, "folder")) continue;
+    for (const file of leftovers(dir)) {
+      if (!out.kept.some(kept => nodePath.relative(kept, file) === "") && !out.refused.some(refused => nodePath.relative(refused, file) === "")) out.kept.push(file);
+    }
   }
   // Nothing points at the storage any more: no Claude plugin, no Codex catalog (both are rebuilt on a restore). Each is
   // removed only while it is exactly what OpenRig wrote: the plugin manifest is a constant, and the catalog's digest
@@ -587,7 +622,7 @@ export function cleanSeatSkills(paths: SeatSkillPaths, opts: { dropRecords?: boo
   const anchor = seatsAnchor(paths.root);
   const emptied = new Set<string>();
   for (const file of removedFiles) {
-    for (let dir = nodePath.dirname(nodePath.resolve(file)); dir.startsWith(anchor + nodePath.sep); dir = nodePath.dirname(dir)) emptied.add(dir);
+    for (let dir = nodePath.dirname(nodePath.resolve(file)); seatDescendant(anchor, dir); dir = nodePath.dirname(dir)) emptied.add(dir);
   }
   for (const dir of [...emptied].sort((a, b) => b.split(nodePath.sep).length - a.split(nodePath.sep).length)) {
     try { if (anchored(anchor, dir, "folder") && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch {}

@@ -14,7 +14,8 @@ describe("literal TUI command arguments", () => {
     const action = parseCommand("read workspace/run  book.md");
     expect(action.type).toBe("file-open");
     if (action.type !== "file-open") throw new Error("file action required");
-    expect(readAllowedFile([{ name: "workspace", canonicalPath: realpathSync(root) }], action.target.root, action.target.path).content).toBe("requested document");
+    const canonical = process.platform === "win32" ? realpathSync.native(root) : realpathSync(root);
+    expect(readAllowedFile([{ name: "workspace", canonicalPath: canonical }], action.target.root, action.target.path).content).toBe("requested document");
   });
   it.each(["two  spaces", "a\tb", "Unicode α  β"])("keeps find/prefix filter parity for %s", (text) => {
     expect(parseCommand(`find ${text}`)).toEqual(parseCommand(`/${text}`));

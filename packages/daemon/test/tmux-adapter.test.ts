@@ -30,6 +30,19 @@ function mockExec(responses: Record<string, { stdout?: string; error?: Error }>)
 }
 
 describe("TmuxAdapter", () => {
+  it.each(["\n","\r\n"])("preserves attachment, active panes and client identity with %j record endings",async newline=>{
+    const name=" seat|notes ";
+    const adapter=new TmuxAdapter(mockExec({
+      "list-sessions":{stdout:`${name}|1|1790000100|1${newline}`},
+      "list-windows":{stdout:`0| window|notes |1|1${newline}`},
+      "list-panes":{stdout:`%1|0|C:/owned|path |80|24|1${newline}`},
+      "list-clients":{stdout:`client-1|${name}${newline}`},
+    }));
+    expect(await adapter.listSessions()).toEqual([{name,windows:1,created:"1790000100",attached:true}]);
+    expect(await adapter.listWindows(name)).toEqual([{index:0,name:" window|notes ",panes:1,active:true}]);
+    expect(await adapter.listPanes(name)).toEqual([{id:"%1",index:0,cwd:"C:/owned|path ",width:80,height:24,active:true}]);
+    expect(await adapter.listClients()).toEqual([{name:"client-1",session:name}]);
+  });
   it("starts only an empty terminal server and reconciles repeated requests", async () => {
     let live = false;
     const exec = vi.fn(async (command: string) => {
@@ -1392,13 +1405,16 @@ describe("TmuxAdapter", () => {
     it("respawnPane marks the names removed on the pane's session before the respawn, without -k", async () => {
       const exec = execWithGlobal(POLLUTED);
       await adapterFor(exec).respawnPane("%3", "codex", { env: { OPENRIG_NODE_ID: "n" } });
-      expect(exec.mock.calls.map((c) => c[0])).toEqual([
-        "tmux show-environment -g",
+      const commands = exec.mock.calls.map((c) => c[0]);
+      expect(commands[0]).toBe("tmux show-environment -g");
+      expect(commands.at(-1)).toBe("tmux respawn-pane -t '%3' -e 'OPENRIG_NODE_ID=n' 'codex'");
+      // Each inherited name must be removed before respawn; independent
+      // removals need not share an enumeration order across host platforms.
+      expect(commands.slice(1, -1).sort()).toEqual([
         "tmux set-environment -t %3 -r CLAUDECODE",
-        "tmux set-environment -t %3 -r HERDR_PANE_ID",
         "tmux set-environment -t %3 -r CLAUDE_EFFORT",
-        "tmux respawn-pane -t '%3' -e 'OPENRIG_NODE_ID=n' 'codex'",
-      ]);
+        "tmux set-environment -t %3 -r HERDR_PANE_ID",
+      ].sort());
     });
 
     // An unreadable global environment can't show whether the seat inherits an identity: the launch
@@ -1542,6 +1558,19 @@ describe("TmuxAdapter", () => {
   });
 
   describe("signalPaneProcess", () => {
+    it.skipIf(process.platform !== "win32")("uses taskkill for a native psmux process and preserves failure", async () => {
+      const exec = vi.fn<ExecFn>(async () => "");
+      const adapter = new TmuxAdapter(exec, undefined, undefined, "psmux");
+      expect((await adapter.signalPid(4242, "TERM")).ok).toBe(true);
+      expect(exec).toHaveBeenLastCalledWith("taskkill /PID 4242 /T");
+      expect((await adapter.signalPid(4242, "KILL")).ok).toBe(true);
+      expect(exec).toHaveBeenLastCalledWith("taskkill /PID 4242 /T /F");
+      exec.mockRejectedValueOnce(new Error("Access is denied"));
+      expect((await adapter.signalPid(4242, "KILL")).ok).toBe(false);
+      exec.mockClear();
+      expect((await adapter.signalPid(0, "KILL")).ok).toBe(false);
+      expect(exec).not.toHaveBeenCalled();
+    });
     it("sends the given signal to the pane's foreground pid (graceful TERM / fallback KILL)", async () => {
       const calls: string[] = [];
       const exec = vi.fn<ExecFn>(async (cmd: string) => { calls.push(cmd); return cmd.includes("pane_pid") ? "4242\n" : ""; });

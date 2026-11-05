@@ -19,13 +19,15 @@
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
+import { writeWindowsNodeFixture } from "../../../../scripts/windows-node-fixture.mjs";
 import { writeRuntimeStubs } from "../../../../test/stub-runtimes.js";
 import { shellQuote } from "../../src/adapters/shell-quote.js";
 
@@ -283,6 +285,8 @@ export interface HermeticScaffold {
 export interface PrepareHermeticEnvOptions {
   /** Base environment to derive the clean child env from. Explicit provider roots are preserved; defaults to process.env. */
   baseEnv?: EnvLike;
+  /** Owned inert terminal fixture only. Real Windows terminal servers require their own lifecycle harness. */
+  nativeTmuxFixture?: string;
   /**
    * The A3-R3 injected clock. When set, the scaffold's child env carries
    * OPENRIG_TEST_CLOCK_NOW = this value (an ISO timestamp) so the compaction bridge
@@ -319,8 +323,11 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
   // operator's server. Refuse before any filesystem effect, like the others.
   assertNoAmbientTmux(baseEnv);
 
-  // Leave room for the per-home socket, including macOS's /private prefix,
-  // while keeping every socket within the caller's isolated TMPDIR.
+  if (process.platform === "win32" && opts.nativeTmuxFixture
+    && (!isAbsolute(opts.nativeTmuxFixture) || !/\.exe$/i.test(opts.nativeTmuxFixture) || !lstatSync(opts.nativeTmuxFixture).isFile())) {
+    throw new Error("Native terminal fixture must be an explicit regular .exe");
+  }
+  // Leave room for the per-home socket, including macOS's /private prefix.
   const root = mkdtempSync(join(tmpdir(), "o"));
   const home = join(root, "home");
   const openrigHome = join(root, "openrig-home");
@@ -342,8 +349,16 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
 
   // Test-only command seam: every child `tmux` call gets one explicit private
   // socket. TMUX_TMPDIR remains for compatibility, but is never the selector.
-  // Exec directly so each terminal operation does not start another Node process.
+  // POSIX execs directly; the native fixture adapter below pins its Node bridge.
   const originalPath = baseEnv.PATH ?? process.env.PATH ?? "";
+  if (process.platform === "win32") {
+    const fixture = opts.nativeTmuxFixture;
+    writeWindowsNodeFixture(tmuxWrapperDir, "tmux", `import {spawnSync} from 'node:child_process';
+const fixture=${JSON.stringify(fixture ?? null)};
+if(!fixture){console.error('Native real-terminal scaffold unavailable; supply an owned inert terminal fixture');process.exit(1);}
+const result=spawnSync(fixture,['-S',${JSON.stringify(tmuxSocketPath)},...process.argv.slice(2)],{env:{...process.env,PATH:${JSON.stringify(originalPath)}},stdio:'inherit',windowsHide:true});
+if(result.error)throw result.error;process.exitCode=result.status??1;`);
+  }
   writeFileSync(
     tmuxWrapperPath,
     `#!/bin/sh
@@ -371,6 +386,12 @@ exec tmux -S ${shellQuote(tmuxSocketPath)} "$@"
   // only an explicit injectClockNow can set it below — never an inherited value.
   for (const name of TEST_CLOCK_ENV_VARS) delete env[name];
   env.HOME = home;
+  if (process.platform === "win32") {
+    env.USERPROFILE = home;
+    env.SystemRoot = baseEnv.SystemRoot ?? process.env.SystemRoot ?? "C:\\Windows";
+    const temp = join(root, "tmp"); mkdirSync(temp);
+    env.TMPDIR = temp; env.TEMP = temp; env.TMP = temp;
+  }
   env.XDG_CONFIG_HOME = join(home, ".config");
   env.XDG_STATE_HOME = join(home, ".local", "state");
   env.XDG_DATA_HOME = join(home, ".local", "share");
@@ -393,6 +414,7 @@ exec tmux -S ${shellQuote(tmuxSocketPath)} "$@"
   const cleanup = () => {
     if (!existsSync(root)) return;
     if (existsSync(tmuxSocketPath)) {
+      if (process.platform === "win32") throw new Error("Native terminal fixture left a socket marker; scratch evidence retained");
       let privateServerRunning = true;
       let privateProcesses = "";
       try {

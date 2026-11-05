@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 /**
  * Exact tracked docs paths allowed outside the three durable roots.
@@ -57,6 +59,8 @@ export function main() {
   process.exitCode = 1;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+let invokedDirectly = false;
+try { invokedDirectly = Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { /* imported without an existing entry file */ }
+if (invokedDirectly) {
   main();
 }

@@ -18,6 +18,7 @@
 
 import nodePath from "node:path";
 import { shellQuote } from "./shell-quote.js";
+import { readPlatformEnv } from "../domain/platform-env.js";
 export type RunnerRuntime = "pi" | "omp";
 
 // ── Seat state layout ────────────────────────────────────────────────────────
@@ -201,24 +202,35 @@ export function providerFromModel(model: string | undefined): string | null {
  *  the runner's own env; only allowlisted names cross the boundary. */
 export function buildPiChildEnv(
   source: Record<string, string | undefined>,
-  opts: { agentDir: string; sessionsDir: string; model?: string; runtime?: RunnerRuntime; sessionName?: string; nodeId?: string; openrigHome?: string; openrigUrl?: string },
+  opts: { agentDir: string; sessionsDir: string; model?: string; runtime?: RunnerRuntime; sessionName?: string; nodeId?: string; openrigHome?: string; openrigUrl?: string; platform?: NodeJS.Platform },
 ): Record<string, string> {
   const env: Record<string, string> = {};
+  const platform = opts.platform ?? process.platform;
   for (const name of [...PI_ENV_BASELINE_VARS, ...PI_ENV_OPENRIG_VARS]) {
-    const value = source[name];
+    const value = readPlatformEnv(source, name, platform);
     if (value !== undefined) env[name] = value;
   }
   env.PI_CODING_AGENT_DIR = opts.agentDir;
+  if (platform === "win32") {
+    // OS process/runtime locations, not provider credentials. Node and native
+    // dependencies require SystemRoot; gh uses APPDATA to locate the existing
+    // Windows login configuration. The Pi directory remains explicitly pinned.
+    for (const name of ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "APPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]) {
+      const value = readPlatformEnv(source, name, platform);
+      if (value !== undefined) env[name] = value;
+    }
+  }
   env.PI_CODING_AGENT_SESSION_DIR = opts.sessionsDir;
   const provider = providerFromModel(opts.model);
   const providerVar = provider ? (opts.runtime === "omp" ? OMP_PROVIDER_ENV_VARS : PI_PROVIDER_ENV_VARS)[provider] : undefined;
-  if (providerVar && source[providerVar] !== undefined) {
-    env[providerVar] = source[providerVar]!;
+  if (providerVar) {
+    const value = readPlatformEnv(source, providerVar, platform);
+    if (value !== undefined) env[providerVar] = value;
   }
   // The declared provider's endpoint, for the providers whose key is scoped to one.
   if (opts.runtime === "omp" && provider) {
     for (const extra of OMP_PROVIDER_EXTRA_ENV_VARS[provider] ?? []) {
-      const value = source[extra];
+      const value = readPlatformEnv(source, extra, platform);
       if (value !== undefined) env[extra] = value;
     }
   }
@@ -227,6 +239,7 @@ export function buildPiChildEnv(
     // and ~/.env. Project cwd/.env remains an OMP discovery surface. The
     // runner resolves the OMP binary before this HOME applies.
     env.HOME = nodePath.dirname(opts.agentDir);
+    if (platform === "win32") env.USERPROFILE = env.HOME;
     // OMP seats also pin their managed identity and daemon locator from the
     // runner's own arguments (never the hook token, which belongs to the
     // runner's POST client).

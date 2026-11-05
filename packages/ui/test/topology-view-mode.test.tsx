@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
 import { AppShell } from "../src/components/AppShell.js";
-import { HostScopePage, RigScopePage } from "../src/components/topology/ScopePages.js";
+import { HostScopePage, RigScopePage, SeatScopePage } from "../src/components/topology/ScopePages.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -55,8 +55,9 @@ function buildTopologyRouter(initialPath: string) {
   });
   const hostRoute = createRoute({ getParentRoute: () => rootRoute, path: "/topology", component: HostScopePage });
   const rigRoute = createRoute({ getParentRoute: () => rootRoute, path: "/topology/rig/$rigId", component: RigScopePage });
+  const seatRoute = createRoute({ getParentRoute: () => rootRoute, path: "/topology/seat/$rigId/$logicalId", component: SeatScopePage });
   const catchAll = createRoute({ getParentRoute: () => rootRoute, path: "$", component: () => null });
-  const routeTree = rootRoute.addChildren([hostRoute, rigRoute, catchAll]);
+  const routeTree = rootRoute.addChildren([hostRoute, rigRoute, seatRoute, catchAll]);
   return createRouter({ routeTree, history: createMemoryHistory({ initialEntries: [initialPath] }) });
 }
 
@@ -110,18 +111,39 @@ describe("SC-10: topology view-mode tabs IN-PLACE single URL", () => {
     expect(container.querySelector("[data-testid='topology-rig-tab-overview']")).toBeTruthy();
   });
 
-  // Seat scope brings in LiveNodeDetails which makes additional fetches.
-  // Host + rig scope tests above prove the IN-PLACE pattern; the
-  // source-assertion regression test below proves no view-mode-as-URL
-  // anti-patterns. Skipping the explicit seat-scope route render here.
-  it.skip("seat scope at /topology/seat/$rigId/$logicalId — covered by source-assertion + scope-page direct test", () => {});
+  it("seat scope switches the current Overview/Details body in place without changing its URL", async () => {
+    const detail = {
+      rigId: "abc-rig", rigName: "owned-rig", logicalId: "dev.impl", podId: "dev",
+      canonicalSessionName: "dev-impl@owned-rig", nodeKind: "infrastructure", runtime: "terminal",
+      sessionStatus: "stopped", startupStatus: "ready", restoreOutcome: "n-a", terminalActive: false,
+      tmuxAttachCommand: null, resumeCommand: null, latestError: null, model: null,
+      agentRef: null, profile: null, resolvedSpecName: null, resolvedSpecVersion: null,
+      cwd: "C:\\owned\\workspace", startupFiles: [], startupActions: [], recentEvents: [],
+      infrastructureStartupCommand: null, binding: {}, peers: [], edges: { outgoing: [], incoming: [] },
+      transcript: { enabled: false, path: null, tailCommand: null }, compactSpec: null,
+    };
+    mockFetch.mockImplementation(async (url: string) => new Response(JSON.stringify(
+      String(url).includes("/api/rigs/abc-rig/nodes/dev.impl") ? detail : [],
+    )));
+    const url = "/topology/seat/abc-rig/dev.impl";
+    const { container, router } = await renderTopologyAt(url);
+    await waitFor(() => expect(container.querySelector("[data-testid='live-tab-details']")).toBeTruthy());
+    expect(mockFetch.mock.calls.some(([request]) => String(request).includes("/api/rigs/abc-rig/nodes/dev.impl"))).toBe(true);
+    expect(container.querySelector("[data-testid='live-overview-section']")).toBeTruthy();
+    fireEvent.click(container.querySelector("[data-testid='live-tab-details']")!);
+    expect(container.querySelector("[data-testid='live-details-section']")).toBeTruthy();
+    expect(container.querySelector("[data-testid='live-overview-section']")).toBeNull();
+    expect(router.state.location.pathname).toBe(url);
+    fireEvent.click(container.querySelector("[data-testid='live-tab-overview']")!);
+    expect(container.querySelector("[data-testid='live-overview-section']")).toBeTruthy();
+    expect(router.state.location.pathname).toBe(url);
+  });
 });
 
-describe("Seat scope tabs (direct render — bypasses route fetching)", () => {
-  it("SeatScopePage renders all three seat tabs when mounted directly", async () => {
-    // Direct render uses the SeatScopePage useParams from a memory router
-    // stub; skipping that complexity, we already cover seat tabs in the
-    // SEAT_SCOPE_TABS export shape.
+describe("Legacy seat tab definitions", () => {
+  it("retains the exported three-tab definition", async () => {
+    // This only pins the legacy export shape. The actual current seat page
+    // and its route-bound Overview/Details interaction are exercised above.
     const { SEAT_SCOPE_TABS } = await import("../src/components/topology/TopologyViewModeTabs.js");
     expect(SEAT_SCOPE_TABS.map((t) => t.id)).toEqual(["detail", "transcript", "terminal"]);
   });

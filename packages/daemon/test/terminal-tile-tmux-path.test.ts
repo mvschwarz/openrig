@@ -17,7 +17,7 @@ import type { ComposedPane, ComposedView, OpenViewResult, TerminalProvider } fro
 const local = (seat: string, readOnly = false): ViewMemberInput => ({ seat, label: seat, tmuxSession: seat, host: null, readOnly, alive: true });
 
 describe("#707 local tiles run the tmux the daemon resolves", () => {
-  it("a provider PATH without tmux fails the bare command; the resolved path attaches, keeping -r", () => {
+  it.skipIf(process.platform === "win32")("a provider PATH without tmux fails the bare command; the resolved path attaches, keeping -r", () => {
     const root = mkdtempSync(join(tmpdir(), "openrig-707-"));
     const narrow = join(root, "provider-path"); // the provider's PATH: no tmux here
     const elsewhere = join(root, "elsewhere"); // where the daemon found tmux
@@ -94,7 +94,7 @@ function service(resolveLocalTmux?: TerminalServiceDeps["resolveLocalTmux"]): { 
 
 describe("#707 the service passes only an absolute resolved tmux to the composer", () => {
   const cases: Array<[string, TerminalServiceDeps["resolveLocalTmux"] | undefined, string]> = [
-    ["an absolute path", () => "/usr/local/bin/tmux", "'/usr/local/bin/tmux' attach -f ignore-size -t 'a@r'"],
+    ["an absolute path", () => process.platform === "win32" ? "C:\\tools\\tmux.exe" : "/usr/local/bin/tmux", process.platform === "win32" ? "& 'C:\\tools\\tmux.exe' 'attach' '-f' 'ignore-size' '-t' 'a@r'" : "'/usr/local/bin/tmux' attach -f ignore-size -t 'a@r'"],
     ["a bare name", () => "tmux", "tmux attach -f ignore-size -t 'a@r'"],
     ["nothing found", async () => null, "tmux attach -f ignore-size -t 'a@r'"],
     ["a failed probe", () => { throw new Error("probe failed"); }, "tmux attach -f ignore-size -t 'a@r'"],
@@ -104,7 +104,7 @@ describe("#707 the service passes only an absolute resolved tmux to the composer
     const { svc, herdr } = service(resolver);
     const res = await svc.openView({ view: "rig:r" });
     expect(res.ok).toBe(true);
-    expect(herdr.last!.opened[0]!.recoveryCommand).toBe(expected);
+    expect(herdr.last!.opened[0]!.recoveryCommand).toBe(process.platform === "win32" && expected.startsWith("tmux ") ? "& 'tmux' 'attach' '-f' 'ignore-size' '-t' 'a@r'" : expected);
   });
 
   it("resolves once, so the preview's plan still matches the open", async () => {

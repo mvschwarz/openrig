@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // The MCP server's operation table against the daemon itself: every registered tool named once, each tool's hints matching
 // its effect, every route the table names mounted in the daemon's app, and the newest reads answering through their real
 // routes with the shared error shape. The health, slice, mission and context reads also run through their real routes, so
@@ -7,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import { serve, type ServerType } from "@hono/node-server";
+import { createAdaptorServer, type ServerType } from "@hono/node-server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type Database from "better-sqlite3";
@@ -55,9 +56,8 @@ describe("MCP operation table against the daemon", () => {
     } });
     const { app } = setup;
     routes = app.routes;
-    server = await new Promise<ServerType>((resolve) => {
-      const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
-    });
+    server = createAdaptorServer({ fetch: app.fetch });
+    await listenOwnedHttpFixture(server);
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 
@@ -186,7 +186,7 @@ describe("MCP operation table against the daemon", () => {
     const client = await connect();
 
     const pack = await client.callTool({ name: "rig_context_pack", arguments: { ref: "team-notes" } });
-    expect(pack.isError).toBeFalsy();
+    expect(pack.isError, JSON.stringify({ url, pack })).toBeFalsy();
     expect(pack.structuredContent).toEqual({
       ref: "team-notes", name: "team-notes", version: "1", purpose: "What the team decided.",
       files: [{ path: "notes.md", role: "source", summary: "Decisions so far.", estimatedTokens: 31 }],

@@ -8,6 +8,8 @@ import { DaemonClient } from "../client.js";
 import { ConfigStore } from "../config-store.js";
 import { findSlice, readProjectMissionsRoot, resolveMissionsRoot } from "../lib/scope/scope-fs.js";
 import { ScopeCliError, type SliceInfo } from "../lib/scope/types.js";
+import { createWindowsPrivateDirectory } from "../lib/private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "../lib/windows-owned-text.js";
 
 /** findSlice, then, for an absolute slice path the configured tree doesn't own, the catalogued project whose root holds it
  *  (chosen as work-install chooses one for a working folder), read under that project's missions root. A tree named with
@@ -554,10 +556,21 @@ checkboxes do not accept an item under the selected proof policy.
  *  first failure is the one reported. There is no fsync: this is a same-directory swap, not a
  *  crash-durability guarantee. */
 export function replaceArtifactFile(target: string, content: string, stagingId: string = randomUUID()): void {
-  const staging = path.join(path.dirname(target), `.${path.basename(target)}.${stagingId}.replace-tmp`);
   const existing = fs.lstatSync(target, { throwIfNoEntry: false });
+  const nativeRegular = process.platform === "win32" && existing?.isFile();
+  const stagingDirectory = nativeRegular ? createWindowsPrivateDirectory(path.dirname(target)) : undefined;
+  const basename = path.basename(target);
+  // Keep room for the unique suffix even when the target already approaches
+  // the filesystem's component limit. Ordinary short staging names stay stable.
+  const stagingStem = Buffer.byteLength(basename, "utf8") <= 100 ? basename : "openrig-artifact";
+  const staging = path.join(stagingDirectory ?? path.dirname(target), `.${stagingStem}.${stagingId}.replace-tmp`);
   const keepMode = existing?.isFile() ? existing.mode & 0o777 : undefined;
-  const fd = fs.openSync(staging, "wx", keepMode ?? 0o666); // never created wider than the artifact it replaces
+  let fd: number;
+  try { fd = fs.openSync(staging, "wx", keepMode ?? 0o666); }
+  catch (error) {
+    if (stagingDirectory) try { fs.rmdirSync(stagingDirectory); } catch { /* Retain only owned staging. */ }
+    throw error;
+  }
   let failure: unknown;
   try {
     if (keepMode !== undefined) fs.fchmodSync(fd, keepMode);
@@ -573,10 +586,13 @@ export function replaceArtifactFile(target: string, content: string, stagingId: 
   }
   try {
     if (failure !== undefined) throw failure;
-    fs.renameSync(staging, target);
+    if (nativeRegular) replaceWindowsFilePreservingMetadata(target, staging, true);
+    else fs.renameSync(staging, target);
   } catch (err) {
     try { fs.rmSync(staging, { force: true }); }
     catch (cleanupErr) { console.error(`warning: could not remove staging file ${staging}: ${(cleanupErr as Error).message}`); }
     throw err;
+  } finally {
+    if (stagingDirectory) try { fs.rmdirSync(stagingDirectory); } catch { /* Retain only owned staging. */ }
   }
 }

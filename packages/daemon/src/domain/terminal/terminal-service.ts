@@ -41,9 +41,9 @@ import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import type { TaskTerminalView, TaskMembership } from "./task-terminal-view.js";
 import { composeView, type ViewMemberInput } from "./view-composer.js";
 import { createHash } from "node:crypto";
-import { isAbsolute } from "node:path";
+import { isAbsolute, win32 } from "node:path";
 import { buildGridRoot } from "./herdr-adapter.js";
-import { daemonTmuxServerArgs, daemonTmuxServerInfo } from "../../adapters/tmux-server.js";
+import { daemonTmuxAttachCommand, daemonTmuxServerArgs, daemonTmuxServerInfo } from "../../adapters/tmux-server.js";
 import type { TmuxServerSelection } from "../tmux-server-selection.js";
 // deriveViewMembers is a VALUE exported by the views store (not the composer).
 import { deriveViewMembers } from "./terminal-views-store.js";
@@ -116,13 +116,15 @@ export interface ProviderStatusReport {
 export interface TerminalStatusResult {
   following?: ReturnType<TerminalFollowing["list"]>;
   providers: ProviderStatusReport[];
-  tmux?: TmuxServerSelection;
+  tmux?: TmuxServerSelection & { command?: string[] };
   session?: string;
   error?: string;
   code?: string;
 }
 
 export interface TerminalServiceDeps {
+  /** OS where this daemon's local tile processes run. */
+  localPlatform?: NodeJS.Platform;
   eventBus?: Pick<EventBus, "subscribe">;
   followingStatePath?: string;
   /** Resolve a provider name to its adapter, or null for an unknown name. */
@@ -261,7 +263,8 @@ export class TerminalService {
     this.localTmux ??= (async () => {
       try {
         const path = await this.deps.resolveLocalTmux?.();
-        return typeof path === "string" && isAbsolute(path) ? path : undefined;
+        const absolute = (this.deps.localPlatform ?? process.platform) === "win32" ? win32.isAbsolute : isAbsolute;
+        return typeof path === "string" && absolute(path) ? path : undefined;
       } catch {
         return undefined;
       }
@@ -313,8 +316,11 @@ export class TerminalService {
     const result = await provider.openView({ ...composed, planId });
     if (result.opened.length === 0 && composed.opened.length > 0) {
       notes.push("In a new terminal on the daemon's host, attach directly using one of these commands:");
-      for (const pane of composed.opened) notes.push(`${pane.label}: env -u TMUX ${pane.recoveryCommand ?? pane.paneCommand}`);
-      notes.push("Each labelled command above opens a different seat. When sharing how to join this team, include every command in full, unchanged, including env -u TMUX, paths and quoting.");
+      for (const pane of composed.opened) {
+        const reset = pane.recoveryShell === "powershell" ? "Remove-Item Env:TMUX -ErrorAction SilentlyContinue; " : "env -u TMUX ";
+        notes.push(`${pane.label}: ${reset}${pane.recoveryCommand ?? pane.paneCommand}`);
+      }
+      notes.push("Each labelled command above opens a different seat. When sharing how to join this team, include every command in full, unchanged, including environment-reset prefixes, paths and quoting.");
     }
     if (!composed.kernelLayout && composed.opened.some(pane => !pane.readOnly)) {
       notes.push("The shared dashboard is the overview; the team's lead pane is where you can talk about the work. Check the opened seats and any absent or degraded seats above. Can you see the team? A created workspace or a capture alone does not confirm what is visible on your screen.");
@@ -327,7 +333,7 @@ export class TerminalService {
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
-    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode });
+    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode, localPlatform: this.deps.localPlatform ?? process.platform });
     const saved = view.startsWith("saved:") ? this.deps.viewsStore.get(view.slice(6))
       : !/^(qitem|mission|slice|pod|seat|rig):/.test(view) ? this.deps.viewsStore.get(view) : null;
     composed.viewDescriptor = { kind: saved && saved.id === resolved.id ? "fixed" : "following",
@@ -434,7 +440,7 @@ export class TerminalService {
       const inventory = await this.deps.listRigSeatsBatch?.(result.rigs);
       for (const entry of entries) {
         const rows = entry.kind === "derived" ? inventory?.get(entry.name) : undefined;
-        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode })
+        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode, localPlatform: this.deps.localPlatform ?? process.platform })
           : await this.resolveComposed(entry.view, this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage);
         if ("code" in plan) continue;
         result.catalog.push({ ...entry, members: [...plan.opened, ...plan.absent, ...plan.degraded].map((m) => m.seat), ready: plan.opened.length, absent: plan.absent.length, degraded: plan.degraded.length, pages: plan.pages.length });
@@ -445,7 +451,8 @@ export class TerminalService {
 
   /** Provider availability + liveness (doctor). Unknown named provider → empty report for it. */
   async status(providerName?: string, session?: string): Promise<TerminalStatusResult> {
-    const tmux = daemonTmuxServerInfo();
+    const selection = daemonTmuxServerInfo();
+    const tmux = selection ? { ...selection, command: daemonTmuxAttachCommand() } : undefined;
     if (session !== undefined) {
       const selected = this.selectProvider({ provider: providerName, session });
       if ("ok" in selected) return { providers: [], error: selected.error, code: selected.code };

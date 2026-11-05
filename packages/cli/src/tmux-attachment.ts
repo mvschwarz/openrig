@@ -3,11 +3,22 @@ import { readFileSync, realpathSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
 import path from "node:path";
 import type { DaemonClient } from "./client.js";
+import { bindNativeSessionName, windowsTileAttachArgv } from "@openrig/daemon/windows-launch";
 
 export interface TmuxAttachment {
   session: string;
   serverArgs: string[];
   readOnly?: boolean;
+  command?: string[];
+}
+
+export function readTmuxAttachCommand(value: unknown): string[] {
+  if (value === undefined) return ["tmux"];
+  if (!Array.isArray(value) || !value.length || typeof value[0] !== "string" || !value[0]
+    || value.some(word => typeof word !== "string" || word.includes("\0"))) {
+    throw new Error("The daemon returned invalid tmux executable metadata.");
+  }
+  return [...value] as string[];
 }
 
 /** The daemon supplies server options as data; clients never parse a shell command. */
@@ -29,7 +40,12 @@ export function readRecordedTmuxServerArgs(home: string): string[] {
   catch (error) { readError = error; }
   const pinned = record?.mode === "isolated" || record?.pinned === true;
   let matchesHome = false;
-  try { matchesHome = record?.home === realpathSync(home); } catch { /* A missing/unreadable home is not a valid record. */ }
+  try {
+    matchesHome = typeof record?.home === "string" && path.isAbsolute(record.home)
+      && (process.platform === "win32"
+        ? realpathSync.native(record.home) === realpathSync.native(home)
+        : record.home === realpathSync(home));
+  } catch { /* A missing/unreadable home is not a valid record. */ }
   const valid = record?.version === 1 && matchesHome
     && (record.mode === "inherit" || record.mode === "isolated")
     && (record.pinned === undefined || typeof record.pinned === "boolean")
@@ -82,11 +98,16 @@ export async function assertLocalTmux(
 /** Attach only; creating or retargeting somebody else's tmux client is not part of this operation. */
 export function attachTmux(target: TmuxAttachment): Promise<number> {
   const server = readTmuxServerArgs(target.serverArgs);
+  const command = readTmuxAttachCommand(target.command);
   return new Promise((resolve, reject) => {
     const env = { ...process.env };
-    delete env.TMUX;
-    delete env.TMUX_PANE;
-    const child = spawn("tmux", [...server, "attach-session", ...(target.readOnly ? ["-r"] : []), "-t", `=${target.session}`],
+    for (const key of Object.keys(env)) {
+      if (["TMUX", "TMUX_PANE"].includes(process.platform === "win32" ? key.toUpperCase() : key)) delete env[key];
+    }
+    const argv = process.platform === "win32" && bindNativeSessionName(target.session).marker
+      ? windowsTileAttachArgv(command[0]!, [...command.slice(1), ...server], target.session, target.readOnly ?? false, 30, true)
+      : [...command, ...server, "attach-session", ...(target.readOnly ? ["-r"] : []), "-t", `=${target.session}`];
+    const child = spawn(argv[0]!, argv.slice(1),
       { stdio: "inherit", env, windowsHide: true });
     child.once("error", reject);
     child.once("exit", code => resolve(code ?? 1));

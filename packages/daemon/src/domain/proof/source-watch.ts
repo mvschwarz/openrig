@@ -19,7 +19,7 @@ class WatchFailure extends Error {}
 /** Per directory outside the missions root, the entry names that matter there. */
 type Shallow = Map<string, Set<string>>;
 
-const within = (p: string, root: string) => p === root || p.startsWith(root + path.sep);
+const within = (p: string, root: string) => p === root || p.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
 function add(out: Shallow, dir: string, name: string) {
   const names = out.get(dir) ?? new Set<string>();
   names.add(name);
@@ -55,7 +55,9 @@ function shallowWatches(missionsRoot: string, realRoot: string, top: string, pro
     const bound = topOf(dir);
     if (bound === null) continue;
     while (dir !== child && dir !== bound && !inside(dir)) { child = dir; dir = path.dirname(dir); }
-    if (dir === child || dir === bound) continue;
+    // At a filesystem root the project has no parent anchor. Its own policy
+    // still needs a filtered shallow watch; other upper boundaries stay excluded.
+    if (dir === child || (dir === bound && dir !== project)) continue;
     add(out, dir, path.basename(child));
   }
   // The missions root is anchored under both its names: a replaced real root must rebind the recursive watch too.

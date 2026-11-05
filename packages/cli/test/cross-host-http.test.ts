@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.4.6.MH4 C4 — the http transport branch + §4 target-sugar/precedence
 // matrix for the four cross-host coordination verbs. Everything runs through
 // the shipped depsOverride injection (mock clientFactory + hostRegistryLoader
@@ -11,6 +12,7 @@
 // precedence contract.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
@@ -384,9 +386,10 @@ describe("send --host (http branch)", () => {
         }, 6_000);
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     try {
       const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      allowFetchTarget(url);
       const deps = httpDeps(mockClient(() => ({ status: 200, data: {} })), {
         clientFactory: (u: string) => new DaemonClient(u) as never,
         hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "slow-b", transport: "http", url }] } }),
@@ -397,7 +400,7 @@ describe("send --host (http branch)", () => {
       expect(captured.stderrLines.join("\n")).not.toContain("unreachable");
       expect(process.exitCode).toBeUndefined();
     } finally {
-      server.close();
+      await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
 

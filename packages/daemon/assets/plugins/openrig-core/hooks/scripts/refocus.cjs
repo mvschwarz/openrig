@@ -9,8 +9,11 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const crypto = require("node:crypto");
-const { spawnSync } = require("node:child_process");
+const { spawnRig } = require("./rig-command.cjs");
+const { spawnPython } = require("./python-command.cjs");
+const { acquireNativeStateLock } = require("./refocus-state-lock.cjs");
 const { recordRefocusResult } = require("./refocus-health.cjs");
 
 // Keep the operator's command lookup order; env-node CLI scripts can also use this hook's Node.
@@ -74,7 +77,7 @@ function readConfiguredContent(home) {
   if (contentRef) {
     const timeout = lookupTimeout();
     if (timeout <= MIN_LOOKUP_MS) return { content: null, contentRef, failure: "no time left in the refocus budget" };
-    const result = spawnSync("rig", ["context", "get", contentRef], {
+    const result = spawnRig(["context", "get", contentRef], {
       encoding: "utf8",
       env: childEnv,
       timeout,
@@ -143,7 +146,7 @@ function workPacketEnabled() {
 function readQueueWhoami(timeout = lookupTimeout()) {
   if (timeout <= MIN_LOOKUP_MS) return { unknown: "no time left in the refocus budget" };
   const args = ["queue", "whoami", "--json", ...(workPacketEnabled() ? ["--work-candidates"] : [])];
-  let result = spawnSync("rig", args, {
+  let result = spawnRig(args, {
     encoding: "utf8", env: childEnv, timeout, maxBuffer: 16 * 1024 * 1024,
   });
   // A rig CLI older than this hook rejects the flag. Ask again without it, inside what is left of
@@ -152,7 +155,7 @@ function readQueueWhoami(timeout = lookupTimeout()) {
     && /unknown option/i.test(`${result.stderr || ""}${result.stdout || ""}`)) {
     const remaining = remainingLookupBudget();
     if (remaining > 250) {
-      result = spawnSync("rig", ["queue", "whoami", "--json"], {
+      result = spawnRig(["queue", "whoami", "--json"], {
         encoding: "utf8", env: childEnv, timeout: remaining, maxBuffer: 16 * 1024 * 1024,
       });
     }
@@ -211,7 +214,7 @@ function renderRole(result) {
 // start, after reserving python's cap and, when a content ref is configured, the content lookup
 // that runs after python; with 250 ms or less left it is skipped.
 function traceEnv(trees) {
-  const env = { ...childEnv };
+  const env = { ...childEnv, OPENRIG_NODE: process.execPath, PYTHONIOENCODING: "utf-8" };
   const missing = [
     ["OPENRIG_TOPOLOGY_ROOT", "topology", "topology"],
     ["OPENRIG_WORKSPACE_ROOT", "workspace", "work"],
@@ -219,7 +222,7 @@ function traceEnv(trees) {
   if (missing.length === 0) return env;
   const timeout = remainingLookupBudget();
   if (timeout <= 250) return env;
-  const result = spawnSync("rig", ["config", "--json"], {
+  const result = spawnRig(["config", "--json"], {
     encoding: "utf8",
     env: childEnv,
     timeout,
@@ -284,7 +287,7 @@ function renderTrace() {
   const timeout = lookupTimeout(contentReserveMs());
   const result = timeout <= MIN_LOOKUP_MS
     ? { error: new Error("no time left in the refocus budget"), status: null, stdout: "", stderr: "" }
-    : spawnSync(process.env.PYTHON || "python3", args, {
+    : spawnPython(args, {
       encoding: "utf8",
       ...(evidence ? { input: evidence } : {}),
       env,
@@ -357,7 +360,7 @@ function runsForThisSeatsProject(env = process.env) {
   if (event === "SessionStart") process.exit(0);
 
   const seat = process.env.OPENRIG_SESSION_NAME || "unknown-seat";
-  const home = process.env.OPENRIG_HOME || path.join(process.env.HOME || "/tmp", ".openrig");
+  const home = process.env.OPENRIG_HOME || path.join(process.env.HOME || (process.platform === "win32" ? os.homedir() : "/tmp"), ".openrig");
   const transcriptPath = input.transcript_path || input.transcriptPath || "";
   let size = 0;
   try { size = fs.statSync(transcriptPath).size; } catch {}
@@ -420,6 +423,7 @@ function runsForThisSeatsProject(env = process.env) {
   } catch {}
 
   const stateFile = path.join(stateDir, `${seatKey}__${keyFor(identity)}.json`);
+  await acquireNativeStateLock(stateFile);
   let state = null;
   try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")) || null; } catch {}
   const persist = () => {

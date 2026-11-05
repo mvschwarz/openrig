@@ -1,3 +1,4 @@
+import { readNamedSessionCommand } from "./session-pane-lookup.js";
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
 import { codexMemberEnvelope, observeCodexEnvelope, readProfileFingerprint, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
@@ -5,6 +6,8 @@ import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { resolveCodexCommand } from "../domain/windows-provider-command.js";
+import { prepareWindowsJobProcess } from "../domain/windows-job-process.js";
 import { createRequire } from "node:module";
 import os from "node:os";
 import { isDeepStrictEqual } from "node:util";
@@ -42,6 +45,7 @@ import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/m
 import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
 import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexSeatFolder, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
+import { resourceDirectoryPath, resourceIdFromDirectoryName } from "../domain/resource-directory-name.js";
 import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
@@ -54,14 +58,26 @@ import {
 /** Runs Codex's own CLI with the daemon's CODEX_HOME; tests inject a recorder. */
 export type CodexCliRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise<{ status: number | null; stdout: string; stderr: string }>;
 
-const defaultCodexCli: CodexCliRunner = (args, env) => new Promise((resolve) => {
-  execFile("codex", args, { env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
-    const status = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null) : 0;
-    // A spawn failure (ENOENT, EACCES) has no exit code and empty output: keep its message as the reason.
-    const err = String(stderr ?? "");
-    resolve({ status, stdout: String(stdout ?? ""), stderr: err.trim() || !error ? err : error.message });
-  });
-});
+export const defaultCodexCli: CodexCliRunner = async (args, env) => {
+  let selected: ReturnType<typeof resolveCodexCommand>;
+  let job: ReturnType<typeof prepareWindowsJobProcess> | undefined;
+  try {
+    selected = resolveCodexCommand(env);
+    if (process.platform === "win32") job = prepareWindowsJobProcess(selected.command, [...selected.prefix, ...args], { env });
+  } catch (error) { return { status: null, stdout: "", stderr: (error as Error).message }; }
+  try {
+    return await new Promise((resolve) => {
+      execFile(job?.file ?? selected.command, job?.args ?? [...selected.prefix, ...args],
+        { env, ...job?.options, windowsHide: true, timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
+          ...(job ? { killSignal: "SIGKILL" as const } : {}) }, (error, stdout, stderr) => {
+          const status = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null) : 0;
+          // A spawn failure has no exit code: keep its message as the reason.
+          const err = String(stderr ?? "");
+          resolve({ status, stdout: String(stdout ?? ""), stderr: err.trim() || !error ? err : error.message });
+        });
+    });
+  } finally { job?.dispose(); }
+};
 
 // Codex's hook trust recipe (the key and hash Codex records for a trusted hook), kept in one script.
 const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/openrig-core/hooks/scripts/codex-hook-trust.cjs") as {
@@ -71,7 +87,8 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "../domain/seat-skill-storage.js";
-import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
+import { codexPluginContentHash, shippedCodexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
+import { platformPluginFile } from "../domain/windows-claude-plugin-hooks.js";
 import { findTomlTable, opensTomlTable, parseTomlRoot, tomlArrayTableHeaderPath, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
@@ -290,7 +307,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.verifyProfilePreflight = deps.verifyProfilePreflight ?? ((profile, cwd, home) => {
       const selected = home ?? this.codexHome;
-      return defaultProfilePreflight(profile, selected ? { cwd, codexHome: selected, launchPath: this.launchPath } : undefined);
+      return defaultProfilePreflight(profile, { cwd, ...(selected ? { codexHome: selected } : {}), launchPath: this.launchPath });
     });
   }
 
@@ -413,13 +430,18 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     collect(nodePath.join(shipped, "hooks"));
     ownFiles.push(".codex-plugin/plugin.json");
     const matchesShipped = (dir: string) => ownFiles.every(relative => {
-      try { return fs.readFileSync(nodePath.join(dir, relative)).equals(fs.readFileSync(nodePath.join(shipped, relative))); }
+      try {
+        const source = fs.readFileSync(nodePath.join(shipped, relative));
+        const expected = process.platform === "win32" && ["hooks/claude.json", "hooks/codex.json"].includes(relative.replaceAll("\\", "/"))
+          ? Buffer.from(platformPluginFile("openrig-core", relative, source.toString("utf8"))) : source;
+        return fs.readFileSync(nodePath.join(dir, relative)).equals(expected);
+      }
       catch { return false; }
     });
     if (!matchesShipped(pluginDir)) return report("skipped", "vendored hook files differ from this daemon's shipped plugin; existing choices are left alone");
     // Installation retains the hook-file predicate; any approval requires the complete shipped tree.
     const matchesShippedTree = (dir: string) => {
-      try { return codexPluginContentHash(dir, true) === codexPluginContentHash(shipped, true); }
+      try { return codexPluginContentHash(dir, true) === shippedCodexPluginContentHash(shipped, true); }
       catch { return false; }
     };
 
@@ -526,7 +548,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       this.fs.mkdirp(nodePath.dirname(manifestPath));
       this.fs.writeFile(manifestPath, manifest);
     }
-    const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome, ...(this.launchPath ? { PATH: this.launchPath } : {}) };
+    const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome, ...(this.launchPath !== undefined ? { PATH: this.launchPath } : {}) };
     if (recorded === undefined) {
       const added = await this.runCodexCli(["plugin", "marketplace", "add", pluginsDir], env);
       if (added.status !== 0) return report("skipped", `codex plugin marketplace add failed: ${(added.stderr || added.stdout).trim() || `exit ${added.status}`}`);
@@ -793,8 +815,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const results: InstalledResource[] = [];
     const skillsDir = binding.seatSkillsRoot ?? nodePath.join(binding.cwd, ".agents", "skills");
     if (this.fs.exists(skillsDir) && this.fs.listFiles) {
-      for (const file of this.fs.listFiles(skillsDir)) {
-        results.push({ effectiveId: file, category: "skill", installedPath: nodePath.join(skillsDir, file) });
+      for (const file of new Set(this.fs.listFiles(skillsDir).map(file => file.split(/[\\/]/)[0]!))) {
+        results.push({ effectiveId: resourceIdFromDirectoryName(file), category: "skill", installedPath: nodePath.join(skillsDir, file) });
       }
     }
     return results;
@@ -923,7 +945,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // The git dirs and the seat folder follow the parent id: ps flattens argv, so a path with a space placed before the
       // id would be read as the id when the fork is verified.
       const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}${seatFolderArg}`;
-      const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
+      const staged = await this.seatCommand(binding, cmd);
+      if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Codex launch preparation; no native command was sent.", recovery: "attention_required" };
+      const textResult = opts.beforeNativeDispatch
+        ? await this.tmux.sendShellCommand(binding.tmuxSession, staged, () => { if (!opts.beforeNativeDispatch!()) throw new Error("Selected history changed before Codex input"); })
+        : await this.tmux.sendShellCommand(binding.tmuxSession, staged);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }
@@ -949,6 +975,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           forkIdentityPending: true,
         };
       }
+      const composer = await this.tmux.prepareWindowsCodexComposer?.(binding.tmuxSession!);
+      if (composer && !composer.ok) return { ok: false, error: composer.message };
       return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch };
     }
 
@@ -976,6 +1004,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding.tmuxSession, updatePrompt, { resumeToken: opts.resumeToken, ...this.ownHomeOpt(binding) });
       if (!verification.ok) return verification;
+      const composer = await this.tmux.prepareWindowsCodexComposer?.(binding.tmuxSession!);
+      if (composer && !composer.ok) return { ok: false, error: composer.message };
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id", appliedLaunch,
         ...(verification.resumedProcess ? { resumedProcess: verification.resumedProcess } : {}) };
     }
@@ -983,6 +1013,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const threadId = await this.captureFreshThreadId(binding, updatePrompt);
     if (updatePrompt.failure) return updatePrompt.failure;
     if (threadId) {
+      const composer = await this.tmux.prepareWindowsCodexComposer?.(binding.tmuxSession!);
+      if (composer && !composer.ok) return { ok: false, error: composer.message };
       return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch };
     }
 
@@ -1236,7 +1268,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ready: false, reason: "tmux session not responsive" };
     }
 
-    const paneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
+    const paneCommand = await readNamedSessionCommand(this.tmux, binding.tmuxSession);
     const paneContent = await this.captureProbeScreen(binding.tmuxSession);
     let probe = assessNativeResumeProbe({
       runtime: "codex",
@@ -1248,7 +1280,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const process = await verifyCodexPaneProcess({ target: binding.tmuxSession, tmux: this.tmux as { getPanePid(target: string): Promise<number | null> },
         listProcesses: this.listProcesses as never });
       if (process) {
-        const currentPaneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
+        const currentPaneCommand = await readNamedSessionCommand(this.tmux, binding.tmuxSession);
         const currentPaneContent = await this.captureProbeScreen(binding.tmuxSession);
         probe = assessNativeResumeProbe({ runtime: "codex", paneCommand: currentPaneCommand,
           paneContent: currentPaneContent, codexProcessVerified: true });
@@ -1498,11 +1530,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   private resolveTargetDir(entry: ProjectionEntry, cwd: string, seatSkillsRoot?: string): string | null {
     switch (entry.category) {
-      case "skill": return nodePath.join(seatSkillsRoot ?? nodePath.join(cwd, ".agents", "skills"), entry.effectiveId);
+      case "skill": return resourceDirectoryPath(seatSkillsRoot ?? nodePath.join(cwd, ".agents", "skills"), entry.effectiveId);
       case "guidance": return null; // handled via merge
       case "subagent": return nodePath.join(cwd, ".agents"); // .agents/{id}.yaml per preserved contract
-      case "plugin": return nodePath.join(cwd, ".codex", "plugins", entry.effectiveId);
-      case "runtime_resource": return nodePath.join(cwd, ".agents", "extensions", entry.effectiveId);
+      case "plugin": return resourceDirectoryPath(nodePath.join(cwd, ".codex", "plugins"), entry.effectiveId);
+      case "runtime_resource": return resourceDirectoryPath(nodePath.join(cwd, ".agents", "extensions"), entry.effectiveId);
       default: return null;
     }
   }
@@ -2025,7 +2057,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   private launchCommand(command: string, home: string | undefined = this.codexHome): string {
-    const env = [this.launchPath ? `PATH=${shellQuote(this.launchPath)}` : "", home ? `CODEX_HOME=${shellQuote(home)}` : ""].filter(Boolean);
+    const env = [this.launchPath !== undefined ? `PATH=${shellQuote(this.launchPath)}` : "", home ? `CODEX_HOME=${shellQuote(home)}` : ""].filter(Boolean);
     return env.length ? `env ${env.join(" ")} ${command}` : command;
   }
 }
@@ -2947,10 +2979,10 @@ function escapeRegExp(value: string): string {
 // production, execFn runs the real `codex -p <profile> mcp list` through
 // execRuntimeProbe (utf-8, 10s bound, off the event loop). Injected as the
 // adapter's default verifyProfilePreflight; tests substitute a controlled stub.
-async function defaultProfilePreflight(profile: string, selected?: { cwd: string; codexHome: string; launchPath?: string }): Promise<CodexProfileProbeResult> {
+async function defaultProfilePreflight(profile: string, selected?: { cwd: string; codexHome?: string; launchPath?: string }): Promise<CodexProfileProbeResult> {
   const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
   const execFn = (cmd: string) => execRuntimeProbe("codex.runtime.profile_preflight", cmd,
-    selected ? { cwd: selected.cwd, env: { ...process.env, CODEX_HOME: selected.codexHome, ...(selected.launchPath ? { PATH: selected.launchPath } : {}) } } : {});
+    selected ? { cwd: selected.cwd, env: { ...process.env, ...(selected.codexHome ? { CODEX_HOME: selected.codexHome } : {}), ...(selected.launchPath !== undefined ? { PATH: selected.launchPath } : {}) } } : {});
   return verifyCodexProfileLoads(profile, execFn, undefined, selected?.codexHome);
 }
 

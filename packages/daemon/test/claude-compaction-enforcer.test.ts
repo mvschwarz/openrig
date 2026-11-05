@@ -17,7 +17,7 @@ import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-s
 
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 const fixtureHomes: string[] = [];
 // The home these tests pass explicitly (and assert in prompt text). A fixed path such as
 // /tmp/openrig-test-home accumulates files across runs and fails when that path is a file,
@@ -251,7 +251,7 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(belowRestore).toEqual({ triggered: true });
     expect(send).toHaveBeenLastCalledWith(
       "claude-seat@rig",
-      expect.stringContaining(`${TEST_HOME}/compaction/restore-pending/claude-seat@rig.json`),
+      expect.stringContaining(join(TEST_HOME, "compaction", "restore-pending", "claude-seat@rig.json")),
       { openrigNotice: true, preserveInput: true, waitForIdleMs: expect.any(Number), beforeWrite: expect.any(Function) },
     );
     expect(send.mock.calls[3]![1]).toContain("/tmp/claude.jsonl");
@@ -794,7 +794,7 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).toHaveBeenCalledTimes(5);
     expect(send.mock.calls[2]![1]).toContain("OpenRig post-compaction turn boundary");
     expect(send.mock.calls[3]![1]).toContain("Please respond to this normal user message now");
-    expect(send.mock.calls[4]![1]).toContain(`${TEST_HOME}/compaction/restore-pending/claude-seat@rig.json`);
+    expect(send.mock.calls[4]![1]).toContain(join(TEST_HOME, "compaction", "restore-pending", "claude-seat@rig.json"));
     expect(send.mock.calls[4]![1]).toContain("/tmp/claude.jsonl");
   });
 
@@ -847,18 +847,48 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[3]![1]).toContain("read your newest restore map and use the restore packet as a lookup");
     expect(send.mock.calls[3]![1]).not.toContain("read the restore packet files");
     expect(send.mock.calls[2]![1]).not.toContain("refocusing");
-    expect(send.mock.calls[3]![1]).toContain(`${TEST_HOME}/plugins/openrig-core/skills/refocusing/SKILL.md`);
+    expect(send.mock.calls[3]![1]).toContain(join(TEST_HOME, "plugins", "openrig-core", "skills", "refocusing", "SKILL.md"));
     expect(send.mock.calls[3]![1]).toContain("consume the current topology and work traces delivered with this restore request");
     expect(send.mock.calls[4]![1]).toContain("If no current trace arrived, report that delivery gap");
   });
 
-  it("post-compact restore prompt carries the configured operator restore instruction", async () => {
+  it.each(["invalidate", "generation-change", "policy-disabled"])("does not send an old restore prompt after %s during session-home observation", async change => {
+    const settings = makeSettingsStore({ ...POLICY_ENABLED_AT_80, messageFilePath: "~/owned-extra.md" });
+    const { transport, send } = makeSessionTransport();
+    let generation = "original";
+    let release!: (home: string) => void;
+    let observed!: () => void;
+    const started = new Promise<void>(resolve => { observed = resolve; });
+    Object.assign(transport, { restoreUserHome: vi.fn(() => {
+      observed(); return new Promise<string>(resolve => { release = resolve; });
+    }) });
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: TEST_HOME, resolveOccupantGeneration: () => generation });
+    const tick = (usedPercentage: number) => enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage });
+    expect(await tick(95)).toEqual({ triggered: true });
+    expect(await tick(95)).toEqual({ triggered: true });
+    expect(await tick(0)).toEqual({ triggered: true });
+    const before = send.mock.calls.length;
+    const pending = tick(0);
+    await started;
+    if (change === "invalidate") enforcer.invalidateOccupant("claude-seat@rig");
+    else if (change === "generation-change") generation = "successor";
+    else vi.mocked(settings.resolveClaudeCompactionPolicy).mockReturnValue({ ...POLICY_ENABLED_AT_80, enabled: false });
+    release(join(TEST_HOME, "selected-user-home"));
+    expect(await pending).toEqual({ triggered: false, reason: "preparation_stopped" });
+    expect(send).toHaveBeenCalledTimes(before);
+  });
+
+  it.each(["absolute", "slash-home", "backslash-home"])("post-compact restore prompt carries the configured operator restore instruction (%s)", async form => {
+    const userHome = join(TEST_HOME, "selected-user-home");
+    const configuredFile = form === "absolute" ? "/tmp/openrig-extra-restore.md" : form === "slash-home" ? "~/openrig-extra-restore.md" : "~\\openrig-extra-restore.md";
     const settings = makeSettingsStore({
       ...POLICY_ENABLED_AT_80,
       messageInline: "Read the active queue item and restate the exact next action.",
-      messageFilePath: "/tmp/openrig-extra-restore.md",
+      messageFilePath: configuredFile,
     });
     const { transport, send } = makeSessionTransport();
+    const readUserHome = vi.fn(async () => userHome);
+    Object.assign(transport, { restoreUserHome: readUserHome });
     const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
       openrigHome: TEST_HOME,
     });
@@ -894,7 +924,9 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[3]![1]).toContain("Operator post-compaction instruction");
     expect(send.mock.calls[3]![1]).toContain("Read the active queue item and restate the exact next action.");
     expect(send.mock.calls[3]![1]).toContain("Additional post-compaction instruction file");
-    expect(send.mock.calls[3]![1]).toContain("/tmp/openrig-extra-restore.md");
+    const expectedFile = form === "absolute" || (form === "backslash-home" && process.platform !== "win32") ? configuredFile : join(userHome, "openrig-extra-restore.md");
+    expect(send.mock.calls[3]![1]).toContain(`Additional post-compaction instruction file: ${expectedFile}.`);
+    if (form !== "absolute") expect(readUserHome).toHaveBeenCalledWith("claude-seat@rig");
   });
 
   it("post-compact restore prompt falls back to configured instruction file when inline is empty", async () => {
@@ -1347,7 +1379,7 @@ describe("ClaudeCompactionEnforcer", () => {
 
       const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
       expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "wait_for_idle_timeout",
-        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining("/RESTORE-MAP.md"), delivery: "delivered", compact: "not_sent" } });
+        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining(`${sep}RESTORE-MAP.md`), delivery: "delivered", compact: "not_sent" } });
       expect(enforcer.getManualCompactionState(SEAT)?.stage).toBe("skipped-or-failed");
 
       // No turn_boundary was seeded, so a below-threshold poll finds nothing to drain.
@@ -1365,7 +1397,7 @@ describe("ClaudeCompactionEnforcer", () => {
 
       const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
       expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "mid_work",
-        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining("/RESTORE-MAP.md"), delivery: "not_sent", compact: "not_sent" } });
+        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining(`${sep}RESTORE-MAP.md`), delivery: "not_sent", compact: "not_sent" } });
       expect(send).toHaveBeenCalledTimes(1);
     });
 

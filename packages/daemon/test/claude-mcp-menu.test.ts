@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
@@ -103,6 +104,7 @@ describe("current Claude MCP menus through assessment, readiness and HTTP send",
     cleanup.push(() => new Promise<void>((resolve, reject) => { server.closeAllConnections(); server.close(error => error ? reject(error) : resolve()); }));
     await new Promise<void>(resolve => server.once("listening", resolve));
     const { port } = server.address() as AddressInfo;
+    allowFetchTarget(`http://127.0.0.1:${port}`);
     const sends: Array<{ hook: string; status: number; body: { ok: boolean; reason?: string }; effects: typeof effects }> = [];
     for (const hook of ["none", "running", "permission"] as const) {
       if (hook !== "none") activity.recordHookEvent({ runtime: "claude-code", sessionName: "worker@test",

@@ -11,12 +11,42 @@ import { parseManagedClaudeNodeCommand } from "../src/domain/claude-activity-hoo
 import { RestoreCheckService, type NodeInventoryEntry } from "../src/domain/restore-check-service.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
+import { windowsClaudePluginHooks } from "../src/domain/windows-claude-plugin-hooks.js";
+
+const nativeShell = process.platform === "win32" ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe") : "/bin/sh";
+const shellArgs = (command: string) => process.platform === "win32" ? ["-NoProfile", "-NonInteractive", "-Command", command] : ["-c", command];
+const shellOnlyPath = process.platform === "win32" ? path.dirname(nativeShell) : "";
+// Retain Windows process infrastructure while removing every spelling of PATH.
+// A nearly empty environment can silently prevent PowerShell's native child
+// from consuming redirected stdin, which does not exercise the hook contract.
+const shellEnvironment = () => {
+  const env = process.platform === "win32" ? { ...process.env } : {};
+  for (const key of Object.keys(env)) if (key.toUpperCase() === "PATH") delete env[key];
+  return { ...env, PATH: shellOnlyPath };
+};
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 const relay = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
 const collector = path.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs");
 const relayParser = createRequire(import.meta.url)(relay) as { settingsRelayPath(command: string): { executable: string; relay: string } | null };
+const activityCommand = (executable: string, script: string) => process.platform === "win32"
+  ? "& " + [executable, script].map(value => "'" + value.replaceAll("'", "''") + "'").join(" ")
+  : `${shellQuote(executable)} ${shellQuote(script)}`;
+const collectorCommand = (executable: string, ...args: string[]) => process.platform === "win32"
+  ? "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + Buffer.from("& " + [executable, ...args].map(value => "'" + value.replaceAll("'", "''") + "'").join(" "), "utf16le").toString("base64")
+  : [executable, ...args].map(shellQuote).join(" ");
+
+it.runIf(process.platform === "win32")("recognizes literal native short paths in both readers without accepting tilde expansion", () => {
+  const executable = "C:/PROGRA~1/nodejs/node.exe", script = "C:/Users/USERNA~1/state/claude-activity-hooks/activity-relay.cjs";
+  const command = `${executable} ${script}`;
+  expect(parseManagedClaudeNodeCommand(command)).toEqual({ executable, args: [script] });
+  expect(relayParser.settingsRelayPath(command)).toEqual({ executable, relay: script });
+  for (const invalid of [`~node ${script}`, "node ~/state/claude-activity-hooks/activity-relay.cjs", command + " && echo extra", command + " $(echo extra)"]) {
+    expect(parseManagedClaudeNodeCommand(invalid)).toBeNull();
+    expect(relayParser.settingsRelayPath(invalid)).toBeNull();
+  }
+});
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "hook-node-")); roots.push(root);
@@ -53,7 +83,9 @@ it.each(["legacy", "pinned", "unquoted", "absolute-unquoted", "plugin-unquoted"]
   const oldRelay = kind === "plugin-unquoted" ? path.join(f.root, "plugins/openrig-core/hooks/scripts/activity-relay.cjs")
     : unquoted ? path.join(f.root, "state/claude-activity-hooks/activity-relay.cjs") : f.relayDest;
   const oldCollector = unquoted ? path.join(f.root, ".openrig/context-collector.cjs") : f.collectorDest;
-  const arg = (value: string) => unquoted ? value : shellQuote(value);
+  // These exercise literal shell words. Backslashes in an unquoted native
+  // Windows path are shell escapes, so use its valid forward-slash spelling.
+  const arg = (value: string) => unquoted ? value.replaceAll("\\", "/") : shellQuote(value);
   const custom = { type: "command", command: `custom-wrapper ${shellQuote(f.relayDest)}` };
   const permissions = { allow: ["Bash(ls:*)"] };
   fs.writeFileSync(f.settings, JSON.stringify({ permissions,
@@ -62,11 +94,11 @@ it.each(["legacy", "pinned", "unquoted", "absolute-unquoted", "plugin-unquoted"]
   }));
   const a = f.adapter();
   const result = await f.project(a);
-  const wanted = `${shellQuote(process.execPath)} ${shellQuote(f.relayDest)}`;
-  expect(result.hooks.Stop.flatMap((g: any) => g.hooks)).toEqual([custom, { type: "command", command: wanted, timeout: 5 }]);
+  const wanted = activityCommand(process.execPath, f.relayDest);
+  expect(result.hooks.Stop.flatMap((g: any) => g.hooks)).toEqual([custom, { type: "command", command: wanted, timeout: 5, ...(process.platform === "win32" ? { shell: "powershell" } : {}) }]);
   expect(result.permissions).toEqual(permissions);
   expect(result.statusLine).toEqual({ type: "command", padding: 3,
-    command: `${shellQuote(process.execPath)} ${shellQuote(f.collectorDest)} ${shellQuote(path.join(f.state, "state/context-usage"))} ${shellQuote(path.join(f.state, "state/provider-usage"))}` });
+    command: collectorCommand(process.execPath, f.collectorDest, path.join(f.state, "state/context-usage"), path.join(f.state, "state/provider-usage")) });
   const bytes = fs.readFileSync(f.settings, "utf8");
   await f.project(a);
   expect(fs.readFileSync(f.settings, "utf8")).toBe(bytes);
@@ -85,8 +117,8 @@ it("keeps non-node-named runtimes on the recognized legacy form through refresh 
   fs.symlinkSync(process.execPath, executable);
   const a = f.adapter(executable);
   const first = await f.project(a);
-  expect(first.hooks.Stop[0].hooks[0].command).toBe(`node ${shellQuote(f.relayDest)}`);
-  expect(first.statusLine.command).toBe(`node ${shellQuote(f.collectorDest)} ${shellQuote(path.join(f.state, "state/context-usage"))} ${shellQuote(path.join(f.state, "state/provider-usage"))}`);
+  expect(first.hooks.Stop[0].hooks[0].command).toBe(activityCommand("node", f.relayDest));
+  expect(first.statusLine.command).toBe(collectorCommand("node", f.collectorDest, path.join(f.state, "state/context-usage"), path.join(f.state, "state/provider-usage")));
   expect(relayParser.settingsRelayPath(first.hooks.Stop[0].hooks[0].command))
     .toEqual({ executable: "node", relay: f.relayDest });
   const bytes = fs.readFileSync(f.settings, "utf8");
@@ -111,13 +143,13 @@ it("keeps non-node-named runtimes on the recognized legacy form through refresh 
 
   // A later recognized interpreter replaces the collector rather than treating it as user-owned.
   const refreshed = await f.project(f.adapter());
-  expect(refreshed.statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote(f.collectorDest)} ${shellQuote(path.join(f.state, "state/context-usage"))} ${shellQuote(path.join(f.state, "state/provider-usage"))}`);
+  expect(refreshed.statusLine.command).toBe(collectorCommand(process.execPath, f.collectorDest, path.join(f.state, "state/context-usage"), path.join(f.state, "state/provider-usage")));
   expect(refreshed.hooks.Stop).toHaveLength(1);
 });
 
 it("executes both actual generated commands with no Node on PATH and quoted interpreter/project names", async () => {
   const f = fixture();
-  const executable = path.join(f.root, "Node O'Brien", "node");
+  const executable = path.join(f.root, "Node O'Brien", process.platform === "win32" ? "node.exe" : "node");
   fs.mkdirSync(path.dirname(executable)); fs.symlinkSync(process.execPath, executable);
   const result = await f.project(f.adapter(executable));
   const posts: unknown[] = [];
@@ -129,10 +161,10 @@ it("executes both actual generated commands with no Node on PATH and quoted inte
   try {
     const port = (server.address() as { port: number }).port;
     const command = result.hooks.Stop[0].hooks[0].command as string;
-    expect(command).toBe(`${shellQuote(executable)} ${shellQuote(f.relayDest)}`);
+    expect(command).toBe(activityCommand(executable, f.relayDest));
     await new Promise<void>((ok, fail) => {
-      const child = spawn("/bin/sh", ["-c", command], { cwd: f.cwd, timeout: 5000,
-        env: { PATH: "", HOME: f.root, OPENRIG_HOME: f.state, OPENRIG_URL: `http://127.0.0.1:${port}`,
+      const child = spawn(nativeShell, shellArgs(command), { cwd: f.cwd, timeout: 5000, windowsHide: true,
+        env: { ...shellEnvironment(), HOME: f.root, OPENRIG_HOME: f.state, OPENRIG_URL: `http://127.0.0.1:${port}`,
           OPENRIG_ACTIVITY_HOOK_TOKEN: "fixture-only", OPENRIG_RUNTIME: "claude-code", OPENRIG_NODE_ID: "fixture-node",
           OPENRIG_SESSION_NAME: "fixture-worker", OPENRIG_OCCUPANT_GENERATION: "fixture-generation" }, stdio: ["pipe", "ignore", "pipe"] });
       let error = ""; child.stderr.on("data", chunk => { error += chunk; });
@@ -141,17 +173,17 @@ it("executes both actual generated commands with no Node on PATH and quoted inte
     });
     expect(posts).toEqual([expect.objectContaining({ hookEvent: "Stop", nodeId: "fixture-node", generation: "fixture-generation" })]);
     const sample = { session_id: "fixture-id", session_name: "fixture-worker", context_window: { used_percentage: 37 } };
-    const r = spawnSync("/bin/sh", ["-c", result.statusLine.command], {
-      cwd: f.cwd, env: { PATH: "", HOME: f.root }, input: JSON.stringify(sample), encoding: "utf8", timeout: 5000,
+    const r = spawnSync(nativeShell, shellArgs(result.statusLine.command), {
+      cwd: f.cwd, env: { ...shellEnvironment(), HOME: f.root }, input: JSON.stringify(sample), encoding: "utf8", timeout: 5000, windowsHide: true,
     });
     expect(r.status, r.stderr).toBe(0);
     expect(JSON.parse(fs.readFileSync(path.join(f.state, "state/context-usage/fixture-worker.json"), "utf8")))
       .toMatchObject({ session_id: "fixture-id", context_window: { used_percentage: 37 } });
     fs.unlinkSync(executable);
-    const missing = spawnSync("/bin/sh", ["-c", result.statusLine.command], {
-      cwd: f.cwd, env: { PATH: process.env.PATH }, input: JSON.stringify(sample), encoding: "utf8", timeout: 5000,
+    const missing = spawnSync(nativeShell, shellArgs(result.statusLine.command), {
+      cwd: f.cwd, env: shellEnvironment(), input: JSON.stringify(sample), encoding: "utf8", timeout: 5000, windowsHide: true,
     });
-    expect(missing.status).toBe(127); // no hidden fallback to a different PATH interpreter
+    expect(missing.status).toBe(process.platform === "win32" ? 1 : 127); // no hidden fallback to a different PATH interpreter
   } finally { await new Promise<void>(ok => server.close(() => ok())); }
 });
 
@@ -165,17 +197,70 @@ it.each(["node", shellQuote("/Node O'Brien/node")])("keeps the adapter and stand
   }
 });
 
+it.runIf(process.platform === "win32")("executes a generated activity hook in the native PowerShell fallback without Git Bash", async () => {
+  const f = fixture();
+  const result = await f.project(f.adapter());
+  // Keep the real writer's command, replacing only the owned copied script's effects.
+  fs.writeFileSync(f.relayDest, "let s='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>process.stdout.write('owned-native-hook-executed:'+JSON.parse(s).value))");
+  const executable = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.toUpperCase() === "PATH") delete env[key];
+  env.PATH = "";
+  const hook = result.hooks.Stop[0].hooks[0];
+  expect(hook.shell).toBe("powershell");
+  expect(parseManagedClaudeNodeCommand(hook.command)).toEqual({ executable: process.execPath, args: [f.relayDest] });
+  expect(relayParser.settingsRelayPath(hook.command)).toEqual({ executable: process.execPath, relay: f.relayDest });
+  for (const suffix of ["; echo injected", " | echo injected", " $(echo injected)", " extra", "\necho injected"]) {
+    expect(parseManagedClaudeNodeCommand(hook.command + suffix)).toBeNull();
+    expect(relayParser.settingsRelayPath(hook.command + suffix)).toBeNull();
+  }
+  const run = spawnSync(executable, ["-NoProfile", "-NonInteractive", "-Command", hook.command], {
+    cwd: f.cwd, env, encoding: "utf8", input: JSON.stringify({ value: "原生 O'Brien" }), timeout: 5000, windowsHide: true,
+  });
+  expect(run.error).toBeUndefined();
+  expect(run.status, run.stderr).toBe(0);
+  expect(run.stdout).toBe("owned-native-hook-executed:原生 O'Brien");
+});
+
+it.runIf(process.platform === "win32").for(["PowerShell", "Git Bash"])("executes the generated status collector through %s without Node on PATH", async (shell, context) => {
+  const f = fixture();
+  const result = await f.project(f.adapter());
+  const executable = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+  const bash = path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git/bin/bash.exe");
+  if (shell === "Git Bash" && !fs.existsSync(bash)) context.skip();
+  const env = { ...process.env, HOME: f.root };
+  for (const key of Object.keys(env)) if (key.toUpperCase() === "PATH") delete env[key];
+  env.PATH = path.dirname(executable);
+  const sample = { session_id: "原生 O'Brien", session_name: "fixture-native", context_window: { used_percentage: 37 } };
+  const run = spawnSync(shell === "PowerShell" ? executable : bash,
+    shell === "PowerShell" ? ["-NoProfile", "-NonInteractive", "-Command", result.statusLine.command] : ["-c", result.statusLine.command], {
+    cwd: f.cwd, env, encoding: "utf8", input: JSON.stringify(sample), timeout: 5000, windowsHide: true,
+  });
+  expect(run.error).toBeUndefined();
+  expect(run.status, run.stderr).toBe(0);
+  expect(JSON.parse(fs.readFileSync(path.join(f.state, "state/context-usage/fixture-native.json"), "utf8")))
+    .toMatchObject({ session_id: sample.session_id, context_window: sample.context_window });
+  expect(parseManagedClaudeNodeCommand(result.statusLine.command)).toEqual({ executable: process.execPath,
+    args: [f.collectorDest, path.join(f.state, "state/context-usage"), path.join(f.state, "state/provider-usage")] });
+  for (const suffix of ["; echo injected", " extra", "\necho injected"]) {
+    expect(parseManagedClaudeNodeCommand(result.statusLine.command + suffix)).toBeNull();
+  }
+});
+
 it.each(["explicit", "legacy"])("runs every Claude plugin hook command with the %s interpreter selection", kind => {
   const f = fixture();
   const plugin = path.join(f.root, "plugin's hooks");
-  const manifest = JSON.parse(fs.readFileSync(path.resolve(path.dirname(relay), "../claude.json"), "utf8"));
-  const commands = Object.values(manifest.hooks).flatMap((groups: any) => groups.flatMap((g: any) => g.hooks.map((h: any) => h.command))) as string[];
-  for (const command of commands) {
-    const relative = /\$\{CLAUDE_PLUGIN_ROOT\}([^"\s]+)/.exec(command)![1]!;
+  const source = fs.readFileSync(path.resolve(path.dirname(relay), "../claude.json"), "utf8");
+  const manifest = JSON.parse(process.platform === "win32" ? windowsClaudePluginHooks(source) : source);
+  const hooks = Object.values(manifest.hooks).flatMap((groups: any) => groups.flatMap((g: any) => g.hooks)) as Array<{ command: string; args?: string[] }>;
+  for (const hook of hooks) {
+    const relative = process.platform === "win32" ? hook.args!.find(arg => arg.startsWith("${CLAUDE_PLUGIN_ROOT}/"))!.slice("${CLAUDE_PLUGIN_ROOT}".length)
+      : /\$\{CLAUDE_PLUGIN_ROOT\}([^"\s]+)/.exec(hook.command)![1]!;
     const script = path.join(plugin, relative);
     fs.mkdirSync(path.dirname(script), { recursive: true });
     fs.writeFileSync(script, 'process.stdout.write(JSON.stringify({ node: process.execPath, args: process.argv.slice(2) }));');
-    const r = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", timeout: 5000,
+    const r = spawnSync(process.platform === "win32" ? hook.command : "/bin/sh",
+      process.platform === "win32" ? hook.args!.map(arg => arg.replaceAll("${CLAUDE_PLUGIN_ROOT}", plugin)) : ["-c", hook.command], { encoding: "utf8", timeout: 5000, windowsHide: true,
       env: { PATH: kind === "explicit" ? "" : path.dirname(process.execPath), CLAUDE_PLUGIN_ROOT: plugin,
         ...(kind === "explicit" ? { OPENRIG_NODE: process.execPath } : {}) } });
     expect(r.status, r.stderr).toBe(0);

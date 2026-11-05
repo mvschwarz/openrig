@@ -19,6 +19,11 @@ files:
 estimated_tokens: 500
 `;
 
+it.each(["C:\\outside.md", "C:outside.md", "\\\\host\\share\\outside.md", "\\rooted.md", "bad\0.md"])("rejects non-relative native context-pack paths: %s", value => {
+  const raw = validManifest.replace("prd.md", JSON.stringify(value));
+  expect(() => parseManifest(raw, "/fixture/manifest.yaml")).toThrow(/relative path inside the pack/);
+});
+
 describe("parseManifest", () => {
   it("parses a valid manifest into the typed shape", () => {
     const m = parseManifest(validManifest, "/test/manifest.yaml");

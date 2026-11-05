@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { resourceDirectoryPath } from "./resource-directory-name.js";
 import nodePath from "node:path";
 import type Database from "better-sqlite3";
 import type { AgentSpec, Node, RigSpec, RigSpecPod, RigSpecPodMember, StartupAction } from "./types.js";
@@ -116,7 +117,7 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
     const projected = planProjection({ config, collisions: source.collisions, fsOps,
       // The instantiator's targets for the same runtime, with the target's own seat storage for skills.
       resolveTargetPath: (category, effectiveId, root, sourcePath) => category === "skill"
-        ? nodePath.join(seatSkills.skillsRoot, effectiveId, "SKILL.md")
+        ? nodePath.join(resourceDirectoryPath(seatSkills.skillsRoot, effectiveId), "SKILL.md")
         : claudeConflictTargetPath(category, effectiveId, root, sourcePath, runtime === "claude-code" ? input.claudeManagedBlockFile : undefined),
       lastHashLookup: (file) => manifests.lastHash(file) });
     if (!projected.ok) throw new Error(`The seat's materials can't be planned for ${runtime}: ${projected.errors.join("; ")}`);

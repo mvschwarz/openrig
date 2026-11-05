@@ -35,10 +35,12 @@ export interface TmuxOptionDefaultsDeps {
  * applied ONLY to the just-created session name passed in — never a
  * pre-existing/discovered session — so the never-retro-flip rail (BR-1)
  * holds and a `terminal.status_bar` flip affects future launches only.
- * SERVER-scope options (`set-clipboard`, `copy-command`) are asserted ONCE
+ * POSIX SERVER-scope options (`set-clipboard`, `copy-command`) are asserted ONCE
  * per daemon lifetime via the shared memo on this single instance; a daemon
  * RESTART re-asserts (a fresh applier). Callers MUST only invoke this after
- * a successful `createSession` on a freshly-created session.
+ * a successful `createSession` on a freshly-created session. Native psmux has
+ * one server per session: clipboard is applied to that exact fresh target,
+ * never through the unscoped POSIX server API or its once-per-daemon memo.
  */
 export class TmuxOptionDefaultsApplier {
   private tmuxAdapter: TmuxAdapter;
@@ -92,6 +94,11 @@ export class TmuxOptionDefaultsApplier {
       warnings.push(`tmux "detach-on-destroy" option not set for ${sessionName}: ${detach.message}`);
     }
 
+    if (this.platform === "win32") {
+      const clip = await this.tmuxAdapter.setNativeServerOption(sessionName, "set-clipboard", "on");
+      if (!clip.ok) warnings.push(`psmux "set-clipboard" server option not set for ${sessionName}: ${clip.message}`);
+      return warnings;
+    }
     await this.ensureServerDefaults(warnings);
     return warnings;
   }

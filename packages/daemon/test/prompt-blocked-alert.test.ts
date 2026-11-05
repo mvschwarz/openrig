@@ -12,7 +12,6 @@ import type { PolicyJob } from "../src/domain/policies/types.js";
 import { WatchdogHistoryLog, type WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { tmuxAttachCommand } from "../src/adapters/tmux-server.js";
-import { shellQuote } from "../src/adapters/shell-quote.js";
 import { makeKernelHookReviewReader } from "../src/domain/kernel-hook-review.js";
 import { verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { runWakeLadderTick, queueRecoveryOwnsWake, classifyPromptAfterRefusal } from "../src/domain/queue-wake-ladder.js";
@@ -481,7 +480,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       await hookTick(port);
       const updated = repo.getById(alert.qitemId)!;
       expect(updated.summary).toContain("Hooks need review");
-      expect(updated.summary).toContain(tmuxAttachCommand(shellQuote(seat)));
+      expect(updated.summary).toContain(tmuxAttachCommand(seat));
       expect(notes(alert.qitemId).filter(n => n.startsWith("hook-review observed:"))).toHaveLength(1);
       expect(notes(alert.qitemId).join("\n")).toContain("through Codex's hook review");
       expect(updated.body).toBe(before.body); // retain the original delivered content and receipt

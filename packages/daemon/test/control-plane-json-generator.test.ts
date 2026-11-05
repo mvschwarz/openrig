@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 
 const roots: string[] = [];
@@ -23,6 +24,20 @@ afterEach(() => {
 });
 
 describe("control-plane JSON generator", () => {
+  it("imports without argv[1] and executes the real CLI entry with its validation error", () => {
+    const script = join(REPO_ROOT, "packages/daemon/scripts/gen-control-plane-json.mjs");
+    const imported = spawnSync(process.execPath, ["-e", `import(${JSON.stringify(pathToFileURL(script).href)}).then(m=>process.stdout.write(typeof m.generateControlPlaneJson))`], {
+      encoding: "utf8", timeout: 5000, windowsHide: true,
+    });
+    expect(imported.error).toBeUndefined();
+    expect(imported.status, imported.stderr).toBe(0);
+    expect(imported.stdout).toBe("function");
+    const direct = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: 5000, windowsHide: true });
+    expect(direct.error).toBeUndefined();
+    expect(direct.status).toBe(1);
+    expect(direct.stderr).toContain("--repo-root is required");
+  });
+
   it("exposes the daemon-workspace generation command without a root YAML dependency", () => {
     const daemonPackage = JSON.parse(
       readFileSync(join(REPO_ROOT, "packages/daemon/package.json"), "utf8"),
@@ -209,7 +224,7 @@ describe("control-plane JSON generator", () => {
     ).toBe(false);
   });
 
-  it("rejects edge directory symlinks before traversal or digesting outside-root bytes", async () => {
+  it.each(process.platform === "win32" ? ["dir", "junction"] as const : ["dir"] as const)("rejects edge directory %s links before traversal or digesting outside-root bytes", async (linkType) => {
     const generator = await loadGenerator();
     const root = tempRoot();
     const input = seedGeneratorInput(root);
@@ -221,7 +236,7 @@ describe("control-plane JSON generator", () => {
       "skills/_canonical/core/alpha/references/linked-directory",
     );
     mkdirSync(dirname(link), { recursive: true });
-    symlinkSync(outside, link, "dir");
+    symlinkSync(outside, link, linkType);
 
     await expect(
       generator.generateControlPlaneJson(input),
@@ -236,8 +251,7 @@ async function loadGenerator(): Promise<Record<string, any>> {
   const url = pathToFileURL(
     join(REPO_ROOT, "packages/daemon/scripts/gen-control-plane-json.mjs"),
   ).href;
-  const loaded = await import(url).catch(() => null);
-  expect(loaded, "daemon control-plane JSON generator must exist").not.toBeNull();
+  const loaded = await import(url);
   expect(typeof loaded?.generateControlPlaneJson).toBe("function");
   expect(typeof loaded?.extractSkillEdgeLayout).toBe("function");
   return loaded as Record<string, any>;

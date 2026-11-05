@@ -179,6 +179,19 @@ function renderTree(opts: RenderTreeOpts): ReturnType<typeof render> {
 }
 
 describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
+  it.each([
+    ["C:\\books", "C:\\books\\workspace", "workspace/missions"],
+    ["\\\\host\\share", "\\\\host\\share\\workspace", "workspace/missions"],
+    ["C:\\books\\workspace\\", "C:/books/workspace", "missions"],
+  ])("discovers missions under native workspace %s", async (root, workspace, relative) => {
+    const { findByTestId } = renderTree({ workspaceRoot: workspace, roots: [{ name: "ws", path: root }],
+      listings: { [`ws:${relative}`]: [{ name: "native-release", type: "dir" }] }, slices: [] });
+    expect(await findByTestId("project-mission-native-release")).toBeTruthy();
+    expect(mockFetch.mock.calls.some(([input]) => {
+      const url = new URL(String(input), "http://fixture");
+      return url.pathname === "/api/files/list" && url.searchParams.get("root") === "ws" && url.searchParams.get("path") === relative;
+    })).toBe(true);
+  });
   it("filesystem-discovered missions surface as tree nodes when allowlist exposes workspace root", async () => {
     const { findByTestId } = renderTree({
       workspaceRoot: "/Users/admin/.openrig/workspace",

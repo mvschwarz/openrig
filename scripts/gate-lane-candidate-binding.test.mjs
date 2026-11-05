@@ -12,7 +12,8 @@ import {
 } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
+import { writeNativeGateNpm } from "./gate-test-fixtures.mjs";
 import { fileURLToPath } from "node:url";
 
 const GATE_SCRIPT = fileURLToPath(new URL("./gate-lane.mjs", import.meta.url));
@@ -38,7 +39,7 @@ function makeRepo() {
   };
   write(join(root, "package-lock.json"), `${JSON.stringify({ name: "fixture", lockfileVersion: 3, packages }, null, 2)}\n`);
   mkdirSync(join(root, "node_modules/@openrig"), { recursive: true });
-  symlinkSync("../../packages/cli", join(root, "node_modules/@openrig/cli"));
+  symlinkSync(join(root, "packages/cli"), join(root, "node_modules/@openrig/cli"), process.platform === "win32" ? "junction" : "dir");
   git(root, "init", "-q");
   git(root, "config", "user.email", "gate@example.invalid");
   git(root, "config", "user.name", "Gate Test");
@@ -124,6 +125,12 @@ test("candidate binding: only the canonical verdict path may be present and the 
   const verdict = JSON.parse(readFileSync(verdictPath, "utf8"));
   assert.equal(verdict.candidateSha, head);
   assert.equal(verdict.gate, "pass");
+  assert.equal(verdict.foreignLoad.processObservation, "available");
+  assert.equal(typeof verdict.foreignLoad.foreignProcessCount, "number");
+  if (process.platform === "win32") {
+    assert.equal(verdict.foreignLoad.loadavg, null);
+    assert.ok(verdict.foreignLoad.advisory.some(line => /loadavg unavailable/.test(line)));
+  }
 });
 
 test("candidate binding: HEAD drift during the gate refuses before writing a verdict", async () => {
@@ -134,13 +141,14 @@ test("candidate binding: HEAD drift during the gate refuses before writing a ver
   const fakeNpm = join(fakeBin, "npm");
   write(fakeNpm, `#!/bin/sh\n: > "$OPENRIG_TEST_MARKER"\nsleep 1\nexit 0\n`);
   chmodSync(fakeNpm, 0o755);
+  writeNativeGateNpm(fakeBin);
   const port = await freePort();
 
   const child = spawn(process.execPath, [GATE_SCRIPT], {
     cwd: root,
     env: {
       ...process.env,
-      PATH: `${fakeBin}:${process.env.PATH}`,
+      PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
       OPENRIG_TEST_MARKER: marker,
       OPENRIG_GATE_LANE_PORT: String(port),
       OPENRIG_GATE_VERDICT: verdictPath,
@@ -176,13 +184,14 @@ test("candidate binding: Git-visible input added during the gate refuses before 
   const fakeNpm = join(fakeBin, "npm");
   write(fakeNpm, `#!/bin/sh\n: > "$OPENRIG_TEST_MARKER"\nwhile [ ! -e "$OPENRIG_TEST_RELEASE" ]; do sleep 0.02; done\nexit 0\n`);
   chmodSync(fakeNpm, 0o755);
+  writeNativeGateNpm(fakeBin);
   const port = await freePort();
 
   const child = spawn(process.execPath, [GATE_SCRIPT], {
     cwd: root,
     env: {
       ...process.env,
-      PATH: `${fakeBin}:${process.env.PATH}`,
+      PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
       OPENRIG_TEST_MARKER: marker,
       OPENRIG_TEST_RELEASE: release,
       OPENRIG_GATE_LANE_PORT: String(port),

@@ -1,21 +1,42 @@
 import { Command } from "commander";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, type DaemonResponse } from "../client.js";
-import { readOpenRigEnv } from "../openrig-compat.js";
+import { getOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { assertLocalTmux, isLocalTmuxHost, readTmuxAttachCommand, readTmuxServerArgs } from "../tmux-attachment.js";
+import { bindNativeSessionName, powershellQuote, windowsTileAttachArgv } from "@openrig/daemon/windows-launch";
+import { createTerminalCommandSession } from "@openrig/daemon/terminal-cleanup";
+import { shellQuote } from "../cross-host-executor.js";
+
+/** Creating a local watcher must address the selected local instance, including inherited servers. */
+export async function chatroomTmuxSelection(client: Pick<DaemonClient, "baseUrl" | "get" | "isLocalInstance">): Promise<{ command: string[]; serverArgs: string[] }> {
+  if (!isLocalTmuxHost(client.baseUrl)) throw new Error("A tmux watcher must be started on the selected daemon's machine.");
+  await assertLocalTmux(client, "isolated", "The selected daemon's instance identity could not be confirmed locally; no watcher was created.");
+  const response = await client.get<{ tmux?: { serverArgs?: unknown; command?: unknown } }>("/api/terminal/status");
+  if (response.status >= 400 || response.data.tmux?.serverArgs === undefined) throw new Error("The selected daemon cannot report its tmux server; no watcher was created.");
+  return { command: readTmuxAttachCommand(response.data.tmux.command), serverArgs: readTmuxServerArgs(response.data.tmux.serverArgs) };
+}
+
+export function chatroomWatcherCommand(platform: NodeJS.Platform = process.platform): string[] {
+  return platform === "win32" ? [process.execPath, fileURLToPath(new URL("../index.js", import.meta.url))] : ["rig"];
+}
 
 /** tmux's arguments for the session that runs `rig chatroom watch`. The watcher goes to tmux as separate arguments, so
  *  tmux runs it without a shell and the rig name arrives as one argument; `--` keeps a name that starts with `-` from
  *  reading as an option. tmux reads the `-s` value as a format, where `##` is one `#` and a run of `#` before `[` is a
  *  style it keeps as written, so every other `#` is doubled and the session is `chatroom@<rig>`. Some tmux versions
  *  still change a session name (3.5a writes `_` for `:` and `.`, and escapes a backslash or a control character such
- *  as a newline or tab), so `-P -F` prints the name tmux used. */
-export function chatroomWatchTmuxArgs(rig: string): string[] {
+ *  as a newline or tab). `-P -F` returns the stable session ID because a printed
+ *  escaped name is not necessarily usable as an exact target. */
+export function chatroomWatchTmuxArgs(rig: string, watcher: readonly string[] = ["rig"], platform: NodeJS.Platform = process.platform): string[] {
   const session = `chatroom@${rig}`.replace(/#+(\[)?/g, (run, style?: string) => style ? run : run + run);
-  return ["new-session", "-d", "-P", "-F", "#{session_name}", "-s", tmuxArg(session),
-    "rig", "chatroom", "watch", "--", tmuxArg(rig)];
+  return ["new-session", "-d", "-P", "-F", "#{session_id}", "-s", tmuxArg(session),
+    // Stock psmux otherwise joins positional words into a shell command, losing
+    // executable and script paths with spaces. `--` selects its direct argv mode.
+    ...(platform === "win32" ? ["--"] : []),
+    ...watcher.map(tmuxArg), "chatroom", "watch", "--", tmuxArg(rig)];
 }
 
 /** tmux ends a command at an argument that ends in `;`, unless a `\` comes before it, so a final `;` gets that `\`. */
@@ -192,13 +213,21 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       if (opts.tmux) {
         const sessionName = `chatroom@${rig}`;
         try {
-          // The name tmux used, which differs from sessionName when tmux changed it (a `.` in a rig name, for example).
-          const created = execFileSync("tmux", chatroomWatchTmuxArgs(rig), { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-            .trim() || sessionName;
-          console.log(`Started watch in tmux session: ${created}`);
-          console.log(`Attach with: tmux attach -t ${created}`);
-        } catch {
-          console.error(`Failed to create tmux session '${sessionName}'. It may already exist.`);
+          const selected = await chatroomTmuxSelection(client);
+          // Printed names can be escaped and cannot reliably address the session.
+          // Its server-local immutable ID avoids name normalization and shell expansion.
+          const child = [process.execPath, fileURLToPath(new URL("../chatroom-watch-child.js", import.meta.url)), getOpenRigHome(), client.baseUrl, rig];
+          const created = await createTerminalCommandSession(sessionName, child, selected.serverArgs, selected.command);
+          if (!/^\$\d+$/.test(created)) throw new Error("No stable tmux session ID returned");
+          console.log(`Started watch in tmux session: ${sessionName} (${created})`);
+          const quote = process.platform === "win32" ? powershellQuote : shellQuote;
+          const target = process.platform === "win32" ? `=${sessionName}` : created;
+          const attach = process.platform === "win32" && bindNativeSessionName(sessionName).marker
+            ? windowsTileAttachArgv(selected.command[0]!, [...selected.command.slice(1), ...selected.serverArgs], sessionName, false, 30, true)
+            : [...selected.command, ...selected.serverArgs, "attach", "-t", target];
+          console.log(`Attach with: ${process.platform === "win32" ? "& " : ""}${attach.map(quote).join(" ")}`);
+        } catch (error) {
+          console.error(`Failed to create tmux session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
           process.exitCode = 1;
         }
         return;

@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { JsonRpcRequestError, JsonRpcTransportClosed, StdioJsonRpcPeer } from "./json-rpc-stdio.js";
 import { findRunProcesses, RUN_MARKER } from "./run-processes.js";
+import { resolveAcpAgentCommand } from "./agent-command.js";
 
 // `rig acp run`: one queue row's task to one ACP agent turn, with the outcome back on that row. OpenRig carries the
 // agent's permission requests to an owning seat and returns that seat's answer; it holds no permission policy of its
@@ -77,8 +78,21 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
 
   mkdirSync(dirname(options.logPath), { recursive: true });
   const log = (entry: Record<string, unknown>) => appendFileSync(options.logPath, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
-  const child = spawn(options.agent[0]!, options.agent.slice(1), {
+  const record = async (outcome: AcpOutcome): Promise<AcpOutcome> => {
+    const shown = outcome.text.length > NOTE_TEXT_LIMIT ? `${outcome.text.slice(0, NOTE_TEXT_LIMIT)}\n… (truncated; the full transcript is in ${options.logPath})` : outcome.text;
+    await queue.update(row.qitemId, {
+      note: `ACP run ${options.runId} outcome ${outcome.kind}: ${outcome.summary}${shown ? `\n\n${shown}` : ""}\nThis is the agent's report, not a judgment of the work; the row stays open for you to judge and close with your own resolution.`,
+    });
+    return outcome;
+  };
+  let executable: ReturnType<typeof resolveAcpAgentCommand>;
+  try { executable = resolveAcpAgentCommand(options.agent[0]!, options.cwd); }
+  catch (error) { return record({ kind: "failed", text: "", summary: `the agent couldn't be run: ${(error as Error).message}` }); }
+  const child = spawn(executable.command, [...executable.prefix, ...options.agent.slice(1)], {
     cwd: options.cwd, stdio: "pipe", env: { ...process.env, [RUN_MARKER]: options.runId },
+    // A Windows agent must own its process group to survive the connector's
+    // console closing after detach. Pipes still carry ACP until release().
+    ...(process.platform === "win32" ? { detached: true, windowsHide: true } : {}),
   });
   child.stderr.on("data", (data: Buffer) => log({ direction: "stderr", text: data.toString() }));
   const spawned = new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
@@ -150,14 +164,6 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
       }
     }
   });
-
-  const record = async (outcome: AcpOutcome): Promise<AcpOutcome> => {
-    const shown = outcome.text.length > NOTE_TEXT_LIMIT ? `${outcome.text.slice(0, NOTE_TEXT_LIMIT)}\n… (truncated; the full transcript is in ${options.logPath})` : outcome.text;
-    await queue.update(row.qitemId, {
-      note: `ACP run ${options.runId} outcome ${outcome.kind}: ${outcome.summary}${shown ? `\n\n${shown}` : ""}\nThis is the agent's report, not a judgment of the work; the row stays open for you to judge and close with your own resolution.`,
-    });
-    return outcome;
-  };
 
   try {
     await spawned;
