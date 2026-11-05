@@ -98,7 +98,7 @@ describe("issue #2528: config reset and set with active environment overrides", 
     await cmd.parseAsync(["node", "rig", "reset"]);
 
     const output = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-    expect(output).toMatch(/Config overrides cleared; \d+ environment overrides? still active\./);
+    expect(output).toMatch(/Config overrides cleared; 1 environment override still active\./);
     expect(fs.existsSync(configPath)).toBe(false);
   });
 
