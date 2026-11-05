@@ -62,6 +62,7 @@ export interface DoctorDeps {
 }
 
 const DEFAULT_PORT = 7433;
+const DOCTOR_HTTP_TIMEOUT_MS = 2000;
 const CMUX_SOCKET_CONTROL_FIX = 'In cmux Settings > Automation, select "Automation mode" for Socket Control Mode, or set automation.socketControlMode to "automation" in ~/.config/cmux/cmux.json (older versions use ~/.config/cmux/settings.json; current cmux reads that legacy file only for keys absent from cmux.json). cmux reloads saved settings automatically; rerun `rig doctor` to re-probe without restarting the daemon.';
 
 /** The port's OpenRig daemon, judged by the OS user it reports. /healthz's pid and euid are the daemon's own report,
@@ -73,7 +74,7 @@ async function listenerOwnerCheck(where: string, base: string, res: { json?: () 
   const env = deps.env ?? process.env;
   const at = `Port ${where} (${base}, OpenRig home ${getOpenRigHome(env)})`;
   const callerUid = deps.callerUid === undefined ? process.geteuid?.() : deps.callerUid ?? undefined;
-  const boundMs = deps.ownerReportTimeoutMs ?? 2000;
+  const boundMs = deps.ownerReportTimeoutMs ?? DOCTOR_HTTP_TIMEOUT_MS;
   let reported: { pid?: unknown; euid?: unknown } = {};
   let late = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -302,7 +303,7 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
   const daemonPort = config.daemon.port ?? DEFAULT_PORT;
   const daemonBase = `http://${formatDaemonHostForUrl(daemonHost)}:${daemonPort}`;
   const fetchFn = (deps.fetch ?? globalThis.fetch) as typeof fetch;
-  const httpBudget = { timeoutMs: deps.ownerReportTimeoutMs ?? 2000, timeoutMessage: "Doctor HTTP check timed out" };
+  const httpBudget = { timeoutMs: deps.ownerReportTimeoutMs ?? DOCTOR_HTTP_TIMEOUT_MS, timeoutMessage: "Doctor HTTP check timed out" };
   const portCheck = deps.checkPort(daemonPort, daemonHost).then(async (available): Promise<DoctorCheck> => {
     if (available) {
       return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} available.` };
@@ -503,15 +504,26 @@ function readTmuxMouseMode(deps: DoctorDeps): "on" | "off" | null {
 export async function readLiveLogicalIds(base: string, rigName: string, ownerClient = new DaemonClient(base)): Promise<string[] | null> {
   try {
     await ownerClient.assertLocalOwner();
-    const rigsRes = await fetch(`${base}/api/rigs`);
+    const budget = { timeoutMs: DOCTOR_HTTP_TIMEOUT_MS, timeoutMessage: "Doctor topology read timed out" };
+    let rigs: Array<{ id?: string; name?: string }> = [];
+    const rigsRes = await fetchWithTimeout(fetch, `${base}/api/rigs`, {}, {
+      ...budget, consumeResponse: async response => {
+        if (response.ok) rigs = await response.json() as typeof rigs;
+        else await response.body?.cancel();
+      },
+    });
     if (!rigsRes.ok) return null;
-    const rigs = (await rigsRes.json()) as Array<{ id?: string; name?: string }>;
     const rig = rigs.find((r) => r.name === rigName);
     if (!rig?.id) return null;
     await ownerClient.assertLocalOwner();
-    const nodesRes = await fetch(`${base}/api/rigs/${rig.id}/nodes`);
+    let nodes: Array<{ logicalId?: string | null }> = [];
+    const nodesRes = await fetchWithTimeout(fetch, `${base}/api/rigs/${rig.id}/nodes`, {}, {
+      ...budget, consumeResponse: async response => {
+        if (response.ok) nodes = await response.json() as typeof nodes;
+        else await response.body?.cancel();
+      },
+    });
     if (!nodesRes.ok) return null;
-    const nodes = (await nodesRes.json()) as Array<{ logicalId?: string | null }>;
     return nodes.map((n) => n.logicalId ?? "");
   } catch (error) {
     if (error instanceof ForeignLocalDaemonError) throw error;
