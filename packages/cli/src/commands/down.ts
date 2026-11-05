@@ -149,7 +149,9 @@ rig up <rig> --existing brings it back, resuming each seat's conversation where 
 --delete the rig record is removed too, so it can't be brought back that way.
 Once no live seat uses a working folder, rig down also takes back what OpenRig added there: its
 guidance blocks, and in a Claude seat's folder the status line, activity hooks and context collector.
-Anything a person edited is kept and listed. rig up <rig> --existing puts the guidance back.
+It keeps and lists an edited skills-line block, edited team skill files, and settings or a collector
+that don't match what OpenRig wrote or that another seat shares by a link. Any other guidance block
+goes even if someone edited it. rig up <rig> --existing puts the guidance back.
 When your resolved seat belongs to this rig, confirm before stopping it. Without a terminal,
 the command warns and exits without stopping; re-run with --yes to confirm explicitly.`);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };

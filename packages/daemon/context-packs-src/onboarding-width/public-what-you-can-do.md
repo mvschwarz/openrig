@@ -527,10 +527,13 @@ not have to tear one down to change it, and you rarely have to start from nothin
   rig. `rig up` with a pod-aware spec on a stopped team's name replaces that team (the earlier one
   is archived), so check `rig ps --nodes` first. A rig name containing a dot is refused before
   launch, because tmux would rename its sessions. Launch-created `AGENTS.md` or `CLAUDE` files now show in `git status`.
-  A fresh Pi seat keeps OpenRig's guidance in its own agent folder, and a fresh Codex 0.164.0+ seat
-  gets it as launch developer instructions, so neither adds it to the repository's `AGENTS.md`
-  (`docs/reference/agent-startup-guide.md` has the rule). A block a person edited is kept and
-  named (`guidance_block_edited`), not replaced.
+  A fresh Pi seat normally keeps OpenRig's guidance in its own agent folder, and a fresh Codex
+  0.164.0+ seat normally gets it as launch developer instructions, so neither adds it to the
+  repository's `AGENTS.md`. The repository file is still used when the Pi folder or its `AGENTS.md`
+  is a link, when a Codex config layer sets `developer_instructions` or can't be read, and for a
+  Codex resume, fork, restore or handover successor, or an older or unknown Codex version
+  (`docs/reference/agent-startup-guide.md` has the rule). At
+  launch, a block a person edited is kept and named (`guidance_block_edited`), not replaced.
   `rig up <rig> --existing` puts back the OpenRig guidance blocks `rig down` removed before a
   resumed seat starts. A seat still missing one makes the rig `partially_restored` (its node lists
   `guidanceGaps`) and `rig up` exits 1. A seat that wasn't running at the snapshot, but whose
@@ -600,9 +603,11 @@ not have to tear one down to change it, and you rarely have to start from nothin
   best-effort snapshot, not a record of what was interrupted. With `--host`, a remote teardown
   that reports errors exits 2. For a community harness seat it prints `Pane stopped: <seat>`
   (`paneOnly` in `--json`): the harness's own processes may keep running after its pane. Once no
-  live seat uses a working folder, it takes back what OpenRig added there (its guidance blocks, and
-  a Claude folder's status line, activity hooks and context collector), and keeps and lists
-  anything a person edited.
+  live seat uses a working folder, it takes back what OpenRig added there: its guidance blocks, and
+  a Claude folder's status line, activity hooks and context collector. It keeps and lists an
+  edited skills-line block, edited team skill files, and settings or a collector that don't match
+  what OpenRig wrote or that another seat shares by a link. Any other guidance block goes even if
+  someone edited it.
 - **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
   rest. It takes the rig's name or ID; a name shared by more than one active rig stops and lists their IDs. Add `--plan` to preview it first, locally or with `--host`; a plan is never sent to a
   daemon older than 0.5.9, which would ignore it and launch. A seat whose agent exited to a shell in
@@ -772,7 +777,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   effectful handover path.** Both forms perform the operation by default; pass `--dry-run`
   to plan without changing the seat. Check the selected source and continuity evidence first. A
   seat can be handed over again into its own pane, so a seat left half-handed-over recovers by
-  running the handover again.
+  running the handover again. A Claude seat started through a `#!` wrapper that runs Claude without
+  `exec`, or through the installer's `~/.local/bin/claude` symlink, rebuilds with `--source
+  rebuild`; a failed rebuild leaves the resume target on the earlier conversation, so rebuild again
+  rather than relaunching it fresh.
 - **`rig seat clear-attention` / `set-resume-token`** — clear a stale attention flag, or repair a
   lost resume handle so restore works next time.
 - **`rig seat continue <seat>`** — a launch stopped on Claude's bypass-permissions consent dialog.
@@ -1429,8 +1437,8 @@ your circumstances is configuration, and the ones that are not, another agent ca
   proxy and a narrowly scoped, revocable token; see `reference/hosted-members.md`. Task terminal
   following does not require internet exposure.
 - **`reference/daemon-http-clients.md`** — for a program that calls the daemon's HTTP API instead of
-  the CLI. It covers the registered people, a person's open updates, a rig's whole outbox in one
-  request, Slack channels and people without holding the bot token, and opt-in decision revisions,
+  the CLI. It covers the registered people, a person's open updates, a rig's outbox (every seat's
+  messages, newest first) in one request, Slack channels and people without holding the bot token, and opt-in decision revisions,
   where a stale `expectedRevision` gets 409 and writes nothing.
 - **`rig skill loadout --runtime <claude-code|codex>`** — inspect the exact catalog revision,
   selectors, target, and current/missing/shadowed/conflicting state for one working directory.
