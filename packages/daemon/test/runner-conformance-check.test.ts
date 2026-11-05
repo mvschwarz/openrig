@@ -79,6 +79,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["abort-in-block", "2", "a line reading /abort inside a block isn't control"],
     ["no-queue", "2", "a block sent mid-turn waits for the next turn"],
     ["cancelled-always", "2", "cancelled is reported only on the agent's own stop reason"],
+    ["ctrl-c-ignored", "2", "Ctrl-C outside a paste sends session/cancel"],
     ["no-token", "3", "every post uses the hook token"],
     ["no-sequence", "3", "every post carries the contract's fields"],
     ["refuse-on-404", "4", "404: the agent gets its allow_once option"],
@@ -146,6 +147,15 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     const { code, report } = await check(["--cases", "1"], "", ["--require", LATE_TIMERS]);
     expect(failing(report)).toEqual([]);
     expect(report.results.map((r) => [r.id, r.status])).toEqual([["1", "pass"]]);
+    expect(code).toBe(0);
+  }, 90_000);
+
+  // A busy machine also delays the runner. Case 2 must still pass a runner that handles Ctrl-C late: the agent's turn
+  // stays open until the cancel arrives, so only the runner's own delivery is timed.
+  it("passes case 2 for a runner that keeps the contract when it handles Ctrl-C late", async () => {
+    const { code, report } = await check(["--cases", "2"], " --interrupt-delay 4000");
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["2", "pass"]]);
     expect(code).toBe(0);
   }, 90_000);
 

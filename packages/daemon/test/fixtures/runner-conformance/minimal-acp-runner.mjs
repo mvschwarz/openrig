@@ -12,6 +12,8 @@
 // --startup-idle <ms> keeps it another way too: with no first input, it reports idle once it's ready, as a runner may, and
 // that first POST goes out <ms> late, holding the posts behind it, as a slow first request does. The agent gets each
 // prompt without waiting on its accepted post, so it can die before the late report arrives.
+// --interrupt-delay <ms> keeps it another way too: it handles a Ctrl-C <ms> late, as a runner whose event loop is busy
+// does, and still sends session/cancel if the turn is open by then.
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
@@ -24,6 +26,7 @@ const readQuery = readWait === "none" ? "" : `?waitSeconds=${readWait}`;
 const withdrawAfterStop = argv.includes("--withdraw-after-stop");
 const readRetries = argv.includes("--read-retries") ? Number(argv[argv.indexOf("--read-retries") + 1]) : 0;
 const startupIdleMs = argv.includes("--startup-idle") ? Number(argv[argv.indexOf("--startup-idle") + 1]) : null;
+const interruptDelayMs = argv.includes("--interrupt-delay") ? Number(argv[argv.indexOf("--interrupt-delay") + 1]) : 0;
 // --beat: the optional working beat (section 4). While a turn is open and nothing waits on a person, post active/liveness
 // every 10 s with livenessSeconds 30; after delivering an answer to an ask OpenRig opened, post active/permission_resolved
 // first. Breaks: beat-after-stop, beat-during-ask, no-resolve, and beat-time-backwards (each beat says it happened 15 s
@@ -311,6 +314,11 @@ function abort() {
   if (breaks.has("release-refusal-on-abort")) attention = false;
   void withdrawLive("turn_cancelled");
 }
+function interrupt() {
+  if (breaks.has("ctrl-c-ignored")) return;
+  if (interruptDelayMs) setTimeout(abort, interruptDelayMs);
+  else abort();
+}
 
 // Input: raw mode with bracketed paste. Everything up to Enter is one block; Ctrl-C outside a paste aborts.
 let inPaste = false;
@@ -331,7 +339,7 @@ function onInput(chunk) {
     const head = start < 0 ? raw : raw.slice(0, start);
     for (const ch of head) {
       if (ch === "\r") { const text = block; block = ""; if (text) submit(text); }
-      else if (ch === "\x03") abort();
+      else if (ch === "\x03") interrupt();
       else if (ch >= " ") block += ch;
     }
     if (start < 0) { raw = ""; return; }
