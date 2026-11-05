@@ -7,7 +7,7 @@ import stringWidth from "string-width";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
@@ -238,4 +238,113 @@ it("a draft-aware seat with a recorded pane is not affected by the pane check", 
   const outcome = await manual.e.triggerManualCompact({ ...input, usedPercentage: 40 }, { operatorInitiated: true });
   expect(outcome).toMatchObject({ reason: "draft_aware_lifecycle" });
   expect(manual.rows()).toEqual([{ kind: "prep", state: "delivered" }]);
+});
+
+// #2575: a seat whose empty input box OpenRig can't read used to sit unrestored, retried on every poll. After two idle
+// polls that can't read the box, a post-compaction step goes in and is recorded as over an unreadable box; a typed draft
+// still holds it, and so does the stricter check after a /compact whose result was lost.
+describe("#2575: a post-compaction step OpenRig can't read the input box for", () => {
+  const restorePastes = (f: Awaited<ReturnType<typeof fixture>>) =>
+    f.writes.filter((w) => w.startsWith("paste:") && w.includes("Please respond to this normal user message now")).length;
+  async function owedRestore(f: Awaited<ReturnType<typeof fixture>>) {
+    expect(await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true })).toMatchObject({ triggered: true });
+    expect(await f.e.maybeAutoCompact(input)).toEqual({ triggered: true }); // the turn boundary, into an empty box
+    expect(f.e.getOwedRestore(seat)?.stage).toBe("restore_prompt");
+  }
+
+  it("goes in after two idle polls that can't read the box, recorded as over an unreadable box, never as empty", async () => {
+    const f = await fixture({ pane: "%1", mode: "off" });
+    await owedRestore(f);
+    const cursor = vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue(null); // an empty box that can't be confirmed live
+    const held: Array<ReturnType<typeof f.e.getOwedRestore>> = [];
+    for (let i = 1; i <= 2; i++) {
+      expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false });
+      held.push(f.e.getOwedRestore(seat));
+    }
+    expect(restorePastes(f)).toBe(0);
+    expect(await f.e.maybeAutoCompact(input)).toEqual({ triggered: true });
+    expect(restorePastes(f)).toBe(1);
+    // What the two held polls showed: each counted, and the state said what would happen next.
+    held.forEach((owed, i) => expect(owed?.lastDelivery).toMatchObject({ stage: "restore_prompt", ok: false, reason: "draft_input_unknown", unreadable: i + 1 }));
+    expect(held[1]?.detail).toContain("After 2 idle polls that can't read the input box, the step goes in anyway; a typed draft still holds it.");
+    const owed = f.e.getOwedRestore(seat)!;
+    expect(owed.stage).toBe("compliance_prompt");
+    expect(owed.lastDelivery).toEqual({ stage: "restore_prompt", at: expect.any(String), ok: true,
+      reason: "delivered_over_unreadable_input_box", inputBox: "unknown", failures: 0 });
+    expect(owed.detail).toContain("The restore request went in at");
+    expect(owed.detail).toContain("over an input box OpenRig couldn't read (it read unknown); a draft there, if any, may hold its text.");
+    expect(cursor).toHaveBeenCalled();
+  });
+
+  it("a typed draft still holds it after two unreadable polls, and the run starts again", async () => {
+    const f = await fixture({ pane: "%1", mode: "off" });
+    await owedRestore(f);
+    const cursor = vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue(null);
+    for (let i = 0; i < 2; i++) await f.e.maybeAutoCompact(input);
+    f.draft("half a sentence");
+    cursor.mockResolvedValue({ x: 2 + "half a sentence".length, y: 2, width: 100000, height: 60 }); // typed, cursor after it
+    for (let i = 0; i < 3; i++) expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false });
+    expect(f.body()).toBe("half a sentence");
+    expect(restorePastes(f)).toBe(0);
+    expect(f.e.getOwedRestore(seat)).toMatchObject({ stage: "restore_prompt", lastDelivery: { ok: false, reason: "draft_input_busy" } });
+    expect(f.e.getOwedRestore(seat)?.lastDelivery?.unreadable).toBeUndefined();
+  });
+
+  it("typed text with Claude's suggestion after it still holds it after two unreadable polls", async () => {
+    const f = await fixture({ pane: "%1", mode: "off" });
+    await owedRestore(f);
+    const cursor = vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue(null);
+    for (let i = 0; i < 2; i++) await f.e.maybeAutoCompact(input);
+    f.draft("fix\x1b[2m the typecheck errors\x1b[22m");
+    cursor.mockResolvedValue({ x: 2 + "fix".length, y: 2, width: 100000, height: 60 });
+    for (let i = 0; i < 3; i++) expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false });
+    expect(restorePastes(f)).toBe(0);
+    expect(f.body()).toBe("fix\x1b[2m the typecheck errors\x1b[22m");
+    expect(f.e.getOwedRestore(seat)?.stage).toBe("restore_prompt");
+  });
+
+  it("held drafts with Claude's suggestion don't count: one unreadable poll after them still holds the step", async () => {
+    const f = await fixture({ pane: "%1", mode: "off" });
+    await owedRestore(f);
+    f.draft("fix\x1b[2m the typecheck errors\x1b[22m");
+    const cursor = vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue({ x: 2 + "fix".length, y: 2, width: 100000, height: 60 });
+    for (let i = 0; i < 2; i++) await f.e.maybeAutoCompact(input);
+    const mixed = f.e.getOwedRestore(seat)?.lastDelivery;
+    f.draft("");
+    cursor.mockResolvedValue(null);
+    expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false });
+    expect(restorePastes(f)).toBe(0);
+    expect(mixed).toMatchObject({ reason: "draft_input_unknown", inputBox: "typed-with-suggestion" });
+    expect(mixed?.unreadable).toBeUndefined();
+    expect(f.e.getOwedRestore(seat)?.lastDelivery).toMatchObject({ reason: "draft_input_unknown", inputBox: "unknown", unreadable: 1 });
+  });
+
+  it("a step held as retained reads as still owed, never as gone in", async () => {
+    const f = await fixture({ pane: "%1", mode: "off" });
+    await owedRestore(f);
+    const real = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementation(async (s: string, text: string, opts?: any) => text.includes("Please respond to this normal user message now")
+      ? { ok: true, sessionName: s, sent: false, outcome: "retained", reason: "draft_input_unknown", heldInputBox: "unknown" } as any : real(s, text, opts));
+    expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false });
+    const owed = f.e.getOwedRestore(seat)!;
+    expect(owed).toMatchObject({ stage: "restore_prompt", held: true, lastDelivery: { ok: true, outcome: "retained" } });
+    expect(owed.detail).toContain("OpenRig will retry on its existing polls.");
+    expect(owed.detail).not.toContain("went in");
+    expect(owed.detail).not.toContain("goes in anyway");
+  });
+
+  it("after a /compact whose result was lost, an unreadable box still holds every step, however many polls", async () => {
+    const f = await fixture({ pane: "%1", mode: "off" });
+    const real = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementation(async (s: string, text: string, opts?: any) => text.startsWith("/compact")
+      ? { ok: false, sessionName: s, sent: false, inputPhase: "written", reason: "submit_failed" } as any : real(s, text, opts));
+    await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true });
+    expect(f.e.getPreparationState(seat)).toMatchObject({ compact: "uncertain" });
+    expect(f.e.getOwedRestore(seat)?.stage).toBe("turn_boundary");
+    vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue(null);
+    const before = f.writes.length;
+    for (let i = 0; i < 5; i++) expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false });
+    expect(f.writes.length).toBe(before);
+    expect(f.e.getOwedRestore(seat)).toMatchObject({ stage: "turn_boundary", held: true });
+  });
 });
