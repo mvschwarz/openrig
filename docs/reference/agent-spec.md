@@ -440,7 +440,7 @@ guidance:
 |-------|------|----------|---------|-------------|
 | `id` | string | yes | — | Resource identifier. A `rig-role` guidance resource is never merged; deliver a role with a `send_text` startup file. |
 | `path` | string | yes | — | Relative path to the guidance file. |
-| `target` | string | no | — | Parsed but not used: the runtime decides the file. Claude merges into the rig's `managed_blocks` file (`CLAUDE.md` by default, or `CLAUDE.local.md`); Codex, Pi and OMP merge into `<cwd>/AGENTS.md`. |
+| `target` | string | no | — | Parsed but not used: the runtime decides the file. Claude merges into the rig's `managed_blocks` file (`CLAUDE.md` by default, or `CLAUDE.local.md`); Codex, Pi and OMP merge into `<cwd>/AGENTS.md`, except that a fresh Pi seat normally uses its own agent folder's `AGENTS.md` and a fresh Codex 0.164.0+ seat normally gets launch developer instructions; the conditions are in [Codex guidance at launch](agent-startup-guide.md#codex-guidance-at-launch) and [Runtime Differences](agent-startup-guide.md#runtime-differences). |
 | `merge` | string | no | `managed_block` | Only `managed_block` is applied. Any other value, such as `append`, merges nothing. |
 
 ---
