@@ -7,6 +7,7 @@ import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import { hookEventState, isRunnerExit } from "../domain/agent-activity-store.js";
 import { WorkingLivenessGate, isWorkingLivenessBeat, workingLivenessSeconds, type WorkingLivenessIgnored } from "../domain/working-liveness.js";
 import type { EventBus } from "../domain/event-bus.js";
+import type { StreamStore } from "../domain/stream-store.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
 import { ActivityGrantStore, grantGeneration, type ActivityGrant } from "../domain/activity-grants.js";
 import { RunnerPermissions, parseRunnerPermissionRequest, type RunnerPermissionSeat } from "../domain/runner-permissions.js";
@@ -768,7 +769,8 @@ function permissionContext(c: Context, installTokenAccepted: boolean): Permissio
   const rigRepo = (c.get("rigRepo" as never) as RigRepository | undefined) ?? new RigRepository(store.db);
   const permissions = new RunnerPermissions({ db: store.db, queueRepo, eventBus, humanRegistry: () => queueRepo.humanRegistry(),
     ownerOf: (nodeId) => rigRepo.getNodePermissionsTo(nodeId),
-    currentGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null });
+    currentGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+    stream: c.get("streamStore" as never) as StreamStore | undefined });
   return { store, grant: principal.grant, registry, permissions };
 }
 
