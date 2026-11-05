@@ -491,6 +491,31 @@ export function custodyHeadline(rowId: string, targets: string[], ageMinutes: nu
     : `Custody not checked: no successor of ${rowId} in this store (${ageMinutes} min)`;
 }
 
+function findingHeadline(c: Candidate): string {
+  return c.verificationTargets
+    ? custodyHeadline(c.row.qitemId, c.verificationTargets, c.ageMinutes)
+    : `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`;
+}
+
+const REASON_NOTE = "stuck-sweep reason: ";
+
+/** An open recovery opened for another finding kind keeps custody of the row, but its headline and body give that
+ *  kind's reason. When the reason last recorded on it isn't this candidate's, record this one: its headline, and its
+ *  evidence as a note. The body stays as written, the reason it was opened for, so the headline names that too. */
+async function recordCurrentReason(deps: StuckSweepDeps, recovery: QueueItem, c: Candidate): Promise<void> {
+  const openedFor = (recovery.tags ?? []).find((tag) => tag.startsWith("stuck-sweep:"))?.match(/^stuck-sweep:([a-z-]+):/)?.[1];
+  const latest = deps.queueRepo.transitionLog.listForQitem(recovery.qitemId)
+    .map((t) => t.transitionNote ?? "").reverse().find((note) => note.startsWith(REASON_NOTE));
+  const recorded = latest?.slice(REASON_NOTE.length).match(/^([a-z-]+) /)?.[1] ?? openedFor;
+  if (!recorded || recorded === c.kind) return;
+  await deps.queueRepo.update({
+    qitemId: recovery.qitemId,
+    actorSession: "stuck-sweep@system",
+    summary: c.kind === openedFor ? findingHeadline(c) : `${findingHeadline(c)}, opened for ${openedFor}`,
+    transitionNote: `${REASON_NOTE}${c.kind} on ${c.row.qitemId}; the sweep reported ${recorded} before\n${evidenceBody(deps.db, c)}`,
+  });
+}
+
 function evidenceBody(db: Database.Database, c: Candidate): string {
   if (c.verificationTargets?.length) {
     const checks = c.verificationTargets
@@ -944,7 +969,16 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (shared && !renewedDeadline) {
         const existingTags = sharedRow?.tags ?? [];
         for (const tag of existingTags) if (tag.startsWith("stuck-sweep:")) liveDedupTags.add(tag);
-        if (["pending", "in-progress", "blocked"].includes(shared.state)) findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: shared.qitemId, action: "refreshed" });
+        if (["pending", "in-progress", "blocked"].includes(shared.state)) {
+          if (sharedRow) {
+            try {
+              await recordCurrentReason(deps, sharedRow, c);
+            } catch (err) {
+              log(`[stuck-sweep] ${c.kind} reason for ${c.row.qitemId} not recorded on ${shared.qitemId}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: shared.qitemId, action: "refreshed" });
+        }
         continue;
       }
       liveDedupTags.add(dedupTag);
@@ -973,9 +1007,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           sourceSession: c.row.sourceSession,
           destinationSession: c.route,
           body: evidenceBody(deps.db, c) + (routeNotes.has(c.row.qitemId) ? `\nescalation route: ${routeNotes.get(c.row.qitemId)}` : ""),
-          summary: c.verificationTargets
-            ? custodyHeadline(c.row.qitemId, c.verificationTargets, c.ageMinutes)
-            : `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`,
+          summary: findingHeadline(c),
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId),
             ...(routed.has(c.row.qitemId) || c.row.tags?.includes(ESCALATION_HOP_TAG) ? [ESCALATION_HOP_TAG] : [])],
