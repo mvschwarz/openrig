@@ -353,6 +353,48 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     });
   });
 
+  // #2533: progress clears the stall while the row is still overdue. The open recovery keeps custody of the row, and
+  // what its recipient reads names the reason that remains, once.
+  it("an open stall recovery that now stands for an overdue claim says so, once, and keeps custody", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep();
+    const prior = (await findingsFor(row.qitemId))[0]!;
+    expect(prior.body).toContain("stalled-after-claim");
+
+    makeOverdue(row.qitemId);
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", transitionNote: "resumed work" });
+    expect(repo.getById(row.qitemId)!.pickup?.state).toBe("working");
+    const after = await runSweep();
+    expect(after.result.findings).toContainEqual(expect.objectContaining({
+      kind: "overdue-claim", action: "refreshed", findingQitemId: prior.qitemId,
+    }));
+    const recovery = repo.getById(prior.qitemId)!;
+    expect(recovery.state).toBe("pending");
+    expect(recovery.summary).toMatch(new RegExp(`^Stuck sweep: overdue-claim on ${row.qitemId} \\(\\d+ min\\), opened for stalled-after-claim$`));
+    const reasonNotes = () => repo.transitionLog.listForQitem(prior.qitemId)
+      .map((t) => t.transitionNote ?? "").filter((note) => note.startsWith("stuck-sweep reason: "));
+    expect(reasonNotes()).toHaveLength(1);
+    expect(reasonNotes()[0]).toContain(`stuck-sweep reason: overdue-claim on ${row.qitemId}; the sweep reported stalled-after-claim before`);
+    expect(reasonNotes()[0]).toContain("STUCK SWEEP FINDING (overdue-claim)");
+
+    await runSweep();
+    expect(reasonNotes()).toHaveLength(1);
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+
+    // The worker goes quiet again while the row is still overdue: the stall is the sweep's reason again, and the headline
+    // is the stall's own once more.
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND transition_note = 'resumed work'")
+      .run(new Date(Date.now() - 45 * 60_000).toISOString(), row.qitemId);
+    expect(repo.getById(row.qitemId)!.pickup?.state).toBe("stalled-after-claim");
+    await runSweep();
+    expect(repo.getById(prior.qitemId)!.summary).toMatch(new RegExp(`^Stuck sweep: stalled-after-claim on ${row.qitemId} \\(\\d+ min\\)$`));
+    expect(reasonNotes()).toHaveLength(2);
+    expect(reasonNotes()[1]).toContain("the sweep reported overdue-claim before");
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
   // A dead owner with no delegates_to edge: the orchestrator resolves to nobody and the owner's session is gone. The
   // ladder covers handed-off batons only, so a finding addressed to the dead seat would reach nobody.
   function seedMissingSession(session: string): void {
