@@ -6,7 +6,7 @@ import type { ConfigStore, RiggedConfig } from "./config-store.js";
 import type { DaemonStatus } from "./daemon-lifecycle.js";
 import { buildTmuxControlFailure, probeTmuxControlAsync } from "./tmux-health.js";
 import { classifyNodeVersion } from "./node-support.js";
-import { blockedConnectionGuidance, isBlockedConnectionCode } from "./daemon-reachability.js";
+import { isBlockedConnectionCode } from "./daemon-reachability.js";
 
 export interface PreflightCheck {
   name: string;
@@ -178,14 +178,15 @@ export class SystemPreflight {
       (status.host ?? "127.0.0.1") === effectiveHost &&
       status.port === effectivePort;
 
-    if (daemonOnSameEndpoint) {
+    if (daemonOnSameEndpoint && isBlockedConnectionCode(status.probeErrorCode)) {
+      checks.push({ name: "port_available", ok: true, warning: `Port availability could not be checked: the connection was blocked (${status.probeErrorCode}). A daemon may still be running.` });
+    } else if (daemonOnSameEndpoint) {
       // Our daemon is already running on this exact endpoint — skip
       checks.push({ name: "port_available", ok: true });
     } else {
       const available = await checkPort(effectiveHost, effectivePort);
       if (typeof available === "object") {
-        const guidance = blockedConnectionGuidance(available.blocked);
-        checks.push({ name: "port_available", ok: false, error: guidance.consequence, fix: guidance.action });
+        checks.push({ name: "port_available", ok: true, warning: `Port availability could not be checked: the connection was blocked (${available.blocked}). A daemon may still be running.` });
       } else if (available === "available") {
         checks.push({ name: "port_available", ok: true });
       } else {

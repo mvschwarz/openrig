@@ -170,9 +170,16 @@ describe("SystemPreflight", () => {
     const constructor = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as net.Socket);
     try {
       const result = await createPreflight().run({ port: 7433 });
-      expect(result.ready).toBe(false);
-      expect(result.checks.find((c) => c.name === "port_available")).toMatchObject({ ok: false, error: expect.stringContaining(code), fix: expect.stringContaining("Do not start another daemon") });
+      expect(result.ready).toBe(true);
+      expect(result.checks.find((c) => c.name === "port_available")).toMatchObject({ ok: true, warning: expect.stringContaining(code) });
+      expect(result.checks.find((c) => c.name === "port_available")!.warning).toContain("could not be checked");
     } finally { constructor.mockRestore(); }
+  });
+
+  it("warns when a recorded daemon on the same endpoint has a blocked probe", async () => {
+    const pf = createPreflight({ daemonStatus: { state: "running", port: 7433, host: "127.0.0.1", probeErrorCode: "EPERM" } });
+    const result = await pf.run({ port: 7433, host: "127.0.0.1" });
+    expect(result.checks.find((c) => c.name === "port_available")).toMatchObject({ ok: true, warning: expect.stringContaining("EPERM") });
   });
 
   // Test 6

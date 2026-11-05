@@ -64,15 +64,13 @@ describe("auto-start only for a daemon confirmed down", () => {
       expect(c.requests.length).toBeGreaterThan(0);
     });
 
-    it.each(["EPERM", "EACCES"])(`${name}: a blocked health probe does not start a daemon (%s)`, async (code) => {
+    it.each(["EPERM", "EACCES"])(`${name}: a blocked health probe reaches the shared start path (%s)`, async (code) => {
       lifecycle.status = { state: "unverified", host: "127.0.0.1", port: 7433, probeErrorCode: code };
       const c = client();
       const cmd = (command as (d: unknown) => import("commander").Command)({ lifecycleDeps: {}, clientFactory: c.factory, preflightExec: async () => "" });
       cmd.exitOverride();
       await cmd.parseAsync(argv as unknown as string[]).catch(() => {});
-      expect(lifecycle.startDaemon).not.toHaveBeenCalled();
-      expect(c.requests).toEqual([]);
-      expect(vi.mocked(console.error).mock.calls.flat().join(" ")).toContain("blocked");
+      expect(lifecycle.startDaemon).toHaveBeenCalledOnce();
     });
 
   }

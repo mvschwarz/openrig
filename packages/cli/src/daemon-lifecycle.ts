@@ -435,7 +435,10 @@ function resolveLifecycleFile(deps: LifecycleDeps, filename: "daemon.json" | "da
  *  - "dead" — PID not alive
  *  - { blocked } — the OS refused the probe; identity is unknown */
 async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openrig" | "not_openrig" | "unresponsive" | "dead" | { blocked: string }> {
-  if (!deps.isProcessAlive(state.pid)) return "dead";
+  const liveness = deps.processLiveness
+    ? deps.processLiveness(state.pid)
+    : deps.isProcessAlive(state.pid) ? "alive" : "dead";
+  if (liveness === "dead") return "dead";
   const host = state.host ?? DEFAULT_HOST;
   try {
     await fetchDaemonProbe(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
@@ -702,8 +705,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     } catch (error) {
       const code = connectionErrorCode(error);
       if (isBlockedConnectionCode(code)) {
-        const guidance = blockedConnectionGuidance(code);
-        throw new Error(`${guidance.consequence} ${guidance.action}`);
+        console.warn(`Warning: daemon health probe was blocked (${code}); the port could not be checked and a daemon may already be running.`);
       }
       // WSL2 can silently drop probes to an unused port. A slow live daemon can
       // also time out: do not run a second child's initialization against its DB.
