@@ -104,7 +104,7 @@ export function streamCommand(depsOverride?: StreamDeps): Command {
     .description("Append a stream item")
     .requiredOption("--source <session>", "Source session (e.g. dev-build@starter)")
     .requiredOption("--body <text>", "Stream item body")
-    .option("--hint-destination <session>", "Hint at intended destination seat")
+    .option("--hint-destination <session>", "Hint at intended destination seat (the queue worker routes by this hint)")
     .option("--hint-type <type>", "Hint type (e.g. review, handoff, idea)")
     .option("--hint-urgency <urgency>", "Hint urgency (routine, urgent, critical)")
     .option("--hint-tags <tags>", "Comma-separated hint tags")

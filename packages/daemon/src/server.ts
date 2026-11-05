@@ -219,6 +219,7 @@ export interface AppDeps {
   wakeResolveService?: WakeResolveService;
   chatRepo?: ChatRepository;
   streamStore?: StreamStore;
+  streamIntakeCoordinator?: import("./domain/stream-intake.js").StreamIntakeCoordinator;
   slowOpRecorder?: SlowOperationInstrumentation;
   requestPhaseObserver?: import("./domain/request-phase-observer.js").RequestPhaseObserver;
   queueRepo?: QueueRepository;
