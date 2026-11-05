@@ -119,4 +119,10 @@ it("does not choose the first duplicate route when activity observations conflic
   }
   expect(enrichRosterMember(member, { readAt: "2026-10-01T00:00:01Z", nodes: [idle, idle], sources: [] }).live.agentActivity)
     .toEqual({ state: "idle", reason: null, sampledAt: "2026-10-01T00:00:00Z" });
+  const later = { ...idle, agentActivity: { ...idle.agentActivity, sampledAt: "2026-10-01T00:00:01Z" } };
+  const missing = { ...idle, agentActivity: null };
+  for (const nodes of [[idle, later], [later, idle], [idle, missing], [missing, idle]]) {
+    expect(enrichRosterMember(member, { readAt: "2026-10-01T00:00:02Z", nodes, sources: [] }).live.agentActivity)
+      .toEqual({ state: "unknown", reason: "Conflicting activity observations", sampledAt: null });
+  }
 });
