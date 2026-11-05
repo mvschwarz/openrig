@@ -193,7 +193,12 @@ Precedence: CLI flag > environment variable > config file > default`)
     .action(async (key: string, value: string) => {
       try {
         store.set(key, value);
-        console.log(`${key} = ${store.get(key)}`);
+        const resolved = store.resolveWithSource(key);
+        if (resolved.source === "env") {
+          console.log(`${key} = ${value} (effective: ${resolved.value}, overridden by environment)`);
+        } else {
+          console.log(`${key} = ${store.get(key)}`);
+        }
         // SWEEP-c: boot-only key + running daemon = stale-until-restart; say so loudly.
         if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
           console.error(`note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`);
@@ -212,9 +217,20 @@ Precedence: CLI flag > environment variable > config file > default`)
       try {
         store.reset(key);
         if (key) {
-          console.log(`${key} reset to default (${store.get(key)}).`);
+          const resolved = store.resolveWithSource(key);
+          if (resolved.source === "env") {
+            console.log(`${key} override cleared (effective: ${resolved.value}, from environment; default: ${resolved.defaultValue}).`);
+          } else {
+            console.log(`${key} reset to default (${store.get(key)}).`);
+          }
         } else {
-          console.log("Config reset to defaults.");
+          const all = store.resolveAllWithSource();
+          const envOverrides = Object.entries(all).filter(([, r]) => r.source === "env");
+          if (envOverrides.length > 0) {
+            console.log(`Config overrides cleared; ${envOverrides.length} environment override${envOverrides.length === 1 ? "" : "s"} still active.`);
+          } else {
+            console.log("Config reset to defaults.");
+          }
         }
       } catch (err) {
         console.error((err as Error).message);
