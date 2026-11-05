@@ -2249,8 +2249,22 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
   const unclaimedFinding = async (qitemId: string) => (await findingsFor(qitemId))
     .filter((f) => (f.tags ?? []).includes(`stuck-sweep:unclaimed-obligation:${qitemId}`));
 
-  it("keeps an aged informational update readable for its registered human without creating recovery work", async () => {
-    const row = await repo.create({ sourceSession: "asker@r", destinationSession: READER.address,
+  it.each([
+    { destination: "human-reader@external", transport: "gateway-routable" },
+    { destination: "human-reader@kernel", transport: "pane-bound" },
+  ])("keeps an aged informational update readable at $destination without creating recovery work", async ({ destination, transport }) => {
+    if (transport === "pane-bound") {
+      // Isolated topology fixture, as in seedLeadSeat: no native session or pane is contacted.
+      db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-reader', 'kernel')").run();
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-reader', 'rig-reader', 'human-reader', 'terminal', '/tmp')").run();
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('sess-reader', 'node-reader', ?, 'running', '2026-11-05 00:00:00')").run(destination);
+      db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('bind-reader', 'node-reader', 'tmux', ?, '%1')").run(destination);
+      // Distinguish explicit fixture binding from the empty-topology legacy fallback.
+      expect(repo.classifyDestinationOf("unbound-fixture@kernel").class).toBe("unroutable");
+    }
+    expect(repo.classifyDestinationOf(READER.address)).toMatchObject({ class: "gateway-routable", resolvedHuman: READER.address });
+    expect(repo.classifyDestinationOf(destination).class).toBe(transport);
+    const row = await repo.create({ sourceSession: "asker@r", destinationSession: destination,
       body: "The requested build finished. No action or decision is needed.", summary: "Build finished",
       evidenceRef: "https://example.test/build", humanIntent: "update", nudge: false });
     age(row.qitemId);
@@ -2261,7 +2275,7 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     const result = await sweep();
     expect(result.outcome, result.error).not.toBe("failed");
     expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(before);
-    expect(repo.list({ destinationSession: READER.address }).find((item) => item.qitemId === row.qitemId))
+    expect(repo.list({ destinationSession: destination }).find((item) => item.qitemId === row.qitemId))
       .toMatchObject({ body: row.body, state: "pending", humanIntent: "update" });
     expect(await findingsFor(row.qitemId)).toEqual([]);
   });
