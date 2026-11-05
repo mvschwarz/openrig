@@ -5,6 +5,7 @@ import type { PersistedEvent } from "./types.js";
 import type { StreamItem, StreamStore } from "./stream-store.js";
 import type { QueueRepository } from "./queue-repository.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { RUNNER_PERMIT_TAG } from "./runner-permissions.js";
 
 export const STREAM_INTAKE_TAG = "stream-subscription";
 
@@ -310,6 +311,12 @@ export class StreamIntakeCoordinator {
       console.warn(
         `[stream-intake] skipping stream item ${item.streamItemId} with sort key ${item.streamSortKey} <= cursor ${cursor}`
       );
+      return;
+    }
+    // OpenRig's record of a permit it decided by default (#2361) is pull-only: "A record wakes no one". Read past it with
+    // no row, note or wake.
+    if (item.hintTags?.includes(RUNNER_PERMIT_TAG)) {
+      this.writeCursor(item.streamSortKey);
       return;
     }
 
