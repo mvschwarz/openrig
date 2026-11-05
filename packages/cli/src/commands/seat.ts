@@ -21,6 +21,7 @@ async function defaultReadStdin(): Promise<string> {
 }
 
 interface SeatStatusResponse {
+  permission_stop?: { state: "unavailable"; command: "unavailable"; origin: "unknown" };
   seat_ref: string;
   rig_id: string;
   rig_name: string;
@@ -243,6 +244,8 @@ function printHuman(status: SeatStatusResponse): void {
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   console.log(`Session: ${display(status.session_status, "unknown")}`);
+  // Older daemons have no diagnostic either. Do not turn absence into a pending request or a guard verdict.
+  console.log("Permission stop: command unavailable; origin unknown");
   if (status.compaction) console.log(`Managed compaction (${status.compaction.stage}): ${status.compaction.detail}`);
   const reason = sessionReason(status.session_reason);
   if (reason) console.log(`Reason: ${reason}`);

@@ -15,6 +15,8 @@ import { claudeSeatTokenFallbackNotice, claudeSeatTokenFileProblem, readClaudeSe
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
 export interface SeatStatus {
+  /** No command observation is admitted yet. Never infer one from generic activity or a last tool. */
+  permission_stop?: { state: "unavailable"; command: "unavailable"; origin: "unknown" };
   compaction?: ObservedCompaction & { owedRestore: ReturnType<ClaudeCompactionEnforcer["getOwedRestore"]> };
   seat_ref: string;
   rig_id: string;
@@ -147,6 +149,8 @@ export class SeatStatusService {
 
   private projectStatus(seatRef: string, entry: NodeInventoryEntry): SeatStatus {
     return {
+      // Keep the diagnostic independent of permissions and activity until a source-bound observer exists.
+      permission_stop: { state: "unavailable", command: "unavailable", origin: "unknown" },
       ...this.compactionStatus(entry),
       seat_ref: seatRef,
       rig_id: entry.rigId,

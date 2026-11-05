@@ -94,6 +94,35 @@ const STATUS = {
 };
 
 describe("seat typing guard commands", () => {
+  it.each([undefined, { state: "unavailable", command: "unavailable", origin: "unknown" }])(
+    "reports an unavailable permission command without requesting a permission change (%j)", async permission_stop => {
+      const paths: string[] = [], bodies: unknown[] = [];
+      const deps = makeDeps({ status: 200, data: { ...STATUS, permission_stop } }, paths, bodies);
+      const result = await captureLogs(() => makeCommand(deps).parseAsync([
+        "node", "rig", "seat", "status", "dev-impl@seat-rig",
+      ]).then(() => undefined));
+      expect(result.exitCode).toBeUndefined();
+      expect(result.logs).toContain("Permission stop: command unavailable; origin unknown");
+      expect(result.logs).toContain("Startup: ready");
+      expect(result.logs.join("\n")).not.toMatch(/approval requested|DCG|permission pending/);
+      expect(paths).toEqual(["/api/seat/status/dev-impl%40seat-rig"]);
+      expect(bodies).toEqual([]);
+    },
+  );
+
+  it("keeps the unknown diagnostic in seat status JSON without a permission mutation", async () => {
+    const permission_stop = { state: "unavailable", command: "unavailable", origin: "unknown" };
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permission_stop } }, paths, bodies);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "status", "dev-impl@seat-rig", "--json",
+    ]).then(() => undefined));
+    expect(JSON.parse(result.logs.join(""))).toEqual({ ...STATUS, permission_stop });
+    expect(result.exitCode).toBeUndefined();
+    expect(paths).toEqual(["/api/seat/status/dev-impl%40seat-rig"]);
+    expect(bodies).toEqual([]);
+  });
+
   it("identifies the account home selected by a switch rather than the native default", async () => {
     const deps = makeDeps({ status: 200, data: { ...STATUS, runtime_home: {
       variable: "CODEX_HOME", home: "/accounts/api", source: "account-switch",
