@@ -303,6 +303,35 @@ describe("#2575: a post-compaction step OpenRig can't read the input box for", (
     expect(f.e.getOwedRestore(seat)?.stage).toBe("restore_prompt");
   });
 
+  it("held drafts with Claude's suggestion don't count: one unreadable poll after them still holds the step", async () => {
+    const f = await fixture({ pane: "%1", mode: "off" });
+    await owedRestore(f);
+    f.draft("fix\x1b[2m the typecheck errors\x1b[22m");
+    const cursor = vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue({ x: 2 + "fix".length, y: 2, width: 100000, height: 60 });
+    for (let i = 0; i < 2; i++) await f.e.maybeAutoCompact(input);
+    const mixed = f.e.getOwedRestore(seat)?.lastDelivery;
+    f.draft("");
+    cursor.mockResolvedValue(null);
+    expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false });
+    expect(restorePastes(f)).toBe(0);
+    expect(mixed).toMatchObject({ reason: "draft_input_unknown", inputBox: "typed-with-suggestion" });
+    expect(mixed?.unreadable).toBeUndefined();
+    expect(f.e.getOwedRestore(seat)?.lastDelivery).toMatchObject({ reason: "draft_input_unknown", inputBox: "unknown", unreadable: 1 });
+  });
+
+  it("a step held as retained reads as still owed, never as gone in", async () => {
+    const f = await fixture({ pane: "%1", mode: "off" });
+    await owedRestore(f);
+    const real = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementation(async (s: string, text: string, opts?: any) => text.includes("Please respond to this normal user message now")
+      ? { ok: true, sessionName: s, sent: false, outcome: "retained", reason: "draft_input_unknown" } as any : real(s, text, opts));
+    expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false });
+    const owed = f.e.getOwedRestore(seat)!;
+    expect(owed).toMatchObject({ stage: "restore_prompt", held: true, lastDelivery: { ok: true, outcome: "retained" } });
+    expect(owed.detail).toContain("OpenRig will retry on its existing polls.");
+    expect(owed.detail).not.toContain("went in");
+  });
+
   it("after a /compact whose result was lost, an unreadable box still holds every step, however many polls", async () => {
     const f = await fixture({ pane: "%1", mode: "off" });
     const real = f.transport.send.bind(f.transport);

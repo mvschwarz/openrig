@@ -428,9 +428,10 @@ export interface RestoreDeliveryAttempt {
   errorClass?: string;
   failures: number;
   noticeErrorClass?: string;
-  /** Consecutive idle polls whose input box couldn't be read as empty or typed (`draft_input_unknown`) for this step. */
+  /** Consecutive idle polls whose input box read neither empty nor typed for this step (#2575). */
   unreadable?: number;
-  /** On a delivery made over an input box OpenRig couldn't read (#2575): what the box read. Never "empty". */
+  /** What the input box read: on a hold, the reading held on; on a delivery over a box OpenRig couldn't read (#2575),
+   *  that reading. Never "empty" on a delivery. */
   inputBox?: string;
 }
 
@@ -724,7 +725,7 @@ export class ClaudeCompactionEnforcer {
     const failed = !!lastDelivery && lastDelivery.failures > 0;
     const last = lastDelivery ? { lastDelivery } : {};
     const steps = { turn_boundary: "post-compaction turn boundary", restore_prompt: "restore request", compliance_prompt: "post-restore audit" };
-    const failure = !lastDelivery ? "" : lastDelivery.ok
+    const failure = !lastDelivery ? "" : lastDelivery.reason === "delivered_over_unreadable_input_box"
       ? ` The ${steps[lastDelivery.stage]} went in at ${lastDelivery.at} over an input box OpenRig couldn't read (it read ${lastDelivery.inputBox ?? "unknown"}); a draft there, if any, may hold its text.`
       : ` ${failed ? "Last delivery" : "waiting: seat busy"} at ${lastDelivery.at}: ${[lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass, lastDelivery.noticeErrorClass && `owner notice failed (${lastDelivery.noticeErrorClass})`].filter(Boolean).join("; ")}. OpenRig will retry on its existing polls.${lastDelivery.unreadable
         ? ` After ${UNREADABLE_POLLS_BEFORE_DELIVERY} idle polls that can't read the input box, the step goes in anyway; a typed draft still holds it.` : ""}`;
@@ -842,21 +843,23 @@ export class ClaudeCompactionEnforcer {
   private recordRestoreFailure(
     session: string, stage: PendingPostCompactStage | undefined,
     record: { file: string; record: CompactionRecord } | undefined,
-    result: Pick<SendResult, "ok" | "reason" | "outcome" | "activity">, errorClass?: string,
+    result: Pick<SendResult, "ok" | "reason" | "outcome" | "activity" | "heldInputBox">, errorClass?: string,
   ): void {
     if (!stage || !record || this.records.get(session) !== record || this.pendingPostCompactRestore.get(session) !== stage) return;
     const prior = record.record.lastDelivery;
     // Active work is the expected wait between restore steps, not an undeliverable stage.
     const waiting = result.reason === "wait_for_idle_timeout" && result.activity?.state === "running";
-    // The idle wait passed and the box read neither empty nor typed. Any other result breaks the run.
-    const unreadable = result.reason === "draft_input_unknown"
-      ? (prior && !prior.ok && prior.stage === stage ? prior.unreadable ?? 0 : 0) + 1 : 0;
+    // The idle wait passed and the box read neither empty nor typed. A recognised draft, a hold with no reading, or any
+    // other result breaks the run.
+    const held = result.heldInputBox;
+    const unreadable = result.reason === "draft_input_unknown" && held && held !== "typed" && held !== "typed-with-suggestion"
+      ? (prior && prior.stage === stage ? prior.unreadable ?? 0 : 0) + 1 : 0;
     const lastDelivery: RestoreDeliveryAttempt = {
       stage, at: new Date(this.now()).toISOString(), ok: result.ok, reason: result.reason ?? "send_failed",
       ...(result.outcome ? { outcome: result.outcome } : {}),
       ...(result.activity ? { activity: { state: result.activity.state, reason: result.activity.reason, evidenceSource: result.activity.evidenceSource } } : {}),
       ...(errorClass ? { errorClass } : {}), failures: waiting ? 0 : (prior?.failures ?? 0) + 1,
-      ...(unreadable ? { unreadable } : {}),
+      ...(held ? { inputBox: held } : {}), ...(unreadable ? { unreadable } : {}),
     };
     this.persist(session, record.record.attemptId, { lastDelivery });
   }
