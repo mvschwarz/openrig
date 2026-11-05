@@ -167,7 +167,10 @@ describe("RigSpecPreflight", () => {
   });
 
   it("a Pi version check that hit the time limit stays a warning with the same message", async () => {
-    const exec = vi.fn<ExecFn>().mockRejectedValue(new ProbeTimeoutError("pi --version", RUNTIME_PROBE_TIMEOUT_MS));
+    const exec = vi.fn<ExecFn>().mockImplementation(async command => {
+      if (command === "pi --version") throw new ProbeTimeoutError(command, RUNTIME_PROBE_TIMEOUT_MS);
+      return "/usr/bin/rig";
+    });
     const result = await createPreflight({ exec }).check(validSpec({ nodes: [{ id: "worker", runtime: "pi", cwd: "/" }] }));
     expect(result.ready).toBe(true);
     expect(result.errors).toEqual([]);

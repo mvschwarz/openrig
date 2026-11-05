@@ -76,8 +76,17 @@ You need Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude
 Code or Codex account: one is enough, since the kernel operator adapts the
 shipped `starter` team to whichever you have. On Linux, the distribution's own
 Node.js can be older (Ubuntu 24.04's is 18); install a supported version with
-[nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac
-with Apple silicon, use Node.js 22 (see the [compatibility
+[nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource.
+
+For a tarball or manual Node install on Linux, put its bin directory on PATH in
+`~/.profile`, for example `export PATH="/path/to/node/bin:$PATH"`, rather than only
+in an interactive `~/.bashrc`. Bash reads the first of `~/.bash_profile`,
+`~/.bash_login` and `~/.profile`; if one of the first two exists, source `~/.profile`
+there. Other shells use their own login file (for example, zsh's `~/.zprofile`).
+Check `bash -lc 'command -v rig node'`: both commands must resolve for Codex's
+login-shell tools to use them.
+
+On a Mac with Apple silicon, use Node.js 22 (see the [compatibility
 history](../releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where
 you aren't an administrator, or where Homebrew belongs to another account (its
 `brew install` is refused), install Node.js in your own home folder with
