@@ -154,6 +154,7 @@ describe("a runner seat's answered permission path", () => {
     expect(ask.humanQuestions?.[0]?.options.map((option) => option.id)).toEqual(["allow", "always", "reject"]);
     expect(ask.body).toContain("Edit src/app.ts");
     expect(ask.body).toMatch(/Always allow \(allow_always, always\): the agent's harness remembers this choice/);
+    expect(ask.body).toContain("Your choice goes to this one request, once. A reply of just yes or no counts as the agent's allow or reject. Any other words choose nothing: OpenRig's default permits the request when the agent offered an allow option, and a runner that forwards your words passes them to the agent only after its turn. Closing this without choosing counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.");
     expect(f.waitsOnPerson()).toBe(true);
     expect(await f.read(String(submitted.body.askId))).toMatchObject({ status: 200, body: { state: "pending" } });
     expect(await f.answer(String(submitted.body.askId), { optionId: "always" })).toMatchObject({ status: 200 });
