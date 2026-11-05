@@ -1,4 +1,6 @@
 import type Database from "better-sqlite3";
+import { codexPromptBindingKey, codexPromptNeedsInput, type CodexPromptBinding, type StructuralPromptAttempt } from "./codex-prompt-observation.js";
+import { DEFAULT_STRUCTURAL_STALE_MS } from "./seat-structural-activity-service.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { EventBus } from "./event-bus.js";
 import type { SeatActivity } from "./types.js";
@@ -47,6 +49,8 @@ export interface SeatActivityServiceDeps {
   /** Visible prompt observation: null means capture could not establish a state. */
   permissionPromptReader?: (sessionName: string, runtime: string) => Promise<boolean | null>;
   permissionPromptChanged?: (sessionName: string, confirmed: boolean, runtime: string) => void;
+  /** Current committed native binding; null/throw means no new Codex prompt authority. */
+  codexPromptBindingReader?: (sessionName: string) => CodexPromptBinding | null;
   /** Claude pid.json, consulted for seats declaring self-report. */
   selfReportReader?: (sessionName: string, seatNodeId: string) => ActivityEvidence | null;
   /** A runner seat's last recorded hook, restored when its inventory is declared with no hook evidence yet (after a
@@ -70,6 +74,7 @@ export class SeatActivityService {
   private sweeping = false;
   private readonly permissionPromptReader?: SeatActivityServiceDeps["permissionPromptReader"];
   private readonly permissionPromptChanged?: SeatActivityServiceDeps["permissionPromptChanged"];
+  private readonly depsCodexPromptBindingReader?: SeatActivityServiceDeps["codexPromptBindingReader"];
 
   private readonly selfReportReader: ((sessionName: string, seatNodeId: string) => ActivityEvidence | null) | null;
 
@@ -77,6 +82,7 @@ export class SeatActivityService {
 
   constructor(deps: SeatActivityServiceDeps) {
     this.permissionPromptReader = deps.permissionPromptReader;
+    this.depsCodexPromptBindingReader = deps.codexPromptBindingReader;
     this.permissionPromptChanged = deps.permissionPromptChanged;
     this.tmux = deps.tmux;
     this.defaultWindowSeconds = deps.defaultWindowSeconds;
@@ -254,6 +260,86 @@ export class SeatActivityService {
       needsInput: { count, reason: count ? reason : null } });
   }
 
+  /** A ticket for the EXISTING structural capture, including its batch await. This is a native
+   * observation, not a permission event or hook promotion. The tracked-request lane is unchanged. */
+  beginCodexPromptCapture(sessionName: string, runtime: string | null | undefined): StructuralPromptAttempt | null {
+    if (runtime !== "codex") return null;
+    // A newer capture opportunity cannot later revive an earlier clear after a transient identity outage.
+    const priorId = this.sessionToSeat.get(sessionName);
+    const prior = priorId ? this.ladder.get(priorId) : undefined;
+    if (prior?.sessionName === sessionName) prior.codexPromptProof = null;
+    const binding = this.readCodexPromptBinding(sessionName);
+    const seat = binding ? this.ladder.get(binding.nodeId) : undefined;
+    if (!binding || !seat || seat.retired || seat.sessionName !== sessionName
+        || this.sessionToSeat.get(sessionName) !== binding.nodeId || seat.inventory?.runtime !== "codex"
+        || seat.permissions.size > 0 || seat.permissionEvidence !== null) return null;
+    const frozen = Object.freeze({ ...binding });
+    const sequence = Math.max(seat.codexPromptSequence, seat.sources.get(CODEX_PROMPT_SOURCE)?.latest.seq ?? 0) + 1;
+    seat.codexPromptSequence = sequence;
+    const revision = seat.permissionRevision;
+    const occupant = seat.arbitrated.lastSwap;
+    const inventory = seat.inventory;
+    return { pane: frozen.pane, finish: capture => {
+      const current = this.readCodexPromptBinding(sessionName);
+      if (this.ladder.get(frozen.nodeId) !== seat || seat.retired || seat.sessionName !== sessionName
+          || this.sessionToSeat.get(sessionName) !== frozen.nodeId || seat.inventory !== inventory
+          || seat.arbitrated.lastSwap !== occupant || seat.permissionRevision !== revision
+          || seat.codexPromptSequence !== sequence || seat.permissions.size > 0 || seat.permissionEvidence !== null
+          || !current || codexPromptBindingKey(current) !== codexPromptBindingKey(frozen)
+          || current.captureRevision !== frozen.captureRevision) return;
+      const needsInput = codexPromptNeedsInput(capture.text, sessionName);
+      const startedMs = Date.parse(capture.captureStartedAt ?? "");
+      const observedMs = Date.parse(capture.observedAt);
+      const nowMs = this.now().getTime();
+      if (!needsInput || !Number.isFinite(startedMs) || !Number.isFinite(observedMs)
+          || startedMs > observedMs || observedMs > nowMs || nowMs - startedMs >= DEFAULT_STRUCTURAL_STALE_MS) {
+        seat.codexPromptProof = null;
+        seat.sources.delete(CODEX_PROMPT_SOURCE);
+        this.arbitrate(seat);
+        return;
+      }
+      seat.codexPromptProof = { binding: frozen, sequence, revision, occupant, inventory, startedMs, observedMs };
+      this.reportEvidence({ seatNodeId: frozen.nodeId, sessionName, rung: "needs-input-chrome",
+        sourceId: CODEX_PROMPT_SOURCE, seq: sequence, observedAt: capture.observedAt, needsInput });
+    } };
+  }
+
+  private readCodexPromptBinding(sessionName: string): CodexPromptBinding | null {
+    try { return this.depsCodexPromptBindingReader?.(sessionName) ?? null; } catch { return null; }
+  }
+
+  /** Evaluated at the oracle READ as well as publication: checkedAt cannot renew old bytes, and
+   * a stalled capture cannot leave a clear latched. Use the existing native frame lifetime/order. */
+  private currentCodexPromptEvidence(seat: SeatLadderState, evidence: ActivityEvidence): boolean {
+    const proof = seat.codexPromptProof;
+    const invalidate = () => { seat.codexPromptProof = null; return false; };
+    const nowMs = this.now().getTime();
+    const current = this.readCodexPromptBinding(seat.sessionName);
+    if (!proof || evidence.seq !== proof.sequence || seat.codexPromptSequence !== proof.sequence
+        || seat.retired || seat.inventory !== proof.inventory || seat.inventory?.runtime !== "codex"
+        || seat.arbitrated.lastSwap !== proof.occupant || seat.permissionRevision !== proof.revision
+        || this.sessionToSeat.get(seat.sessionName) !== seat.arbitrated.seatNodeId
+        || !current || codexPromptBindingKey(current) !== codexPromptBindingKey(proof.binding)
+        || proof.startedMs > proof.observedMs || proof.observedMs > nowMs
+        || nowMs - proof.startedMs >= DEFAULT_STRUCTURAL_STALE_MS
+        || seat.permissions.size > 0 || seat.permissionEvidence !== null) return invalidate();
+    if (evidence.needsInput?.count === 0) {
+      // A generic clear never hides another producer's actual positive or a newer working hook.
+      for (const [id, source] of seat.sources) {
+        if (id === CODEX_PROMPT_SOURCE) continue;
+        if ((source.latest.needsInput?.count ?? 0) > 0) return invalidate();
+        if (source.latestActivity?.rung !== "window-sampling" && source.latestActivity?.activity === "working"
+            && Date.parse(source.latestActivity.observedAt) >= proof.startedMs) return invalidate();
+      }
+      const motion = this.latestByPaneId.get(seat.sessionName);
+      if (motion?.isActiveWithinWindow) {
+        const motionMs = Date.parse(motion.lastActivityAt ?? "");
+        if (!Number.isFinite(motionMs) || Math.floor(proof.startedMs / 1000) <= Math.floor(motionMs / 1000)) return invalidate();
+      }
+    }
+    return true;
+  }
+
   /**
    * Return the latest stored observation for a seat, or null when no
    * observation has been recorded yet (e.g. service hasn't polled this
@@ -278,6 +364,7 @@ export class SeatActivityService {
     seat.permissions.clear();
     seat.claudeToolBatches.clear();
     seat.permissionEvidence = null;
+    seat.codexPromptProof = null;
     seat.pendingIdle = null;
     seat.contradictionSinceMs = null;
     seat.promotion.clear();
@@ -489,6 +576,7 @@ export class SeatActivityService {
     seat.permissions.clear();
     seat.claudeToolBatches.clear();
     seat.permissionEvidence = null;
+    seat.codexPromptProof = null;
     seat.pendingIdle = null;
     seat.contradictionSinceMs = null;
     seat.promotion.clear();
@@ -575,6 +663,8 @@ export class SeatActivityService {
         permissionRevision: 0,
         permissionPolling: false,
         permissionEvidence: null,
+        codexPromptSequence: 0,
+        codexPromptProof: null,
         trust: new Map(),
         promotion: new Map(),
         contradictionSinceMs: null,
@@ -619,6 +709,7 @@ export class SeatActivityService {
     for (const entry of seat.sources.values()) {
       const evd = kind === "activity" ? entry.latestActivity : entry.latest;
       if (!evd || evd.rung !== rung) continue;
+      if (evd.sourceId === CODEX_PROMPT_SOURCE && !this.currentCodexPromptEvidence(seat, evd)) continue;
       if (!best || evd.seq > best.seq) best = evd;
     }
     return best;
@@ -899,7 +990,21 @@ interface PromotionRun {
   firstAgreementAtMs: number | null;
 }
 
+export const CODEX_PROMPT_SOURCE = "codex:current-native-prompt";
+
+interface CodexPromptProof {
+  binding: CodexPromptBinding;
+  sequence: number;
+  revision: number;
+  occupant: ArbitratedSeatState["lastSwap"];
+  inventory: AdapterRungInventory;
+  startedMs: number;
+  observedMs: number;
+}
+
 interface SeatLadderState {
+  codexPromptSequence: number;
+  codexPromptProof: CodexPromptProof | null;
   permissions: Map<string, { sinceMs: number; observedAt: string; hookAgentId?: string | null;
     confirmed: boolean; seen: boolean; nextCheckMs: number }>;
   claudeToolBatches: Map<string | null, number>;

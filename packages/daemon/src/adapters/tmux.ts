@@ -1593,9 +1593,12 @@ export class TmuxAdapter {
    * fails too leaves the chunk to per-target reads. Each entry carries the time its own chunk was read (`capturedAt`), so a slow later
    * chunk can't make an earlier capture look fresh.
    */
-  async capturePanesContent(targets: string[], lines: number = 20, now: () => Date = () => new Date()): Promise<Map<string, PaneCapture> | null> {
+  async capturePanesContent(targets: string[], lines: number = 20, now: () => Date = () => new Date(), boundPanes?: ReadonlyMap<string, string>): Promise<Map<string, PaneCapture> | null> {
+    // A native observation freezes its physical pane before any command/await; result keys stay canonical.
+    const frozenPanes = boundPanes ? new Map(boundPanes) : undefined;
     const listing = this.run(["tmux", "list-sessions", "-F", "#{session_name}"], "tmux list-sessions -F '#{session_name}'")
       .then((output) => new Set(output.split(/\r?\n/).filter(Boolean)), () => null);
+    const targetFor = (name: string) => frozenPanes?.has(name) ? exactTarget(frozenPanes.get(name)!, "pane") : `=${name}:`;
     const out = new Map<string, PaneCapture>();
     let unlisted = false;
     /** Capture one chunk with a single chained tmux call into `out`; on failure, retry it without the unlisted targets
@@ -1605,10 +1608,10 @@ export class TmuxAdapter {
       const mark = (k: number) => `__openrig_capture_${nonce}_${k}__`;
       const argv = ["tmux", ...chunk.flatMap((t, k) => [
         ...(k > 0 ? [";"] : []),
-        "display-message", "-p", "-t", `=${t}:`, mark(k), ";", "capture-pane", "-p", "-t", `=${t}:`, "-S", `-${lines}`,
+        "display-message", "-p", "-t", targetFor(t), mark(k), ";", "capture-pane", "-p", "-t", targetFor(t), "-S", `-${lines}`,
       ])];
       const legacy = "tmux " + chunk.map((t, k) =>
-        `display-message -p -t ${shellQuote(`=${t}:`)} ${shellQuote(mark(k))} \\; capture-pane -p -t ${shellQuote(`=${t}:`)} -S -${lines}`,
+        `display-message -p -t ${shellQuote(targetFor(t))} ${shellQuote(mark(k))} \\; capture-pane -p -t ${shellQuote(targetFor(t))} -S -${lines}`,
       ).join(" \\; ");
       let output: string;
       let capturedAt: Date;

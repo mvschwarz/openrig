@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import type { StructuralPromptAttempt, StructuralPromptObserver } from "./codex-prompt-observation.js";
 import type { PaneCapture, TmuxAdapter } from "../adapters/tmux.js";
 import { communityHarnessPaneActivity, classifyPaneActivity, readSeatBeforePaste, type PaneActivityClassification } from "./session-transport.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
@@ -55,6 +56,7 @@ export class SeatStructuralActivityService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweeping = false; // single-flight guard: one whole-fleet sweep at a time (MUST-FIX 2)
   private activityChanged?: (sessionName: string) => void;
+  private promptObserver?: StructuralPromptObserver;
   private bannerEmitter:
     | ((sessionName: string, banner: CodexLimitBanner | null, observedAt: Date) => void)
     | null = null;
@@ -77,6 +79,9 @@ export class SeatStructuralActivityService {
     this.bannerEmitter = emitter;
   }
 
+  /** Reuse this sweep: attempts are frozen BEFORE either batch or per-seat capture. */
+  attachPromptObserver(observer: StructuralPromptObserver): void { this.promptObserver = observer; }
+
   /** Notify from the existing captures only, after the cache holds the new verdict. */
   attachActivityChanged(listener: (sessionName: string) => void): void { this.activityChanged = listener; }
 
@@ -97,7 +102,9 @@ export class SeatStructuralActivityService {
    *  null or failed capture INVALIDATES the prior row (never leaves a stale positive verdict) and
    *  returns null (MUST-FIX 1). `prefetched` (#308) is the sweep's batched capture: a session it holds (null = gone or
    *  empty) is used as is; one it lacks is captured here, per seat. */
-  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null, runtime?: string | null, communityHarness?: string | null, prefetchedStartedAt?: Date): Promise<StructuralObservation | null> {
+  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null, runtime?: string | null, communityHarness?: string | null, prefetchedStartedAt?: Date, promptAttempt?: StructuralPromptAttempt | null): Promise<StructuralObservation | null> {
+    // Explicit null from the batch means no qualifying entry context; do not start a late ticket.
+    const attempt = promptAttempt === undefined ? this.promptObserver?.(sessionName, runtime) ?? null : promptAttempt;
     let content: string | null;
     let observedAt: Date | null = null;
     // Completion can lag the bytes: use a lower bound taken before the actual read.
@@ -108,18 +115,21 @@ export class SeatStructuralActivityService {
       observedAt = capture.capturedAt; // the capture's own time, never the end of the sweep (#309 review)
     } else {
       try {
-        content = await this.tmuxAdapter.capturePaneContent(sessionName, this.captureLines);
+        content = await this.tmuxAdapter.capturePaneContent(attempt?.pane ?? sessionName, this.captureLines);
       } catch {
         this.latestBySession.delete(sessionName);
+        attempt?.finish({ text: null, captureStartedAt: captureStartedAt?.toISOString() ?? null, observedAt: this.now().toISOString() });
         return null;
       }
     }
     if (content === null) {
       this.latestBySession.delete(sessionName);
+      attempt?.finish({ text: null, captureStartedAt: captureStartedAt?.toISOString() ?? null, observedAt: this.now().toISOString() });
       return null;
     }
     const c = communityHarnessPaneActivity(classifyPaneActivity(content), communityHarness, content);
     const at = observedAt ?? this.now();
+    attempt?.finish({ text: content, captureStartedAt: captureStartedAt?.toISOString() ?? null, observedAt: at.toISOString() });
     const obs: StructuralObservation = {
       state: c.state,
       reason: c.reason,
@@ -194,12 +204,18 @@ export class SeatStructuralActivityService {
       // #308: one batched capture for the whole fleet (a few tmux calls) instead of a fork per seat; anything the batch
       // didn't cover (no listing, a failed chunk) is read per seat inside pollSeat, as before.
       const captureStartedAt = this.now();
-      const prefetched = this.tmuxAdapter.capturePanesContent && due.length > 0
-        ? await this.tmuxAdapter.capturePanesContent(due.map((r) => r.session_name), this.captureLines, this.now).catch(() => null)
+      const attempts = new Map(due.map((r) => [r.session_name,
+        this.promptObserver?.(r.session_name, runtimeBySession.get(r.session_name)) ?? null] as const));
+      const targets = new Map([...attempts].flatMap(([name, attempt]) => attempt ? [[name, attempt.pane] as const] : []));
+      const captureBatch = this.tmuxAdapter.capturePanesContent;
+      const prefetched = captureBatch && due.length > 0
+        ? await (targets.size > 0
+          ? captureBatch.call(this.tmuxAdapter, due.map((r) => r.session_name), this.captureLines, this.now, targets)
+          : captureBatch.call(this.tmuxAdapter, due.map((r) => r.session_name), this.captureLines, this.now)).catch(() => null)
         : null;
       await Promise.all(due.map(async (r) => {
         try {
-          const obs = await this.pollSeat(r.session_name, prefetched, runtimeBySession.get(r.session_name) ?? null, communityHarnessBySession.get(r.session_name), captureStartedAt);
+          const obs = await this.pollSeat(r.session_name, prefetched, runtimeBySession.get(r.session_name) ?? null, communityHarnessBySession.get(r.session_name), captureStartedAt, attempts.get(r.session_name) ?? null);
           const seen = activity?.get(r.session_name);
           if (obs && seen !== undefined) this.capturedActivity.set(r.session_name, { activity: seen.activity, size: seen.size, startSec, fullAt: sweepAt.getTime() });
           else this.capturedActivity.delete(r.session_name);

@@ -106,6 +106,7 @@ import { restoredRunnerHookEvidence } from "./routes/activity.js";
 import { readClaudeSelfReportEvidence } from "./adapters/claude-code-adapter.js";
 import { replaceFile } from "./adapters/replace-file.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
+import { readCodexPromptBinding } from "./domain/codex-prompt-observation.js";
 import { deriveSelfHostIdSource, SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./domain/seat-identity-store.js";
 import { DaemonLifecycleStore } from "./domain/daemon-lifecycle-store.js";
@@ -570,6 +571,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const seatActivityService = new SeatActivityService({
     tmux: tmuxAdapter,
     defaultWindowSeconds: 3,
+    codexPromptBindingReader: sessionName => readCodexPromptBinding(db, sessionRegistry, new SeatIdentityStore(db), sessionName, new Date()),
     permissionPromptReader: async (sessionName, runtime) => {
       if (runtime === "claude-code") {
         const context = sessionRegistry.findResumeContextByName(sessionName);
@@ -603,6 +605,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // per running seat per tick + classifies motion STRUCTURALLY, so the `rig ps` ACTIVITY column reflects
   // real liveness for hook-less / stale-hook / turn-boundary seats WITHOUT a per-request capture storm.
   const seatStructuralActivityService = new SeatStructuralActivityService(tmuxAdapter);
+  seatStructuralActivityService.attachPromptObserver((sessionName, runtime) => seatActivityService.beginCodexPromptCapture(sessionName, runtime));
   // A confirmed prompt clearing recovers its refused queue wakes immediately, using the same
   // hook/pane resolution as status. No new captures, timer or delivery admission path.
   const retryPromptWakes = (sessionName: string) => {
