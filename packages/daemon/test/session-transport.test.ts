@@ -704,6 +704,22 @@ describe("SessionTransport", () => {
       expect(callOrder).toEqual(["cancelPaneMode", "sendKeys:Enter"]);
     });
 
+    it("reports an unconfirmed submitOnly Enter after the key write was attempted", async () => {
+      seedCanonicalRig();
+      const tmux = modalPane({ leaves: true, callOrder: [], capture: "❯ staged message" });
+      let submits = 0;
+      tmux.sendKeys = vi.fn(async (_target, _keys, beforeInput) => {
+        beforeInput?.();
+        submits++;
+        return { ok: false as const, code: "unknown", message: "response lost" };
+      });
+      const result = await createTransport(tmux).send("dev-impl@my-rig", "", { submitOnly: true, expectedStagedText: "staged message" });
+      expect(submits).toBe(1);
+      expect(result).toMatchObject({ ok: false, inputPhase: "attempted" });
+      expect(result.error).toContain("unconfirmed");
+      expect(result.error).not.toContain("did not land");
+    });
+
     it("types nothing when the pane cannot leave the mode", async () => {
       seedCanonicalRig();
       const callOrder: string[] = [];

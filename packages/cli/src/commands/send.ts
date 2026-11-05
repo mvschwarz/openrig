@@ -571,7 +571,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         const envelope = !effect
           ? res.data
           : effectUnresolved(effect)
-            ? { ...res.data, verified: false, outcome: "staged-not-consumed", effectCheck: effect }
+            ? { ...res.data, verified: false, outcome: effectSubmissionUnconfirmed(effect) ? "submission-unconfirmed" : "staged-not-consumed", effectCheck: effect }
             : { ...res.data, effectCheck: effect };
         console.log(JSON.stringify(envelope));
         if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
@@ -638,7 +638,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
  * recheck, then stops. Pure classification: no printing here.
  */
 type EffectCheck =
-  | { checked: true; state: "staged"; remedy: "submitted-cleared" | "submitted-still-staged" | "submit-refused"; detail?: string }
+  | { checked: true; state: "staged"; remedy: "submitted-cleared" | "submitted-still-staged" | "submit-refused" | "submit-unconfirmed"; detail?: string }
   | { checked: true; state: "no-staged-residual" }
   | { checked: false; why: string };
 
@@ -689,16 +689,26 @@ async function classifyDeliveryEffect(
   const probe = await detectStagedAtPrompt(client, session, identity);
   if (probe.state === "unchecked") return { checked: false, why: probe.why };
   if (probe.state === "not-staged") return { checked: true, state: "no-staged-residual" };
-  const enter = await client.post<Record<string, unknown>>("/api/transport/send", {
-    session,
-    submitOnly: true,
-    expectedStagedText: identity.expectedStagedText,
-    expectedStagedLineCount: identity.expectedLines,
-  }, transportRequestOptions(waitForIdleMs));
+  let enter: { status: number; data: Record<string, unknown> };
+  try {
+    enter = await client.post<Record<string, unknown>>("/api/transport/send", {
+      session,
+      submitOnly: true,
+      expectedStagedText: identity.expectedStagedText,
+      expectedStagedLineCount: identity.expectedLines,
+    }, transportRequestOptions(waitForIdleMs));
+  } catch (err) {
+    return { checked: true, state: "staged", remedy: "submit-unconfirmed", detail: (err as Error).message };
+  }
   if (enter.status >= 400) {
-    return { checked: true, state: "staged", remedy: "submit-refused", detail: (enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}` };
+    const phase = enter.data?.["inputPhase"];
+    const reason = enter.data?.["reason"];
+    const unconfirmed = phase === "attempted" || phase === "written"
+      || (phase !== "not_reached" && enter.data?.["sent"] !== false && (reason === "submit_failed" || enter.status >= 500));
+    return { checked: true, state: "staged", remedy: unconfirmed ? "submit-unconfirmed" : "submit-refused", detail: (enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}` };
   }
   const recheck = await detectStagedAtPrompt(client, session, identity);
+  if (recheck.state === "unchecked") return { checked: true, state: "staged", remedy: "submit-unconfirmed", detail: recheck.why };
   return recheck.state === "staged"
     ? { checked: true, state: "staged", remedy: "submitted-still-staged" }
     : { checked: true, state: "staged", remedy: "submitted-cleared" };
@@ -711,13 +721,17 @@ function effectHumanLines(effect: EffectCheck, session: string): string[] {
     return [`Note: the pane-effect check could not run (${effect.why}); the verdict above is transport-level only.`];
   }
   if (effect.state === "no-staged-residual") return [];
+  if (effect.remedy === "submit-unconfirmed") return [
+    `Delivery: submission unconfirmed — the text was staged before one guarded Enter attempt, but the result could not be confirmed (${effect.detail}). Inspect with: rig capture ${session}`,
+  ];
+  if (effect.remedy === "submit-refused") return [
+    `Delivery: unconfirmed — the guarded Enter was refused (${effect.detail}); the earlier staged observation may have changed. Inspect with: rig capture ${session}`,
+  ];
   const out = ["Delivery: staged, not consumed (checked: post-send pane capture; observed: the sent text is still at the prompt — typed, never submitted)"];
   if (effect.remedy === "submitted-cleared") {
     out.push("Remedy: one guarded Enter submitted — the staged text left the prompt.");
   } else if (effect.remedy === "submitted-still-staged") {
     out.push(`Remedy: one guarded Enter submitted, but the text is STILL at the prompt — not consumed; stopping here (one submit is the contract). Inspect with: rig capture ${session}`);
-  } else {
-    out.push(`Remedy: the single guarded Enter (submit path) was refused (${effect.detail}); stopping here — one submit is the contract. Inspect with: rig capture ${session}`);
   }
   return out;
 }
@@ -725,6 +739,10 @@ function effectHumanLines(effect: EffectCheck, session: string): string[] {
 /** True when a staged detection did not end consumed — a non-silent failure. */
 function effectUnresolved(effect: EffectCheck | undefined): boolean {
   return !!effect && effect.checked && effect.state === "staged" && effect.remedy !== "submitted-cleared";
+}
+
+function effectSubmissionUnconfirmed(effect: EffectCheck | undefined): boolean {
+  return !!effect && effect.checked && effect.state === "staged" && (effect.remedy === "submit-unconfirmed" || effect.remedy === "submit-refused");
 }
 
 /**
@@ -760,7 +778,7 @@ async function detectStagedAtPrompt(
   for (let i = lines.length - 1; i >= 0; i--) {
     if (PROMPT_LINE_PATTERN.test(lines[i]!)) { lastPrompt = i; break; }
   }
-  if (lastPrompt === -1) return { state: "not-staged" };
+  if (lastPrompt === -1) return { state: "unchecked", why: "no input prompt was visible in the capture" };
   const inputRegionRaw = lines.slice(lastPrompt).join("\n").replace(PROMPT_LINE_PATTERN, "");
   // IDENTITY FIRST (round-2 F2, desk-binding): the literal-residual match uses
   // the daemon submit-precheck's own normalization (strip ALL whitespace,
@@ -1089,6 +1107,7 @@ async function runFanOutSend(params: {
   }
   const effectBySeat = new Map((effects ?? []).map((e) => [e.sessionName, e.effect]));
   const unresolvedCount = (effects ?? []).filter((e) => effectUnresolved(e.effect)).length;
+  const unconfirmedCount = (effects ?? []).filter((e) => effectSubmissionUnconfirmed(e.effect)).length;
 
   if (opts.json) {
     // Round-2 F1: ONE verdict per recipient — a staged-unresolved recipient's
@@ -1096,7 +1115,7 @@ async function runFanOutSend(params: {
     const rawResults = (res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string }> | undefined) ?? [];
     const encodedResults = rawResults.map((r) =>
       effectUnresolved(effectBySeat.get(r.sessionName))
-        ? { ...r, ok: false, verified: false, outcome: "staged-not-consumed", error: "staged, not consumed (pane effect); the one guarded submit did not clear it" }
+        ? { ...r, ok: false, verified: false, outcome: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission-unconfirmed" : "staged-not-consumed", error: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "delivery unconfirmed; inspect the recipient after the guarded submit attempt" : "staged, not consumed (pane effect); the one guarded submit did not clear it" }
         : r
     );
     // Round-3 (r2 row 00fb3a68): the machine-readable AGGREGATE derives from
@@ -1139,6 +1158,8 @@ async function runFanOutSend(params: {
     if (ec && ec.checked && ec.state === "staged") {
       if (ec.remedy === "submitted-cleared") {
         console.log(`${r.sessionName}: sent — staged at the prompt, cleared by one guarded Enter (consumed)`);
+      } else if (effectSubmissionUnconfirmed(ec)) {
+        console.log(`${r.sessionName}: ${effectHumanLines(ec, r.sessionName)[0]}`);
       } else {
         console.log(`${r.sessionName}: staged, not consumed — ${effectHumanLines(ec, r.sessionName).slice(-1)[0]}`);
       }
@@ -1151,7 +1172,7 @@ async function runFanOutSend(params: {
   }
   // The delivered count never includes a staged-unresolved recipient.
   const deliveredCount = Math.max(0, ((data["sent"] as number) ?? 0) - unresolvedCount);
-  console.log(`${deliveredCount}/${data["total"]} delivered${unresolvedCount > 0 ? `, ${unresolvedCount} staged-not-consumed` : ""}`);
+  console.log(`${deliveredCount}/${data["total"]} delivered${unresolvedCount - unconfirmedCount > 0 ? `, ${unresolvedCount - unconfirmedCount} staged-not-consumed` : ""}${unconfirmedCount > 0 ? `, ${unconfirmedCount} submission-unconfirmed` : ""}`);
   // S2 (OPR.0.5.4.3): surface additive advisories (e.g. the unknown-sender
   // sign-it notice) — an env-less operator must see it, not "sent" lines alone.
   const fanoutAdvisory = data["warning"] as string | undefined;
