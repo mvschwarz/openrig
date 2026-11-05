@@ -179,11 +179,16 @@ function piCredentialHint(message: string): string {
     : " For managed Pi, configure this provider in the seat's PI_CODING_AGENT_DIR (auth.json or models.json). Its key is not in OpenRig's Pi environment passthrough map; default Pi logins are not automatically shared.";
 }
 
-function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
-  // Empty or control-only fields must not hide a later usable diagnostic.
-  const text = details.map(detail => typeof detail === "string"
+/** The first usable diagnostic, on one line with control characters removed. Empty or control-only fields must not hide
+ *  a later usable one. */
+function diagnosticText(details: unknown[]): string {
+  return details.map(detail => typeof detail === "string"
     ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
     : "").find(Boolean) ?? "";
+}
+
+function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
+  const text = diagnosticText(details);
   const marker = runtime === "omp" ? "[omp-runner] ERROR" : PI_RUNNER_ERROR_MARKER;
   return `${marker} ${text.slice(0, 400) || "request failed"}${runtime === "pi" ? piCredentialHint(text) : ""}`;
 }
@@ -257,8 +262,13 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
       return { mirrorLines: [] };
     case "compaction_start":
       return { mirrorLines: [`[${runtime}] compacting context…`], activity: { hookEvent: "active", subtype: "compaction" } };
-    case "compaction_end":
-      return { mirrorLines: [`[${runtime}] compaction done`] };
+    case "compaction_end": {
+      // Pi's compaction_end says `aborted` when it was cancelled, and carries `errorMessage` when it failed and wrote no
+      // summary (Pi's docs/rpc.md). An end that names neither is done.
+      const failure = diagnosticText([event.errorMessage]).slice(0, 400);
+      return { mirrorLines: [event.aborted === true ? `[${runtime}] compaction cancelled`
+        : failure ? `[${runtime}] compaction failed: ${failure}` : `[${runtime}] compaction done`] };
+    }
     // OMP names its automatic compaction separately. Pi keeps main's mapping
     // (unmapped), so an idle Pi seat never reads as running after one.
     case "auto_compaction_start":
