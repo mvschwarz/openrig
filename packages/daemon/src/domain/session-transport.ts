@@ -2,6 +2,7 @@ import { expectedConversation, sameConversation, resolveExpectedConversation, ty
 import type { ContextUsageStore } from "./context-usage-store.js";
 import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
+import { currentClaudeThemeMenu } from "./claude-theme-menu.js";
 import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
@@ -688,7 +689,9 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     : null;
   // Claude's resume picker types a paste into its search and resumes a card on Enter. A Codex or Pi pane printing one is output.
   const claudePicker = options.runtime === "codex" || options.runtime === "pi" ? null : currentClaudeResumePicker(paneContent);
-  const selectionPromptEvidence = claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
+  const themeMenu = options.runtime === undefined || options.runtime === "claude-code"
+    ? currentClaudeThemeMenu(paneContent) : null;
+  const selectionPromptEvidence = themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
     currentComposerSelection ?? (options.currentClaudeDialogueOnly ? null
       : findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]));
   if (selectionPromptEvidence) {
