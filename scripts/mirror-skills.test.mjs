@@ -227,7 +227,7 @@ test("stagePublicSkills applies membership, path, frontmatter, and fence transfo
   }
 });
 
-test("stagePublicSkills preserves prose and executable source modes", async () => {
+test("stagePublicSkills preserves prose and executable source modes", { skip: process.platform === "win32" ? "POSIX permission bits are not represented by Windows chmod" : false }, async () => {
   const mirror = await import("./mirror-skills.mjs");
   const root = mkdtempSync(join(tmpdir(), "openrig-mirror-modes-"));
   try {
@@ -502,7 +502,7 @@ test("stagePublicSkills rejects canon file symlinks before reading or staging ou
       }),
       (error) => {
         assert.match(error.message, /symlink/i);
-        assert.match(error.message, /alpha\/references\/linked\.txt/);
+        assert.match(error.message, /alpha[/\\]references[/\\]linked\.txt/);
         return true;
       },
     );
@@ -537,7 +537,7 @@ test("stagePublicSkills rejects canon directory symlinks before recursion or sta
       }),
       (error) => {
         assert.match(error.message, /symlink/i);
-        assert.match(error.message, /alpha\/references\/linked-directory/);
+        assert.match(error.message, /alpha[/\\]references[/\\]linked-directory/);
         return true;
       },
     );
@@ -948,7 +948,7 @@ test("Windows native regeneration handles file/directory changes and refuses jun
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("authoring regeneration repairs permission-only drift in generated copies from the home's modes", async () => {
+test("authoring regeneration repairs permission-only drift in generated copies from the home's modes", { skip: process.platform === "win32" ? "POSIX permission bits are not represented by Windows chmod" : false }, async () => {
   const mirror = await import("./mirror-skills.mjs");
   const root = mkdtempSync(join(tmpdir(), "openrig-authoring-modes-"));
   try {
@@ -973,7 +973,7 @@ test("authoring regeneration repairs permission-only drift in generated copies f
   }
 });
 
-test("staged files keep the source's exact mode, so a publishable home passes under umask 0077 and 0022", async () => {
+test("staged files keep the source's exact mode, so a publishable home passes under umask 0077 and 0022", { skip: process.platform === "win32" ? "POSIX permission bits are not represented by Windows chmod" : false }, async () => {
   const mirror = await import("./mirror-skills.mjs");
   for (const mask of [0o077, 0o022]) {
     const root = mkdtempSync(join(tmpdir(), "openrig-umask-"));

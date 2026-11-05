@@ -177,7 +177,7 @@ test("MALFORMED PROJECTION FAILS THE BUILD — a '..' content path is rejected a
       failed = true;
       assert.equal(err.status, 1, "exit code must be 1 (build failure)");
       assert.match(String(err.stderr), /FAILING THE BUILD/);
-      assert.match(String(err.stderr), /no '\.\.' segments/);
+      assert.match(String(err.stderr), /no '\.\.' segments|path traversal \(\.\.\) is not allowed/);
     }
     assert.ok(failed, "generator must exit non-zero on a malformed projection");
     // and it must NOT have written a partial/invalid library

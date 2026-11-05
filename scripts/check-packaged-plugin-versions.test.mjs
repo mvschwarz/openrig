@@ -81,7 +81,10 @@ test('snapshot refresh rejects symlinked package metadata without replacing the 
   execFileSync('tar', ['-czf', join(dir, 'release.tgz'), '-C', join(dir, 'input'), 'package']);
   const baseline=join(dir,'baseline.json'); writeFileSync(baseline,'original baseline');
   const run=spawnSync(process.execPath,[fileURLToPath(new URL('./check-packaged-plugin-versions.mjs',import.meta.url)),join(dir,'release.tgz'),'--snapshot','--out',baseline],{encoding:'utf8',windowsHide:true});
-  assert.notEqual(run.status,0); assert.match(run.stderr,/package.json: expected a regular file/);
+  assert.notEqual(run.status,0);
+  // Native Windows tar may reject the symlink while extracting, before the
+  // checker can inspect it. Both paths must fail closed and preserve baseline.
+  assert.match(run.stderr, process.platform === 'win32' ? /package\/package.json: Can't create|package.json: expected a regular file/ : /package.json: expected a regular file/);
   assert.equal(readFileSync(baseline,'utf8'),'original baseline');
 });
 

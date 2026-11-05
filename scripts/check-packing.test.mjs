@@ -61,7 +61,7 @@ test("build-package scans the complete daemon specs tree before LP-7 copies it",
 });
 
 test("build-package emits the substance roots from the staging branches that actually ran", () => {
-  const buildScript = readFileSync("scripts/build-package.sh", "utf8");
+  const buildScript = readFileSync("scripts/build-package.sh", "utf8").replace(/\r\n/g, "\n");
   assert.match(buildScript, /SUBSTANCE_SURFACE_ROOTS=\(\)/);
   const assetsBranch = buildScript.match(/^if \[ -d "\$DAEMON_DIR\/assets" \]; then\n[\s\S]*?^fi$/m)?.[0] ?? "";
   assert.match(assetsBranch, /"\$DAEMON_DIR\/assets" "\$CLI_DIR\/daemon\/assets"/);
