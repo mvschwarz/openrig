@@ -10,7 +10,7 @@ already does it, or two verbs crossed already answer it. **You cannot look up a 
 not know exists.** So the point of what follows is not skill. It is recognition: that when a task
 lands, something rhymes, and you go check instead of building.
 
-Ninety top-level verbs ship (capability canon refreshed through
+Ninety-one top-level verbs ship (capability canon refreshed through
 `capability-delta-v0.7.6`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
@@ -235,11 +235,14 @@ unseen — which makes messages the one delivery channel that never gets skipped
   New slice views default to four automatic tiles (`--max-tiles` overrides it). Known empty slices
   stay following; incomplete reads keep prior viewers, and draft/focus protection still applies.
   A join refused before a pane split can join on a later refresh. Hold notices keep the seat and phase.
-  The first notice keeps the original reason; later notices can show a generic reason, while the
-  original failure remains in the journal.
+  Later notices label the current confirmation apart from the first failure, also after the follower
+  is recreated, so the original reason stays in view.
   An attach that ran and then exited to a shell is not restarted automatically; the whole slice view
   can hold until that tile is resolved. No tested workaround is offered for that case.
-  Slice following targets the Linux Herdr 0.9.5 / protocol 22 path. Mission following is not included in 0.7.6.
+  **`rig terminal open mission:<id> --follow --provider herdr`** follows a mission's current owners the same way: the
+  union of active rows with that exact `mission:` tag and rows associated with its indexed child slices, each counted
+  once, with four automatic tiles by default. Flat legacy slices without that parent association aren't inferred into
+  the mission. Slice and mission following target the Linux Herdr 0.9.5 / protocol 22 path.
   An unconfirmed pane is reported as `pane_unconfirmed`, not counted as opened. Inspect before
   retrying: an unconfirmed result does not prove that nothing opened.
   Add `--session <name>` to select a Herdr session for that request; `--session default`
@@ -532,6 +535,9 @@ not have to tear one down to change it, and you rarely have to start from nothin
   `CODEX_HOME`, `OPENRIG_*` and the allowlisted provider auth variables) and its own `env`. Put an
   account or key in the seat's `env` or `rig up --env`, or set the key to true. Running seats are
   untouched, and `rig setup` warns when it sees a custom tmux configuration.
+  `rig config set terminal.tmux_server isolated` (default `inherit`) keeps managed seats on their own tmux server,
+  out of the person's `tmux ls`; it's read at daemon start, and `rig terminal attach '<session>'` reaches a seat. It
+  selects only the tmux server: home, credentials, filesystem and network stay shared.
   **`rig up <spec> --name <rig>`** runs one spec as another rig under that name; the rig keeps the
   name for `--existing`, snapshots and restore, and the spec file isn't changed.
 - **A Claude member can bring its own setup** in the rig spec: `agent_file`,
@@ -539,7 +545,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
   that seat's own storage, never the project, so one seat in a shared repository can have its own
   persona, prompt or plugins. A bundle's before-install view lists them. `plugin_channels`
   (`plugin:<name>@<marketplace>` entries) registers that seat alone for those plugins' channel
-  notifications, through Claude's `--channels`.
+  notifications, through Claude's `--channels`. `claude_mcp: none` on a Claude member starts it with no MCP
+  servers, plugin servers included, on fresh, resume and fork launches.
 - **A new Claude member can name a prepared subscription token** with
   `claude_token: {label: name, file: /abs/token}` beside its `env.CLAUDE_CONFIG_DIR`; the seat stores
   the file reference and reads it at launch. A missing/unreadable token uses the existing fallback
@@ -552,11 +559,17 @@ not have to tear one down to change it, and you rarely have to start from nothin
   harness its first startup text through a private file named by `OPENRIG_FIRST_INPUT`. Examples for
   Cursor, Hermes and OpenClaw are in `docs/reference/community-harness-examples/`; OpenClaw's local
   and Gateway-client examples each resume a named conversation. A preset can declare `runner: true`
-  (with `launch_result: true`) so activity follows its runner reports, recorded per launch.
+  (with `launch_result: true`) so activity follows its runner reports, recorded per launch. A runner seat's
+  permission requests reach a person: the default person, or one chosen with `rig seat set-permissions-to <seat>
+  --to <person> --reason "…"` (`--clear` returns to the default; `--deny` opts the seat in to refusal). When no one
+  can be asked, the request is permitted with the agent's own allow option, and a person's no is never a grant.
+  `docs/reference/community-harness-examples/dsh/` is an example runner, and
+  `node docs/reference/runner-conformance/check-runner.mjs --runner '<command with {agent}>' --name <harness>` checks a
+  runner with no daemon, model, credentials or network.
   `passes_model: true` sends the declared model as `OPENRIG_MODEL`; it does not establish the
   effective model. Cursor and Hermes examples leave model passing off pending native qualification.
   `docs/reference/community-harness-presets.md` is the contract: what a community harness gets from
-  OpenRig and what it doesn't (no turn-cancel verb, no approvals reaching OpenRig), how to write
+  OpenRig and what it doesn't (no turn-cancel verb; permission requests reach OpenRig only from a runner preset), how to write
   one, and how promotion is judged. Whether processes a harness starts outside its pane survive
   isn't exercised. An OpenClaw seat whose last local turn was refused reads as needing attention
   (`OPENCLAW_TURN_NOT_RECOVERED`): OpenRig doesn't recover that turn, and a send submits a new one,
@@ -665,7 +678,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   `/healthz` reports the daemon's effective UID as `euid`, beside `pid`. Running several OpenRig
   homes on one machine on purpose: `rig config set daemon.db_conflict stop` refuses a start whose
   database another live daemon already holds (the default, `warn`, only warns), and
-  `rig daemon start --allow-db-conflict` allows one deliberate start.
+  `rig daemon start --allow-db-conflict` allows one deliberate start. A start still in progress reads
+  `Daemon starting: launch reserved by pid N since T; not listening yet` in `rig daemon status`, not stopped.
 - **A busy daemon isn't a down one.** The CLI refuses only when the daemon is confirmed down
   (stopped, stale, a refused probe), its probe is blocked, or it's a sibling home; a busy daemon
   gets the real request. A write that then times out says its outcome is **unknown**: check its
@@ -676,7 +690,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   credential, the way setup does; it fails for a harness the person doesn't use, which they can
   ignore. A pass is not "ready": local credential availability is not proof that a provider accepts
   the credential or that an agent can work. `rig setup` and `rig doctor` also check that tmux
-  can capture a pane, on a throwaway server (`tmux_capture`); no tmux version is refused.
+  can capture a pane, on a throwaway server (`tmux_capture`); no tmux version is refused. When the
+  configured port's daemon belongs to another OS user (by `/healthz`'s `euid`), doctor warns and names the fix:
+  `rig config set daemon.port <free-port>`, then `rig daemon start`. Nothing is stopped or refused.
   **`rig preflight`** asks whether this machine can run OpenRig at all.
 - **Bare `rig`** — the same TUI for first setup, daemon-down startup and ordinary work.
   After a successful daemon read it opens the ordinary work views, even when no rig is running;
@@ -835,7 +851,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   `policies.claude_compaction.preparation_root` (an absolute path) puts restore maps where seats
   may write. A daemon restart picks a managed compaction up where it stopped: an owed restore step
   resumes, a `/compact` that may have been sent is never sent again, and `rig compact --state`
-  shows anything stranded or owed. `rig seat status` shows an owed restore stage and its last
+  shows anything stranded or owed. A map finished during automatic preparation stays armed for the next idle moment
+  through the next retry interval; `--state` shows `idleDeadlineAt`. In either mode, expiry reads
+  `map_complete_seat_never_idle` when the map is finished, or `preparation_incomplete` when it is not.
+  `rig seat status` shows an owed restore stage and its last
   delivery result, and repeated delivery failures open one queue item for the seat's orchestrator, or a
   person when it has none.
 - **Codex seats get `openrig-core` too: its refocus after a compaction and its skills, with no
@@ -1058,6 +1077,8 @@ reaching them is ordinary work rather than an escalation.
 
 - **`rig host add` / `rename` / `doctor`** — make another machine reachable as one pasted address,
   see which host you are acting on, and check a registered host is *actually* usable end to end.
+  `rig host edit <id>` corrects an entry (its id and transport stay fixed), and `rig host remove <id>` deletes
+  only the registry entry: credential files, the learned identity and the selection stay as they are.
 - **A cross-host queue write that times out reads INDETERMINATE, not failed.** The CLI waits 15
   seconds for the daemon's answer, and `rig queue create` with no answer reads the row back once by
   its ID. Reconcile by that ID before any retry; don't send the write twice.
@@ -1253,7 +1274,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
   restarts the seat in place and prints a restart command for every peer on that home. For a Claude
   seat, `--to-account <label> --token-file <absolute path>` moves it to its own subscription token
   (from `claude setup-token`, in a file only the user can read); OpenRig keeps the path and label,
-  never the token, and `--stored-login` moves it back. These seat account and runtime moves were
+  never the token, and `--stored-login` moves it back. On a stopped Claude seat it relaunches nothing: it
+  saves the reference only when the seat's next launch would resume the conversation, and names that
+  `rig launch`. These seat account and runtime moves were
   tested with stubs, not real accounts, before 0.7.2: check a moved seat's account and conversation
   yourself after the first move.
 - **Move to an existing account home** with `rig provider switch --seat <seat> --to-account <name>
@@ -1271,6 +1294,10 @@ your circumstances is configuration, and the ones that are not, another agent ca
   never overrides a user-declared table; see `docs/reference/agent-spec.md`.
 - **`rig env`** — the real services behind a rig: are they up, what are they saying, how do you
   stop them without killing the rig.
+- **`rig environment`** — not `rig env`: places a worker seat in an NVIDIA OpenShell sandbox and returns
+  verified result files (`setup`, `create` or `attach`, `export`; reference in the packaged
+  `daemon/assets/openshell/README.md`). In 0.7.8's release testing the worker never became usable, so
+  read the installed version's release notes before relying on it.
 - **`rig setup`** — what OpenRig would change about this machine, shown before it touches anything.
   It installs herdr by default on macOS and Linux (`--no-herdr` declines; if the install fails,
   views fall back to plain tmux) and on a Mac offers Ghostty once (`--ghostty` / `--no-ghostty`).
