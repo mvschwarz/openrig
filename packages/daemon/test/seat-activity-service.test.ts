@@ -10,6 +10,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { SeatActivityService } from "../src/domain/seat-activity-service.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { TMUX_GENERIC_RUNG_INVENTORY } from "../src/domain/activity-taxonomy.js";
 
 // Slice 15 — tmux adapter mock keyed by canonical session name.
 // Map value: Unix epoch seconds of last activity (number), or null to
@@ -31,6 +32,28 @@ const FIXED_NOW = new Date("2026-05-16T10:00:00.000Z");
 const FIXED_NOW_EPOCH = FIXED_NOW.getTime() / 1000;
 
 describe("SeatActivityService", () => {
+  it("does not keep an old idle verdict when subsequent tmux observations are unavailable", async () => {
+    let nowMs = FIXED_NOW.getTime();
+    const observations: Record<string, number | null> = { "seat@rig": FIXED_NOW_EPOCH - 30 };
+    const svc = new SeatActivityService({ tmux: makeTmuxAdapter(observations), defaultWindowSeconds: 3, now: () => new Date(nowMs) });
+    svc.declareRungInventory({ seatNodeId: "seat", sessionName: "seat@rig" }, TMUX_GENERIC_RUNG_INVENTORY);
+    await svc.pollSeat("seat@rig");
+    expect(svc.getSeatState("seat")?.activity).toBe("idle-at-prompt");
+    observations["seat@rig"] = null;
+    nowMs += 60_000;
+    await svc.pollSeat("seat@rig");
+    expect(svc.getSeatState("seat")?.activity).toBe("unknown");
+    observations["seat@rig"] = nowMs / 1000;
+    await svc.pollSeat("seat@rig");
+    expect(svc.getSeatState("seat")?.activity).toBe("working");
+    observations["seat@rig"] = null;
+    nowMs += 1_000;
+    await svc.pollSeat("seat@rig");
+    expect(svc.getSeatState("seat")?.activity).toBe("working");
+    nowMs += 60_000;
+    await svc.pollSeat("seat@rig");
+    expect(svc.getSeatState("seat")?.activity).toBe("unknown");
+  });
   it("pollSeat records ACTIVE observation when window_activity is within the silence window", async () => {
     // Activity 1s ago, window 3s → active
     const tmux = makeTmuxAdapter({ "claude@rig": FIXED_NOW_EPOCH - 1 });
