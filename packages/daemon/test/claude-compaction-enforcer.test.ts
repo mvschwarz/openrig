@@ -42,6 +42,7 @@ class ClaudeCompactionEnforcer extends ActualEnforcer {
       return result;
     };
     transport.waitUntilIdle = async () => ({ok: true, activity: {state: "idle", reason: "fixture", evidenceSource: "fixture"} as any, waitedMs: 0, attempts: 1});
+    // The 50 ms manual deadline runs on `now`: a cell that completes a manual trigger fixes `now`, so a slow runner can't spend it.
     super(settings, transport, { openrigHome: home, manualPrepWaitMs: 50, resolveOccupantGeneration: () => "fixture-generation", ...opts });
   }
 }
@@ -1115,7 +1116,7 @@ describe("ClaudeCompactionEnforcer", () => {
     it("guided sequence for one seat: below-threshold trigger sends prep → /compact (trust-bridge), then the EXISTING poll drains restore→audit (no second path)", async () => {
       const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
       const { transport, send } = makeSessionTransport();
-      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME });
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME, now: () => 1_700_000_000_000 });
 
       const outcome = await enforcer.triggerManualCompact({
         sessionName: SEAT,
@@ -1214,7 +1215,7 @@ describe("ClaudeCompactionEnforcer", () => {
       it("sequential call after compact-sent but before the back-half drains: no second prep, no second /compact", async () => {
         const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
         const { transport, send } = makeSessionTransport();
-        const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME });
+        const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME, now: () => 1_700_000_000_000 });
 
         expect(await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 }))
           .toEqual({ triggered: true, stage: "compact-sent" });
@@ -1258,7 +1259,7 @@ describe("ClaudeCompactionEnforcer", () => {
     it("threshold-independent + deterministic: runs the guided sequence even when auto-compaction is DISABLED, and the back-half still drains via the single path", async () => {
       const settings = makeSettingsStore(POLICY_DISABLED);
       const { transport, send } = makeSessionTransport();
-      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME });
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME, now: () => 1_700_000_000_000 });
 
       const outcome = await enforcer.triggerManualCompact({
         sessionName: SEAT, runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/claude.jsonl",
@@ -1285,7 +1286,7 @@ describe("ClaudeCompactionEnforcer", () => {
     it("GHOST-STAGE (a) PM-pin: an AUTOMATION-initiated manual trigger is NOT drain-exempt — a disabled tick drains nothing (no laundering bypass)", async () => {
       const settings = makeSettingsStore(POLICY_DISABLED);
       const { transport, send } = makeSessionTransport();
-      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME });
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME, now: () => 1_700_000_000_000 });
 
       // Automation calls the manual verb WITHOUT operator initiation (fail-safe default). The verb
       // still runs (prep + /compact), but the resulting stage must NOT be drain-exempt — otherwise
@@ -1477,7 +1478,7 @@ describe("ClaudeCompactionEnforcer", () => {
         return { ok: true };
       });
       const transport = { send } as unknown as SessionTransport;
-      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME });
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME, now: () => 1_700_000_000_000 });
 
       const isRestore = (c: unknown[]) =>
         typeof c[1] === "string" && (c[1] as string).includes("Please respond to this normal user message now");
