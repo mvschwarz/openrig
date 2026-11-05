@@ -8,7 +8,7 @@ import { TerminalPolicyStore } from "../src/domain/terminal-policy.js";
 // 400; enforcer-unwired → 503. Reuses the shipped SessionTransport + the SAME
 // ClaudeCompactionEnforcer (no second path).
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
@@ -118,7 +118,7 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     return { claudeNodeId: claude.id, codexNodeId: codex.id };
   }
 
-  function buildApp(opts?: { wireEnforcer?: boolean; completeMap?: boolean; bearerToken?: string; afterPreparation?: () => void; afterPreparationSubmit?: () => void | Promise<void> }): AppParts {
+  function buildApp(opts?: { wireEnforcer?: boolean; completeMap?: boolean; bearerToken?: string | null; afterPreparation?: () => void; afterPreparationSubmit?: () => void | Promise<void> }): AppParts {
     const sentTexts: string[] = [];
     let clock = Date.now();
     const sleep = async (ms: number) => { clock += ms; };
@@ -374,6 +374,48 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     });
     expect(malformed.status).toBe(400);
     expect(sentTexts).toHaveLength(0);
+  });
+
+  it.each([
+    ["missing", undefined, "missing Authorization header"],
+    ["malformed", "Basic SYNTHETIC_HEADER_SECRET", "Authorization header must be 'Bearer <token>'"],
+    ["wrong", "Bearer SYNTHETIC_OTHER_TOKEN", "bearer token does not match"],
+  ] as const)("identifies compaction's terminal gate for a %s credential without disclosing secrets or submitting", async (_case, authorization, reason) => {
+    seed();
+    const { app, enforcer, sentTexts } = buildApp({ bearerToken: "SYNTHETIC_TERMINAL_TOKEN" });
+    const trigger = vi.spyOn(enforcer, "triggerManualCompact").mockResolvedValue({ triggered: false, reason: "mid_work" });
+    const res = await app.request("/api/compaction/trigger", { method: "POST",
+      headers: { "Content-Type": "application/json", ...(authorization ? { Authorization: authorization } : {}) },
+      body: JSON.stringify({ session: "dev-impl@my-rig" }) });
+    expect(res.status).toBe(401);
+    expect(trigger).not.toHaveBeenCalled();
+    expect(sentTexts).toEqual([]);
+    const body = await res.json();
+    expect(Object.keys(body).sort()).toEqual(["error", "message", "what_failed", "what_to_do", "why_it_matters"]);
+    expect(body.error).toBe("unauthorized");
+    expect(body.what_failed).toBe(reason);
+    expect.soft(body.message).toBe(`Terminal auth failed: ${reason}`);
+    expect.soft(body.why_it_matters).toBe("Terminal and transport requests require the configured terminal bearer token to protect terminal access and input.");
+    expect.soft(body.what_to_do).toBe("Use the daemon's terminal bearer token with `Authorization: Bearer <token>`: OPENRIG_TERMINAL_BEARER_TOKEN, or OPENRIG_AUTH_BEARER_TOKEN when terminal auth falls back to it.");
+    for (const secret of ["SYNTHETIC_TERMINAL_TOKEN", "SYNTHETIC_HEADER_SECRET", "SYNTHETIC_OTHER_TOKEN"]) expect(JSON.stringify(body)).not.toContain(secret);
+  });
+
+  it.each([
+    ["the configured terminal token", "SYNTHETIC_TERMINAL_TOKEN", "Bearer SYNTHETIC_TERMINAL_TOKEN"],
+    ["the existing fallback value supplied as the terminal token", "SYNTHETIC_AUTH_TOKEN", "Bearer SYNTHETIC_AUTH_TOKEN"],
+    ["the null-token gate", null, undefined],
+  ] as const)("preserves admission for %s without performing real compaction", async (_case, bearerToken, authorization) => {
+    const { claudeNodeId } = seed();
+    usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 42));
+    const { app, enforcer, sentTexts } = buildApp({ bearerToken });
+    const trigger = vi.spyOn(enforcer, "triggerManualCompact").mockResolvedValue({ triggered: false, reason: "mid_work" });
+    const res = await app.request("/api/compaction/trigger", { method: "POST",
+      headers: { "Content-Type": "application/json", ...(authorization ? { Authorization: authorization } : {}) },
+      body: JSON.stringify({ session: "dev-impl@my-rig" }) });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, reason: "mid_work" });
+    expect(trigger).toHaveBeenCalledTimes(1);
+    expect(sentTexts).toEqual([]);
   });
 
 });
