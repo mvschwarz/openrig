@@ -429,6 +429,18 @@ exit 1
     expect(result.stdout).not.toContain("Build useful things");
   });
 
+  it("reports an unresolved typed mission and supplies only broad orientation without failing the hook check", () => {
+    const f = fixture();
+    const basis = "typed work did not resolve: row q1 — mission missing resolves to 0 directories";
+    const result = trace(["--trees", "work", "--check", "--unresolved-work-advisory", "--work-basis", basis], unpinned(f.env), f.workStart);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`TRACE GAP — no single current work node: ${basis}`);
+    expect(result.stdout).toContain("a broad orientation, not evidence of a current mission");
+    expect(result.stdout).not.toContain("Deliver refocus");
+    const strict = trace(["--trees", "work", "--check", "--work-basis", basis], unpinned(f.env), f.workStart);
+    expect(strict.status).not.toBe(0);
+  });
+
   it("names an ambiguous basis as the gap even when the working directory is inside the workspace", () => {
     const f = fixture();
     const result = trace(["--trees", "work", "--work-basis", AMBIGUOUS], unpinned(f.env), f.workStart);

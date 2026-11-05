@@ -243,6 +243,7 @@ function renderTrace() {
     "--trees", trees,
     "--depth", process.env.OPENRIG_REFOCUS_DEPTH || "light",
     "--check",
+    "--unresolved-work-advisory",
   ];
   if (process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE) {
     args.push("--topology-start", process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE);
