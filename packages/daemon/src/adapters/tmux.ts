@@ -11,6 +11,14 @@ import type { TmuxControlExec } from "./tmux-control.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
+/** tmux 3.4 escapes these dollar forms in command output even for show-options -v.
+ * Remove only its added escape; preserve an intentionally preceding backslash. */
+export function decodeTmux34Option(value: string, serverVersion: string): string {
+  return /^3\.4(?:[a-z])?$/.test(serverVersion.trim())
+    ? value.replace(/\\\$(?=[A-Za-z_{])/g, "$")
+    : value;
+}
+
 interface TmuxShellCommandOptions {
   /** Pi can send commands within the terminal byte bound directly. */
   stageIfLong?: boolean;
@@ -400,7 +408,15 @@ export class TmuxAdapter {
       // as a first start does, so it gets the same scoped environment as every later seat (#2041).
       if (!shell && (await this.startServer()).ok) shell = await this.getDefaultShell();
       if (!shell) throw new Error("Default shell unavailable");
-      if (command === undefined) command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
+      if (command === undefined) {
+        command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
+        // The server, not the connecting client, formats option output. If its version is unavailable,
+        // retain the readback unchanged rather than guessing about a user's command.
+        try {
+          const serverVersion = await this.run(["tmux", "display-message", "-p", "#{version}"]);
+          command = decodeTmux34Option(command, serverVersion);
+        } catch { /* unknown version: keep the original readback */ }
+      }
       // tmux normally copies these client values from the daemon on new-session.
       // Read its configured names, but never reuse values stored on the server.
       const updated = (await this.run(["tmux", "show-options", "-gv", "update-environment"]))
