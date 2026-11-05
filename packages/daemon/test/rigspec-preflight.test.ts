@@ -167,10 +167,7 @@ describe("RigSpecPreflight", () => {
   });
 
   it("a Pi version check that hit the time limit stays a warning with the same message", async () => {
-    const exec = vi.fn<ExecFn>().mockImplementation(async command => {
-      if (command === "pi --version") throw new ProbeTimeoutError(command, RUNTIME_PROBE_TIMEOUT_MS);
-      return "/usr/bin/rig";
-    });
+    const exec = vi.fn<ExecFn>().mockRejectedValue(new ProbeTimeoutError("pi --version", RUNTIME_PROBE_TIMEOUT_MS));
     const result = await createPreflight({ exec }).check(validSpec({ nodes: [{ id: "worker", runtime: "pi", cwd: "/" }] }));
     expect(result.ready).toBe(true);
     expect(result.errors).toEqual([]);
@@ -590,7 +587,7 @@ describe("seat login-shell PATH warning", () => {
     expect(warning(result.warnings)).toHaveLength(1);
     expect(warning(result.warnings)[0]).toContain("dev.one, dev.two");
     expect(warning(result.warnings)[0]).toContain("~/.profile");
-    expect(warning(result.warnings)[0]).toContain("bash -lc 'command -v rig node'");
+    expect(warning(result.warnings)[0]).toContain("bash -lc 'command -v node rig'");
     expect(warning(result.warnings)[0]).toContain("launch continues");
     expect(result.warnings.join("\n")).not.toContain("private diagnostic");
     const lookups = exec.mock.calls.map(([command]) => command).filter(isLookup);

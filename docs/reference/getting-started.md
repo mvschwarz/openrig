@@ -83,8 +83,8 @@ For a tarball or manual Node install on Linux, put its bin directory on PATH in
 in an interactive `~/.bashrc`. Bash reads the first of `~/.bash_profile`,
 `~/.bash_login` and `~/.profile`; if one of the first two exists, source `~/.profile`
 there. Other shells use their own login file (for example, zsh's `~/.zprofile`).
-Check `bash -lc 'command -v rig node'`: both commands must resolve for Codex's
-login-shell tools to use them.
+Check `bash -lc 'command -v node rig'`: both paths must appear in the output.
+Use Codex's tool shell for this check if it differs from Bash.
 
 On a Mac with Apple silicon, use Node.js 22 (see the [compatibility
 history](../releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where

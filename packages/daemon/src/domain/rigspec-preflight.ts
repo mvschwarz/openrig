@@ -121,7 +121,7 @@ export class RigSpecPreflight {
     }
 
     if (errors.length === 0) {
-      await warnRigLoginPath(spec.nodes.filter(node => node.runtime !== "terminal").map(node => ({ label: node.id, env: {} })), this.exec, warnings);
+      await warnRigLoginPath(spec.nodes.filter(node => node.runtime === "codex").map(node => ({ label: node.id, env: {} })), this.exec, warnings);
     }
 
     // cmux layout hints: warning if cmux unavailable and spec uses hints
@@ -403,7 +403,7 @@ async function preflightMembers(
         continue;
       }
 
-      if (member.runtime !== "terminal") loginTargets.push({ label: `${pod.id}.${member.id}`,
+      if (member.runtime === "codex") loginTargets.push({ label: `${pod.id}.${member.id}`,
         env: mergeSeatEnv(rigSpec.env, member.env, preflightCtx.envOverride && withoutRuntimeHomes(preflightCtx.envOverride)) });
 
       // Managed Claude activity-hook delivery preflight (NONFATAL): when a claude-code member
@@ -474,7 +474,7 @@ async function preflightMembers(
   return { ready: errors.length === 0, errors, warnings };
 }
 
-/** A login-shell lookup for each distinct declared seat environment, advisory only.
+/** A Codex login-shell lookup for each distinct declared seat environment, advisory only.
  * No profile output or environment values are included in the warning. */
 async function warnRigLoginPath(targets: Array<{ label: string; env: SeatEnv }>, exec: ExecFn, warnings: string[]): Promise<void> {
   const checks = new Map<string, string[]>();
@@ -488,7 +488,7 @@ async function warnRigLoginPath(targets: Array<{ label: string; env: SeatEnv }>,
   for (const [command, labels] of checks) {
     try { await exec(command); }
     catch {
-      warnings.push(`${labels.join(", ")}: login-shell PATH check could not confirm 'rig'; launch continues. For tarball/manual Node, put its bin directory on PATH in ~/.profile (or the login file your shell reads), then check: bash -lc 'command -v rig node'.`);
+      warnings.push(`${labels.join(", ")}: login-shell PATH check could not confirm 'rig'; launch continues. For tarball/manual Node, put its bin directory on PATH in ~/.profile (or the login file your shell reads), then check: bash -lc 'command -v node rig'.`);
     }
   }
 }
