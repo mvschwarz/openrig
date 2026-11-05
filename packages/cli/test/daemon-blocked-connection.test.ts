@@ -260,7 +260,7 @@ describe("sandboxed liveness: EPERM on kill(pid, 0) is not a dead daemon", () =>
     expect(live("sent", "Z")).toBe("dead");
     expect(live("sent", null)).toBe("unknown");
     expect(live("missing", "S")).toBe("dead");
-    expect(live("not-permitted", "S")).toBe("alive");
+    expect(live("not-permitted", "S")).toBe("unknown");
     expect(live("not-permitted", "Z")).toBe("dead");
     expect(live("not-permitted", null)).toBe("unknown");
   });

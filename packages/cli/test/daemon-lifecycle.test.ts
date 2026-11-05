@@ -3,7 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { createServer } from "node:net";
-import { realDeps } from "../src/commands/daemon.js";
+import { createProcessLiveness, realDeps } from "../src/commands/daemon.js";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import {
@@ -108,7 +108,7 @@ describe("Daemon Lifecycle", () => {
       exists: vi.fn((p: string) => p === STATE_FILE),
       readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null),
       isProcessAlive: vi.fn(() => false),
-      processLiveness: vi.fn(() => "unknown"),
+      processLiveness: createProcessLiveness({ signal: () => "not-permitted", readProcessState: () => "S" }),
       fetch: vi.fn(neverFetch),
     });
     await expect(stopDaemon(deps)).rejects.toThrow(/liveness is unknown.*no signal sent.*state preserved/i);
