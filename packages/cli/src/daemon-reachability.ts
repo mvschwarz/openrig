@@ -78,7 +78,7 @@ export function daemonMayAnswer(status: DaemonStatus): boolean {
 export function shouldAutoStartDaemon(status: DaemonStatus): boolean {
   if (status.state === "stopped" || status.state === "stale") return true;
   if (status.state !== "unverified") return false;
-  if (isBlockedConnectionCode(status.probeErrorCode)) return !status.siblingHint?.moved;
+  if (isBlockedConnectionCode(status.probeErrorCode)) return !status.explicitRemote && !status.siblingHint?.moved;
   if (status.siblingHint) return !status.siblingHint.moved;
   return false;
 }

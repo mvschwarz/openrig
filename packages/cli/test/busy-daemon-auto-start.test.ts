@@ -73,6 +73,15 @@ describe("auto-start only for a daemon confirmed down", () => {
       expect(lifecycle.startDaemon).toHaveBeenCalledOnce();
     });
 
+    it.each(["EPERM", "EACCES"])(`${name}: a blocked explicit remote target never starts a local daemon (%s)`, async (code) => {
+      lifecycle.status = { state: "unverified", host: "remote.example", port: 7433, probeErrorCode: code, explicitRemote: true };
+      const c = client();
+      const cmd = (command as (d: unknown) => import("commander").Command)({ lifecycleDeps: {}, clientFactory: c.factory, preflightExec: async () => "" });
+      cmd.exitOverride();
+      await cmd.parseAsync(argv as unknown as string[]).catch(() => {});
+      expect(lifecycle.startDaemon).not.toHaveBeenCalled();
+    });
+
   }
 
   it("rig up --plan starts nothing: a stopped daemon is daemon_not_running, a blocked probe keeps its own guidance", async () => {

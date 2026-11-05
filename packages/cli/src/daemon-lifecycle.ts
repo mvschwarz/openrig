@@ -39,6 +39,8 @@ export interface DaemonEventLoopEvidence {
 }
 
 export interface DaemonStatus {
+  /** The selected OPENRIG_URL names a non-loopback endpoint. */
+  explicitRemote?: boolean;
   databaseWarnings?: string[];
   /** RULING 1ae863d2 — C3 3-state semantics (canonical: daemon crash-cart-detect.ts, kept in
    *  lockstep): "stopped" requires POSITIVE evidence (connection refused); a probe TIMEOUT or
@@ -1130,7 +1132,9 @@ export async function getDaemonStatus(
     const endpoint = (() => {
       try {
         const url = new URL(openrigUrl);
-        return { port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST };
+        const host = url.hostname || DEFAULT_HOST;
+        const loopback = host.toLowerCase() === "localhost" || host === "[::1]" || host === "::1" || /^127\.\d+\.\d+\.\d+$/.test(host);
+        return { port: Number(url.port) || DEFAULT_PORT, host, ...(!loopback ? { explicitRemote: true } : {}) };
       } catch {
         return {};
       }
