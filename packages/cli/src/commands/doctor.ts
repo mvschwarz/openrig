@@ -6,6 +6,7 @@ import { execSync } from "node:child_process";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { DaemonClient, ForeignLocalDaemonError, formatDaemonHostForUrl } from "../client.js";
 import { ConfigStore } from "../config-store.js";
+import { fetchWithTimeout, FetchTimeoutError } from "../fetch-with-timeout.js";
 import { buildWritableHomeCheck } from "../system-preflight.js";
 import {
   CMUX_SETTINGS_DISCLOSURE_PATH,
@@ -45,7 +46,7 @@ export interface DoctorDeps {
   /** The caller's effective user id, compared with the one the port's daemon reports. Absent: this process's own;
    *  null: this platform has none. */
   callerUid?: number | null;
-  /** How long the port's /healthz body may take to arrive (default 2000 ms); after that its owner is unknown. */
+  /** Bound for doctor HTTP headers and finite cmux bodies, and separately the owner report (default 2000 ms). */
   ownerReportTimeoutMs?: number;
   /**
    * Build B — path to a rig spec to check against the RUNNING rig of the same name (`--spec`).
@@ -300,7 +301,8 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
   const daemonHost = config.daemon.host ?? "127.0.0.1";
   const daemonPort = config.daemon.port ?? DEFAULT_PORT;
   const daemonBase = `http://${formatDaemonHostForUrl(daemonHost)}:${daemonPort}`;
-  const fetchFn = deps.fetch ?? globalThis.fetch;
+  const fetchFn = (deps.fetch ?? globalThis.fetch) as typeof fetch;
+  const httpBudget = { timeoutMs: deps.ownerReportTimeoutMs ?? 2000, timeoutMessage: "Doctor HTTP check timed out" };
   const portCheck = deps.checkPort(daemonPort, daemonHost).then(async (available): Promise<DoctorCheck> => {
     if (available) {
       return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} available.` };
@@ -308,9 +310,17 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
     // Port in use — check if it's an OpenRig daemon via healthz, and whose.
     const owner = new AbortController();
     try {
-      const res = await fetchFn(`${daemonBase}/healthz`, { signal: owner.signal });
+      const res = await fetchWithTimeout(fetchFn, `${daemonBase}/healthz`, { signal: owner.signal }, httpBudget);
       if (res.ok) return await listenerOwnerCheck(`${daemonHost}:${daemonPort}`, daemonBase, res, () => owner.abort(), deps);
-    } catch { /* not our daemon */ }
+    } catch (error) {
+      if (error instanceof FetchTimeoutError) return {
+        name: "port", status: "warn",
+        message: `Port ${daemonHost}:${daemonPort} is in use; its listener identity is unknown.`,
+        reason: `/healthz response headers did not arrive within ${httpBudget.timeoutMs / 1000} s. A timeout does not establish whether this is an OpenRig daemon or who owns it.`,
+        fix: `Inspect the listener, or give your OpenRig home a free port with: rig config set daemon.port <free-port>, then rig daemon start.`,
+      };
+      // A non-HTTP listener or connection failure remains the existing occupied-port diagnostic.
+    }
     finally { owner.abort(); }
     return {
       name: "port",
@@ -326,7 +336,9 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
   if (shellCmuxPassed) {
     const daemonCmuxCheck = (async (): Promise<DoctorCheck> => {
       try {
-        const healthRes = await fetchFn(`${daemonBase}/healthz`);
+        const healthRes = await fetchWithTimeout(fetchFn, `${daemonBase}/healthz`, {}, {
+          ...httpBudget, consumeResponse: async response => { await response.body?.cancel(); },
+        });
         if (!healthRes.ok) {
           return { name: "cmux_daemon", status: "skipped", message: "Daemon healthz not ok. Skipping daemon cmux check." };
         }
@@ -335,9 +347,14 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
       }
 
       try {
-        const cmuxRes = await fetchFn(`${daemonBase}/api/adapters/cmux/status`);
-        if (cmuxRes.ok && cmuxRes.json) {
-          const data = (await cmuxRes.json()) as { available?: boolean };
+        let data: { available?: boolean } | undefined;
+        const cmuxRes = await fetchWithTimeout(fetchFn, `${daemonBase}/api/adapters/cmux/status`, {}, {
+          ...httpBudget, consumeResponse: async response => {
+            if (response.ok && response.json) data = await response.json() as { available?: boolean };
+            else await response.body?.cancel();
+          },
+        });
+        if (cmuxRes.ok && data) {
           if (data.available) {
             return { name: "cmux_daemon", status: "pass", message: "Daemon cmux control available." };
           }
