@@ -950,7 +950,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         // can share custody and must retain their author's text.
         if (sharedRow && isFindingRow(sharedRow) && sharedRow.summary?.startsWith("Stuck sweep: ")) {
           const currentKind = sharedRow.summary.match(/^Stuck sweep: ([a-z-]+) on /)?.[1];
-          if (currentKind && currentKind !== c.kind) {
+          const pickupOrDeadline = (kind: string) => kind === "stalled-after-claim" || kind === "overdue-claim";
+          if (currentKind && currentKind !== c.kind && pickupOrDeadline(currentKind) && pickupOrDeadline(c.kind)) {
             const marker = "\n\n--- Original finding (historical) ---\n";
             const original = sharedRow.body.includes(marker) ? sharedRow.body.split(marker, 2)[1]! : sharedRow.body;
             const body = evidenceBody(deps.db, c) + marker + original;

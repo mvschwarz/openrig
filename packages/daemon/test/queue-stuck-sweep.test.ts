@@ -134,6 +134,20 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
+  it("does not rewrite a recovery presenting an unrelated finding kind", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep();
+    const prior = (await findingsFor(row.qitemId))[0]!;
+    const otherSummary = `Stuck sweep: undelivered-wake on ${row.qitemId} (60 min)`;
+    db.prepare("UPDATE queue_items SET summary = ? WHERE qitem_id = ?").run(otherSummary, prior.qitemId);
+    makeOverdue(row.qitemId);
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", transitionNote: "resumed work" });
+    await runSweep();
+    expect(repo.getById(prior.qitemId)).toMatchObject({ summary: otherSummary, body: prior.body });
+  });
+
   it("#2278 keeps a local human decision on the attention surface without a false failed-wake finding", async () => {
     const rigs = new RigRepository(db);
     const rig = rigs.createRig("kernel");
