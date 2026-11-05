@@ -699,7 +699,7 @@ async function readReviewRegistry(rigsRoot: string): Promise<ReviewRegistry> {
 }
 
 /** Read review drops co-located with this slice, plus the legacy global registry
- * when no catalogued project was selected (`registry` is then null). Both sources keep the same slice and
+ * when no catalogued project was selected (`registry` is null for a project-scoped read). Both sources keep the same slice and
  * built-commit join; unbound global artifacts cannot establish project review. */
 function scanReviewArtifacts(registry: ReviewRegistry | null, sliceDirOrId: string[], proofDir: string): ReviewArtifactFact[] | Indeterminate {
   const out: ReviewArtifactFact[] = [];
