@@ -1445,7 +1445,7 @@ export class PodRigInstantiator {
     if (!nameGuard.ok) return nameGuard;
 
     // 2. Preflight
-    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
+    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, envOverride: opts?.env, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }

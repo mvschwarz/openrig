@@ -21,9 +21,12 @@ export function runtimeVersionProbeCwd(cmd: string): string | undefined {
  *  runtime binary otherwise holds a rig launch (or the daemon's startup) indefinitely and outlives the daemon. */
 const versionProbe = boundedProbeExec(undefined, undefined, { cwd: runtimeVersionProbeCwd });
 
+/** Login profiles can hang too; keep this lookup on the existing bounded probe path. */
+export const RIG_LOGIN_PATH_CHECK = " -lc 'command -v rig'";
+
 /** Production preflight only; callers still prefer an explicitly injected exec. */
 export const execPreflightCommand: ExecFn = async (cmd) => {
-  if (runtimeVersionProbeCwd(cmd) === undefined) return execCommand(cmd);
+  if (runtimeVersionProbeCwd(cmd) === undefined && !cmd.endsWith(RIG_LOGIN_PATH_CHECK)) return execCommand(cmd);
   return versionProbe(cmd);
 };
 
