@@ -174,6 +174,18 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   return null;
 }
 
+/** A numbered choice, with or without the selector a platform draws before it (`❯`, `›`, or ASCII `>` on Windows). */
+const PROMPT_CHOICE_LINE = /^(?:[❯›>]\s*)?\d+\.\s+\S/;
+
+/** The last permission question with a numbered choice after it, as every native menu draws one. */
+function findPermissionQuestionWithChoices(lines: string[]): string | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (PERMISSION_PROMPT_PATTERNS.some((pattern) => pattern.test(lines[i]!))
+        && lines.slice(i + 1).some((line) => PROMPT_CHOICE_LINE.test(line))) return truncateEvidence(lines[i]!);
+  }
+  return null;
+}
+
 const PI_DIALOG_HINTS = [
   /^↑↓ navigate\s+\S.* select\s+\S.* cancel$/,
   /^\S+ submit\s+\S+ cancel$/,
@@ -666,7 +678,15 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     ? lastLine
     : null;
   const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
-  const permissionPromptEvidence = findPatternEvidence(promptScanLines, PERMISSION_PROMPT_PATTERNS);
+  // Above Claude's complete, empty input box with its mode bar, a permission question counts only with its numbered
+  // choices after it, as every native menu draws them: a bare question there is a finished reply quoting one, and
+  // refusing on it held wakes until the line scrolled out of the scan. Without that box, or on another runtime, any
+  // listed question line counts, as before.
+  const emptyClaudeInputBelow = options.runtime === "claude-code" && claudeComposer?.framed === true &&
+    CLAUDE_ANCHORED_MODE_FOOTER.test(claudeComposer.bar) && IDLE_PROMPT_PATTERNS.some(pattern => pattern.test(claudeComposer.text));
+  const permissionPromptEvidence = emptyClaudeInputBelow
+    ? findPermissionQuestionWithChoices(promptScanLines)
+    : findPatternEvidence(promptScanLines, PERMISSION_PROMPT_PATTERNS);
   // A complete later empty composer with a recognized Claude bar makes the preceding question history.
   // Keep draft handling and selectors without this dialog boundary unchanged.
   const selectionLines = claudeComposer?.framed &&
