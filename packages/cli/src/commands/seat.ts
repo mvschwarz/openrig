@@ -1428,7 +1428,9 @@ Examples:
     .description("Stop exactly one LIVE managed seat (kills only that seat's tmux session; audited)")
     .addHelpText("after", `
 Siblings are untouched. A dead seat is refused (use rig seat clean); an adopted
-session is refused (use rig unclaim). Stopping ends that agent's session and any
+session is refused (use rig unclaim). A seat handed over (fresh, fork or rebuild)
+before OpenRig 0.7.9 still reads adopted and is refused too, until its next launched
+handover or managed launch; the refusal says so. Stopping ends that agent's session and any
 work in progress: check it first (rig capture <seat>) and stop only a seat you
 own or were asked to stop. rig seat launch <seat> --fresh --reason <text> starts
 a fresh occupant there; it does not resume the stopped conversation.

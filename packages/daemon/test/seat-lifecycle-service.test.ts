@@ -398,6 +398,46 @@ describe("SeatLifecycleService", () => {
     expect(sessionRegistry.getBindingForNode(a.node.id)).not.toBeNull();
   });
 
+  // #2440 records a launched handover's successor as launched from 0.7.9; one handed over earlier keeps origin=claimed.
+  function recordHandover(nodeId: string, outcome: string | null) {
+    db.prepare("UPDATE nodes SET continuity_outcome = ?, handover_result = 'complete', handover_at = ? WHERE id = ?")
+      .run(outcome, "2026-11-01T10:00:00.000Z", nodeId);
+  }
+
+  it.each(["fresh", "forked", "rebuilt"])("a seat handed over (%s) before 0.7.9 is refused as that case, never pointed at rig unclaim", async (outcome) => {
+    const seat = seatFixture("s5-rig", "dev.handed", { origin: "claimed" });
+    recordHandover(seat.node.id, outcome);
+    for (const result of [
+      await service.stopSeat({ seatRef: seat.sessionName, reason: "x" }),
+      await service.cleanSeat({ seatRef: seat.sessionName, reason: "x" }),
+    ]) {
+      expect(result).toMatchObject({ ok: false, code: "claimed_session" });
+      if (result.ok) throw new Error("expected refusal");
+      expect(result.message).toContain(`last handover (${outcome} at 2026-11-01T10:00:00.000Z)`);
+      expect(result.message).toContain("before OpenRig 0.7.9");
+      expect(result.guidance).toBe("It keeps that origin until its next launched handover or managed launch.");
+      expect(result.guidance).not.toContain("rig unclaim");
+    }
+    expect(tmux.killed).toEqual([]);
+  });
+
+  it("an adopted seat with no handover, or a discovered one, still points at rig unclaim", async () => {
+    const adopted = seatFixture("s5-rig", "dev.adopted", { origin: "claimed" });
+    const discovered = seatFixture("s5-rig", "dev.discovered", { origin: "claimed" });
+    recordHandover(discovered.node.id, null);
+    for (const seat of [adopted, discovered]) {
+      for (const result of [
+        await service.stopSeat({ seatRef: seat.sessionName, reason: "x" }),
+        await service.cleanSeat({ seatRef: seat.sessionName, reason: "x" }),
+      ]) {
+        expect(result).toMatchObject({ ok: false, code: "claimed_session", guidance: "Release an adopted session with: rig unclaim" });
+        if (result.ok) throw new Error("expected refusal");
+        expect(result.message).toContain("was adopted (origin=claimed)");
+      }
+    }
+    expect(tmux.killed).toEqual([]);
+  });
+
   it("P4: stop refuses a claimed (adopted) session, an indeterminate probe, and a no-session node", async () => {
     const claimed = seatFixture("s5-rig", "dev.adopted", { origin: "claimed" });
     const claimedResult = await service.stopSeat({ seatRef: claimed.sessionName, reason: "x" });
