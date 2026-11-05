@@ -95,7 +95,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(res.submitOnly).toBe(true);
     expect(sendText).not.toHaveBeenCalled();                       // nothing typed — ever
     expect(sendKeys).toHaveBeenCalledTimes(1);
-    expect(sendKeys).toHaveBeenCalledWith("dev-impl@my-rig", ["Enter"]);
+    expect(sendKeys.mock.calls[0]?.slice(0, 2)).toEqual(["dev-impl@my-rig", ["Enter"]]);
   });
 
   it("REFUSES (staged_mismatch) when the pane shows something else — a bare Enter at a permission prompt would approve it", async () => {

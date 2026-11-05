@@ -106,6 +106,7 @@ export const SETTINGS_VALID_KEYS = [
   // OPR.0.5.9.5 Wave B — canonical context library; old key is refused.
   "context.root",
   "context.system_world",
+  "specs.builtins_visible",
   "skills.root",
   // OPR.0.7.0.13 (router): the person's recorded yes to OpenRig's one-line seat-skills bootstrap in AGENTS.md / CLAUDE.md.
   "skills.router_line.enabled",
@@ -223,6 +224,7 @@ export const SETTINGS_VALID_KEYS = [
   // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
   "retention.stream_days",
   "retention.stream_max_items",
+  "stream.intake",
   "retention.batch_size",
   // S04 (OPR.0.5.5.4) — pickup-receipt stall threshold; net-new key, OPENRIG_* only,
   // CLI-settable twin lockstep with cli/src/config-store.ts VALID_KEYS. Fresh-read per
@@ -266,6 +268,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   "context.root": { primary: "OPENRIG_CONTEXT_ROOT" },
   "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
+  "specs.builtins_visible": { primary: "OPENRIG_SPECS_BUILTINS_VISIBLE" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "skills.router_line.enabled": { primary: "OPENRIG_SKILLS_ROUTER_LINE_ENABLED" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
@@ -341,6 +344,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.stream_days": { primary: "OPENRIG_RETENTION_STREAM_DAYS" },
   "retention.stream_max_items": { primary: "OPENRIG_RETENTION_STREAM_MAX_ITEMS" },
+  "stream.intake": { primary: "OPENRIG_STREAM_INTAKE" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
   // S04 — net-new key; OPENRIG_* primary only.
   "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
@@ -371,6 +375,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "topology.root": ["topology", "root"],
   "context.root": ["context", "root"],
   "context.system_world": ["context", "systemWorld"],
+  "specs.builtins_visible": ["specs", "builtinsVisible"],
   "skills.root": ["skills", "root"],
   "skills.router_line.enabled": ["skills", "routerLine", "enabled"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
@@ -438,6 +443,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.stream_days": ["retention", "streamDays"],
   "retention.stream_max_items": ["retention", "streamMaxItems"],
+  "stream.intake": ["stream", "intake"],
   "retention.batch_size": ["retention", "batchSize"],
   "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
   "queue.stuck_sweep_interval_seconds": ["queue", "stuckSweepIntervalSeconds"],
@@ -666,6 +672,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "topology.root": return DEFAULT_TOPOLOGY_ROOT;
     case "context.root": return DEFAULT_CONTEXT_ROOT;
     case "context.system_world": return "default";
+    case "specs.builtins_visible": return true;
     case "skills.root": return DEFAULT_SKILLS_ROOT;
     case "skills.router_line.enabled": return false;
     case "onboarding.default_pack.enabled": return true;
@@ -752,6 +759,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "retention.watchdog_keep_per_job": return 50;
     case "retention.stream_days": return 30;
     case "retention.stream_max_items": return 20000;
+    case "stream.intake": return "queue.worker";
     case "retention.batch_size": return 500;
     case "queue.pickup_stall_threshold_minutes": return 3;
     case "queue.stuck_sweep_interval_seconds": return 300;
@@ -971,6 +979,12 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "retention.stream_max_items": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.stream_max_items: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "stream.intake": (raw) => {
+    const val = (raw ?? "").trim();
+    if (val !== "off" && val !== "queue.worker" && !/^[a-zA-Z0-9\-_.]+@[a-zA-Z0-9\-_.]+$/.test(val)) {
+      throw new Error(`Invalid value for stream.intake: must be "queue.worker", a canonical session (<seat>@<rig>), or "off", got "${raw}"`);
     }
   },
   "retention.batch_size": (raw, coerced) => {

@@ -133,8 +133,8 @@ function askState(h, entry) {
   const script = h.asks.script;
   if (entry.withdrawn) return script.late ?? { state: "withdrawn" };
   if (script.answer && Date.now() >= entry.created + (script.answer.afterMs ?? 0)) {
-    const { state, optionId, reason } = script.answer;
-    return { state, ...(optionId ? { optionId } : {}), ...(reason ? { reason } : {}) };
+    const { state, optionId, reason, said } = script.answer;
+    return { state, ...(optionId ? { optionId } : {}), ...(reason ? { reason } : {}), ...(said ? { said } : {}) };
   }
   return { state: "pending" };
 }
@@ -242,6 +242,19 @@ async function launch(label, { scenario = {}, env = {}, asks } = {}) {
 // An ordinary send arrives inside an envelope, so a line in it that reads /abort is still just text.
 const message = (h, body) => `From: checker@runner-check\nTo: ${h.session}\n---\n${body}`;
 const nonExitStops = (h, after = 0) => h.hooks("Stop").filter((p) => p.at >= after && !String(p.body?.subtype ?? "").endsWith("_exited"));
+// Whether post `a` comes before post `b` in the runner's own order, as OpenRig orders them: by `occurredAt` when it's a
+// non-blank string that reads as a time, otherwise by its arrival; then by `sequence`, when both carry a positive whole number.
+const postedAt = (p) => {
+  const value = p?.body?.occurredAt;
+  const t = typeof value === "string" && value.trim() ? Date.parse(value) : NaN;
+  return Number.isFinite(t) ? t : p?.at ?? 0;
+};
+const sequenceOf = (p) => { const value = p?.body?.sequence; return Number.isSafeInteger(value) && value > 0 ? value : null; };
+const precedes = (a, b) => postedAt(a) !== postedAt(b) ? postedAt(a) < postedAt(b)
+  : sequenceOf(a) !== null && sequenceOf(b) !== null && sequenceOf(a) < sequenceOf(b);
+// Non-exit Stops the runner posted after `post` in that order. An idle report from before the turn began (a runner may report
+// idle at startup) is never one made during it, however late its POST arrives.
+const stopsAfter = (h, post) => nonExitStops(h).filter((p) => !post || !precedes(p, post));
 const ready = (h, ms) => waitFor(() => h.record()?.nativeRef && h.record(), ms);
 
 function result(id, title, { proposed = false } = {}) {
@@ -257,8 +270,17 @@ const cases = {
     const h = await launch("1", { scenario: { newDelayMs: scale(2000), sessionId: "fake-session-1" } });
     const asked = await waitFor(() => h.received("session/new")[0]);
     if (!r.check("the runner opens a conversation with session/new", asked, "no session/new arrived")) return r;
-    await sleep(scale(800));
-    r.check("no launch record while session/new is still unanswered", !h.record(), `a record was written early: ${JSON.stringify(h.record())}`);
+    // Until the agent's answer is logged, there must be no record. The agent logs each message before it sends it, so a
+    // record read before a log that still holds no answer was written before the answer went out. Reading against the
+    // agent's log, not after a fixed settle, keeps a busy machine from reading a correct runner's record as early.
+    let early;
+    await waitFor(() => {
+      const record = h.record();
+      if (h.replyTo(asked)) return true;
+      if (record) early = record;
+      return early;
+    }, scale(2000) + opts.waitMs);
+    r.check("no launch record while session/new is still unanswered", !early, `a record was written early: ${JSON.stringify(early)}`);
     const record = await ready(h);
     r.check("a launch record arrives after session/new is answered", record, `no record with a nativeRef at ${h.recordPath}`);
     if (!record) return r;
@@ -288,7 +310,7 @@ const cases = {
 
   async "2"() {
     const r = result("2", "Input framing, queued messages and cancel");
-    const h = await launch("2", { scenario: { turns: [{}, { holdMs: scale(15000) }, { holdMs: scale(2500), ignoreCancel: true }, {}] } });
+    const h = await launch("2", { scenario: { turns: [{}, { holdMs: scale(15000) }, { holdMs: scale(15000), ignoreCancel: true, endAfterCancelMs: scale(300) }, {}] } });
     if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
     const block = message(h, "first line\n/abort\nthird line");
     h.paste(block);
@@ -317,10 +339,12 @@ const cases = {
     r.check("one /abort sends one session/cancel", h.received("session/cancel").length === 1, `got ${h.received("session/cancel").length}`);
     r.check("the waiting block becomes the next prompt", await waitFor(() => h.prompts()[2] === queued, scale(4000)), `prompts: ${JSON.stringify(h.prompts().slice(2))}`);
 
+    // The agent keeps this turn open until the cancel arrives and then ends it end_turn, so a runner that handles Ctrl-C
+    // late on a busy machine still has a turn to cancel. Only its delivery is timed, by the per-step bound.
     const interrupted = Date.now();
     await sleep(scale(200));
     h.keys("C-c");
-    r.check("Ctrl-C outside a paste sends session/cancel", await waitFor(() => h.received("session/cancel").length >= 2, scale(3000)), "no second session/cancel");
+    r.check("Ctrl-C outside a paste sends session/cancel", await waitFor(() => h.received("session/cancel").length >= 2), "no second session/cancel");
     const ended = await waitFor(() => nonExitStops(h, interrupted)[0], scale(6000));
     r.check("cancelled is reported only on the agent's own stop reason", ended?.body?.subtype === "end_turn",
       `the agent ended the turn end_turn; the runner reported ${ended ? `Stop/${ended.body.subtype}` : "no Stop"}`);
@@ -352,6 +376,65 @@ const cases = {
     r.check("livenessSeconds, when given, is a whole number from 1 to 3600",
       beats.every((p) => Number.isInteger(p.body.livenessSeconds) && p.body.livenessSeconds >= 1 && p.body.livenessSeconds <= 3600),
       beats.map((p) => p.body.livenessSeconds).join(", "));
+    return r;
+  },
+
+  // The optional working beat (section 4). When a runner posts active/liveness in a quiet turn, each beat names the open
+  // turn it belongs to, keeps the post order, comes often enough for its own lifetime, stops at the turn's end, and never
+  // runs while a person is asked; after an answer, active/permission_resolved comes before the next beat. Order is read
+  // from the runner's own sequence and times, so a slow delivery never reads as a broken runner.
+  async "3b"() {
+    const r = result("3b", "Working beat (optional): beats name their open turn, keep order, and stop at its end and while a person is asked");
+    const quiet = scale(22000);
+    const seqOf = (p) => Number(p?.body?.sequence);
+    const at = (p) => Date.parse(p.body.occurredAt);
+    const h = await launch("3b", { scenario: { turns: [{ silent: true, holdMs: quiet }, {}] } });
+    if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
+    h.paste(message(h, "a long, quiet turn"));
+    const accepted = await waitFor(() => h.hooks("UserPromptSubmit", "accepted")[0]);
+    const end = await waitFor(() => h.hooks("Stop", "end_turn")[0], quiet + opts.waitMs);
+    await sleep(scale(11000)); // room for a beat a runner wrongly sends after the Stop
+    const beats = h.hooks("active", "liveness");
+    if (!beats.length) return r.skip("the runner sends no working beat in a quiet turn; the beat is optional (section 4)");
+    r.check("each beat names the turn it belongs to", accepted && beats.every((b) => b.body.turnId === accepted.body.turnId),
+      `turnIds: ${beats.map((b) => b.body.turnId).join(", ")}`);
+    // In the runner's own time order, not delivery's: a post delivered late still has to fit where the runner sent it.
+    const byTime = (a, b) => at(a) - at(b) || seqOf(a) - seqOf(b);
+    const timed = h.posts().slice().sort(byTime);
+    r.check("sequence rises with the runner's own time across every post, beats included",
+      timed.every((p, i) => Number.isFinite(seqOf(p)) && Number.isFinite(at(p)) && (i === 0 || seqOf(p) > seqOf(timed[i - 1]))),
+      `sequences in occurredAt order: ${timed.map(seqOf).join(", ")}`);
+    const life = (b) => (Number.isFinite(b.body.livenessSeconds) ? b.body.livenessSeconds : 30);
+    const inTurn = beats.filter((b) => !end || seqOf(b) < seqOf(end)).sort(byTime);
+    const gaps = inTurn.map((b, i) => at(b) - at(i === 0 ? accepted : inTurn[i - 1]));
+    r.check("beats come more often than every livenessSeconds / 2", inTurn.every((b, i) => gaps[i] <= life(b) * 500 + 1000),
+      `gaps by the runner's own times: ${gaps.join(", ")} ms`);
+    r.check("no beat after the turn's Stop", end && beats.every((b) => seqOf(b) < seqOf(end)),
+      `beats after Stop/end_turn: ${beats.filter((b) => end && seqOf(b) > seqOf(end)).length}`);
+
+    // A person is asked first, and answers after a while; the agent then carries on, quietly, in the same turn.
+    const p = await launch("3b-asked", { scenario: { turns: [{ permission: true, silent: true, holdMs: quiet }, {}] },
+      asks: { answer: { afterMs: scale(12000), state: "answered", optionId: "allow-once" } } });
+    if (!r.check("asked: the runner opens its conversation", await ready(p), "no launch record")) return r;
+    p.paste(message(p, "edit the notes"));
+    const submitted = await waitFor(() => p.permissionCalls("POST").find((c) => c.path === "/api/activity/permission-requests"), scale(5000));
+    if (!r.check("asked: the request is submitted", submitted, "no submit")) return r;
+    await waitFor(() => p.hooks("Stop", "end_turn")[0], scale(12000) + quiet + opts.waitMs);
+    const resolvedPost = p.hooks("active", "permission_resolved")[0];
+    const before = p.hooks("active", "liveness").filter((b) => at(b) > submitted.at && (!resolvedPost || seqOf(b) < seqOf(resolvedPost)));
+    r.check("asked: no beat while the ask waits on a person", before.length === 0, `${before.length} beats while it waited`);
+    r.check("asked: after the answer, active/permission_resolved names the turn and the ask, before any beat",
+      resolvedPost && resolvedPost.body.askId && resolvedPost.body.turnId === p.hooks("UserPromptSubmit", "accepted")[0]?.body.turnId,
+      resolvedPost ? `permission_resolved: ${JSON.stringify({ turnId: resolvedPost.body.turnId, askId: resolvedPost.body.askId })}` : "no permission_resolved");
+
+    // OpenRig permits at submit when no one can be asked: no ask opens, so nothing waits and the beats go on.
+    const q = await launch("3b-permitted", { scenario: { turns: [{ permission: true, silent: true, holdMs: quiet }, {}] },
+      asks: { submit: { permitted: true } } });
+    if (!r.check("permitted at submit: the runner opens its conversation", await ready(q), "no launch record")) return r;
+    q.paste(message(q, "edit the notes"));
+    const qEnd = await waitFor(() => q.hooks("Stop", "end_turn")[0], quiet + opts.waitMs);
+    const qBeats = q.hooks("active", "liveness").filter((b) => !qEnd || seqOf(b) < seqOf(qEnd));
+    r.check("permitted at submit: the quiet turn's beats go on, with no ask to resolve", qBeats.length > 0, "no beat in the quiet turn after the permit");
     return r;
   },
 
@@ -440,7 +523,8 @@ const cases = {
       const submitted = await waitFor(() => submits(h)[0], scale(3000));
       if (!r.check(`${label}: the request is submitted to /api/activity/permission-requests`, submitted, "no submit")) continue;
       const asked = h.sent("session/request_permission")[0];
-      const accepted = h.hooks("UserPromptSubmit", "accepted")[0];
+      // The submit isn't one of the runner's ordered activity posts, so it can arrive before the accepted prompt does.
+      const accepted = await waitFor(() => h.hooks("UserPromptSubmit", "accepted")[0], scale(3000));
       const sent = submitted.body ?? {};
       if (label === "allow") {
         r.check("the submit passes OpenRig's checks", h.asks.submitted[0]?.problems.length === 0, h.asks.submitted[0]?.problems.join("; "));
@@ -477,6 +561,8 @@ const cases = {
     const outcomes = [
       ["permitted at submit", { submit: { permitted: true } }, "allow-once"],
       ["permitted at read", { answer: { afterMs: 300, state: "permitted", optionId: "allow-once" } }, "allow-once"],
+      // A person's own words come back beside the outcome, and never change the option delivered.
+      ["permitted at read, with the person's words", { answer: { afterMs: 300, state: "permitted", optionId: "allow-once", said: "only the notes file" } }, "allow-once"],
       ["duplicate_request", { submit: { status: 409, code: "duplicate_request" } }, "allow-once"],
       ["activity_grant_pending", { submit: { status: 409, code: "activity_grant_pending" } }, "allow-once"],
       ["activity_grant_revoked", { submit: { status: 401, code: "activity_grant_revoked" } }, "allow-once"],
@@ -492,8 +578,9 @@ const cases = {
     await Promise.all(outcomes.map(async ([label, asks, optionId]) => {
       const h = await open(label.replace(/[^a-z0-9]+/g, "-"), asks, [{ permission: true, holdMs: scale(800) }, {}]);
       if (!h) return;
-      // A runner may retry a read that got no answer a few times before it permits.
-      const got = await waitFor(() => outcome(h), scale(label === "unreachable read" ? 10000 : 4000));
+      // Section 7 sets no time limit for what follows a read, so the check waits its ordinary per-step bound (--wait-ms),
+      // and longer when the read got no answer, which a runner may retry a few times before it permits.
+      const got = await waitFor(() => outcome(h), label === "unreachable read" ? scale(10000) : opts.waitMs);
       if (!optionId) {
         r.check(`${label}: the agent gets cancelled`, got?.outcome === "cancelled", `got ${JSON.stringify(got)}`);
         r.check(`${label}: nothing is held`, await waitFor(() => h.hooks("Stop", "end_turn")[0], scale(3000))
@@ -520,19 +607,22 @@ const cases = {
         await sleep(scale(1500));
         r.check("pending: the runner keeps reading the ask", h.permissionCalls("GET").length >= 1, "no read of the ask");
         r.check("pending: nothing is delivered while no one has answered", answers(h).length === 0, `got ${JSON.stringify(outcome(h))}`);
-        r.check("pending: no idle Stop while it waits", nonExitStops(h).length === 0, nonExitStops(h).map((p) => p.body.subtype).join(", "));
+        const turn = h.hooks("UserPromptSubmit", "accepted").at(-1);
+        r.check("pending: no idle Stop while it waits", stopsAfter(h, turn).length === 0, stopsAfter(h, turn).map((p) => p.body.subtype).join(", "));
         h.paste(message(h, "allow it"));
         await sleep(scale(800));
         r.check("pending: a pasted message isn't an answer", answers(h).length === 0, `got ${JSON.stringify(outcome(h))}`);
+        const abortedAt = Date.now();
         h.paste("/abort");
         const withdrawn = await waitFor(() => withdraws(h)[0], scale(3000));
         r.check("pending: /abort withdraws the ask with turn_cancelled", withdrawn?.body?.reason === "turn_cancelled", `withdraw: ${JSON.stringify(withdrawn?.body)}`);
         r.check("pending: the agent's request is answered cancelled", (await waitFor(() => outcome(h), scale(3000)))?.outcome === "cancelled",
           `got ${JSON.stringify(outcome(h))}`);
         // Once the ask is withdrawn no person is still waiting, so the cancelled turn's own end is reported as usual (the
-        // pasted message above runs as the next turn, so only that turn's Stop/cancelled counts).
+        // pasted message above runs as the next turn, so only that turn's Stop/cancelled counts). The contract doesn't
+        // order the Stop and the withdraw, so the Stop is any after /abort, not only one after the withdraw arrived.
         r.check("pending: after /abort, the turn's end is reported, holding nothing",
-          await waitFor(() => h.hooks("Stop", "cancelled").some((p) => p.at >= (withdrawn?.at ?? 0)), scale(3000)), "no Stop/cancelled after the withdraw");
+          await waitFor(() => h.hooks("Stop", "cancelled").some((p) => p.at >= abortedAt), scale(3000)), "no Stop/cancelled after /abort");
         await sleep(scale(1200));
         r.check("pending: an answer after the withdraw isn't delivered", answers(h).every((a) => a.msg.result?.outcome?.outcome !== "selected"),
           `answers: ${JSON.stringify(answers(h).map((a) => a.msg.result))}`);
@@ -544,9 +634,36 @@ const cases = {
       if (!h) continue;
       const withdrawn = await waitFor(() => withdraws(h)[0], scale(4000));
       r.check(`${label}: the ask is withdrawn with ${reason}`, withdrawn?.body?.reason === reason, `withdraw: ${JSON.stringify(withdrawn?.body)}`);
-      if (reason === "turn_ended") r.check(`${label}: nothing is held once the ask is withdrawn`,
-        await waitFor(() => nonExitStops(h, withdrawn?.at ?? 0).length > 0, scale(3000)), "no Stop after the withdraw");
+      // The turn's own end: a Stop with the agent's own stop reason, after the agent answered that turn's session/prompt,
+      // on either side of the withdraw (the contract doesn't order them). A Stop posted before the turn ended doesn't count.
+      if (reason === "turn_ended") {
+        const turnEnd = await waitFor(() => {
+          const asked = h.sent("session/request_permission")[0];
+          const prompt = asked && h.received("session/prompt").filter((p) => p.at <= asked.at).at(-1);
+          return prompt && h.replyTo(prompt);
+        }, scale(4000));
+        const stopReason = turnEnd?.msg.result?.stopReason;
+        r.check(`${label}: nothing is held once the ask is withdrawn`,
+          stopReason && await waitFor(() => h.hooks("Stop", stopReason).some((p) => p.at >= turnEnd.at), scale(3000)),
+          `no Stop/${stopReason ?? "(no turn end)"} after the agent ended the turn`);
+      }
     }
+    return r;
+  },
+
+  // Section 7: a person who answers in their own words gets them passed on. OpenRig carries them as the read's `said`, and
+  // a runner queues them for the agent like any other prompt, after the turn, never as the answer. A runner that drops
+  // them still keeps the contract, so the result is advisory.
+  async "4c"() {
+    const r = result("4c", "The person's words: a read's said is queued to the agent as a prompt (advisory)", { proposed: true });
+    const said = "Only the notes file, please. Leave the rest alone.";
+    const h = await launch("4c", { scenario: { turns: [{ permission: true }, {}] },
+      asks: { answer: { afterMs: 300, state: "permitted", optionId: "allow-once", said } } });
+    if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
+    h.paste(message(h, "edit the notes"));
+    if (!r.check("the first turn ends", await waitFor(() => h.hooks("Stop", "end_turn")[0], scale(6000)), "no Stop/end_turn")) return r;
+    const later = await waitFor(() => h.prompts().slice(1).find((prompt) => prompt?.includes(said)), scale(4000));
+    r.check("the person's words are queued to the agent as a prompt, after the turn", later, `prompts: ${JSON.stringify(h.prompts())}`);
     return r;
   },
 
@@ -607,7 +724,10 @@ const cases = {
     if (!r.check("the agent exits mid-turn", died, "the agent didn't exit")) return r;
     const exited = await waitFor(() => h.hooks("Stop", `${opts.name}_exited`)[0], scale(4000));
     r.check(`Stop/${opts.name}_exited is posted`, exited, `posts: ${h.posts().map((p) => `${p.body?.hookEvent}/${p.body?.subtype}`).join(", ")}`);
-    r.check("no idle Stop after the exit", nonExitStops(h, died.at).length === 0, nonExitStops(h, died.at).map((p) => p.body.subtype).join(", "));
+    // Any idle report for the turn the agent died in counts, before or after the exit; one from before the turn doesn't.
+    const turn = h.hooks("UserPromptSubmit", "accepted")[0];
+    const idle = turn ? stopsAfter(h, turn) : nonExitStops(h, died.at);
+    r.check("no idle report for the turn it died in", idle.length === 0, idle.map((p) => p.body.subtype).join(", "));
     return r;
   },
 
@@ -663,7 +783,7 @@ const cases = {
   },
 };
 
-const order = ["1", "1b", "2", "3", "4", "4b", "5", "6", "7", "7b", "7c", "8", "9"];
+const order = ["1", "1b", "2", "3", "3b", "4", "4b", "4c", "5", "6", "7", "7b", "7c", "8", "9"];
 const selected = opts.cases ?? order;
 const unknown = selected.filter((id) => !order.includes(id));
 if (unknown.length) { console.error(`unknown case ${unknown.join(", ")}; cases are ${order.join(", ")}`); process.exit(2); }

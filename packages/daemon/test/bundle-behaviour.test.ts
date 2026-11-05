@@ -122,6 +122,19 @@ describe("archive-only bundle behaviour", () => {
     expect(view.unknownBeforeLaunch).toEqual(expect.arrayContaining([expect.objectContaining({ subject: "claude/plugins/absent", seat: "build.worker" })]));
   });
 
+  it("names a Claude member's plugin channels as needs before install, and writes nothing for them (#2044)", () => {
+    const files = fixture();
+    files.set("rig.yaml", files.get("rig.yaml")!.replace("    profile: default\n", "    profile: default\n"
+      + "    plugin_channels: [plugin:example-channel@example, plugin:second@example]\n"));
+    const view = inspect(files);
+    if (view.state !== "generated") throw new Error(view.reason);
+    expect(view.needs.filter((need) => need.kind === "claude_plugin_channel")).toEqual(["plugin:example-channel@example", "plugin:second@example"].map((entry, i) => ({
+      seat: "build.worker", kind: "claude_plugin_channel", status: "not_checked",
+      name: `Claude plugin channel ${entry} (--channels): its plugin installed, and the channel admitted by Claude's channel policy`,
+      sourceRefs: [{ path: "rig.yaml", field: `pods.build.members.worker.plugin_channels[${i}]` }] })));
+    expect(view.writes.filter((w) => w.destinationBase === "openrig_seat_storage")).toEqual([]);
+  });
+
   it("never reads host paths and keeps missing selected files explicit", () => {
     const files = fixture();
     files.set("agents/worker/agent.yaml", files.get("agents/worker/agent.yaml")!.replace("path: brief.md", "path: /private/host-context.md"));

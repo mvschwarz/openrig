@@ -1568,7 +1568,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   lines.push(paneRule(cols, explW, "top", explorerTitle, contentTitle));
 
   const contentWidth = Math.max(cols - explW - 2, 0);
-  const model = buildPulseModel(snap, nowMs);
+  const model = buildPulseModel(snap, nowMs, state.timeZone);
   const chromeRows = 3; // bottom rule + hint bar + status line
   const bodyRows = Math.max(rows - lines.length - chromeRows, 1);
 

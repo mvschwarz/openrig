@@ -27,6 +27,8 @@ import { describe, it, expect, vi } from "vitest";
 import Database from "better-sqlite3";
 import { SeatDeliveryGuard, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
+import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 
@@ -90,6 +92,15 @@ describe("delivery pause and durable custody", () => {
     expect(outbox.retire("id", "person", "read outside pane")).toMatchObject({ deliveryState: "retired", deliveredAt: null, body: "draft-safe", retiredBy: "person" });
     expect(outbox.heldForNode("a").total).toBe(0);
     expect(outbox.listPending("id")).toEqual([]); db.close();
+  });
+  it("keeps one held reminder per watchdog job: a newer one retires the one held before it (#2430)", () => {
+    const { db, targets, outbox } = fixture();
+    const reminder = (id: string, job: string) => outbox.retain({ outboxId: id, senderSession: "watchdog@system", destinationSession: "a", body: `reminder ${id}`, auditPointer: job }, targets.a!);
+    reminder("r1", "job-1"); reminder("r2", "job-1"); reminder("other", "job-2");
+    outbox.retain({ outboxId: "agent", senderSession: "planner@test", destinationSession: "a", body: "real work", auditPointer: "job-1" }, targets.a!);
+    expect(outbox.heldForNode("a").items.map((entry) => entry.outboxId).sort()).toEqual(["agent", "other", "r2"]);
+    expect(outbox.getById("r1")).toMatchObject({ deliveryState: "retired", body: "reminder r1", retiredBy: "watchdog@system" });
+    db.close();
   });
   it("rolls back rejected staging but retains committed overflow members with original bodies", () => {
     const { db, targets, outbox } = fixture();
@@ -270,18 +281,30 @@ describe("real queue transaction and retained delivery",()=>{
     const row=await createWithFullHeldQuota();
     expect(row.lastNudgeResult).toContain("wake not retained");
   });
-  it("precommit quota refusal rolls back closure, successor, transitions and events",async()=>{
+  // #2430 reverses the earlier contract here, which rolled the whole handoff back: a full held quota is about one
+  // seat's pane, and the row is durable, so the work moves and only its wake is recorded as not retained.
+  it("a handoff to a seat whose held quota is full still moves the work, its wake recorded as not retained",async()=>{
     const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
     await f.guard.set("a",true,"person","draft");
     for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:"sender@test",destinationSession:"worker@test",body:"held"},f.guard.target("a"));
-    const before=JSON.stringify(f.db.prepare("SELECT * FROM queue_transitions").all());
-    const events=JSON.stringify(f.db.prepare("SELECT * FROM events").all());
-    await expect(f.repo.handoff({qitemId:source.qitemId,fromSession:"relay@test",toSession:"worker@test"})).rejects.toThrow("quota");
-    expect(f.repo.getById(source.qitemId)!.state).toBe("pending");
-    expect(f.db.prepare("SELECT count(*) n FROM queue_items").get()).toEqual({n:1});
-    expect(JSON.stringify(f.db.prepare("SELECT * FROM queue_transitions").all())).toBe(before);
-    expect(JSON.stringify(f.db.prepare("SELECT * FROM events").all())).toBe(events);
+    const {closed,created}=await f.repo.handoff({qitemId:source.qitemId,fromSession:"relay@test",toSession:"worker@test"});
+    expect(f.repo.getById(closed.qitemId)!.state).toBe("handed-off");
+    expect(f.repo.getById(created.qitemId)).toMatchObject({state:"pending",destinationSession:"worker@test",body:"work",
+      lastNudgeResult:expect.stringMatching(/^failed:wake not retained: Held-message quota is full/)});
+    expect(f.outbox.getById(`wake-intent-${created.qitemId}`)).toBeNull();
+    expect(f.outbox.heldForNode("a").total).toBe(100);
     expect(f.writes).toEqual([]);f.db.close();
+  });
+  it("a mission control handoff to a seat whose held quota is full moves the work too, as a queue handoff does",async()=>{
+    const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
+    await f.guard.set("a",true,"person","draft");
+    for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:"sender@test",destinationSession:"worker@test",body:"held"},f.guard.target("a"));
+    const contract=new MissionControlWriteContract({db:f.db,eventBus:f.bus,queueRepo:f.repo,actionLog:new MissionControlActionLog(f.db)});
+    const result=await contract.act({verb:"handoff",qitemId:source.qitemId,actorSession:"human@test",destinationSession:"worker@test"});
+    expect(f.repo.getById(source.qitemId)!.state).toBe("handed-off");
+    expect(f.repo.getById(result.createdQitemId!)).toMatchObject({state:"pending",destinationSession:"worker@test",body:"work",
+      lastNudgeResult:expect.stringMatching(/^failed:wake not retained: Held-message quota is full/)});
+    expect(f.outbox.heldForNode("a").total).toBe(100);f.db.close();
   });
   it("handoff retains one audited intent without duplicate transport record or delivered label",async()=>{
     const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});

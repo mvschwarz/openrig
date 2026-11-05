@@ -1264,7 +1264,8 @@ bundleRoutes.post("/install", async (c) => {
       const routing: BundleContentRouting | undefined = bundleRouting
         ?? (result.status === "completed" ? await bootstrapOrchestrator.routeBundleContents(bundlePath) : undefined);
       // The hook already put its failures in warnings; the legacy fallback adds its own here.
-      const warnings = [...(result.warnings ?? []), ...(bundleRouting ? [] : routingFailureWarnings(routing))];
+      const warnings = [...(result.warnings ?? [])];
+      if (!bundleRouting) warnings.push(...(routing?.warnings ?? []).filter(w => !warnings.includes(w)), ...routingFailureWarnings(routing));
       warnings.unshift(...(installMeta.warnings ?? []).filter(w => !warnings.includes(w)));
       const responseBody = routing ? { ...bootstrapResult, ...routing, warnings } : { ...bootstrapResult, warnings };
       if (result.status === "completed") {

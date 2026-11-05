@@ -6,6 +6,10 @@ import { COMMUNITY_HARNESS_RUNG_INVENTORY, COMMUNITY_RUNNER_RUNG_INVENTORY, runt
 import { EventBus } from "../src/domain/event-bus.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { StartupOrchestrator, isRecoverableStartupFailure, type StartupInput, type StartupResult } from "../src/domain/startup-orchestrator.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { SessionTransport } from "../src/domain/session-transport.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile, ProjectionResult, StartupDeliveryResult, ReadinessResult } from "../src/domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
@@ -24,6 +28,7 @@ import { CommunityHarnessRuntimeAdapter } from "../src/adapters/community-harnes
 import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE, describeSkillRouterFootprint, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { managedBlockRecords } from "../src/domain/managed-block-records.js";
 import { prepareSeatLaunchAdditions, recordConversationPrompt, systemPromptPendingNote } from "../src/domain/seat-launch-additions.js";
 import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
@@ -301,6 +306,75 @@ describe("StartupOrchestrator", () => {
       latestError: expect.stringMatching(/sign in/i) });
   });
 
+  // #6: a fresh Claude with no login of its own draws its persistent "Not logged in · Run /login" footer and refuses the
+  // first request. The footer alone must not block (a gateway may authenticate); the refusal must reach the node view.
+  it.each([
+    // Claude 2.1.312 with an empty home draws the refusal as a result row under the prompt.
+    ["refused as a result row", "  ⎿  Not logged in · Please run /login\n\n✻ Cogitated for 0s · done 8:46 AM\n"],
+    ["refused as a reply", "● Not logged in · Please run /login\n\n"],
+    ["gateway", "● Ready to work.\n\n"],
+    ["quoted", "● The setup guide says to expect:\n  ● Not logged in · Please run /login\n\n"],
+  ] as const)("a fresh Claude whose first reply is %s reaches the node view honestly", async (kind, reply) => {
+    const seed = seedSession();
+    const files: ResolvedStartupFile[] = ["role.md", "a.md"].map((path) => ({
+      path, absolutePath: `/fixture/${path}`, ownerRoot: "/fixture", deliveryHint: "send_text" as const, required: true,
+      appliesOn: ["fresh_start" as const],
+    }));
+    const read = (path: string) => `Contents of ${nodePath.basename(path)}`;
+    const submitted: string[] = [];
+    let composer = "";
+    const footer = "                                                    Not logged in · Run /login";
+    const frame = () => `${submitted.length ? `❯ ${submitted[0]}\n${reply}` : ""}────────────────────\n❯ ${composer}\n`
+      + `────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)\n${footer}\n`;
+    const t = mockTmux({
+      getPaneCommand: vi.fn(async () => "claude"),
+      capturePaneContent: vi.fn(async () => frame()),
+      sendText: vi.fn(async (_session: string, text: string) => { composer = text; return { ok: true as const }; }),
+      sendKeys: vi.fn(async () => { submitted.push(composer); composer = ""; return { ok: true as const }; }),
+    });
+    const real = new ClaudeCodeAdapter({ tmux: t, sleep: async () => {}, fsOps: {
+      readFile: read, writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {}, listFiles: () => [],
+    } });
+    const adapter = mockAdapter({ deliverStartup: real.deliverStartup.bind(real), checkReady: vi.fn(binding => real.checkReady(binding)) });
+    const result = await createOrchestrator({ tmux: t, readFile: read }).startNode(makeInput(seed, {
+      adapter, resolvedStartupFiles: files, startupActions: [makeIdentityAction()],
+    }));
+
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("rigRepo" as never, rigRepo);
+      c.set("tmuxAdapter" as never, t);
+      await next();
+    });
+    app.route("/api/rigs/:rigId/nodes", nodesRoutes);
+    const served = await (await app.request(`/api/rigs/${seed.rigId}/nodes`)).json();
+    if (!kind.startsWith("refused")) {
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(submitted).toHaveLength(2);
+      expect(served[0]).toMatchObject({ startupStatus: "ready", needsAttention: false });
+      return;
+    }
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+    expect(submitted).toHaveLength(1);
+    const inventory = getNodeInventory(db, seed.rigId)[0];
+    expect(inventory).toMatchObject({ startupStatus: "attention_required", lifecycleState: "attention_required" });
+    expect(inventory?.latestError).toMatch(/logs in/);
+    expect(inventory?.latestError).not.toContain("Readiness timeout");
+    expect(served[0]).toMatchObject({ startupStatus: "attention_required", needsAttention: true,
+      latestError: expect.stringMatching(/logs in/) });
+    expect(compactNodeProjection(served)[0]).toMatchObject({ needsAttention: true, latestError: expect.stringMatching(/logs in/) });
+  });
+
+  it("a Claude that never draws its TUI still ends in the generic readiness timeout", async () => {
+    const seed = seedSession();
+    const t = mockTmux({ getPaneCommand: vi.fn(async () => "node"), capturePaneContent: vi.fn(async () => "") });
+    const real = new ClaudeCodeAdapter({ tmux: t, sleep: async () => {} });
+    const adapter = mockAdapter({ checkReady: vi.fn(binding => real.checkReady(binding)) });
+    const result = await createOrchestrator({ tmux: t }).startNode(makeInput(seed, { adapter, readinessTimeoutMs: 1_000 }));
+    expect(result).toMatchObject({ ok: false, startupStatus: "failed" });
+    expect(getNodeInventory(db, seed.rigId)[0]?.latestError).toContain("Readiness timeout");
+  });
+
   // OPR.0.7.0.13 (router, R1.1): a start replaying a saved context delivers the old seat-skills pointer only with the
   // person's recorded yes. The Codex catalog (same logical name, sent as text) and other guidance are unchanged.
   it.each([
@@ -489,6 +563,177 @@ describe("StartupOrchestrator", () => {
     } finally {
       nodeFs.rmSync(cwd, { recursive: true, force: true });
     }
+  });
+
+  // #2456 part 3: a start records what it wrote in each managed block, so a later start refreshes a block it wrote and keeps a
+  // block a person has edited since, naming it, instead of replacing their edit.
+  describe("a start and a managed block it wrote before (#2456)", () => {
+    let cwd: string;
+    let source: string;
+    const fsOps = {
+      readFile: (f: string) => nodeFs.readFileSync(f, "utf8"), writeFile: (f: string, c: string) => nodeFs.writeFileSync(f, c),
+      exists: (f: string) => nodeFs.existsSync(f), mkdirp: (d: string) => { nodeFs.mkdirSync(d, { recursive: true }); },
+      copyFile: (a: string, b: string) => nodeFs.copyFileSync(a, b), listFiles: (d: string) => nodeFs.readdirSync(d), homedir: "",
+    };
+    const tmuxNever = new Proxy({}, { get() { throw new Error("no tmux calls in delivery"); } }) as never;
+    const files = (): ResolvedStartupFile[] => [{ path: "culture.md", absolutePath: source, ownerRoot: nodePath.dirname(source), deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }];
+    const read = (file: string) => nodeFs.readFileSync(file, "utf8");
+    beforeEach(() => {
+      cwd = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "block-refresh-"));
+      fsOps.homedir = cwd;
+      source = nodePath.join(cwd, "spec", "culture.md");
+      nodeFs.mkdirSync(nodePath.dirname(source), { recursive: true });
+      nodeFs.writeFileSync(source, "Culture v1.\n");
+    });
+    afterEach(() => { nodeFs.rmSync(cwd, { recursive: true, force: true }); });
+    // Each adapter gets the records the daemon gives it, so its own guidance writes are checked and recorded.
+    function realAdapter(runtime: "codex" | "claude-code", overrides?: Partial<RuntimeAdapter>, records = managedBlockRecords(db)): RuntimeAdapter {
+      const real = runtime === "codex"
+        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [], managedBlockRecords: records } as never)
+        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, managedBlockRecords: records } as never);
+      // Codex's own projection is what queues launch developer instructions; with an empty plan it does nothing else.
+      return mockAdapter({ runtime, ...(real instanceof CodexRuntimeAdapter ? { project: real.project.bind(real) as RuntimeAdapter["project"] } : {}),
+        deliverStartup: real.deliverStartup.bind(real) as RuntimeAdapter["deliverStartup"], ...overrides });
+    }
+
+    it.each(["codex", "claude-code"] as const)("through the real %s adapter: a start refreshes a block the last start wrote when its source changed", async (runtime) => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, runtime === "codex" ? "AGENTS.md" : "CLAUDE.md");
+      const adapter = realAdapter(runtime);
+      const start = () => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1.");
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      const second = await start();
+      expect(second.ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v2.");
+      expect((second.warnings ?? []).some((w) => w.includes("guidance_block_edited")), JSON.stringify(second.warnings)).toBe(false);
+    });
+
+    it.each(["codex", "claude-code"] as const)("through the real %s adapter: a start keeps a block a person edited since the last start, and names it", async (runtime) => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, runtime === "codex" ? "AGENTS.md" : "CLAUDE.md");
+      const adapter = realAdapter(runtime);
+      const start = () => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      const second = await start();
+      expect(second.ok).toBe(true);
+      // The person's bytes first: on a build without the record, the start replaces the edit.
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+      expect(read(guidance)).not.toContain("Culture v2.");
+      expect(second.warnings?.some((w) => w.includes("guidance_block_edited:") && w.includes("culture.md")), JSON.stringify(second.warnings)).toBe(true);
+    });
+
+    // Q3: a Codex start that carries its guidance as launch developer instructions writes nothing to AGENTS.md, so a block an
+    // earlier start wrote there would stay stale, and the launch text asks Codex to follow AGENTS.md. It's refreshed by the
+    // same rule.
+    it("a Codex start on launch developer instructions refreshes the AGENTS.md block an earlier start wrote", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "AGENTS.md");
+      let launchInstructions = false;
+      const adapter = realAdapter("codex", {
+        guidanceFileFor: vi.fn(() => (launchInstructions ? { file: null, launchInstructions: true as const } : { file: null })),
+      } as Partial<RuntimeAdapter>);
+      const start = () => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1.");
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      launchInstructions = true;
+      expect((await start()).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v2.");
+      expect(read(guidance)).not.toContain("Culture v1.");
+    });
+
+    // Round 1: a block is recorded as it's written, so a later failure in the same start can't lose its record, and a
+    // person's edit before the retry is kept.
+    it("a block a start wrote keeps its record when a later write of that start fails, so an edit before the retry is kept", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const adapter = realAdapter("claude-code");
+      const missing: ResolvedStartupFile = { path: "missing.md", absolutePath: nodePath.join(cwd, "spec", "missing.md"), ownerRoot: nodePath.dirname(source), deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] };
+      const start = (startupFiles: ResolvedStartupFile[]) => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: startupFiles }));
+      expect((await start([...files(), missing])).ok).toBe(false);
+      expect(read(guidance)).toContain("Culture v1.");
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      expect((await start(files())).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+    });
+
+    // Round 1: two links to one guidance file name the same file, so they share its records.
+    it("two links to one guidance file share its records: a start through the second keeps an edit made after the first wrote", async () => {
+      const seed = seedSession();
+      const shared = nodePath.join(cwd, "shared", "CLAUDE.md");
+      nodeFs.mkdirSync(nodePath.dirname(shared), { recursive: true });
+      nodeFs.writeFileSync(shared, "# Shared notes\n");
+      for (const dir of ["a", "b"]) {
+        nodeFs.mkdirSync(nodePath.join(cwd, dir));
+        nodeFs.symlinkSync(shared, nodePath.join(cwd, dir, "CLAUDE.md"));
+      }
+      const adapter = realAdapter("claude-code");
+      const startIn = (dir: string) => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd: nodePath.join(cwd, dir) }, resolvedStartupFiles: files() }));
+      expect((await startIn("a")).ok).toBe(true);
+      expect(read(shared)).toContain("Culture v1.");
+      nodeFs.writeFileSync(shared, read(shared).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      expect((await startIn("b")).ok).toBe(true);
+      expect(read(shared)).toContain("Culture v1. PERSON EDIT");
+    });
+
+    // Round 1: a start that leaves a block as it is tells the seat in one line once it's ready. A resume types nothing: the
+    // resumed conversation gets no new turn, and the result names the block instead.
+    it("a start that keeps an edited block tells the seat in one line; a resume with the same block types nothing", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const adapter = realAdapter("claude-code");
+      const start = (extra?: Partial<StartupInput>) => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files(), ...extra }));
+      const typed = () => vi.mocked(tmux.sendText).mock.calls.filter((call) => String(call[1]).includes("OpenRig guidance note"));
+      expect((await start()).ok).toBe(true);
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      expect((await start()).ok).toBe(true);
+      expect(typed()).toHaveLength(1);
+      expect(String(typed()[0]![1])).toContain("culture.md");
+      vi.mocked(tmux.sendText).mockClear();
+      const resumed = await start({ isRestore: true, resumeToken: "native-original" });
+      expect(resumed.ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+      expect(typed()).toHaveLength(0);
+    });
+
+    // Round 2: the records live in the daemon database, which can fail. Only a schema without the table means "no records";
+    // any other failed read is unknown, so the block is kept and named, and a failed record write is named.
+    const failing = (statement: "SELECT body_sha256" | "INSERT INTO managed_block_writes") => managedBlockRecords({
+      prepare: (sql: string) => {
+        if (sql.trimStart().startsWith(statement)) throw new Error("SQLITE_BUSY: database is locked");
+        return db.prepare(sql);
+      },
+    } as never);
+
+    it("a start keeps a recorded block a person edited when its record can't be read, and names it", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const start = (records?: ReturnType<typeof managedBlockRecords>) => createOrchestrator().startNode(makeInput(seed,
+        { adapter: realAdapter("claude-code", undefined, records), binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      const second = await start(failing("SELECT body_sha256"));
+      expect(second.ok).toBe(true);
+      // Unknown isn't unrecorded: on a build that reads a failed lookup as no record, this start replaces the edit.
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+      expect(read(guidance)).not.toContain("Culture v2.");
+      expect(second.warnings?.some((w) => w.startsWith("guidance_block_record_unreadable:") && w.includes("culture.md")), JSON.stringify(second.warnings)).toBe(true);
+    });
+
+    it("a start names a block whose write record couldn't be saved", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const first = await createOrchestrator().startNode(makeInput(seed,
+        { adapter: realAdapter("claude-code", undefined, failing("INSERT INTO managed_block_writes")), binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect(first.ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1.");
+      expect(first.warnings?.some((w) => w.startsWith("guidance_block_record_not_saved:") && w.includes("culture.md")), JSON.stringify(first.warnings)).toBe(true);
+    });
   });
 
   // A link refusing a seat's first plugin manifest or catalog: its skills are refused there and named, never written into
@@ -728,6 +973,21 @@ describe("StartupOrchestrator", () => {
     expect(result.warnings).toEqual(["AGENTS.md is untracked", "plugin exclude skipped"]);
   });
 
+  it("tells a seat that starts with held messages, once, and names it in the launch's warnings (#2431)", async () => {
+    const seed = seedSession();
+    db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql); // as the guard suites add the held-message store
+    new OutboxHandler(db).retain({ outboxId: "held-1", senderSession: "planner@test-rig", destinationSession: "r01-impl", body: "Real work for you" },
+      { nodeId: seed.nodeId, session: "r01-impl", occupant: null, pane: null });
+    const send = vi.spyOn(SessionTransport.prototype, "send").mockResolvedValue({ ok: true, sent: true } as never);
+    try {
+      const result = await createOrchestrator().startNode(makeInput(seed));
+      const notice = "1 held message was kept for this seat and not delivered: read it with rig seat held-messages r01-impl.";
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(result.warnings).toContain(notice);
+      expect(send.mock.calls.filter(([, text]) => text === notice)).toEqual([["r01-impl", notice, { openrigNotice: true }]]);
+    } finally { send.mockRestore(); }
+  });
+
   it("keeps a challenge-only transport failure best-effort", async () => {
     const seed = seedSession();
     const tmux = mockTmux({ sendText: vi.fn(async () => ({ ok: false as const, message: "fixture transport failure" })) });
@@ -774,6 +1034,45 @@ describe("StartupOrchestrator", () => {
     expect(before.created_at).toBeTruthy();
     await orch.startNode(makeInput(seed, { isRestore: true, resumeToken: "original", preserveStartupContext: true }));
     expect(read()).toEqual(before);
+  });
+
+  // #875 direction 2: a launch decides once where its managed guidance goes and records it; a restore passes the saved
+  // choice (null for an older snapshot), so the adapter isn't asked again and an old seat isn't silently repointed.
+  it("records the adapter's chosen guidance file at launch, and uses a restore's saved choice without asking again", async () => {
+    const seed = seedSession(); const orch = createOrchestrator();
+    const chosen = "/openrig-home/state/pi/r01-impl/agent/AGENTS.md";
+    const guidanceFileFor = vi.fn(() => ({ file: chosen }));
+    const adapter = mockAdapter({ runtime: "pi", guidanceFileFor } as never);
+    const recorded = () => (db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { guidance_file: string | null }).guidance_file;
+    expect((await orch.startNode(makeInput(seed, { adapter }))).ok).toBe(true);
+    expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).toMatchObject({ guidanceFile: chosen });
+    expect(vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1]).toMatchObject({ guidanceFile: chosen });
+    expect(recorded()).toBe(chosen);
+    guidanceFileFor.mockClear();
+    const restored = await orch.startNode(makeInput(seed, { adapter, isRestore: true, binding: { ...makeBinding(), guidanceFile: null } }));
+    expect(restored.ok).toBe(true);
+    expect(guidanceFileFor).not.toHaveBeenCalled();
+    expect(recorded()).toBeNull();
+  });
+
+  // #875 Codex: the adapter may answer asynchronously, a resume is named to it, and a choice of launch instructions rides
+  // the binding to projection, delivery and the launch; nothing is recorded as a guidance file for it.
+  it("passes whether the launch resumes, and carries an adapter's launch-instructions choice on the binding", async () => {
+    const seed = seedSession(); const orch = createOrchestrator();
+    const guidanceFileFor = vi.fn(async (_binding: NodeBinding, opts?: { resuming?: boolean }) =>
+      opts?.resuming ? { file: null } : { file: null, launchInstructions: true });
+    const adapter = mockAdapter({ runtime: "codex", guidanceFileFor } as never);
+    expect((await orch.startNode(makeInput(seed, { adapter }))).ok).toBe(true);
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: false });
+    const chosen = { guidanceFile: null, guidanceLaunchInstructions: true };
+    expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).toMatchObject(chosen);
+    expect(vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1]).toMatchObject(chosen);
+    expect(vi.mocked(adapter.launchHarness).mock.calls[0]?.[0]).toMatchObject(chosen);
+    expect((db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { guidance_file: string | null }).guidance_file).toBeNull();
+    vi.mocked(adapter.project).mockClear();
+    expect((await orch.startNode(makeInput(seed, { adapter, resumeToken: "native-original" }))).ok).toBe(true);
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true });
+    expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).not.toMatchObject({ guidanceLaunchInstructions: true });
   });
 
   it("exact resume retains configured fresh context while sending no replay", async () => {
@@ -1475,6 +1774,34 @@ describe("StartupOrchestrator", () => {
       const rows = db.prepare("SELECT payload FROM events WHERE node_id=? AND type='node.startup_model_passed'").all(seed.nodeId) as { payload: string }[];
       expect(rows).toHaveLength(records);
       if (records) expect(JSON.parse(rows[0]!.payload)).toMatchObject({ model, resume: false });
+    } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("delivers contained identity, role and actions without host input when the viewer exits after readiness", async () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "contained-startup-race-"));
+    try {
+      const marker = nodePath.join(dir, "host-executed");
+      const seed = seedSession(); db.prepare("UPDATE nodes SET runtime='openshell-claude' WHERE id=?").run(seed.nodeId);
+      let passed: string | undefined; let viewerExited = false;
+      const contained = { platform: { forNode: () => ({ guestRoot: "/sandbox/openrig" }) }, preflight: async () => {}, project: async () => ({ projected: [], skipped: [], failed: [] }),
+        deliverStartup: async () => ({ delivered: 1, failed: [] }),
+        launch: async (_binding: unknown, opts: { firstInputText?: string }) => { passed = opts.firstInputText;
+          return { ok: true, ...(passed ? { firstInput: { path: "/guest/control/first-input.txt", submission: "unconfirmed" } } : {}) }; },
+        checkReady: async () => { viewerExited = true; return { ready: true }; } };
+      const adapter = new CommunityHarnessRuntimeAdapter("openshell-claude", { environmentStartup: contained as never,
+        tmux: { hasSession: async () => true, getPaneCommand: async () => { viewerExited = true; return "node"; }, sendShellCommand: async () => ({ ok: true }) } });
+      vi.mocked(tmux.sendText).mockImplementation(async (_target, text) => {
+        if (viewerExited) { try { execFileSync("/bin/sh", ["-c", text], { stdio: "ignore" }); } catch {} }
+        return { ok: true };
+      });
+      const role: ResolvedStartupFile = { path: "role.md", absolutePath: "/role.md", ownerRoot: "/", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] };
+      const result = await createOrchestrator({ readFile: () => `Selected role\ntouch '${marker}'` }).startNode(makeInput(seed, { adapter,
+        resolvedStartupFiles: [role], startupActions: [makeIdentityAction(), makeAction({ type: "send_text", value: "selected after-ready instruction" })] }));
+      expect(nodeFs.existsSync(marker)).toBe(false);
+      expect(tmux.sendText).not.toHaveBeenCalled(); expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(passed).toContain("OpenRig-generated identity context");
+      expect(passed).toContain("role.md"); expect(passed).toContain("selected after-ready instruction");
+      expect(result.ok).toBe(true);
     } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
   });
 

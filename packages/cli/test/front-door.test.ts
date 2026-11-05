@@ -484,12 +484,17 @@ describe("PUBLIC bin ownership (guard finding 1 — the wrapper is the real fron
   //  "PRODUCTION PATH … REAL probeFrontDoor" test earlier, with no real TUI spawned.)
 
   it.skipIf(!existsSync(binWrapper))("piped PUBLIC bin keeps the commander usage baseline (no TUI, fast exit)", () => {
+    const started = Date.now();
     const result = spawnSync(process.execPath, [binWrapper], {
       input: "x\n",
       timeout: 5000,
       encoding: "utf-8",
     });
-    expect(result.status).toBe(0);
+    expect(result.status, JSON.stringify({
+      elapsedMs: Date.now() - started, status: result.status, signal: result.signal,
+      error: result.error && { name: result.error.name, message: result.error.message, code: (result.error as NodeJS.ErrnoException).code },
+      stdout: result.stdout?.slice(-4096), stderr: result.stderr?.slice(-4096),
+    })).toBe(0);
     expect(`${result.stderr}${result.stdout}`).toMatch(/Usage: rig/);
   });
 

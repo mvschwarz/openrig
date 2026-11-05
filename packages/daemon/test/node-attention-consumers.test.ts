@@ -27,6 +27,9 @@ describe("served seat attention across the rig, CLI and TUI", () => {
     { name: "failed startup survives observed clear", signal: false, hook: "idle", cause: "failed", expected: true },
     { name: "held seat survives observed clear", signal: false, hook: "idle", cause: "held", expected: true },
     { name: "recorded error survives observed clear", signal: false, hook: "idle", cause: "error", expected: true },
+    // #2456: a handover whose successor started without a required startup file marks that successor, and only it.
+    { name: "a successor started without a required startup file", signal: false, hook: "idle", cause: "required_missing", expected: true },
+    { name: "a later session clears an earlier successor's missing required file", signal: false, hook: "idle", cause: "required_missing_earlier", expected: false },
     // A Codex seat at an approval prompt that no hook reports: only the cached pane reading sees it (ring 2, ovh07).
     { name: "a prompt only the pane reading sees", signal: null, hook: null, cause: "none", pane: true, expected: true },
     { name: "the pane reading after a stale hook", signal: null, hook: "unknown", cause: "none", pane: true, expected: true },
@@ -52,6 +55,11 @@ describe("served seat attention across the rig, CLI and TUI", () => {
     if (cause === "error") {
       db.exec("UPDATE sessions SET startup_status='pending'");
       db.exec(`INSERT INTO events(rig_id,node_id,type,payload) VALUES('rig','node','node.startup_failed','{"error":"launch error"}')`);
+    }
+    if (cause === "required_missing" || cause === "required_missing_earlier") {
+      db.exec("UPDATE nodes SET handover_result='complete', handover_at='2026-11-04T00:00:00.000Z'");
+      db.prepare("INSERT INTO events(rig_id,node_id,type,payload) VALUES('rig','node','seat.handover_completed',?)").run(JSON.stringify({
+        startedWithoutRequired: ["/spec/culture.md"], successorSessionId: cause === "required_missing" ? "session" : "earlier-session" }));
     }
     const evidence = signal == null ? null : { rung: "needs-input-chrome", observedAt: "2026-10-23T20:00:00Z" };
     const seatActivity = { getSeatActivity: () => null, getSeatStateBySession: () => restart ? null : ({
@@ -86,6 +94,11 @@ describe("served seat attention across the rig, CLI and TUI", () => {
     expect(ps.getEntries()[0]!.attentionCount).toBe(nodes.filter((n: { needsAttention: boolean }) => n.needsAttention).length);
     const cli = compactNodeProjection(nodes)[0]!;
     expect(cli).toMatchObject({ needsAttention: expected });
+    // The missing file is the attention's evidence, served and kept in the compact read.
+    if (cause === "required_missing") {
+      expect(nodes[0].startedWithoutRequired).toEqual(["/spec/culture.md"]);
+      expect(cli.startedWithoutRequired).toEqual(["/spec/culture.md"]);
+    }
     if (pane && expected) {
       // The served activity and the attention flag tell the same truth, and the reason survives into the compact read.
       expect(nodes[0].agentActivity).toMatchObject({ state: "needs_input", reason: attentionReason, evidenceSource: "pane_heuristic" });

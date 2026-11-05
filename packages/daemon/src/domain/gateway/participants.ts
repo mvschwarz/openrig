@@ -328,6 +328,21 @@ export function participantsView(home: string = getOpenRigHome()): ParticipantsV
   };
 }
 
+/** The participant JSON shared by the CLI and daemon read route. Never return the raw default-person fragment,
+ *  which includes connector credential pointers; the participant records carry the public address and policy. */
+export function participantsJsonView(home: string = getOpenRigHome(), organization?: string) {
+  const view = participantsView(home);
+  if (!view.ok) return view;
+  const side = readParticipantsFile(home);
+  const defaultPerson = view.default.person
+    ? { id: view.default.person.entityId, source: view.default.source }
+    : { id: null, reason: view.default.source === "none" ? view.default.reason : null };
+  return { ok: true as const,
+    participants: organization ? view.participants.filter((participant) => participant.organization?.id === organization) : view.participants,
+    default: defaultPerson, organizations: side.ok ? side.file.organizations : null, groups: side.ok ? side.file.groups : null,
+    warnings: view.warnings, participantFile: view.sideFile };
+}
+
 // ── The writes behind the `rig gateway` verbs. Each goes through updateParticipantsFile, so each is validated the same
 // way a read is and written atomically.
 

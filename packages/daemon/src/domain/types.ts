@@ -243,7 +243,10 @@ export type RigEvent =
        *  fork provenance, or rebuild's exact primed set / gaps / empty-chain reason. */
       sourceOutcome?:
         | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
-        | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string } }
+        | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
+      /** #2456: the required startup files the successor started without (a start would have failed), and that successor's
+       *  session. The seat list marks the seat while this session is its current one. */
+      startedWithoutRequired?: string[]; successorSessionId?: string }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
@@ -258,7 +261,7 @@ export type RigEvent =
   | { type: "node.startup_first_input_passed"; rigId: string; nodeId: string; sessionId: string; path: string; submission: "unconfirmed" }
   | { type: "node.startup_model_passed"; rigId: string; nodeId: string; sessionId: string; model: string; resume: boolean }
   | { type: "node.startup_ready"; rigId: string; nodeId: string; previousStatus?: "failed" | "attention_required"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
-  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
+  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; guidanceLaunchInstructions?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
   // `node.startup_challenged` freezes this launch's challenge ground truth
   // (challengeId + contractHash; the expected answer is recomputed, never
@@ -389,6 +392,8 @@ export interface NodeStartupSnapshot {
   resolvedStartupFiles: import("./runtime-adapter.js").ResolvedStartupFile[];
   startupActions: StartupAction[];
   runtime: string;
+  /** #875: the guidance file this seat's launch chose and recorded. Absent (every older snapshot) means the rule's file. */
+  guidanceFile?: string;
 }
 
 export interface SnapshotData {
@@ -535,6 +540,10 @@ export interface RestoreNodeResult {
   /** Managed guidance block ids the seat's guidance file still lacks after restore. The seat keeps
    *  its own status (a resumed session is still running); this only discloses the gap. */
   guidanceGaps?: string[];
+  /** #2456: managed guidance blocks the seat runs as they are although they differ from their source, each named with the
+   *  reason (edited by hand since OpenRig wrote it, or no record of OpenRig writing it). Not a gap: the seat has guidance
+   *  there, and the rig's result doesn't change. */
+  guidanceNotes?: string[];
   /** Restore gaps that are not guidance: a resumed seat whose saved startup
    *  context lacked a selection the current specification still makes and
    *  whose re-apply was skipped, failed, or threw (e.g. the Claude
@@ -869,6 +878,9 @@ export interface NodeInventoryEntry {
   /** OPR.0.3.4.11 — held reason derived from the latest `node.held` event.
    *  Null when no held event, or superseded by a running session / later launch. */
   heldReason?: string | null;
+  /** #2456: the required startup files this occupant started without, from the latest `seat.handover_completed` event while
+   *  its successor session is the seat's current one. A later launch or handover starts a new session, which clears it. */
+  startedWithoutRequired?: string[];
   /** PL-007: per-node workspace block when the rig declares a workspace.
    *  workspaceRoot mirrors RigSpec.workspace.workspaceRoot. activeRepo is
    *  the repo whose path contains the node's cwd, or RigSpec.workspace.
@@ -1250,6 +1262,8 @@ export interface RigSpecPodMember {
   agentFile?: string;
   appendSystemPromptFile?: string;
   pluginDirs?: string[];
+  /** #2044 — Claude members only: `plugin:<name>@<marketplace>` entries, passed as one `--channels` on every launch. */
+  pluginChannels?: string[];
   /** Non-secret launch environment for this seat; overrides the rig-level `env`. */
   env?: Record<string, string>;
   cwd: string;

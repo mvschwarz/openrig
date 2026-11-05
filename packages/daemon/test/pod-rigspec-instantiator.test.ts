@@ -550,14 +550,15 @@ profiles:
       db = fixture.db;
       const member = { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: project };
       const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
-        { ...member, agentFile: "claude/reviewer.md", appendSystemPromptFile: "claude/prompts/house.md", pluginDirs: ["claude/plugins/review"] },
+        { ...member, agentFile: "claude/reviewer.md", appendSystemPromptFile: "claude/prompts/house.md", pluginDirs: ["claude/plugins/review"],
+          pluginChannels: ["plugin:example-channel@example"] },
         { ...member, id: "qa", agentFile: "claude/missing.md" },
       ] }] } as never);
       const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
       expect(result.ok, JSON.stringify(result)).toBe(true);
       if (!result.ok) return;
       const additions = seatLaunchAdditions(seatSkillPaths({ rigId: result.result.rigId, logicalId: "dev.impl", runtime: "claude-code" }));
-      expect(additions).toMatchObject({ agent: "openrig:reviewer", pluginDirs: [expect.stringContaining("review")] });
+      expect(additions).toMatchObject({ agent: "openrig:reviewer", pluginDirs: [expect.stringContaining("review")], pluginChannels: ["plugin:example-channel@example"] });
       expect(fs.readFileSync(additions!.appendSystemPromptFile!, "utf8")).toBe("House rules.\n"); // the seat's own copy
       const qa = result.result.nodes.find((n) => n.logicalId === "dev.qa");
       expect(JSON.stringify(qa)).toMatch(/addition_missing: .*claude\/missing\.md/);

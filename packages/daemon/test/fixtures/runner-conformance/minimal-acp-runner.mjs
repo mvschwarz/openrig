@@ -1,8 +1,19 @@
 // A minimal ACP runner that keeps the runner contract, for testing the conformance check (docs/reference/runner-conformance).
 // It's a test double, not a reference runner. Each --break <name> breaks one promise, so the test can show the check
 // catches it.
-//   node minimal-acp-runner.mjs --agent <command> [--break <name>]... [--read-wait <seconds>|none]
+//   node minimal-acp-runner.mjs --agent <command> [--break <name>]... [--read-wait <seconds>|none] [--withdraw-after-stop]
 // --read-wait keeps the contract another way: it reads with that waitSeconds (or none) and sleeps between pending reads.
+// --read-retries <n> keeps it another way too: a read refusal the runner would permit on (a code section 7 marks "permits",
+// or one it doesn't list) is retried n times, 1.5 s apart, before the runner permits; section 7 sets no time limit for that.
+// A refusal section 7 cancels or holds on (a request that isn't the current occupant's, or the seat's opt-in to hold) is
+// acted on at once.
+// --withdraw-after-stop keeps it another way too: a cancelled or ended turn's ask is withdrawn after the turn's Stop is
+// posted, not before; the contract doesn't order the two posts.
+// --startup-idle <ms> keeps it another way too: with no first input, it reports idle once it's ready, as a runner may, and
+// that first POST goes out <ms> late, holding the posts behind it, as a slow first request does. The agent gets each
+// prompt without waiting on its accepted post, so it can die before the late report arrives.
+// --interrupt-delay <ms> keeps it another way too: it handles a Ctrl-C <ms> late, as a runner whose event loop is busy
+// does, and still sends session/cancel if the turn is open by then.
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
@@ -12,18 +23,43 @@ const agentCommand = argv[argv.indexOf("--agent") + 1];
 const breaks = new Set(argv.flatMap((a, i) => (a === "--break" ? [argv[i + 1]] : [])));
 const readWait = argv.includes("--read-wait") ? argv[argv.indexOf("--read-wait") + 1] : "25";
 const readQuery = readWait === "none" ? "" : `?waitSeconds=${readWait}`;
+const withdrawAfterStop = argv.includes("--withdraw-after-stop");
+const readRetries = argv.includes("--read-retries") ? Number(argv[argv.indexOf("--read-retries") + 1]) : 0;
+const startupIdleMs = argv.includes("--startup-idle") ? Number(argv[argv.indexOf("--startup-idle") + 1]) : null;
+const interruptDelayMs = argv.includes("--interrupt-delay") ? Number(argv[argv.indexOf("--interrupt-delay") + 1]) : 0;
+// --beat: the optional working beat (section 4). While a turn is open and nothing waits on a person, post active/liveness
+// every 10 s with livenessSeconds 30; after delivering an answer to an ask OpenRig opened, post active/permission_resolved
+// first. Breaks: beat-after-stop, beat-during-ask, no-resolve, and beat-time-backwards (each beat says it happened 15 s
+// before it did, so its sequence no longer rises with the runner's own time).
+const beatMode = argv.includes("--beat");
+let beatTurn = null;
+// With --withdraw-after-stop: the ask a cancelled or ended turn withdraws once its Stop is posted.
+let deferredWithdraw = null;
+// --break stop-before-end: a non-exit Stop posted while the ask waits stands in for the turn's end, which is then not posted.
+let stoppedEarly = false;
+// The current turn's accepted prompt's occurredAt.
+let acceptedAt = null;
+if (beatMode) setInterval(() => {
+  if (beatTurn !== null && (!attention || breaks.has("beat-during-ask"))) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30,
+    ...(breaks.has("beat-time-backwards") ? { occurredAt: new Date(Date.now() - 15_000).toISOString() } : {}) });
+}, 10_000).unref();
+const resolved = (ask) => { if (beatMode && !breaks.has("no-resolve")) void post("active", "permission_resolved", { turnId: String(turn), askId: ask.askId }); };
 const env = process.env;
 const name = env.OPENRIG_RUNTIME ?? "runner";
 
 // Activity posts go one at a time, in order, and never hold up the agent.
-let sequence = 0;
+// With --break idle-string-sequence-on-exit the first post is numbered 2, so a "1" falls below the accepted prompt.
+let sequence = breaks.has("idle-string-sequence-on-exit") ? 1 : 0;
 let posting = Promise.resolve();
+let holdNextPostMs = 0;
 function post(hookEvent, subtype, extra = {}) {
+  const hold = holdNextPostMs;
+  holdNextPostMs = 0;
   const body = JSON.stringify({ sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, runtime: name,
     generation: breaks.has("wrong-generation") ? "gen-other" : env.OPENRIG_OCCUPANT_GENERATION,
     ...(breaks.has("no-sequence") ? {} : { sequence: ++sequence }), occurredAt: new Date().toISOString(), hookEvent, subtype, ...extra });
   const headers = { "content-type": "application/json", ...(breaks.has("no-token") ? {} : { authorization: `Bearer ${env.OPENRIG_ACTIVITY_HOOK_TOKEN}` }) };
-  posting = posting.then(() => new Promise((resolve) => {
+  posting = posting.then(() => hold && new Promise((resolve) => setTimeout(resolve, hold))).then(() => new Promise((resolve) => {
     const req = request(`${env.OPENRIG_URL}/api/activity/hooks`, { method: "POST", headers, timeout: 2000 }, (res) => { res.resume(); res.on("end", resolve); });
     req.on("error", resolve);
     req.on("timeout", () => { req.destroy(); resolve(); });
@@ -88,7 +124,13 @@ agent.stdout.on("data", (chunk) => {
 let exiting = false;
 agent.on("exit", async () => {
   if (exiting) return;
+  beatTurn = null;
   await withdrawLive("exited");
+  // --break idle-low-sequence-on-exit: an idle Stop for the dead turn, numbered below its accepted prompt but later in time.
+  if (breaks.has("idle-low-sequence-on-exit")) await post("Stop", "idle_heartbeat", { livenessSeconds: 30, sequence: 1 });
+  // --break idle-string-sequence-on-exit: an idle Stop for the dead turn at its accepted prompt's time, numbered below it but
+  // as a string, which OpenRig doesn't read as a sequence.
+  if (breaks.has("idle-string-sequence-on-exit")) await post("Stop", "idle_heartbeat", { livenessSeconds: 30, occurredAt: acceptedAt, sequence: "1" });
   await post("Stop", breaks.has("idle-on-exit") ? "end_turn" : `${name}_exited`);
   process.exit(1);
 });
@@ -108,7 +150,8 @@ let cancelSent = false;
 const queue = [];
 
 // Permissions. Every request goes to OpenRig's answered path, and the runner delivers the option that comes back: the
-// person's, or OpenRig's permit. A refusal, at submit or while reading, is read by its code: the seat's opt-in refuses and
+// person's, or OpenRig's permit. A person's own words (`said`) join the prompt queue, after the turn. A refusal,
+// at submit or while reading, is read by its code: the seat's opt-in refuses and
 // holds attention; one that says the request isn't the current occupant's answers cancelled and holds nothing, as a
 // refused, stale or withdrawn read does; anything else (404, unreachable, a "permits" code or one the contract doesn't
 // list) permits with the agent's allow_once, else allow_always, or refuses and holds when there's no allow option. An
@@ -150,6 +193,13 @@ async function onPermission(msg) {
   // A person is asked. OpenRig records the seat's permission prompt, so the runner doesn't post it.
   attention = true;
   if (breaks.has("self-prompt")) void post("Notification", "permission_prompt");
+  // --break beat-during-ask beats as soon as the ask waits too, so the check sees it whatever the 10 s timer's phase.
+  if (breaks.has("beat-during-ask") && beatTurn !== null) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30 });
+  if (breaks.has("stop-before-end")) { stoppedEarly = true; void post("Stop", "idle_heartbeat", { livenessSeconds: 30 }); }
+  // --break stop-low-sequence: an idle Stop while the ask waits, numbered below the accepted prompt but later in time.
+  if (breaks.has("stop-low-sequence")) void post("Stop", "idle_heartbeat", { livenessSeconds: 30, sequence: 1 });
+  // --break stop-numeric-time: an idle Stop while the ask waits, its occurredAt a number, which OpenRig dates by arrival.
+  if (breaks.has("stop-numeric-time")) void post("Stop", "idle_heartbeat", { livenessSeconds: 30, occurredAt: 0 });
   // done: the agent has its answer. open: OpenRig's ask may still be open, so it's withdrawn at the turn's end.
   const ask = { id: msg.id, askId: submitted.body.askId, offered: options.map((o) => o.optionId), done: false, open: true };
   live = ask;
@@ -157,16 +207,28 @@ async function onPermission(msg) {
   if (agent.exitCode !== null || agent.signalCode !== null) { await withdrawLive("exited"); return; }
   if (!busy || turn !== askedInTurn) { await withdrawLive("turn_ended"); return; }
   for (;;) {
-    const read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}${readQuery}`);
+    let read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}${readQuery}`);
+    const permitsOn = (r) => r.status >= 300 && !NOT_CURRENT.has(r.body?.code) && !HOLDS.has(r.body?.code);
+    for (let tries = 0; permitsOn(read) && tries < readRetries && !ask.done; tries++) {
+      await new Promise((done) => setTimeout(done, 1500));
+      read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}${readQuery}`);
+    }
     if (ask.done && !breaks.has("late-deliver")) return;
     const state = read.status === 200 ? read.body?.state : undefined;
     if (state === "pending") { if (readWait !== "25") await new Promise((done) => setTimeout(done, 200)); continue; }
     // A listed answer means OpenRig closed its ask; anything else leaves it open, to withdraw at the turn's end.
     if (["answered", "permitted", "refused", "withdrawn", "stale"].includes(state)) ask.open = false;
-    if ((state === "answered" || state === "permitted") && ask.offered.includes(read.body.optionId)) {
+    // A person who answered in words: their words join the prompt queue in order, after this turn, never as the answer.
+    const said = state && typeof read.body?.said === "string" && read.body.said.trim() ? read.body.said : null;
+    if (said && !breaks.has("drop-words")) queue.push(`The person who answered your permission request (${toolCall?.title}) also wrote:\n\n${said}`);
+    if (said && breaks.has("said-as-answer") && !ask.done) {
+      refuse(ask.id);
+      attention = false;
+    } else if ((state === "answered" || state === "permitted") && ask.offered.includes(read.body.optionId)) {
       select(ask.id, read.body.optionId);
       if (breaks.has("deliver-twice")) select(ask.id, read.body.optionId);
       attention = false;
+      resolved(ask);
     } else if (!ask.done) {
       // A refused, withdrawn or stale read, or a refusal saying the request isn't the current occupant's: it can't take an
       // answer, and no person is still waiting, so it's cancelled and nothing is held. The seat's opt-in refuses and holds.
@@ -179,7 +241,7 @@ async function onPermission(msg) {
       else if (cancelled || (!state && breaks.has("cancel-on-read-error")) || (state && breaks.has("cancel-on-unlisted-state"))) {
         refuse(ask.id); attention = breaks.has("hold-on-cancel");
       }
-      else { permit(); attention = !allowOf(options); }
+      else { permit(); attention = !allowOf(options); if (!attention) resolved(ask); }
     }
     ask.done = true;
     if (live === ask && (!ask.open || breaks.has("forget-permitted-ask"))) live = null;
@@ -200,6 +262,10 @@ function withdrawLive(reason) {
   }
   if (!ask.open || breaks.has("no-withdraw")) return Promise.resolve();
   ask.open = false;
+  if (withdrawAfterStop && busy && (reason === "turn_cancelled" || reason === "turn_ended")) {
+    deferredWithdraw ??= { askId: ask.askId, reason };
+    return Promise.resolve();
+  }
   return api("POST", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}/withdraw`, { reason });
 }
 
@@ -207,16 +273,26 @@ async function prompt(text) {
   busy = true;
   cancelSent = false;
   turn += 1;
+  stoppedEarly = false;
+  beatTurn = turn;
   show(`you ▸ ${text.split("\n")[0]}`);
   attention = false;
-  await post("UserPromptSubmit", "accepted", { turnId: String(turn) });
+  acceptedAt = new Date().toISOString();
+  const accepted = post("UserPromptSubmit", "accepted", { turnId: String(turn), occurredAt: acceptedAt });
+  if (startupIdleMs === null) await accepted; // with --startup-idle, the agent doesn't wait on the post, as in dsh's runner
   const res = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
   await withdrawLive("turn_ended");
+  if (!breaks.has("beat-after-stop")) beatTurn = null;
   if (res.error) {
     if (!breaks.has("no-error-post")) await post("Notification", "runtime_error");
   } else {
     const reason = breaks.has("cancelled-always") && cancelSent ? "cancelled" : res.result.stopReason;
-    if (!attention || breaks.has("stop-while-attention")) await post("Stop", reason);
+    if ((!attention || breaks.has("stop-while-attention")) && !stoppedEarly) await post("Stop", reason);
+  }
+  if (deferredWithdraw) {
+    const { askId, reason } = deferredWithdraw;
+    deferredWithdraw = null;
+    await api("POST", `/api/activity/permission-requests/${encodeURIComponent(askId)}/withdraw`, { reason });
   }
   busy = false;
   if (queue.length) void prompt(queue.shift());
@@ -238,6 +314,11 @@ function abort() {
   if (breaks.has("release-refusal-on-abort")) attention = false;
   void withdrawLive("turn_cancelled");
 }
+function interrupt() {
+  if (breaks.has("ctrl-c-ignored")) return;
+  if (interruptDelayMs) setTimeout(abort, interruptDelayMs);
+  else abort();
+}
 
 // Input: raw mode with bracketed paste. Everything up to Enter is one block; Ctrl-C outside a paste aborts.
 let inPaste = false;
@@ -258,7 +339,7 @@ function onInput(chunk) {
     const head = start < 0 ? raw : raw.slice(0, start);
     for (const ch of head) {
       if (ch === "\r") { const text = block; block = ""; if (text) submit(text); }
-      else if (ch === "\x03") abort();
+      else if (ch === "\x03") interrupt();
       else if (ch >= " ") block += ch;
     }
     if (start < 0) { raw = ""; return; }
@@ -288,6 +369,10 @@ async function main() {
   process.stdout.write("\x1b[?2004h");
   process.stdin.on("data", onInput);
   show("ready");
+  if (startupIdleMs !== null && !env.OPENRIG_FIRST_INPUT) {
+    holdNextPostMs = startupIdleMs;
+    void post("Stop", "idle_heartbeat", { livenessSeconds: 30 });
+  }
   if (env.OPENRIG_FIRST_INPUT) {
     const text = readFileSync(env.OPENRIG_FIRST_INPUT, "utf8");
     void prompt(breaks.has("first-input-trim") ? text.trim() : text);

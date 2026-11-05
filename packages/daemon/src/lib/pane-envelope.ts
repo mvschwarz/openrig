@@ -19,6 +19,8 @@
 //      output except for the body content
 // If you update this function, update wrapSendBody in lockstep.
 
+import { isHumanSeatSessionRef } from "../domain/session-name.js";
+
 const SENDER_FALLBACK = "<unknown sender>";
 
 /** OpenRig's own sender: the daemon (`daemon@kernel`, the scheduler's existing name) or a subsystem actor (`system:health`).
@@ -114,6 +116,9 @@ export function wrapPaneEnvelope(
   // carries its origin triple from the forwarding boundary and rides verbatim — the wrapper
   // never appends this host's id to anything.
   const senderLabel = sender && sender.trim().length > 0 ? sender : SENDER_FALLBACK;
+  // Only reply classification uses the bare address; From and the destination retain the origin host.
+  const senderParts = senderLabel.split("@");
+  const personAddress = senderParts.length === 3 && senderParts[2] ? senderParts.slice(0, 2).join("@") : senderLabel;
   const header = [`From: ${senderLabel}`, renderToLine(recipient, meta?.scope)];
   if (meta?.stampISO) {
     // GHOST-STAGE (g): the sender's occupant generation rides the Sent: line as a short suffix
@@ -126,8 +131,10 @@ export function wrapPaneEnvelope(
   }
   const reply = senderLabel.endsWith("@external")
     ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
-    : isOpenRigSender(senderLabel)
-      ? "↩ Sent by OpenRig itself, not by a seat. Act on the row it names."
-      : `↩ Reply: rig send ${senderLabel} "..."`;
+    : isHumanSeatSessionRef(personAddress)
+      ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`
+      : isOpenRigSender(senderLabel)
+        ? "↩ Sent by OpenRig itself, not by a seat. Act on the row it names."
+        : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
 }

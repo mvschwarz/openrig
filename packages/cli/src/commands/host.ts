@@ -24,8 +24,9 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { hostname as osHostname, userInfo } from "node:os";
 import { connect } from "node:net";
+import { execFile } from "node:child_process";
 import { getOpenRigHome } from "../openrig-compat.js";
-import { addHostEntry, updateHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry } from "../host-registry.js";
+import { addHostEntry, updateHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry, type SshHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type CrossHostResult } from "../cross-host-executor.js";
 import { recordHostObservation, loadHostBindings, describeBindingConflict, defaultHostBindingsPath, type HostObservationOutcome } from "../host-bindings.js";
 import { DaemonClient } from "../client.js";
@@ -167,15 +168,35 @@ function defaultDoctorDeps(): DoctorDeps {
   };
 }
 
+/** Where ssh would connect for this host, from `ssh -G`, which reads ssh config without connecting.
+ *  Null when ssh can't resolve the target or a ProxyJump/ProxyCommand sits in between, since no
+ *  direct dial stands for that transport. */
+export function resolveSshEndpoint(host: SshHostEntry, timeoutMs = 1500): Promise<{ hostname: string; port: number } | null> {
+  const args = [...(host.user ? ["-l", host.user] : []), "-G", host.target];
+  return new Promise((resolve) => {
+    execFile("ssh", args, { timeout: timeoutMs }, (error, stdout) => {
+      if (error) return resolve(null);
+      const conf = new Map(stdout.split("\n").map((line) => {
+        const i = line.indexOf(" ");
+        return [line.slice(0, i).toLowerCase(), line.slice(i + 1).trim()] as const;
+      }));
+      const proxied = ["proxyjump", "proxycommand"].some((k) => (conf.get(k) ?? "none") !== "none");
+      const hostname = conf.get("hostname");
+      const port = Number(conf.get("port"));
+      resolve(hostname && Number.isInteger(port) && !proxied ? { hostname, port } : null);
+    });
+  });
+}
+
 /** FR-1 doctor legs — each failing step maps to a DISTINCT actionable error:
  *  "SSH works but daemon is down" ≠ "daemon works but registry is wrong" ≠
  *  "remote rig binary missing/old". */
 /** OPR.0.4.6.MH1 FR-3 — the coarse ls status word: a BOUNDED tcp dial
- *  against the host's transport endpoint (ssh: target:22; http: the
- *  URL's host:port). Coarse by design (the kubectl STATUS / docker
- *  context ls precedent): reachable | unreachable | unknown — never a
- *  hang (hard timeout), never a guess (dial failure = unreachable,
- *  probe error/unparseable endpoint = unknown). */
+ *  against the host's transport endpoint (ssh: the host and port ssh itself
+ *  resolves, see resolveSshEndpoint; http: the URL's host:port). Coarse by
+ *  design (the kubectl STATUS / docker context ls precedent): reachable |
+ *  unreachable | unknown — never a hang (hard timeout), never a guess (dial
+ *  failure = unreachable, probe error/unparseable endpoint = unknown). */
 export async function probeHostStatus(
   host: HostEntry,
   tcpProbe: DoctorDeps["tcpProbe"],
@@ -185,8 +206,9 @@ export async function probeHostStatus(
     let target: string;
     let port: number;
     if (host.transport === "ssh") {
-      target = host.target;
-      port = 22;
+      const endpoint = await resolveSshEndpoint(host, timeoutMs);
+      if (!endpoint) return "unknown";
+      ({ hostname: target, port } = endpoint);
     } else {
       const u = new URL(host.url);
       target = u.hostname.replace(/^\[|\]$/g, "");
@@ -560,6 +582,7 @@ function printHostNextSteps(host: HostEntry): void {
 
 export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
   const cmd = new Command("host").description("Manage the multi-host registry (~/.openrig/hosts.yaml)");
+  const rewritesRegistry = "\nIt rewrites ~/.openrig/hosts.yaml from the fields it knows, so comments, formatting, unknown entry keys and other top-level keys aren't kept.";
 
   cmd
     .command("add")
@@ -573,6 +596,7 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
     .option("--bearer-file <path>", "File PATH holding the bearer token — http transport (optional pointer, never a value; at most one bearer flag)")
     .option("--notes <text>", "Free-form operator note")
     .option("--json", "JSON output")
+    .addHelpText("after", rewritesRegistry)
     .action((opts: { id: string; transport: string; target?: string; user?: string; url?: string; bearerEnv?: string; bearerFile?: string; notes?: string; json?: boolean }) => {
       const rawEntry: Record<string, unknown> = { id: opts.id, transport: opts.transport };
       if (opts.target !== undefined) rawEntry["target"] = opts.target;
@@ -703,6 +727,7 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
     .option("--url <url>", "Remote daemon base URL — http transport")
     .option("--notes <text>", "Free-form operator note (empty string clears the value)")
     .option("--json", "JSON output")
+    .addHelpText("after", rewritesRegistry)
     .action((id: string, opts: { target?: string; user?: string; url?: string; notes?: string; json?: boolean }) => {
       const changes: Record<string, unknown> = {};
       if (opts.target !== undefined) changes["target"] = opts.target;
@@ -738,6 +763,7 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
     .description("Remove a host entry (deletes only the registry entry — credential files, the learned identity and the selection stay as they are)")
     .argument("<id>", "A registered host id")
     .option("--json", "JSON output")
+    .addHelpText("after", rewritesRegistry)
     .action((id: string, opts: { json?: boolean }) => {
       const res = removeHostEntry(id.trim());
       if (!res.ok) {
@@ -757,7 +783,7 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
   cmd
     .command("pair")
     .description("Pair with a remote host from one pasted address — one approval on the target, done (FR-6)")
-    .argument("<url>", "The target daemon's address (http[s]://host:port, or host:port)")
+    .argument("<url>", "The target daemon's address (http[s]://host:port, or host:port); that daemon must run with OPENRIG_AUTH_BEARER_TOKEN set")
     .option("--id <id>", "Registry id for the new host (default: derived from the hostname)")
     .option("--timeout <seconds>", "How long to wait for the target-side approval", "600")
     .option("--human <address>", "Registered @external approval recipient on the target (required when several exist)")

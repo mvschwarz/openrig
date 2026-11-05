@@ -20,7 +20,7 @@ function fixture() {
   const calls: string[][] = [];
   let ids = { workspace_id: "w1", pane_id: "w1:p1", terminal_id: "term_001", cwd: "" };
   let label = "", running = false, uncertainCreate = false, uncertainRun = false, idless = false;
-  let gone = false, enumerable = true, unreadable = false;
+  let gone = false, enumerable = true, unreadable = false, attachFlags = ["-f", "ignore-size"];
   let workspaceInventory: unknown[] | undefined, paneInventory: Record<string, unknown> | undefined;
   const inspect = async () => ({ sessionId: "$1", nodeId: key.nodeId });
   const run: HerdrViewerRun = async args => {
@@ -45,7 +45,7 @@ function fixture() {
       return "";
     }
     if (command === "pane process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: running
-      ? ["/usr/bin/tmux", "-S", "/tmp/own-tmux.sock", "attach", "-f", "ignore-size", "-t", "$1"] : ["/bin/bash"] }] } } });
+      ? ["/usr/bin/tmux", "-S", "/tmp/own-tmux.sock", "attach", ...attachFlags, "-t", "$1"] : ["/bin/bash"] }] } } });
     throw new Error(`Unexpected provider operation ${args}`);
   };
   const viewer = () => new HerdrViewer(socket, run, "linux", root, inspect);
@@ -53,7 +53,8 @@ function fixture() {
     lose: (listed: boolean, malformed = false) => { gone = true; enumerable = listed; unreadable = malformed; },
     loseChanged: () => { gone = false; enumerable = false; },
     setEnumeration: (workspaces: unknown[], panes: Record<string, unknown>) => { workspaceInventory = workspaces; paneInventory = panes; },
-    setCreateLost: () => { uncertainCreate = true; }, setRunLost: () => { uncertainRun = true; }, setIdless: () => { idless = true; }, exit: () => { running = false; } };
+    setCreateLost: () => { uncertainCreate = true; }, setRunLost: () => { uncertainRun = true; }, setIdless: () => { idless = true; }, exit: () => { running = false; },
+    setAttachFlags: (flags: string[]) => { attachFlags = flags; } };
 }
 
 describe("owned Herdr viewer", () => {
@@ -169,12 +170,20 @@ describe("owned Herdr viewer", () => {
     expect(await new HerdrViewer(socket, async () => { throw new Error("should not run"); }, "darwin", f.root).ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unsupported" });
     expect(await new HerdrViewer(socket, async () => JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket: "/other.sock" }), "linux", f.root).ensure(key, f.target)).toMatchObject({ ok: false });
   });
-  it("keeps ignore-size in writable initial/fallback/replacement and recovery attaches, and preserves read-only", () => {
+  it("decides ignore-size per writable initial/fallback/replacement attach, keeps it in recovery, and preserves read-only", () => {
     const rw = tileAttachArgv("tmux", [], "a@team", false)[2]!;
-    expect(rw.match(/attach -f ignore-size -t/g)).toHaveLength(4);
+    expect(rw.match(/pick "[^"]+" "\$@"; (exec )?"\$@" attach \$ro -t/g)).toHaveLength(4);
+    expect(rw).toContain('ro="-f ignore-size"');
     const ro = tileAttachArgv("tmux", [], "a@team", true)[2]!;
     expect(ro.match(/attach -r -t/g)).toHaveLength(4);
+    expect(ro).not.toContain("pick");
     const f = fixture(); expect(f.target.recoveryCommand).toContain("attach -f ignore-size -t");
+  });
+  it("verifies a writable viewer that sized its session (no ignore-size), but not a read-only spelling", async () => {
+    const f = fixture(); f.setAttachFlags([]);
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true });
+    const g = fixture(); g.setAttachFlags(["-r"]);
+    expect(await g.viewer().ensure(key, g.target)).toMatchObject({ ok: false });
   });
   it("rechecks membership after a queued request and performs no create for a departed member", async () => {
     const f = fixture(), v = f.viewer();
@@ -186,7 +195,7 @@ describe("owned Herdr viewer", () => {
     const provider = { name: "herdr", status: async () => ({ provider: "herdr", available: true, capabilities: {} }), liveness: async () => ({ alive: true }),
       openView: async () => { throw new Error("Whole-plan open must not run"); },
       ensureViewer: async (_key: unknown, pane: typeof f.target, stillCurrent?: () => Promise<boolean>) => {
-        calls++; expect(pane.readOnly).toBe(false); expect(pane.attachArgv![2]).toContain("attach -f ignore-size");
+        calls++; expect(pane.readOnly).toBe(false); expect(pane.attachArgv![2]).toContain("attach $ro -t");
         expect(await stillCurrent!()).toBe(true); return { ok: true as const, viewer: { workspaceId: "w", paneId: "p", terminalId: "t", readOnly: false }, created: true };
       } };
     const svc = new TerminalService({ viewsStore: { get: () => null, list: () => [] }, listRigSeats: () => null, listPodSeats: () => null,

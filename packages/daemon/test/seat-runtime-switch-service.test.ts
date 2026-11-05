@@ -21,6 +21,9 @@ import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.j
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { SeatRuntimeSwitchService, runtimeSwitchSummary } from "../src/domain/seat-runtime-switch-service.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
@@ -378,6 +381,20 @@ describe("live seat runtime switch", () => {
     expect(declareOccupantSwap).toHaveBeenCalledWith(nodeId, row.successor_generation);
   });
 
+  it("tells the successor of messages held for the seat once per activation attempt, and names them in the switch's warnings (#2431)", async () => {
+    db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql); // as the guard suites add the held-message store
+    new OutboxHandler(db).retain({ outboxId: "held-1", senderSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "Real work for you" },
+      { nodeId, session: SEAT, occupant: null, pane: null });
+    const svc = service();
+    successorConfirms(svc);
+
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Codex usage limit" });
+
+    const notice = `1 held message was kept for this seat and not delivered: read it with rig seat held-messages ${SEAT}.`;
+    expect(result).toMatchObject({ ok: true, changed: true, recoveryPending: false, warnings: expect.arrayContaining([notice]) });
+    expect(typed.filter((t) => t.text.includes(notice))).toEqual([{ target: SEAT, text: expect.stringMatching(/You now hold dev-impl@seat-rig on claude-code/) }]);
+  });
+
   it.each([undefined, "none"] as const)("carries retained Claude rules and MCP selection (%s) into the target successor", async claudeMcp => {
     const rules = { allow: ["Read(./work/**)"], deny: ["Read(./private/**)"] };
     db.prepare("UPDATE nodes SET claude_permissions_json=? WHERE id=?").run(JSON.stringify(rules), nodeId);
@@ -434,6 +451,25 @@ describe("live seat runtime switch", () => {
     expect(handover).toMatch(/predecessor screen tail/);
     expect(handover).toMatch(/The seat's open queue work \(1 rows/);
     expect(handover).toMatch(new RegExp(`rig seat set-runtime dev\\.impl@seat-rig --confirm ${openSwitch()!.id} --note`));
+  });
+
+  // #2456: a guidance block the preparation kept is named in the successor's first turn as well as the switch's result, as a
+  // start tells its seat and a handover its packet.
+  it.each([true, false])("the handover names a guidance block the preparation kept (kept: %s), as the result does (#2456)", async (kept) => {
+    const note = "guidance_block_edited: /project/CLAUDE.md: culture.md was edited by hand since OpenRig wrote it, so it wasn't refreshed from /spec/culture.md";
+    const claude = adapter("claude-code");
+    vi.mocked(claude.deliverStartup).mockResolvedValue({ delivered: 0, failed: [], ...(kept ? { warnings: [note] } : {}) } as never);
+    const svc = service({ runtimeAdapters: { codex: adapter("codex"), "claude-code": claude } });
+    successorConfirms(svc);
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "better fit" });
+    const handover = typed.find((t) => t.target.startsWith("openrig-switch-"))!.text;
+    if (kept) {
+      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([note]) });
+      expect(handover).toContain(`OpenRig guidance note: ${note}.`);
+    } else {
+      expect(result).toMatchObject({ ok: true });
+      expect(handover).not.toContain("OpenRig guidance note");
+    }
   });
 
   it("a Claude Code seat moves to Codex, with an explicit Codex profile", async () => {
@@ -569,6 +605,12 @@ describe("live seat runtime switch", () => {
       const result = await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "x", dryRun: true });
       expect(result).toMatchObject({ ok: false, code: "runtime_switch_unsupported" });
       expect((result as { message: string }).message).toMatch(/only a single-window, single-pane seat can/);
+    });
+    it("a seat with no bound pane says how to get it on the other runtime, and what that route doesn't carry", async () => {
+      db.prepare("UPDATE bindings SET tmux_pane = NULL WHERE node_id = ?").run(nodeId);
+      expect(await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "x", dryRun: true })).toMatchObject({ ok: false, code: "runtime_switch_unsupported",
+        message: expect.stringMatching(/it has no bound tmux pane/),
+        guidance: expect.stringMatching(/start it first.*never started.*declare the other runtime.*rig spec.*doesn't carry this seat's edges, settings or queued work/s) });
     });
     it("a seat on another runtime", async () => {
       db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(nodeId);

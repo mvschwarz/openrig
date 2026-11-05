@@ -418,6 +418,15 @@ export function FeedCard({
     onDismiss(card);
   };
   const qitemViewerData = qitemViewerDataFromItem(card, queueItem);
+  const payload = card.source.payload ?? {};
+  // Remote cards must use their origin's payload, not a same-id local queue row.
+  const localItem = !card.hostId || card.hostId === "local" ? queueItem : undefined;
+  const hasQuestions = (Array.isArray(payload.humanQuestions) && payload.humanQuestions.length > 0)
+    || (Array.isArray(localItem?.humanQuestions) && localItem.humanQuestions.length > 0);
+  // Event cards can arrive before the queue read. Do not offer a closing action until it resolves.
+  const questionsKnown = localItem !== undefined || Object.hasOwn(payload, "humanQuestions");
+  const permissionTags = localItem ? localItem.tags : payload.tags;
+  const isRunnerPermission = Array.isArray(permissionTags) && permissionTags.includes("runner-permission");
   const body = compactQueueBody(queueItem?.body || card.body);
   const tags = queueItem?.tags ?? qitemViewerData?.tags ?? [];
   const source = qitemViewerData?.source ?? card.authorSession;
@@ -549,13 +558,12 @@ export function FeedCard({
             data-testid={`feed-card-actions-${card.id}`}
             className="mt-3 bg-background/40 p-3"
           >
-            {/* CORRECTIVE §7.1 + founder live-review 2026-07-05: JUST the two
-                buttons — APPROVE (one-tap, the existing verb + write path) and
-                CHAT (the shared terminal, preamble per BR-12). No "Your turn"
-                prose, no "Choose response" chrome (VerbActions `bare`) —
-                buttons are self-evident. Deny/route stay retired. */}
+            {/* CORRECTIVE §7.1 + founder live-review 2026-07-05: bare APPROVE
+                and CHAT only. Questions require answers in the TUI: Approve would
+                close the ask without returning them. Runner permission asks
+                retain Approve because their runner reads that closure as allow. */}
             <div className="flex flex-wrap items-center gap-2">
-              <VerbActions
+              {questionsKnown && (!hasQuestions || isRunnerPermission) ? <VerbActions
                 qitemId={qitemViewerData.qitemId}
                 actorSession={actorSession}
                 bare
@@ -567,7 +575,13 @@ export function FeedCard({
                     ? (outcome) => onOptimisticOutcome(qitemViewerData.qitemId, outcome)
                     : undefined
                 }
-              />
+              /> : hasQuestions ? (
+                <span className="font-mono text-[10px] text-on-surface-variant break-words min-w-0">
+                  {card.hostId && card.hostId !== "local"
+                    ? `This ask has questions. Answer in the TUI on host ${card.hostId} (rig tui).`
+                    : `This ask has questions. Answer in the TUI (rig tui)${terminalSession ? `, or tell ${terminalSession} in Chat.` : "."}`}
+                </span>
+              ) : null}
               <button
                 type="button"
                 data-testid={`feed-card-chat-${card.id}`}

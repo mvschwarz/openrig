@@ -2,3 +2,5 @@
 // then the elapsed time and "esc to interrupt" in parentheses, e.g. "• Working (1h 09m 39s • esc to interrupt)".
 // Completed output that merely says "Working directory: …" or "Working tree is clean." never matches.
 export const CODEX_TURN_STATUS_PATTERN = /^[•◦]\s+\S.*\((?:\d+[hms]\s*)+•\s*esc to interrupt\)/;
+// Some Codex frames omit the closing parenthesis before the status separator. This is positive activity evidence only.
+export const CODEX_LIVE_WORKING_FRAME_PATTERN = /^[•◦]\s+\S.*\((?:\d+[hms]\s*)+•\s*esc to interrupt(?:\)|\s+·(?:\s|$))/;

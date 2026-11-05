@@ -552,6 +552,35 @@ describe("Claude identity with inline settings in ps output", () => {
     expect(await verifyClaudePaneProcess(input(args))).toBeNull();
     expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
   });
+  // #2044 (from cerebral-work/openrig#54): a seat's plugin channels, one `--channels` and its entries; the option names
+  // no conversation.
+  it.each([
+    `--channels plugin:example-channel@example --session-id ${token}`,
+    `--session-id ${token} --channels plugin:example-channel@example plugin:second@example`,
+    `--channels=plugin:example-channel@example --resume ${token}`,
+    // The form Claude itself uses when it passes the option on: one entry per flag.
+    `--channels plugin:example-channel@example --channels plugin:second@example --session-id ${token}`,
+    `--agent openrig:reviewer --append-system-prompt-file /home/u/.openrig/state/seats/r/dev.impl/claude-code/additions/system-prompt.md --channels plugin:example-channel@example plugin:second@example --resume ${token}`,
+  ])("proves the exact Claude identity beside the plugin channels option: %s", async args => {
+    const actual = input(args);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
+    expect((await observeClaudeDelivery({ ...actual, expectedToken: "different" })).state).toBe("unknown");
+  });
+  it.each([
+    `--channels --session-id ${token}`,
+    `--session-id ${token} --channels`,
+    `--channels plugin:example-channel@example --session-id ${token} --unknown-flag`,
+    // Only the plain plugin entries OpenRig passes: a server entry, or a bare word Claude would also take into the list.
+    `--channels server:example --session-id ${token}`,
+    `--channels plugin:example-channel@example stray --session-id ${token}`,
+    `--channels=server:example --session-id ${token}`,
+    `--channels= --session-id ${token}`,
+  ])("a channels option with no plugin entry, a value that isn't one, or beside an unknown flag proves nothing: %s", async args => {
+    expect(await verifyClaudePaneProcess(input(args))).toBeNull();
+    expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
   it("preserves an apostrophe in the native Claude executable path", async () => {
     const actual = input(`--settings ${settings[0]![1]} --session-id ${token}`);
     const list = (await actual.listProcesses()).map(r => r.pid === 21 ? { ...r,

@@ -1,7 +1,7 @@
 import type { TerminalActor, TerminalPolicyStore } from "./terminal-policy.js";
 import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
-import type { SessionTransport, SendResult } from "./session-transport.js";
+import { CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type SendResult } from "./session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
 import { postCompactExtraSetting } from "./managed-restore-read-access.js";
 import * as fs from "node:fs";
@@ -503,6 +503,8 @@ interface CompactionRecord {
    *  `compact_uncertain`: the attempt stopped after a /compact whose outcome is unknown, so its restore is owed if it ran.
    *  `done`: the post-restore audit was sent. `ended`: the attempt stopped or was cancelled. */
   phase: "preparing" | PendingPostCompactStage | "compact_uncertain" | "done" | "ended";
+  /** Diagnostic only; older records may omit the reason an attempt stopped. */
+  reason?: string;
   delivery: PreparationState["delivery"];
   deadlineAt: number | null;
   sends: number;
@@ -1185,7 +1187,11 @@ export class ClaudeCompactionEnforcer {
       this.reconcilePreparations();
     } while (attempt.status === "waiting");
     if (!idle.ok || attempt.status !== "waiting") {
-      const reason = attempt.reason ?? (!idle.ok ? idle.reason : "preparation_incomplete");
+      // The transport was given this attempt's remaining budget; name its timeout like preparation expiry.
+      const reason = attempt.reason ?? (idle.ok ? "preparation_incomplete"
+        : idle.reason === "wait_for_idle_timeout"
+          ? this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete"
+          : idle.reason);
       return failed(reason);
     }
     const compact = await this.sendPreparedCompact(input, attempt, opts.skipMap === true);
@@ -1364,11 +1370,11 @@ export class ClaudeCompactionEnforcer {
     };
     const send = async () => {
       check();
-      // Both paths send only to an idle seat, with the same idle wait, bounded by the attempt's existing
-      // deadline. (The automatic path used to send into a seat still finishing its preparation turn.)
+      // Both paths send only to an idle seat. Include the readable observation's budget in the wait,
+      // still bounded by the attempt's existing deadline.
       // Idle comes from a live pane read: the newest hook can predate the rest of the preparation turn.
       return this.sessionTransport.send(input.sessionName, composed.command,
-        { openrigNotice: true, preserveInput: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
+        { openrigNotice: true, preserveInput: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs + CAPTURE_READABLE_BUDGET_MS, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
     };
     let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase">;
     let guardRefused = false;
@@ -1424,7 +1430,7 @@ export class ClaudeCompactionEnforcer {
    *  why it couldn't be read. Never throws. */
   private async inputBoxStatus(sessionName: string): Promise<string> {
     try {
-      const capture = await this.sessionTransport.capture(sessionName, { inputBox: true });
+      const capture = await this.sessionTransport.capture(sessionName, { inputBox: true, readable: { width: 120, height: 40 } });
       return capture.inputBox?.status ?? capture.reason ?? "unknown";
     } catch { return "unknown"; }
   }
@@ -1501,9 +1507,9 @@ export class ClaudeCompactionEnforcer {
     } catch { try { fs.rmSync(temporary, { force: true }); } catch { /* nothing to clean */ } }
   }
 
-  private persistStage(sessionName: string, phase: CompactionRecord["phase"]): void {
+  private persistStage(sessionName: string, phase: CompactionRecord["phase"], reason?: string): void {
     const current = this.records.get(sessionName);
-    if (current) this.persist(sessionName, current.record.attemptId, { phase, lastDelivery: undefined });
+    if (current) this.persist(sessionName, current.record.attemptId, { phase, ...(reason !== undefined ? { reason } : {}), lastDelivery: undefined });
   }
 
   /**
@@ -1589,7 +1595,7 @@ export class ClaudeCompactionEnforcer {
     const attempt = this.pendingPreCompactPrep.get(session);
     if ((expected && expected !== attempt) || !attempt || attempt.status === "stopped" || attempt.status === "compact-sent") return;
     attempt.status = "stopped"; attempt.reason = reason; attempt.stoppedAt = this.now(); attempt.controller.abort();
-    this.persist(session, attempt.attemptId, { phase: attempt.compact === "uncertain" ? "compact_uncertain" : "ended" });
+    this.persist(session, attempt.attemptId, { phase: attempt.compact === "uncertain" ? "compact_uncertain" : "ended", reason });
     if (attempt.mode === "manual") this.setManualStage(session, "skipped-or-failed", reason);
   }
 
@@ -1605,7 +1611,7 @@ export class ClaudeCompactionEnforcer {
         attempt.reason = "compaction_cancelled";
         attempt.controller.abort();
       }
-      this.persistStage(session, "ended");
+      this.persistStage(session, "ended", "compaction_cancelled");
       this.pendingPostCompactRestore.delete(session);
       this.pendingStageGeneration.delete(session);
       this.restoreCarry.delete(session);

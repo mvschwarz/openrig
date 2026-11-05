@@ -260,8 +260,9 @@ const HANDOVER_RESULT = {
   eventSeq: 42,
   sideEffects: {
     departingSessionKilled: false,
+    departingProcess: "not-touched",
     startupContextDelivered: false,
-    provenanceRecordWritten: false,
+    provenanceRecordWritten: true,
   },
 };
 
@@ -272,8 +273,9 @@ const HANDOVER_RESULT_FRESH = {
   discovery: { id: "disc-fresh", status: "claimed", tmuxSession: "dev-impl@seat-rig-h1SUCCID0", tmuxPane: "%9" },
   sideEffects: {
     departingSessionKilled: false,
+    departingProcess: "ended-graceful",
     startupContextDelivered: true,
-    provenanceRecordWritten: false,
+    provenanceRecordWritten: true,
   },
 };
 
@@ -677,8 +679,9 @@ describe("rig seat status", () => {
       currentStatus: { handoverResult: "complete" },
       sideEffects: {
         departingSessionKilled: false,
+        departingProcess: "not-touched",
         startupContextDelivered: false,
-        provenanceRecordWritten: false,
+        provenanceRecordWritten: true,
       },
     });
   });
@@ -715,10 +718,37 @@ describe("rig seat status", () => {
     expect(output).toContain("Previous occupant: dev-impl@seat-rig");
     expect(output).toContain("Current occupant: successor-session");
     expect(output).toContain("Seat binding and inventory provenance were updated.");
-    // startupContextDelivered:false — the message must include "startup context delivery" in the NOT-performed list.
-    expect(output).toContain("No conversation continuity, startup context delivery, provenance markdown, or session stop was performed.");
+    // The receipt's side effects, as they happened: the lineage record written, the old process left alone.
+    expect(output).toContain("The handover's lineage record (occupant tenure) was written.");
+    expect(output).toContain("The previous occupant's process wasn't touched: the successor was an existing session.");
+    // startupContextDelivered:false — the output says nothing was delivered or carried...
+    expect(output).toContain("OpenRig delivered no startup context and carried no conversation: the discovered successor was already running.");
     // ...and must NOT falsely claim a delivery happened.
     expect(output).not.toContain("restore packet) was delivered");
+  });
+
+  it("handover human output says when the lineage record wasn't written, and that the old process was killed (rebuild)", async () => {
+    const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT, source: { mode: "rebuild", raw: "rebuild" },
+      sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [] },
+      sideEffects: { departingSessionKilled: false, departingProcess: "ended-forced", startupContextDelivered: true, provenanceRecordWritten: false } } }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "rebuild", "--reason", "context wall"]);
+    });
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined(); // the handover itself completed
+    expect(output).toContain("The handover's lineage record (occupant tenure) was NOT written; check the daemon log, which names the first such failure since the daemon started. The seat is already bound to the successor, so don't run the handover again.");
+    expect(output).toContain("The previous occupant's process didn't exit on TERM and was killed; its tmux session was kept, and the successor runs in the same pane.");
+    expect(output).toContain("No conversation continuity was carried: the successor started a fresh conversation.");
+    expect(output).not.toContain("session stop");
+  });
+
+  it("handover human output from an older daemon, whose receipt has no departingProcess, claims neither side effect", async () => {
+    const older = { departingSessionKilled: false, startupContextDelivered: false, provenanceRecordWritten: false };
+    const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT, sideEffects: older } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "discovered:disc-1", "--reason", "mvp-proof"]);
+    });
+    expect(logs.join("\n")).not.toMatch(/lineage record|previous occupant's process/);
   });
 
   it("handover fresh human output HONESTLY reports the delivered startup context (B2)", async () => {
@@ -739,7 +769,7 @@ describe("rig seat status", () => {
     expect(output).toContain("Current occupant: dev-impl@seat-rig-h1SUCCID0");
     // The fresh path DID deliver context — the surface must say so, not deny it.
     expect(output).toContain("The captured startup context (restore packet) was delivered to the successor.");
-    expect(output).not.toContain("No conversation continuity, startup context delivery,");
+    expect(output).not.toContain("OpenRig delivered no startup context");
   });
 
   it("handover fresh human output says an unconfirmed restore packet was sent, not that nothing was delivered", async () => {
@@ -759,8 +789,21 @@ describe("rig seat status", () => {
     expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
     expect(output).toContain(`its submission is unconfirmed: ${reason}.`);
     expect(output).toContain("Check the successor's screen before sending the context again");
-    expect(output).not.toContain("No conversation continuity, startup context delivery,");
+    expect(output).not.toContain("OpenRig delivered no startup context");
     expect(output).not.toContain("restore packet) was delivered");
+  });
+
+  it("handover human output says the successor started without a required file, not a plain complete (#2456)", async () => {
+    const missing = "/project/spec/culture.md";
+    const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT_FRESH, startedWithoutRequired: [missing] } }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "fresh", "--reason", "context-wall"]);
+    });
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined(); // the successor is running, so the handover itself completed
+    expect(logs[0]).toBe("Seat handover complete, degraded: dev-impl@seat-rig");
+    expect(output).toContain(`The successor started without required file ${missing}.`);
+    expect(output).not.toContain("Seat handover complete: dev-impl@seat-rig");
   });
 
   it("handover surfaces a loud step-named failure (successor_create_failed)", async () => {

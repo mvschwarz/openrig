@@ -2789,3 +2789,90 @@ describe("a seat's own permission envelope (argv only, not native enforcement)",
     expect(command).not.toContain("exclude_slash_tmp");
   });
 });
+
+// #875 Codex: on a fresh launch of a supported Codex, OpenRig's managed guidance goes in as the launch's developer
+// instructions (`-c developer_instructions`, Codex 0.164.0), so the person's tracked repository AGENTS.md and the Codex
+// home are left alone. Anything else keeps the repository AGENTS.md, as before.
+describe("a fresh Codex seat's managed guidance as launch developer instructions (#875)", () => {
+  const HOME = "/codex-home";
+  const adapterFor = (fs: CodexAdapterFsOps, tmux = mockTmux(), codexVersion: string | null = "0.164.0") => new CodexRuntimeAdapter({
+    tmux, fsOps: fs, codexHome: HOME, listProcesses: () => [], sleep: async () => {},
+    resolveManagedConfigSettings: async () => ({ enabled: false, ...(codexVersion ? { codexVersion } : {}) }),
+  });
+  const plan = (entries: ProjectionEntry[]): ProjectionPlan => ({ runtime: "codex", cwd: "/project", entries,
+    startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] } as unknown as ProjectionPlan);
+  const guidance = (effectiveId: string, absolutePath: string) => makeEntry({ category: "guidance", effectiveId, mergeStrategy: "managed_block", absolutePath });
+  const startupFile = (path: string, absolutePath: string): ResolvedStartupFile => ({ path, absolutePath, ownerRoot: nodePath.dirname(absolutePath),
+    deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start"] });
+  const instructionsIn = (command: string): string | undefined => {
+    const arg = /-c 'developer_instructions=([^']*)'/.exec(command)?.[1];
+    return arg === undefined ? undefined : JSON.parse(arg) as string;
+  };
+
+  it("chooses launch instructions only for a fresh launch of Codex 0.164.0 or later with none configured", async () => {
+    expect(await adapterFor(mockFs()).guidanceFileFor(makeBinding())).toEqual({ file: null, launchInstructions: true });
+    expect(await adapterFor(mockFs(), mockTmux(), "0.165.2").guidanceFileFor(makeBinding())).toEqual({ file: null, launchInstructions: true });
+    expect(await adapterFor(mockFs()).guidanceFileFor(makeBinding(), { resuming: true })).toEqual({ file: null });
+    expect(await adapterFor(mockFs(), mockTmux(), "0.163.9").guidanceFileFor(makeBinding())).toEqual({ file: null });
+    expect(await adapterFor(mockFs(), mockTmux(), null).guidanceFileFor(makeBinding())).toEqual({ file: null });
+  });
+
+  it.each([
+    ["the Codex home config", `${HOME}/config.toml`, 'developer_instructions = "Mine."\n'],
+    ["a profile in the Codex home config", `${HOME}/config.toml`, '[profiles.work]\ndeveloper_instructions = "Mine."\n'],
+    ["the project config", "/project/.codex/config.toml", 'developer_instructions = "Mine."\n'],
+    ["an unreadable config layer", `${HOME}/config.toml`, "this is = = not toml"],
+  ])("keeps the repository AGENTS.md when %s sets developer_instructions or can't be read, and says why", async (_case, path, text) => {
+    const chosen = await adapterFor(mockFs({ [path]: text })).guidanceFileFor(makeBinding());
+    expect(chosen.launchInstructions).toBeUndefined();
+    expect(chosen.file).toBeNull();
+    expect(chosen.note).toMatch(/repository AGENTS\.md/);
+  });
+
+  // With no CODEX_HOME declared for the seat or the daemon, the launch's Codex uses the person's ~/.codex, so that's the
+  // home read. (One exported only in the person's shell startup, with the daemon started without it, isn't seen.)
+  it("reads the person's ~/.codex when neither the seat nor the daemon declares CODEX_HOME", async () => {
+    const withoutHome = (fs: CodexAdapterFsOps) => new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/person" },
+      listProcesses: () => [], sleep: async () => {}, resolveManagedConfigSettings: async () => ({ enabled: false, codexVersion: "0.164.0" }) });
+    expect(await withoutHome(mockFs()).guidanceFileFor(makeBinding())).toEqual({ file: null, launchInstructions: true });
+    const chosen = await withoutHome(mockFs({ "/person/.codex/config.toml": 'developer_instructions = "Mine."\n' })).guidanceFileFor(makeBinding());
+    expect(chosen.launchInstructions).toBeUndefined();
+    expect(chosen.note).toContain("/person/.codex/config.toml sets developer_instructions");
+  });
+
+  it("sends the guidance with the fresh launch, writes neither the repository nor the home AGENTS.md, and keeps roles and the seat-skills line out", async () => {
+    const fs = mockFs({ "/spec/culture.md": "Team culture.", "/spec/SOP.md": "How work flows here.", "/spec/rig-role.md": "Seat role text.",
+      "/spec/openrig-seat-skills.md": "Seat skills line." }) as CodexAdapterFsOps & { _store: Record<string, string> };
+    const tmux = mockTmux();
+    const adapter = adapterFor(fs, tmux);
+    const binding = { ...makeBinding(), guidanceFile: null, guidanceLaunchInstructions: true } as NodeBinding;
+    await adapter.project(plan([guidance("culture.md", "/spec/culture.md"), guidance("rig-role", "/spec/rig-role.md")]), binding);
+    await adapter.deliverStartup([startupFile("SOP.md", "/spec/SOP.md")], binding);
+    expect("/project/AGENTS.md" in fs._store).toBe(false);
+    expect(`${HOME}/AGENTS.md` in fs._store).toBe(false);
+    // The person's yes to the seat-skills line was for its AGENTS.md footprint, so it keeps that file.
+    await adapter.deliverStartup([startupFile("openrig-seat-skills.md", "/spec/openrig-seat-skills.md")], binding);
+    expect(fs._store["/project/AGENTS.md"]).toContain("Seat skills line.");
+    expect((await adapter.launchHarness(binding, { name: "dev-qa@test-rig" })).ok).toBe(true);
+    const sent = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[1] as string).find((call) => call.includes(" -C '/project'"))!;
+    const text = instructionsIn(sent);
+    expect(text).toMatch(/^OpenRig seat guidance for this session follows\. Where it conflicts with AGENTS\.md guidance in the repository or the Codex home, follow AGENTS\.md\./);
+    expect(text).toContain("Team culture.");
+    expect(text).toContain("How work flows here.");
+    expect(text).not.toContain("Seat role text.");
+    expect(text).not.toContain("Seat skills line.");
+    // Still read as a fresh launch by the process-lineage readers.
+    expect(codexCommandResumeToken(sent)).toBeUndefined();
+  });
+
+  it("a launch without the choice (a resume, a restore, an older Codex) sends no developer instructions and merges into AGENTS.md as before", async () => {
+    const fs = mockFs({ "/spec/SOP.md": "How work flows here." }) as CodexAdapterFsOps & { _store: Record<string, string> };
+    const tmux = mockTmux();
+    const adapter = adapterFor(fs, tmux);
+    await adapter.deliverStartup([startupFile("SOP.md", "/spec/SOP.md")], { ...makeBinding(), guidanceFile: null } as NodeBinding);
+    expect(fs._store["/project/AGENTS.md"]).toContain("How work flows here.");
+    await adapter.launchHarness({ ...makeBinding(), guidanceFile: null } as NodeBinding, { name: "dev-qa@test-rig" });
+    const sent = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[1] as string).find((call) => call.includes(" -C '/project'"))!;
+    expect(sent).not.toContain("developer_instructions");
+  });
+});

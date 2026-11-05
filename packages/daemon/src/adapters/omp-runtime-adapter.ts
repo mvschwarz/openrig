@@ -13,4 +13,9 @@ export class OmpRuntimeAdapter extends PiRuntimeAdapter {
     if (!tmuxSession) return null;
     return nodePath.join(piSeatPaths(this.stateRoot, tmuxSession).agentDir, "skills", effectiveId, "SKILL.md");
   }
+
+  /** #875: OMP keeps its guidance in the repository AGENTS.md. Pi's agent-folder loading was shown natively; OMP's wasn't. */
+  override guidanceFileFor(): { file: string | null; note?: string } {
+    return { file: null };
+  }
 }

@@ -217,6 +217,8 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     if (!session || !(await this.deps.tmux.hasSession(session))) {
       return { ready: false, reason: "The seat's tmux session isn't there.", code: "session_missing" };
     }
+    const contained = this.contained();
+    if (contained) return contained.checkReady(binding);
     const command = await this.deps.tmux.getPaneCommand(session);
     if (!command || isShellForeground(command)) {
       return { ready: false, reason: `Community harness "${this.runtime}" isn't running: the pane is at a shell.`, code: "harness_not_running" };

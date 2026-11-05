@@ -2034,8 +2034,9 @@ describe.each(["done", "handed-off"] as const)("#318 seat-target closure without
 describe("#514 unclaimed sweep and a pending ask posted to a registered human", () => {
   const OWNER = { entityId: "human-owner", class: "human", displayName: "Owner", address: "human-owner@external",
     connectorBindings: [{ connector: "slack", ref: "U0OWNER", primary: true }], prefs: {} } as unknown as HumanFragment;
+  // Each is reached in Slack, as a posted receipt needs: nothing is posted to a person with no connector binding.
   const human = (entityId: string) => ({ entityId, class: "human", displayName: entityId, address: `${entityId}@external`,
-    connectorBindings: [], prefs: {} }) as unknown as HumanFragment;
+    connectorBindings: [{ connector: "slack", ref: `U-${entityId}`, primary: true }], prefs: {} }) as unknown as HumanFragment;
   const ALPHA = human("human-alpha");
   const BETA = human("human-beta");
   // A registered human whose id has no human- prefix: its canonical alias (owner@kernel) cannot carry an intent.

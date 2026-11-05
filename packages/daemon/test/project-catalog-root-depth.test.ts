@@ -70,4 +70,10 @@ describe("inferCatalogProject working-directory depth", () => {
     catalog({ id: "alpha", root: "/a" }, { id: "beta", root: "/a/b" });
     expect(infer("/a/b/c")).toEqual({ id: "beta", root: "/a/b", selectedBy: "cwd" });
   });
+
+  it("finds the workspace's project from a new kernel's own folder, as from the workspace root", () => {
+    catalog({ id: "default", root: "/ws" }, { id: "bundle", root: "/ws/projects/bundle" });
+    expect(infer("/ws/kernel")).toEqual({ id: "default", root: "/ws", selectedBy: "cwd" });
+    expect(infer("/ws")).toEqual(infer("/ws/kernel"));
+  });
 });

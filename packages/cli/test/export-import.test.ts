@@ -262,6 +262,67 @@ describe("rig export + import", () => {
     expect(writeFile).toHaveBeenCalledWith("rig.yaml", expect.any(String));
   });
 
+  describe("export: a default export never replaces a file", () => {
+    const occupied = (...taken: string[]) => vi.fn((p: string) => {
+      if (taken.includes(p)) throw Object.assign(new Error(`EEXIST: ${p}`), { code: "EEXIST" });
+    });
+    const run = async (deps: Partial<ExportDeps>, ...args: string[]) => {
+      const program = new Command();
+      program.addCommand(exportCommand(exportDeps(deps)));
+      return captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-1", ...args]));
+    };
+
+    it("the first export writes rig.yaml", async () => {
+      const writeNewFile = occupied();
+      const logs = await run({ writeNewFile });
+      expect(writeNewFile.mock.calls.map((c) => c[0])).toEqual(["rig.yaml"]);
+      expect(logs).toContain("Exported to rig.yaml");
+      expect(logs.join("\n")).not.toContain("left unchanged");
+    });
+
+    it("an occupied rig.yaml sends the export to a sibling, and says which", async () => {
+      const writeFile = vi.fn();
+      const writeNewFile = occupied("rig.yaml");
+      const exitCode = process.exitCode;
+      const logs = await run({ writeFile, writeNewFile });
+      expect(writeFile).not.toHaveBeenCalled();
+      expect(writeNewFile).toHaveBeenLastCalledWith("rig-export.yaml", expect.any(String));
+      expect(logs).toContain("Exported to rig-export.yaml");
+      expect(logs.join("\n")).toContain("rig.yaml already exists and was left unchanged");
+      expect(process.exitCode).toBe(exitCode);
+    });
+
+    it("occupied siblings are kept too", async () => {
+      const writeNewFile = occupied("rig.yaml", "rig-export.yaml", "rig-export-2.yaml");
+      const logs = await run({ writeNewFile });
+      expect(writeNewFile.mock.calls.map((c) => c[0])).toEqual(["rig.yaml", "rig-export.yaml", "rig-export-2.yaml", "rig-export-3.yaml"]);
+      expect(logs).toContain("Exported to rig-export-3.yaml");
+    });
+
+    it("-o replaces the file it names, including rig.yaml", async () => {
+      const writeFile = vi.fn();
+      const writeNewFile = occupied("rig.yaml");
+      const logs = await run({ writeFile, writeNewFile }, "-o", "rig.yaml");
+      expect(writeFile).toHaveBeenCalledWith("rig.yaml", expect.any(String));
+      expect(writeNewFile).not.toHaveBeenCalled();
+      expect(logs).toContain("Exported to rig.yaml");
+    });
+
+    it("a real write failure stays a failure, with no success reported", async () => {
+      const writeNewFile = vi.fn(() => { throw Object.assign(new Error("no space"), { code: "ENOSPC" }); });
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const program = new Command();
+        program.addCommand(exportCommand(exportDeps({ writeNewFile })));
+        await expect(program.parseAsync(["node", "rig", "export", "rig-1"])).rejects.toThrow("no space");
+        expect(writeNewFile).toHaveBeenCalledTimes(1);
+        expect(log).not.toHaveBeenCalledWith(expect.stringContaining("Exported to"));
+      } finally {
+        log.mockRestore();
+      }
+    });
+  });
+
   it("export: warns when culture_file or startup files do not resolve relative to output directory", async () => {
     const writeFile = vi.fn();
     const exists = vi.fn((p: string) => !p.includes("missing-culture.md") && !p.includes("missing-start.md") && !p.includes("optional-start.md"));

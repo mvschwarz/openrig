@@ -55,7 +55,8 @@ together in that home; it needs its own working sign-in and doesn't relocate `~/
 >   - Codex: hooks, workspace trust and team-selected config fragments (including MCP) in the selected
 >     `CODEX_HOME/config.toml`, default `~/.codex/config.toml`. These affect other Codex sessions using that home.
 >   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
->     `.claude/settings.local.json`, plus a status line unless you already have your own.
+>     `.claude/settings.local.json`, plus a status line unless you already have your own. `rig down` takes the hooks
+>     and status line back out once no Claude seat uses that directory.
 >   - Discovery skills go in `~/.claude/skills` and `~/.agents/skills`.
 >   - Each seat's `CLAUDE.md` or `AGENTS.md` gets OpenRig's managed blocks (culture, identity, onboarding). One more
 >     line, pointing an agent at its seat skills, is added only on a yes: saved at setup, or set where the daemon runs
@@ -75,8 +76,17 @@ You need Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude
 Code or Codex account: one is enough, since the kernel operator adapts the
 shipped `starter` team to whichever you have. On Linux, the distribution's own
 Node.js can be older (Ubuntu 24.04's is 18); install a supported version with
-[nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac
-with Apple silicon, use Node.js 22 (see the [compatibility
+[nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource.
+
+For a tarball or manual Node install on Linux, put its bin directory on PATH in
+`~/.profile`, for example `export PATH="/path/to/node/bin:$PATH"`, rather than only
+in an interactive `~/.bashrc`. Bash reads the first of `~/.bash_profile`,
+`~/.bash_login` and `~/.profile`; if one of the first two exists, source `~/.profile`
+there. Other shells use their own login file (for example, zsh's `~/.zprofile`).
+Check `bash -lc 'command -v node rig'`: both paths must appear in the output.
+Use Codex's tool shell for this check if it differs from Bash.
+
+On a Mac with Apple silicon, use Node.js 22 (see the [compatibility
 history](../releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where
 you aren't an administrator, or where Homebrew belongs to another account (its
 `brew install` is refused), install Node.js in your own home folder with
@@ -289,6 +299,17 @@ kernel in the background without a project starter. An absent unused provider is
 fine; if both accounts are authenticated, the kernel uses both even when your
 later project uses just one. A request to use only one provider for everything
 is a separate choice.
+
+`/api/kernel/status` retains the chosen template (`rig.yaml`,
+`rig-claude-only.yaml` or `rig-codex-only.yaml`) across daemon restarts and
+recovery, including starts with `--no-kernel`. It reads the rig's latest rig-spec
+bootstrap record, including a partial launch, so an older kernel's recorded
+selection is also available. This is the original selection; the rig's live spec
+describes its current configuration. The saved source must match a template under
+the current installation’s built-in specs directory. A custom project path with
+the same directory suffix, an old source path that can no longer be verified
+(for example, after a Node version change moves the global install), or a kernel
+without bootstrap history reports an unknown variant.
 
 **Started is not ready.** Read the `Kernel:` boot state in `rig status` and the
 individual seat state in `rig ps --nodes --rig kernel`. The view may open while

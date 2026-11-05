@@ -33,7 +33,8 @@ import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-re
 import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
-import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks } from "./restore-guidance.js";
+import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
+import { decideManagedBlock, managedBlockRecords } from "./managed-block-records.js";
 import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -1424,6 +1425,9 @@ export class RestoreOrchestrator {
     launchResult: { session: import("./types.js").Session; binding: import("./types.js").Binding },
     warnings: string[] | undefined,
     activityHookGaps: string[] | undefined,
+    // The directory the seat was launched in (snapshot cwd, else live node
+    // cwd, else "." — resolved by the caller, which owns the live lookup).
+    launchCwd: string,
   ): Promise<void> {
     let desired: DesiredClaudeActivityHooks;
     try {
@@ -1458,9 +1462,9 @@ export class RestoreOrchestrator {
     };
     try {
       const result = await activityAdapter.project({
-        runtime: "claude-code", cwd: node.cwd ?? ".", entries: [marker],
+        runtime: "claude-code", cwd: launchCwd, entries: [marker],
         startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
-      }, { ...launchResult.binding, cwd: node.cwd ?? "." });
+      }, { ...launchResult.binding, cwd: launchCwd });
       warnings?.push(...(result.warnings ?? []));
       if (result.projected.includes(marker.effectiveId)) {
         const detail = "saved startup context had no Claude activity-hook selection; the current seat specification selects it, so the current marker was re-applied without replaying startup content.";
@@ -1494,6 +1498,12 @@ export class RestoreOrchestrator {
     try { return readFootprintAnswer(this.routerLineSettings ?? new SettingsStore()).state === "yes"; } catch { return false; }
   }
 
+  /** The recorded guidance file follows the snapshot a seat was exactly resumed from (#2432); nothing else in its saved
+   *  startup selection changes. A database from before the column has nothing to record. */
+  private recordRestoredGuidanceFile(nodeId: string, file: string | null): void {
+    try { this.db.prepare("UPDATE node_startup_context SET guidance_file = ? WHERE node_id = ?").run(file, nodeId); } catch { /* no column */ }
+  }
+
   private checkRestoredGuidance(
     result: RestoreNodeResult,
     node: SnapshotData["nodes"][number],
@@ -1505,7 +1515,15 @@ export class RestoreOrchestrator {
     if (!["resumed", "fresh-primed", "fresh", "rebuilt", "attention_required"].includes(result.status)) return result;
     let guidance: ReturnType<typeof seatGuidance>;
     try {
-      guidance = seatGuidance(data.nodeStartupContext?.[node.id] ?? null, node.cwd,
+      // The seat was launched in the snapshot node's cwd when set, else the
+      // live node's cwd — the same resolved launch directory the hook
+      // projection and startup replay use. Passing node.cwd alone returns
+      // no guidance at all when the snapshot node has no cwd. No "." fallback:
+      // when neither cwd exists the old skip is kept, so no guidance file is
+      // written into the daemon's own working directory.
+      const guidanceCwd = node.cwd
+        ?? this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId)?.cwd;
+      guidance = seatGuidance(data.nodeStartupContext?.[node.id] ?? null, guidanceCwd,
         this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
     } catch (err) {
       warnings?.push(`Restore: ${node.logicalId}: could not check its guidance: ${(err as Error).message}`);
@@ -1513,16 +1531,37 @@ export class RestoreOrchestrator {
     }
     if (guidance) guidance = applySeatSkillsLineRule(guidance, this.routerLineAnsweredYes()).guidance;
     if (!guidance || guidance.items.length === 0) return result;
+    // #2456: blocks the seat runs as they are although they differ from their source (edited by hand, or with no record of
+    // OpenRig writing them), named on its result. They aren't gaps: the seat has guidance there.
+    const notes = this.keptGuidanceNotes(guidance);
+    const noted = notes.length > 0 ? { ...result, guidanceNotes: notes } : result;
     let missing: string[];
     try {
       missing = missingGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") });
     } catch (err) {
       missing = [`(could not read ${guidance.targetPath}: ${(err as Error).message})`];
     }
-    if (missing.length === 0) return result;
+    if (missing.length === 0) return noted;
     const gap = `${node.logicalId} is running without part of its guidance: ${guidance.targetPath} lacks the OpenRig blocks ${missing.join(", ")}.`;
     warnings?.push(`Restore: ${gap}`);
-    return { ...result, guidanceGaps: missing };
+    return { ...noted, guidanceGaps: missing };
+  }
+
+  /** #2456: a note for each block in the seat's guidance file that differs from its source and isn't OpenRig's last write. */
+  private keptGuidanceNotes(guidance: NonNullable<ReturnType<typeof seatGuidance>>): string[] {
+    let content: string;
+    try { content = existsSync(guidance.targetPath) ? readFileSync(guidance.targetPath, "utf-8") : ""; } catch { return []; }
+    if (!content) return [];
+    const records = managedBlockRecords(this.db);
+    const notes: string[] = [];
+    for (const item of guidance.items) {
+      if (item.unresolved) continue;
+      let source: string;
+      try { source = readFileSync(item.sourcePath, "utf-8"); } catch { continue; }
+      const { note } = decideManagedBlock(content, item.blockId, source, records, guidance.targetPath, { unrecorded: "keep", sourcePath: item.sourcePath });
+      if (note) notes.push(note);
+    }
+    return notes;
   }
 
   /** OPR.0.3.4.2 (B) — roll a just-launched session back to ZERO sessions for
@@ -1675,6 +1714,16 @@ export class RestoreOrchestrator {
     // deliberately skips the resume attempt; its launch reports `fresh-primed`.
     const liveRuntime = this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId
       && (!selected || current.id === node.id))?.runtime ?? node.runtime;
+    // The seat was launched in the snapshot node's cwd when set; NodeLauncher
+    // otherwise falls back to the live node's cwd, and to the daemon's working
+    // directory when neither is set (tmux new-session without -c inherits it;
+    // "." is the codebase-wide convention for that case). Projecting hooks
+    // with the snapshot cwd alone would write another project's settings when
+    // the live node moved the seat.
+    const launchCwd = node.cwd
+      ?? this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId
+        && (!selected || current.id === node.id))?.cwd
+      ?? ".";
     const restorePolicy = effectiveRestorePolicy(seatFacts(data, node.id, node.runtime, liveRuntime), session?.restorePolicy);
     const noConversation = isOrdinaryTerminalSeat(seatFacts(data, node.id, node.runtime, liveRuntime));
     // A terminal's restore is its shell and its saved startup: one whose startup failed wasn't restored whole.
@@ -1704,17 +1753,26 @@ export class RestoreOrchestrator {
     // re-apply the CURRENT marker, marker-only: no profile-wide resolution,
     // no guidance, skills or startup replay, and the saved context is never
     // rewritten. A seat whose current spec does not select hooks stays silent.
+    // The no-context fallback is scoped: it applies only to a legacy
+    // (non-pod) agent whose live runtime still matches the snapshot's. A
+    // runtime changed after the snapshot would otherwise read the snapshot's
+    // runtime and write Claude hooks into another agent's working folder
+    // (with a saved context, the compatibility gate already stops that
+    // mismatch), and a pod-aware agent must get no write from this recovery
+    // at all — it still ends at the "Harness not started" gate, unchanged.
     const activityAdapter = opts?.adapters?.["claude-code"];
-    if (resumeRequested && resumeToken && launchResult && startupCtx?.runtime === "claude-code") {
-      const entries = startupCtx.projectionEntries.filter(e =>
+    const recoveryRuntime = startupCtx?.runtime
+      ?? (!isPodAware && liveRuntime === node.runtime ? node.runtime : null);
+    if (resumeRequested && resumeToken && launchResult && recoveryRuntime === "claude-code") {
+      const entries = (startupCtx?.projectionEntries ?? []).filter(e =>
         e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks");
       if (entries.length > 0 && activityAdapter) try {
         const result = await activityAdapter.project({
-          runtime: "claude-code", cwd: node.cwd ?? ".",
+          runtime: "claude-code", cwd: launchCwd,
           entries: entries.map(e => ({ ...e, category: "runtime_resource" as const, classification: "safe_projection" as const,
             mergeStrategy: e.mergeStrategy as import("./projection-planner.js").ProjectionEntry["mergeStrategy"] })),
           startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
-        }, { ...launchResult.binding, cwd: node.cwd ?? "." });
+        }, { ...launchResult.binding, cwd: launchCwd });
         warnings?.push(...(result.warnings ?? []));
         for (const skipped of result.skipped) warnings?.push(`Restore activity hooks: skipped ${skipped}; saved hooks could not be reapplied.`);
         for (const failure of result.failed) warnings?.push(`Restore activity hooks: ${failure.error}`);
@@ -1722,7 +1780,7 @@ export class RestoreOrchestrator {
         // Activity delivery remains best-effort, as on an ordinary fresh launch.
         warnings?.push(`Restore activity hooks: ${(error as Error).message}`);
       } else if (entries.length === 0) {
-        await this.restoreCurrentActivityHooks(node, activityAdapter, launchResult, warnings, activityHookGaps);
+        await this.restoreCurrentActivityHooks(node, activityAdapter, launchResult, warnings, activityHookGaps, launchCwd);
       }
     }
 
@@ -1734,7 +1792,13 @@ export class RestoreOrchestrator {
     if (resumeRequested && resumeToken && launchResult) {
       let guidance: ReturnType<typeof seatGuidance> = null;
       try {
-        guidance = seatGuidance(startupCtx, node.cwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
+        // Same resolved directory as launchCwd, without its "." fallback:
+        // when neither the snapshot nor the live node has a cwd, keep the
+        // old skip instead of writing guidance into the daemon's folder.
+        const guidanceCwd = node.cwd
+          ?? this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId
+            && (!selected || current.id === node.id))?.cwd;
+        guidance = seatGuidance(startupCtx, guidanceCwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
       } catch (err) {
         // Guidance never blocks the exact resume; the post-launch check discloses the gap.
         warnings?.push(`Restore guidance: ${node.logicalId}: could not read its saved guidance selection: ${(err as Error).message}`);
@@ -1744,16 +1808,32 @@ export class RestoreOrchestrator {
         guidance = rule.guidance;
         if (rule.excluded === "linked") warnings?.push(`Restore guidance: ${node.logicalId}: the seat-skills line wasn't put back, because ${guidance.targetPath} is a link.`);
       }
+      // #2432: the record names the file this resumed seat uses, the snapshot's choice, which can be older than the
+      // database's: an older snapshot restored exactly after a newer launch resumes on its repository file.
+      if (startupCtx) this.recordRestoredGuidanceFile(node.id, startupCtx.guidanceFile ?? null);
+      // #2432: a recorded file that became a link after its launch gets nothing put back through it; the check after the
+      // launch reports the blocks it lacks.
+      const linked = startupCtx?.guidanceFile && guidance ? guidanceFileSharedByLink(guidance.targetPath, lstatLinkInfo) : null;
+      if (linked && guidance) {
+        warnings?.push(`Restore guidance: ${node.logicalId}: ${linked} is now a link, so nothing was put back in ${guidance.targetPath}, which other sessions could read.`);
+        guidance = null;
+      }
       if (guidance && guidance.items.length > 0) {
+        // #2456: a block OpenRig wrote whose source changed since is refreshed too; an edited one, or one with no record, is
+        // left as it is and named (the check after the launch carries the names onto the seat's result).
         const repair = restoreMissingGuidance(guidance, {
           exists: existsSync,
           readFile: (path) => readFileSync(path, "utf-8"),
           writeFile: (path, content) => writeFileSync(path, content, "utf-8"),
           mkdirp: (path) => mkdirSync(path, { recursive: true }),
-        });
+        }, managedBlockRecords(this.db));
         if (repair.restored.length > 0) {
           warnings?.push(`Restore guidance: ${node.logicalId}: put back missing blocks ${repair.restored.join(", ")} in ${guidance.targetPath} from their current source files.`);
         }
+        if (repair.refreshed.length > 0) {
+          warnings?.push(`Restore guidance: ${node.logicalId}: refreshed blocks ${repair.refreshed.join(", ")} in ${guidance.targetPath} from their current source files.`);
+        }
+        for (const kept of repair.kept) warnings?.push(`Restore guidance: ${node.logicalId}: ${kept}`);
         for (const gap of repair.gaps) warnings?.push(`Restore guidance: ${node.logicalId}: ${gap}`);
       }
     }
@@ -1776,7 +1856,7 @@ export class RestoreOrchestrator {
           } catch { /* best-effort: without it a rotation stays unproved, as before */ }
         }
         if (selected && !selected.beforeNative(launchedSessionId, launchResult?.binding.id)) return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: "The selected seat, settings or history changed after shell creation; native resume was not dispatched." };
-        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", this.liveCodexProfile(rigId, node, selected?.nodeId), modelForRestore(), this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor,
+        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, launchCwd, this.liveCodexProfile(rigId, node, selected?.nodeId), modelForRestore(), this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor,
           selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
@@ -1985,7 +2065,7 @@ export class RestoreOrchestrator {
           // Build fresh projection plan (all safe_projection; replaySkip says which seat skills are left alone)
           const plan: import("./projection-planner.js").ProjectionPlan = {
             runtime: startupCtx.runtime,
-            cwd: node.cwd ?? ".",
+            cwd: launchCwd,
             entries: filteredEntries.map((e) => ({
               ...e,
               classification: "safe_projection" as const,
@@ -2000,9 +2080,11 @@ export class RestoreOrchestrator {
 
           const binding = {
             ...launchResult.binding,
+            // #875: the guidance file this seat's launch recorded; an older snapshot recorded none, so its file stays the rule's.
+            guidanceFile: startupCtx.guidanceFile ?? null,
             ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
             ...(opts?.claudeExecutable ? { claudeExecutable: opts.claudeExecutable } : {}),
-            cwd: node.cwd ?? ".",
+            cwd: launchCwd,
             codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined,
             // OPR.0.4.8.3 Seam B: the pod-aware restore path binds the restored posture too
             // (both restore paths consume persisted provenance — preflight surface 3).

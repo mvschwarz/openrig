@@ -559,3 +559,97 @@ profiles:
     expect(result.ready).toBe(true);
   });
 });
+
+
+describe("seat login-shell PATH warning", () => {
+  const isLookup = (command: string) => command.endsWith(" -lc 'command -v rig'");
+  const warning = (warnings: string[]) => warnings.filter(text => text.includes("login-shell PATH"));
+  async function preflight(exec: ExecFn, materializeOnly = false, runtime = "codex") {
+    const member = { agentRef: "local:agents/impl", profile: "default", runtime, cwd: ".",
+      env: { PATH: "/member/bin:/usr/bin", MEMBER_TAG: "member" } };
+    const input = {
+      rigSpecYaml: makeRigYaml({ env: { SHELL: "/bin/bash", PATH: "/rig/bin:/usr/bin", RIG_TAG: "rig" },
+        pods: [{ id: "dev", label: "Dev", members: [{ ...member, id: "one" }, { ...member, id: "two" }], edges: [] }] }),
+      rigRoot: RIG_ROOT, fsOps: mockFs({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl") }),
+      exec, materializeOnly, envOverride: { PATH: "/override/bin:/usr/bin" },
+    };
+    return rigPreflight(input);
+  }
+
+  it("warns once for matching seat environments without refusing, with the login-profile fix", async () => {
+    const exec = vi.fn<ExecFn>().mockImplementation(async command => {
+      if (isLookup(command)) throw Object.assign(new Error("private diagnostic"), { code: 1 });
+      return "available";
+    });
+    const result = await preflight(exec);
+    expect(result.ready).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(warning(result.warnings)).toHaveLength(1);
+    expect(warning(result.warnings)[0]).toContain("dev.one, dev.two");
+    expect(warning(result.warnings)[0]).toContain("~/.profile");
+    expect(warning(result.warnings)[0]).toContain("bash -lc 'command -v node rig'");
+    expect(warning(result.warnings)[0]).toContain("launch continues");
+    expect(result.warnings.join("\n")).not.toContain("private diagnostic");
+    const lookups = exec.mock.calls.map(([command]) => command).filter(isLookup);
+    expect(lookups).toHaveLength(1);
+    expect(lookups[0]).toContain("'/bin/bash' -lc 'command -v rig'");
+    expect(lookups[0]).toContain("'PATH=/override/bin:/usr/bin'");
+    expect(lookups[0]).toContain("'RIG_TAG=rig'");
+    expect(lookups[0]).toContain("'MEMBER_TAG=member'");
+    expect(lookups[0]).not.toContain("/rig/bin");
+    expect(lookups[0]).not.toContain("/member/bin");
+  });
+
+  it("reports an uncompleted login check as unconfirmed, with no new error or leaked command", async () => {
+    const exec = vi.fn<ExecFn>().mockImplementation(async command => {
+      if (isLookup(command)) throw new ProbeTimeoutError(command + " private diagnostic", RUNTIME_PROBE_TIMEOUT_MS);
+      return "available";
+    });
+    const result = await preflight(exec);
+    expect(result).toMatchObject({ ready: true, errors: [] });
+    expect(warning(result.warnings)).toHaveLength(1);
+    expect(warning(result.warnings)[0]).toContain("could not confirm");
+    expect(warning(result.warnings)[0]).not.toContain("private diagnostic");
+    expect(warning(result.warnings)[0]).not.toContain("/override/bin");
+  });
+
+  it("keeps a successful lookup quiet", async () => {
+    const result = await preflight(async () => "/opt/node/bin/rig");
+    expect(result).toMatchObject({ ready: true, errors: [] });
+    expect(warning(result.warnings)).toEqual([]);
+  });
+
+  it("does not start a login-shell lookup for materialize-only preflight", async () => {
+    const exec = vi.fn<ExecFn>().mockResolvedValue("available");
+    const result = await preflight(exec, true);
+    expect(result).toMatchObject({ ready: true, errors: [] });
+    expect(exec.mock.calls.map(([command]) => command).filter(isLookup)).toEqual([]);
+    expect(warning(result.warnings)).toEqual([]);
+  });
+
+  it("keeps a Claude-only pod quiet when rig exists only in its interactive shell", async () => {
+    const exec = vi.fn<ExecFn>().mockImplementation(async command => {
+      if (isLookup(command)) throw Object.assign(new Error("login PATH has no rig"), { code: 1 });
+      return "available";
+    });
+    const result = await preflight(exec, false, "claude-code");
+    expect(result).toMatchObject({ ready: true, errors: [] });
+    expect(warning(result.warnings)).toEqual([]);
+    expect(exec.mock.calls.map(([command]) => command).filter(isLookup)).toEqual([]);
+  });
+
+  it("keeps a Claude-only legacy launch quiet without a login-shell lookup", async () => {
+    const db = setupDb();
+    const exec = vi.fn<ExecFn>().mockImplementation(async command => {
+      if (isLookup(command)) throw Object.assign(new Error("login PATH has no rig"), { code: 1 });
+      return "available";
+    });
+    try {
+      const preflight = new RigSpecPreflight({ rigRepo: new RigRepository(db), tmuxAdapter: mockTmux(), exec, cmuxExec: exec });
+      const result = await preflight.check(validSpec());
+      expect(result).toMatchObject({ ready: true, errors: [] });
+      expect(warning(result.warnings)).toEqual([]);
+      expect(exec.mock.calls.map(([command]) => command).filter(isLookup)).toEqual([]);
+    } finally { db.close(); }
+  });
+});

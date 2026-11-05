@@ -19,6 +19,28 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
   });
 }
 
+function captureOutputs(fn: () => Promise<void>): Promise<{ stdout: string[]; stderr: string[]; exitCode: number | undefined }> {
+  return new Promise(async (resolve) => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    const origExitCode = process.exitCode;
+    process.exitCode = undefined;
+    console.log = (...args: unknown[]) => stdout.push(args.join(" "));
+    console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+    try {
+      await fn();
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+    }
+    const exitCode = process.exitCode;
+    process.exitCode = origExitCode;
+    resolve({ stdout, stderr, exitCode });
+  });
+}
+
 function runningDeps(port: number): StatusDeps {
   return { lifecycleDeps: { ...mockLifecycleDeps(), exists: vi.fn((p: string) => p === STATE_FILE), readFile: vi.fn((p: string) => { if (p === STATE_FILE) return JSON.stringify({ pid: 123, port, db: "test.sqlite", startedAt: "2026-04-03T00:00:00Z" } as DaemonState); return null; }), fetch: vi.fn(async () => ({ ok: true })) }, clientFactory: (baseUrl) => new DaemonClient(baseUrl) };
 }
@@ -38,11 +60,16 @@ const RIG_REVIEW = {
 describe("Specs CLI", () => {
   let server: http.Server;
   let port: number;
+  let lastLibraryUrl = "";
+  const libraryRequests: string[] = [];
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
-      const url = decodeURIComponent(req.url ?? "");
+      const rawUrl = req.url ?? "";
+      libraryRequests.push(rawUrl);
+      const url = decodeURIComponent(rawUrl);
       if (url === "/api/specs/library" || url.startsWith("/api/specs/library?")) {
+        lastLibraryUrl = url;
         res.writeHead(200, { "Content-Type": "application/json" });
         const kind = new URL(`http://localhost${url}`).searchParams.get("kind");
         const filtered = kind ? LIBRARY_ENTRIES.filter((e) => e.kind === kind) : LIBRARY_ENTRIES;
@@ -112,6 +139,80 @@ describe("Specs CLI", () => {
     expect(parsed.length).toBe(2);
   });
 
+  it("requests hidden built-ins only when explicitly asked", async () => {
+    await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--include-builtins", "--kind", "rig"]); });
+    const params = new URL(`http://localhost${lastLibraryUrl}`).searchParams;
+    expect(params.get("kind")).toBe("rig");
+    expect(params.get("include_builtins")).toBe("true");
+  });
+
+  it("specs ls --kind warns on unrecognized kind and still queries daemon", async () => {
+    const requestStart = libraryRequests.length;
+    const { stdout, stderr, exitCode } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", "invalid"]);
+    });
+    expect(stderr.join("\n")).toContain("Warning: unrecognized --kind 'invalid'. Supported kinds: rig, agent, workflow");
+    expect(stdout.join("\n")).toContain("No invalid specs found");
+    expect(exitCode).toBeUndefined();
+    expect(libraryRequests.slice(requestStart)).toContain("/api/specs/library?kind=invalid");
+  });
+
+  it("specs ls --kind '' warns on empty kind and still queries daemon", async () => {
+    const requestStart = libraryRequests.length;
+    const { stdout, stderr, exitCode } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", ""]);
+    });
+    expect(stderr.join("\n")).toContain("Warning: unrecognized --kind ''. Supported kinds: rig, agent, workflow");
+    expect(stdout.join("\n")).toContain("No specs found");
+    expect(exitCode).toBeUndefined();
+    expect(libraryRequests.slice(requestStart)).toContain("/api/specs/library?kind=");
+  });
+
+  it("specs ls --kind encodes special characters in daemon request", async () => {
+    const requestStart = libraryRequests.length;
+    await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", "rig#draft"]);
+    expect(libraryRequests.slice(requestStart)).toContain("/api/specs/library?kind=rig%23draft");
+  });
+
+  it("filters an unknown kind even when built-ins are requested", async () => {
+    const { stdout, stderr } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", "rig&kind=agent", "--include-builtins", "--json"]);
+    });
+    expect(stderr.join("\n")).toContain("Warning: unrecognized --kind");
+    expect(JSON.parse(stdout.join("\n"))).toEqual([]);
+    expect(new URL(`http://localhost${libraryRequests.at(-1)}`).searchParams.get("kind")).toBe("rig&kind=agent");
+    expect(new URL(`http://localhost${libraryRequests.at(-1)}`).searchParams.get("include_builtins")).toBe("true");
+  });
+
+  it.each(["rig", "agent", "workflow"])("specs ls --kind %s runs without warning", async (kind) => {
+    const requestStart = libraryRequests.length;
+    const { stderr, exitCode } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", kind]);
+    });
+    expect(stderr.join("\n")).not.toContain("Warning:");
+    expect(exitCode).toBeUndefined();
+    expect(libraryRequests.slice(requestStart)).toContain(`/api/specs/library?kind=${kind}`);
+  });
+
+  it("specs ls with --kind reports 'No <kind> specs found' when empty", async () => {
+    const { stdout, stderr } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", "workflow"]);
+    });
+    expect(stdout.join("\n")).toContain("No workflow specs found");
+    expect(stdout.join("\n")).not.toContain("No specs in library");
+    expect(stderr.join("\n")).not.toContain("Warning:");
+  });
+
+  it("specs ls --kind invalid --json emits parseable JSON on stdout and warning on stderr", async () => {
+    const { stdout, stderr } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", "invalid", "--json"]);
+    });
+    expect(stderr.join("\n")).toContain("Warning: unrecognized --kind 'invalid'. Supported kinds: rig, agent, workflow");
+    const parsed = JSON.parse(stdout.join("\n"));
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBe(0);
+  });
+
   it("specs show resolves by name and prints metadata", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "specs", "show", "review-rig"]);
@@ -149,7 +250,7 @@ describe("Specs CLI", () => {
   it("specs show --kind resolves same-name rig/workflow entries", async () => {
     const dupServer = http.createServer((req, res) => {
       const url = decodeURIComponent(req.url ?? "");
-      if (url === "/api/specs/library?kind=rig") {
+      if (url.startsWith("/api/specs/library?kind=rig")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify([{ ...LIBRARY_ENTRIES[0], id: "rig-same", kind: "rig", name: "conveyor" }]));
       } else {
@@ -172,6 +273,28 @@ describe("Specs CLI", () => {
     expect(output).toContain("Kind:     rig");
     expect(output).toContain("/builtin/review-rig.yaml");
     expect(exitCode).toBeUndefined();
+  });
+
+  it("specs show --kind warns on unrecognized kind and still queries daemon", async () => {
+    const requestStart = libraryRequests.length;
+    const { stderr, exitCode } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "show", "review-rig", "--kind", "invalid"]);
+    });
+    expect(stderr.join("\n")).toContain("Warning: unrecognized --kind 'invalid'. Supported kinds: rig, agent, workflow");
+    expect(stderr.join("\n")).toContain("Spec 'review-rig' not found in invalid library");
+    expect(exitCode).toBe(1);
+    expect(libraryRequests.slice(requestStart)).toContain("/api/specs/library?kind=invalid");
+  });
+
+  it("specs preview --kind warns on unrecognized kind and still queries daemon", async () => {
+    const requestStart = libraryRequests.length;
+    const { stderr, exitCode } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "preview", "review-rig", "--kind", "invalid"]);
+    });
+    expect(stderr.join("\n")).toContain("Warning: unrecognized --kind 'invalid'. Supported kinds: rig, agent, workflow");
+    expect(stderr.join("\n")).toContain("Spec 'review-rig' not found in invalid library");
+    expect(exitCode).toBe(1);
+    expect(libraryRequests.slice(requestStart)).toContain("/api/specs/library?kind=invalid");
   });
 
   it("specs show not-found error points people back to managed apps in the library", async () => {

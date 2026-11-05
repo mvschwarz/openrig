@@ -336,10 +336,11 @@ function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
   };
 }
 
-/** The grant service names an external caller's seat cus-<id>-caller@<rig>. v1 marks no seat as a caller, so an item
- *  from a seat of this shape is never the team's question to an external caller, and an external caller can't hand a
- *  task to one. The shape never grants anything. */
-const CALLER_SHAPED = /^cus-.+-caller@[^@]+$/;
+/** The grant service names each connected assistant's seat cus-<id>-<connection>@<rig> (an existing connection's is
+ *  cus-<id>-caller@<rig>). v1 marks no seat as a caller, so for a grant without team/list an item from a seat of this
+ *  shape is never the team's question to it, and it can't hand a task to one. The shape only refuses; it never grants
+ *  anything, and a grant with team/list doesn't read it. */
+const CALLER_SHAPED = /^cus-[^@]+-[^@]+@[^@]+$/;
 
 /** OpenRig's own tags that decide what a person asked about a row sees of its body: what Slack ingestion records about where
  *  the row came from and which parts of its body OpenRig wrote (the sender's channel, the attachments block, the body's
@@ -349,11 +350,15 @@ const CALLER_SHAPED = /^cus-.+-caller@[^@]+$/;
 const OPENRIG_PROVENANCE_TAG = /^(?:founder-slack|inbound|shared-channel|gate)$|^participant:|^slack-/;
 
 /** An external grant (openrig.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
- *  only caller. It may hand tasks to its rigs' team seats (never a caller-shaped seat, a person or another host's
- *  seat), read the items it sent and the team's questions to it (never team-internal or another caller's items), follow
- *  a handed-on item only where it came back to it, and read the artifacts of its own items under its named roots. */
+ *  only caller. It may hand tasks to its rigs' other seats (never a person or another host's seat, and without team/list
+ *  never a caller-shaped seat), read the items it sent and those addressed to it from those seats (never team-internal
+ *  items or other callers' items between themselves), change only the items addressed to its own seat (with the claim and
+ *  update pairs), follow a handed-on item only where it came back to it, and read the artifacts of its own items under
+ *  its named roots. */
 function externalScope(access: McpAccess, seatOf: () => string | undefined): Scope {
   const rigs = new Set(access.rigs);
+  // team/list makes the caller one of its rigs' participants: it may reach another connected assistant's seat.
+  const participant = access.external?.objects.team?.includes("list") === true;
   const caller = (value: unknown): boolean => typeof value === "string" && value !== "" && value === seatOf();
   // A seat of one of its rigs on this instance: member@rig, never a person or another host's seat.
   const member = (value: unknown): boolean => {
@@ -361,17 +366,20 @@ function externalScope(access: McpAccess, seatOf: () => string | undefined): Sco
     const parts = value.split("@");
     return parts.length === 2 && parts[0] !== "" && parts[1] !== "external" && rigs.has(parts[1]!);
   };
-  const team = (value: unknown): boolean => member(value) && !caller(value) && !CALLER_SHAPED.test(value as string);
+  const team = (value: unknown): boolean => member(value) && !caller(value) && (participant || !CALLER_SHAPED.test(value as string));
   const field = (row: unknown, name: "sourceSession" | "destinationSession"): unknown => ((row ?? {}) as Record<string, unknown>)[name];
   const item = (row: unknown): boolean => caller(field(row, "sourceSession"))
     || (caller(field(row, "destinationSession")) && team(field(row, "sourceSession")));
   return {
     session: (value) => caller(value) || team(value),
     item,
-    owner: () => false,
+    // Only an item addressed to its exact seat, and one it may read, is its own to change; the daemon's claim also checks
+    // the claimant.
+    owner: (row) => caller(field(row, "destinationSession")) && item(row),
     rig: (name) => typeof name === "string" && rigs.has(name),
     root: (name) => typeof name === "string" && access.roots.includes(name),
-    // A task goes to the team: never to the caller itself or to another caller-shaped seat, which v1 can't tell apart.
+    // A task goes to another seat of its rigs: never to the caller itself, and without team/list never to another
+    // caller-shaped seat, which v1 can't tell apart.
     destination: team,
     successor: caller,
     artifact: (row) => caller(field(row, "sourceSession")),
@@ -480,7 +488,8 @@ export type McpAccess = {
 
 /** The tool each external object/action pair offers. A pair not listed here offers nothing. */
 const EXTERNAL_TOOLS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
-  queue: { create: "rig_queue_create", show: "rig_queue_show", list: "rig_queue_list" },
+  queue: { create: "rig_queue_create", show: "rig_queue_show", list: "rig_queue_list", claim: "rig_queue_claim", update: "rig_queue_update" },
+  team: { list: "rig_team" },
   artifact: { read: "rig_artifact_read" },
 };
 
@@ -564,6 +573,16 @@ const SHARED_INSTRUCTIONS = [
 ];
 const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
 const EXTERNAL_INSTRUCTIONS = SHARED_INSTRUCTIONS.join("\n");
+/** For an external grant that names claim and update: how it works the items addressed to it, messages included. */
+const EXTERNAL_INBOX_INSTRUCTIONS = [...SHARED_INSTRUCTIONS,
+  "Items addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it, close it done, and reply, when it needs one, with a new item to its sender. Nothing promises to wake you, so check your items again.",
+].join("\n");
+
+function instructionsFor(access: McpAccess | undefined): string {
+  if (!access?.external) return INSTRUCTIONS;
+  const tools = externalTools(access.external.objects);
+  return tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? EXTERNAL_INBOX_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
+}
 
 /**
  * Maps a DaemonResponse to MCP tool result.
@@ -616,7 +635,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
-  }, { instructions: options.access?.external ? EXTERNAL_INSTRUCTIONS : INSTRUCTIONS });
+  }, { instructions: instructionsFor(options.access) });
   const { access } = options;
   const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
   const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
@@ -1345,7 +1364,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const denied = await itemOutOfScope(qitemId);
         if (denied) return denied;
-        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {}), undefined, { structured: true });
+        const res = await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
+        // An external caller's claimed item goes through the same projection as show and list.
+        const view = externalView(scope);
+        return mapResult(view && res.status < 400 ? { ...res, data: projectForExternal(res.data, view) } : res, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
@@ -1376,9 +1398,18 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const denied = await itemOutOfScope(qitemId, "owner");
         if (denied) return denied;
-        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
+        // An external caller waits only on an item it names and can read: parking on a person would ask them, parking on
+        // another item would say whether it exists, and a park that names nothing would restore a blocker the team set.
+        if (access?.external && (blockedOn || state === "blocked")) {
+          const blocker = blockedOn?.startsWith("qitem-") ? await client.get(`/api/queue/${encodeURIComponent(blockedOn)}`) : null;
+          if (!blocker || blocker.status >= 400 || !scope?.item(blocker.data)) return outOfScope(`Blocker ${blockedOn ?? "(none named)"}`);
+        }
+        const res = await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state, closureReason, closureTarget, summary, evidenceRef, blockedOn, wakeAfterSeconds, transitionNote: note, resolution, reopen,
-        }), undefined, { structured: true });
+        });
+        // An external caller's updated item goes through the same projection as show and list.
+        const view = externalView(scope);
+        return mapResult(view && res.status < 400 ? { ...res, data: projectForExternal(res.data, view) } : res, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
@@ -1491,6 +1522,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     },
     async ({ rigId }) => {
       try {
+        // An external caller names one of its grant's rigs, so a lookup never answers about another workspace's rig.
+        if (access?.external && !scope?.rig(rigId)) return outOfScope(`Rig ${rigId}`);
         const rig = await rigIdFor(client, rigId);
         if ("content" in rig) return rig;
         const id = encodeURIComponent(rig.id);
@@ -1511,7 +1544,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           async (seat) => {
             const rows = await client.get(`/api/queue/list?${new URLSearchParams({ destinationSession: seat, compact: "1", limit: String(PRESENCE_ROWS) }).toString()}`)
               .then((res) => (res.status < 400 ? res.data : null), () => null);
-            return { lastCallAt: readPresence(presenceFile())[seat]?.lastCallAt ?? null, lastWake: newestWake(rows, seat),
+            // An external caller sees a ring only on an item it may read, so another pair's item isn't named.
+            const visible = access?.external && Array.isArray(rows) ? rows.filter((row) => scope?.item(row)) : rows;
+            return { lastCallAt: readPresence(presenceFile())[seat]?.lastCallAt ?? null, lastWake: newestWake(visible, seat),
               lastWakeScope: `the latest ring among its ${PRESENCE_ROWS} most recent rows` };
           });
         return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...(hosted.note ? { hostedMembersNote: hosted.note } : {}) } }, undefined, { structured: true });

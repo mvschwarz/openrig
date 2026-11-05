@@ -266,6 +266,22 @@ describe("a seat added to a running rig gets the rig's culture and startup layer
     expect(f.rigFile("dev.late", "RIG-NOTES.md")).toBeUndefined();
     f.db.close();
   });
+
+  // #2454: the spec the layering sees carries only the rig layers there are, never a key whose value is undefined.
+  it("carries only the layers there are: no culture_file or startup key without a value (#2454)", () => {
+    const f = fixture();
+    const inst = f.inst as unknown as {
+      rigStartupLayers(spec: object, root: string, rigId: string): { root: string; cultureFile?: string };
+      withRigStartupLayers(spec: object, layers: { root: string; cultureFile?: string }): Record<string, unknown>;
+    };
+    const spec = { version: "0.2", name: "rig-a", pods: [], edges: [] };
+    const none = inst.withRigStartupLayers(spec, inst.rigStartupLayers(spec, f.rigRoot, "no-stored-layers"));
+    expect(Object.keys(none)).toEqual(Object.keys(spec));
+    const cultureOnly = inst.withRigStartupLayers(spec, { root: f.rigRoot, cultureFile: "CULTURE.md" });
+    expect(cultureOnly).toEqual({ ...spec, cultureFile: "CULTURE.md" });
+    expect(Object.hasOwn(cultureOnly, "startup")).toBe(false);
+    f.db.close();
+  });
 });
 
 describe("a seat added to an existing pod also gets that pod's startup files, and the add stops when a required inherited file is gone", () => {

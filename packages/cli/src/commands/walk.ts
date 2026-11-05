@@ -273,7 +273,7 @@ initial record is explicitly reported as unverified delivery.`)
 
             let verdict = await pollConsumed();
             if (verdict === "generation-rolled") {
-              failPiece(i, piece.label, "the seat's generation rolled mid-walk (a re-prime); the walk cannot continue into a different generation.");
+              failPiece(i, piece.label, "the seat's generation rolled mid-walk (a re-prime); delivery is unconfirmed. Inspect the recipient before any resend; the walk cannot continue into a different generation.");
               return;
             }
             if (verdict === "timeout") {
@@ -289,23 +289,39 @@ initial record is explicitly reported as unverified delivery.`)
                 /\[Pasted text #\d+ \+\d+ lines\]/.test(pane)
               );
               if (stagedEvidence) {
-                const enter = await client.post<Record<string, unknown>>("/api/transport/send", {
-                  session: seat,
-                  submitOnly: true,
-                  expectedStagedText: piece.content, // FULL bytes — the transport checks the rendered literal residual for contiguous containment
-                  expectedStagedLineCount: piece.content.split("\n").length,
-                }, { headers: terminalAuthHeaders() });
+                let enter: { status: number; data: Record<string, unknown> };
+                try {
+                  enter = await client.post<Record<string, unknown>>("/api/transport/send", {
+                    session: seat,
+                    submitOnly: true,
+                    expectedStagedText: piece.content, // FULL bytes — the transport checks the rendered literal residual for contiguous containment
+                    expectedStagedLineCount: piece.content.split("\n").length,
+                  }, { headers: terminalAuthHeaders() });
+                } catch (error) {
+                  failPiece(i, piece.label, `the guarded submit result is unconfirmed (${(error as Error).message}); inspect the recipient before any resend.`);
+                  return;
+                }
                 if (enter.status >= 400) {
-                  failPiece(i, piece.label, `typed but not consumed; the single submit retry was refused (${(enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}`}).`);
+                  const phase = enter.data?.["inputPhase"], reason = enter.data?.["reason"];
+                  const unconfirmed = phase === "attempted" || phase === "written"
+                    || (phase !== "not_reached" && enter.data?.["sent"] !== false && (reason === "submit_failed" || enter.status >= 500));
+                  const detail = (enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}`;
+                  failPiece(i, piece.label, unconfirmed
+                    ? `the guarded submit result is unconfirmed (${detail}); inspect the recipient before any resend.`
+                    : `the single guarded submit was refused (${detail}); the earlier staged observation may have changed. Inspect the recipient before any resend.`);
                   return;
                 }
                 verdict = await pollConsumed();
+                if (verdict === "generation-rolled") {
+                  failPiece(i, piece.label, "the seat's generation rolled after the guarded submit; delivery is unconfirmed. Inspect the recipient before any resend.");
+                  return;
+                }
                 if (verdict !== "consumed") {
-                  failPiece(i, piece.label, `typed and staged, but not consumed even after the single submit retry — the piece never entered the seat's conversation record. Not re-sending (one retry is the contract).`);
+                  failPiece(i, piece.label, "no matching conversation record was observed within the verification window after the single submit retry; delivery is unconfirmed. Inspect the recipient before any resend.");
                   return;
                 }
               } else {
-                failPiece(i, piece.label, `send reported ${sendOutcome === "ok" ? "success" : "a transport error"} but the piece is neither consumed in the generation record nor staged in the pane — delivery lost; consumption verification fails this walk closed.`);
+                failPiece(i, piece.label, `send reported ${sendOutcome === "ok" ? "success" : "a transport error"}, but no matching record or staged input was observed within the verification window. Delivery and consumption are unconfirmed; inspect the recipient before any resend.`);
                 return;
               }
             }

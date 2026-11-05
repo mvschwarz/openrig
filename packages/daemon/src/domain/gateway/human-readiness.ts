@@ -11,7 +11,8 @@ export interface HumanDeliveryReadiness {
   enabled: boolean;
   active: boolean;
   ready: boolean;
-  connector: { kind: string; ref: string };
+  /** Absent for a person with no connector binding. */
+  connector?: { kind: string; ref: string };
   reason: string;
   nextAction: string | null;
   checkedAt: string;
@@ -36,8 +37,14 @@ export async function resolveHumanDeliveryReadiness(
   input: HumanDeliveryReadinessInput,
   deps: HumanDeliveryReadinessDeps = {},
 ): Promise<HumanDeliveryReadiness> {
-  const primary = input.human.connectorBindings.find((binding) => binding.role === "primary")!;
+  const primary = input.human.connectorBindings.find((binding) => binding.role === "primary");
   const checkedAt = (deps.now?.() ?? new Date()).toISOString();
+  // A person with no connector binding is reached in the Feed and Steering only: never ready for Slack, and no connector.
+  if (!primary) {
+    const enabled = input.config.enabled;
+    return { state: "not-ready", configured: false, enabled, active: enabled && input.gatewayState === "active", ready: false, checkedAt,
+      reason: "this person has no connector binding, so they're reached in the Feed and Steering only, not Slack", nextAction: null };
+  }
   const base = {
     connector: { kind: primary.kind, ref: primary.connectorRef },
     checkedAt,

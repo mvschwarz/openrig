@@ -105,7 +105,7 @@ export class RuntimeVerifier {
     let result = await this.verifyVersionOrHelp("pi", "pi");
     if (result.status === "verified") {
       try {
-        const nodeVersion = this.parseVersion(await this.exec("node --version"));
+        const nodeVersion = this.parseVersion(await this.probeExec("node --version"));
         if (nodeVersion && !meetsPiNodeEngineFloor(nodeVersion)) {
           result = this.buildVerification(
             "pi",
@@ -115,9 +115,13 @@ export class RuntimeVerifier {
             `Pi requires Node >= ${PI_NODE_ENGINE_FLOOR}; found ${nodeVersion}. Upgrade Node to run pi seats.`,
           );
         }
-      } catch {
-        // `node` unresolvable from the daemon's exec context — leave the
-        // binary verification standing; the engine floor re-checks at launch.
+      } catch (err) {
+        if (err instanceof ProbeStoppedError) throw err;
+        if (err instanceof ProbeTimeoutError) {
+          result = this.buildVerification("pi", "error", result.version, null, err.message);
+        }
+        // Other failures (such as `node` not on PATH) leave the binary verification
+        // standing; the engine floor re-checks at launch.
       }
     }
     this.persist(result);

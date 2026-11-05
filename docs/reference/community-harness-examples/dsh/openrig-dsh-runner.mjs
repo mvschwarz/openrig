@@ -4,11 +4,12 @@
 //
 // It follows docs/reference/harness-runner-contract.md: it hosts `dsh --profile acp` over ACP on stdio, writes the
 // launch record once the conversation is open, turns each submitted block into one prompt, reports turn boundaries as
-// activity hooks, cancels on /abort or Ctrl-C, and sends permission requests to OpenRig: a person answers, or OpenRig
-// permits when no one can be asked, and so does the runner when OpenRig can't answer (refusing and holding needs input
-// only when the seat opted in to refusal). Copy it and maintain it as your own.
+// activity hooks with a working beat through a long, quiet turn, cancels on /abort or Ctrl-C, and sends permission
+// requests to OpenRig: a person answers, or OpenRig permits when no one can be asked, and so does the runner when OpenRig
+// can't answer (refusing and holding needs input only when the seat opted in to refusal). Copy it and maintain it as your
+// own.
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,9 @@ const RUNNER = "openrig-dsh-runner 1";
 const NAME = process.env.OPENRIG_RUNTIME || "dsh"; // the preset's name: OpenRig passes it, and checks the record against it
 const LIVENESS_SECONDS = 60;
 const BEAT_MS = 30_000;
+// The working beat (contract section 4): every 10 s, more often than half its 30 s lifetime.
+const WORK_LIVENESS_SECONDS = 30;
+const WORK_BEAT_MS = 10_000;
 const ACTIVE_EVERY_MS = 15_000;
 const POST_TIMEOUT_MS = 2_000;
 const WAIT_SECONDS = 25;
@@ -30,6 +34,8 @@ const NOT_LIVE = ["stale_generation", "activity_grant_wrong_seat", "activity_gra
 const ENDED = ["refused", "withdrawn", "stale", "answered"];
 const CANCELLED = { outcome: { outcome: "cancelled" } };
 const ACP_RESOURCE_NOT_FOUND = -32002;
+// The most pages of dsh's session list read before a resume; a longer list decides nothing.
+const LIST_PAGES = 50;
 
 const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
@@ -201,16 +207,29 @@ const UPLOADS_OFF = [
   "",
 ].join("\n");
 
-/** Each seat gets its own writable dsh home (dsh rewrites its profile there on every start). OPENRIG_DSH_HOME names
- *  one you prepared yourself, which is used as it is. */
+/** Each seat gets its own writable dsh home (dsh rewrites its profile there on every start). DSH_SEAT_HOME, which a rig
+ *  spec's env: can set, or OPENRIG_DSH_HOME names one you prepared yourself, which is used as it is. Not dsh's own
+ *  DSH_HOME: a person's shell startup files can export it, and they run after the seat's env:. */
 function seatHome() {
-  if (process.env.OPENRIG_DSH_HOME) return process.env.OPENRIG_DSH_HOME;
+  const prepared = process.env.OPENRIG_DSH_HOME || process.env.DSH_SEAT_HOME;
+  if (prepared) return prepared;
   const seat = process.env.OPENRIG_NODE_ID || process.env.OPENRIG_SESSION_NAME || "default";
   const home = join(openrigHome(), "state", "dsh", seat, "home");
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const patch = join(home, "cordis.patch.yml");
   if (!existsSync(patch)) writeFileSync(patch, UPLOADS_OFF, { mode: 0o600 });
   return home;
+}
+
+/** dsh's version as its CLI reports it, or null when it can't say. dsh 0.2.1-rc.2's ACP handshake reports 0.0.1.
+ *  SIGKILL at the timeout, because a synchronous call waits for the child to exit, and a child can ignore SIGTERM. */
+function cliVersion(bin, env) {
+  try {
+    const out = execFileSync(bin, ["--version"], { encoding: "utf8", env, timeout: 5_000, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "ignore"] });
+    return out.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?/)?.[0] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function writeLaunchRecord(fields) {
@@ -248,16 +267,23 @@ async function main() {
   agentEnv.DSH_PERMISSION_MODE ??= "workspace-write";
   if (agentEnv.DSH_TELEMETRY_DISABLED === undefined && agentEnv.DSH_TELEMETRY_MODE === undefined) agentEnv.DSH_TELEMETRY_DISABLED = "1";
 
-  const child = spawn(env.OPENRIG_DSH || "dsh", ["--profile", "acp"], { cwd, env: agentEnv, stdio: ["pipe", "pipe", "inherit"] });
+  // DSH_SEAT_BIN, which a rig spec's env: can set, or OPENRIG_DSH names another dsh binary.
+  const bin = env.OPENRIG_DSH || env.DSH_SEAT_BIN || "dsh";
+  const version = cliVersion(bin, agentEnv);
+  const child = spawn(bin, ["--profile", "acp"], { cwd, env: agentEnv, stdio: ["pipe", "pipe", "inherit"] });
   child.stdin.on("error", () => {});
   const peer = new AgentPeer(child, (line) => say(`[dsh] ${line}`));
-  const state = { sessionId: null, turn: 0, running: false, cancelRequestedAt: null, holding: false, refused: false, queue: [], asks: new Set(), lastActive: 0 };
+  const state = { sessionId: null, turn: 0, running: false, cancelRequestedAt: null, holding: false, refused: false, queue: [], asks: new Set(), lastActive: 0, asking: 0, waiting: 0, resolvedAsk: null };
   const inflight = new Set();
   const track = (promise) => { inflight.add(promise); promise.finally(() => inflight.delete(promise)); return promise; };
   let agentExited = false;
   let stopping = false;
   let heartbeat;
+  let workBeat;
   let tty = false;
+  // The turn may read working: it runs, nothing holds needs input, no permission request is being submitted or waits for its
+  // permission_resolved, and dsh is alive. The beat and the agent's own reports both go by it.
+  const working = () => state.running && !state.holding && state.asking === 0 && !state.resolvedAsk && !agentExited;
 
   const restoreTty = () => {
     if (!tty) return;
@@ -267,6 +293,7 @@ async function main() {
   };
   const finish = async (code) => {
     clearInterval(heartbeat);
+    clearInterval(workBeat);
     restoreTty();
     await Promise.race([Promise.allSettled([...inflight, activity.flushed()]), sleep(2_000)]);
     process.exit(code);
@@ -297,7 +324,7 @@ async function main() {
   peer.onNotification("session/update", (params) => {
     if (params.sessionId !== state.sessionId || !params.update) return;
     const update = params.update;
-    const reporting = state.running && !state.holding; // while needs input is held, nothing may read working
+    const reporting = working();
     if (update.sessionUpdate === "agent_message_chunk") {
       if (update.content?.type === "text") process.stdout.write(update.content.text);
       if (reporting && Date.now() - state.lastActive >= ACTIVE_EVERY_MS) { state.lastActive = Date.now(); activity.post("active", "agent_message"); }
@@ -344,9 +371,16 @@ async function main() {
     const allow = options.find((option) => option.kind === "allow_once") ?? options.find((option) => option.kind === "allow_always");
     const permit = (why) => {
       if (!allow) return refuse(`${why}, and the agent offered no allow option`);
-      state.holding = false;
+      state.holding = state.refused || state.waiting > 0; // another ask may still wait on a person
       say(`[permission] permitted: ${why} (${allow.optionId})`);
       return { outcome: { outcome: "selected", optionId: allow.optionId } };
+    };
+    // A person who answered in their own words: OpenRig passes them back as `said`. They join the prompt queue like any
+    // message, so dsh gets them after this turn and after any message already waiting. They're never the answer.
+    const passOn = (said) => {
+      if (typeof said !== "string" || !said.trim()) return;
+      say(`[permission] the person also wrote: ${firstLine(said)}`);
+      submit(`The person who answered your permission request (${toolCall.title}) also wrote:\n\n${said}`);
     };
     if (!askId) {
       if (submitted.body?.code === "denied_by_seat") return refuse("the seat's operator chose to refuse its permission requests");
@@ -358,7 +392,12 @@ async function main() {
         : submitted.status === 0 ? "OpenRig couldn't be reached" : `OpenRig couldn't ask anyone (${submitted.body?.code ?? submitted.status})`);
     }
     state.holding = true; // OpenRig recorded the seat's permission prompt when it opened the ask
+    state.waiting += 1;
     say(`[permission] OpenRig asked a person (${askId}); waiting for their answer`);
+    // This ask no longer waits on a person; the seat still needs input while another one does, or after its own refusal.
+    const stopWaiting = () => { state.waiting -= 1; state.holding = state.refused || state.waiting > 0; };
+    // The agent got an answer or a permit for this ask: once nothing else waits, permission_resolved says the turn goes on.
+    const resolved = () => { state.resolvedAsk = { turn, askId }; };
     return new Promise((resolve) => {
       let done = false; // the agent has its answer
       let ended = false; // OpenRig was told the request is over
@@ -369,7 +408,7 @@ async function main() {
         withdraw(askId, reason);
         if (done) return;
         done = true;
-        if (!state.refused) state.holding = false; // the turn ended the person's ask: no one is still being asked
+        stopWaiting(); // the turn ended the person's ask
         resolve(CANCELLED);
       } };
       state.asks.add(ask);
@@ -385,18 +424,23 @@ async function main() {
           // A person's option, or OpenRig's permit when they closed it without one.
           if ((answer.state === "answered" || answer.state === "permitted") && offered(answer.optionId) && live()) {
             state.asks.delete(ask);
-            state.holding = false;
+            stopWaiting();
             say(`[permission] ${answer.state}: ${answer.optionId}`);
             resolve({ outcome: { outcome: "selected", optionId: answer.optionId } });
+            resolved();
+            passOn(answer.said);
           } else if (live() && (read.status === 200 ? !ENDED.includes(answer.state) : !NOT_LIVE.includes(answer.code))) {
             // OpenRig stopped answering, or answered in a way the contract doesn't list: nobody can be asked. The ask stays
             // tracked, so the turn's end still withdraws it.
+            stopWaiting();
             resolve(permit(read.status === 0 ? "OpenRig couldn't be reached" : `OpenRig couldn't answer (${answer.code ?? read.status})`));
+            if (!state.refused) resolved(); // permitted, not refused for want of an allow option
           } else {
             state.asks.delete(ask);
-            state.holding = false; // a person said no, or the request is over: no one is still waiting
+            stopWaiting(); // a person said no, or the request is over
             say(`[permission] not answered (${answer.reason ?? answer.state ?? answer.code ?? read.status}); answered cancelled`);
             resolve(CANCELLED);
+            passOn(answer.said);
           }
         }
       })();
@@ -409,8 +453,18 @@ async function main() {
     const options = Array.isArray(params.options) ? params.options : [];
     say(`\n[permission] dsh asks: ${toolCall.title} (${toolCall.kind}); options ${options.map((option) => option.optionId).join(", ")}`);
     if (!state.running || state.cancelRequestedAt) return CANCELLED;
-    return askOwner(requestId, toolCall, options);
+    state.asking += 1; // no beat while a permission request is open: it may be waiting on a person
+    return askOwner(requestId, toolCall, options).finally(() => { state.asking -= 1; setImmediate(settle); });
   });
+
+  // Once nothing waits on a person or is being submitted, the seat holds no refusal of its own and dsh is alive, say the turn
+  // goes on. It goes out after the agent has its answer, and before the next beat.
+  const settle = () => {
+    const done = state.resolvedAsk;
+    if (!done || state.holding || state.asking > 0) return;
+    state.resolvedAsk = null;
+    if (state.running && state.turn === done.turn && !agentExited) activity.post("active", "permission_resolved", { turnId: String(done.turn), askId: done.askId });
+  };
 
   const abort = () => {
     if (!state.running) { say("[openrig-dsh] no turn is running"); return; }
@@ -427,6 +481,8 @@ async function main() {
     state.turn += 1;
     state.holding = false;
     state.refused = false;
+    state.waiting = 0;
+    state.resolvedAsk = null;
     state.cancelRequestedAt = null;
     state.lastActive = 0;
     const turnId = String(state.turn);
@@ -470,16 +526,37 @@ async function main() {
     return fatal(`dsh didn't complete the ACP handshake (${error.message})`, 1);
   }
   const capabilities = init?.agentCapabilities ?? {};
-  const producer = `${RUNNER}; dsh ${init?.agentInfo?.version ?? "(version not reported)"}; ACP ${init?.protocolVersion ?? "?"}`;
+  const reported = init?.agentInfo?.version ? `${init.agentInfo.version} (as its ACP handshake reports it)` : "(version not reported)";
+  const producer = `${RUNNER}; dsh ${version ?? reported}; ACP ${init?.protocolVersion ?? "?"}`;
   const resumeRef = env.OPENRIG_RESUME_REF;
+  // Whether dsh's own session list names a conversation, following its pages: true, false when every page was read and
+  // none names it, or undefined when the list fails, answers in another shape, or runs past LIST_PAGES pages. An ACP
+  // cursor is an opaque string, possibly empty, passed back unchanged; an absent or null one ends the list.
+  const listsConversation = async (id) => {
+    let cursor;
+    for (let page = 0; page < LIST_PAGES; page += 1) {
+      let listing;
+      try { listing = await peer.request("session/list", cursor === undefined ? {} : { cursor }); } catch { return undefined; }
+      if (!Array.isArray(listing?.sessions) || listing.sessions.some((session) => typeof session?.sessionId !== "string")) return undefined;
+      if (listing.sessions.some((session) => session.sessionId === id)) return true;
+      if (listing.nextCursor === undefined || listing.nextCursor === null) return false;
+      if (typeof listing.nextCursor !== "string") return undefined;
+      cursor = listing.nextCursor;
+    }
+    return undefined;
+  };
   if (resumeRef) {
     // The method dsh advertises; with neither advertised, session/resume, the method dsh 0.2.1-rc.2 answered in its
-    // maintainer's checks. Only dsh's own "not found" counts as missing; anything else leaves the resume unconfirmed.
+    // maintainer's checks. dsh 0.2.1-rc.2 answers -32602 both for a conversation it doesn't have and for one active
+    // elsewhere, so that error can't mean missing. Only dsh's own "not found" counts as missing, and not when dsh's list
+    // names the conversation. The list can't show a conversation is gone: one another running dsh holds unsaved may be
+    // left out, so an unlisted conversation is still reopened. Anything else leaves the resume unconfirmed.
     const method = capabilities.sessionCapabilities?.resume ? "session/resume" : capabilities.loadSession ? "session/load" : "session/resume";
+    const listed = capabilities.sessionCapabilities?.list ? await listsConversation(resumeRef) === true : false;
     try {
       await peer.request(method, { sessionId: resumeRef, cwd, mcpServers: [] });
     } catch (error) {
-      if (error.code === ACP_RESOURCE_NOT_FOUND) {
+      if (error.code === ACP_RESOURCE_NOT_FOUND && !listed) {
         writeLaunchRecord({ error: "missing", producer });
         return fatal(`dsh says conversation ${resumeRef} doesn't exist (${error.message}); no new one was started`, 3);
       }
@@ -500,6 +577,12 @@ async function main() {
   say("[openrig-dsh] each submitted message is one prompt; /abort or Ctrl-C cancels the running turn");
 
   heartbeat = setInterval(() => { if (!state.running && !state.holding && !agentExited) postIdle("idle_heartbeat"); }, BEAT_MS);
+  // While a turn runs and nothing waits on a person: the turn is still outstanding and dsh is alive. Not progress.
+  workBeat = setInterval(() => {
+    if (working()) {
+      activity.post("active", "liveness", { turnId: String(state.turn), livenessSeconds: WORK_LIVENESS_SECONDS });
+    }
+  }, WORK_BEAT_MS);
   for (const signal of ["SIGHUP", "SIGTERM"]) {
     process.on(signal, () => {
       if (state.running && !state.cancelRequestedAt) peer.notify("session/cancel", { sessionId: state.sessionId });

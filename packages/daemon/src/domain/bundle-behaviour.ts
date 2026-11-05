@@ -262,6 +262,12 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
             if (kind === "launch_plugin_dir") { view.alsoRuns.push({ ...fact, trigger: "if selected runtime supports and loads this resource" }); hooks(fact); }
             write(seat, kind, "openrig_seat_storage", dest(String(ref)), fact.sourceRefs, "copy");
           }
+          // #2044: a member's plugin channels are names, not files: what its launches need from the installing host.
+          for (const [index, entry] of list(member.plugin_channels).entries()) {
+            if (!text(entry)) continue;
+            view.needs.push({ seat, kind: "claude_plugin_channel", name: `Claude plugin channel ${entry} (--channels): its plugin installed, and the channel admitted by Claude's channel policy`,
+              status: "not_checked", sourceRefs: [{ path: rigPath, field: `pods.${pod.id}.members.${member.id}.plugin_channels[${index}]` }] });
+          }
         }
         const startup = (block: StartupBlock | undefined, base: string, refs: SourceRef[]) => {
           for (const f of block?.files ?? []) {

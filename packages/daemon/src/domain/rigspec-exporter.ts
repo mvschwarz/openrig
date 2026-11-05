@@ -8,7 +8,7 @@ import type {
   RigSpec, RigSpecPod, RigSpecPodMember, RigSpecPodEdge, RigSpecCrossPodEdge,
 } from "./types.js";
 import { RigNotFoundError } from "./errors.js";
-import { seatLaunchAdditionsForNode } from "./seat-launch-additions.js";
+import { seatLaunchAdditionsForLaunch, seatLaunchAdditionsForNode } from "./seat-launch-additions.js";
 import { isAbsolute, normalize } from "node:path";
 import { validateSafePath } from "./path-safety.js";
 
@@ -232,6 +232,10 @@ export class RigSpecExporter {
         if (node.effort) member.effort = node.effort;
         if (node.advisor) member.advisor = node.advisor;
         if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
+        // #2044: unlike the copied files, a seat's plugin channels are names the record keeps as the spec gave them, so
+        // an export carries the ones its launch passes.
+        const channels = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.rigRepo.db, node.id).additions?.pluginChannels : undefined;
+        if (channels?.length) member.pluginChannels = channels;
         // OPR.0.4.6.FAC1: a declared seat role exports with the pod
         // member (round-trip fidelity — export→import keeps the role).
         if (node.role) member.role = node.role;

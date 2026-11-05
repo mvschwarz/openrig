@@ -537,7 +537,9 @@ not have to tear one down to change it, and you rarely have to start from nothin
 - **A Claude member can bring its own setup** in the rig spec: `agent_file`,
   `append_system_prompt_file`, `plugin_dirs` and `advisor` (an Advisor model). They're copied into
   that seat's own storage, never the project, so one seat in a shared repository can have its own
-  persona, prompt or plugins. A bundle's before-install view lists them.
+  persona, prompt or plugins. A bundle's before-install view lists them. `plugin_channels`
+  (`plugin:<name>@<marketplace>` entries) registers that seat alone for those plugins' channel
+  notifications, through Claude's `--channels`.
 - **A new Claude member can name a prepared subscription token** with
   `claude_token: {label: name, file: /abs/token}` beside its `env.CLAUDE_CONFIG_DIR`; the seat stores
   the file reference and reads it at launch. A missing/unreadable token uses the existing fallback
@@ -1072,8 +1074,9 @@ reaching them is ordinary work rather than an escalation.
   transitions before retrying. `rig send` remains agent-terminal delivery only.
   `--human-questions-file` adds clickable decision questions. On an unparked ask, a typed Slack
   reply is kept in `humanAnswers` under the first unanswered question. On a question parked on
-  its own person, a typed reply resumes it but isn't recorded as the answer; the owner receives
-  it as a message instead. Buttons work in both cases. Closing isn't approval.
+  its own person, that person's typed reply resumes it and is kept the same way, in the same
+  transaction; a reply whose order against the posted question can't be confirmed resumes it
+  with the words in context and isn't recorded. Buttons work in both cases. Closing isn't approval.
 - **When project policy calls for human judgment or an update, load `messaging-the-human`.**
   Use `rig context get skills/core/messaging-the-human/SKILL.md` for a complete decision brief,
   related supplemental detail and explicit quiet-update intent. An FYI creates no approval
@@ -1451,6 +1454,6 @@ deliberate writing.
 
 **`rig --help`**, then `rig <verb> --help`.
 
-Ninety verbs ship, and this page named most of them once. **You will not remember which — you
+Ninety-one verbs ship, and this page named most of them once. **You will not remember which — you
 are meant to remember only that the list is long enough to be worth reading before you build
 anything.** The question is never *how do I write this*; it is **does this already exist**.

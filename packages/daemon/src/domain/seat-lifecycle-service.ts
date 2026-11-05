@@ -1280,7 +1280,9 @@ export class SeatLifecycleService {
       || !this.stillPending(node.id, session.id, pending)) return { ok: false as const, code: "continuation_unavailable", message: "Startup changed during the readiness check. Refresh." };
     const result = await this.startupOrchestrator.startNode({
       rigId: seat.rigId, nodeId: node.id, sessionId: session.id,
-      binding: { ...binding, cwd: node.cwd ?? ".", model: node.model ?? undefined, effort: resolveSeatEffort(node).effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codexConfigProfile ?? undefined },
+      binding: { ...binding, cwd: node.cwd ?? ".", model: node.model ?? undefined, effort: resolveSeatEffort(node).effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codexConfigProfile ?? undefined,
+        // #875: the launch already carried this seat's guidance as developer instructions; keep that, and write no AGENTS.md.
+        ...(pending.mode === "fresh" && pending.guidanceLaunchInstructions ? { guidanceFile: null, guidanceLaunchInstructions: true } : {}) },
       adapter, plan: startup.context.plan, resolvedStartupFiles: startup.context.resolvedStartupFiles,
       startupActions: startup.context.startupActions, isRestore: pending.mode === "fork" && pending.isRestore,
       sessionName: session.session_name, skipHarnessLaunch: true, continueFreshStartup: pending.mode === "fresh", includeDurableObligations: true, allowFreshFallback: false,

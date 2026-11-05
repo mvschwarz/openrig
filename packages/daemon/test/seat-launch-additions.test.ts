@@ -17,7 +17,7 @@ import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import {
-  carrySeatLaunchAdditions, prepareSeatLaunchAdditions, recordConversationPrompt, recordForkConversationPrompt, seatLaunchAdditions, seatLaunchAdditionsReport, systemPromptPendingNote,
+  carrySeatLaunchAdditions, prepareSeatLaunchAdditions, recordConversationPrompt, recordForkConversationPrompt, seatLaunchAdditionArgs, seatLaunchAdditions, seatLaunchAdditionsReport, systemPromptPendingNote,
 } from "../src/domain/seat-launch-additions.js";
 
 // OPR.0.7.0.9: a Claude seat's own launch additions live in its own storage (slice 13's seat root), never in the
@@ -498,5 +498,79 @@ describe("a fork's copy of its source seat's additions (OPR.0.7.0.9)", () => {
     rmSync(prepared.additions.appendSystemPromptFile!);
     expect(carrySeatLaunchAdditions(source, fork)).toMatchObject({ status: "not_carried", kept: false, omitted: [expect.stringContaining("is missing")] });
     expect(seatLaunchAdditions(fork)).toBeUndefined();
+  });
+});
+
+// #2044: a seat's plugin channels are names, not files: kept in the same record, passed by every launch, nothing copied.
+describe("a seat's plugin channels (#2044)", () => {
+  const CHANNELS = ["plugin:example-channel@example", "plugin:second@example"];
+  const seat = (logicalId: string) => seatSkillPaths({ rigId: "rig-1", logicalId, runtime: "claude-code" });
+  const manifest = (paths: SeatSkillPaths) => join(paths.root, "launch-additions.json");
+
+  it("a seat that asks only for channels gets a record holding them, and no copies", () => {
+    const paths = seat("dev.impl");
+    const prepared = prepareSeatLaunchAdditions(paths, { pluginChannels: CHANNELS });
+    expect(prepared).toEqual({ ok: true, additions: { pluginDirs: [], pluginChannels: CHANNELS } });
+    expect(tree(paths.root)).toEqual(["launch-additions.json"]);
+    expect(seatLaunchAdditions(paths)).toEqual({ pluginDirs: [], pluginChannels: CHANNELS });
+    expect(seatLaunchAdditionArgs(seatLaunchAdditions(paths))).toEqual(["--channels", ...CHANNELS]);
+  });
+
+  it("the launch passes them after the agent and the prompt file; a later launch asking for none removes them", () => {
+    const paths = seat("dev.impl");
+    const prepared = prepareSeatLaunchAdditions(paths, { ...sources().input, pluginChannels: CHANNELS });
+    if (!prepared.ok) throw new Error(prepared.message);
+    expect(seatLaunchAdditionArgs(prepared.additions)).toEqual(["--agent", "openrig:reviewer",
+      "--append-system-prompt-file", prepared.additions.appendSystemPromptFile, "--channels", ...CHANNELS]);
+    expect(prepareSeatLaunchAdditions(paths, {})).toEqual({ ok: true, additions: { pluginDirs: [] } });
+    expect(seatLaunchAdditions(paths)).toBeUndefined();
+  });
+
+  it("an entry that isn't plugin:<name>@<marketplace> is refused before anything is written", () => {
+    const paths = seat("dev.impl");
+    for (const bad of ["server:example", "--dangerously-load-development-channels", "plugin:a@b c", "plugin:no-marketplace"]) {
+      const prepared = prepareSeatLaunchAdditions(paths, { pluginChannels: ["plugin:ok@market", bad] });
+      expect(prepared, bad).toMatchObject({ ok: false, code: "addition_invalid" });
+      expect(prepared.ok ? "" : prepared.message).toContain(JSON.stringify(bad));
+    }
+    expect(tree(paths.root)).toEqual([]);
+  });
+
+  it("a record from before #2044 (no channels) still reads, and passes no --channels", () => {
+    const paths = seat("dev.impl");
+    mkdirSync(paths.root, { recursive: true });
+    writeFileSync(manifest(paths), `${JSON.stringify({ additions: { pluginDirs: [] } })}\n`);
+    expect(seatLaunchAdditionArgs(seatLaunchAdditions(paths))).toEqual([]);
+    expect(seatLaunchAdditionsReport(paths)).toEqual({ pluginDirs: [], missing: [], refused: [] });
+  });
+
+  it("a hand-edited entry that isn't a plugin entry is left off the launch and named; the others still pass", () => {
+    const paths = seat("dev.impl");
+    expect(prepareSeatLaunchAdditions(paths, { pluginChannels: CHANNELS }).ok).toBe(true);
+    writeFileSync(manifest(paths), `${JSON.stringify({ additions: { pluginDirs: [], pluginChannels: [CHANNELS[0], "server:example", "x --settings {}"] } })}\n`);
+    expect(seatLaunchAdditionsReport(paths)).toEqual({ pluginDirs: [], pluginChannels: [CHANNELS[0]], missing: [],
+      refused: ["the plugin channel \"server:example\" isn't plugin:<name>@<marketplace>", "the plugin channel \"x --settings {}\" isn't plugin:<name>@<marketplace>"] });
+    // A record whose channels aren't a list of strings isn't one OpenRig wrote: named, and nothing passed.
+    writeFileSync(manifest(paths), `${JSON.stringify({ additions: { pluginDirs: [], pluginChannels: "plugin:a@b" } })}\n`);
+    expect(seatLaunchAdditionsReport(paths)).toMatchObject({ pluginDirs: [], refused: [expect.stringContaining("isn't a launch additions record OpenRig can read")] });
+    expect(seatLaunchAdditionsReport(paths)?.pluginChannels).toBeUndefined();
+  });
+
+  it("the seat view lists them", () => {
+    const paths = seat("dev.impl");
+    expect(prepareSeatLaunchAdditions(paths, { pluginChannels: CHANNELS }).ok).toBe(true);
+    const view = { nodeId: "n1", rigId: "rig-1", logicalId: "dev.impl", runtime: "claude-code" as const, sessionName: "dev-impl@rig", cwd: "/project" };
+    expect(inspectSeatSkills(view, null).launchAdditions).toEqual({ pluginDirs: [], pluginChannels: CHANNELS, missing: [], refused: [] });
+  });
+
+  it("a fork carries them, alone or beside copied files", () => {
+    const source = seat("dev.impl"), fork = seat("dev.fork");
+    expect(prepareSeatLaunchAdditions(source, { pluginChannels: CHANNELS }).ok).toBe(true);
+    expect(carrySeatLaunchAdditions(source, fork)).toEqual({ status: "carried", kept: true, omitted: [] });
+    expect(seatLaunchAdditions(fork)).toEqual({ pluginDirs: [], pluginChannels: CHANNELS });
+    const withFiles = seat("dev.files"), fork2 = seat("dev.fork2");
+    expect(prepareSeatLaunchAdditions(withFiles, { ...sources().input, pluginChannels: CHANNELS }).ok).toBe(true);
+    expect(carrySeatLaunchAdditions(withFiles, fork2)).toEqual({ status: "carried", kept: true, omitted: [] });
+    expect(seatLaunchAdditions(fork2)).toMatchObject({ agent: "openrig:reviewer", pluginChannels: CHANNELS });
   });
 });

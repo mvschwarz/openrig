@@ -3,17 +3,20 @@
 > **Status.** This is a draft for contributors.
 > - **Released in 0.7.6:** the `runner` field and OpenRig's side of declaration, identity and activity
 >   (sections 2-4).
-> - **Proposed runner-author behavior:** the input, cancellation and permission recipe in sections 5-7, and the
->   runner-side shutdown obligation in section 9. A dsh port implementing this recipe is not qualified.
+> - **Released in 0.7.8:** seat activity grants (section 4), and OpenRig's side of the answered permission path
+>   (section 7).
+> - **Runner-author behavior, not yet qualified:** the input, cancellation and permission recipe in sections 5-7, and
+>   the runner-side shutdown obligation in section 9. A dsh port implementing this recipe is not qualified.
 > - **Existing interfaces with author obligations:** launch-result identity, exact resume, first input and model
 >   handoff. These interfaces do not establish that a particular runner implements them correctly.
 > - **Unchanged:** plain community presets and the built-in runtimes (Claude Code, Codex, Pi, OMP, terminal).
 >
-> No harness has been run end to end under this contract yet. The first candidate is dsh over ACP.
+> No harness has been run end to end under this contract yet, and the native verdict is pending. The first candidate
+> is dsh over ACP.
 >
 > Release status and pinned references are in the [joined author guide](author-contracts.md). The
-> [community presets reference](https://github.com/mvschwarz/openrig/blob/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-presets.md)
-> describes the implemented fields at that base; this chapter also labels proposed author behavior.
+> [community presets reference](community-harness-presets.md) describes the implemented fields, including the runner
+> preset's exception for approvals; this chapter also labels runner-author behavior that isn't qualified.
 
 This chapter covers **which agent runs in a seat and how OpenRig talks to it**. *Where* that agent runs (a host, a
 sandbox, another machine) is the [execution platform chapter](execution-platform-contract.md). The two are separate on purpose:
@@ -104,6 +107,8 @@ Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer 
 |---|---|---|
 | You gave the agent the prompt for a submitted message | `UserPromptSubmit` / `accepted`, `turnId` = your prompt number | working |
 | The agent is working (message chunks, tool calls) | `active` / `agent_message`; `PreToolUse` / `<tool kind>` | working |
+| Optional working beat, from 0.7.9: the turn is still outstanding and the agent alive, with nothing new to report (a long tool or model call) | `active` / `liveness`, with `turnId`, `sequence` and `livenessSeconds` | working while beats keep coming |
+| From 0.7.9: you delivered an answer or permit to a request OpenRig had shown as needing input, and the agent continues the same turn (section 7) | `active` / `permission_resolved`, with `turnId` and `askId` | working |
 | You refused a permission request (section 7) | `Notification` / `permission_prompt` | needs input |
 | The turn ended | `Stop` / its stop reason (`end_turn`, `cancelled`, `max_tokens`, `refusal`) | idle. While you hold attention (section 7), don't post it: OpenRig reads any non-exit `Stop` as idle and clears needs input |
 | Optional idle heartbeat | `Stop` / `idle_heartbeat`, with `livenessSeconds` | idle while beats keep coming |
@@ -114,6 +119,41 @@ Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer 
   idle `Stop`, the turn's end as well as each beat. OpenRig stops reading the seat idle after 2 × `livenessSeconds` without
   a newer idle report. Without it, an idle report holds until your next post, even if your runner has died. Never send a
   non-exit `Stop` or a beat while holding permission attention.
+- **Working evidence lasts 15 seconds.** A working post (`UserPromptSubmit`, `active`, `PreToolUse`) decides the seat's
+  activity for 15 s. After that the seat reads from its other evidence: the screen can still show work, but it never
+  reads a runner seat idle, so with nothing else the seat reads unknown.
+- **The working beat (from 0.7.9)** keeps a long, quiet turn reading working. It says only that this turn's prompt is
+  outstanding and the agent process you started is alive. It isn't progress.
+  - **When to beat:** only while a prompt is outstanding and the agent is alive, more often than every
+    `livenessSeconds` ÷ 2.
+  - **When to stop:** stop at once on the turn's `Stop`, on a permission request that needs a person, or on the agent's
+    exit, and post that boundary first.
+  - **`livenessSeconds`** is how long one beat counts as working. OpenRig clamps it to 5-60 s, and uses 30 s when a beat
+    has none. After that the beat stops counting, and the seat reads from its other evidence, as a working post's does.
+  - **A beat counts only when all of these hold:**
+    - it carries `generation`, equal to the seat's live occupant generation, and so did the `UserPromptSubmit` /
+      `accepted` post that opened its turn;
+    - its `turnId` is your latest `UserPromptSubmit` / `accepted` turn, and you haven't posted that turn's `Stop` or an
+      exit;
+    - it carries a `sequence`, greater than every earlier post's in the same generation that OpenRig counted, beats
+      included;
+    - the seat has no attention outstanding, such as a permission request waiting on a person.
+
+    So number every post with one `sequence` that rises across your whole runner process, beats included. OpenRig
+    orders your posts by `occurredAt`, then `sequence`. A post older than one OpenRig already counted changes nothing:
+    a late `Stop` for an earlier turn doesn't end the current one, and an older beat doesn't count. A post without a
+    valid `occurredAt` is dated when it arrives, by OpenRig's clock, so it can read older than it is when your clock
+    runs ahead. Give every post its `occurredAt`.
+  - **After you deliver an answer or permit** to a request OpenRig had shown as needing input (section 7; it created an
+    ask, and a permit at submit opens none), post `active` / `permission_resolved` with the turn's `turnId` and the
+    `askId`, before your next beat. That clears the seat's attention. So does any other working or idle post OpenRig
+    counts, and an operator's `rig seat clear-attention`. OpenRig doesn't match `permission_resolved` to its `askId`.
+    Beats are ignored until attention clears.
+  - **A beat that fails any of these is ignored.** The seat reads as it would without it. A beat never starts or extends
+    a turn, never clears attention, and never stands in for a `Stop`.
+  - **OpenRig keeps what it needs to judge beats in memory.** After a daemon restart, a beat already counted keeps its
+    lifetime, but new beats are ignored until your next accepted prompt, and the seat reads as it would without them.
+  - **A runner that sends no beats** behaves as before.
 - **Exit:** post `Stop` / `<preset name>_exited` only when you observe the agent's process exit.
 
 - **The screen still counts,** but only as evidence of work. On its own it never reads a runner seat idle.
@@ -136,13 +176,17 @@ Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer 
   A refused post records nothing, so the seat's activity stays as it was, or unknown.
 
   **The guest's boundary is its listener, not the grant.** A guest reaches OpenRig only through a guest-only listener that
-  serves this one route and accepts only a grant. It must never reach the daemon's main port. The grant scopes activity
-  posts only, and the main port's other routes don't check it.
+  serves this route and section 7's three permission-request routes, and accepts only a grant. It must never reach the
+  daemon's main port. The grant scopes activity posts and permission requests, and the main port's other routes don't
+  check it.
+  - The listener is off by default. Turn it on with `OPENRIG_GUEST_ACTIVITY_PORT`, which must differ from the daemon's
+    main port or the daemon refuses to start.
+  - It binds `OPENRIG_GUEST_ACTIVITY_HOST`, default `127.0.0.1`: set it to an address the guest can reach.
 
 ## 5. Input: one submitted message is one prompt
 
-Sections 5-7 specify the proposed first dsh/ACP runner recipe. They do not change permission or input handling in
-existing built-in runtimes or require every possible runner protocol to use ACP.
+Sections 5-7 specify the first dsh/ACP runner recipe; no runner has been qualified against it yet. They do not change
+permission or input handling in existing built-in runtimes or require every possible runner protocol to use ACP.
 
 - **Set up the pane:** put your TTY in raw mode and turn on bracketed paste (`\e[?2004h`).
 - **What arrives:** `rig send` and queue reminders paste the whole message, then press Enter. Everything up to that Enter
@@ -162,6 +206,8 @@ existing built-in runtimes or require every possible runner protocol to use ACP.
 
 - **On `/abort` or Ctrl-C:** send the agent's cancel (for ACP, the `session/cancel` notification, which has no reply),
   and record when you sent it.
+  - A person cancels by typing `/abort` in the seat's pane. A `/abort` sent with `rig send` arrives inside a From/To
+    envelope, so it's an ordinary prompt.
 - **Report "cancelled" only when the agent says so:** for ACP, when `session/prompt` returns `stopReason: "cancelled"`.
   Then post `Stop` / `cancelled`.
 - **Whether the provider stopped work or spend is unknown.** Don't claim it.
@@ -263,11 +309,15 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
      `refused` (with `reason`: `said_no` when the person said no and the agent offered no reject option, or
      `no_allow_offered` when it was closed without a choice and the agent offered no allow option), `withdrawn` or
      `stale`.
+   - **From 0.7.9, `said`,** with `permitted` or `refused` (`no_allow_offered`), is the person's own words, when they
+     answered in words that were neither a choice nor a plain yes or no. It never changes the outcome.
    - **A seat grant reads and withdraws only its own launch's requests.** Once its occupant is replaced, the grant is
      refused (`409 activity_grant_stale`), even during a read's wait.
 3. **Deliver** `{"outcome": {"outcome": "selected", "optionId": "<optionId>"}}` to the agent once, and only while that
    request is still its live one. For `refused`, `withdrawn` or `stale`, answer `cancelled` and hold no attention: no
-   person is still waiting. A refusal of the read itself follows the refusals below.
+   person is still waiting. A refusal of the read itself follows the refusals below. From 0.7.9, when the read carries
+   `said`, queue those words for the agent as an ordinary prompt: they reach it after the current turn, behind any prompt
+   already waiting. They're never the answer. A runner that drops them still keeps this contract.
 4. **Withdraw** when the turn is cancelled or ends, or the agent exits:
    `POST <base>/api/activity/permission-requests/<askId>/withdraw` with
    `{"reason": "turn_cancelled" | "turn_ended" | "exited"}`.
@@ -310,8 +360,19 @@ its pane. That covers:
 ## 8. Resume: exactly the same conversation, or say honestly that you couldn't
 
 - On a resume, OpenRig passes the conversation to reopen in `OPENRIG_RESUME_REF`. Use the method your agent
-  advertises: ACP's `session/load` (capability `loadSession`), or your agent's own reopen method, named with its
+  advertises: ACP's `session/load` (capability `loadSession`), ACP's `session/resume` (capability
+  `sessionCapabilities.resume`, which dsh `0.2.1-rc.2` uses), or your agent's own reopen method, named with its
   capability and pinned version in your `limits`.
+- **Telling "missing" from "won't reopen":** an agent may answer one error for both. dsh `0.2.1-rc.2` answers `-32602`
+  for a conversation it doesn't have and for one already active elsewhere. So don't read an error's code or text as
+  missing unless the agent defines it that way, as ACP's not-found `-32002` is.
+  - **Report missing only on the agent's own not-found,** and leave anything else unconfirmed.
+  - **When the agent advertises `sessionCapabilities.list`,** its `session/list` can show that a conversation exists:
+    one it lists but won't reopen is unconfirmed, even on a not-found. Follow `nextCursor` (an opaque string, possibly
+    empty), and treat a page you can't read as deciding nothing.
+  - **A list doesn't show that a conversation is gone,** unless your agent guarantees it lists every conversation. An
+    agent may leave out one that another running process holds unsaved; dsh `0.2.1-rc.2` can. So still try the reopen
+    for a conversation the list doesn't name.
 
 | What happened | Write in the launch record | What OpenRig does |
 |---|---|---|
@@ -378,8 +439,9 @@ its pane. That covers:
 
 ## Open questions
 
-1. **For the dsh maintainer:** which method and capability does dsh advertise for reopening a session, at a pinned
-   version: `session/load` with `loadSession`, or `session/resume`?
+1. **Answered:** which method and capability does dsh advertise for reopening a session, at a pinned version? dsh
+   `0.2.1-rc.2` advertises `sessionCapabilities` `{close, list, resume}`, without `loadSession`, and reopens with
+   `session/resume` (section 8). This was observed with a stand-in model, not a real one.
 2. **For the dsh maintainer:** can dsh's ACP profile run with tools off? A first journey that needs no permission
    answers is the simplest to check.
 3. **For OpenRig:** should a later version route permission requests to a chosen seat, as `rig acp run` already does

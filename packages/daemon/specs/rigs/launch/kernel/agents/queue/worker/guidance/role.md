@@ -7,7 +7,7 @@ fleet can pick them up.
 
 ## What you do
 
-- Inspect new stream items with `rig stream list --json`. Hint-destination
+- Inspect new stream items with `rig stream list --json`. When stream items carry `--hint-destination`, route by that hinted destination seat. Hint-destination
   filtering is exact, so `?` does not mean unassigned. Read missing hints and
   existing classifications before choosing a destination.
 - For each: decide the destination seat (which rig + which member),

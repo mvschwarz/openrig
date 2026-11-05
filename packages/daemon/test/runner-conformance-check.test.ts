@@ -7,16 +7,17 @@ import { promisify } from "node:util";
 // against copies of it that each break one promise: the check must pass the first and catch every break.
 const CHECK = resolve(__dirname, "../../../docs/reference/runner-conformance/check-runner.mjs");
 const RUNNER = resolve(__dirname, "fixtures/runner-conformance/minimal-acp-runner.mjs");
+const LATE_TIMERS = resolve(__dirname, "fixtures/runner-conformance/late-check-timers.cjs");
 const hasTmux = spawnSync("tmux", ["-V"]).status === 0;
 
 type Check = { name: string; ok: boolean; detail?: string };
 type Result = { id: string; status: "pass" | "fail" | "skip" | "advisory"; met?: boolean; checks: Check[]; reason?: string };
 type Report = { results: Result[]; summary: { pass: number; fail: number; skip: number; advisory: number } };
 
-async function check(args: string[], runnerFlags = ""): Promise<{ code: number; report: Report }> {
+async function check(args: string[], runnerFlags = "", nodeArgs: string[] = [], timeoutMs = 90_000): Promise<{ code: number; report: Report }> {
   const runner = `${process.execPath} ${RUNNER} --agent {agent}${runnerFlags}`;
   try {
-    const { stdout } = await promisify(execFile)(process.execPath, [CHECK, "--runner", runner, "--name", "minimal", "--json", ...args], { timeout: 90_000 });
+    const { stdout } = await promisify(execFile)(process.execPath, [...nodeArgs, CHECK, "--runner", runner, "--name", "minimal", "--json", ...args], { timeout: timeoutMs });
     return { code: 0, report: JSON.parse(stdout) };
   } catch (error) {
     const failed = error as { code?: number; stdout?: string; stderr?: string };
@@ -31,7 +32,10 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
   it("passes every case for a runner that keeps the contract", async () => {
     const { code, report } = await check(["--resume", "--first-input"]);
     expect(failing(report)).toEqual([]);
-    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 0, advisory: 1 });
+    // 3b, the optional working beat, skips: this double sends no beats unless it's run with --beat.
+    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 1, advisory: 2 });
+    expect(report.results.find((r) => r.id === "3b")).toMatchObject({ status: "skip", reason: expect.stringContaining("optional") });
+    expect(report.results.find((r) => r.id === "4c")).toMatchObject({ status: "advisory", met: true });
     expect(report.results.find((r) => r.id === "7c")).toMatchObject({ status: "advisory", met: true });
     expect(code).toBe(0);
   }, 120_000);
@@ -44,6 +48,18 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(shutdown).toMatchObject({ status: "advisory", met: false });
     expect(shutdown.checks.filter((c) => !c.ok).map((c) => c.name)).toContainEqual(expect.stringContaining("closing the pane ends the agent process"));
     expect(report.results.find((r) => r.id === "7b")!.status).toBe("pass");
+    expect(report.summary).toMatchObject({ fail: 0, advisory: 1 });
+    expect(code).toBe(0);
+  }, 90_000);
+
+  // Section 7 lets a runner drop a person's words (OpenRig's `said`) and still keep the contract, so passing them on is
+  // reported on its own, like the shutdown duty.
+  it("reports a runner that drops the person's words as an advisory result that doesn't fail the run", async () => {
+    const { code, report } = await check(["--cases", "4b,4c"], " --break drop-words");
+    const words = report.results.find((r) => r.id === "4c")!;
+    expect(words).toMatchObject({ status: "advisory", met: false });
+    expect(words.checks.filter((c) => !c.ok).map((c) => c.name)).toContainEqual(expect.stringContaining("the person's words are queued to the agent as a prompt"));
+    expect(report.results.find((r) => r.id === "4b")!.status).toBe("pass");
     expect(report.summary).toMatchObject({ fail: 0, advisory: 1 });
     expect(code).toBe(0);
   }, 90_000);
@@ -63,6 +79,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["abort-in-block", "2", "a line reading /abort inside a block isn't control"],
     ["no-queue", "2", "a block sent mid-turn waits for the next turn"],
     ["cancelled-always", "2", "cancelled is reported only on the agent's own stop reason"],
+    ["ctrl-c-ignored", "2", "Ctrl-C outside a paste sends session/cancel"],
     ["no-token", "3", "every post uses the hook token"],
     ["no-sequence", "3", "every post carries the contract's fields"],
     ["refuse-on-404", "4", "404: the agent gets its allow_once option"],
@@ -83,6 +100,10 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["permit-on-refused-read", "4b", "refused read (said_no): the agent gets cancelled"],
     ["hold-on-cancel", "4b", "stale ask: nothing is held"],
     ["hold-after-withdraw", "4b", "turn end: nothing is held once the ask is withdrawn"],
+    ["stop-before-end", "4b", "turn end: nothing is held once the ask is withdrawn"],
+    ["stop-low-sequence", "4b", "pending: no idle Stop while it waits"],
+    // An idle Stop whose occurredAt isn't a string: OpenRig dates it by its arrival, so it counts.
+    ["stop-numeric-time", "4b", "pending: no idle Stop while it waits"],
     ["hold-after-withdraw", "4b", "pending: after /abort, the turn's end is reported, holding nothing"],
     ["forget-permitted-ask", "4b", "unreachable read: the ask is still withdrawn at the turn's end"],
     ["cancel-on-revoked", "4b", "activity_grant_revoked: the agent gets its allow_once option"],
@@ -90,10 +111,15 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["no-withdraw", "4b", "pending: /abort withdraws the ask with turn_cancelled"],
     ["late-deliver", "4b", "pending: an answer after the withdraw isn't delivered"],
     ["paste-answers", "4b", "pending: a pasted message isn't an answer"],
+    ["said-as-answer", "4b", "permitted at read, with the person's words: the agent gets its allow_once option"],
     ["wrong-generation", "5", "generation is OPENRIG_OCCUPANT_GENERATION on every post"],
     ["new-on-resume", "6", "other failure: no new conversation starts"],
     ["missing-on-any-error", "6", "other failure: not reported missing or resumed"],
-    ["idle-on-exit", "7", "no idle Stop after the exit"],
+    ["idle-on-exit", "7", "no idle report for the turn it died in"],
+    // An idle Stop numbered below the turn's accepted prompt but later in time: OpenRig orders by time first, so it counts.
+    ["idle-low-sequence-on-exit", "7", "no idle report for the turn it died in"],
+    // An idle Stop at the accepted prompt's time with a string sequence: OpenRig reads no sequence there, so it counts.
+    ["idle-string-sequence-on-exit", "7", "no idle report for the turn it died in"],
     ["no-error-post", "7b", "a failed session/prompt posts Notification/runtime_error"],
     ["ignore-unknown", "8", "the unknown request is answered -32601"],
     ["first-input-trim", "9", "the first prompt is the file's bytes, newlines and spaces included"],
@@ -115,9 +141,75 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(code).toBe(0);
   }, 90_000);
 
+  // A busy machine delays the check's own timers. Case 1 must still pass a runner that writes its record only after the
+  // answer: whether a record came early is read against the fake agent's log, not against a fixed settle.
+  it("passes case 1 for a runner that keeps the contract when the check's own timers run late", async () => {
+    const { code, report } = await check(["--cases", "1"], "", ["--require", LATE_TIMERS]);
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["1", "pass"]]);
+    expect(code).toBe(0);
+  }, 90_000);
+
+  // A busy machine also delays the runner. Case 2 must still pass a runner that handles Ctrl-C late: the agent's turn
+  // stays open until the cancel arrives, so only the runner's own delivery is timed.
+  it("passes case 2 for a runner that keeps the contract when it handles Ctrl-C late", async () => {
+    const { code, report } = await check(["--cases", "2"], " --interrupt-delay 4000");
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["2", "pass"]]);
+    expect(code).toBe(0);
+  }, 90_000);
+
+  // The optional working beat (section 4): a runner that beats in a quiet turn keeps 3b's promises, and each way of
+  // breaking one is caught by the check that names it. Case 3b's three launches take about 90 s, so it gets a longer bound.
+  const CASE_3B_MS = 170_000;
+  it("passes 3b for a runner that beats through a quiet turn, stops while a person is asked, and resolves before beating again", async () => {
+    const { code, report } = await check(["--cases", "3b"], " --beat", [], CASE_3B_MS);
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["3b", "pass"]]);
+    expect(code).toBe(0);
+  }, CASE_3B_MS + 10_000);
+  it.concurrent.each([
+    ["beat-after-stop", "no beat after the turn's Stop"],
+    ["beat-during-ask", "asked: no beat while the ask waits on a person"],
+    ["no-resolve", "asked: after the answer, active/permission_resolved names the turn and the ask, before any beat"],
+    ["beat-time-backwards", "sequence rises with the runner's own time across every post, beats included"],
+  ])("catches %s in case 3b", async (broken, name) => {
+    const { code, report } = await check(["--cases", "3b"], ` --beat --break ${broken}`, [], CASE_3B_MS);
+    const result = report.results.find((r) => r.id === "3b")!;
+    expect(result.status).toBe("fail");
+    expect(result.checks.filter((c) => !c.ok).map((c) => c.name)).toContainEqual(expect.stringContaining(name));
+    expect(code).toBe(1);
+  }, CASE_3B_MS + 10_000);
+
+  // Section 7 sets no time limit for a permit after a read OpenRig answered with a status it doesn't list. A runner that
+  // retries such a read a few times first keeps the contract, so the check waits its ordinary per-step bound for it.
+  it("passes 4b for a runner that retries a failed read three times, 1.5 s apart, before it permits", async () => {
+    const { code, report } = await check(["--cases", "4b"], " --read-retries 3");
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["4b", "pass"]]);
+    expect(code).toBe(0);
+  }, 120_000);
+
+  // A runner may report idle at startup, before any turn: that's neither an idle report while an ask waits (4b) nor one
+  // for a turn the agent died in (7), even when its POST arrives after the agent's exit.
+  it("passes 4b and 7 for a runner that reports idle at startup, even when that report arrives late", async () => {
+    const { code, report } = await check(["--cases", "4b,7"], " --startup-idle 1500");
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["4b", "pass"], ["7", "pass"]]);
+    expect(code).toBe(0);
+  }, 150_000);
+
+  // The contract doesn't order a turn's Stop and its ask's withdraw. A runner that posts the Stop first keeps it.
+  it("passes 4b for a runner that withdraws a cancelled or ended turn's ask after posting its Stop", async () => {
+    const { code, report } = await check(["--cases", "4b"], " --withdraw-after-stop");
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["4b", "pass"]]);
+    expect(code).toBe(0);
+  }, 90_000);
+
   // --wait-ms is for slow machines: a larger one must stretch the fake agent's own timings with the check's settling times,
   // so a runner that keeps the contract still passes. With fixed fake timings, a factor of 3 outgrows case 1's handshake
-  // delay; case 2's holds would first be outgrown at about a factor of 5.
+  // delay; case 2's holds would first be outgrown at about a factor of 12.
   it("still passes a runner that keeps the contract when --wait-ms triples every bound", async () => {
     const { code, report } = await check(["--cases", "1,2", "--wait-ms", "24000"]);
     expect(failing(report)).toEqual([]);
