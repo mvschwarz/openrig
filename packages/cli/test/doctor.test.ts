@@ -775,3 +775,60 @@ describe("rig doctor", () => {
     expect(portArgs).toContain(7433);
   });
 });
+
+
+describe("doctor JSON HTTP deadlines", () => {
+  it.each(["health headers", "cmux headers", "cmux body"] as const)("returns an honest diagnostic when a real listener holds %s", async (held) => {
+    const { createServer } = await import("node:http");
+    const requests: string[] = [];
+    const server = createServer((req, res) => {
+      requests.push(req.url!);
+      if (held === "health headers") return;
+      if (req.url === "/healthz") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, pid: 4242, euid: 1002 }));
+      } else if (held === "cmux body") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.write('{"available":');
+      }
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const priorExitCode = process.exitCode;
+    const program = new Command();
+    program.addCommand(doctorCommand(makeDeps({ checkPort: async () => false, callerUid: 1002,
+      ownerReportTimeoutMs: 100, fetch: (url, init) => globalThis.fetch(url, init),
+      configStore: { resolve: () => ({ ...defaultConfig, daemon: { host: "127.0.0.1", port } }) },
+    })));
+    const task = program.parseAsync(["node", "rig", "doctor", "--json"]);
+    let observationTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const outcome = await Promise.race([task.then(() => "settled"), new Promise<string>(resolve => {
+        observationTimer = setTimeout(() => resolve("still-waiting"), 1500);
+      })]);
+      expect(["darwin", "linux"]).toContain(process.platform);
+      expect(requests).toContain(held === "health headers" ? "/healthz" : "/api/adapters/cmux/status");
+      console.info("[doctor HTTP deadline]", JSON.stringify({ platform: process.platform, held, requests, outcome }));
+      expect(outcome).toBe("settled");
+      const result = JSON.parse(String(log.mock.calls.at(-1)![0]));
+      const portCheck = result.checks.find((c: { name: string }) => c.name === "port");
+      const cmux = result.checks.find((c: { name: string }) => c.name === "cmux_daemon");
+      if (held === "health headers") {
+        expect(portCheck).toMatchObject({ status: "warn", message: expect.stringContaining("unknown") });
+        expect(portCheck.reason).toContain("headers");
+        expect(cmux.status).toBe("skipped");
+      } else {
+        expect(portCheck.status).toBe("pass");
+        expect(cmux.status).toBe("warn");
+      }
+    } finally {
+      clearTimeout(observationTimer);
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await Promise.allSettled([task]);
+      log.mockRestore(); process.exitCode = priorExitCode;
+      expect(server.listening).toBe(false);
+    }
+  });
+});
