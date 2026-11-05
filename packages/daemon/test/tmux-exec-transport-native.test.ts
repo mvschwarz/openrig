@@ -30,6 +30,8 @@ async function spawnedFiles(fn: () => Promise<void>): Promise<string[]> {
 async function scenario(mode: "shell" | "argv") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-exec-"));
   roots.push(root);
+  // Exercise input arriving while a login shell is still starting, without relying on host profile timing.
+  fs.writeFileSync(path.join(root, ".profile"), "sleep 1\n");
   const serverDir = path.join(root, "server");
   const emptyDir = path.join(root, "empty");
   fs.mkdirSync(serverDir);
