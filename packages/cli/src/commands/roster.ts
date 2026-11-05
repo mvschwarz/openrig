@@ -64,7 +64,14 @@ export function enrichRosterMember(member: RosterMember, inventory: RosterInvent
     const activity = current && object(n.agentActivity) ? n.agentActivity : null;
     return { state: text(activity?.state) ?? "unknown", reason: text(activity?.reason), sampledAt: text(activity?.sampledAt) };
   });
-  const activity = node && new Set(activities.map(a => JSON.stringify(a))).size === 1 ? activities[0]!
+  const agreed = node && new Set(activities.map(a => JSON.stringify([a.state, a.reason]))).size === 1;
+  const times = activities.map(a => a.sampledAt);
+  const sameTime = new Set(times).size === 1;
+  const comparable = times.every((t): t is string => t !== null && Number.isFinite(Date.parse(t)));
+  // A later timestamp is meaningful only when every route supplied a comparable time.
+  const sampledAt = sameTime ? times[0] ?? null : comparable
+    ? [...times].sort((a, b) => Date.parse(b!) - Date.parse(a!) || b!.localeCompare(a!))[0] ?? null : null;
+  const activity = agreed ? { ...activities[0]!, sampledAt }
     : { state: "unknown", reason: matches.length > 1 ? "Conflicting activity observations" : null, sampledAt: null };
   const observations = matches.map(n => modelObservation(n.modelObservation, current));
   const observation = node && new Set(observations.map(o => JSON.stringify(o))).size === 1 ? observations[0]!
