@@ -556,7 +556,10 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "not_codex" });
     w.db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(w.node.id);
     w.db.prepare("UPDATE sessions SET origin = 'claimed' WHERE id = ?").run(w.session.id);
-    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "claimed_session" });
+    const claimed = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(claimed).toMatchObject({ ok: false, code: "claimed_session" });
+    // B5: the refusal names rig down and rig unclaim, not only rig unclaim.
+    expect((claimed as { guidance?: string }).guidance).toMatch(/run rig down '[^']+' \(.*\)\. To release it from OpenRig and leave its process running, run rig unclaim '/);
   });
 });
 
