@@ -5,22 +5,32 @@ export function tileAttachArgv(
   tmux: string, server: readonly string[], session: string, readOnly: boolean,
   retrySeconds = 30,
 ): string[] {
-  const ro = readOnly ? "-r " : "-f ignore-size ";
+  // tmux honours ignore-size server-wide: while any client of any session sizes
+  // its window, ignore-size clients size nothing, so a session they alone view
+  // keeps its 80x24 creation size. A writable tile therefore ignores size only
+  // when its session already has a sizing client.
+  const ro = readOnly ? "-r " : "$ro ";
+  const pick = (target: string) => (readOnly ? "" : `pick ${target} "$@"; `);
   // No apostrophes or control characters in the script: Herdr also stores this
   // argv as its restart command. All external values stay positional arguments.
   const script = [
     'target=$1; shift;',
-    `snapshot=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || exec "$@" attach ${ro}-t "=$target";`,
+    ...(readOnly ? [] : [
+      // Shell builtins only: the provider PATH may hold nothing but tmux.
+      'pick() { s=$1; shift; ro=; for f in $("$@" list-clients -t "$s" -F "#{client_flags}" 2>/dev/null); do',
+      'case ",$f," in *,ignore-size,*) ;; *) ro="-f ignore-size";; esac; done; };',
+    ]),
+    `snapshot=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || { ${pick('"=$target"')}exec "$@" attach ${ro}-t "=$target"; };`,
     // display-message may succeed with empty/fallback context for a missing target.
-    `if [ "\${snapshot#*:}" != "$target" ]; then exec "$@" attach ${ro}-t "=$target"; fi;`,
+    `if [ "\${snapshot#*:}" != "$target" ]; then ${pick('"=$target"')}exec "$@" attach ${ro}-t "=$target"; fi;`,
     'snapshot=${snapshot%%:*};',
     'node=$("$@" show-environment -t "${snapshot#* }" OPENRIG_NODE_ID 2>/dev/null) || node=;',
     'case "$node" in OPENRIG_NODE_ID=?*) ;; *) node=;; esac;',
     'if [ -z "$node" ]; then',
     'printf "%s\\n" "No managed identity for $target; reopen this view after replacement.";',
-    `exec "$@" attach ${ro}-t "\${snapshot#* }"; fi;`,
+    `${pick('"${snapshot#* }"')}exec "$@" attach ${ro}-t "\${snapshot#* }"; fi;`,
     'while :; do',
-    `"$@" attach ${ro}-t "\${snapshot#* }";`,
+    `${pick('"${snapshot#* }"')}"$@" attach ${ro}-t "\${snapshot#* }";`,
     `left=${retrySeconds}; same=0;`,
     'while [ "$left" -gt 0 ]; do',
     'next=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || next=;',

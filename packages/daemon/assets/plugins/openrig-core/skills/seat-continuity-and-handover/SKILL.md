@@ -73,6 +73,15 @@ This is the system's truth-source for "how did the current occupant get
 there." Without it, the control plane shows the current occupant but
 not the legitimacy of the transition.
 
+`rig seat handover`'s receipt reports it under `sideEffects`:
+`provenanceRecordWritten` says whether this handover's lineage record (its
+occupant tenure) exists, and `departingProcess` says how the old process
+ended (`ended-graceful`, `ended-forced`, or `not-touched` for a discovered
+successor). If `provenanceRecordWritten` is false, the seat is already bound
+to the successor and only its lineage record is missing: check the daemon
+log, which names the first such failure since the daemon started, and don't
+run the handover again, which would replace the occupant a second time.
+
 ## State models — independent
 
 ### Occupant-creation state (per candidate)
@@ -85,7 +94,7 @@ not the legitimacy of the transition.
 
 1. **Stable** — current occupant attached, no in-flight binding
 2. **Binding** — handover in progress
-3. **Bound** — handover succeeded; provenance record written
+3. **Bound** — handover succeeded; provenance record written (or missing, when the receipt says so: see failure mode 3)
 4. **Unchanged** — bind failed before completion; seat retains old occupant
 
 A seat stays `Stable` even if multiple candidate-occupants were produced and discarded.
@@ -94,7 +103,7 @@ A seat stays `Stable` even if multiple candidate-occupants were produced and dis
 
 1. **Candidate creation failed** — `rebuild` couldn't synthesize from artifacts; `fork` couldn't resolve `session_source`; `fresh` couldn't launch. **Action**: bind operation does not begin; seat unchanged; provenance records the failed candidate-creation step.
 2. **Old occupant cannot be detached cleanly** — runtime hung, tmux locked, etc. **Action**: bind halts mid-flight; seat enters `Binding` state with explicit "halted" sub-status; operator alerted. **Do NOT auto-rollback by reattaching old-occupant if detach didn't complete cleanly.**
-3. **Bind succeeded but provenance write failed** — disk/db error. **Action**: not durable until provenance writes; treat as `Binding` halted, not `Bound`.
+3. **Bind succeeded but the lineage record didn't write** — disk/db error; the receipt says `provenanceRecordWritten: false`. **Action**: the binding is committed and the successor is the occupant; only its lineage record is missing. Report it as bound with the record missing, check the daemon log (it names the first such failure since the daemon started), and don't run the handover again.
 4. **Old occupant disposition unfulfillable** — operator requested `advise` (keep alive as advisor) but runtime can't keep old alive. **Action**: degrade to `retire` with explicit notification, OR fail if operator passed strict-disposition flag.
 5. **Concurrent handover attempts** — two operations target the same seat. **Action**: serialize by seat-id lock; second attempt refuses with clear error.
 
@@ -104,7 +113,7 @@ A seat stays `Stable` even if multiple candidate-occupants were produced and dis
 - **Do NOT introduce successor-suffix seat names** (`lead2`/`lead3`). Stable seat identity is the architectural goal. The live address stays stable. A retired tenure is distinguished by its ledger
 generation and exact history token; preserving it does not require a renamed live pane.
 
-- **Do NOT report `seatBindingOutcome: handed_over`** if the provenance record didn't write durably.
+- **Do NOT report a handover's provenance record as written** unless its receipt says `provenanceRecordWritten: true`; a bound seat whose record is missing is reported as exactly that (failure mode 3).
 - **Do NOT auto-rollback a half-completed handover** by re-attaching the old occupant unless detach completed cleanly first.
 
 ## Composition and current command surface

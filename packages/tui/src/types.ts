@@ -470,9 +470,8 @@ export interface FleetSnapshot {
    * the render keeps only unclaimed (claimedAt null) and caps for display. */
   pending: QueueRead[];
   /** PULSE JUST FINISHED source (increment 3) — the shipped
-   * state=done,handed-off read (a bounded recent WINDOW; no fleet-wide
-   * finish-time-ordered transitions endpoint exists — the served order is
-   * ts_created, so the render re-sorts by tsUpdated DESC for newest-finished-first). */
+   * state=done,handed-off read with sort=updated (a bounded recent WINDOW of the
+   * most recently finished; the render sorts by tsUpdated DESC for newest-finished-first). */
   recentlyFinished: QueueRead[];
   /** When THIS snapshot finished hydrating (TUI render-time fact, not a daemon
    * read) — the PULSE footer "updated Ns ago" freshness. Absent before the first

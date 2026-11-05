@@ -14,7 +14,8 @@ import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
 
 const registry = { ok: true as const, entities: [{ entityId: "human-owner", class: "human" as const,
-  displayName: "Owner", address: "human-owner@external", connectorBindings: [], prefs: {} }] };
+  displayName: "Owner", address: "human-owner@external",
+  connectorBindings: [{ kind: "slack", connectorRef: "primary", secretsRef: "unused", role: "primary" }], prefs: {} }] };
 const questions = [{ id: "continue", question: "Continue?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] }];
 
 describe("Slack sweep selection", () => {

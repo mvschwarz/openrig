@@ -326,6 +326,7 @@ describe("Broadcast CLI", () => {
     const output = logs.join("\n");
     expect(output).toContain("No running sessions found");
     expect(output).toContain("0/0 delivered");
+    expect(logs).toContainEqual(expect.stringMatching(/^FAILED — No running sessions found/));
     expect(exitCode).toBe(1);
   });
 });

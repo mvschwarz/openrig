@@ -8,7 +8,9 @@ import { RigNotFoundError } from "./errors.js";
 import type { ResumeMetadataRefresher } from "./resume-metadata-refresher.js";
 import fs from "node:fs";
 import nodePath from "node:path";
-import { removeManagedBlocksFromFile, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE } from "./managed-blocks.js";
+import { removeManagedBlocksFromFile } from "./managed-blocks.js";
+import { recordedGuidanceFile, seatGuidanceFile } from "./restore-guidance.js";
+import { cleanupOwnedClaudeCwd } from "./claude-owned-settings.js";
 import { stopTranscriptRotation } from "./transcript-rotation.js";
 import { findOtherSessionOwner } from "./session-owner.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
@@ -29,6 +31,10 @@ export interface TeardownResult {
   /** Managed guidance blocks left in a guidance file because a person edited them, as `<file>: <block id>`. Present
    *  only when something was kept. */
   keptGuidance?: string[];
+  /** #875: files in a Claude seat's cwd that still hold OpenRig's additions because down couldn't safely change them
+   *  (settings that don't parse, a collector that isn't the shipped one), as `<file>: <why>`. Present only when
+   *  something was kept. */
+  keptFiles?: string[];
   /** Sessions of seats joined with `rig attach` as an external CLI, which down doesn't stop or check. Without --delete
    *  each keeps its claim as it was, whether or not the app still runs. Present only when there was one. */
   leftRunning?: string[];
@@ -54,6 +60,8 @@ interface TeardownDeps {
   eventBus: EventBus;
   resumeMetadataRefresher?: ResumeMetadataRefresher;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
+  /** The shipped Claude context collector. A cwd's copy is removed only while its bytes match this file. */
+  claudeCollectorAssetPath?: string;
 }
 
 interface LatestNodeSession {
@@ -126,6 +134,7 @@ export class RigTeardownOrchestrator {
       // Additional intent is best-effort; keep down's existing result if it cannot be recorded.
       await this.recordAlreadyStoppedIntent(rigId).catch(() => {});
       this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets(), result);
+      this.cleanupClaudeCwds(rigId, result);
       result.alreadyStopped = true;
       // Still tear down services even if no agent sessions are running
       if (this.deps.serviceOrchestrator) {
@@ -218,7 +227,7 @@ export class RigTeardownOrchestrator {
         if (!ownedByAnotherRig) stopTranscriptRotation(session.sessionName);
         // Success or already gone — update DB atomically
         this.atomicNodeCleanup(session);
-        this.cleanupManagedGuidanceFileForNode(rigId, session.runtime, session.cwd, currentLiveGuidanceTargets(), result);
+        this.cleanupManagedGuidanceFileForNode(rigId, session.runtime, session.cwd, currentLiveGuidanceTargets(), result, session.nodeId);
         if (killResult.ok) result.sessionsKilled++;
         if (killResult.ok && communityHarnessOf(session.communityHarness, session.runtime)) (result.paneOnly ??= []).push(session.sessionName);
       } else {
@@ -230,6 +239,7 @@ export class RigTeardownOrchestrator {
     // Stop live sessions before probing historical rows; bookkeeping must not fail down.
     await this.recordAlreadyStoppedIntent(rigId).catch(() => {});
     this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets(), result);
+    this.cleanupClaudeCwds(rigId, result);
 
     // 5b. Tear down services if they exist
     if (this.deps.serviceOrchestrator) {
@@ -388,19 +398,19 @@ export class RigTeardownOrchestrator {
 
   private liveGuidanceTargets(rigId: string): Set<string> {
     const rows = this.db.prepare(`
-      SELECT n.rig_id, n.runtime, n.cwd FROM nodes n
+      SELECT n.id, n.rig_id, n.runtime, n.cwd FROM nodes n
       JOIN rigs r ON r.id = n.rig_id
       WHERE r.archived_at IS NULL AND r.id <> ? AND n.cwd IS NOT NULL
-    `).all(rigId) as Array<{ rig_id: string; runtime: string | null; cwd: string }>;
+    `).all(rigId) as Array<{ id: string; rig_id: string; runtime: string | null; cwd: string }>;
     const targets = new Set<string>();
     for (const row of rows) {
-      const target = this.guidanceTargetPath(row.rig_id, row.runtime, row.cwd);
+      const target = this.guidanceTargetPath(row.rig_id, row.runtime, row.cwd, row.id);
       if (target) targets.add(this.guidancePathKey(target));
     }
     // A failed kill or inconclusive probe leaves this rig's session live.
     // Its file may also be shared with a sibling that stopped successfully.
     for (const session of this.getLatestLiveSessions(rigId)) {
-      const target = this.guidanceTargetPath(rigId, session.runtime, session.cwd);
+      const target = this.guidanceTargetPath(rigId, session.runtime, session.cwd, session.nodeId);
       if (target) targets.add(this.guidancePathKey(target));
     }
     return targets;
@@ -408,25 +418,69 @@ export class RigTeardownOrchestrator {
 
   private cleanupManagedGuidanceFiles(rigId: string, liveGuidanceTargets: ReadonlySet<string>, result: TeardownResult): void {
     const rows = this.db.prepare(`
-      SELECT DISTINCT runtime, cwd
+      SELECT id, runtime, cwd
       FROM nodes
       WHERE rig_id = ?
-    `).all(rigId) as Array<{ runtime: string | null; cwd: string | null }>;
+    `).all(rigId) as Array<{ id: string; runtime: string | null; cwd: string | null }>;
     for (const row of rows) {
-      this.cleanupManagedGuidanceFileForNode(rigId, row.runtime, row.cwd, liveGuidanceTargets, result);
+      this.cleanupManagedGuidanceFileForNode(rigId, row.runtime, row.cwd, liveGuidanceTargets, result, row.id);
     }
   }
 
-  private guidanceTargetPath(rigId: string, runtime: string | null, cwd: string | null): string | null {
+  /** #875: take OpenRig's Claude collector, status line and relay hooks back out of each of this rig's Claude cwds that
+   *  no seat still uses, and report what had to be kept. */
+  private cleanupClaudeCwds(rigId: string, result: TeardownResult): void {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT cwd FROM nodes WHERE rig_id = ? AND runtime = 'claude-code' AND cwd IS NOT NULL
+    `).all(rigId) as Array<{ cwd: string }>;
+    if (rows.length === 0) return;
+    const inUse = this.claudeTargetsInUse(rigId);
+    const done = new Set<string>();
+    for (const { cwd } of rows) {
+      const key = this.guidancePathKey(cwd);
+      if (inUse.has(key) || done.has(key)) continue;
+      done.add(key); // one cleanup per directory, however many of this rig's seats name it
+      try {
+        const isShared = (path: string) => inUse.has(this.guidancePathKey(path));
+        for (const entry of cleanupOwnedClaudeCwd(cwd, this.deps.claudeCollectorAssetPath, isShared)) {
+          if (!result.keptFiles?.includes(entry)) (result.keptFiles ??= []).push(entry);
+        }
+      } catch (err) {
+        result.errors.push(`Claude settings cleanup in ${cwd}: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  /** What a Claude seat may still use, by the same rule as guidance files: the cwd of a Claude seat of any other rig that
+   *  isn't archived, or of one of this rig's Claude seats still live (a failed stop, an inconclusive probe, an attached
+   *  CLI). Each cwd's settings file, collector, `.claude` and `.openrig` are keyed by their own identity too, so a target
+   *  another directory reaches through a symlink or a hardlink counts as in use. */
+  private claudeTargetsInUse(rigId: string): Set<string> {
+    const rows = this.db.prepare(`
+      SELECT n.cwd FROM nodes n
+      JOIN rigs r ON r.id = n.rig_id
+      WHERE r.archived_at IS NULL AND r.id <> ? AND n.runtime = 'claude-code' AND n.cwd IS NOT NULL
+    `).all(rigId) as Array<{ cwd: string }>;
+    const cwds = rows.map((row) => row.cwd);
+    for (const session of this.getLatestLiveSessions(rigId)) {
+      if (session.runtime === "claude-code" && session.cwd) cwds.push(session.cwd);
+    }
+    const keys = new Set<string>();
+    for (const cwd of cwds) {
+      for (const target of [".", ".claude", nodePath.join(".claude", "settings.local.json"), ".openrig", nodePath.join(".openrig", "context-collector.cjs")]) {
+        keys.add(this.guidancePathKey(nodePath.join(cwd, target)));
+      }
+    }
+    return keys;
+  }
+
+  /** The file a seat reads its managed guidance from: the one its last launch recorded (#875), else the rule's. */
+  private guidanceTargetPath(rigId: string, runtime: string | null, cwd: string | null, nodeId?: string | null): string | null {
     if (!runtime || !cwd) {
       return null;
     }
     // #25: clean only the rig's selected Claude file; the other file is never touched.
-    return runtime === "claude-code"
-      ? nodePath.join(cwd, this.deps.rigRepo.getRigClaudeManagedBlockFile(rigId) ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
-      : runtime === "codex"
-        ? nodePath.join(cwd, "AGENTS.md")
-        : null;
+    return seatGuidanceFile(runtime, cwd, this.deps.rigRepo.getRigClaudeManagedBlockFile(rigId), recordedGuidanceFile(this.db, nodeId));
   }
 
   private guidancePathKey(path: string): string {
@@ -444,11 +498,16 @@ export class RigTeardownOrchestrator {
     }
   }
 
-  private cleanupManagedGuidanceFileForNode(rigId: string, runtime: string | null, cwd: string | null, liveGuidanceTargets: ReadonlySet<string>, result: TeardownResult): void {
-    const targetPath = this.guidanceTargetPath(rigId, runtime, cwd);
-    if (!targetPath) {
-      return;
+  /** Takes OpenRig's unedited blocks out of the file the seat's launch recorded and out of the rule's file, where an
+   *  older launch of the same seat wrote them (#875): a recorded file never leaves blocks behind in the repository. */
+  private cleanupManagedGuidanceFileForNode(rigId: string, runtime: string | null, cwd: string | null, liveGuidanceTargets: ReadonlySet<string>, result: TeardownResult, nodeId?: string | null): void {
+    const targets = new Set([this.guidanceTargetPath(rigId, runtime, cwd, nodeId), this.guidanceTargetPath(rigId, runtime, cwd)]);
+    for (const targetPath of targets) {
+      if (targetPath) this.cleanupManagedGuidanceFile(targetPath, liveGuidanceTargets, result);
     }
+  }
+
+  private cleanupManagedGuidanceFile(targetPath: string, liveGuidanceTargets: ReadonlySet<string>, result: TeardownResult): void {
     if (liveGuidanceTargets.has(this.guidancePathKey(targetPath))) return;
     // The seat-skills line's block is removed only while it still holds the line; a person's edit is kept and reported.
     const { keptEdited } = removeManagedBlocksFromFile({

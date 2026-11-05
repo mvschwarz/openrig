@@ -31,7 +31,7 @@ describe("managed blocks keep authored $ sequences literal", () => {
     expect(fs.store[FILE]).toBe(managedBlock("core", DOLLAR_TEXT));
     for (let i = 0; i < 3; i++) {
       mergeManagedBlock(fs, FILE, "core", DOLLAR_TEXT);
-      // Trailing blank-line growth on re-merge is pre-existing and out of scope here.
+      // A re-merge ends the file with one newline, which the first write doesn't add.
       expect(fs.store[FILE]!.trimEnd()).toBe(managedBlock("core", DOLLAR_TEXT));
     }
   });

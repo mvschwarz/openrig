@@ -49,7 +49,8 @@ COPY ${OPENRIG_TARBALL} /tmp/openrig.tgz
 RUN set -eux; \
     npm install -g /tmp/openrig.tgz; \
     rm -f /tmp/openrig.tgz; \
-    rig --version
+    rig --version; \
+    rig --help
 
 # --- layer 4: stub runtime assets (zero-token by construction; staged by the build verb into the
 #     build context as ./stub-assets/, hashed into the manifest via deriveStubAssetsHash) ---

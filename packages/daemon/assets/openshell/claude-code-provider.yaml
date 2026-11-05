@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Example provider profile. OpenShell does not load it; import it explicitly:
+#   openshell provider profile lint   -f providers/claude-code.yaml
+#   openshell provider profile import -f providers/claude-code.yaml --global
+#
+# Copy and edit this file rather than importing it unchanged. `binaries` is the
+# least-privilege control that decides which processes may reach the endpoints
+# below, so it has to name the paths in *your* image.
+#
+# Client binaries:   claude.
+# Reference layout:  the Claude Code CLI at /usr/bin/claude or
+#                    /usr/local/bin/claude. An npm global install resolves
+#                    elsewhere (for example /usr/lib/node_modules/@anthropic-ai/**);
+#                    add that path if your image installs it that way.
+# Credential scope:  ANTHROPIC_API_KEY or CLAUDE_API_KEY, sent as the x-api-key
+#                    header to the endpoints below and nowhere else.
+# Endpoint access:   api.anthropic.com for inference; statsig.anthropic.com and
+#                    sentry.io for the CLI's telemetry and error reporting. Drop
+#                    the last two if your policy forbids that traffic.
+# Smoke test:        openshell sandbox create --provider <name> -- \
+#                      claude -p 'reply with OK'
+
+id: claude-code
+display_name: Claude Code
+description: Claude Code CLI
+category: agent
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Anthropic API key used by Claude Code
+    env_vars: [ANTHROPIC_API_KEY, CLAUDE_API_KEY]
+    required: true
+    auth_style: header
+    header_name: x-api-key
+discovery:
+  credentials: [api_key]
+endpoints:
+  - host: api.anthropic.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: statsig.anthropic.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: sentry.io
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries: [/usr/bin/claude, /usr/local/bin/claude]

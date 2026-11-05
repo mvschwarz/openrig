@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { annotateInputBox, classifyPaneActivity, inspectComposerInput } from "../src/domain/session-transport.js";
 import { composerContainsOwnedText, ownCollapsedPaste, type ComposerSnapshot } from "../src/domain/composer-prompts.js";
@@ -75,6 +77,22 @@ describe("cursor-bound composer input", () => {
     expect(inspectComposerInput(claude(ghost, { x: 2, y: 2 })).state).toBe("text");
   });
 
+  it("ignores a suggestion whose words are dim and whose spaces aren't, as capture does, in a native Claude frame (#2428)", () => {
+    const lines = readFileSync(join(import.meta.dirname, "fixtures/input-box/claude-code-2.1.296/openrig-seat-accept-edits-idle.txt"), "utf8")
+      .replace(/\n$/, "").split("\n");
+    const row = lines.findLastIndex(line => line.startsWith("❯"));
+    const prompt = (text: string): ComposerSnapshot => {
+      const screen = [...lines]; screen[row] = `\x1b[0m❯ ${text}`;
+      return { screen: screen.join("\n"), cursor: { x: 2, y: row, width: 80, height: lines.length }, inMode: false };
+    };
+    const dim = (text: string) => `\x1b[2m${text}\x1b[22m`;
+    const suggestion = prompt(["fix", "typecheck", "errors"].map(dim).join(" "));
+    expect(annotateInputBox(suggestion.screen, suggestion.cursor, "claude-code")).toMatchObject({ status: "likely-suggestion", confidence: "high" });
+    expect(inspectComposerInput(suggestion)).toMatchObject({ state: "empty", suggestionRows: ["fix typecheck errors"] });
+    // A word the person typed among dim ones keeps it a draft.
+    expect(inspectComposerInput(prompt(`fix ${dim("typecheck")} ${dim("errors")}`)).state).toBe("text");
+  });
+
   it("excludes only a wholly dim suffix after the cursor when identifying staged text", () => {
     const input = inspectComposerInput(claude("owned\x1b[2m ghost suggestion\x1b[22m", { x: 7, y: 2 }));
     expect(input.state).toBe("text");
@@ -145,6 +163,18 @@ describe("cursor-bound composer input", () => {
     expect(composerContainsOwnedText(words, "one two three")).toBe(true);
     expect(composerContainsOwnedText(words, "one  two three")).toBe(false);
     expect(composerContainsOwnedText(inspectComposerInput(claude("one\ntwo")), "one two")).toBe(false);
+  });
+
+  it("finds a delivery's own text in Claude's native wrapped rows, which wrap short of the box (#2429)", () => {
+    const fixtures = join(import.meta.dirname, "fixtures/input-box");
+    const lines = readFileSync(join(fixtures, "claude-code-2.1.296/staged-wrapped.raw.txt"), "utf8").replace(/\n$/, "").split("\n");
+    const text = readFileSync(join(fixtures, "texts/wrapped.txt"), "utf8").replace(/\n$/, "");
+    const last = lines.findLastIndex(line => line.startsWith("❯")) + 2;
+    const input = inspectComposerInput({ screen: lines.join("\n"), cursor: { x: lines[last]!.trimEnd().length, y: last, width: 120, height: lines.length }, inMode: false });
+    expect(input).toMatchObject({ state: "text", cursorAtEnd: true });
+    expect(input.rows).toHaveLength(3);
+    expect(composerContainsOwnedText(input, text)).toBe(true);
+    expect(composerContainsOwnedText(input, text.replace("asked", "ASKED"))).toBe(false);
   });
 
   it("matches Unicode cell widths and treats an opaque paste as separately owned evidence", () => {

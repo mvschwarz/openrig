@@ -10,7 +10,7 @@ type: `openrig-urgent`, `urgent-only` and `sends-only`. Sibling seats keep their
 | `off` (default) | Existing delivery and prompt checks | Existing send result |
 | `draft-aware` | Paste into a recognized empty composer; check ownership again before Enter | Hold input and retain this attempt for inspection when bookkeeping is available |
 | `openrig-urgent` | OpenRig's own messages (watchdogs, scheduled wakes, notices) and anything marked urgent type, never over a draft | Other agents' messages are held, the sender is told, and held messages stay readable |
-| `urgent-only` | Only messages marked urgent type (`rig send --urgent`, or a queue item at priority urgent or critical), never over a draft | Everything else is held, the sender is told, and held messages stay readable |
+| `urgent-only` | Only messages marked urgent type (`rig send --urgent`, `urgent: true` on `POST /api/transport/send`, or a queue item at priority urgent or critical), never over a draft | Everything else is held, the sender is told, and held messages stay readable |
 | `sends-only` | Deliberate sends from people and agents type, as with `off`; a terminal member's typing isn't protected, because its shell input can't be read | OpenRig's own notices are held. A terminal member defaults to this level |
 | `hold` | No automatic terminal input, even at an empty prompt | Retain for inspection outside the pane |
 
@@ -111,8 +111,18 @@ their existing behaviour.
 
 ### Terminal delivery
 
-Run from a seat shell with `OPENRIG_SESSION_NAME` set; the daemon derives the
-audit actor from transport identity.
+`rig seat set-typing-guard` works from an ordinary terminal as well as from a
+seat's shell. The daemon takes the recorded actor from transport identity only:
+
+- From a managed seat's shell (`OPENRIG_SESSION_NAME` set), the preference and
+  its audit entry name that seat.
+- From a terminal with no seat identity, the change applies the same way, and
+  the preference and its audit entry record the actor as
+  `unattributed (no seat identity)`.
+
+Neither case takes an actor from the request body or from the target seat's name.
+`rig seat retire-held-message` still records the seat that retired a message, so
+run it from a seat's shell.
 
 ~~~sh
 rig seat set-typing-guard dev-impl@my-rig --mode draft-aware \
@@ -131,8 +141,21 @@ to finish. The API may return HTTP 202 with `pending: true`; wait for
 and effective modes and retains the text `Typing guard: on (hold)` for hold.
 
 A held send immediately returns `outcome: "retained"`, `sent: false`, its exact
-reason (such as `draft_input_busy`) and the saved attempt's `outboxIds`. No automatic
-retry is scheduled. Each explicit draft-aware request is a new attempt, including
+reason and the saved attempt's `outboxIds`. No automatic
+retry is scheduled. The reasons are:
+
+- `typing_guard_enabled`: the seat's mode holds this send (`hold`, or a level that
+  holds this kind of message).
+- `runtime_switch_in_progress`: the seat is switching runtime.
+- In `draft-aware` mode, a refusal before any input was written:
+  `draft_input_busy` (the input holds unsubmitted text), `draft_input_unknown` (the
+  input can't be read), `draft_input_changed` (the input or its target changed during
+  the delivery), `draft_wake_superseded`, `target_needs_input`,
+  `wait_for_idle_timeout`, `target_activity_unknown`, `target_runtime_unverified`,
+  `target_runtime_not_running`, `target_runtime_conflict`, `invalid_wait_for_idle`,
+  `invalid_dangerously_interact`, `dangerously_interact_requires_reason`,
+  `prompt_override_audit_unavailable`, `transport_unavailable`, `session_missing` or
+  `tmux_unavailable`. Each explicit draft-aware request is a new attempt, including
 one with a reused `deliveryId`; the result warns older callers that this field no
 longer deduplicates input. The CLI does not generate a deduplication key.
 
@@ -230,7 +253,9 @@ refuses Enter and is not replayed. Unsupported provider layouts remain held.
 Use off when that tradeoff is unsuitable.
 
 HTTP configuration uses `POST /api/seat/set-typing-guard/:seatRef` with
-`{mode, reason}` or `{enabled, reason}`. Status and held-message routes are
+`{mode, reason}` or `{enabled, reason}`. The `X-OpenRig-Session` header, when
+present, is the recorded actor; without it the change is recorded as
+`unattributed (no seat identity)`. Status and held-message routes are
 unchanged; no RigSpec field is required.
 
 ## Verification scope

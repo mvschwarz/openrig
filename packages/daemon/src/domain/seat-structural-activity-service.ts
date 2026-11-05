@@ -42,11 +42,11 @@ export const DEFAULT_STRUCTURAL_STALE_MS = 5000;
  *         positive verdict never survives a capture outage or a same-name occupant transition; and
  *   (MF2) sweeps are SINGLE-FLIGHT and HELD until the real captures settle — a slow/stuck tmux can
  *         never accumulate overlapping whole-fleet captures (only one sweep's captures are ever in
- *         flight). We deliberately do NOT time-out a capture to release the guard: execCommand has no
- *         AbortSignal, so a wrapper timeout would release single-flight while the child process lives,
- *         letting a later sweep spawn MORE children — the storm at the process level. A permanently
- *         stuck tmux therefore degrades to "no structural signal" (honest, via MF1 age-expiry), never
- *         a storm. A kill-backed capture primitive (bounded abort) is a tmux-adapter follow-on.
+ *         flight). Default argv and POSIX legacy tmux execs have a kill-backed deadline: the client is killed and reaped
+ *         before the failure releases single-flight. We still do NOT race a capture against a wrapper
+ *         timeout, which could leave an injected or alternate executor alive and let a later sweep
+ *         spawn MORE children. Failed or stuck captures degrade to "no structural signal" (via MF1
+ *         invalidation/age-expiry), never an idle observation or an overlapping capture storm.
  */
 export class SeatStructuralActivityService {
   private readonly latestBySession = new Map<string, StructuralObservation>();

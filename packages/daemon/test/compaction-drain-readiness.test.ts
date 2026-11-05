@@ -107,6 +107,7 @@ describe("post-compact drain readiness", () => {
     });
     tmux = {
       hasSession: async () => true,
+      readWindow: async () => null,
       probeSession: async () => ({ state: "present" }),
       getPanePid: async () => null,
       getPaneCommand: async () => null,

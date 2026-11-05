@@ -66,6 +66,12 @@ describe("#192 channel map through the real Slack wire", () => {
       fetchImpl: async (url, init) => {
         if (url.endsWith("apps.connections.open")) return reply({ ok: true, url: "wss://fake-slack/ws" });
         if (url.includes("conversations.history") || url.includes("conversations.replies")) {
+          // Exact-message settlement is separate from the delivery reconciliation scan counted below.
+          // This text-only fixture has no retained Block Kit payload; the settlement suite supplies that payload.
+          const query = new URL(url).searchParams;
+          if (query.get("limit") === "1" && query.get("inclusive") === "true" && (query.has("latest") || query.has("oldest"))) {
+            return reply({ ok: true, messages: [] });
+          }
           const raw = String(init?.body ?? "");
           const params = raw.startsWith("{") ? JSON.parse(raw) as Record<string, string> : Object.fromEntries(new URLSearchParams(raw));
           const channel = new URL(url).searchParams.get("channel") ?? params.channel ?? "";

@@ -36,8 +36,8 @@ export function isFixtureScopedHome(home: string): boolean {
   return underTemp && /(^|\/)openrig-qa[^/]*/.test(home);
 }
 
-export function getOpenRigHome(): string {
-  const configured = readOpenRigEnv("OPENRIG_HOME", "RIGGED_HOME");
+export function getOpenRigHome(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = readOpenRigEnv("OPENRIG_HOME", "RIGGED_HOME", env);
   if (configured !== undefined) return configured;
   return join(homedir(), ".openrig");
 }

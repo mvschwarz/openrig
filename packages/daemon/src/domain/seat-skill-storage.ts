@@ -253,6 +253,11 @@ export interface SeatSkillRehydration {
 
 const sha256 = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
 
+/** Whether a recorded copy's source still has the bytes OpenRig wrote from it, so a restore can rebuild that copy. */
+const sourceHasRecordedBytes = (entry: { sha256: string; source: string }): boolean => {
+  try { return sha256(fs.readFileSync(entry.source)) === entry.sha256; } catch { return false; }
+};
+
 /**
  * Put back the seat's selected skills from what its manifest recorded, before a restore relaunches it. The saved
  * selection is kept (nothing is re-resolved). A missing file comes back only from its recorded source, and only when
@@ -511,10 +516,12 @@ export interface SeatSkillCleanup {
 }
 
 /**
- * Remove what OpenRig wrote into a seat's skills once the seat's consumers have stopped: only recorded files whose
- * bytes still match the record, and the generated plugin's manifest, so nothing points at the storage. Edited and
- * unrecorded files are kept and reported. The records themselves stay, unless `dropRecords` (the rig is deleted), so a
- * later restore can rebuild the seat's skills from their sources.
+ * Remove what OpenRig wrote into a seat's skills once the seat's consumers have stopped. A recorded file goes only
+ * while its bytes still match the record and its source still has those bytes, so a later restore can rebuild it.
+ * The generated plugin's manifest goes too, so nothing points at the storage. Edited and unrecorded files are kept
+ * and reported. So is a recorded file whose source moved on or can't be read: it is the only copy of the saved bytes,
+ * and a restore can't put it back from the source. The records themselves stay, unless `dropRecords` (the rig is
+ * deleted), so a later restore can rebuild the seat's skills from their sources.
  */
 export function cleanSeatSkills(paths: SeatSkillPaths, opts: { dropRecords?: boolean } = {}): SeatSkillCleanup {
   const out: SeatSkillCleanup = { removed: [], kept: [], refused: [] };
@@ -525,7 +532,10 @@ export function cleanSeatSkills(paths: SeatSkillPaths, opts: { dropRecords?: boo
     if (!lexists(file)) continue;
     if (!insideSeatStorage(paths.root, file)) { out.refused.push(file); continue; }
     try {
-      if (sha256(fs.readFileSync(file)) === entry.sha256 && removeInsideSeatStorage(paths.root, file)) { out.removed.push(file); removedFiles.push(file); }
+      if (sha256(fs.readFileSync(file)) !== entry.sha256) { out.kept.push(file); continue; }
+      // A copy its source no longer has is the saved selection itself: keep it while a restore can still need it.
+      if (!opts.dropRecords && !sourceHasRecordedBytes(entry)) { out.kept.push(file); continue; }
+      if (removeInsideSeatStorage(paths.root, file)) { out.removed.push(file); removedFiles.push(file); }
       else out.kept.push(file);
     } catch { out.kept.push(file); }
   }
@@ -714,8 +724,8 @@ export interface SkillRouterFootprint {
  * Slice 20 seam: the exact preview of the bootstrap line's footprint, before any write: the line verbatim, the exact text
  * written (the line between OpenRig's markers) and where it goes, and each file
  * it would go into (a Claude seat's rig file, `CLAUDE.md` or `CLAUDE.local.md`; a Codex seat's `AGENTS.md`), one entry
- * per file with every seat sharing it. Pure: no filesystem or settings read. The file rule is main's
- * `seatGuidanceFile` (restore-guidance.ts), repeated here until this branch carries it.
+ * per file with every seat sharing it. Pure: no filesystem or settings read. The file rule is `seatGuidanceFile`'s
+ * (restore-guidance.ts) for the two runtimes that get the line, Claude and Codex, repeated here.
  */
 export function describeSkillRouterFootprint(seats: FootprintSeat[]): SkillRouterFootprint {
   const byPath = new Map<string, { path: string; runtime: "claude-code" | "codex"; seats: string[] }>();

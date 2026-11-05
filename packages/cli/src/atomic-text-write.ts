@@ -62,3 +62,16 @@ export function writeTextAtomically(path: string, content: string, label = "file
     if (owned) try { unlinkSync(temporary); } catch { /* Renamed or already removed. */ }
   }
 }
+
+/** Create a file, failing with EEXIST rather than replacing anything already at the path, even a dangling link. */
+export function writeNewText(path: string, content: string): void {
+  const fd = openSync(path, "wx", 0o666);
+  try {
+    writeFileSync(fd, content, "utf-8");
+  } catch (error) {
+    try { unlinkSync(path); } catch { /* Report the write failure. */ }
+    throw error;
+  } finally {
+    closeSync(fd);
+  }
+}

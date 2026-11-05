@@ -66,7 +66,7 @@ resolve → project → deliver pre-launch files → persist replay context → 
 ## 2. Execution and projection types
 
 The member's optional `claude_mcp: none` is normalized as `claudeMcp` and
-persisted independently in `nodes.claude_mcp` (migration 141). The
+persisted independently in `nodes.claude_mcp` (migration 142). The
 expansion HTTP route preserves both `claude_mcp` and `claudeMcp`, including
 invalid values for the canonical validator to reject. An authored relaunch
 updates the seat choice after launch eligibility and startup-source resolution;

@@ -188,6 +188,29 @@ export class DaemonClient {
   private readonly sessionName?: string;
   private readonly principal?: DaemonClientOptions["principal"];
 
+  /** Isolated terminal tools require this home's durable identity, even on loopback. */
+  async isLocalInstance(): Promise<boolean> {
+    if (this.remoteTarget) return false;
+    const origin = (await import("./local-origin.js")).readLocalOrigin();
+    return !!origin && await this.matchesInstanceIdentity(origin);
+  }
+
+  private async matchesInstanceIdentity(origin: string): Promise<boolean> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const target = await Promise.race([
+        (async () => {
+          const res = await this.fetchImpl(`${this.baseUrl.replace(/\/+$/, "")}/healthz`, { signal: controller.signal });
+          return res.ok ? (await res.json() as { selfHostId?: unknown }).selfHostId : undefined;
+        })(),
+        new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), Math.min(this.timeoutMs, 1000)); }),
+      ]);
+      return target === origin;
+    } catch { return false; }
+    finally { clearTimeout(timer); controller.abort(); }
+  }
+
   private async identityHeaders(): Promise<Record<string, string>> {
     const { headers, local } = await this.senderHeaders();
     // Only beside a seat this client was built for, and only to this host's own daemon: the endpoint itself must answer

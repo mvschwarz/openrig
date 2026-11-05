@@ -709,6 +709,7 @@ function noRigsText(snap: FleetSnapshot, host: FleetSnapshot["hosts"][number], l
     : `  (no rigs served by ${host.name})`;
 }
 
+/** Rig boundaries take a solid rule and pod boundaries a dotted one; RIG repeats on every row so scrolled rows keep it. */
 function instanceContentLines(
   state: ViewState,
   snap: FleetSnapshot,
@@ -808,10 +809,13 @@ function instanceContentLines(
   let attentionCount = 0;
   let attentionUnknown = 0;
   let openCount = 0;
+  let firstRig = true;
   for (const rig of host.rigs) {
     const agents = rig.pods.flatMap((pod) => pod.agents.map((agent) => ({ pod: pod.name, agent })))
       .filter(({ pod, agent }) => !state.filter || rig.name.includes(state.filter) || pod.includes(state.filter) || agent.name.includes(state.filter));
     if (state.filter && agents.length === 0 && !rig.name.includes(state.filter)) continue;
+    if (!firstRig) lines.push({ text: "─".repeat(columnsWidth(columns)) });
+    firstRig = false;
     const rigAction: Action = { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } };
     if (agents.length === 0) {
       lines.push({
@@ -1564,7 +1568,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   lines.push(paneRule(cols, explW, "top", explorerTitle, contentTitle));
 
   const contentWidth = Math.max(cols - explW - 2, 0);
-  const model = buildPulseModel(snap, nowMs);
+  const model = buildPulseModel(snap, nowMs, state.timeZone);
   const chromeRows = 3; // bottom rule + hint bar + status line
   const bodyRows = Math.max(rows - lines.length - chromeRows, 1);
 

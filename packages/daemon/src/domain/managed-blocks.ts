@@ -93,7 +93,9 @@ export function mergeManagedBlock(
     if (!updated.includes(begin) || !updated.includes(end)) {
       updated = `${updated.trim()}\n\n${block}`.trim();
     }
-    fs.writeFile(targetPath, `${updated}\n`);
+    // End with one newline only when the file doesn't already: re-merging on every launch must not add a line each time
+    // (#2372), and blank lines a person left after the last block stay.
+    fs.writeFile(targetPath, updated.endsWith("\n") ? updated : `${updated}\n`);
     return;
   }
 
@@ -105,11 +107,40 @@ function managedBlockPattern(blockId: string): RegExp {
   return new RegExp(`${escapeRegex(MANAGED_BLOCK_START(blockId))}([\\s\\S]*?)${escapeRegex(MANAGED_BLOCK_END(blockId))}`, "g");
 }
 
+/** A block body without the writer's own framing: CRLF line endings become LF, and newlines at either end go. */
+export function frameManagedBlockBody(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/^\n+|\n+$/g, "");
+}
+
 /** Whether a block's body still holds `written`: the same bytes, ignoring only the writer's own framing (newlines at either
  *  end, and CRLF line endings). A person's spaces count, so an indented line is an edit. */
 export function managedBlockBodyMatches(body: string, written: string): boolean {
-  const frame = (text: string) => text.replace(/\r\n/g, "\n").replace(/^\n+|\n+$/g, "");
-  return frame(body) === frame(written);
+  return frameManagedBlockBody(body) === frameManagedBlockBody(written);
+}
+
+/** The bodies of every `blockId` block in `content`, in the current or the legacy marker form. */
+export function managedBlockBodies(content: string, blockId: string): string[] {
+  const legacy = new RegExp(`${escapeRegex(LEGACY_BLOCK_START(blockId))}([\\s\\S]*?)${escapeRegex(LEGACY_BLOCK_END(blockId))}`, "g");
+  return [...content.matchAll(managedBlockPattern(blockId)), ...content.matchAll(legacy)].map((m) => m[1]!);
+}
+
+/** #2456: how a block already in a guidance file stands against its current source and OpenRig's record of what it last
+ *  wrote there (a hash of the framed body, `managedBlockBodyHash`):
+ *  - `absent`: the file holds no such block;
+ *  - `current`: it holds the source's text;
+ *  - `stale`: it holds what OpenRig last wrote, and the source has changed since, so it's OpenRig's to refresh;
+ *  - `edited`: it holds something else, which someone wrote by hand;
+ *  - `unrecorded`: it differs from the source and OpenRig has no record of writing it, so which of the two is unknown.
+ *  A block written more than once counts as edited when any copy is. */
+export type ManagedBlockStanding = "absent" | "current" | "stale" | "edited" | "unrecorded";
+
+export function managedBlockStanding(content: string, blockId: string, source: string, recordedHash: string | undefined,
+  hash: (body: string) => string): ManagedBlockStanding {
+  const bodies = managedBlockBodies(content, blockId);
+  if (bodies.length === 0) return "absent";
+  if (bodies.every((body) => managedBlockBodyMatches(body, source))) return "current";
+  if (recordedHash === undefined) return "unrecorded";
+  return bodies.every((body) => hash(body) === recordedHash) ? "stale" : "edited";
 }
 
 /** Whether `content` holds a `blockId` block whose body is anything but `written`: someone edited it. */
@@ -170,7 +201,7 @@ const CURRENT_BLOCK = /(?:\n|^)\s*(<!-- BEGIN OpenRig MANAGED BLOCK: [\s\S]*?<!-
 /**
  * `content` with OpenRig's blocks taken out as `mergeManagedBlock` put them in: each block, the separator it wrote before
  * the first (none when that block started a new file), and the newline-only text between and after blocks, where the
- * writer puts its separators (a later merge ends the file with one more). Text a person adds is kept. Blank lines a
+ * writer puts its separators (a later merge ends the file with a newline). Text a person adds is kept. Blank lines a
  * person adds right next to a block, between blocks or after the last, go with it: they can't be told from the writer's.
  * Null when the file isn't in that shape, such as a legacy block, or text against a block without the writer's separator.
  */

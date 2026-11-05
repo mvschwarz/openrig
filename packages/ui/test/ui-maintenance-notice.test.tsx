@@ -1,12 +1,10 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("../src/routes.js", () => ({ router: {} }));
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   UI_MAINTENANCE_NOTICE_STORAGE_KEY,
   UiMaintenanceNotice,
-} from "../src/App.js";
+} from "../src/components/UiMaintenanceNotice.js";
 
 describe("UI maintenance notice", () => {
   beforeEach(() => {
@@ -30,7 +28,8 @@ describe("UI maintenance notice", () => {
     const first = render(<UiMaintenanceNotice />);
     const notice = screen.getByTestId("ui-maintenance-notice");
 
-    expect(notice.className).toContain("fixed");
+    expect(notice.className).not.toContain("fixed");
+    expect(notice.className).toContain("shrink-0");
     fireEvent.click(screen.getByRole("button", { name: "Dismiss maintenance notice" }));
 
     expect(screen.queryByTestId("ui-maintenance-notice")).toBeNull();

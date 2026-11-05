@@ -50,7 +50,10 @@ export function verifyPromptState(proof) {
   assert.notEqual(waiting.send.code, 0, 'real prompt admitted send');
   assert.match(waiting.send.stdout + waiting.send.stderr, /target_needs_input/);
   assert.ok(!waiting.pane.includes(waiting.marker), 'send typed into real prompt');
-  assert.ok(waiting.wake.fired, 'refused wake never attempted');
+  assert.equal(waiting.wake.fired, false, 'retryable refusal consumed the one-shot timer');
+  assert.equal(waiting.wake.job?.state, 'active');
+  assert.equal(waiting.wake.job?.lastFireAt, null);
+  assert.match(waiting.wake.retryNote ?? '', /occurrence remains owed; retry at/);
   assert.match(waiting.wake.delivery, /needs_input|refused|retained|held|failed/i);
   const attempt = waiting.wake.attempt;
   assert.ok(attempt?.historyId && waiting.wake.jobId, 'missing watchdog refusal attempt');
@@ -59,6 +62,8 @@ export function verifyPromptState(proof) {
   assert.equal(attempt.outcome, 'refused');
   assert.equal(attempt.deliveryStatus, 'failed');
   assert.ok(attempt.deliveryMessage.includes(waiting.wake.id), 'attempt belongs to another queue row');
+  assert.ok(Number.isFinite(Date.parse(attempt.evaluationNotes?.retryAt)), 'refusal has no bounded retry time');
+  assert.match(attempt.evaluationNotes?.nextAction ?? '', /Occurrence remains owed; retry at/);
   const reason = attempt.evaluationNotes?.deliveryReason;
   assert.ok(typeof reason === 'string' && reason.startsWith(`Refused: '${proof.claude}' is at an interactive prompt (`));
   assert.match(reason, /interactive prompt \((?:selection_prompt|permission_prompt)\)/);
@@ -178,14 +183,18 @@ export async function runPromptState(rigBin, frames, proof = {}) {
       const read = async () => {
         const transitions = await jsonCli('queue', 'transitions', id, '--full');
         const fired = entries(transitions).find(row => row.wake?.phase === 'fired');
-        const jobId = fired?.wake?.ref;
-        const history = !expectDelivery && jobId ? (await get(`/api/watchdog/${encodeURIComponent(jobId)}/status`)).recentHistory : [];
+        const armed = entries(transitions).find(row => row.wake?.phase === 'armed');
+        const jobId = fired?.wake?.ref ?? armed?.wake?.ref;
+        const status = !expectDelivery && jobId ? await get(`/api/watchdog/${encodeURIComponent(jobId)}/status`) : null;
+        const history = status?.recentHistory ?? [];
         // A fresh generated one-shot timer must have exactly one matching attempt, not an unrelated delivery error.
         const matches = history.filter(row => row.jobId === jobId && row.deliveryTargetSession === claude && row.deliveryMessage?.includes(id));
         return { id, fired: Boolean(fired), jobId, attempt: matches.length === 1 ? matches[0] : null,
-          delivery: fired?.wake?.deliveryStatus ?? '', pane: await capture(claude) };
+          delivery: fired?.wake?.deliveryStatus ?? matches[0]?.deliveryStatus ?? '', job: status?.job,
+          retryNote: entries(transitions).find(row => row.transitionNote?.includes('occurrence remains owed; retry at'))?.transitionNote,
+          pane: await capture(claude) };
       };
-      const observed = await until(read, row => expectDelivery ? row.pane.includes(id) : row.fired && row.delivery && row.attempt,
+      const observed = await until(read, row => expectDelivery ? row.pane.includes(id) : row.delivery && row.attempt && row.retryNote,
         'timer wake not observed', 35_000);
       await cli(['queue', 'update', id, '--state', 'done', '--closure-reason', 'no-follow-on'], claude);
       return observed;

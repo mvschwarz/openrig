@@ -29,6 +29,7 @@ import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { isSeatSkillsBootstrapLine } from "../src/domain/startup-orchestrator.js";
+import { managedBlockRecords } from "../src/domain/managed-block-records.js";
 
 // #25 — a rig can send Claude Code's OpenRig-managed blocks to CLAUDE.local.md
 // instead of the (often git-tracked) CLAUDE.md. These drive the real
@@ -145,7 +146,8 @@ function wire(db: ReturnType<typeof createDb>, home: string) {
   const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
   // This fixture checks file projection with a fixed mock pane, not native startup timing.
   const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
-  const claude = new ClaudeCodeAdapter({ tmux, fsOps: realFs(home), sleep: async () => {} });
+  // As the daemon wires it: the adapter's guidance writes keep OpenRig's record of each managed block (#2456).
+  const claude = new ClaudeCodeAdapter({ tmux, fsOps: realFs(home), sleep: async () => {}, managedBlockRecords: managedBlockRecords(db) });
   const resolverFs: AgentResolverFsOps = {
     readFile: (p) => fs.readFileSync(p, "utf-8"),
     exists: (p) => fs.existsSync(p),
@@ -264,8 +266,8 @@ describe("#25 selected-file semantics — preservation, idempotence, the other f
     await f.claude.deliverStartup(files, { ...binding, claudeManagedBlockFile: "CLAUDE.local.md" });
     await f.claude.deliverStartup(files, { ...binding, claudeManagedBlockFile: "CLAUDE.local.md" });
     const again = f.read("CLAUDE.local.md")!;
-    // Blocks are replaced in place, never duplicated. mergeManagedBlock's trailing
-    // blank-line growth on re-merge predates #25 and is file-independent (parity below).
+    // Blocks are replaced in place, never duplicated. A re-merge ends the file with one
+    // newline, whichever file it is (parity below).
     const count = (text: string) => text.split(BEGIN).length - 1;
     expect(count(again)).toBe(count(first!));
     expect(again.trimEnd()).toBe(first!.trimEnd());
@@ -468,5 +470,62 @@ describe("#25 teardown — cleans the selected file only", () => {
     expect(f.read("CLAUDE.md")).toBeNull();
     expect(f.read("CLAUDE.local.md")).toBe(OLD_BLOCKS_CLAUDE_MD);
     f.db.close();
+  });
+});
+
+// #2456 part 3: the seat's CLAUDE.md kept its blocks (as when another live seat reads the same file, so rig down leaves it),
+// and the rig's culture changed after the launch. An exact resume refreshes the block the launch wrote, and keeps a block a
+// person edited since, naming it.
+describe("#2456 part 3 — an exact resume and a block the launch wrote", () => {
+  async function resumeAfterRestart(between: (f: ReturnType<typeof fixture>) => void) {
+    const f = fixture("culture_file: CULTURE.md");
+    fs.writeFileSync(nodePath.join(f.rigRoot, "CULTURE.md"), "Culture v1.\n");
+    const rigId = await launched(f);
+    expect(f.read("CLAUDE.md")).toContain("Culture v1.");
+    const node = f.rigRepo.getRig(rigId)!.nodes[0]!;
+    const session = f.sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === node.id)!;
+    f.sessionRegistry.updateStatus(session.id, "running");
+    const snapshotRepo = new SnapshotRepository(f.db);
+    const checkpointStore = new CheckpointStore(f.db);
+    const snap = new SnapshotCapture({ db: f.db, rigRepo: f.rigRepo, sessionRegistry: f.sessionRegistry, eventBus: f.eventBus, snapshotRepo, checkpointStore })
+      .captureSnapshot(rigId, "manual");
+    f.sessionRegistry.updateStatus(session.id, "exited");
+    f.db.close();
+    between(f);
+
+    const db2 = createDb(f.dbFile);
+    const s2 = wire(db2, f.home);
+    const snapshotRepo2 = new SnapshotRepository(db2);
+    const checkpointStore2 = new CheckpointStore(db2);
+    const orch = new RestoreOrchestrator({
+      db: db2, rigRepo: s2.rigRepo, sessionRegistry: s2.sessionRegistry, eventBus: s2.eventBus,
+      snapshotRepo: snapshotRepo2, checkpointStore: checkpointStore2,
+      snapshotCapture: new SnapshotCapture({ db: db2, rigRepo: s2.rigRepo, sessionRegistry: s2.sessionRegistry, eventBus: s2.eventBus, snapshotRepo: snapshotRepo2, checkpointStore: checkpointStore2 }),
+      nodeLauncher: s2.nodeLauncher, tmuxAdapter: s2.tmux,
+      claudeResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as ClaudeResumeAdapter,
+      codexResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as CodexResumeAdapter,
+    });
+    const restored = await orch.restore(snap.id, { adapters: { "claude-code": s2.claude } } as never);
+    expect(restored, JSON.stringify(restored)).toMatchObject({ ok: true });
+    db2.close();
+    const nodes = (restored as { ok: true; result: { nodes: Array<{ status: string; guidanceNotes?: string[] }> } }).result.nodes;
+    expect(nodes[0]!.status, JSON.stringify(restored)).not.toBe("failed");
+    return { f, notes: nodes[0]!.guidanceNotes ?? [] };
+  }
+
+  it("refreshes the culture block the launch wrote when the culture changed", { timeout: 30000 }, async () => {
+    const { f } = await resumeAfterRestart((g) => fs.writeFileSync(nodePath.join(g.rigRoot, "CULTURE.md"), "Culture v2.\n"));
+    expect(f.read("CLAUDE.md")).toContain("Culture v2.");
+    expect(f.read("CLAUDE.md")).not.toContain("Culture v1.");
+  });
+
+  it("keeps a culture block a person edited since the launch, and names it", { timeout: 30000 }, async () => {
+    const { f, notes } = await resumeAfterRestart((g) => {
+      fs.writeFileSync(nodePath.join(g.cwd, "CLAUDE.md"), g.read("CLAUDE.md")!.replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      fs.writeFileSync(nodePath.join(g.rigRoot, "CULTURE.md"), "Culture v2.\n");
+    });
+    expect(f.read("CLAUDE.md")).toContain("Culture v1. PERSON EDIT");
+    expect(f.read("CLAUDE.md")).not.toContain("Culture v2.");
+    expect(notes.some((note) => note.includes("guidance_block_edited") && note.includes("CULTURE.md")), JSON.stringify(notes)).toBe(true);
   });
 });

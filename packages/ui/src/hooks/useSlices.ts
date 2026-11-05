@@ -385,6 +385,8 @@ export function proofAssetUrl(sliceName: string, relPath: string): string {
 }
 
 export interface QueueItemDetail {
+  /** Structured questions already included in the queue API response. */
+  humanQuestions?: unknown[] | null;
   qitemId: string;
   tsCreated: string;
   tsUpdated: string;

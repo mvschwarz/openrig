@@ -227,7 +227,8 @@ function renderBroadcastResults(data: Record<string, unknown>): void {
     if (r.ok) {
       console.log(`${r.sessionName}: sent`);
     } else {
-      console.log(`${r.sessionName}: FAILED — ${r.error ?? "unknown error"}`);
+      // A target that resolved to no sessions has no name to report.
+      console.log(`${r.sessionName ? `${r.sessionName}: ` : ""}FAILED — ${r.error ?? "unknown error"}`);
     }
     if (typeof r.managedCompaction?.notice === "string") console.log(`Notice: ${r.managedCompaction.notice}`);
   }

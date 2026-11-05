@@ -23,7 +23,10 @@ Only the activity axis is served today. The session and resumability values are 
 `activity-taxonomy.ts` but no surface reads them: `rig ps --nodes --full` shows the raw session
 STATUS, both node views show a LIFECYCLE of `running`, `detached`, `recoverable` or `attention_required` (`run`, `det`, `rec`,
 `att`), and node inventory serves `occupantLifecycle` (`active`, `retiring`, `retired`,
-`context_walled`, `compacted`, `crashed`, `unknown`).
+`context_walled`, `compacted`, `crashed`, `unknown`). Node inventory's `sessionStatus` is the
+recorded session status, with two observed corrections: a running session whose pane is verified
+to have exited (identity reason `pane_exited`) reads `exited`, with `startupStatus:
+"attention_required"`, and a running session confirmed missing reads `detached`.
 
 The axes never blend. Reachability is strict; revival optimism is a different field
 (omnigent's strict-liveness split). `unknown` is a first-class honest value — the oracle
@@ -58,6 +61,21 @@ A zero prompt count alone is not an observed clear. Absent arbitration evidence 
 the existing live-hook fallback in effect; lifecycle, startup, held and error signals
 can independently raise attention. A false attention flag means no known trigger, not
 proof that an unobserved input box is clear.
+
+A handover whose successor started without a required file also raises attention. That's
+a projected guidance file or a guidance startup file marked `required` still missing from
+the guidance file, or, for a fresh or rebuild successor, a required `send_text` startup
+file that's missing. The seat serves `startedWithoutRequired` with each file's path, the
+table's reason column names each file, and the handover's own output says it's degraded.
+The mark belongs to that successor's session, so the seat's next launch or handover
+clears it. Time alone never does. Repairing the file in place doesn't clear it either,
+because no route delivers guidance into a running conversation.
+
+A fresh or rebuild successor's first turn opens with the seat's `send_text` startup files,
+the ones a fresh start delivers, as absolute paths with the role first. A pointer asks the
+successor to read the file; it isn't the pasted text a start sends. A fork successor
+carries its parent's conversation and gets no list. `send_text` startup actions, such as
+an `after_ready` preload, aren't run for a successor.
 
 The compact human table's ATTN column renders `yes`, `no`, or `?` when the flag is
 unavailable. Compact JSON retains `needsAttention`; use `--full` or

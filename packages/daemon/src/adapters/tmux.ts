@@ -241,6 +241,16 @@ function classifyWriteError(err: unknown): TmuxResult {
   return { ok: false, code: "unknown", message: err.message };
 }
 
+/** tmux 3.7+ refuses every send-keys, `-l` included, while the target client is read-only (`tmux attach -r`). */
+function isReadOnlyClientRefusal(result: TmuxResult): boolean {
+  return !result.ok && /client is read-only/i.test(result.message);
+}
+
+/** The key names that submit staged input; both reach the pane as a carriage return. */
+function isSubmitKey(key: string): boolean {
+  return key === "Enter" || key === "C-m";
+}
+
 /** The launch warning when the parent-session identity cleanup could not finish (#771). */
 function parentSessionEnvWarning(target: string, err: unknown): string {
   const reason = err instanceof Error ? err.message : String(err);
@@ -445,7 +455,7 @@ export class TmuxAdapter {
     // uses. An id alone is unique only for one server's lifetime.
     let created: { id: string; at: string } | null;
     try {
-      const out = await this.exec(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
+      const out = await this.exec(this.onServer(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`));
       const match = /^(\$\d+) (\d+)$/.exec(out.trim());
       created = match ? { id: match[1]!, at: match[2]! } : null;
     } catch (err) {
@@ -478,7 +488,7 @@ export class TmuxAdapter {
   private async removeCreatedSession(name: string, created: { id: string; at: string }): Promise<TmuxResult> {
     const same = `#{&&:#{==:#{session_name},${name}},#{==:#{session_created},${created.at}}}`;
     try {
-      const out = await this.exec(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`);
+      const out = await this.exec(this.onServer(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`));
       if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
       return { ok: true };
     } catch (err) {
@@ -557,7 +567,16 @@ export class TmuxAdapter {
     private exec: ExecFn,
     private fileOps: TmuxFileOps = defaultTmuxFileOps(),
     private argvExec?: ArgvExecFn,
-  ) {}
+    serverArgs: readonly string[] = [],
+  ) { this.serverArgs = [...serverArgs]; }
+
+  private readonly serverArgs: readonly string[];
+
+  /** Prefix one adapter-owned tmux invocation, including its chained commands.
+   * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
+  private onServer(command: string): string {
+    return this.serverArgs.length ? `tmux ${posixJoinArgv([...this.serverArgs])}${command.slice(4)}` : command;
+  }
 
   /**
    * Run a multiplexer command. `argv` is what is EXECUTED on both paths:
@@ -569,8 +588,9 @@ export class TmuxAdapter {
    * preserve an exact legacy string, never to smuggle new semantics.
    */
   private async run(argv: string[], legacy?: string): Promise<string> {
-    if (this.argvExec) return this.argvExec(argv);
-    return this.exec(legacy ?? posixJoinArgv(argv));
+    const targeted = this.serverArgs.length ? [argv[0]!, ...this.serverArgs, ...argv.slice(1)] : argv;
+    if (this.argvExec) return this.argvExec(targeted);
+    return this.exec(legacy ? this.onServer(legacy) : posixJoinArgv(targeted));
   }
 
   /** Environment-bearing commands travel in a private config, never a client's argv.
@@ -600,7 +620,7 @@ export class TmuxAdapter {
       // and server bootstrap is POSIX-specific (psmux auto-starts its own).
       // Native socket ownership arbitrates
       // concurrent starts; the readback below, not shell exit, proves availability.
-      await this.exec("tmux -D </dev/null >/dev/null 2>&1 &");
+      await this.exec(this.onServer("tmux -D </dev/null >/dev/null 2>&1 &"));
       for (let attempt = 0; attempt < 20; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 25));
         if ((await this.probeSession(probeName)).state !== "transport_unavailable") return { ok: true };
@@ -899,7 +919,16 @@ export class TmuxAdapter {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
       const checkDraft = guard?.needsInputCheck(identity);
       const policy = checkDraft || options?.beforePaste ? {
-        beforePaste: async () => { if (checkDraft) await guard!.beforeInput(identity, false, text); await options?.beforePaste?.(); },
+        // A paste the guard proves it left unsubmitted (#2429) is submitted first, under this lease, once this send's own
+        // checks pass; they then aren't run a second time.
+        beforePaste: async () => {
+          let checked = false;
+          const checks = async () => { await options?.beforePaste?.(); beforeWrite(); beforeInput?.(); checked = true; };
+          // The synchronous checks run again just before the key: the guard's re-read awaits after `checks`.
+          const enter = async () => { beforeWrite(); beforeInput?.(); return (await this.sendKeysUnchecked(pane, ["Enter"])).ok; };
+          if (checkDraft) await guard!.beforeInput(identity, false, text, { checks, enter });
+          if (!checked) await options?.beforePaste?.();
+        },
         afterPaste: async () => { if (checkDraft) await guard!.notePasted(identity, text); },
       } : undefined;
       return this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }, options?.bracketed, policy);
@@ -1021,13 +1050,24 @@ export class TmuxAdapter {
     }
   }
 
-  async sendKeys(target: string, keys: string[], beforeInput?: () => void): Promise<TmuxResult> {
+  async sendKeys(target: string, keys: string[], beforeInput?: () => void, options?: { beforeKeys?: () => Promise<void> }): Promise<TmuxResult> {
     return this.guardedInput(target, async (pane, beforeWrite) => {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
-      const submit = keys.some(key => key === "Enter" || key === "C-m");
-      if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
+      const submit = keys.some(isSubmitKey);
+      const check = async () => {
+        if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
+        if (options?.beforeKeys) await options.beforeKeys();
+      };
+      await check();
       beforeWrite(); beforeInput?.();
-      const result = await this.sendKeysUnchecked(pane, keys);
+      let result = await this.sendKeysUnchecked(pane, keys);
+      // A read-only client stops send-keys but not load-buffer/paste-buffer (#2090). A lone submit key goes as its
+      // carriage return through the unbracketed paste, once the same checks pass again, so input that changed in
+      // the gap is not submitted.
+      if (keys.length === 1 && isSubmitKey(keys[0]!) && isReadOnlyClientRefusal(result)) {
+        result = await this.sendTextUnchecked(pane, "\r", () => { beforeWrite(); beforeInput?.(); }, false,
+          { beforePaste: check, afterPaste: async () => {} });
+      }
       if (result.ok && submit) this.deliveryGuard?.noteSubmitted(identity);
       return result;
     }, false, "keys");

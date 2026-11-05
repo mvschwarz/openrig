@@ -110,6 +110,17 @@ limitation: use the live spec-library commands to determine where a spec is
 served from, and do not infer convergence merely because the canonical
 directory exists.
 
+The spec library scans the built-in specs, `$OPENRIG_HOME/specs` and, when
+present, that legacy library. At any depth below them it skips directories
+named `.git`, `.worktrees`, `node_modules`, `dist`, `build`, `.turbo` and
+`.next`, which usually hold build output or dependencies (`SKIP_DIRS` in
+`packages/daemon/src/domain/spec-library-service.ts`). A spec inside one of
+them, such as `specs/build/rig.yaml`, isn't listed, and nothing reports that it
+was skipped. To list it, rename its directory and run `rig specs sync`.
+`rig specs add <directory>` copies a directory under its own name, so adding a
+directory named `build` doesn't help. `rig up <path-to-rig.yaml>` still launches
+a spec by its path, without the library.
+
 Config updates publish a complete replacement file atomically where directory
 permissions and the filesystem allow it. On POSIX systems, replacement preserves
 the existing owner, group, and read/write/execute permission bits. If creating or

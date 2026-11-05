@@ -432,6 +432,129 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(f.bodies.a).toBe("incoming message");
   });
 
+  // #2429: Claude may still be redrawing a fresh paste when the guard reads before Enter; this frame has no composer yet.
+  const redrawing = (): ComposerSnapshot => ({ screen: "Ready\n❯ [Pasted text #1 +2 lines]\n", cursor: { x: 27, y: 1, width: 240, height: 60 }, inMode: false });
+
+  it("re-reads its own paste once when it can't read the input before Enter, then submits it (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    const text = "first line\nsecond line\nlast line";
+    let entering = false, readsBeforeEnter = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text && entering && readsBeforeEnter++ === 0) return redrawing();
+      return body == null ? null : frame(body === text ? "[Pasted text #1 +2 lines]" : body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200) entering = true; };
+    expect(await f.send("redrawn-paste", text, { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(readsBeforeEnter).toBe(2);
+    expect(f.submissions).toEqual([text]);
+  });
+
+  it.each([["its recorded collapsed label", "first line\nsecond line\nlast line"], ["its visible text", "one line"]])(
+    "submits its own unreadable leftover, shown as %s, before the next wake (#2429)", async (_shown, text) => {
+    const f = fixture(); await f.enable();
+    let unreadable = false;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text) return unreadable ? redrawing() : frame(text.includes("\n") ? "[Pasted text #1 +2 lines]" : text);
+      return body == null ? null : frame(body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200 && f.bodies.a === text) unreadable = true; };
+    const first = await f.send("unreadable-paste", text, { verify: false });
+    expect(first).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+    expect(first.error).toContain("Enter was not sent");
+    unreadable = false;
+    expect(await f.send("next-wake", "next work", { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text, "next work"]);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toHaveLength(2);
+    expect(f.bodies.a).toBe("");
+  });
+
+  // A wake whose Enter was refused on an unreadable input, leaving its paste behind.
+  async function leaveOwnPaste(f: ReturnType<typeof fixture>, text: string) {
+    let unreadable = false;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text) return unreadable ? redrawing() : frame(text);
+      return body == null ? null : frame(body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200 && f.bodies.a === text) unreadable = true; };
+    expect(await f.send("unreadable-paste", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+    unreadable = false;
+  }
+
+  it("submits the leftover only after this send's own checks pass: a check that refuses after buffer preparation sends no key (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    let prepared = false;
+    f.hooks.load = () => { prepared = true; };
+    // The caller's own check passes until the send's buffer is prepared, then refuses (as a cancellation would).
+    const next = await f.send("next-wake", "next work", { verify: false, beforeWrite: () => { if (prepared) throw new Error("fixture: the caller went away"); } });
+    expect(next.sent).not.toBe(true);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe("one line");
+  });
+
+  it("submits nothing when this send's own check goes invalid during the re-read before the leftover's Enter, and keeps the record (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    let prepared = false, readsAfterPrepare = 0, valid = true;
+    f.hooks.load = () => { prepared = true; };
+    const capture = vi.mocked(f.tmux.captureComposerSnapshot).getMockImplementation()!;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      // The second read after the buffer is prepared is the re-read after this send's checks passed: the caller goes away then.
+      if (prepared && ++readsAfterPrepare === 2) valid = false;
+      return capture(name);
+    });
+    const next = await f.send("next-wake", "next work", { verify: false, beforeWrite: () => { if (!valid) throw new Error("fixture: the caller went away"); } });
+    expect(next.sent).not.toBe(true);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe("one line");
+    // The record is kept, so a later ordinary wake still submits the leftover first.
+    expect(await f.send("later-wake", "later work", { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["one line", "later work"]);
+  });
+
+  it("a send that needs an idle seat leaves the leftover and is held, so it never types into the turn the leftover would start (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    expect(await f.send("idle-wake", "next work", { verify: false, waitForIdleMs: 60000 })).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe("one line");
+  });
+
+  it("says it submitted the leftover even when its own text then isn't sent (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    // The caller goes away after the leftover's Enter, before this send's own paste.
+    const next = await f.send("next-wake", "next work", { verify: false, beforeWrite: () => { if (f.submissions.length) throw new Error("fixture: the caller went away"); } });
+    expect(next).toMatchObject({ ownPasteSubmitted: true, warning: expect.stringContaining("earlier paste") });
+    expect(next.sent).not.toBe(true);
+    expect(f.submissions).toEqual(["one line"]);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it.each(["a different label", "human input", "an unrecorded label"])("keeps the next wake held when its unreadable leftover isn't provably its own: %s (#2429)", async condition => {
+    const f = fixture(); await f.enable();
+    const text = "first line\nsecond line\nlast line", other = "other first\nother second\nother last";
+    let unreadable = condition === "an unrecorded label";
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text) return unreadable ? redrawing() : frame("[Pasted text #1 +2 lines]");
+      return body == null ? null : frame(body === other ? "[Pasted text #2 +2 lines]" : body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200 && f.bodies.a === text) unreadable = true; };
+    expect(await f.send("unreadable-paste", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+    unreadable = false;
+    // A person attached directly replaces the paste, or types through OpenRig.
+    if (condition === "a different label") f.bodies.a = other;
+    if (condition === "human input") await f.guard.humanInput("worker@test", async () => {});
+    expect(await f.send("next-wake", "next work", { verify: false })).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(f.submissions).toEqual([]);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe(condition === "a different label" ? other : text);
+  });
+
   it("tries a current request after the person's draft clears, without replaying a saved prerequisite", async () => {
     const f = fixture(); await f.enable(); f.bodies.a = "a person's draft";
     const oldPrerequisite = vi.fn();
@@ -799,7 +922,6 @@ describe("supported seat and queue integration", () => {
       { mode: "draft-aware", holdSeconds: 60, reason: "obsolete" }, { mode: "hold" }]) {
       expect((await f.post("/api/seat/set-typing-guard/worker@test", body)).status).toBe(400);
     }
-    expect((await f.post("/api/seat/set-typing-guard/worker@test", { mode: "hold", reason: "draft", actor: "spoof" }, "")).status).toBe(400);
   });
 
   it("hold keeps messages indefinitely while a sibling still receives sends", async () => {

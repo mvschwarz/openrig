@@ -88,6 +88,8 @@ interface TeardownResult {
   keptSkills?: string[];
   /** Managed guidance blocks a person edited, kept in their file as `<file>: <block id>`. */
   keptGuidance?: string[];
+  /** Files in a Claude seat's cwd that keep OpenRig's additions because down couldn't safely change them, as `<file>: <why>`. */
+  keptFiles?: string[];
   /** Seats joined with `rig attach` as an external CLI, which OpenRig doesn't stop. */
   leftRunning?: string[];
   paneOnly?: string[];
@@ -294,6 +296,10 @@ the command warns and exits without stopping; re-run with --yes to confirm expli
       if (result.keptGuidance && result.keptGuidance.length > 0) {
         console.log(`Kept ${result.keptGuidance.length} edited OpenRig block(s) in guidance files; remove them by hand if you don't want them:`);
         for (const block of result.keptGuidance) console.log(`  ${block}`);
+      }
+      if (result.keptFiles && result.keptFiles.length > 0) {
+        console.log(`Kept ${result.keptFiles.length} file(s) that still hold OpenRig's additions; check them by hand:`);
+        for (const file of result.keptFiles) console.log(`  ${file}`);
       }
 
       if (result.leftRunning && result.leftRunning.length > 0) {

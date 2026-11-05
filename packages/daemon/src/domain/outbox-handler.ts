@@ -1,3 +1,4 @@
+import type { ExpectedConversation } from "./expected-conversation.js";
 import type Database from "better-sqlite3";
 
 /**
@@ -13,6 +14,8 @@ import type Database from "better-sqlite3";
  * select it. Single source of truth for the drain query only.
  */
 export const WAKE_INTENT_PREFIX = "wake-intent-";
+/** The sender a watchdog's reminders carry; their audit pointer is the job. */
+const WATCHDOG_SENDER = "watchdog@system";
 
 // Outcomes retain unresolved uncertainty. Wake recovery can claim failed/indeterminate
 // work again; it never steals a live sending claim or interprets unknown as unsent.
@@ -114,12 +117,36 @@ export class OutboxHandler {
    *  era-stamp column, so the writer degrades (omits it) instead of throwing. */
   private readonly hasIdentityProvenanceColumn: boolean;
   private readonly hasIdentityPrincipalColumn: boolean;
+  private readonly hasGuardDeliveryColumn: boolean;
 
   constructor(db: Database.Database) {
     this.db = db;
     const columns = (this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>).map((col) => col.name);
     this.hasIdentityProvenanceColumn = columns.includes("identity_provenance");
     this.hasIdentityPrincipalColumn = columns.includes("identity_principal");
+    this.hasGuardDeliveryColumn = columns.includes("guard_delivery");
+  }
+
+  /** The optional original-conversation constraint shares the existing durable delivery receipt. */
+  expectedIdentity(outboxId: string): ExpectedConversation | undefined {
+    if (!this.hasGuardDeliveryColumn) return undefined;
+    const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(outboxId) as { guard_delivery: string | null } | undefined;
+    return row?.guard_delivery ? JSON.parse(row.guard_delivery).expectedIdentity : undefined;
+  }
+
+  bindExpectedIdentity(input: OutboxRecordInput & { outboxId: string }, expected: ExpectedConversation): void {
+    if (!this.hasGuardDeliveryColumn) throw new OutboxHandlerError("expected_identity_unavailable", "The durable conditional-delivery schema is unavailable.");
+    this.db.transaction(() => {
+      const prior = this.getById(input.outboxId), bound = this.expectedIdentity(input.outboxId);
+      if (prior && (prior.senderSession !== input.senderSession || prior.destinationSession !== input.destinationSession || prior.body !== input.body)
+        || bound && ["nodeId", "sessionName", "runtime", "nativeId"].some(key => bound[key as keyof ExpectedConversation] !== expected[key as keyof ExpectedConversation]))
+        throw new OutboxHandlerError("delivery_identity_conflict", "This delivery ID already selects different input or an original conversation.");
+      if (!prior) this.record(input);
+      const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(input.outboxId) as { guard_delivery: string | null };
+      const receipt = row.guard_delivery ? JSON.parse(row.guard_delivery) : { ids: [input.outboxId] };
+      this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?")
+        .run(JSON.stringify({ ...receipt, expectedIdentity: expected }), input.outboxId);
+    })();
   }
 
   record(input: OutboxRecordInput): OutboxEntry {
@@ -191,6 +218,14 @@ export class OutboxHandler {
         }
       } else if (precommitted) {
         throw new OutboxHandlerError("outbox_not_found", "Precommitted delivery is missing; no replacement custody is created.");
+      }
+      // One held reminder per watchdog job: a newer reminder retires the one held before it, so a held seat's quota isn't
+      // filled by repeats of one job (#2430).
+      if (!existing && !precommitted && input.senderSession === WATCHDOG_SENDER && input.auditPointer) {
+        this.db.prepare(`UPDATE outbox_entries SET delivery_state='retired', retired_at=?, retired_by=?, retirement_reason=?
+          WHERE delivery_state='retained' AND sender_session=? AND audit_pointer=? AND json_extract(guard_binding,'$.nodeId')=?`)
+          .run(new Date().toISOString(), WATCHDOG_SENDER, "superseded by a newer reminder from the same watchdog job",
+            WATCHDOG_SENDER, input.auditPointer, binding.nodeId);
       }
       if (!precommitted) this.assertRetentionCapacity(binding.nodeId, input.body);
       if (!existing) this.record(input);
@@ -347,6 +382,18 @@ export class OutboxHandler {
     return rows.map((r) => this.rowToEntry(r));
   }
 
+  /** Messages a rig's seats sent or were sent, newest first: sender or destination `<member>@<rig>`. */
+  listForRig(rig: string, limit = 100): OutboxEntry[] {
+    const pattern = `%@${rig.replace(/[\\%_]/g, (ch) => `\\${ch}`)}`;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM outbox_entries WHERE sender_session LIKE ? ESCAPE '\\' OR destination_session LIKE ? ESCAPE '\\'
+         ORDER BY ts_dispatched DESC, rowid DESC LIMIT ?`
+      )
+      .all(pattern, pattern, limit) as OutboxEntryRow[];
+    return rows.map((r) => this.rowToEntry(r));
+  }
+
   /**
    * W1 (transactional closure): list still-`pending` rows whose outbox_id begins
    * with `idPrefix`, oldest first. The drain uses this to recover intents a crash
@@ -422,4 +469,12 @@ export class OutboxHandler {
       } : {}),
     };
   }
+}
+
+/** The line a seat's new occupant is told when its seat holds messages (#2431): a started seat, a handover successor and a
+ *  runtime-switch successor alike. Held messages are never replayed; null when there are none or no held-message store. */
+export function heldMessagesNotice(db: Database.Database, nodeId: string, seat: string): string | null {
+  let count = 0;
+  try { count = new OutboxHandler(db).retentionUsage(nodeId).count; } catch { /* no held-message store: nothing to tell */ }
+  return count ? `${count} held message${count === 1 ? " was" : "s were"} kept for this seat and not delivered: read ${count === 1 ? "it" : "them"} with rig seat held-messages ${seat}.` : null;
 }

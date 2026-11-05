@@ -10,7 +10,8 @@ export interface GuardedDeliverySummary {
 }
 
 /** Historical attempts contain outcomes, never executable options or callbacks. */
-interface Receipt { ids: string[]; result?: SendResult }
+interface Receipt { ids: string[]; result?: SendResult; expectedIdentity?: import("./expected-conversation.js").ExpectedConversation;
+  watchdog?: { nextAction?: string } }
 type Deliver = (session: string, text: string, opts: SendOpts) => Promise<SendResult>;
 /** Applicability needs the intended queue row and recipient, not a saved delivery receipt. */
 export type QueueWakeFacts = Pick<OutboxEntry, "outboxId" | "auditPointer" | "destinationSession">;
@@ -34,7 +35,7 @@ export class DraftAwareDelivery {
     const entry = this.outbox.getById(id)!;
     const state = entry.deliveryState === "retained" || entry.deliveryState === "retired" ? "held"
       : entry.deliveryState === "delivered" ? "complete" : entry.deliveryState === "sending" ? "sending" : entry.deliveryState === "failed" ? "failed" : "indeterminate";
-    const reason = entry.deliveryState === "retired" ? "message_retired" : receipt.result?.reason
+    const reason = entry.deliveryState === "retired" ? "message_retired" : receipt.result?.reason ?? receipt.watchdog?.nextAction
       ?? (state === "sending" ? "delivery_in_progress" : state === "complete" ? "delivered" : "interrupted_write");
     return { id: receipt.ids[0]!, state, reason };
   }
@@ -42,7 +43,7 @@ export class DraftAwareDelivery {
   /** The existing per-seat lease serializes requests. Each current request gets an attempt, not an old result. */
   async send(session: string, text: string, opts: SendOpts, ids: string[]): Promise<SendResult> {
     if (!ids.length || new Set(ids).size !== ids.length) throw new DeliveryGuardError("invalid_delivery_ids", "Distinct delivery IDs are required.");
-    const pending = this.attempt(session, text, opts, { ids });
+    const pending = this.attempt(session, text, opts, { ids, ...(opts.expectedIdentity ? { expectedIdentity: opts.expectedIdentity } : {}) });
     this.sends.add(pending);
     try { return await pending; }
     finally { this.sends.delete(pending); }
@@ -69,9 +70,14 @@ export class DraftAwareDelivery {
         }
       })();
       recorded = true;
-    } catch { /* Bookkeeping cannot veto input; report its absence with the actual result. */ }
+    } catch (error) {
+      if (opts.expectedIdentity) throw error; // A conditional send cannot lose its durable constraint and still type.
+      /* Legacy bookkeeping cannot veto input; report its absence with the actual result. */
+    }
     try {
-      await this.guard.beforeInput(session);
+      // A paste the guard left unsubmitted (#2429) is recognized here, to be submitted ahead of this delivery, unless the
+      // delivery needs an idle seat: submitting it starts a turn, so that delivery is held as before.
+      await this.guard.beforeInput(session, false, undefined, opts.waitForIdleMs === undefined && !opts.preserveInput ? "recognize" : undefined);
       result = await this.deliver(session, text, { ...opts,
         onInputEffect: phase => { inputWritten = true; opts.onInputEffect?.(phase); },
         beforeWrite: () => {
@@ -103,6 +109,9 @@ export class DraftAwareDelivery {
       // A wait-path failure can follow a dispatched native write. Only a positive pre-input result proves no write.
       const { sent: _sent, ...uncertain } = result; result = uncertain;
     }
+    // Whatever became of this delivery's own text, its record says it submitted OpenRig's earlier paste.
+    if (this.guard.submittedOwnLeftover(session)) result = { ...result, ownPasteSubmitted: true,
+      warning: [result.warning, "OpenRig first submitted its own earlier paste, left unsubmitted in this seat's input."].filter(Boolean).join(" ") };
     if (opts.deliveryId && !opts.committedOutboxIds) result = { ...result,
       warning: [result.warning, "Delivery IDs do not deduplicate requests; this is a new input attempt."].filter(Boolean).join(" ") };
     const state = noWrite ? "retained" : result.sent === false ? "failed" : result.ok && (result.verified || !opts.verify) ? "delivered" : "indeterminate";

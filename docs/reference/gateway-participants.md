@@ -5,14 +5,30 @@ OpenRig's gateway can register **several people** and **shared channels**, group
 OpenRig doesn't enforce it. This page covers the commands, what the default is for, and what upgrading and rolling back
 do.
 
+For a remote client, `GET /api/gateway/participants` returns the same participant, organization, group, default and
+warning fields as `rig gateway participants --json`. Add `?organization=<id>` to filter the participant list; the default
+and organization and group maps still describe the whole registry. The result names the participant file and reports
+an unreadable side file without treating it as an empty one. If the human registry itself cannot be read, the route
+returns `503` with `error: "human_registry_unavailable"`. The result does not include connector secret pointers.
+
 ## Participants
 
 A participant is either:
-- **a person**, registered with `rig gateway human add` as before, with their own Slack binding; or
+- **a person**, registered with `rig gateway human add`, with or without a connector binding; or
 - **a shared channel**: one vetted Slack channel registered as one participant, `<id>@external`, not a person per
   sender.
 
 People and channels share one address space: a channel can't take a person's id.
+
+A registered person is addressed as `<id>@external`, including without Slack: for example,
+`rig gateway human add alex --display-name "Alex" --delivery-class B` creates `alex@external`, reached in the Feed and Steering.
+`human@host` is the unnamed person at the terminal; `human@kernel` is also accepted as a human/gate address.
+These aliases (including `human-<name>@host` and `human-<name>@kernel`) are not agent sessions: reply with
+`rig queue create --destination human@host --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`,
+substituting the sender's address and your summary, evidence path and reply. A reply destination doesn't identify
+who acted or determine who may answer an ask. Clients acting as a registered person name that person's
+`actorSession`; a seat identity header takes precedence. The terminal's primary-user authority records the unnamed
+`human@host` actor, not the person whose queue is being viewed.
 
 ```bash
 # An organization and a group inside it (one command each, create or update)
@@ -59,30 +75,26 @@ never changes `workspace.operator_seat_name`, which keeps its own meaning.
 
 ## In the TUI: whose queue, and who acts
 
-The person at the terminal is the **primary user**: the default person, or, with several people and none chosen, the
-person at the terminal unnamed. Whatever the TUI shows, its acts are theirs.
+The person at the terminal is the **primary user**. The TUI records their acts as unnamed (`human@host`),
+whatever person's queue it shows or who is configured as the default.
 - **Opening:** with a chosen default, the TUI opens on that person's Feed. With none chosen, including a one-person
   install that never chose one, it opens on the topology, as before.
 - **Whose queue:** `whose <person>` shows one person's asks, `whose all` everyone's, and `whose default` the default
   person's. The Feed's first line says whose queue it shows and who acts.
-- **Acting on someone else's ask** (answer, approve or resolve from the TUI) records both: the primary user as the actor,
-  and the person asked in the audit notes and the transition. The asking seat reads, for example, "Answered by
-  mike@external, the primary user at the terminal, on sarah@external's ask". With several people and none chosen, the
-  actor is `human@host`.
-- **Viewing Sarah isn't acting as Sarah.** Only Sarah, from her own channel, answers as Sarah. Without the primary
-  user's authority, one registered person can't answer, approve, deny or resolve what was asked of another; that's
-  refused (`answer_not_recorded`) and nothing changes.
-- With no one registered, the TUI and its acts are as before, except on a shared channel's ask or a row parked on a
-  channel: the TUI shows the act as `human@host`, the person at the terminal, and it's recorded that way, never as the
-  channel.
+- **Acting on someone else's ask** (answer, approve or resolve from the TUI) records both: the unnamed terminal
+  actor `human@host` and the person asked in the audit notes and transition. The asking seat reads, for example,
+  "Unattributed (human@host) answered sarah@external's ask".
+- **Viewing Sarah isn't acting as Sarah.** A registered person may answer, approve, deny or resolve another person's
+  ask as themselves; both the actor and person asked are recorded. No connector binding is required, and viewing
+  someone else's queue doesn't make its viewer that person.
 - **A shared channel never acts.** Its messages are correspondence, so nothing it says answers, approves, denies or
   resolves an ask, and a customer's earlier message in an ask's thread is never taken as its answer. A request without
   the primary user's authority that acts as a channel, with any Mission Control verb (including drop, route, hold, hand
   off and annotate), is refused (`answer_not_recorded`) and nothing changes.
-- **Where the authority applies:** only on a request that carries no seat identity header, which is how the TUI calls
-  the daemon. Seats and the CLI send that header, so their acts stay theirs. This is the existing trusted-network
-  distinction, not an authentication check: a request that leaves the header out is taken as the terminal's, as any
-  such request already is.
+- **Where the authority applies:** primary-user authority is accepted only on a request that carries no seat identity
+  header, which is how the TUI calls the daemon. A headerless client can instead name a person's `actorSession` without
+  that authority. Seats and the CLI send the identity header, so their acts stay theirs. This is the existing
+  trusted-network distinction, not an authentication check.
 
 ## Shared-channel conversations
 

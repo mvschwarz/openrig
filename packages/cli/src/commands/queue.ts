@@ -356,6 +356,17 @@ function printResult(json: boolean, body: unknown, status: number): void {
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
 }
 
+// Priority is matched exactly where it matters (the founder view, attention ranks), so "Critical" would quietly file
+// the row as ordinary work. The daemon stores what it's given, so a documented value is normalized here. Other values
+// are kept as given: `high`, `normal` and `background` are in real use, and the mission view ranks some of them.
+const QUEUE_PRIORITIES = ["routine", "urgent", "critical"];
+function queuePriorityArg(value: string): string {
+  const lower = value.toLowerCase();
+  if (QUEUE_PRIORITIES.includes(lower)) return lower;
+  console.error(`Note: --priority '${value}' is outside the documented choices (${QUEUE_PRIORITIES.join(", ")}); keeping it as given.`);
+  return value;
+}
+
 /** #2276: the daemon's checks of a new row's human-facing fields (missing summary or evidence for a person,
  *  notification, questions, reply-to). The queue repository raises them before the row's first write, inside the
  *  create's transaction. A remote host's refusal arrives as remote_queue_write_failed instead, so it isn't one of these. */
@@ -639,6 +650,18 @@ async function printQueueItemResult(
 // IMPL-SPEC §2.3-2.4.
 const SHOW_BODY_PREVIEW_MAX_CODEPOINTS = 512;
 
+// A misspelled state ("in_progress") would otherwise read as an empty queue, not as a mistake: the list route matches
+// names as given. Each name is checked and trimmed the way the route trims it. This warns rather than refuses, so the
+// CLI's copy of the list doesn't stop it working with a newer daemon that knows more states.
+const QUEUE_STATE_NAMES = ["pending", "in-progress", "done", "blocked", "failed", "denied", "canceled", "handed-off"];
+function warnIfUnknownStates(value?: string): void {
+  const names = (value ?? "").split(",").map((name) => name.trim()).filter(Boolean);
+  const unknown = names.filter((name) => !QUEUE_STATE_NAMES.includes(name));
+  if (unknown.length === 0) return;
+  const effect = unknown.length === names.length ? " Nothing is filed under these names, so an empty result doesn't mean an empty queue." : "";
+  console.error(`Warning: unrecognized --state '${unknown.join("', '")}'. Supported states: ${QUEUE_STATE_NAMES.join(", ")}.${effect}`);
+}
+
 // Commander option parser. InvalidArgumentError (like positiveIntArg/enumArg) is what Commander
 // renders as its usual "option ... argument ... is invalid" error; a plain Error would escape parse.
 const WAKE_DURATION_FORMAT = "must be a positive integer with an optional s, m or h suffix (for example 90s, 15m, 168h)";
@@ -678,6 +701,12 @@ export function previewBody(
     bodyBytes,
     bodyTruncated: true,
   };
+}
+
+// Mark the cut inside the body so readers that discard metadata or stderr can request the complete brief.
+// Counts use code points, like the preview.
+export function previewCutMarker(qitemId: string, shownCodePoints: number, totalCodePoints: number): string {
+  return `…[cut at ${shownCodePoints} of ${totalCodePoints} chars; rig queue show ${shellQuote(qitemId)} --full]`;
 }
 
 function isRecordWithStringBody(v: unknown): v is Record<string, unknown> & { body: string } {
@@ -911,7 +940,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--mission <id>", "First-class mission scope; translated to a mission:<id> tag (composes with --tags)")
     .option("--slice <id>", "First-class slice scope; translated to a slice:<id> tag (composes with --tags)")
     .option("--gate <role>", "OPR.0.4.3.16: mark this as a gate qitem; translated to a gate:<role> tag (role e.g. guard | spec-review | pm-lead | qa | human). The idle-gate watchdog reads this predicate. Composes with --tags.")
-    .option("--priority <priority>", "Priority: routine | urgent | critical", "routine")
+    .option("--priority <priority>", "Priority: routine | urgent | critical", queuePriorityArg, "routine")
     .option("--tier <tier>", "Tier (e.g. fast, routine, deep, critical) — drives SLA")
     .option("--tags <tags>", "Comma-separated tags (composes with --mission and --slice)")
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
@@ -1211,6 +1240,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--reopen", "Explicitly acknowledge a deliberate terminal-to-active repair; requires --state and --note")
     .option("--closure-reason <reason>", "Required for state=done. --state canceled takes no reason, except 'superseded' (with --closure-target = the successor), which records a supersession, distinct from an abandoned cancel")
     .option("--closure-target <target>", "Required for handed_off_to, escalation, and superseded; blocked_on park records use state=blocked with --blocked-on")
+    .option("--closure-required-at <iso>", "Accept a revised closure deadline on an in-progress item; keeps the claim and records the old/new time and accepting actor")
     .option("--resolution <text>", "The outcome, stored on the row and shown by rig queue show. Needs --state done, canceled, denied, failed or handed-off, and non-blank text. Stored when the update closes an open row, after anything the row already has (a fallback line, an earlier outcome); a row that is already closed keeps what it has")
     .option("--blocked-on <blocker>", "For state=blocked: the blocker — a qitem id (must exist and be live), a human seat (FR-6 park; requires summary + evidence_ref), or a typed non-qitem gate 'fold:<what>' / 'auth:<what>' / 'external:<what>'")
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
@@ -1226,6 +1256,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       reopen?: boolean;
       closureReason?: string;
       closureTarget?: string;
+      closureRequiredAt?: string;
       resolution?: string;
       blockedOn?: string;
       wakeWatchdog?: string;
@@ -1262,6 +1293,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           reopen: opts.reopen,
           closureReason: opts.closureReason,
           closureTarget: opts.closureTarget,
+          ...(opts.closureRequiredAt !== undefined ? { closureRequiredAt: opts.closureRequiredAt } : {}),
           resolution: opts.resolution,
           blockedOn: opts.blockedOn,
           wakeWatchdogId: opts.wakeWatchdog,
@@ -1385,7 +1417,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--note <text>", "Transition note")
-    .option("--priority <priority>", "Override priority for the new qitem")
+    .option("--priority <priority>", "Override priority for the new qitem: routine | urgent | critical", queuePriorityArg)
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
@@ -1489,7 +1521,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--note <text>", "Transition note")
-    .option("--priority <priority>", "Override priority for the new qitem")
+    .option("--priority <priority>", "Override priority for the new qitem: routine | urgent | critical", queuePriorityArg)
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
@@ -1652,7 +1684,10 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           ...(closingTransition === undefined ? [] : [omittedReadField("closingTransition", closingTransition)]),
         ];
         const view = readView(item, fullCommand, omitted);
-        const transformed = { ...record, body: preview, bodyBytes, bodyTruncated, readView: view };
+        const shownBody = bodyTruncated
+          ? `${preview}${previewCutMarker(qitemId, Array.from(preview).length, Array.from(item.body).length)}`
+          : preview;
+        const transformed = { ...record, body: shownBody, bodyBytes, bodyTruncated, readView: view };
         // Slice 15 P2: with output.compact on, the empty fields are left out and counted.
         const compact = compactOutputEnabled() ? compactShow(transformed) : null;
         printResult(json, compact ? compact.item : transformed, res.status);
@@ -1772,6 +1807,7 @@ Examples:
       }
       if (opts.destination) params.set("destinationSession", opts.destination);
       if (opts.source) params.set("sourceSession", opts.source);
+      warnIfUnknownStates(opts.state);
       if (opts.state) params.set("state", opts.state);
       if (opts.targetRepo) params.set("targetRepo", opts.targetRepo);
       if (opts.limit) params.set("limit", String(opts.limit));

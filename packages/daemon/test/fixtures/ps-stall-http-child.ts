@@ -19,13 +19,24 @@ import { AgentActivityStore } from "../../src/domain/agent-activity-store.js";
 import { PsProjectionService } from "../../src/domain/ps-projection.js";
 import { psRoutes } from "../../src/routes/ps.js";
 import { rigsRoutes } from "../../src/routes/rigs.js";
+import { nodesRoutes } from "../../src/routes/sessions.js";
+import { queueRoutes } from "../../src/routes/queue.js";
+import { QueueRepository } from "../../src/domain/queue-repository.js";
+import { ContextUsageStore } from "../../src/domain/context-usage-store.js";
+import { createDb } from "../../src/db/connection.js";
+import { migrate } from "../../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../../src/db/all-migrations.js";
 import { createMigratedDb, seedHostShaped } from "../helpers/seed-host-shaped.js";
 
-export function buildStallApp(db: Database.Database): Hono {
+export const NODES_QUEUE_PROBE_ID = "qitem-nodes-burst-probe";
+
+export function buildStallApp(db: Database.Database, includeNodes = false): Hono {
   const repo = new RigRepository(db);
   const eventBus = new EventBus(db);
   const agentActivity = new AgentActivityStore({ db, eventBus });
   const psService = new PsProjectionService({ db, agentActivity }); // agentActivity REQUIRED; seatActivity ABSENT
+  const queueRepo = includeNodes ? new QueueRepository(db, eventBus, { loadHumanRegistry: () => ({ ok: true, entities: [] }) }) : null;
+  const contextUsage = includeNodes ? new ContextUsageStore(db, { stateDir: "" }) : null;
 
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -33,9 +44,17 @@ export function buildStallApp(db: Database.Database): Hono {
     c.set("rigRepo" as never, repo as never);
     c.set("eventBus" as never, eventBus as never);
     c.set("agentActivityStore" as never, agentActivity as never);
+    if (includeNodes) {
+      c.set("queueRepo" as never, queueRepo as never);
+      c.set("contextUsageStore" as never, contextUsage as never);
+    }
     await next();
   });
   app.route("/api/ps", psRoutes);
+  if (includeNodes) {
+    app.route("/api/rigs/:rigId/nodes", nodesRoutes);
+    app.route("/api/queue", queueRoutes());
+  }
   app.route("/api/rigs", rigsRoutes);
   // Trivial diagnostic /healthz — NOT daemon health semantics; it measures pure
   // event-loop availability (a synchronous ps/summary handler blocks even this).
@@ -62,9 +81,17 @@ if (runAsChild) {
   process.on("SIGINT", () => closeAll(0));
   process.on("uncaughtException", (e) => { process.stderr.write(`child uncaught: ${(e as Error).message}\n`); closeAll(1); });
   try {
-    db = createMigratedDb();
+    const includeNodes = process.argv.includes("--nodes");
+    db = includeNodes ? createDb() : createMigratedDb();
+    if (includeNodes) migrate(db, ALL_MIGRATIONS);
     seedHostShaped(db);
-    const app = buildStallApp(db);
+    if (includeNodes) {
+      // Keep the frozen rig/node/event counts, with today's runtime spelling and schema.
+      db.prepare("UPDATE nodes SET runtime = 'claude-code' WHERE runtime = 'claude'").run();
+      db.prepare("INSERT INTO queue_items (qitem_id, source_session, destination_session, body, state, ts_created, ts_updated) VALUES (?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+        .run(NODES_QUEUE_PROBE_ID, "coordinator@fixture", "worker@fixture", "Exact queue read during nodes burst");
+    }
+    const app = buildStallApp(db, includeNodes);
     server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, (info) => {
       process.stdout.write(`READY ${info.port}\n`);
     });

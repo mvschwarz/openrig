@@ -107,12 +107,13 @@ export class SnapshotCapture {
     const nodeStartupContext: Record<string, import("./types.js").NodeStartupSnapshot | null> = {};
     for (const node of rig.nodes) {
       const ctx = this.db.prepare("SELECT * FROM node_startup_context WHERE node_id = ?")
-        .get(node.id) as { projection_entries_json: string; resolved_files_json: string; startup_actions_json: string; runtime: string } | undefined;
+        .get(node.id) as { projection_entries_json: string; resolved_files_json: string; startup_actions_json: string; runtime: string; guidance_file?: string | null } | undefined;
       nodeStartupContext[node.id] = ctx ? {
         projectionEntries: JSON.parse(ctx.projection_entries_json),
         resolvedStartupFiles: JSON.parse(ctx.resolved_files_json),
         startupActions: JSON.parse(ctx.startup_actions_json),
         runtime: ctx.runtime,
+        ...(ctx.guidance_file ? { guidanceFile: ctx.guidance_file } : {}),
       } : null;
     }
 
@@ -125,6 +126,18 @@ export class SnapshotCapture {
       } catch { /* receipt_only — no checkpoint available */ }
     }
 
+    const environmentBindingsByNode: NonNullable<SnapshotData["environmentBindingsByNode"]> = {};
+    if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='environment_bindings'").get()) {
+      for (const node of rig.nodes) {
+        const binding = this.db.prepare("SELECT binding_id,resource_json,generation,config_json FROM environment_bindings WHERE node_id=?").get(node.id) as { binding_id: string; resource_json: string | null; generation: string | null; config_json: string } | undefined;
+        if (!binding?.resource_json) continue;
+        const checkpoint = this.db.prepare("SELECT receipt_json FROM environment_operations WHERE binding_id=? AND kind='checkpoint' AND state='confirmed' ORDER BY rowid DESC LIMIT 1").get(binding.binding_id) as { receipt_json: string } | undefined;
+        const cp = checkpoint ? JSON.parse(checkpoint.receipt_json) : null, config = JSON.parse(binding.config_json);
+        environmentBindingsByNode[node.id] = { version: 1, bindingId: binding.binding_id, resourceId: JSON.parse(binding.resource_json).id, generation: binding.generation,
+          checkpointId: cp?.checkpointId ?? null, nativeType: cp?.nativeType ?? null, nativeId: cp?.nativeId ?? null,
+          destinationCwd: `${config.guestRoot}/work`, nativeState: `${config.guestRoot}/native` };
+      }
+    }
     // 5. Assemble SnapshotData
     const data: SnapshotData = {
       rig: rig.rig,
@@ -143,6 +156,7 @@ export class SnapshotCapture {
         intendedNodeIds,
       },
       checkpoints,
+      ...(Object.keys(environmentBindingsByNode).length ? { environmentBindingsByNode } : {}),
       pods: podRows.map((p) => ({ id: p.id, rigId: p.rig_id, namespace: p.namespace, label: p.label, summary: p.summary, continuityPolicyJson: p.continuity_policy_json, createdAt: p.created_at })),
       continuityStates: continuityRows.map((r) => ({ podId: r.pod_id, nodeId: r.node_id, status: r.status as "healthy" | "degraded" | "restoring", artifactsJson: r.artifacts_json, lastSyncAt: r.last_sync_at, updatedAt: r.updated_at })),
       nodeStartupContext,

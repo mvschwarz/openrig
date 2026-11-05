@@ -247,6 +247,7 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
         : err.code === "qitem_not_leg1_parked" ? 409
         : err.code === "answer_not_closed" ? 409
         : err.code === "answer_not_recorded" ? 400
+        : err.code === "decision_revision_changed" ? 409
         : 500;
       return c.json(
         { error: err.code, message: err.message, ...(err.details ?? {}) },
@@ -330,9 +331,11 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
         auditNotes?: Record<string, unknown>;
         authority?: string;
         hostId?: string;
+        expectedRevision?: unknown;
       }>()
       .catch(() => ({} as never));
     if (!body.verb) return c.json({ error: "verb is required" }, 400);
+    if (body.expectedRevision !== undefined && typeof body.expectedRevision !== "string") return c.json({ error: "expectedRevision must be a string" }, 400);
     if (!MISSION_CONTROL_VERBS.includes(body.verb)) {
       return c.json(
         {
@@ -434,6 +437,8 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
         decision: body.decision,
         ...(typeof body.questionId === "string" ? { questionId: body.questionId } : {}),
         ...(typeof body.optionId === "string" ? { optionId: body.optionId } : {}),
+        // #2446: opt-in; a request without it acts exactly as before. A forward carries it to the origin, which compares it.
+        ...(typeof body.expectedRevision === "string" ? { expectedRevision: body.expectedRevision } : {}),
         notify: body.notify,
         auditNotes: body.auditNotes,
         // The person at the terminal (the TUI sends no seat header): the actor is the primary user, whoever was asked.

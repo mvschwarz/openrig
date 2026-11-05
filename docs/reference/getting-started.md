@@ -55,7 +55,8 @@ together in that home; it needs its own working sign-in and doesn't relocate `~/
 >   - Codex: hooks, workspace trust and team-selected config fragments (including MCP) in the selected
 >     `CODEX_HOME/config.toml`, default `~/.codex/config.toml`. These affect other Codex sessions using that home.
 >   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
->     `.claude/settings.local.json`, plus a status line unless you already have your own.
+>     `.claude/settings.local.json`, plus a status line unless you already have your own. `rig down` takes the hooks
+>     and status line back out once no Claude seat uses that directory.
 >   - Discovery skills go in `~/.claude/skills` and `~/.agents/skills`.
 >   - Each seat's `CLAUDE.md` or `AGENTS.md` gets OpenRig's managed blocks (culture, identity, onboarding). One more
 >     line, pointing an agent at its seat skills, is added only on a yes: saved at setup, or set where the daemon runs
@@ -290,6 +291,17 @@ fine; if both accounts are authenticated, the kernel uses both even when your
 later project uses just one. A request to use only one provider for everything
 is a separate choice.
 
+`/api/kernel/status` retains the chosen template (`rig.yaml`,
+`rig-claude-only.yaml` or `rig-codex-only.yaml`) across daemon restarts and
+recovery, including starts with `--no-kernel`. It reads the rig's latest rig-spec
+bootstrap record, including a partial launch, so an older kernel's recorded
+selection is also available. This is the original selection; the rig's live spec
+describes its current configuration. The saved source must match a template under
+the current installation’s built-in specs directory. A custom project path with
+the same directory suffix, an old source path that can no longer be verified
+(for example, after a Node version change moves the global install), or a kernel
+without bootstrap history reports an unknown variant.
+
 **Started is not ready.** Read the `Kernel:` boot state in `rig status` and the
 individual seat state in `rig ps --nodes --rig kernel`. The view may open while
 agents finish starting; describe that state, without claiming they are ready.
@@ -509,7 +521,12 @@ rig terminal open saved:kernel --provider herdr --json
 rig terminal open saved:kernel --provider cmux --json
 ```
 
-Use `rig terminal status --json` to inspect provider availability and liveness.
+Use `rig terminal status --json` to inspect provider availability, liveness and the
+daemon's effective tmux server. To keep managed seats out of your personal tmux
+session list, opt into [an isolated server](tmux-servers.md) with
+`rig config set terminal.tmux_server isolated`; existing live seats defer the
+switch until they are stopped and the daemon restarts.
+
 To keep rigs in separate Herdr sessions, select one explicitly:
 `rig terminal open future-prod-rig --provider herdr --session future-prod`.
 `--session default` selects Herdr's default session; omitting the option keeps

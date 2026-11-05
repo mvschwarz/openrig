@@ -501,7 +501,7 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     expect(JSON.stringify(result)).toContain(`kept ${target}`);
   }, 30_000);
 
-  it("fresh restore, end to end: a removed file whose recorded source has changed isn't put back with today's bytes", async () => {
+  it("fresh restore, end to end: a file whose recorded source changed comes back as the copy the seat had, never today's bytes", async () => {
     const src = join(root, "src-fresh2", "orient", "SKILL.md");
     mkdirSync(join(src, ".."), { recursive: true });
     writeFileSync(src, "orient\n");
@@ -513,7 +513,29 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     mkdirSync(join(target, ".."), { recursive: true });
     writeFileSync(target, "orient\n");
     recordSeatSkillWrite(seat.skillsRoot, target, src, "orient\n");
-    // rig down (inside run) removes the unchanged copy; the source changes before the restore.
+    // The source changes before rig down (inside run): down keeps the copy the restore can no longer rebuild.
+    writeFileSync(src, "today's bytes\n");
+    const result = await h.run();
+    expect(readFileSync(target, "utf8")).toBe("orient\n");
+    expect(result).toMatchObject({ ok: true, result: { rigResult: "partially_restored", nodes: [{ logicalId: "test.c", status: "fresh-primed" }] } });
+    expect(JSON.stringify((result as { result: { nodes: unknown[] } }).result.nodes)).not.toContain('"error"');
+    expect(JSON.stringify(result)).not.toContain("today's bytes");
+  }, 30_000);
+
+  it("fresh restore, end to end: a missing file whose recorded source has changed isn't put back with today's bytes", async () => {
+    const src = join(root, "src-fresh2", "orient", "SKILL.md");
+    mkdirSync(join(src, ".."), { recursive: true });
+    writeFileSync(src, "orient\n");
+    const file = { path: "skills/orient/SKILL.md", absolutePath: src, ownerRoot: join(root, "src-fresh2"), deliveryHint: "skill_install", required: false, appliesOn: ["fresh_start", "restore"] };
+    const h = restoreHarness([], undefined, { fresh: true, files: [file], realFs: true });
+    const seat = seatSkillPaths({ rigId: h.rigId, logicalId: "test.c", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    const target = join(seat.skillsRoot, "orient", "SKILL.md");
+    mkdirSync(join(target, ".."), { recursive: true });
+    writeFileSync(target, "orient\n");
+    recordSeatSkillWrite(seat.skillsRoot, target, src, "orient\n");
+    // The copy goes missing (someone removed it) and the source changes before the restore.
+    rmSync(target);
     writeFileSync(src, "today's bytes\n");
     const result = await h.run();
     expect(existsSync(target)).toBe(false);

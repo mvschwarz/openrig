@@ -7,6 +7,22 @@ import { describe, expect, it, vi } from "vitest";
 import { workspaceCommand, parseMaxFilesStrict, type WorkspaceDeps } from "../src/commands/workspace.js";
 import type { LifecycleDeps } from "../src/daemon-lifecycle.js";
 
+vi.mock("../src/daemon-lifecycle.js", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>(
+    "../src/daemon-lifecycle.js",
+  );
+  return {
+    ...actual,
+    getDaemonStatus: vi.fn(async () => ({
+      state: "running",
+      healthy: true,
+      pid: 1234,
+      port: 7433,
+    })),
+    getDaemonUrl: vi.fn(() => "http://localhost:7433"),
+  };
+});
+
 function captureStdout(): { logs: string[]; restore: () => void } {
   const logs: string[] = [];
   const original = console.log;
@@ -127,4 +143,69 @@ describe("rig workspace validate --max-files — CLI-side discriminator (BLOCK 1
   // requires stubbing the daemon-status check too, which is covered
   // by the daemon-lifecycle adopt/expand test pattern (out of scope
   // for this BC discriminator).
+});
+
+describe("rig workspace validate daemon error reporting", () => {
+  it("prints daemon refusal message as a single readable stderr line in human mode", async () => {
+    const post = vi.fn(async () => ({
+      status: 400,
+      data: {
+        error: "invalid_workspace_kind",
+        message: "workspaceKind must be one of: user, project, knowledge, lab, delivery",
+      },
+    }));
+    const deps = fakeRunningDeps(post);
+    const errors: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    const origExit = process.exitCode;
+    process.exitCode = 0;
+    try {
+      const root = workspaceCommand(deps);
+      await root.parseAsync(["node", "rig", "validate", "/tmp/ws", "--kind", "invalid"]);
+      expect(post).toHaveBeenCalledWith(
+        "/api/workspace/validate",
+        expect.objectContaining({ workspaceKind: "invalid" }),
+      );
+      expect(process.exitCode).toBe(1);
+      expect(errors).toEqual(["workspaceKind must be one of: user, project, knowledge, lab, delivery"]);
+    } finally {
+      console.error = origError;
+      process.exitCode = origExit;
+    }
+  });
+
+  it("prints raw JSON on stderr when daemon refuses and --json is set", async () => {
+    const refusal = {
+      error: "invalid_workspace_kind",
+      message: "workspaceKind must be one of: user, project, knowledge, lab, delivery",
+    };
+    const post = vi.fn(async () => ({
+      status: 400,
+      data: refusal,
+    }));
+    const deps = fakeRunningDeps(post);
+    const errors: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    const origExit = process.exitCode;
+    process.exitCode = 0;
+    try {
+      const root = workspaceCommand(deps);
+      await root.parseAsync(["node", "rig", "validate", "/tmp/ws", "--kind", "invalid", "--json"]);
+      expect(post).toHaveBeenCalledWith(
+        "/api/workspace/validate",
+        expect.objectContaining({ workspaceKind: "invalid" }),
+      );
+      expect(process.exitCode).toBe(1);
+      expect(errors).toEqual([JSON.stringify(refusal, null, 2)]);
+    } finally {
+      console.error = origError;
+      process.exitCode = origExit;
+    }
+  });
 });

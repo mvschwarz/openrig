@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import net from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
@@ -25,6 +25,8 @@ const realBaseEnv = () => ({ HOME: process.env.HOME, PATH: process.env.PATH, TER
 
 describe("surface readers — reserved-proof defense-in-depth + dispatch (pure)", () => {
   const ctx: SurfaceContext = { rigBin: RIG_BIN, readEnv: {}, baseUrl: "http://127.0.0.1:1" };
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
   it("a runtime-smuggled 'proof' read still FAILS LOUD with a named UnboundSurfaceError (defense-in-depth)", async () => {
     // "proof" left the ExpectSurface type (RESERVED); only a cast can reach here.
@@ -39,6 +41,26 @@ describe("surface readers — reserved-proof defense-in-depth + dispatch (pure)"
 
   it("readSurface(unknown surface) throws (never silently skips)", async () => {
     await expect(readSurface("database" as never, ctx)).rejects.toThrow();
+  });
+
+  it("queue reader invokes `rig queue list --json --full --all` so a closed source row is visible", async () => {
+    // A stand-in rig bin: records the REAL argv the reader spawns, so the flag
+    // plumbing is pinned through the subprocess boundary (a comment-only change
+    // cannot silently drop --all and hide handed-off rows from expect).
+    const d = mkdtempSync(join(tmpdir(), "surf-"));
+    dirs.push(d);
+    const argvLog = join(d, "argv.log");
+    const fakeRig = join(d, "fake-rig.mjs");
+    writeFileSync(fakeRig, [
+      'import { appendFileSync } from "node:fs";',
+      `appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+      'process.stdout.write("[]");',
+      "",
+    ].join("\n"));
+    const observed = await readSurface("queue", { rigBin: fakeRig, readEnv: { PATH: process.env.PATH }, baseUrl: "http://127.0.0.1:1" });
+    expect(observed).toEqual([]);
+    const invocations = readFileSync(argvLog, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(invocations).toContainEqual(["queue", "list", "--json", "--full", "--all"]);
   });
 });
 

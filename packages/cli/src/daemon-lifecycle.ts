@@ -62,6 +62,9 @@ export interface DaemonStatus {
   eventLoop?: DaemonEventLoopEvidence;
   /** #275 — the OS code behind a failed health probe (e.g. EPERM when a sandbox blocked it). */
   probeErrorCode?: string;
+  /** T2 — a refused listener under a live start reservation (daemon-start.lock): a launch is in
+   *  progress and not listening yet. `pid` is the live launcher (else child) PID; `since` its start. */
+  startPending?: { pid: number; since?: string };
 }
 
 /** "unknown": the process may exist but this shell can neither signal nor inspect it. */
@@ -134,6 +137,16 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
       fact: `Daemon could not be checked: the health probe was blocked (${status.probeErrorCode}).`,
       consequence: `This command needs a responsive daemon. ${blocked.consequence}`,
       action: blocked.action,
+      ...causeCode,
+    };
+  }
+  // A refused probe under a live start reservation: a launch is in progress and nothing is listening yet.
+  if (status.startPending) {
+    const since = status.startPending.since ? ` since ${status.startPending.since}` : "";
+    return {
+      fact: `Daemon is starting (launch reserved by pid ${status.startPending.pid}${since}); it isn't listening yet.`,
+      consequence: "This command needs a responsive daemon.",
+      action: "Wait, then re-check with 'rig daemon status'.",
       ...causeCode,
     };
   }
@@ -1043,6 +1056,40 @@ function findSiblingHome(deps: LifecycleDeps): DaemonStatus["siblingHint"] {
   return undefined;
 }
 
+/** T2 — read-only: the live launcher (else child) PID named by a start reservation, or undefined
+ *  when there is no reservation, it is unreadable, or every PID it names is dead. */
+function liveStartReservation(deps: LifecycleDeps): DaemonStatus["startPending"] {
+  try {
+    const file = path.join(deps.homeDir ?? OPENRIG_DIR, "daemon-start.lock");
+    const raw = deps.exists(file) ? deps.readFile(file) : null;
+    if (!raw) return undefined;
+    let launcherPid: number | undefined;
+    let childPid: number | undefined;
+    let since: string | undefined;
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const rec = JSON.parse(line) as { launcherPid?: unknown; childPid?: unknown; startedAt?: unknown };
+        if (typeof rec.launcherPid === "number") launcherPid = rec.launcherPid;
+        if (typeof rec.childPid === "number") childPid = rec.childPid;
+        if (typeof rec.startedAt === "string") since = rec.startedAt;
+      } catch {
+        // partial line: keep whatever parsed
+      }
+    }
+    for (const pid of [launcherPid, childPid]) {
+      if (pid === undefined) continue;
+      const liveness: ProcessLiveness = deps.processLiveness
+        ? deps.processLiveness(pid)
+        : deps.isProcessAlive(pid) ? "alive" : "dead";
+      if (liveness !== "dead") return { pid, ...(since ? { since } : {}) };
+    }
+  } catch {
+    // best-effort only: a status read must never fail on the reservation
+  }
+  return undefined;
+}
+
 export async function getDaemonStatus(
   deps: LifecycleDeps,
   options: GetDaemonStatusOptions = {},
@@ -1095,9 +1142,13 @@ export async function getDaemonStatus(
       // 1ae863d2: the resolved home has NO daemon state — before asserting anything,
       // look for a live sibling home / HOME-MOVED marker (the wrong-home class).
       const siblingHint = findSiblingHome(deps);
-      if (siblingHint) return { state: "unverified", siblingHint, ...probeErrorCodeOf(err) };
-      return isRefusedError(err)
-        ? { state: "stopped" }
+      // T2: a refused listener under a live start reservation is a launch in progress, not down.
+      const refused = isRefusedError(err);
+      const startPending = refused ? liveStartReservation(deps) : undefined;
+      if (siblingHint) return { state: "unverified", siblingHint, ...probeErrorCodeOf(err), ...(startPending ? { startPending } : {}) };
+      if (refused && !startPending) return { state: "stopped" };
+      return refused
+        ? { state: "unverified", port: configured.port, host: configured.host, startPending, ...probeErrorCodeOf(err) }
         : { state: "unverified", port: configured.port, host: configured.host, ...probeErrorCodeOf(err) };
     }
   }
@@ -1125,7 +1176,12 @@ export async function getDaemonStatus(
       return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
+      // T2: unless a live start reservation says a launch is in progress.
+      if (isRefusedError(err)) {
+        const startPending = liveStartReservation(deps);
+        return startPending ? { state: "unverified", pid: state.pid, port: state.port, host, startPending, ...probeErrorCodeOf(err) } : { state: "stopped" };
+      }
+      return { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
     }
   }
 

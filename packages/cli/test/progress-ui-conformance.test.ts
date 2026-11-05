@@ -77,3 +77,15 @@ describe("FR-4 — verb output parses into the expected UI tree", () => {
     expect(file.counts.blocked).toBe(1);
   });
 });
+
+
+it.each(["```md\n## Rail\n- [ ] Ship it\n```\n", "```md\n## Rail\n- [ ] Ship it\n"])("adds and updates a real row without editing example %j", (example) => {
+  const original = `# Progress\n\n${example}`;
+  const added = addProgressRow(original, { section: "Rail", text: "Ship it", status: "active" }).content;
+  const updated = setProgressRow(added, { text: "Ship it", status: "done" }).content;
+  expect(updated).toContain(example);
+  fs.writeFileSync(path.join(root, "PROGRESS.md"), updated);
+  const file = indexerFor().scan().files[0]!;
+  expect(file.counts).toMatchObject({ total: 1, done: 1 });
+  expect(file.rows.filter(r => r.kind === "checkbox")).toMatchObject([{ text: "Ship it", status: "done" }]);
+});

@@ -66,8 +66,6 @@ export interface CreateQitemInput {
   inReplyTo?: string;
   /** A current typed/button answer, never a reaction or a recovered late message. */
   humanAnswer?: boolean;
-  /** The answer is a typed thread reply: on a decision parked on its person, its row belongs to the current question. */
-  typedReply?: boolean;
 }
 
 /** What the inbound router needs: land a durable qitem, get its id (or throw). */
@@ -81,6 +79,9 @@ export interface InboundQueuePort {
   getEpisodeAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
   /** Every answer this person returned to the ask, oldest first, so a replay after close can find its own. */
   listHumanAnswers?(qitemId: string, actorSession: string): Array<{ qitemId: string; body: string }>;
+  /** Whether a reply routed to `destination` can answer the row: routed to a person, only when that person is the row's
+   *  asking seat (the sender of an ask to a person). A root recorded with a person as its seat routes to someone else. */
+  routesToAsker?(qitemId: string, destination: string): boolean;
 }
 
 /** What the outbound driver needs: the current human-alert set, full items included. */
@@ -224,11 +225,13 @@ export function makeQueuePorts(
     const people = registeredPeople((opts.loadHumanRegistry ?? (() => loadHumanRegistry()))());
     if (!people) return null;
     const channels = (opts.sharedChannels ?? (() => sharedChannelAddresses()))();
+    // A person with no connector binding is reached in the Feed and Steering only, so nothing posts for them.
+    const slackPeople = people.filter((person) => person.connectorBindings.length > 0);
     const episodes = queueRepo.transitionLog.activeOwnerNotificationEpisodes(includePosted);
     return episodes.flatMap(({ qitemId, transition, posted }) => {
       const row = queueRepo.getById(qitemId);
       if (!row) return [];
-      const item = project(row, transition, people, channels);
+      const item = project(row, transition, slackPeople, channels);
       return item ? [{ item, posted }] : [];
     });
   };
@@ -241,10 +244,15 @@ export function makeQueuePorts(
     },
     getEpisodeAnswer: (qitemId, actorSession) => queueRepo.currentEpisodeAnswer(qitemId, actorSession),
     listHumanAnswers: (qitemId, actorSession) => queueRepo.listHumanAnswers(qitemId, actorSession),
+    routesToAsker: (qitemId, destination) => {
+      const item = queueRepo.getById(qitemId);
+      return !queueRepo.isPersonAddress(destination) || (item !== null && destination === item.sourceSession);
+    },
     async createQitem(input: CreateQitemInput): Promise<string> {
       const ask = input.inReplyTo ? queueRepo.getById(input.inReplyTo) : null;
-      const directAnswer = input.humanAnswer && ask && ask.destinationSession === input.source && ask.humanIntent !== "update"
-        && queueRepo.isPersonAddress(input.source);
+      // The asked person's answer, or another registered person's: either takes the ask's one shared answer identity.
+      const directAnswer = input.humanAnswer && ask && ask.humanIntent !== "update" && queueRepo.isPersonAddress(ask.destinationSession)
+        && queueRepo.answersAsk(ask, input.source) && queueRepo.isPersonAddress(input.source);
       const createInput = {
         qitemId: input.qitemId,
         sourceSession: input.source,
@@ -256,11 +264,15 @@ export function makeQueuePorts(
         inboundReplyTo: input.inReplyTo ?? null,
         gatewayInbound: true,
       };
-      const created = directAnswer && input.inReplyTo
+      let created = directAnswer && input.inReplyTo
         ? await queueRepo.createHumanAnswer({ ...createInput, inboundReplyTo: input.inReplyTo,
-          // A parked decision's answer belongs to its current question, so a re-park gets its own.
-          ...(input.typedReply && ask?.state === "blocked" ? { episodeKey: queueRepo.currentHumanRequiredEpisode(input.inReplyTo)?.key } : {}) })
+          // A parked decision's answer, typed or clicked, belongs to its current question, so a re-park gets its own.
+          ...(ask?.state === "blocked" ? { episodeKey: queueRepo.currentHumanRequiredEpisode(input.inReplyTo)?.key } : {}) })
         : await queueRepo.create(createInput);
+      // Another registered person's answer already settled the ask: these words still reach the agent, as correspondence.
+      if (directAnswer && created.qitemId !== input.inReplyTo && created.sourceSession !== input.source) {
+        created = await queueRepo.create({ ...createInput, tags: createInput.tags.filter((tag) => tag !== "human-answer") });
+      }
       return (created as unknown as { qitemId: string }).qitemId;
     },
     async listHumanAlerts(filter: AlertFilterOpts): Promise<QueueItem[]> {

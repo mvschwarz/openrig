@@ -205,13 +205,18 @@ describe("#141 explicit YAML import over a stopped same-name generation", () => 
 
 describe("#141 P1 correction: concurrent same-name imports", () => {
   function gate() { let release!: () => void; const wait = new Promise<void>((r) => { release = r; }); return { wait, release }; }
+  // The first import reaches its hold only after preflight's profile-resolution worker answers, which can take more
+  // than a second on a loaded runner. Wait for the hold itself, not a timed poll; an import that settles first fails here.
+  const held = async (entered: Promise<void>, first: Promise<unknown>) =>
+    expect(await Promise.race([entered.then(() => "held"), first.then(() => "settled", () => "settled")])).toBe("held");
 
   it("while one import awaits its stopped-generation probe, a same-name import is refused; one replacement results", async () => {
-    const g = gate(); let calls = 0;
-    const f = setup(async () => { calls++; if (calls === 1) await g.wait; return { state: "absent" }; });
+    const g = gate(); const entered = gate(); let calls = 0;
+    const f = setup(async () => { calls++; if (calls === 1) { entered.release(); await g.wait; } return { state: "absent" }; });
     const oldId = f.priorGeneration();
     const first = f.inst.instantiate(f.yaml, RIG_ROOT);
-    await vi.waitFor(() => expect(calls).toBe(1));
+    await held(entered.wait, first);
+    expect(calls).toBe(1);
     const second = await f.inst.instantiate(f.yaml, RIG_ROOT);
     g.release();
     const firstResult = await first;
@@ -224,11 +229,11 @@ describe("#141 P1 correction: concurrent same-name imports", () => {
   });
 
   it("while one import's replacement waits in its prelaunch hook, a same-name import neither archives it nor adds another", async () => {
-    const g = gate(); let hookEntered = false;
+    const g = gate(); const entered = gate();
     const f = setup(async () => ({ state: "absent" }));
     const oldId = f.priorGeneration();
-    const first = f.inst.instantiate(f.yaml, RIG_ROOT, { prelaunchHook: async () => { hookEntered = true; await g.wait; return { ok: true }; } });
-    await vi.waitFor(() => expect(hookEntered).toBe(true));
+    const first = f.inst.instantiate(f.yaml, RIG_ROOT, { prelaunchHook: async () => { entered.release(); await g.wait; return { ok: true }; } });
+    await held(entered.wait, first);
     const second = await f.inst.instantiate(f.yaml, RIG_ROOT);
     g.release();
     const firstResult = await first;
@@ -241,11 +246,12 @@ describe("#141 P1 correction: concurrent same-name imports", () => {
   });
 
   it("rollback restores only archives this import made (another actor archived the old rig meanwhile)", async () => {
-    const g = gate(); let calls = 0;
-    const f = setup(async () => { calls++; await g.wait; return { state: "absent" }; });
+    const g = gate(); const entered = gate(); let calls = 0;
+    const f = setup(async () => { calls++; entered.release(); await g.wait; return { state: "absent" }; });
     const oldId = f.priorGeneration();
     const first = f.inst.instantiate(f.yaml, RIG_ROOT, { prelaunchHook: async () => ({ ok: false, code: "svc", message: "service failed" }) });
-    await vi.waitFor(() => expect(calls).toBe(1));
+    await held(entered.wait, first);
+    expect(calls).toBe(1);
     f.rigRepo.archiveRig(oldId);
     g.release();
     const result = await first;
@@ -256,11 +262,12 @@ describe("#141 P1 correction: concurrent same-name imports", () => {
   });
 
   it("an import of an unrelated name proceeds while another import is in flight", async () => {
-    const g = gate(); let calls = 0;
-    const f = setup(async () => { calls++; if (calls === 1) await g.wait; return { state: "absent" }; });
+    const g = gate(); const entered = gate(); let calls = 0;
+    const f = setup(async () => { calls++; if (calls === 1) { entered.release(); await g.wait; } return { state: "absent" }; });
     f.priorGeneration();
     const first = f.inst.instantiate(f.yaml, RIG_ROOT);
-    await vi.waitFor(() => expect(calls).toBe(1));
+    await held(entered.wait, first);
+    expect(calls).toBe(1);
     expect(f.yaml).toContain("name: test-rig");
     const other = await f.inst.instantiate(f.yaml.replace("name: test-rig", "name: other-rig"), RIG_ROOT);
     g.release();
