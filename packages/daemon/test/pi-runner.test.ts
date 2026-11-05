@@ -745,6 +745,22 @@ describe("mapPiEvent", () => {
     expect(mapPiEvent({ type: "auto_retry_start" }).activity).toEqual({ hookEvent: "active", subtype: "auto_retry" });
   });
 
+  // Pi's compaction_end (its docs/rpc.md): `aborted` when it was cancelled, otherwise `errorMessage` when it failed and no
+  // summary was written (#2521). The JSON line carries no `result` then.
+  it("reports a compaction's end the way Pi does: cancelled, failed with Pi's reason, or done", () => {
+    const done = { type: "compaction_end", reason: "threshold", result: { summary: "s", firstKeptEntryId: "e1", tokensBefore: 150000 }, aborted: false, willRetry: false };
+    const failed = { type: "compaction_end", reason: "threshold", aborted: false, willRetry: false,
+      errorMessage: "Auto-compaction failed: Summarization failed: generation hit the token cap and the summary is incomplete" };
+    const cancelled = { type: "compaction_end", reason: "manual", aborted: true, willRetry: false };
+    expect(mapPiEvent(done).mirrorLines).toEqual(["[pi] compaction done"]);
+    expect(mapPiEvent(failed).mirrorLines).toEqual(["[pi] compaction failed: Auto-compaction failed: Summarization failed: generation hit the token cap and the summary is incomplete"]);
+    expect(mapPiEvent(cancelled).mirrorLines).toEqual(["[pi] compaction cancelled"]);
+    expect(mapPiEvent({ ...failed, errorMessage: "Compaction failed: \u001b[31mquota\u001b[0m\nexceeded" }).mirrorLines)
+      .toEqual(["[pi] compaction failed: Compaction failed: quota exceeded"]);
+    // An end that names neither a cancel nor a failure keeps reading done, as before.
+    expect(mapPiEvent({ type: "compaction_end" }, "omp").mirrorLines).toEqual(["[omp] compaction done"]);
+  });
+
   it("leaves auto_compaction_* unmapped for Pi so an idle seat never reads as running", () => {
     for (const type of ["auto_compaction_start", "auto_compaction_end"]) {
       expect(mapPiEvent({ type })).toEqual({ mirrorLines: [] });
