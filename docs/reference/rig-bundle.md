@@ -91,10 +91,10 @@ my-rig.rigbundle.sha256   — "a1b2c3d4..." (64-char hex SHA-256)
 The packer produces deterministic output:
 - Files are sorted alphabetically
 - A fixed mtime is used (`2026-01-01T00:00:00Z`)
-- Portable mode normalizes uid/gid/mode
+- Portable mode omits machine-specific owner metadata; file mode bits can be retained
 - Maximum gzip compression (level 9)
 
-Identical staged bytes (including manifest timestamps and provenance) produce the same archive hash. Use the package digest to compare packaged file content independently of manifest metadata.
+Identical staged bytes and file modes (including identical manifest timestamps and provenance) produce the same archive hash. A mode change can change the archive hash even when the file contents are unchanged. Use the package digest to compare packaged file content independently of manifest metadata and file modes.
 
 ---
 
