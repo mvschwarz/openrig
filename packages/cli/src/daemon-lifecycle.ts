@@ -434,10 +434,10 @@ function resolveLifecycleFile(deps: LifecycleDeps, filename: "daemon.json" | "da
  *  - "unresponsive" — pid is alive but healthz probe timed out
  *  - "dead" — PID not alive
  *  - { blocked } — the OS refused the probe; identity is unknown */
-async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openrig" | "not_openrig" | "unresponsive" | "dead" | { blocked: string }> {
-  const liveness = deps.processLiveness
+async function checkPid(state: DaemonState, deps: LifecycleDeps, knownLiveness?: ProcessLiveness): Promise<"openrig" | "not_openrig" | "unresponsive" | "dead" | { blocked: string }> {
+  const liveness = knownLiveness ?? (deps.processLiveness
     ? deps.processLiveness(state.pid)
-    : deps.isProcessAlive(state.pid) ? "alive" : "dead";
+    : deps.isProcessAlive(state.pid) ? "alive" : "dead");
   if (liveness === "dead") return "dead";
   const host = state.host ?? DEFAULT_HOST;
   try {
@@ -986,7 +986,13 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   }
   const stateFile = resolveLifecycleFile(deps, "daemon.json");
 
-  const pidState = await checkPid(state, deps);
+  const liveness = deps.processLiveness
+    ? deps.processLiveness(state.pid)
+    : deps.isProcessAlive(state.pid) ? "alive" : "dead";
+  if (liveness === "unknown") {
+    throw new Error(`Cannot stop safely: PID ${state.pid} liveness is unknown; no signal sent, state preserved.`);
+  }
+  const pidState = await checkPid(state, deps, liveness);
   if (typeof pidState === "object") {
     throw new Error(`Cannot stop safely: the identity probe was blocked (${pidState.blocked}); no signal sent, state preserved.`);
   }
