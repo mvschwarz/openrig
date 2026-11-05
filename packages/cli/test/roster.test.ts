@@ -108,3 +108,15 @@ it.each(["model", "time", "unknown", "generation"])("r2: preserves registry fiel
   expect(enrichRosterMember(member, sample).live.observedModel).toBeNull();
   expect(enrichRosterMember(member, sample).live).toMatchObject({ modelObservation: { status: "unknown", reason: "conflicting-observations" } });
 });
+
+it("does not choose the first duplicate route when activity observations conflict", () => {
+  const idle = { ...node, agentActivity: { state: "idle", sampledAt: "2026-10-01T00:00:00Z" } };
+  const working = { ...node, agentActivity: { state: "working", sampledAt: "2026-10-01T00:00:00Z" } };
+  for (const nodes of [[idle, working], [working, idle]]) {
+    const live = enrichRosterMember(member, { readAt: "2026-10-01T00:00:01Z", nodes, sources: [] }).live;
+    expect(live).toMatchObject({ status: "reported", runtime: "claude-code", configuredModel: "configured-a",
+      agentActivity: { state: "unknown", reason: "Conflicting activity observations", sampledAt: null } });
+  }
+  expect(enrichRosterMember(member, { readAt: "2026-10-01T00:00:01Z", nodes: [idle, idle], sources: [] }).live.agentActivity)
+    .toEqual({ state: "idle", reason: null, sampledAt: "2026-10-01T00:00:00Z" });
+});
