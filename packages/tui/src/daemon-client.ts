@@ -132,7 +132,10 @@ export class DaemonClient {
     });
     const parsed = await res.json().catch(() => null);
     if (!res.ok) {
-      const detail = parsed && typeof parsed === "object" && "error" in parsed ? ` — ${(parsed as { error: unknown }).error}` : "";
+      const detail = parsed && typeof parsed === "object"
+        ? "error" in parsed ? ` — ${(parsed as { error: unknown }).error}`
+          : "message" in parsed ? ` — ${(parsed as { message: unknown }).message}` : ""
+        : "";
       throw new Error(`daemon write failed: POST ${route} → ${res.status}${detail}`);
     }
     return parsed;
