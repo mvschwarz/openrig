@@ -10,12 +10,14 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ## [0.7.8]
 
-**Not yet published.**
+Published 2026-11-05 as `@openrig/cli@0.7.8`, built from the commit tagged
+`v0.7.8` (`12df562c`).
 
 OpenRig 0.7.8 lets a person answer a runner seat's permission requests, with a
-conformance check and an example runner to build against. It adds a maintained
-way to run a Claude worker in an NVIDIA OpenShell sandbox, and includes 0.7.7's
-fixes plus repairs across seats, tmux, Slack and the TUI.
+conformance check and an example runner to build against. It includes 0.7.7's
+fixes plus repairs across seats, tmux, Slack and the TUI. It also includes a
+reference for running a Claude worker in an NVIDIA OpenShell sandbox, but that
+worker isn't usable in this release: see [the OpenShell reference](#the-openshell-reference-isnt-usable-in-078).
 
 ### Before you upgrade
 
@@ -61,20 +63,15 @@ fixes plus repairs across seats, tmux, Slack and the TUI.
 - **A seat activity grant** lets a runner outside the host's hook setup report
   activity for one seat and launch, without the install-wide hook token. ([#2295](https://github.com/mvschwarz/openrig/pull/2295))
 
-### Claude workers in OpenShell sandboxes
+### The OpenShell reference isn't usable in 0.7.8
 
-- **`rig environment setup` installs a maintained reference** that binds a seat
-  to one NVIDIA OpenShell sandbox (`rig environment create` or `attach`, then
-  `rig up`).
-  - **Context and results:** the seat's guidance, skills, plugins and startup
-    files go into the sandbox, and verified JSON results come back through
-    queue work.
-  - **Stop and delete:** stopping the agent, stopping compute and deleting the
-    sandbox are separate actions.
-  - **Restore:** a recreated sandbox resumes the same conversation.
-
-  The steps are in `daemon/assets/openshell/README.md`.
-  ([#2296](https://github.com/mvschwarz/openrig/pull/2296), [#2300](https://github.com/mvschwarz/openrig/pull/2300))
+0.7.8 includes `rig environment` (`setup`, `create`, `attach`) and a reference
+for binding a seat to an NVIDIA OpenShell sandbox (`daemon/assets/openshell/README.md`).
+**In our release testing the worker never became usable:** after the sandbox was
+created and the native process started, `rig environment connect` failed when its
+check timed out after 5 seconds, so no team work ran. Don't rely on this path in
+0.7.8.
+([#2296](https://github.com/mvschwarz/openrig/pull/2296), [#2300](https://github.com/mvschwarz/openrig/pull/2300), [#2378](https://github.com/mvschwarz/openrig/pull/2378))
 
 ### Seats, delivery and the TUI
 
@@ -150,14 +147,13 @@ fixes plus repairs across seats, tmux, Slack and the TUI.
 - **The dsh example keeps one hold per seat:** "if dsh asks twice in one turn,
   settling one ask releases the hold while the other may still wait on a
   person."
-- **The OpenShell reference requires:**
-  - NVIDIA OpenShell 0.1.6;
-  - a Linux image;
-  - an API-backed provider using `ANTHROPIC_API_KEY`. Subscription or OAuth
-    credentials aren't supported.
-
+- **The worker isn't usable** (above). The reference also requires NVIDIA
+  OpenShell 0.1.6, a Linux image, and an API-backed provider using
+  `ANTHROPIC_API_KEY`; subscription or OAuth credentials aren't supported.
   "Provider registration and image construction can incur costs." The worker's
   activity reads unknown, from pane sampling, never idle.
+- **The OpenShell README example uses `operator@kernel`;** the actual kernel
+  operator is `operator-agent@kernel`.
 - **"Never grant the guest access to the daemon's main API port (normally
   7433)."** The guest-only listener is what confines a guest's reach. Its grant
   only authorizes requests for its own seat and launch.
