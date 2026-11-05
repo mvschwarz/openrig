@@ -1814,8 +1814,10 @@ export interface SendOpts {
   onInputEffect?: (phase: "pasted" | "submitted") => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
-  /** Internal: managed lifecycle input must preserve a person's draft even when the optional typing guard is off. */
-  preserveInput?: true;
+  /** Internal: managed lifecycle input must preserve a person's draft even when the optional typing guard is off.
+   *  `"typed"` (#2575) holds only a box that reads typed or typed-with-suggestion; any other reading that isn't empty is
+   *  pasted over and named in `pastedOverInputBox`, never called empty. */
+  preserveInput?: true | "typed";
   /** The caller's request. Aborted while the send still waits, before any input starts, the send ends with
    *  `caller_cancelled` and never writes, then or later. Once input may have started it is ignored: the result stays
    *  attempted or written. Queue wakes and committed outbox deliveries have no caller and ignore it. */
@@ -1988,6 +1990,8 @@ export interface SendResult {
   inputPhase?: "not_reached" | "attempted" | "written";
   /** Typed refusal caught before any attempted/written input; never inferred from error text. */
   noInputCode?: "retained_quota_full" | "terminal_seat";
+  /** A `preserveInput: "typed"` send went ahead over an input box it couldn't read as empty: this was the reading. */
+  pastedOverInputBox?: InputBoxAnnotation["status"];
 }
 
 /** One reading of a Claude Code or Codex input box: `exact` (the sent text, word boundaries kept), `ambiguous`
@@ -2910,9 +2914,11 @@ export class SessionTransport {
       sentHash: null as string | null,
     } : null;
     let existingInput: ExistingInput | undefined;
+    let pastedOverInputBox: InputBoxAnnotation["status"] | undefined;
     let overrideBeforePaste: (() => Promise<void>) | undefined;
     const observe = (result: SendResult): SendResult => {
       if (checkedIdentity) result = { ...result, checkedIdentity, identityContract: 1 };
+      if (pastedOverInputBox) result = { ...result, pastedOverInputBox };
       if (existingInput) result = { ...result, existingInput };
       if (result.ok && runtimeAdvisory) result = { ...result, warning: [runtimeAdvisory, result.warning].filter(Boolean).join(" ") };
       if (observed && this.captureObserver) {
@@ -3390,10 +3396,13 @@ export class SessionTransport {
         ? (await this.readAtReadableSize(sessionName, { width: 120, height: 40 }, { remainingMs: CAPTURE_READABLE_BUDGET_MS }, readBox)).value
         : await readBox();
       if (bindingChanged()) throw new DeliveryGuardError("draft_input_changed", "The managed input target changed; no input was written.");
-      if (box?.status !== "empty" && !(box?.status === "likely-suggestion" && box.confidence === "high")) {
+      const clear = box?.status === "empty" || (box?.status === "likely-suggestion" && box.confidence === "high");
+      const typed = box?.status === "typed" || box?.status === "typed-with-suggestion";
+      if (!clear && (opts?.preserveInput !== "typed" || typed)) {
         throw new DeliveryGuardError(box?.status === "typed" ? "draft_input_busy" : "draft_input_unknown",
           `Managed input waits for an empty composer (it reads ${box?.status ?? "unknown"}). Your draft was left untouched; inspect the pane before retrying.`);
       }
+      if (!clear) pastedOverInputBox = box?.status ?? "unknown";
     } : undefined;
     // Set once the text write has been handed to the adapter: from then on a throw is not "nothing sent".
     let writeIssued = false;
