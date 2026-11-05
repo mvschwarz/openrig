@@ -30,6 +30,7 @@ describe("rig config get --with-source", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (savedPort === undefined) delete process.env["OPENRIG_PORT"];
     else process.env["OPENRIG_PORT"] = savedPort;
     fs.rmSync(dir, { recursive: true, force: true });
@@ -79,5 +80,17 @@ describe("rig config get --with-source", () => {
     expect(JSON.parse(fs.readFileSync(configPath, "utf8")).daemon.port).toBe(7555);
     expect(await run(["reset", "daemon.port"])).toContain("effective value 7666 (source: env; default: 7433)");
     expect(await run(["reset"])).toBe("Config file reset; environment overrides may still apply.");
+  });
+
+  it("distinguishes the saved threshold from the default used after an invalid environment pair", async () => {
+    vi.stubEnv("OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT", "98");
+    vi.stubEnv("OPENRIG_HEALTH_CONTEXT_PRESSURE_CRITICAL_PERCENT", undefined);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(await run(["set", "health.context_pressure.critical_percent", "97"]))
+        .toContain("file override saved; effective value 99 (source: default)");
+      expect(JSON.parse(fs.readFileSync(configPath, "utf8")).health.contextPressure.criticalPercent).toBe(97);
+      expect(stderr).toHaveBeenCalled();
+    } finally { stderr.mockRestore(); }
   });
 });

@@ -196,7 +196,9 @@ Precedence: CLI flag > environment variable > config file > default`)
         const resolved = store.resolveWithSource(key);
         console.log(resolved.source === "env"
           ? `${key} = ${resolved.value} (source: env; file override saved but masked)`
-          : `${key} = ${resolved.value}`);
+          : resolved.source === "default"
+            ? `${key} file override saved; effective value ${resolved.value} (source: default)`
+            : `${key} = ${resolved.value}`);
         // SWEEP-c: boot-only key + running daemon = stale-until-restart; say so loudly.
         if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
           console.error(`note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`);
