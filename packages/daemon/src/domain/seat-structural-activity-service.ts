@@ -124,16 +124,17 @@ export class SeatStructuralActivityService {
     const c = communityHarnessPaneActivity(classifyPaneActivity(content), communityHarness, content);
     const at = observedAt ?? this.now();
     const previous = this.latestBySession.get(sessionName);
-    const seconds = runtime === "codex" && captureStartedAt && c.state === "agent_active" ? codexWorkingElapsed(content) : null;
+    const seconds = runtime === "codex" && captureStartedAt && c.state !== "attention" ? codexWorkingElapsed(content) : null;
     const previousAge = previous ? at.getTime() - Date.parse(previous.observedAt) : NaN;
     const advanced = seconds !== null && previous?.codexWorkingClock && seconds > previous.codexWorkingClock.seconds
       && previousAge >= 0 && previousAge < DEFAULT_STRUCTURAL_STALE_MS;
     const adjacent = seconds !== null && isCodexLiveWorkingFrame(content);
+    const firstAdjacent = adjacent && (previous?.codexWorkingClock === undefined || previous.codexWorkingClock.seconds !== seconds);
     const priorProof = seconds !== null && previous?.codexWorkingClock?.seconds === seconds && previous.codexWorkingFrame
       && at.getTime() - Date.parse(previous.codexWorkingFrame.proofAt) < DEFAULT_STRUCTURAL_STALE_MS ? previous.codexWorkingFrame : undefined;
-    const workingFrame = captureStartedAt && seconds !== null && (adjacent || advanced)
+    const workingFrame = captureStartedAt && seconds !== null && (firstAdjacent || advanced)
       ? { captureStartedAt: captureStartedAt.toISOString(), proofAt: at.toISOString(),
-        ...(advanced && !adjacent ? { previousCaptureStartedAt: previous!.codexWorkingClock!.captureStartedAt } : {}) }
+        ...(advanced ? { previousCaptureStartedAt: previous!.codexWorkingClock!.captureStartedAt } : {}) }
       : priorProof;
     const obs: StructuralObservation = {
       state: c.state,

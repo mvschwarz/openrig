@@ -89,6 +89,58 @@ it("uses an advancing counter when output separates the status from the composer
   expect(oracle.getSeatState(node)?.activity).toBe("idle-at-prompt");
 });
 
+it("expires a repeatedly captured frozen adjacent frame and accepts a later advance", async () => {
+  let time = Date.parse("2026-11-04T20:00:00.000Z"), elapsed = 32;
+  const session = "worker@fixture", node = "node-fixture";
+  const structural = new SeatStructuralActivityService({ capturePaneContent: async () =>
+    screen.replace("32s • esc to interrupt", `${elapsed}s • esc to interrupt`) } as never, () => new Date(time));
+  const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => time / 1000 - 60 },
+    defaultWindowSeconds: 3, now: () => new Date(time), structuralActivity: structural } as never);
+  oracle.declareRungInventory({ seatNodeId: node, sessionName: session }, CODEX_ACTIVITY_RUNG_INVENTORY);
+  for (let i = 0; i <= 6; i++) {
+    await structural.pollSeat(session, null, "codex");
+    await oracle.pollSeat(session);
+    time += 1000;
+  }
+  expect(oracle.getSeatState(node)?.activity).toBe("idle-at-prompt");
+  elapsed++;
+  await structural.pollSeat(session, null, "codex");
+  await oracle.pollSeat(session);
+  expect(oracle.getSeatState(node)?.activity).toBe("working");
+});
+
+it("uses an advancing unclosed status beyond the classifier tail", async () => {
+  let time = Date.parse("2026-11-04T20:00:00.000Z"), elapsed = 32;
+  const session = "worker@fixture", node = "node-fixture";
+  const structural = new SeatStructuralActivityService({ capturePaneContent: async () =>
+    screen.replace("32s • esc to interrupt", `${elapsed}s • esc to interrupt`)
+      .replace("\n› Ask Codex", `\n${Array.from({ length: 10 }, (_, i) => `output ${i}`).join("\n")}\n› Ask Codex`) } as never, () => new Date(time));
+  const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => time / 1000 - 60 },
+    defaultWindowSeconds: 3, now: () => new Date(time), structuralActivity: structural } as never);
+  oracle.declareRungInventory({ seatNodeId: node, sessionName: session }, CODEX_ACTIVITY_RUNG_INVENTORY);
+  const first = await structural.pollSeat(session, null, "codex");
+  expect(first?.state).not.toBe("agent_active");
+  await oracle.pollSeat(session);
+  expect(oracle.getSeatState(node)?.activity).toBe("idle-at-prompt");
+  time += 1000; elapsed++;
+  await structural.pollSeat(session, null, "codex");
+  await oracle.pollSeat(session);
+  expect(oracle.getSeatState(node)?.activity).toBe("working");
+});
+
+it("does not use an advancing working line while the pane asks for input", async () => {
+  let time = Date.parse("2026-11-04T20:00:00.000Z"), elapsed = 32;
+  const session = "worker@fixture";
+  const structural = new SeatStructuralActivityService({ capturePaneContent: async () =>
+    screen.replace("32s • esc to interrupt", `${elapsed}s • esc to interrupt`)
+      .replace("\n› Ask Codex", "\n❯ 1. First option\n  2. Second option\nEnter to select · ↑/↓ to navigate · Esc to cancel\n› Ask Codex") } as never, () => new Date(time));
+  await structural.pollSeat(session, null, "codex");
+  time += 1000; elapsed++;
+  const observation = await structural.pollSeat(session, null, "codex");
+  expect(observation?.state).toBe("attention");
+  expect(observation?.codexWorkingFrame).toBeUndefined();
+});
+
 it("wires the daemon's existing pane reader into the queue oracle", async () => {
   const previous = process.env.OPENRIG_NO_KERNEL;
   process.env.OPENRIG_NO_KERNEL = "1";
@@ -138,6 +190,23 @@ it("does not compare a new occupant's counter with the predecessor's frame", asy
   const session = "worker@fixture", node = "node-fixture";
   const structural = new SeatStructuralActivityService({ capturePaneContent: async () =>
     screen.replace("32s • esc to interrupt", `${elapsed}s • esc to interrupt`).replace("\n› Ask Codex", "\n• Edited files\n\n› Ask Codex") } as never, () => new Date(time));
+  const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => time / 1000 - 60 },
+    defaultWindowSeconds: 3, now: () => new Date(time), structuralActivity: structural } as never);
+  oracle.declareRungInventory({ seatNodeId: node, sessionName: session }, CODEX_ACTIVITY_RUNG_INVENTORY);
+  await structural.pollSeat(session, null, "codex");
+  time += 1000; elapsed++;
+  oracle.declareOccupantSwap(node, "replacement");
+  oracle.declareRungInventory({ seatNodeId: node, sessionName: session }, CODEX_ACTIVITY_RUNG_INVENTORY);
+  await structural.pollSeat(session, null, "codex");
+  await oracle.pollSeat(session);
+  expect(oracle.getSeatState(node)?.activity).toBe("idle-at-prompt");
+});
+
+it("does not renew an adjacent frame using a predecessor's counter", async () => {
+  let time = Date.parse("2026-11-04T20:00:00.000Z"), elapsed = 32;
+  const session = "worker@fixture", node = "node-fixture";
+  const structural = new SeatStructuralActivityService({ capturePaneContent: async () =>
+    screen.replace("32s • esc to interrupt", `${elapsed}s • esc to interrupt`) } as never, () => new Date(time));
   const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => time / 1000 - 60 },
     defaultWindowSeconds: 3, now: () => new Date(time), structuralActivity: structural } as never);
   oracle.declareRungInventory({ seatNodeId: node, sessionName: session }, CODEX_ACTIVITY_RUNG_INVENTORY);

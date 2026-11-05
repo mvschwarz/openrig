@@ -17,7 +17,6 @@ import { sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "./s
 import { hookPrecedes } from "./agent-activity-store.js";
 import type { SeatStructuralActivityService } from "./seat-structural-activity-service.js";
 import { DEFAULT_STRUCTURAL_STALE_MS } from "./seat-structural-activity-service.js";
-import { CODEX_LIVE_WORKING_FRAME_PATTERN } from "./codex-pane-patterns.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
  *  1Hz polling gives at-most ~1s freshness lag on the cached observation. */
@@ -164,7 +163,7 @@ export class SeatActivityService {
         const frameStarted = frame?.codexWorkingFrame ? Date.parse(frame.codexWorkingFrame.captureStartedAt) : NaN;
         const proofAt = frame?.codexWorkingFrame ? Date.parse(frame.codexWorkingFrame.proofAt) : NaN;
         const previousStarted = frame?.codexWorkingFrame?.previousCaptureStartedAt;
-        codexFrameWorking = frame?.state === "agent_active" && CODEX_LIVE_WORKING_FRAME_PATTERN.test(frame.evidence?.trim() ?? "") && Number.isFinite(capturedAt)
+        codexFrameWorking = frame !== null && frame?.state !== "attention" && Number.isFinite(capturedAt)
           && Number.isFinite(frameStarted) && frameStarted >= seat.inventorySinceMs
           && (previousStarted === undefined || Date.parse(previousStarted) >= seat.inventorySinceMs)
           && Number.isFinite(proofAt) && proofAt <= capturedAt && proofAt <= observedAt.getTime()
