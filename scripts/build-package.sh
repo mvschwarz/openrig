@@ -86,7 +86,13 @@ mkdir -p "$CLI_DIR/daemon/dist"
 cp -r "$DAEMON_DIR/dist/"* "$CLI_DIR/daemon/dist/"
 
 if [ -d "$DAEMON_DIR/assets" ]; then
-  cp -r "$DAEMON_DIR/assets" "$CLI_DIR/daemon/assets"
+  node --input-type=module -e '
+    import { cp } from "node:fs/promises";
+    await cp(process.argv[1], process.argv[2], {
+      recursive: true,
+      verbatimSymlinks: true,
+    });
+  ' "$DAEMON_DIR/assets" "$CLI_DIR/daemon/assets"
   SUBSTANCE_SURFACE_ROOTS+=("daemon/assets")
 fi
 
