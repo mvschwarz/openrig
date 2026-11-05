@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { PaneCapture, TmuxAdapter } from "../adapters/tmux.js";
-import { communityHarnessPaneActivity, classifyPaneActivity, readSeatBeforePaste, type PaneActivityClassification } from "./session-transport.js";
+import { communityHarnessPaneActivity, classifyPaneActivity, codexWorkingElapsed, isCodexLiveWorkingFrame, readSeatBeforePaste, type PaneActivityClassification } from "./session-transport.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { detectCodexLimitBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
 import { IDLE_FULL_CAPTURE_MS, windowSnapshot } from "./transcript-rotation.js";
@@ -16,6 +16,9 @@ export interface StructuralObservation {
   observedAt: string;
   /** A complete idle frame read for this capture's target, not a generic footer or hook. */
   idleFrame?: { sessionName: string; runtime: "claude-code" | "codex"; captureStartedAt: string };
+  /** A Codex working observation is usable only for the occupant present when capture began. */
+  codexWorkingFrame?: { captureStartedAt: string; proofAt: string; previousCaptureStartedAt?: string };
+  codexWorkingClock?: { seconds: number; captureStartedAt: string };
   /** Set when a later sweep found the pane unchanged since observedAt without capturing it. Freshness counts from it;
    *  observedAt stays the capture. */
   checkedAt?: string;
@@ -120,16 +123,30 @@ export class SeatStructuralActivityService {
     }
     const c = communityHarnessPaneActivity(classifyPaneActivity(content), communityHarness, content);
     const at = observedAt ?? this.now();
+    const previous = this.latestBySession.get(sessionName);
+    const seconds = runtime === "codex" && captureStartedAt && c.state !== "attention" ? codexWorkingElapsed(content) : null;
+    const previousAge = previous ? at.getTime() - Date.parse(previous.observedAt) : NaN;
+    const advanced = seconds !== null && previous?.codexWorkingClock && seconds > previous.codexWorkingClock.seconds
+      && previousAge >= 0 && previousAge < DEFAULT_STRUCTURAL_STALE_MS;
+    const adjacent = seconds !== null && isCodexLiveWorkingFrame(content);
+    const firstAdjacent = adjacent && (previous?.codexWorkingClock === undefined || previous.codexWorkingClock.seconds !== seconds);
+    const priorProof = seconds !== null && previous?.codexWorkingClock?.seconds === seconds && previous.codexWorkingFrame
+      && at.getTime() - Date.parse(previous.codexWorkingFrame.proofAt) < DEFAULT_STRUCTURAL_STALE_MS ? previous.codexWorkingFrame : undefined;
+    const workingFrame = captureStartedAt && seconds !== null && (firstAdjacent || advanced)
+      ? { captureStartedAt: captureStartedAt.toISOString(), proofAt: at.toISOString(),
+        ...(advanced ? { previousCaptureStartedAt: previous!.codexWorkingClock!.captureStartedAt } : {}) }
+      : priorProof;
     const obs: StructuralObservation = {
       state: c.state,
       reason: c.reason,
       evidence: c.evidence,
       observedAt: at.toISOString(),
+      ...(captureStartedAt && seconds !== null ? { codexWorkingClock: { seconds, captureStartedAt: captureStartedAt.toISOString() } } : {}),
+      ...(workingFrame ? { codexWorkingFrame: workingFrame } : {}),
       ...(captureStartedAt && c.state === "agent_idle" && (runtime === "claude-code" || runtime === "codex")
         && readSeatBeforePaste(content, runtime, sessionName) === "idle"
         ? { idleFrame: { sessionName, runtime, captureStartedAt: captureStartedAt.toISOString() } } : {}),
     };
-    const previous = this.latestBySession.get(sessionName);
     this.latestBySession.set(sessionName, obs);
     if (previous?.state !== obs.state || previous?.reason !== obs.reason) this.activityChanged?.(sessionName);
     // #763: a Codex usage-limit banner is invisible to the hook vocabulary,

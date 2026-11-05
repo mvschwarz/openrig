@@ -134,7 +134,10 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   PER-HARNESS when that harness's hook rung earns trust through a measured agreement
   window in production — never by fixture pass alone (symmetric admission: a fixture
   pass admits a rung to TRIAL, where it is measured but not consulted; production agreement
-  promotes it). Undeclared and partial-coverage rungs are identity-only, which is also where
+  promotes it). For Codex, this fallback also accepts a fresh working status adjacent to
+  the composer, or an advancing counter across two fresh captures when output separates
+  them. This positive evidence expires after five seconds; unrecognized, frozen, old or
+  pre-occupant frames add nothing. It uses the existing pane capture. Undeclared and partial-coverage rungs are identity-only, which is also where
   a degraded rung goes, with one declared exception: for a pi or omp seat or a community
   harness, sampling is positive-only: a changing pane reads working, and a quiet one never reads idle on its
   own, since the pane can be quiet mid-turn.
