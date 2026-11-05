@@ -243,6 +243,22 @@ describe("Claude activity-hook delivery — ENABLE (entry present, source + mani
     expect(Object.keys(readSettings(fs).hooks)).toEqual(["Stop"]);
   });
 
+  it("adds the optional permission observation and formatter during normal managed reprojection", async () => {
+    const source = `${dirname(RELAY_SRC)}/permission-stop-descriptor.cjs`;
+    const formatter = readFileSync(new URL("../assets/plugins/openrig-core/hooks/scripts/permission-stop-descriptor.cjs", import.meta.url), "utf8");
+    const manifest = readFileSync(new URL("../assets/plugins/openrig-core/hooks/claude.json", import.meta.url), "utf8");
+    const fs = enableFs({ [MANIFEST_SRC]: manifest, [source]: formatter,
+      [SETTINGS]: JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: OWNED_CMD }] }] } }) });
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    const settings = readSettings(fs);
+    const commands = (settings.hooks.PermissionRequest ?? []).flatMap((group: any) => group.hooks.map((hook: any) => hook.command));
+    expect(commands).toContain(OWNED_CMD);
+    expect(fs._store[`${STATE_DIR}/state/claude-activity-hooks/permission-stop-descriptor.cjs`]).toBe(formatter);
+    for (const event of EVENTS) {
+      expect(settings.hooks[event].flatMap((group: any) => group.hooks.map((hook: any) => hook.command))).toContain(OWNED_CMD);
+    }
+  });
+
   it("is idempotent: a second project() adds no duplicate owned entries", async () => {
     const fs = enableFs();
     const adapter = makeAdapter(fs);

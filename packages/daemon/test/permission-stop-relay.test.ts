@@ -19,6 +19,25 @@ const env = { OPENRIG_SESSION_NAME: "worker@synthetic", OPENRIG_NODE_ID: "node",
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("synthetic passive PermissionRequest observer failure isolation", () => {
+  // Schema-derived attribution only; these are not captured native PermissionRequest fixtures.
+  it.each([
+    { label: "omitted", input: {}, actor: null },
+    { label: "null", input: { agent_id: null }, actor: null },
+    { label: "subagent", input: { agent_id: "child-1" }, actor: "child-1" },
+  ])("attributes the $label schema actor at the producer boundary", ({ input, actor }) => {
+    expect(relay.buildOpenRigPayload({ ...native, ...input }, env)).toMatchObject({
+      hookEvent: "PermissionRequest", hookAgentId: actor, permissionStopDescriptor: "Bash: git [arguments hidden]",
+    });
+  });
+
+  it.each(["", " ", 42, true, {}, [], "child\nsecret", "a".repeat(129)])(
+    "drops an invalid actor without inferring main at the producer boundary (case %#)", agent_id => {
+      const payload = relay.buildOpenRigPayload({ ...native, agent_id }, env);
+      expect(payload).not.toHaveProperty("hookAgentId");
+      expect(payload).toMatchObject({ hookEvent: "PermissionRequest", permissionStopDescriptor: "Bash: git [arguments hidden]" });
+    },
+  );
+
   it("declares the passive relay with the existing hook timeout in the real shipped manifest", () => {
     const manifest = JSON.parse(readFileSync(new URL("../assets/plugins/openrig-core/hooks/claude.json", import.meta.url), "utf8"));
     expect(manifest.hooks.PermissionRequest).toEqual([{ hooks: [{ type: "command",

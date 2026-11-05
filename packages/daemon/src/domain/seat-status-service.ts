@@ -17,7 +17,8 @@ import type { AgentActivityStore } from "./agent-activity-store.js";
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
 export interface SeatStatus {
-  /** Latest bounded observation, not proof a permission is pending or a guard ran. */
+  /** Latest bounded observation across actors, not aggregate pending state or proof a guard ran.
+   * Completion applies only to the displayed actor; other actors' pending state is unknown. */
   permission_stop?: PermissionStopStatus;
   compaction?: ObservedCompaction & { owedRestore: ReturnType<ClaudeCompactionEnforcer["getOwedRestore"]> };
   seat_ref: string;

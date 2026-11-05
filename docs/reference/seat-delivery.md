@@ -41,6 +41,33 @@ nothing to send later.
 
 ## Configure and inspect
 
+### Latest permission observation
+
+`rig seat status <seat>` can show the latest observed harness permission request,
+with a fixed tool descriptor, source time and actor category. This is one latest
+observation across actors, not an aggregate of pending prompts. `request_observed`
+leaves the displayed actor's pending state unknown. `completed` applies only to
+that actor's later tool batch; other actors' pending state is still unknown. An
+unavailable observation proves neither a permission stop nor the absence of a
+waiting native prompt. The JSON field is `permission_stop`, and its `pending`
+value has the same observation-only scope.
+
+Actor attribution is a convention derived from the [Claude hook schema](https://code.claude.com/docs/en/hooks#common-input-fields): an omitted or null `agent_id`
+is treated as main, a valid ID identifies a subagent or in-process teammate, and
+an invalid ID is dropped rather than inferred as main. The fixtures are synthetic;
+no live PermissionRequest capture qualifies that convention on an installed native
+version. A hook denial without a source-bound guard receipt has unknown origin.
+This diagnostic adds no guard collector, permission decision or attention policy.
+
+The new PermissionRequest diagnostic is optional for activity-hook readiness.
+Every preexisting required event, relay asset and explicit hook-disable check
+still applies. An older installed plugin at the same manifest version retains
+its bytes and may not send this event: plugin-only delivery needs a future normal
+maintainer release refresh, and managed delivery needs normal reprojection. A
+manifest or green readiness check does not prove live hook execution. Raw tool
+arguments and provider reason text are withheld; diagnostic evidence is bounded,
+memory-only and expires after five minutes.
+
 ### Who may intervene
 
 `rig seat status <seat>` shows the seat's terminal interaction account alongside

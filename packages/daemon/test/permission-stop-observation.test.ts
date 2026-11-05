@@ -20,6 +20,26 @@ const databases: ReturnType<typeof createFullTestDb>[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); vi.restoreAllMocks(); });
 const unavailable = { state: "unavailable", command: "unavailable", origin: "unknown" };
 
+describe("permission observation source-time ordering", () => {
+  it.each(["completion-first", "request-first"] as const)(
+    "retains the equal-time newer request for %s arrival", order => {
+      const now = () => new Date("2026-11-05T01:00:00.010Z");
+      const observations = new PermissionStopObservations(now);
+      const identity = { nodeId: "node", generation: "generation", actor: null };
+      observations.observe({ ...identity, at: "2026-11-05T01:00:00.000Z", command: "Tool: Read", completed: false });
+      const completion = { ...identity, at: "2026-11-05T01:00:00.010Z", completed: true };
+      const request = { ...identity, at: "2026-11-05T01:00:00.010Z", command: "Tool: Write", completed: false };
+      for (const event of order === "completion-first" ? [completion, request] : [request, completion]) {
+        observations.observe(event);
+      }
+      expect(observations.read("node", "generation")).toEqual({
+        state: "request_observed", command: "Tool: Write", origin: "harness", source: "PermissionRequest",
+        observed_at: "2026-11-05T01:00:00.010Z", actor: "main", pending: "unknown",
+      });
+    },
+  );
+});
+
 // Schema-based synthetic Claude harness fixture. No real PermissionRequest delivery was captured.
 function fixture() {
   const db = createFullTestDb();
@@ -101,7 +121,7 @@ describe("passive permission observation through relay, ingress and seat status"
     expect(JSON.stringify([wire, report, f.db.prepare("SELECT payload FROM events").all()])).not.toContain("SYNTHETIC_SECRET");
   });
 
-  it.each(["SYNTHETIC_SECRET", "Bash: git --token=SYNTHETIC_SECRET", "Tool: SYNTHETIC_SECRET", "DCG", "Bash: git [arguments hidden]\nsecret", {}, null])(
+  it.each(["SYNTHETIC_SECRET", "Bash: git --token=SYNTHETIC_SECRET", "Tool: SYNTHETIC_SECRET", "guard blocked", "Bash: git [arguments hidden]\nsecret", {}, null])(
     "admits only finite descriptors even when claimed sanitized (case %#)", async permissionStopDescriptor => {
       const f = fixture();
       await f.post("PermissionRequest", { permissionStopDescriptor, tool_input: { command: "SYNTHETIC_SECRET" } });
@@ -130,6 +150,22 @@ describe("passive permission observation through relay, ingress and seat status"
     f.tick();
     await f.post("PermissionRequest", { hookAgentId: "child-1", permissionStopDescriptor: "Tool: Read" });
     expect((await f.status()).permission_stop).toMatchObject({ actor: "subagent", command: "Tool: Read" });
+  });
+
+  it("reports only the latest actor's completion while an older actor observation remains unresolved", async () => {
+    const f = fixture();
+    await f.post("PermissionRequest", { permissionStopDescriptor: "Tool: Read" });
+    expect((await f.status()).permission_stop).toMatchObject({ actor: "main", state: "request_observed", pending: "unknown" });
+    f.tick();
+    const latestAt = f.now().toISOString();
+    await f.post("PermissionRequest", { hookAgentId: "child-1", permissionStopDescriptor: "Tool: Write" });
+    f.tick();
+    await f.post("PostToolBatch", { hookAgentId: "child-1" });
+    // No completion arrived for main. This is the latest observation, not all actors' pending state.
+    expect((await f.status()).permission_stop).toEqual({
+      state: "completed", command: "Tool: Write", origin: "harness", source: "PermissionRequest",
+      observed_at: latestAt, actor: "subagent", pending: false,
+    });
   });
 
   it("rejects late, replayed, future and already completed requests", async () => {
@@ -206,7 +242,7 @@ describe("passive permission observation through relay, ingress and seat status"
     const f = fixture();
     await f.post("Notification", { subtype: "permission_prompt", tool_input: { command: "SYNTHETIC_SECRET" },
       permissionStopDescriptor: "Bash: git [arguments hidden]" });
-    await f.post("PostToolUseFailure", { subtype: "Bash", message: "BLOCKED by dcg SYNTHETIC_SECRET", toolDenialKind: "permission-rule" });
+    await f.post("PostToolUseFailure", { subtype: "Bash", message: "BLOCKED by guard SYNTHETIC_SECRET", toolDenialKind: "permission-rule" });
     expect((await f.status()).permission_stop).toEqual(unavailable);
     expect(JSON.stringify(f.db.prepare("SELECT payload FROM events").all())).not.toContain("SYNTHETIC_SECRET");
   });
@@ -224,14 +260,14 @@ describe("passive permission observation through relay, ingress and seat status"
     expect(JSON.stringify(status)).not.toContain("SYNTHETIC_SECRET");
   });
 
-  it("bounds actors and seats without evicting completion watermarks for replay", () => {
+  it("bounds actors and seats without evicting completion watermarks for strictly older requests", () => {
     const now = () => new Date("2026-11-05T01:00:00Z");
     const observations = new PermissionStopObservations(now);
     const input = { generation: "generation", at: now().toISOString(), actor: null, completed: true };
     for (let i = 0; i < 256; i++) observations.observe({ ...input, nodeId: `node-${i}` });
     observations.observe({ ...input, nodeId: "extra", completed: false, command: "Tool: Read" });
     expect(observations.read("extra", "generation")).toEqual(unavailable);
-    observations.observe({ ...input, nodeId: "node-0", completed: false, command: "Tool: Read" });
+    observations.observe({ ...input, nodeId: "node-0", at: "2026-11-05T00:59:59.999Z", completed: false, command: "Tool: Read" });
     expect(observations.read("node-0", "generation")).toEqual(unavailable);
     for (let i = 0; i < 15; i++) observations.observe({ ...input, nodeId: "node-0", actor: `child-${i}` });
     observations.observe({ ...input, nodeId: "node-0", actor: "overflow", completed: false, command: "Tool: Read" });

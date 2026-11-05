@@ -4,7 +4,7 @@ import { describe, it, expect } from "vitest";
 import { deriveRelayEvents } from "../src/domain/claude-activity-hooks.js";
 
 describe("restore-check Claude activity-hook contract", () => {
-  it("derives the required event set from the daemon-shipped Claude plugin manifest", () => {
+  it("derives all delivery events, including the optional diagnostic, from the shipped manifest", () => {
     const manifestPath = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json");
     const events = deriveRelayEvents({
       exists: existsSync,

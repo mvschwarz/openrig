@@ -248,10 +248,11 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Session: ${display(status.session_status, "unknown")}`);
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {
-    console.log(`Permission stop observed at ${stop.observed_at}: ${stop.command}; harness permission request (${stop.source}, ${stop.actor})`);
-    console.log(stop.state === "completed" ? "  Actor's tool batch completed; request is no longer pending."
-      : "  Current pending status: unknown (an observation does not establish a waiting prompt).");
-  } else console.log("Permission stop: command unavailable; origin unknown");
+    console.log(`Latest permission observation at ${stop.observed_at}: ${stop.command}; harness permission request (${stop.source}, ${stop.actor})`);
+    console.log(stop.state === "completed" ? "  Displayed actor's tool batch completed; this observation is no longer pending."
+      : "  Displayed actor's pending status: unknown (an observation does not establish a waiting prompt).");
+    console.log("  Other actors' pending state: unknown (only the latest observation is shown).");
+  } else console.log("Permission observation unavailable; command unavailable; origin unknown; native pending status unknown.");
   if (status.compaction) console.log(`Managed compaction (${status.compaction.stage}): ${status.compaction.detail}`);
   const reason = sessionReason(status.session_reason);
   if (reason) console.log(`Reason: ${reason}`);

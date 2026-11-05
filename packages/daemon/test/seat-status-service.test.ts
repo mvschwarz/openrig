@@ -17,12 +17,16 @@ describe("SeatStatusService", () => {
   let rigRepo: RigRepository;
   let sessionRegistry: SessionRegistry;
   let service: SeatStatusService;
+  let activityStore: AgentActivityStore;
 
   beforeEach(() => {
     db = createFullTestDb();
     rigRepo = new RigRepository(db);
     sessionRegistry = new SessionRegistry(db);
-    service = new SeatStatusService({ rigRepo });
+    activityStore = new AgentActivityStore({ db, eventBus: new EventBus(db),
+      resolveOccupantGeneration: id => sessionRegistry.currentOccupantTenure(id)?.generationUuid ?? null,
+      isRegisteredOccupantGeneration: (id, generation) => sessionRegistry.isOccupantGenerationRegistered(id, generation) });
+    service = new SeatStatusService({ rigRepo, activityStore });
   });
 
   afterEach(() => {
@@ -36,7 +40,15 @@ describe("SeatStatusService", () => {
     const session = sessionRegistry.registerSession(node.id, "worker@permission-status");
     sessionRegistry.registerSession(other.id, "other@permission-status");
     sessionRegistry.updateStatus(session.id, "running");
-    const store = new AgentActivityStore({ db, eventBus: new EventBus(db) });
+    const store = activityStore;
+    const generation = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+    const observedAt = new Date().toISOString();
+    store.observePermissionStop({ nodeId: node.id, sessionName: session.sessionName, generation,
+      actor: null, at: observedAt, command: "Tool: Read", completed: false });
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: {
+      permission_stop: { state: "request_observed", command: "Tool: Read", actor: "main", pending: "unknown" },
+    } });
+    sessionRegistry.mintOccupantTenure(node.id, "handover");
     expect(store.recordHookEvent({ runtime: "claude-code", sessionName: session.sessionName,
       hookEvent: "PreToolUse", subtype: "SYNTHETIC_PRIVATE_TOOL", generation: "old-generation" }).ok).toBe(true);
     expect(store.recordHookEvent({ runtime: "claude-code", sessionName: "other@permission-status",
@@ -58,8 +70,20 @@ describe("SeatStatusService", () => {
     expect(store.recordHookEvent({ runtime: "claude-code", sessionName: session.sessionName,
       hookEvent: "PostToolBatch", hookAgentId: null }).ok).toBe(true);
     read();
+    const currentGeneration = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+    store.observePermissionStop({ nodeId: node.id, sessionName: session.sessionName, generation: currentGeneration,
+      actor: null, at: new Date().toISOString(), command: "Tool: Write", completed: false });
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: {
+      permission_stop: { state: "request_observed", command: "Tool: Write" },
+    } });
     db.prepare("UPDATE nodes SET occupant_lifecycle = 'retired' WHERE id = ?").run(node.id);
     expect(read().occupant_lifecycle).toBe("retired");
+    db.prepare("UPDATE nodes SET occupant_lifecycle = 'active' WHERE id = ?").run(node.id);
+    store.observePermissionStop({ nodeId: node.id, sessionName: session.sessionName, generation: currentGeneration,
+      actor: null, at: new Date().toISOString(), command: "Tool: Edit", completed: false });
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: {
+      permission_stop: { state: "request_observed", command: "Tool: Edit" },
+    } });
     sessionRegistry.updateStatus(session.id, "exited");
     expect(read().session_status).toBe("exited");
   });

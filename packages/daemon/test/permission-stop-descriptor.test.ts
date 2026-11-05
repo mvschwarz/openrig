@@ -1,7 +1,6 @@
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
-// This suite runs only after Lead confirms the separately authored module for integration.
 const require = createRequire(import.meta.url);
 const { buildPermissionStopDescriptor: describeStop } = require(
   "../assets/plugins/openrig-core/hooks/scripts/permission-stop-descriptor.cjs",

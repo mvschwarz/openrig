@@ -103,10 +103,11 @@ describe("seat typing guard commands", () => {
     const text = await captureLogs(() => makeCommand(deps).parseAsync([
       "node", "rig", "seat", "status", "dev-impl@seat-rig",
     ]).then(() => undefined));
-    expect(text.logs).toContain("Permission stop observed at 2026-11-05T01:00:00.000Z: Bash: git [arguments hidden]; harness permission request (PermissionRequest, subagent)");
-    expect(text.logs).toContain(state === "completed" ? "  Actor's tool batch completed; request is no longer pending."
-      : "  Current pending status: unknown (an observation does not establish a waiting prompt).");
-    expect(text.logs.join("\n")).not.toContain("DCG");
+    expect(text.logs).toContain("Latest permission observation at 2026-11-05T01:00:00.000Z: Bash: git [arguments hidden]; harness permission request (PermissionRequest, subagent)");
+    expect(text.logs).toContain(state === "completed" ? "  Displayed actor's tool batch completed; this observation is no longer pending."
+      : "  Displayed actor's pending status: unknown (an observation does not establish a waiting prompt).");
+    expect(text.logs).toContain("  Other actors' pending state: unknown (only the latest observation is shown).");
+    expect(text.logs.join("\n")).not.toContain("guard blocked");
     const json = await captureLogs(() => makeCommand(deps).parseAsync([
       "node", "rig", "seat", "status", "dev-impl@seat-rig", "--json",
     ]).then(() => undefined));
@@ -123,9 +124,9 @@ describe("seat typing guard commands", () => {
         "node", "rig", "seat", "status", "dev-impl@seat-rig",
       ]).then(() => undefined));
       expect(result.exitCode).toBeUndefined();
-      expect(result.logs).toContain("Permission stop: command unavailable; origin unknown");
+      expect(result.logs).toContain("Permission observation unavailable; command unavailable; origin unknown; native pending status unknown.");
       expect(result.logs).toContain("Startup: ready");
-      expect(result.logs.join("\n")).not.toMatch(/approval requested|DCG|permission pending/);
+      expect(result.logs.join("\n")).not.toMatch(/approval requested|guard blocked|permission pending|Permission stop/);
       expect(paths).toEqual(["/api/seat/status/dev-impl%40seat-rig"]);
       expect(bodies).toEqual([]);
     },
