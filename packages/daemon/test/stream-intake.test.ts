@@ -5,6 +5,7 @@ import { StreamStore } from "../src/domain/stream-store.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { streamIntakeQitemId, StreamIntakeCoordinator, STREAM_INTAKE_TAG } from "../src/domain/stream-intake.js";
 import { OutboxHandler, WAKE_INTENT_PREFIX } from "../src/domain/outbox-handler.js";
+import { RUNNER_PERMIT_TAG } from "../src/domain/runner-permissions.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
@@ -1061,5 +1062,99 @@ describe("StreamIntakeCoordinator", () => {
 
     coord2.stop();
     db.prepare = origPrepare;
+  });
+});
+
+// #2361's record of a permit OpenRig decided by default is pull-only: it is written as runner-permissions.ts writes it (a low
+// observation tagged RUNNER_PERMIT_TAG), and intake must never turn it into a row or a wake.
+describe("StreamIntakeCoordinator with default-permit records", () => {
+  const permit = (streamStore: StreamStore, streamItemId?: string) => streamStore.emit({ ...(streamItemId ? { streamItemId } : {}),
+    sourceSession: "dev-runner@perm-rig", body: "OpenRig permitted a tool call by default", hintType: "observation", hintUrgency: "low",
+    hintTags: [RUNNER_PERMIT_TAG, "node:n1"] });
+  const cursor = (db: Database.Database) =>
+    (db.prepare("SELECT last_sort_key FROM stream_intake_cursor WHERE id = 1").get() as { last_sort_key: string } | undefined)?.last_sort_key;
+  const coordinator = (s: ReturnType<typeof setup>) =>
+    new StreamIntakeCoordinator({ db: s.db, eventBus: s.bus, streamStore: s.streamStore, queueRepo: s.queueRepo, destination: "queue.worker" });
+  const settle = () => new Promise((r) => setTimeout(r, 50));
+
+  it("live: a permit record makes no intake row and wakes no one, the cursor moves past it, and a later observation is routed", async () => {
+    const s = setup();
+    const wake = vi.spyOn(s.queueRepo, "deliverWakeForSuccessor");
+    const c = coordinator(s);
+    c.start();
+    try {
+      await settle();
+      const record = permit(s.streamStore);
+      await settle();
+      expect(s.queueRepo.list({ destinationSession: "queue.worker" })).toHaveLength(0);
+      expect(wake).not.toHaveBeenCalled();
+      expect(cursor(s.db)).toBe(record.streamSortKey);
+      const ordinary = s.streamStore.emit({ sourceSession: "dev-build@starter", body: "An ordinary observation" });
+      await settle();
+      expect(s.queueRepo.list({ destinationSession: "queue.worker" }).map((row) => row.qitemId)).toEqual([streamIntakeQitemId(ordinary.streamSortKey)]);
+      expect(wake).toHaveBeenCalledTimes(1);
+    } finally {
+      c.stop();
+    }
+  });
+
+  it("restart and catch-up: permit records stored while intake was stopped make no row or note, and the cursor moves past them", async () => {
+    const s = setup();
+    s.db.prepare("INSERT INTO stream_intake_cursor (id, last_sort_key, updated_at) VALUES (1, '', ?)").run(new Date().toISOString());
+    permit(s.streamStore);
+    const ordinary = s.streamStore.emit({ sourceSession: "dev-build@starter", body: "An ordinary observation" });
+    const last = permit(s.streamStore);
+    const c = coordinator(s);
+    c.start();
+    try {
+      await settle();
+      const rows = s.queueRepo.list({ destinationSession: "queue.worker" });
+      expect(rows.map((row) => row.qitemId)).toEqual([streamIntakeQitemId(ordinary.streamSortKey)]);
+      expect(s.queueRepo.listTransitions(rows[0]!.qitemId)).toHaveLength(1);
+      expect(cursor(s.db)).toBe(last.streamSortKey);
+    } finally {
+      c.stop();
+    }
+  });
+
+  it("a repeated permit record stays quiet, live and after a restart", async () => {
+    const s = setup();
+    const c = coordinator(s);
+    c.start();
+    await settle();
+    permit(s.streamStore, "permit-1");
+    permit(s.streamStore, "permit-1");
+    await settle();
+    c.stop();
+    const again = coordinator(s);
+    again.start();
+    try {
+      await settle();
+      expect(s.queueRepo.list({ destinationSession: "queue.worker" })).toHaveLength(0);
+    } finally {
+      again.stop();
+    }
+  });
+
+  it("ordinary observations still coalesce into the pending intake row around a permit record", async () => {
+    const s = setup();
+    const c = coordinator(s);
+    c.start();
+    try {
+      await settle();
+      s.streamStore.emit({ sourceSession: "dev-build@starter", body: "First observation" });
+      await settle();
+      const [row] = s.queueRepo.list({ destinationSession: "queue.worker" });
+      const notesBefore = s.queueRepo.listTransitions(row!.qitemId).length;
+      permit(s.streamStore);
+      await settle();
+      expect(s.queueRepo.listTransitions(row!.qitemId)).toHaveLength(notesBefore);
+      s.streamStore.emit({ sourceSession: "dev-test@starter", body: "Second observation" });
+      await settle();
+      expect(s.queueRepo.list({ destinationSession: "queue.worker" })).toHaveLength(1);
+      expect(s.queueRepo.listTransitions(row!.qitemId)).toHaveLength(notesBefore + 1);
+    } finally {
+      c.stop();
+    }
   });
 });
