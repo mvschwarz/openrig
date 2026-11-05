@@ -388,6 +388,20 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(store.resolve().health.contextPressure).toEqual({ warningPercent: 95, criticalPercent: 99 });
   });
 
+  it("explains that saved context-pressure pair validation excludes environment overrides", () => {
+    const store = new ConfigStore(configPath);
+    process.env.OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT = "50";
+    expect(() => store.set("health.context_pressure.critical_percent", "80"))
+      .toThrow(/saved configuration: warning \(95\).*critical \(80\).*environment overrides apply at runtime/);
+    expect(existsSync(configPath)).toBe(false);
+    store.set("health.context_pressure.critical_percent", "100");
+    store.set("health.context_pressure.warning_percent", "99");
+    const before = readFileSync(configPath, "utf8");
+    expect(() => store.reset("health.context_pressure.critical_percent"))
+      .toThrow(/saved configuration: warning \(99\).*critical \(99\).*environment overrides apply at runtime/);
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
   it("S01 wake ladder exposes retry cadence, cap, unconfirmed window, and swap grace defaults", () => {
     const store = new ConfigStore(configPath);
     expect(store.resolveWithSource("queue.wake_retry_interval_seconds" as never)).toMatchObject({
