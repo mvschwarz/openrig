@@ -50,7 +50,17 @@ describe("synthetic passive PermissionRequest observer failure isolation", () =>
       const script = path.join(dir, "activity-relay.cjs");
       copyFileSync(relayFile, script);
       if (formatter === "throws") writeFileSync(path.join(dir, "permission-stop-descriptor.cjs"),
-        'module.exports = { buildPermissionStopDescriptor() { throw new Error("SYNTHETIC_SECRET"); } };');
+        'module.exports = { buildPermissionStopDescriptor() { throw new Error("SYNTHETIC_SECRET"); }, '
+        + 'buildPermissionRuleSuggestions() { throw new Error("SYNTHETIC_SECRET"); } };');
+      const copiedRelay = require(script) as typeof relay;
+      const payload = copiedRelay.buildOpenRigPayload(native, env);
+      expect(payload.permissionRuleSuggestions).toEqual({
+        state: "unavailable", entries: [], unsupported: false, size_cut: false,
+      });
+      expect(payload).not.toHaveProperty("decision");
+      expect(payload).not.toHaveProperty("hookSpecificOutput");
+      expect(payload).not.toHaveProperty("updatedInput");
+      expect(JSON.stringify(payload)).not.toContain("SYNTHETIC_SECRET");
       const stdout = execFileSync(process.execPath, [script], { encoding: "utf8", input: JSON.stringify(native), timeout: 5000,
         env: { ...env, HOME: dir, OPENRIG_HOME: dir, PATH: path.dirname(process.execPath) } });
       expect(stdout).toBe("");

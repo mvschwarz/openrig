@@ -64,6 +64,23 @@ describe("independent suggested-rule ingress and memory", () => {
     expect(inspect(observations, { depth: null })).not.toContain("SYNTHETIC_RULE");
   });
 
+  it("drops expired sensitive rules when observing another seat before any read", () => {
+    let time = Date.parse("2026-11-05T01:00:00.000Z");
+    const observations = new PermissionStopObservations(() => new Date(time));
+    const identity = { nodeId: "node", generation: "generation", actor: null };
+    observations.observe({ ...identity, at: new Date(time).toISOString(), command: "Tool: Read",
+      ruleSuggestions: suggestedEvidence, completed: false });
+    expect(inspect(observations, { depth: null })).toContain("SYNTHETIC_RULE");
+    time += 299_999;
+    observations.observe({ ...identity, at: new Date(time).toISOString(), completed: true });
+    expect(inspect(observations, { depth: null })).toContain("SYNTHETIC_RULE");
+    time += 1;
+    observations.observe({ nodeId: "another-node", generation: "generation", actor: null,
+      at: new Date(time).toISOString(), command: "Tool: Write", completed: false });
+    // Observe must clean expired rules itself; read would mask a missing cleanup here.
+    expect(inspect(observations, { depth: null })).not.toContain("SYNTHETIC_RULE");
+  });
+
   it("clones both input and returned evidence instead of retaining caller-owned objects", () => {
     const at = "2026-11-05T01:00:00.000Z";
     const observations = new PermissionStopObservations(() => new Date(at));
