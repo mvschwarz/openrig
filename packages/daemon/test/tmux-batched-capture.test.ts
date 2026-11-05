@@ -21,7 +21,7 @@ function runTmux(argv: string[], panes: Panes, vanished = new Set<string>(), max
   let out = "";
   for (const c of cmds) {
     const target = c[c.indexOf("-t") + 1]!;
-    const name = /^=(.*):$/.exec(target)?.[1];
+    const name = /^=(.*):$/.exec(target)?.[1] ?? (/^%\d+$/.test(target) ? target : undefined);
     if (name === undefined) throw new Error(`expected an exact =name: target, got ${target}`);
     if (!(name in panes) || vanished.has(name)) throw Object.assign(new Error(`can't find session: ${name}`), { stdout: out });
     out += c[0] === "display-message" ? `${c[c.length - 1]}\n` : panes[name];
@@ -53,6 +53,20 @@ describe("TmuxAdapter.capturePanesContent (#308)", () => {
         : new TmuxAdapter(exec);
       return { a, calls };
     }
+
+    it(`${mode}: frozen physical pane capture keeps the canonical result key through a caller-map rebind`, async () => {
+      const { a, calls } = adapter({ "%42": pane("original"), "%99": pane("successor") });
+      const bindings = new Map([["a@r", "%42"]]);
+      const run = (a as unknown as { run: (argv: string[], legacy?: string) => Promise<string> }).run.bind(a);
+      (a as unknown as { run: unknown }).run = async (argv: string[], legacy?: string) => {
+        if (argv[1] === "list-sessions") bindings.set("a@r", "%99");
+        return run(argv, legacy);
+      };
+      const got = await a.capturePanesContent(["a@r"], 20, () => new Date(), bindings);
+      expect(got!.get("a@r")?.text).toBe(pane("original"));
+      expect([...got!.keys()]).toEqual(["a@r"]);
+      expect(calls.find(c => c.includes("capture-pane"))!.filter(x => x.startsWith("%"))).toEqual(["%42", "%42"]);
+    });
 
     it(`${mode}: one listing + one chained call; text as capture-pane prints it; a missing seat is null, no fork`, async () => {
       const { a, calls } = adapter({ "a@r": pane("a"), "b.x@r": pane("b.x"), "o'q@r": pane("o'q") });
