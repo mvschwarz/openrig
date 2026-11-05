@@ -320,6 +320,22 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     expect(result.logs.some(l => l.includes('"consumptionVerified":true'))).toBe(succeeds);
   });
 
+  it("reports a lost guarded submit response as unconfirmed without retrying", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    w.sendBehavior = (body) => {
+      if (body["text"] !== undefined) {
+        w.pane = `❯ ${String(body["text"])} `;
+        return { status: 200, data: { ok: true } };
+      }
+      return "throw";
+    };
+    const { errLogs, exitCode } = await captureLogs(() => makeCmd(consumptionDeps(w)).parseAsync(walkArgs));
+    expect(exitCode).toBe(1);
+    expect(w.sends.filter(s => s.path === "/api/transport/send" && s.body["submitOnly"] === true)).toHaveLength(1);
+    expect(w.sends.filter(s => s.path === "/api/transport/send" && s.body["text"] !== undefined)).toHaveLength(1);
+    expect(errLogs.join("\n")).toContain("unconfirmed");
+  });
+
   it.each(["during-send", "between-pieces"])("generation changes %s cannot produce a verified walk", async when => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
     w.sendBehavior = b => {
@@ -396,6 +412,27 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     const enterRetries = w.sends.filter((s) => s.path === "/api/transport/send" && s.body["submitOnly"] === true);
     expect(pieceSends.map((s) => (s.body["text"] as string).slice(0, 9))).toEqual(["PIECE ONE", "PIECE TWO"]); // each piece sent ONCE
     expect(enterRetries).toHaveLength(2); // exactly one Enter per staged piece
+  });
+
+  it.each([
+    [{ reason: "submit_failed", inputPhase: "attempted", error: "reply lost" }, "unconfirmed"],
+    [{ reason: "submit_failed", error: "old daemon" }, "unconfirmed"],
+    [{ reason: "staged_mismatch", inputPhase: "not_reached", sent: false, error: "changed" }, "refused"],
+  ] as const)("classifies a guarded submit error %j as %s", async (failure, wording) => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    w.sendBehavior = (body) => {
+      if (body["text"] !== undefined) {
+        w.pane = `❯ ${String(body["text"])} `;
+        return { status: 200, data: { ok: true } };
+      }
+      return { status: 500, data: { ok: false, ...failure } };
+    };
+    const { errLogs, exitCode } = await captureLogs(() => makeCmd(consumptionDeps(w)).parseAsync(walkArgs));
+    expect(exitCode).toBe(1);
+    expect(w.sends.filter(s => s.path === "/api/transport/send" && s.body["submitOnly"] === true)).toHaveLength(1);
+    expect(w.sends.filter(s => s.path === "/api/transport/send" && s.body["text"] !== undefined)).toHaveLength(1);
+    expect(errLogs.join("\n")).toContain(wording);
+    if (wording === "unconfirmed") expect(errLogs.join("\n")).not.toMatch(/typed but not consumed|was refused/i);
   });
 
   it("PIN W3 — a client timeout with server-side completion reconciles BY EFFECT: no re-send, walk proceeds [GREEN — reconcile-by-effect]", async () => {

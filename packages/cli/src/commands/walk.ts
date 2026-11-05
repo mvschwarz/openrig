@@ -289,14 +289,26 @@ initial record is explicitly reported as unverified delivery.`)
                 /\[Pasted text #\d+ \+\d+ lines\]/.test(pane)
               );
               if (stagedEvidence) {
-                const enter = await client.post<Record<string, unknown>>("/api/transport/send", {
-                  session: seat,
-                  submitOnly: true,
-                  expectedStagedText: piece.content, // FULL bytes — the transport checks the rendered literal residual for contiguous containment
-                  expectedStagedLineCount: piece.content.split("\n").length,
-                }, { headers: terminalAuthHeaders() });
+                let enter: { status: number; data: Record<string, unknown> };
+                try {
+                  enter = await client.post<Record<string, unknown>>("/api/transport/send", {
+                    session: seat,
+                    submitOnly: true,
+                    expectedStagedText: piece.content, // FULL bytes — the transport checks the rendered literal residual for contiguous containment
+                    expectedStagedLineCount: piece.content.split("\n").length,
+                  }, { headers: terminalAuthHeaders() });
+                } catch (error) {
+                  failPiece(i, piece.label, `the guarded submit result is unconfirmed (${(error as Error).message}); inspect the recipient before any resend.`);
+                  return;
+                }
                 if (enter.status >= 400) {
-                  failPiece(i, piece.label, `typed but not consumed; the single submit retry was refused (${(enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}`}).`);
+                  const phase = enter.data?.["inputPhase"], reason = enter.data?.["reason"];
+                  const unconfirmed = phase === "attempted" || phase === "written"
+                    || (phase !== "not_reached" && enter.data?.["sent"] !== false && (reason === "submit_failed" || enter.status >= 500));
+                  const detail = (enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}`;
+                  failPiece(i, piece.label, unconfirmed
+                    ? `the guarded submit result is unconfirmed (${detail}); inspect the recipient before any resend.`
+                    : `typed but not consumed; the single submit retry was refused (${detail}).`);
                   return;
                 }
                 verdict = await pollConsumed();
