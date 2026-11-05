@@ -722,6 +722,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (deps.queueRepo.humanNotificationPostedThisEpisode(row.qitemId)) continue;
       // An ask placed on Steering without an alert waits on its person there by design; a finding would alert them.
       if (deps.queueRepo.humanAskWithoutAlert(row.qitemId)) continue;
+      // An explicit informational update to a currently registered human is for reading, not an obligation to claim.
+      if (row.humanIntent === "update") {
+        const destination = deps.queueRepo.classifyDestinationOf(row.destinationSession);
+        if (destination.class === "gateway-routable" && destination.resolvedHuman !== null) continue;
+      }
       // Quiet hours: a held ask whose window's release job is live waits on that job, and one already released waits on
       // its post; neither is stuck. A release whose post failed is reported once, by the undelivered-wake loop above. A
       // hold with no live release job is stuck: nothing will ever release it.
