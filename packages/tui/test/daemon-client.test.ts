@@ -122,6 +122,23 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await expect(c.startupRequest("/r1/seat", { action: "fresh" })).rejects.toBeInstanceOf(StartupRequestError);
   });
 
+  it("preserves an unconfirmed terminal creation message on launch failure", async () => {
+    const c = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: async () => new Response(JSON.stringify({
+      ok: false, code: "session_unconfirmed", message: "creation of session could not be confirmed; inspect before retry",
+    }), { status: 500 }) });
+    await expect(c.launchNode("myrig", "dev.qa")).rejects.toThrow("creation of session could not be confirmed; inspect before retry");
+  });
+
+  it("keeps the existing error field and HTTP fallback for launch failures", async () => {
+    const responses = [
+      new Response(JSON.stringify({ error: "existing error", message: "other message" }), { status: 409 }),
+      new Response("not json", { status: 500 }),
+    ];
+    const c = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: async () => responses.shift()! });
+    await expect(c.launchNode("myrig", "dev.qa")).rejects.toThrow("409 — existing error");
+    await expect(c.launchNode("myrig", "dev.qa")).rejects.toThrow("→ 500");
+  });
+
   it("#729: launch notice retains startup observations", () => {
     expect(launchNodeNotice("dev.qa", { ok: true, launched: [{ logicalId: "dev.qa" }], warnings: ["Startup prompt still staged; press Enter in that pane."] }))
       .toContain("Startup prompt still staged; press Enter in that pane.");
