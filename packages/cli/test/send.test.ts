@@ -381,6 +381,25 @@ describe("Send CLI", () => {
     });
     const result = JSON.parse(logs.find(line => line.trim().startsWith("{")) ?? "{}");
     expect(result.effectCheck.remedy).toBe(remedy);
+    expect(result.outcome).toBe("submission-unconfirmed");
+  });
+
+  it("does not claim the earlier staged text is still unconsumed after a refused Enter", async () => {
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/capture") return { status: 200, data: { content: "❯ make test" } };
+        if (body["submitOnly"]) return { status: 409, data: { ok: false, reason: "staged_mismatch", inputPhase: "not_reached", sent: false, error: "changed" } };
+        return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "infra-ui@term-rig", "make test", "--verify",
+      ]);
+    });
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("guarded Enter was refused");
+    expect(logs.join("\n")).not.toContain("typed, never submitted");
   });
 
   it("reports an unconfirmed post-submit recheck per recipient in fan-out JSON", async () => {

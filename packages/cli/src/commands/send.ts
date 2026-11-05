@@ -721,13 +721,14 @@ function effectHumanLines(effect: EffectCheck, session: string): string[] {
   if (effect.remedy === "submit-unconfirmed") return [
     `Delivery: submission unconfirmed — the text was staged before one guarded Enter attempt, but the result could not be confirmed (${effect.detail}). Inspect with: rig capture ${session}`,
   ];
+  if (effect.remedy === "submit-refused") return [
+    `Delivery: unconfirmed — the guarded Enter was refused (${effect.detail}); the earlier staged observation may have changed. Inspect with: rig capture ${session}`,
+  ];
   const out = ["Delivery: staged, not consumed (checked: post-send pane capture; observed: the sent text is still at the prompt — typed, never submitted)"];
   if (effect.remedy === "submitted-cleared") {
     out.push("Remedy: one guarded Enter submitted — the staged text left the prompt.");
   } else if (effect.remedy === "submitted-still-staged") {
     out.push(`Remedy: one guarded Enter submitted, but the text is STILL at the prompt — not consumed; stopping here (one submit is the contract). Inspect with: rig capture ${session}`);
-  } else {
-    out.push(`Remedy: the single guarded Enter (submit path) was refused (${effect.detail}); stopping here — one submit is the contract. Inspect with: rig capture ${session}`);
   }
   return out;
 }
@@ -738,7 +739,7 @@ function effectUnresolved(effect: EffectCheck | undefined): boolean {
 }
 
 function effectSubmissionUnconfirmed(effect: EffectCheck | undefined): boolean {
-  return !!effect && effect.checked && effect.state === "staged" && effect.remedy === "submit-unconfirmed";
+  return !!effect && effect.checked && effect.state === "staged" && (effect.remedy === "submit-unconfirmed" || effect.remedy === "submit-refused");
 }
 
 /**
@@ -1111,7 +1112,7 @@ async function runFanOutSend(params: {
     const rawResults = (res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string }> | undefined) ?? [];
     const encodedResults = rawResults.map((r) =>
       effectUnresolved(effectBySeat.get(r.sessionName))
-        ? { ...r, ok: false, verified: false, outcome: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission-unconfirmed" : "staged-not-consumed", error: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission unconfirmed; the guarded Enter result or recheck was unavailable" : "staged, not consumed (pane effect); the one guarded submit did not clear it" }
+        ? { ...r, ok: false, verified: false, outcome: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "submission-unconfirmed" : "staged-not-consumed", error: effectSubmissionUnconfirmed(effectBySeat.get(r.sessionName)) ? "delivery unconfirmed; inspect the recipient after the guarded submit attempt" : "staged, not consumed (pane effect); the one guarded submit did not clear it" }
         : r
     );
     // Round-3 (r2 row 00fb3a68): the machine-readable AGGREGATE derives from
