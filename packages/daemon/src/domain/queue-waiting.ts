@@ -12,13 +12,15 @@ export type WaitingActivityReader = (session: string) => Pick<ArbitratedSeatStat
  * actors and typed wake receipts are bookkeeping, never task progress. Historical
  * untyped author notes remain author testimony; their text is not classified.
  * Delivery bookkeeping uses the reserved daemon actors and must not reset the
- * ladder before it can join its dispatch marker to the delivery receipt. */
+ * ladder before it can join its dispatch marker to the delivery receipt. The
+ * stuck sweep's same-state notes on its recoveries are its bookkeeping too; its
+ * resolution close still counts, as every state change does. */
 export function lastMeaningfulTransition(db: Database.Database, id: string): { id: number; at: string } | null {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transitions'").get()) return null;
   const hasWakes = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
   const row = db.prepare(`SELECT t.transition_id, t.ts FROM (
       SELECT *, LAG(state) OVER (ORDER BY transition_id) AS previous_state FROM queue_transitions WHERE qitem_id = ?
-    ) t WHERE (t.actor_session NOT IN ('watchdog@system', 'wake-ladder@system', 'daemon@kernel', 'daemon@system') OR t.state IS NOT t.previous_state)
+    ) t WHERE (t.actor_session NOT IN ('watchdog@system', 'wake-ladder@system', 'stuck-sweep@system', 'daemon@kernel', 'daemon@system') OR t.state IS NOT t.previous_state)
     ${hasWakes ? "AND NOT EXISTS (SELECT 1 FROM queue_transition_wakes w WHERE w.transition_id = t.transition_id AND w.phase = 'fired')" : ""}
     ORDER BY t.transition_id DESC LIMIT 1`).get(id) as { transition_id: number; ts: string } | undefined;
   return row ? { id: row.transition_id, at: row.ts } : null;
