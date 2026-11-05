@@ -462,6 +462,11 @@ do not establish connectivity to a live peer.
 | `rig stream read` | — | `--limit <n>`<br>`--reader <session>`<br>`--json` |
 | `rig stream act <streamItemId>` | — | `--work <qitemId>`<br>`--decline <reason>`<br>`--duplicate <id>`<br>`--reader <session>`<br>`--json` |
 
+Stream intake: the `stream.intake` setting (default `queue.worker`, or a canonical `<seat>@<rig>`) receives each emitted item.
+It opens an intake row for that seat, which wakes it, or adds a note to that seat's intake row still pending; a `critical`
+or interrupting item makes the row urgent. `rig config set stream.intake off` keeps emits passive. A runner's
+default-permit record (tag `runner-permission-permit`) opens no row.
+
 ### queue
 
 | Invocation | Aliases | Declared options |

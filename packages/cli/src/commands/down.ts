@@ -147,6 +147,9 @@ Before running it, check who is working (rig ps --nodes --rig <rig>) and that th
 don't stop a team you didn't start unless asked. OpenRig snapshots the rig first (best-effort), and
 rig up <rig> --existing brings it back, resuming each seat's conversation where its harness allows. With
 --delete the rig record is removed too, so it can't be brought back that way.
+Once no live seat uses a working folder, rig down also takes back what OpenRig added there: its
+guidance blocks, and in a Claude seat's folder the status line, activity hooks and context collector.
+Anything a person edited is kept and listed. rig up <rig> --existing puts the guidance back.
 When your resolved seat belongs to this rig, confirm before stopping it. Without a terminal,
 the command warns and exits without stopping; re-run with --yes to confirm explicitly.`);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
