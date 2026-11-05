@@ -9,22 +9,83 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SeatStatusService } from "../src/domain/seat-status-service.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { EventBus } from "../src/domain/event-bus.js";
 
 describe("SeatStatusService", () => {
   let db: Database.Database;
   let rigRepo: RigRepository;
   let sessionRegistry: SessionRegistry;
   let service: SeatStatusService;
+  let activityStore: AgentActivityStore;
 
   beforeEach(() => {
     db = createFullTestDb();
     rigRepo = new RigRepository(db);
     sessionRegistry = new SessionRegistry(db);
-    service = new SeatStatusService({ rigRepo });
+    activityStore = new AgentActivityStore({ db, eventBus: new EventBus(db),
+      resolveOccupantGeneration: id => sessionRegistry.currentOccupantTenure(id)?.generationUuid ?? null,
+      isRegisteredOccupantGeneration: (id, generation) => sessionRegistry.isOccupantGenerationRegistered(id, generation) });
+    service = new SeatStatusService({ rigRepo, activityStore });
   });
 
   afterEach(() => {
     db.close();
+  });
+
+  it("does not attach a last tool, another actor's prompt or completed activity to a permission diagnostic", () => {
+    const rig = rigRepo.createRig("permission-status");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    const other = rigRepo.addNode(rig.id, "other", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "worker@permission-status");
+    sessionRegistry.registerSession(other.id, "other@permission-status");
+    sessionRegistry.updateStatus(session.id, "running");
+    const store = activityStore;
+    const generation = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+    const observedAt = new Date().toISOString();
+    store.observePermissionStop({ nodeId: node.id, sessionName: session.sessionName, generation,
+      actor: null, at: observedAt, command: "Tool: Read", completed: false });
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: {
+      permission_stop: { state: "request_observed", command: "Tool: Read", actor: "main", pending: "unknown" },
+    } });
+    sessionRegistry.mintOccupantTenure(node.id, "handover");
+    expect(store.recordHookEvent({ runtime: "claude-code", sessionName: session.sessionName,
+      hookEvent: "PreToolUse", subtype: "SYNTHETIC_PRIVATE_TOOL", generation: "old-generation" }).ok).toBe(true);
+    expect(store.recordHookEvent({ runtime: "claude-code", sessionName: "other@permission-status",
+      hookEvent: "Notification", subtype: "permission_prompt", hookAgentId: "another-actor" }).ok).toBe(true);
+    const unavailable = { state: "unavailable", command: "unavailable", origin: "unknown" };
+    const read = () => {
+      const before = db.prepare("SELECT total_changes() AS count").get();
+      const result = service.getStatus(session.sessionName);
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.message);
+      expect(result.status.permission_stop).toEqual(unavailable);
+      expect(JSON.stringify(result.status)).not.toContain("SYNTHETIC_PRIVATE_TOOL");
+      expect(db.prepare("SELECT total_changes() AS count").get()).toEqual(before);
+      return result.status;
+    };
+    expect(read().occupant_lifecycle).toBe("active");
+    expect(store.recordHookEvent({ runtime: "claude-code", sessionName: session.sessionName,
+      hookEvent: "Notification", subtype: "permission_prompt", hookAgentId: "subagent" }).ok).toBe(true);
+    expect(store.recordHookEvent({ runtime: "claude-code", sessionName: session.sessionName,
+      hookEvent: "PostToolBatch", hookAgentId: null }).ok).toBe(true);
+    read();
+    const currentGeneration = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+    store.observePermissionStop({ nodeId: node.id, sessionName: session.sessionName, generation: currentGeneration,
+      actor: null, at: new Date().toISOString(), command: "Tool: Write", completed: false });
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: {
+      permission_stop: { state: "request_observed", command: "Tool: Write" },
+    } });
+    db.prepare("UPDATE nodes SET occupant_lifecycle = 'retired' WHERE id = ?").run(node.id);
+    expect(read().occupant_lifecycle).toBe("retired");
+    db.prepare("UPDATE nodes SET occupant_lifecycle = 'active' WHERE id = ?").run(node.id);
+    store.observePermissionStop({ nodeId: node.id, sessionName: session.sessionName, generation: currentGeneration,
+      actor: null, at: new Date().toISOString(), command: "Tool: Edit", completed: false });
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: {
+      permission_stop: { state: "request_observed", command: "Tool: Edit" },
+    } });
+    sessionRegistry.updateStatus(session.id, "exited");
+    expect(read().session_status).toBe("exited");
   });
 
   it("shows an owed restore's delivery failure on the same seat status the operator reads", () => {
@@ -128,6 +189,7 @@ describe("SeatStatusService", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.message);
     expect(result.status).toMatchObject({
+      permission_stop: { state: "unavailable", command: "unavailable", origin: "unknown" },
       seat_ref: "dev-impl@seat-rig",
       rig_name: "seat-rig",
       logical_id: "dev.impl",
@@ -247,6 +309,7 @@ describe("SeatStatusService", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({
+      permission_stop: { state: "unavailable", command: "unavailable", origin: "unknown" },
       seat_ref: "dev-impl@seat-rig",
       rig_name: "seat-rig",
       logical_id: "dev.impl",

@@ -1267,6 +1267,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         this.fs.copyFile(this.activityRelayPath!, relayDest);
       }
       this.preserveMode(this.activityRelayPath!, relayDest);
+      // The relay can run without its diagnostic formatter (it withholds details), but a managed
+      // copy needs the sibling asset too. Missing assets do not suppress existing activity hooks.
+      const descriptorSource = nodePath.join(nodePath.dirname(this.activityRelayPath!), "permission-stop-descriptor.cjs");
+      const descriptorDest = nodePath.join(nodePath.dirname(relayDest), "permission-stop-descriptor.cjs");
+      try {
+        if (this.fs.exists(descriptorSource)
+          && (!this.fs.exists(descriptorDest) || this.fs.readFile(descriptorDest) !== this.fs.readFile(descriptorSource))) {
+          this.fs.copyFile(descriptorSource, descriptorDest);
+          this.preserveMode(descriptorSource, descriptorDest);
+        }
+      } catch { /* Formatter unavailable: the relay withholds details; existing hooks remain deliverable. */ }
       for (const { event, timeout } of derivedEvents) {
         const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
         const hook: Record<string, unknown> = { type: "command", command: ownedCmd };

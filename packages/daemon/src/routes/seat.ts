@@ -102,7 +102,8 @@ seatRoutes.post("/retire-held-message/:seatRef/:id", async c => {
 
 seatRoutes.get("/status/:seatRef", (c) => {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
-  const service = new SeatStatusService({ rigRepo, compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined });
+  const service = new SeatStatusService({ rigRepo, activityStore: c.get("agentActivityStore" as never) as import("../domain/agent-activity-store.js").AgentActivityStore | undefined,
+    compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined });
   const result = service.getStatus(c.req.param("seatRef")!);
 
   if (result.ok) {
@@ -127,7 +128,8 @@ seatRoutes.get("/status/:seatRef", (c) => {
 seatRoutes.get("/status/node/:nodeId", (c) => {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   const nodeId = c.req.param("nodeId")!.trim();
-  const result = new SeatStatusService({ rigRepo, compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined }).getStatusByNodeId(nodeId);
+  const result = new SeatStatusService({ rigRepo, activityStore: c.get("agentActivityStore" as never) as import("../domain/agent-activity-store.js").AgentActivityStore | undefined,
+    compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined }).getStatusByNodeId(nodeId);
   if (!result.ok) return c.json(result, result.code === "seat_ref_required" ? 400 : 404);
   const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
   const runtimeSwitch = runtimeSwitchSummary(rigRepo.db, { nodeId });
