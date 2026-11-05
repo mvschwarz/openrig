@@ -944,6 +944,22 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (shared && !renewedDeadline) {
         const existingTags = sharedRow?.tags ?? [];
         for (const tag of existingTags) if (tag.startsWith("stuck-sweep:")) liveDedupTags.add(tag);
+        // Keep the original evidence as history, but do not leave it presented as
+        // the current reason when a different condition now owns this recovery.
+        // Only the sweep's own findings are mutable here; other recovery rows
+        // can share custody and must retain their author's text.
+        if (sharedRow && isFindingRow(sharedRow) && sharedRow.summary?.startsWith("Stuck sweep: ")) {
+          const currentKind = sharedRow.summary.match(/^Stuck sweep: ([a-z-]+) on /)?.[1];
+          const pickupOrDeadline = (kind: string) => kind === "stalled-after-claim" || kind === "overdue-claim";
+          if (currentKind && currentKind !== c.kind && pickupOrDeadline(currentKind) && pickupOrDeadline(c.kind)) {
+            const marker = "\n\n--- Original finding (historical) ---\n";
+            const original = sharedRow.body.includes(marker) ? sharedRow.body.split(marker, 2)[1]! : sharedRow.body;
+            const body = evidenceBody(deps.db, c) + marker + original;
+            const summary = `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`;
+            deps.db.prepare("UPDATE queue_items SET body = ?, summary = ? WHERE qitem_id = ? AND body = ? AND summary = ? AND state IN ('pending', 'in-progress', 'blocked')")
+              .run(body, summary, shared.qitemId, sharedRow.body, sharedRow.summary);
+          }
+        }
         if (["pending", "in-progress", "blocked"].includes(shared.state)) findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: shared.qitemId, action: "refreshed" });
         continue;
       }
