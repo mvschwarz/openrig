@@ -493,8 +493,10 @@ files:
   async function startPackServer(
     files: Record<string, string>,
     redirects: Record<string, string> = {},
-  ): Promise<{ baseUrl: string; close: () => void }> {
+  ): Promise<{ baseUrl: string; close: () => void; requests: string[] }> {
+    const requests: string[] = [];
     const srv = http.createServer((req, res) => {
+      requests.push(req.url ?? "/");
       const p = (req.url ?? "/").replace(/^\//, "");
       if (Object.prototype.hasOwnProperty.call(redirects, p)) {
         res.writeHead(302, { location: redirects[p] });
@@ -511,7 +513,7 @@ files:
     });
     await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
     const port2 = (srv.address() as { port: number }).port;
-    return { baseUrl: `http://127.0.0.1:${port2}/`, close: () => srv.close() };
+    return { baseUrl: `http://127.0.0.1:${port2}/`, close: () => srv.close(), requests };
   }
 
   async function withContextRoot(fn: (root: string) => Promise<void>): Promise<void> {
@@ -543,6 +545,40 @@ files:
     } finally {
       pack.close();
     }
+  });
+
+  it("add <url>: creates a fresh nested namespace after fetching a complete pack", async () => {
+    const pack = await startPackServer({ "manifest.yaml": R4_MANIFEST, "SKILL.md": "# downloaded context\n" });
+    try {
+      await withContextRoot(async root => {
+        expect(existsSync(join(root, "fresh"))).toBe(false);
+        const { exitCode } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}manifest.yaml`, "--name", "fresh/fixture"]);
+        });
+        expect(["darwin", "linux"]).toContain(process.platform);
+        expect(pack.requests).toEqual(["/manifest.yaml", "/SKILL.md"]);
+        expect(exitCode).toBeUndefined();
+        expect(readFileSync(join(root, "fresh", "fixture", "manifest.yaml"), "utf8")).toBe(R4_MANIFEST);
+        expect(readFileSync(join(root, "fresh", "fixture", "SKILL.md"), "utf8")).toBe("# downloaded context\n");
+        expect(readdirSync(root)).toEqual(["fresh"]);
+        expect(readdirSync(join(root, "fresh"))).toEqual(["fixture"]);
+      });
+    } finally { pack.close(); }
+  });
+
+  it("add <url>: a missing file creates neither a nested namespace nor a partial pack", async () => {
+    const pack = await startPackServer({ "manifest.yaml": R4_MANIFEST });
+    try {
+      await withContextRoot(async root => {
+        const { exitCode, errLogs } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}manifest.yaml`, "--name", "fresh/fixture"]);
+        });
+        expect(pack.requests).toEqual(["/manifest.yaml", "/SKILL.md"]);
+        expect(exitCode).toBe(1);
+        expect(errLogs.join("\n")).toContain("could not fetch");
+        expect(readdirSync(root)).toEqual([]);
+      });
+    } finally { pack.close(); }
   });
 
   it("add <url>: follows a redirected manifest and resolves files from the FINAL url (r2 MEDIUM-1)", async () => {
