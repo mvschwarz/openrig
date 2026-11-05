@@ -1186,6 +1186,15 @@ function validateTypedFileValue(key: ValidKey, value: string | number | boolean)
   check(raw, value);
 }
 
+// set and reset check the context-pressure pair as the config file will hold it. The file has to
+// stand on its own: each process applies its own environment overrides on top when it resolves.
+function invalidContextPressurePairError(warning: unknown, critical: unknown): Error {
+  return new Error(
+    `Invalid context-pressure policy: in the config file, warning (${warning}) must be less than critical (${critical}); ` +
+      "a value the file doesn't set counts as its default (95/99), and environment overrides aren't saved, so they don't count here",
+  );
+}
+
 export type SettingSource = "env" | "file" | "default";
 
 export interface ResolvedSetting {
@@ -1551,7 +1560,7 @@ export class ConfigStore {
       const critical = getNestedValue(fileConfig, KEY_TO_PATH["health.context_pressure.critical_percent"])
         ?? getDefaultValue("health.context_pressure.critical_percent", workspaceRoot);
       if ((warning as number) >= (critical as number)) {
-        throw new Error(`Invalid context-pressure policy: warning (${warning}) must be less than critical (${critical})`);
+        throw invalidContextPressurePairError(warning, critical);
       }
     }
     mkdirSync(dirname(this.configPath), { recursive: true });
@@ -1603,7 +1612,7 @@ export class ConfigStore {
         const critical = getNestedValue(fileConfig, KEY_TO_PATH["health.context_pressure.critical_percent"])
           ?? getDefaultValue("health.context_pressure.critical_percent", workspaceRoot);
         if ((warning as number) >= (critical as number)) {
-          throw new Error(`Invalid context-pressure policy: warning (${warning}) must be less than critical (${critical})`);
+          throw invalidContextPressurePairError(warning, critical);
         }
       }
       pruneEmptyAncestors(fileConfig, parentParts);
