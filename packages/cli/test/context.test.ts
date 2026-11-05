@@ -575,7 +575,7 @@ files:
         });
         expect(pack.requests).toEqual(["/manifest.yaml", "/SKILL.md"]);
         expect(exitCode).toBe(1);
-        expect(errLogs.join("\n")).toContain("could not fetch");
+        expect(errLogs.join("\n")).toMatch(/could not fetch/i);
         expect(readdirSync(root)).toEqual([]);
       });
     } finally { pack.close(); }
