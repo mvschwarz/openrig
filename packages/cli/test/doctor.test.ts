@@ -565,7 +565,6 @@ describe("runDoctorChecks", () => {
 
   // A listener that sends an OK header and never finishes its body must not hold doctor, or setup, before anything prints.
   it("settles a /healthz body that never finishes as owner unknown within its bound, and releases the request", async () => {
-    // The port check's request carries a signal; doctor's other /healthz reads (the cmux check) don't.
     const signals: AbortSignal[] = [];
     const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, ownerReportTimeoutMs: 50,
       fetch: async (_url: string, init?: { signal?: AbortSignal }) => {
@@ -578,8 +577,8 @@ describe("runDoctorChecks", () => {
     expect(result.status).toBe("warn");
     expect(result.message).toContain("OS user is unknown");
     expect(result.reason).toContain("didn't finish");
-    expect(signals).toHaveLength(1);
-    expect(signals[0]!.aborted).toBe(true);
+    expect(signals).toHaveLength(2);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
   });
 
   it("settles a real listener's held /healthz body the same way, through the real fetch", async () => {
@@ -594,6 +593,28 @@ describe("runDoctorChecks", () => {
       const result = await runDoctorChecks(deps).portCheck;
       expect(result.status).toBe("warn");
       expect(result.reason).toContain("didn't finish");
+    } finally {
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
+
+  it("bounds a real listener that never sends health response headers", async () => {
+    const { createServer } = await import("node:http");
+    const server = createServer(() => {});
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const deps = makeDeps({ checkPort: async () => false, ownerReportTimeoutMs: 100,
+        configStore: { resolve: () => ({ ...defaultConfig, daemon: { port, host: "127.0.0.1" } }) } as DoctorDeps["configStore"] });
+      delete deps.fetch;
+      const checks = runDoctorChecks(deps);
+      const result = await checks.portCheck;
+      expect(result.status).toBe("warn");
+      expect(result.message).toContain("unknown listener");
+      expect(result.reason).toContain("headers did not arrive");
+      const all = await Promise.all(checks.asyncChecks);
+      expect(all.find(check => check.name === "cmux_daemon")?.status).toBe("skipped");
     } finally {
       server.closeAllConnections();
       await new Promise(resolve => server.close(resolve));

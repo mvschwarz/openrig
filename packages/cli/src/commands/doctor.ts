@@ -45,7 +45,7 @@ export interface DoctorDeps {
   /** The caller's effective user id, compared with the one the port's daemon reports. Absent: this process's own;
    *  null: this platform has none. */
   callerUid?: number | null;
-  /** How long the port's /healthz body may take to arrive (default 2000 ms); after that its owner is unknown. */
+  /** How long each part of the port's /healthz response may take (default 2000 ms). */
   ownerReportTimeoutMs?: number;
   /**
    * Build B — path to a rig spec to check against the RUNNING rig of the same name (`--spec`).
@@ -301,6 +301,15 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
   const daemonPort = config.daemon.port ?? DEFAULT_PORT;
   const daemonBase = `http://${formatDaemonHostForUrl(daemonHost)}:${daemonPort}`;
   const fetchFn = deps.fetch ?? globalThis.fetch;
+  const healthHeaders = async (controller: AbortController) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        fetchFn(`${daemonBase}/healthz`, { signal: controller.signal }),
+        new Promise<null>(resolve => { timer = setTimeout(() => { resolve(null); controller.abort(); }, deps.ownerReportTimeoutMs ?? 2000); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  };
   const portCheck = deps.checkPort(daemonPort, daemonHost).then(async (available): Promise<DoctorCheck> => {
     if (available) {
       return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} available.` };
@@ -308,7 +317,13 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
     // Port in use — check if it's an OpenRig daemon via healthz, and whose.
     const owner = new AbortController();
     try {
-      const res = await fetchFn(`${daemonBase}/healthz`, { signal: owner.signal });
+      const res = await healthHeaders(owner);
+      if (!res) return {
+        name: "port", status: "warn",
+        message: `Port ${daemonHost}:${daemonPort} is in use by an unknown listener.`,
+        reason: "Its /healthz response headers did not arrive in time, so doctor cannot identify it.",
+        fix: `Check the listener on port ${daemonPort} or configure a free port for the daemon.`,
+      };
       if (res.ok) return await listenerOwnerCheck(`${daemonHost}:${daemonPort}`, daemonBase, res, () => owner.abort(), deps);
     } catch { /* not our daemon */ }
     finally { owner.abort(); }
@@ -325,14 +340,15 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
   const asyncChecks: Promise<DoctorCheck>[] = [portCheck];
   if (shellCmuxPassed) {
     const daemonCmuxCheck = (async (): Promise<DoctorCheck> => {
+      const health = new AbortController();
       try {
-        const healthRes = await fetchFn(`${daemonBase}/healthz`);
-        if (!healthRes.ok) {
+        const healthRes = await healthHeaders(health);
+        if (!healthRes?.ok) {
           return { name: "cmux_daemon", status: "skipped", message: "Daemon healthz not ok. Skipping daemon cmux check." };
         }
       } catch {
         return { name: "cmux_daemon", status: "skipped", message: "Daemon not reachable. Skipping daemon cmux check." };
-      }
+      } finally { health.abort(); }
 
       try {
         const cmuxRes = await fetchFn(`${daemonBase}/api/adapters/cmux/status`);
