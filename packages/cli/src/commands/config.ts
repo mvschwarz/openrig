@@ -234,11 +234,19 @@ Precedence: CLI flag > environment variable > config file > default`)
             console.log(`${key} reset to default (${effective.value}).`);
           }
         } else {
-          const all = store.resolveAllWithSource();
-          const overridden = VALID_KEYS.filter((k) => all[k].source === "env").map((k) => `${k} (${envVariableFor(k)})`);
+          // The file is already gone: a setting that can't be resolved now is a note, not a failed reset.
+          let overridden: string[] = [];
+          let unresolved: string | null = null;
+          try {
+            const all = store.resolveAllWithSource();
+            overridden = VALID_KEYS.filter((k) => all[k].source === "env").map((k) => `${k} (${envVariableFor(k)})`);
+          } catch (err) {
+            unresolved = (err as Error).message;
+          }
           console.log(overridden.length === 0
             ? "Config reset to defaults."
             : `Config reset to defaults, except where the environment overrides them: ${overridden.join(", ")}.`);
+          if (unresolved) console.error(`note: ${unresolved}`);
         }
       } catch (err) {
         console.error((err as Error).message);
