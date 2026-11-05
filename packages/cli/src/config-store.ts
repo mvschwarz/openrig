@@ -1521,7 +1521,8 @@ export class ConfigStore {
     return this.resolveWithSource(key).value;
   }
 
-  set(key: string, value: string): void {
+  /** Save a value to the config file and return it as saved (coerced). */
+  set(key: string, value: string): string | number | boolean {
     const removedMessage = removedContextSettingMessage(key);
     if (removedMessage) throw new Error(removedMessage);
     // OPR.0.4.4.15: the registered dynamic class is accepted; every other
@@ -1534,7 +1535,7 @@ export class ConfigStore {
       mkdirSync(dirname(this.configPath), { recursive: true });
       this.writeConfig(JSON.stringify(fcDyn, null, 2) + "\n");
       this.verifyPersisted(["feed", "subscriptions", feedHost.hostId, "enabled"], coercedDyn);
-      return;
+      return coercedDyn;
     }
     if (!isValidKey(key)) {
       throw new Error(`Unknown config key "${key}". Valid keys: ${VALID_KEYS.join(", ")}`);
@@ -1557,6 +1558,7 @@ export class ConfigStore {
     mkdirSync(dirname(this.configPath), { recursive: true });
     this.writeConfig(JSON.stringify(fileConfig, null, 2) + "\n");
     this.verifyPersisted(KEY_TO_PATH[key], coerced);
+    return coerced;
   }
 
   /**

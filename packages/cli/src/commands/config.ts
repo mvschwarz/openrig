@@ -1,9 +1,17 @@
 import { Command } from "commander";
-import { ConfigStore, VALID_KEYS, type ResolvedSetting, type ValidKey } from "../config-store.js";
+import { ConfigStore, ENV_MAP, VALID_KEYS, type ResolvedSetting, type ValidKey } from "../config-store.js";
 import { initWorkspaceCommand } from "./config-init-workspace.js";
 
 function formatRow(key: string, value: unknown): string {
   return `${key.padEnd(28)} ${value}`;
+}
+
+/** The environment variable that supplied a key's value: its primary name, or the legacy
+ *  alias when only that is set (the order resolution reads them in). */
+function envVariableFor(key: ValidKey): string {
+  const { primary, legacy } = ENV_MAP[key];
+  const value = process.env[primary];
+  return legacy && (value === undefined || value === "") ? legacy : primary;
 }
 
 function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting> {
@@ -192,8 +200,15 @@ Precedence: CLI flag > environment variable > config file > default`)
     .description("Set a config value")
     .action(async (key: string, value: string) => {
       try {
-        store.set(key, value);
-        console.log(`${key} = ${store.get(key)}`);
+        const saved = store.set(key, value);
+        const effective = store.resolveWithSource(key);
+        if (effective.source === "file") {
+          console.log(`${key} = ${effective.value}`);
+        } else if (effective.source === "env") {
+          console.log(`${key} = ${saved} saved; ${envVariableFor(key as ValidKey)} overrides it in this environment, so ${effective.value} is in effect.`);
+        } else {
+          console.log(`${key} = ${saved} saved; the default ${effective.value} is in effect.`);
+        }
         // SWEEP-c: boot-only key + running daemon = stale-until-restart; say so loudly.
         if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
           console.error(`note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`);
@@ -212,9 +227,18 @@ Precedence: CLI flag > environment variable > config file > default`)
       try {
         store.reset(key);
         if (key) {
-          console.log(`${key} reset to default (${store.get(key)}).`);
+          const effective = store.resolveWithSource(key);
+          if (effective.source === "env") {
+            console.log(`${key} file override cleared; ${envVariableFor(key as ValidKey)} still sets it to ${effective.value} in this environment (default ${effective.defaultValue}).`);
+          } else {
+            console.log(`${key} reset to default (${effective.value}).`);
+          }
         } else {
-          console.log("Config reset to defaults.");
+          const all = store.resolveAllWithSource();
+          const overridden = VALID_KEYS.filter((k) => all[k].source === "env").map((k) => `${k} (${envVariableFor(k)})`);
+          console.log(overridden.length === 0
+            ? "Config reset to defaults."
+            : `Config reset to defaults, except where the environment overrides them: ${overridden.join(", ")}.`);
         }
       } catch (err) {
         console.error((err as Error).message);
