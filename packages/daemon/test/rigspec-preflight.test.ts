@@ -567,8 +567,8 @@ profiles:
 describe("seat login-shell PATH warning", () => {
   const isLookup = (command: string) => command.endsWith(" -lc 'command -v rig'");
   const warning = (warnings: string[]) => warnings.filter(text => text.includes("login-shell PATH"));
-  async function preflight(exec: ExecFn, materializeOnly = false) {
-    const member = { agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: ".",
+  async function preflight(exec: ExecFn, materializeOnly = false, runtime = "codex") {
+    const member = { agentRef: "local:agents/impl", profile: "default", runtime, cwd: ".",
       env: { PATH: "/member/bin:/usr/bin", MEMBER_TAG: "member" } };
     const input = {
       rigSpecYaml: makeRigYaml({ env: { SHELL: "/bin/bash", PATH: "/rig/bin:/usr/bin", RIG_TAG: "rig" },
@@ -628,5 +628,31 @@ describe("seat login-shell PATH warning", () => {
     expect(result).toMatchObject({ ready: true, errors: [] });
     expect(exec.mock.calls.map(([command]) => command).filter(isLookup)).toEqual([]);
     expect(warning(result.warnings)).toEqual([]);
+  });
+
+  it("keeps a Claude-only pod quiet when rig exists only in its interactive shell", async () => {
+    const exec = vi.fn<ExecFn>().mockImplementation(async command => {
+      if (isLookup(command)) throw Object.assign(new Error("login PATH has no rig"), { code: 1 });
+      return "available";
+    });
+    const result = await preflight(exec, false, "claude-code");
+    expect(result).toMatchObject({ ready: true, errors: [] });
+    expect(warning(result.warnings)).toEqual([]);
+    expect(exec.mock.calls.map(([command]) => command).filter(isLookup)).toEqual([]);
+  });
+
+  it("keeps a Claude-only legacy launch quiet without a login-shell lookup", async () => {
+    const db = setupDb();
+    const exec = vi.fn<ExecFn>().mockImplementation(async command => {
+      if (isLookup(command)) throw Object.assign(new Error("login PATH has no rig"), { code: 1 });
+      return "available";
+    });
+    try {
+      const preflight = new RigSpecPreflight({ rigRepo: new RigRepository(db), tmuxAdapter: mockTmux(), exec, cmuxExec: exec });
+      const result = await preflight.check(validSpec());
+      expect(result).toMatchObject({ ready: true, errors: [] });
+      expect(warning(result.warnings)).toEqual([]);
+      expect(exec.mock.calls.map(([command]) => command).filter(isLookup)).toEqual([]);
+    } finally { db.close(); }
   });
 });
