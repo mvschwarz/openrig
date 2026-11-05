@@ -402,6 +402,23 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(readFileSync(configPath, "utf8")).toBe(before);
   });
 
+  it("shows the file-pair explanation through the config command", async () => {
+    process.env.OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT = "50";
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const oldExitCode = process.exitCode;
+    try {
+      process.exitCode = undefined;
+      await configCommand(configPath, { probeDaemonRunning: async () => false })
+        .parseAsync(["node", "rig", "set", "health.context_pressure.critical_percent", "80"]);
+      expect(process.exitCode).toBe(1);
+      expect(error.mock.calls.flat().join(" ")).toContain("config-file pair: warning (95)");
+      expect(existsSync(configPath)).toBe(false);
+    } finally {
+      error.mockRestore();
+      process.exitCode = oldExitCode;
+    }
+  });
+
   it("S01 wake ladder exposes retry cadence, cap, unconfirmed window, and swap grace defaults", () => {
     const store = new ConfigStore(configPath);
     expect(store.resolveWithSource("queue.wake_retry_interval_seconds" as never)).toMatchObject({
