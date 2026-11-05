@@ -698,7 +698,11 @@ async function classifyDeliveryEffect(
     return { checked: true, state: "staged", remedy: "submit-unconfirmed", detail: (err as Error).message };
   }
   if (enter.status >= 400) {
-    return { checked: true, state: "staged", remedy: "submit-refused", detail: (enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}` };
+    const phase = enter.data?.["inputPhase"];
+    const reason = enter.data?.["reason"];
+    const unconfirmed = phase === "attempted" || phase === "written"
+      || (phase !== "not_reached" && enter.data?.["sent"] !== false && (reason === "submit_failed" || enter.status >= 500));
+    return { checked: true, state: "staged", remedy: unconfirmed ? "submit-unconfirmed" : "submit-refused", detail: (enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}` };
   }
   const recheck = await detectStagedAtPrompt(client, session, identity);
   if (recheck.state === "unchecked") return { checked: true, state: "staged", remedy: "submit-unconfirmed", detail: recheck.why };

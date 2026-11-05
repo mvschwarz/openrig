@@ -341,6 +341,48 @@ describe("Send CLI", () => {
     } else expect(logs.join("\n")).toContain("submission unconfirmed");
   });
 
+  it.each([false, true])("reports a failed guarded Enter after attempted input as unconfirmed (json: %s)", async json => {
+    let submits = 0;
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/capture") return { status: 200, data: { content: "❯ make test" } };
+        if (body["submitOnly"]) { submits++; return { status: 500, data: { ok: false, reason: "submit_failed", inputPhase: "attempted", error: "submission unconfirmed" } }; }
+        return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "infra-ui@term-rig", "make test", "--verify", ...(json ? ["--json"] : []),
+      ]);
+    });
+    expect(submits).toBe(1);
+    expect(exitCode).toBe(1);
+    if (json) {
+      const result = JSON.parse(logs.find(line => line.trim().startsWith("{")) ?? "{}");
+      expect(result).toMatchObject({ verified: false, outcome: "submission-unconfirmed", effectCheck: { remedy: "submit-unconfirmed" } });
+    } else expect(logs.join("\n")).toContain("submission unconfirmed");
+  });
+
+  it.each([
+    [{ reason: "submit_failed", error: "older daemon" }, "submit-unconfirmed"],
+    [{ reason: "staged_mismatch", sent: false, inputPhase: "not_reached", error: "changed" }, "submit-refused"],
+  ] as const)("classifies guarded Enter failure %j as %s", async (failure, remedy) => {
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/capture") return { status: 200, data: { content: "❯ make test" } };
+        if (body["submitOnly"]) return { status: 500, data: { ok: false, ...failure } };
+        return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
+      },
+    } as unknown as DaemonClient;
+    const { logs } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "infra-ui@term-rig", "make test", "--verify", "--json",
+      ]);
+    });
+    const result = JSON.parse(logs.find(line => line.trim().startsWith("{")) ?? "{}");
+    expect(result.effectCheck.remedy).toBe(remedy);
+  });
+
   it("reports an unconfirmed post-submit recheck per recipient in fan-out JSON", async () => {
     let captures = 0, submits = 0;
     const client = {
