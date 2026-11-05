@@ -147,8 +147,21 @@ export async function callWebApi(
         ...(Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfterSeconds: retryAfter } : {}), error: ok ? undefined : String(json.error ?? `http ${res.status}`) };
     });
   } catch (e) {
-    return { ok: false, status: 0, grantedScopes: [], json: {}, error: `web-api transport: ${(e as Error).message}` };
+    return { ok: false, status: 0, grantedScopes: [], json: {}, error: `web-api transport: ${withoutToken((e as Error).message, token)}` };
   }
+}
+
+/** A transport error's message can quote the request's Authorization header (Node's fetch does for an invalid value),
+ *  so the token, and each line of it, is removed before the message goes anywhere, as sent and as trimmed (Node trims
+ *  the value before quoting it). A line shorter than 6 characters is left: removing it everywhere would garble the rest
+ *  of the message. One pass, so a marker is never rescanned. */
+function withoutToken(message: string, token: string): string {
+  const lines = token.split(/[\r\n]+/).flatMap((line) => [line, line.trim()]).filter((part) => part.length >= 6);
+  const parts = [...new Set([token, token.trim(), ...lines])].filter((part) => part.length > 0)
+    .sort((a, b) => b.length - a.length);
+  if (parts.length === 0) return message;
+  const pattern = new RegExp(parts.map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+  return message.replace(pattern, "[redacted]");
 }
 
 /** Item 5: read the ACTUAL granted scopes from the response header (configured != granted). */
@@ -251,7 +264,7 @@ export async function downloadPrivateFile(
       return { ok: true as const, bytes };
     });
   } catch (e) {
-    return { ok: false, error: (e as Error).message || "download failed" };
+    return { ok: false, error: withoutToken((e as Error).message, token) || "download failed" };
   }
 }
 
@@ -287,6 +300,49 @@ export async function verifyChannelMembership(
   if (!r.ok) return { ok: false, isMember: false, error: r.error };
   const ch = (r.json.channel ?? {}) as { is_member?: boolean; name?: string };
   return { ok: true, isMember: ch.is_member === true, name: ch.name };
+}
+
+/** One page of a directory read: only the projected fields, never Slack's whole object; on failure, Slack's own result. */
+export type DirectoryPage<T> = { ok: true; items: T[]; nextCursor: string | null } | { ok: false; result: WebApiResult };
+export interface DirectoryChannel { id: string; name: string; isMember: boolean }
+export interface DirectoryUser { id: string; name: string; realName: string | null; displayName: string | null; isBot: boolean; deleted: boolean }
+
+function directoryPage<T>(r: WebApiResult, key: string, project: (raw: Record<string, unknown>) => T): DirectoryPage<T> {
+  if (!r.ok) return { ok: false, result: r };
+  const raw = Array.isArray(r.json[key]) ? (r.json[key] as Record<string, unknown>[]) : [];
+  const next = (r.json.response_metadata as { next_cursor?: unknown } | undefined)?.next_cursor;
+  return { ok: true, items: raw.map(project), nextCursor: typeof next === "string" && next ? next : null };
+}
+
+/** One page of the workspace's public, unarchived channels (conversations.list; channels:read). */
+export async function listPublicChannels(
+  token: string,
+  page: { cursor?: string; limit: number },
+  fetchImpl: FetchImpl = defaultFetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<DirectoryPage<DirectoryChannel>> {
+  const r = await callWebApi("conversations.list", token,
+    { types: "public_channel", exclude_archived: true, limit: page.limit, cursor: page.cursor }, fetchImpl, timeoutMs, "get-query");
+  return directoryPage(r, "channels", (c) => ({ id: String(c.id), name: String(c.name ?? ""), isMember: c.is_member === true }));
+}
+
+/** One page of the workspace's people (users.list; users:read), without email or other profile fields. */
+export async function listUsers(
+  token: string,
+  page: { cursor?: string; limit: number },
+  fetchImpl: FetchImpl = defaultFetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<DirectoryPage<DirectoryUser>> {
+  const r = await callWebApi("users.list", token, { limit: page.limit, cursor: page.cursor }, fetchImpl, timeoutMs, "get-query");
+  return directoryPage(r, "members", (u) => {
+    const profile = (u.profile ?? {}) as { display_name?: unknown };
+    return {
+      id: String(u.id), name: String(u.name ?? ""),
+      realName: typeof u.real_name === "string" ? u.real_name : null,
+      displayName: typeof profile.display_name === "string" && profile.display_name ? profile.display_name : null,
+      isBot: u.is_bot === true, deleted: u.deleted === true,
+    };
+  });
 }
 
 /** Inbound Socket Mode: open a WebSocket URL via apps.connections.open (app-level xapp token). */

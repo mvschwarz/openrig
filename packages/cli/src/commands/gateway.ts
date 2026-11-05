@@ -732,17 +732,16 @@ Examples:
     .option("--json", "Complete records as JSON, including organizations and groups")
     .action(async (opts: { organization?: string; json?: boolean }) => {
       const registry = await import("@openrig/daemon/gateway-human-registry");
+      if (opts.json) {
+        const result = registry.participantsJsonView(undefined, opts.organization);
+        if (!result.ok) { console.error(`refused: ${result.error}`); process.exitCode = 1; return; }
+        console.log(JSON.stringify(result));
+        return;
+      }
       const view = registry.participantsView();
       if (!view.ok) { console.error(`refused: ${view.error}`); process.exitCode = 1; return; }
       const shown = opts.organization ? view.participants.filter((p) => p.organization?.id === opts.organization) : view.participants;
       const defaultPerson = view.default.person ? { id: view.default.person.entityId, source: view.default.source } : { id: null, reason: view.default.source === "none" ? view.default.reason : null };
-      if (opts.json) {
-        const side = registry.readParticipantsFile();
-        console.log(JSON.stringify({ ok: true, participants: shown, default: defaultPerson,
-          organizations: side.ok ? side.file.organizations : null, groups: side.ok ? side.file.groups : null,
-          warnings: view.warnings, participantFile: view.sideFile }));
-        return;
-      }
       if (!shown.length) console.log(opts.organization ? `no participants in organization "${opts.organization}"` : "no participants yet: rig gateway human add … registers a person, rig gateway channel add … a shared channel");
       for (const p of shown) {
         console.log(`${p.id}  ${p.kind}  "${p.displayName}"  ${p.address}${p.channel ? `  channel ${p.channel.channelId}` : ""}`);

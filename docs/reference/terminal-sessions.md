@@ -312,6 +312,11 @@ implies ignore-size), and the printed manual attach commands keep
 the agent's terminal size. Observers of a Herdr terminal do not themselves resize it;
 a controlling browser can. No cross-version resize guarantee is implied.
 
+To type into a seat without changing its size, send the text through OpenRig
+(`rig send`, or `POST /api/transport/send`): it is written to the pane with tmux
+buffers and keys, and no client attaches. There is no supported way to attach a
+writable client that is sure never to resize the agent's window.
+
 
 ## Following a slice or mission's current work
 

@@ -2492,7 +2492,10 @@ export class SessionTransport {
       if (result.outcome !== "retained") {
         try {
           for (const id of ids) {
-            if (result.ok) outbox.markDelivered(id);
+            if (result.ok) {
+              if (result.outcome === "rendered-unconfirmed" || (opts?.verify && result.verified !== true)) outbox.markIndeterminate(id);
+              else outbox.markDelivered(id);
+            } else if (result.inputPhase === "attempted" || result.inputPhase === "written") outbox.markIndeterminate(id);
             else if (result.sent === false || result.inputPhase === "not_reached") outbox.markFailed(id);
             else outbox.markIndeterminate(id);
           }
@@ -2503,11 +2506,20 @@ export class SessionTransport {
       // Before-input conditional failures never fall back to an ordinary send.
       const written = (error as { inputWritten?: boolean }).inputWritten;
       const attempted = (error as { inputAttempted?: boolean }).inputAttempted;
-      if (admitted && !written && !attempted) for (const id of ids) { try { if (outbox.getById(id)) outbox.markFailed(id); } catch { /* Original refusal remains authoritative. */ } }
+      let receiptUnconfirmed = false;
+      if (admitted) for (const id of ids) {
+        try {
+          if (outbox.getById(id)) {
+            if (written || attempted) outbox.markIndeterminate(id);
+            else outbox.markFailed(id);
+          }
+        } catch { receiptUnconfirmed = true; }
+      }
       return { ok: false, sessionName, identityContract: 1, outboxIds: ids,
         sent: written ? true : attempted ? undefined : false,
         inputPhase: written ? "written" : attempted ? "attempted" : "not_reached",
-        reason: (error as { code?: string }).code ?? "expected_identity_unavailable", error: (error as Error).message };
+        reason: (error as { code?: string }).code ?? "expected_identity_unavailable", error: (error as Error).message,
+        ...(receiptUnconfirmed ? { warning: "Conditional input receipt could not be finalized; inspect before retrying." } : {}) };
     }
   }
 

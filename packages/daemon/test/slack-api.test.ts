@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   postWebhook,
   callWebApi,
+  downloadPrivateFile,
   verifyScopes,
   verifyChannelMembership,
   openSocketConnection,
@@ -98,5 +99,43 @@ describe("Slice-11 slack-api — channel membership + socket (item 5, inbound)",
     const r = await openSocketConnection("xoxb-wrong", fetchImpl);
     expect(r.ok).toBe(false);
     expect(r.error).toBe("not_allowed_token_type");
+  });
+});
+
+describe("slack-api — a transport error never carries the bot token", () => {
+  it("keeps the error's reason but not the token, for a token copied with a newline", async () => {
+    // Node's own Headers check rejects the value before any connection, quoting the whole Authorization header.
+    const fetchImpl: FetchImpl = async (_url, init) => { new Headers(init?.headers); return new Response("{}"); };
+    const r = await callWebApi("auth.test", "xoxb-fake-copied\nSECRETTAIL", {}, fetchImpl);
+    expect(r).toMatchObject({ ok: false, status: 0 });
+    expect(r.error).toContain("invalid header value");
+    expect(r.error).not.toMatch(/xoxb-fake-copied|SECRETTAIL/);
+  });
+
+  it("keeps the rest of the message whole when a line of the token is very short", async () => {
+    const fetchImpl: FetchImpl = async (_url, init) => { new Headers(init?.headers); return new Response("{}"); };
+    const r = await callWebApi("auth.test", "xoxb-fake-copied-token\na", {}, fetchImpl);
+    expect(r.error).toContain("Headers.append");
+    expect(r.error).toContain("invalid header value");
+    expect(r.error).not.toContain("xoxb-fake-copied-token");
+  });
+
+  it("removes a token line that Node trimmed before quoting it", async () => {
+    // A short first line is left alone, and Node trims the trailing whitespace off the last line before quoting it.
+    const token = "ab\nLONGSECRETTAIL \t";
+    const fetchImpl: FetchImpl = async (_url, init) => { new Headers(init?.headers); return new Response("{}"); };
+    const r = await callWebApi("auth.test", token, {}, fetchImpl);
+    expect(r.error).toContain("invalid header value");
+    for (const line of token.split("\n").map((l) => l.trim())) {
+      for (let i = 0; i + 6 <= line.length; i++) expect(r.error).not.toContain(line.slice(i, i + 6));
+    }
+  });
+
+  it("a file download's error doesn't carry the token either", async () => {
+    const fetchImpl: FetchImpl = async (_url, init) => { new Headers(init?.headers); return new Response("{}"); };
+    const r = await downloadPrivateFile("https://files.slack.com/files-pri/T1-F1/x.txt", "xoxb-fake-copied\nSECRETTAIL", fetchImpl);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("invalid header value");
+    expect(r.error).not.toMatch(/xoxb-fake-copied|SECRETTAIL/);
   });
 });

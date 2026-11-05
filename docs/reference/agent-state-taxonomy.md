@@ -23,7 +23,10 @@ Only the activity axis is served today. The session and resumability values are 
 `activity-taxonomy.ts` but no surface reads them: `rig ps --nodes --full` shows the raw session
 STATUS, both node views show a LIFECYCLE of `running`, `detached`, `recoverable` or `attention_required` (`run`, `det`, `rec`,
 `att`), and node inventory serves `occupantLifecycle` (`active`, `retiring`, `retired`,
-`context_walled`, `compacted`, `crashed`, `unknown`).
+`context_walled`, `compacted`, `crashed`, `unknown`). Node inventory's `sessionStatus` is the
+recorded session status, with two observed corrections: a running session whose pane is verified
+to have exited (identity reason `pane_exited`) reads `exited`, with `startupStatus:
+"attention_required"`, and a running session confirmed missing reads `detached`.
 
 The axes never blend. Reachability is strict; revival optimism is a different field
 (omnigent's strict-liveness split). `unknown` is a first-class honest value — the oracle

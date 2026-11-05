@@ -735,6 +735,29 @@ When authoring startup content, note which instructions are runtime-specific. Fo
 
 ---
 
+## Files OpenRig writes into a project
+
+These are the files OpenRig writes into a seat's working directory, and what `rig down` does with each. Paths are
+relative to that directory.
+
+| Path | When OpenRig writes it | What `rig down` does |
+| --- | --- | --- |
+| Managed blocks in `CLAUDE.md` (or the rig's `managed_blocks` file, such as `CLAUDE.local.md`) or `AGENTS.md` | Each launch merges the seat's guidance blocks. A fresh Codex launch that takes developer instructions puts them in its launch text instead: in `AGENTS.md` it adds only the seat-skills line, after your yes, and refreshes blocks already there. A fresh Pi seat writes its own agent-directory `AGENTS.md` outside the project, except when that folder or file is a link: then its guidance stays in the repository `AGENTS.md`. | Removes OpenRig's blocks, current or legacy, and keeps everything else. When nothing else is left, it deletes the file if the file began with an OpenRig block, or held only blocks in an older format. A block-only file isn't proof that OpenRig created it. The seat-skills line is kept if you edited it. |
+| `.openrig/context-collector.cjs` | Claude seats, at launch. | Removes it while its bytes are still the shipped collector's; otherwise keeps it and says so. |
+| `.claude/settings.local.json` | Claude seats, at launch: OpenRig's status line and its activity hooks are merged in, separately. Your own status line is never replaced, but the activity hooks are still merged beside it. A file that doesn't parse gets neither. | Removes OpenRig's status line and hooks and keeps the file, even if `{}` is all that's left. |
+| `.claude/settings.local.json` fragments and `.mcp.json` | When a profile or spec declares `claude_settings_fragment` or `claude_mcp_fragment`. | Leaves the merged content in place. |
+| `.claude/agents/`, `.claude/plugins/<id>/`, `.claude/extensions/<id>/`; `.agents/<id>.yaml`, `.codex/plugins/<id>/`, `.agents/extensions/<id>/` | When the seat's projection includes subagents, plugins or runtime resources (Claude, then Codex). | Leaves them in place. |
+| `.claude/skills/<id>/`, `.agents/skills/<id>/` | Only for a seat without seat storage. New Claude and Codex seats keep their skills under `$OPENRIG_HOME/state/seats/`, outside the project. | Leaves them in place. |
+| The managed compaction preparation folder described in [Claude compaction preparation directory](#claude-compaction-preparation-directory), with its `.gitignore` of `*` and each attempt's `RESTORE-MAP.md` | Managed Claude compaction, unless a preparation root is configured elsewhere. | Leaves it in place. |
+| `.rigged-checkpoint.md` | A restore that didn't resume a seat's native conversation (by choice or not) and had a checkpoint to hand it. | Leaves it in place. |
+
+`rig down` leaves a file alone while another seat still uses it: a running seat of the same rig, or any seat of
+another rig that isn't archived. That is decided file by file. A guidance file is kept while another seat's
+guidance targets the same file. The Claude settings and collector are kept while another Claude seat works in that
+directory. So another rig's Codex seat keeps `AGENTS.md` without keeping `CLAUDE.md` or the Claude settings. It
+removes `.openrig/` and `.claude/` only when they are empty.
+`rig down --delete` does nothing more to project files. OpenRig doesn't edit your project's own `.gitignore`.
+
 ## Patterns and Anti-Patterns
 
 ### Good Patterns
