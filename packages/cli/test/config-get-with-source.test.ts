@@ -72,4 +72,12 @@ describe("rig config get --with-source", () => {
     const json = JSON.parse(await run(["get", "daemon.port", "--json"]));
     expect(json).toMatchObject({ value: 7555, source: "file" });
   });
+
+  it("reports the active environment override when setting or resetting a file value", async () => {
+    process.env["OPENRIG_PORT"] = "7666";
+    expect(await run(["set", "daemon.port", "7555"])).toContain("7666 (source: env; file override saved but masked)");
+    expect(JSON.parse(fs.readFileSync(configPath, "utf8")).daemon.port).toBe(7555);
+    expect(await run(["reset", "daemon.port"])).toContain("effective value 7666 (source: env; default: 7433)");
+    expect(await run(["reset"])).toBe("Config file reset; environment overrides may still apply.");
+  });
 });
