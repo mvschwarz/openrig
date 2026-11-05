@@ -170,6 +170,24 @@ describe("Claude activity-hook delivery — shipped relay asset executable mode 
 });
 
 describe("Claude activity-hook delivery — ENABLE (entry present, source + manifest readable)", () => {
+  it.each([false, true])("copies the diagnostic formatter without suppressing existing hooks if its copy fails (%s)", async fail => {
+    const source = "/assets/plugins/openrig-core/hooks/scripts/permission-stop-descriptor.cjs";
+    const destination = `${STATE_DIR}/state/claude-activity-hooks/permission-stop-descriptor.cjs`;
+    const fs = enableFs({ [source]: "// synthetic formatter" });
+    const copy = fs.copyFile;
+    fs.copyFile = (src, dest) => {
+      if (src === source && fail) throw new Error("fixture failure");
+      copy(src, dest);
+    };
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._store[RELAY_DEST]).toBe("// relay");
+    expect(fs._store[destination]).toBe(fail ? undefined : "// synthetic formatter");
+    for (const event of EVENTS) {
+      const commands = (readSettings(fs).hooks?.[event] ?? []).flatMap((group: any) => group.hooks.map((hook: any) => hook.command));
+      expect(commands).toContain(OWNED_CMD);
+    }
+  });
+
   it("leaves identical shared relay bytes alone and refreshes a changed installed asset", async () => {
     const fs = enableFs();
     const copy = fs.copyFile;

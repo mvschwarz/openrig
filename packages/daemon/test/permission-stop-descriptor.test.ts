@@ -13,6 +13,38 @@ const shell = "Bash: details withheld";
 const bash = (command: unknown) => ({ tool_name: "Bash", tool_input: { command } });
 
 describe("permission stop descriptor privacy boundary", () => {
+  it("rejects the whole oversized command rather than accepting its allowed prefix", () => {
+    expect(describeStop(bash("git " + "x".repeat(508)))).toBe("Bash: git [arguments hidden]");
+    expect(describeStop(bash("git " + "x".repeat(509)))).toBe(shell);
+    expect(describeStop(bash(" \t  "))).toBe(shell);
+  });
+
+  it.each([
+    ["Read", "Tool: Read"], ["Write", "Tool: Write"], ["Edit", "Tool: Edit"],
+    ["MultiEdit", "Tool: MultiEdit"], ["NotebookEdit", "Tool: NotebookEdit"],
+    ["Glob", "Tool: Glob"], ["Grep", "Tool: Grep"], ["LS", "Tool: LS"],
+    ["WebFetch", "Tool: WebFetch"], ["WebSearch", "Tool: WebSearch"], ["Skill", "Tool: Skill"],
+    ["Task", "Tool: Task"], ["TodoWrite", "Tool: TodoWrite"],
+  ])("uses a fixed descriptor for known tool %s", (tool_name, expected) => {
+    expect(describeStop({ tool_name, tool_input: { path: "/SYNTHETIC_SECRET", url: "https://user:SECRET@example.invalid" },
+      reason: "SYNTHETIC_SECRET" })).toBe(expected);
+    expect(describeStop({ tool_name, tool_input: [] })).toBe(generic);
+  });
+
+  it.each(["__proto__", "constructor", "toString", "hasOwnProperty"])("does not treat prototype key %s as a known tool", tool_name => {
+    expect(describeStop({ tool_name })).toBe(generic);
+    expect(describeStop(bash(tool_name))).toBe(shell);
+  });
+
+  it("supports JSON-like null-prototype inputs and withholds throwing accessors", () => {
+    const input = Object.assign(Object.create(null), { tool_name: "Bash",
+      tool_input: Object.assign(Object.create(null), { command: "git status" }) });
+    expect(describeStop(input)).toBe("Bash: git [arguments hidden]");
+    expect(describeStop(Object.create({ tool_name: "Bash", tool_input: { command: "git" } }))).toBe(generic);
+    expect(describeStop({ get tool_name() { throw new Error("SYNTHETIC_SECRET"); } })).toBe(generic);
+    expect(describeStop({ tool_name: "Bash", tool_input: { get command() { throw new Error("SYNTHETIC_SECRET"); } } })).toBe(generic);
+  });
+
   it.each(tools)("describes only the allowlisted first executable %s", tool => {
     expect(describeStop(bash(tool))).toBe(`Bash: ${tool} [arguments hidden]`);
     expect(describeStop(bash(`${tool}\t--version`))).toBe(`Bash: ${tool} [arguments hidden]`);

@@ -94,6 +94,27 @@ const STATUS = {
 };
 
 describe("seat typing guard commands", () => {
+  it.each(["request_observed", "completed"])("reports a %s harness observation with time and honest pending state", async state => {
+    const permission_stop = { state, command: "Bash: git [arguments hidden]", origin: "harness",
+      source: "PermissionRequest", observed_at: "2026-11-05T01:00:00.000Z", actor: "subagent",
+      pending: state === "completed" ? false : "unknown" };
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permission_stop } }, paths, bodies);
+    const text = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "status", "dev-impl@seat-rig",
+    ]).then(() => undefined));
+    expect(text.logs).toContain("Permission stop observed at 2026-11-05T01:00:00.000Z: Bash: git [arguments hidden]; harness permission request (PermissionRequest, subagent)");
+    expect(text.logs).toContain(state === "completed" ? "  Actor's tool batch completed; request is no longer pending."
+      : "  Current pending status: unknown (an observation does not establish a waiting prompt).");
+    expect(text.logs.join("\n")).not.toContain("DCG");
+    const json = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "status", "dev-impl@seat-rig", "--json",
+    ]).then(() => undefined));
+    expect(JSON.parse(json.logs.join(""))).toEqual({ ...STATUS, permission_stop });
+    expect(paths).toEqual(["/api/seat/status/dev-impl%40seat-rig", "/api/seat/status/dev-impl%40seat-rig"]);
+    expect(bodies).toEqual([]);
+  });
+
   it.each([undefined, { state: "unavailable", command: "unavailable", origin: "unknown" }])(
     "reports an unavailable permission command without requesting a permission change (%j)", async permission_stop => {
       const paths: string[] = [], bodies: unknown[] = [];

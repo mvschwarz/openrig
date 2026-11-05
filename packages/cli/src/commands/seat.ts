@@ -21,7 +21,9 @@ async function defaultReadStdin(): Promise<string> {
 }
 
 interface SeatStatusResponse {
-  permission_stop?: { state: "unavailable"; command: "unavailable"; origin: "unknown" };
+  permission_stop?: { state: "unavailable"; command: "unavailable"; origin: "unknown" }
+    | { state: "request_observed" | "completed"; command: string; origin: "harness";
+        source: "PermissionRequest"; observed_at: string; actor: "main" | "subagent"; pending: "unknown" | false };
   seat_ref: string;
   rig_id: string;
   rig_name: string;
@@ -244,8 +246,12 @@ function printHuman(status: SeatStatusResponse): void {
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   console.log(`Session: ${display(status.session_status, "unknown")}`);
-  // Older daemons have no diagnostic either. Do not turn absence into a pending request or a guard verdict.
-  console.log("Permission stop: command unavailable; origin unknown");
+  const stop = status.permission_stop;
+  if (stop && stop.state !== "unavailable") {
+    console.log(`Permission stop observed at ${stop.observed_at}: ${stop.command}; harness permission request (${stop.source}, ${stop.actor})`);
+    console.log(stop.state === "completed" ? "  Actor's tool batch completed; request is no longer pending."
+      : "  Current pending status: unknown (an observation does not establish a waiting prompt).");
+  } else console.log("Permission stop: command unavailable; origin unknown");
   if (status.compaction) console.log(`Managed compaction (${status.compaction.stage}): ${status.compaction.detail}`);
   const reason = sessionReason(status.session_reason);
   if (reason) console.log(`Reason: ${reason}`);

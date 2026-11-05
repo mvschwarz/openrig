@@ -583,8 +583,9 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
   // All tools in this actor's batch have resolved. An individual PostToolUse can belong to a parallel tool,
   // and a subagent's batch says nothing about the main session's permission. Only the current occupant can
   // settle a matching, older episode. Do not record an unrelated batch as an unknown hook that hides attention.
+  const permissionObservation = body.runtime === "claude-code" && body.hookEvent === "PermissionRequest";
   const claudePermission = body.runtime === "claude-code" && body.hookEvent === "Notification" && body.subtype === "permission_prompt";
-  if (body.hookEvent === "PostToolBatch" || claudePermission) {
+  if (body.hookEvent === "PostToolBatch" || claudePermission || permissionObservation) {
     const oracle = c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined;
     const registry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
     const sessionName = stringOrNull(body.sessionName);
@@ -605,6 +606,17 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       && generation !== null && current?.generationUuid === generation
       && (hookAgentId === null || (typeof hookAgentId === "string" && hookAgentId.trim().length > 0))
       && occurredAt !== null && Number.isFinite(Date.parse(occurredAt));
+    if ((permissionObservation || body.hookEvent === "PostToolBatch") && attributable
+      && (body.nodeId == null || body.nodeId === seat!.nodeId)) {
+      try {
+        store.observePermissionStop({ nodeId: seat!.nodeId, sessionName: seat!.sessionName, generation: generation!,
+          actor: hookAgentId, at: occurredAt, command: body.permissionStopDescriptor,
+          completed: body.hookEvent === "PostToolBatch" });
+      } catch { /* Optional observation never suppresses the existing completion behavior. */ }
+    }
+    // This event adds a diagnostic only. It must not create/clear attention, change activity,
+    // write raw provider fields to events, or produce a permission decision.
+    if (permissionObservation) return c.json({ ok: true });
     if (body.hookEvent === "PostToolBatch") {
       if (attributable && oracle && !oracle.hasRungInventory(seat!.nodeId, seat!.sessionName)) {
         // The completion may be this occupant's first hook to reach the daemon.
