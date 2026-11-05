@@ -2254,12 +2254,13 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
       body: "The requested build finished. No action or decision is needed.", summary: "Build finished",
       evidenceRef: "https://example.test/build", humanIntent: "update", nudge: false });
     age(row.qitemId);
-    const before = repo.getById(row.qitemId)!;
+    const before = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    expect(before).toBeDefined();
     // This person uses the Feed, so there is no missing Slack delivery to recover.
     expect(repo.deliveryOutcomeFor(row.qitemId)).toBeNull();
     const result = await sweep();
     expect(result.outcome, result.error).not.toBe("failed");
-    expect(repo.getById(row.qitemId)).toEqual(before);
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(before);
     expect(repo.list({ destinationSession: READER.address }).find((item) => item.qitemId === row.qitemId))
       .toMatchObject({ body: row.body, state: "pending", humanIntent: "update" });
     expect(await findingsFor(row.qitemId)).toEqual([]);
@@ -2270,12 +2271,13 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
       body: "Choose option A or B.", summary: "A or B?", evidenceRef: "https://example.test/decision",
       humanIntent, humanAlert: true, nudge: false });
     age(row.qitemId);
-    const before = repo.getById(row.qitemId)!;
+    const before = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    expect(before).toBeDefined();
     const result = await sweep();
     expect(result.outcome, result.error).not.toBe("failed");
     expect(await findingsFor(row.qitemId)).toEqual([expect.objectContaining({ destinationSession: READER.address,
       tags: expect.arrayContaining([`stuck-sweep:unclaimed-obligation:${row.qitemId}`]) })]);
-    expect(repo.getById(row.qitemId)).toEqual(before);
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(before);
   });
 
   it.each([false, true])("keeps an agent obligation eligible (rerouted informational intent: %s)", async (rerouted) => {
@@ -2286,13 +2288,14 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     // Direct creates reject humanIntent on agents. Exercise the supported reroute that retains the original intent.
     if (rerouted) repo.routeToFallback(row.qitemId, "worker@r", "Agent follow-up required");
     age(row.qitemId);
-    const before = repo.getById(row.qitemId)!;
-    expect(before).toMatchObject({ destinationSession: "worker@r", humanIntent: rerouted ? "update" : null });
+    const before = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    expect(before).toBeDefined();
+    expect(repo.getById(row.qitemId)).toMatchObject({ destinationSession: "worker@r", humanIntent: rerouted ? "update" : null });
     const result = await sweep();
     expect(result.outcome, result.error).not.toBe("failed");
     expect(await findingsFor(row.qitemId)).toEqual([expect.objectContaining({ destinationSession: "worker@r",
       tags: expect.arrayContaining([`stuck-sweep:unclaimed-obligation:${row.qitemId}`]) })]);
-    expect(repo.getById(row.qitemId)).toEqual(before);
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(before);
   });
 
   it("does not exempt an update merely because its former human address still looks human", async () => {
@@ -2300,12 +2303,13 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
       summary: "Build status", evidenceRef: "https://example.test/build", humanIntent: "update", nudge: false });
     registeredHumans = registeredHumans.filter((person) => person.entityId !== READER.entityId);
     age(row.qitemId);
-    const before = repo.getById(row.qitemId)!;
+    const before = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    expect(before).toBeDefined();
     const result = await sweep();
     expect(result.outcome, result.error).not.toBe("failed");
     expect(await findingsFor(row.qitemId)).toEqual([expect.objectContaining({ destinationSession: READER.address,
       tags: expect.arrayContaining([`stuck-sweep:unclaimed-obligation:${row.qitemId}`]) })]);
-    expect(repo.getById(row.qitemId)).toEqual(before);
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(before);
   });
 
   it("still reports a failed informational human notice to its asking agent", async () => {
@@ -2316,13 +2320,14 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     // Five minutes exercises delivery recovery without introducing the sixty-minute unclaimed condition.
     age(row.qitemId, 5);
     expect(repo.deliveryOutcomeFor(row.qitemId)?.outcome).toBe("transport-failed");
-    const before = repo.getById(row.qitemId)!;
+    const before = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    expect(before).toBeDefined();
     const result = await sweep();
     expect(result.outcome, result.error).not.toBe("failed");
     expect(await findingsFor(row.qitemId)).toEqual([expect.objectContaining({ destinationSession: "asker@r",
       tags: expect.arrayContaining([`stuck-sweep:undelivered-human-notice:${row.qitemId}`]),
       body: expect.stringContaining("human notice transport-failed") })]);
-    expect(repo.getById(row.qitemId)).toEqual(before);
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(before);
   });
 
   it("a row whose wake the seat's level or hold held isn't reported as unclaimed: it's held at the seat, not stuck", async () => {
