@@ -79,7 +79,21 @@ describe("rig config get --with-source", () => {
     expect(await run(["set", "daemon.port", "7555"])).toContain("7666 (source: env; file override saved but masked)");
     expect(JSON.parse(fs.readFileSync(configPath, "utf8")).daemon.port).toBe(7555);
     expect(await run(["reset", "daemon.port"])).toContain("effective value 7666 (source: env; default: 7433)");
-    expect(await run(["reset"])).toBe("Config file reset; environment overrides may still apply.");
+    expect(await run(["reset"])).toContain("environment overrides them: daemon.port.");
+  });
+
+  it("retains the default reset message when no environment override remains", async () => {
+    expect(await run(["reset"])).toBe("Config reset to defaults.");
+  });
+
+  it("does not promise a masked boot setting will take effect on restart", async () => {
+    process.env["OPENRIG_PORT"] = "7666";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await configCommand(configPath, { probeDaemonRunning: async () => true })
+        .parseAsync(["node", "rig", "set", "daemon.port", "7555"]);
+      expect(errorSpy.mock.calls.flat().join(" ")).toContain("remains masked after restart");
+    } finally { errorSpy.mockRestore(); }
   });
 
   it("distinguishes the saved threshold from the default used after an invalid environment pair", async () => {
