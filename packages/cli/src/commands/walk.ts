@@ -308,7 +308,7 @@ initial record is explicitly reported as unverified delivery.`)
                   const detail = (enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}`;
                   failPiece(i, piece.label, unconfirmed
                     ? `the guarded submit result is unconfirmed (${detail}); inspect the recipient before any resend.`
-                    : `typed but not consumed; the single submit retry was refused (${detail}).`);
+                    : `the single guarded submit was refused (${detail}); the earlier staged observation may have changed. Inspect the recipient before any resend.`);
                   return;
                 }
                 verdict = await pollConsumed();

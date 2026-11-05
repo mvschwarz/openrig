@@ -432,7 +432,8 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     expect(w.sends.filter(s => s.path === "/api/transport/send" && s.body["submitOnly"] === true)).toHaveLength(1);
     expect(w.sends.filter(s => s.path === "/api/transport/send" && s.body["text"] !== undefined)).toHaveLength(1);
     expect(errLogs.join("\n")).toContain(wording);
-    if (wording === "unconfirmed") expect(errLogs.join("\n")).not.toMatch(/typed but not consumed|was refused/i);
+    expect(errLogs.join("\n")).not.toMatch(/typed but not consumed/i);
+    if (wording === "unconfirmed") expect(errLogs.join("\n")).not.toMatch(/was refused/i);
   });
 
   it("PIN W3 — a client timeout with server-side completion reconciles BY EFFECT: no re-send, walk proceeds [GREEN — reconcile-by-effect]", async () => {
