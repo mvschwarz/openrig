@@ -2,7 +2,7 @@
 // Check concrete references, not prose quality. Run with node --import tsx.
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 import { parse as parseYaml } from "yaml";
 
