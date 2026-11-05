@@ -87,6 +87,8 @@ it("uses an advancing counter when output separates the status from the composer
   time += 3000;
   await oracle.pollSeat(session);
   expect(oracle.getSeatState(node)?.activity).toBe("idle-at-prompt");
+  time += 60_000;
+  expect(oracle.getSeatState(node)?.activity).toBe("unknown");
 });
 
 it("expires a repeatedly captured frozen adjacent frame and accepts a later advance", async () => {

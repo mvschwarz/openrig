@@ -72,6 +72,7 @@ export class SeatActivityService {
   // seat-structural-activity-service (MUST-FIX 2). A slowed tmux can never accumulate
   // overlapping whole-fleet sweeps — at most one sweep's worth is ever in flight.
   private sweeping = false;
+  private samplingAuthorityWindowMs = SAMPLING_AUTHORITY_WINDOW_MS;
   private readonly permissionPromptReader?: SeatActivityServiceDeps["permissionPromptReader"];
   private readonly permissionPromptChanged?: SeatActivityServiceDeps["permissionPromptChanged"];
   private readonly structuralActivity?: SeatActivityServiceDeps["structuralActivity"];
@@ -125,7 +126,12 @@ export class SeatActivityService {
       }
     }
     await this.pollPermissionPrompt(paneId);
-    if (lastActivityEpochSeconds === null) return null;
+    if (lastActivityEpochSeconds === null) {
+      const seatNodeId = this.sessionToSeat.get(paneId);
+      const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+      if (seat) this.arbitrate(seat);
+      return null;
+    }
 
     const observedAt = this.now();
     const ageSeconds = observedAt.getTime() / 1000 - lastActivityEpochSeconds;
@@ -389,6 +395,7 @@ export class SeatActivityService {
    */
   start(db: Database.Database, intervalMs: number = DEFAULT_POLL_INTERVAL_MS): void {
     if (this.timer) return;
+    this.samplingAuthorityWindowMs = Math.max(SAMPLING_AUTHORITY_WINDOW_MS, intervalMs * 3);
     this.timer = setInterval(() => {
       void this.pollAllRunningTmuxSeats(db);
     }, intervalMs);
@@ -692,6 +699,7 @@ export class SeatActivityService {
       if (trust !== "authoritative" && trust !== "positive-only") continue;
       const evd = this.latestByRung(seat, rung, "activity");
       if (!evd || evd.activity === undefined) continue;
+      if (rung === "window-sampling" && nowMs - Date.parse(evd.observedAt) > this.samplingAuthorityWindowMs) continue;
       // A working frame only overrides the quiet window while its proof is fresh, even if polling stops.
       if (rung === "window-sampling" && evd.sourceId === "codex:working-frame-fallback"
           && nowMs - Date.parse(evd.observedAt) >= DEFAULT_STRUCTURAL_STALE_MS) return { ...evd, activity: "idle-at-prompt" };
@@ -765,7 +773,8 @@ export class SeatActivityService {
     const nowMs = this.now().getTime();
     const hookFresh = hook && hook.activity !== undefined
       && nowMs - Date.parse(hook.observedAt) <= HOOK_AUTHORITY_WINDOW_MS;
-    const contradicts = hookFresh && hook!.activity === "working"
+    const samplerFresh = sampler && nowMs - Date.parse(sampler.observedAt) <= this.samplingAuthorityWindowMs;
+    const contradicts = hookFresh && hook!.activity === "working" && samplerFresh
       && sampler?.activity === "idle-at-prompt"
       && this.rungTrust(seat, "window-sampling") === "authoritative";
     if (!contradicts) {
@@ -950,6 +959,8 @@ interface SeatLadderState {
 // requires the numbers recorded; rationale in the GREEN commit + reference doc):
 /** Hook evidence older than this no longer decides working/idle (time-bounded authority). */
 export const HOOK_AUTHORITY_WINDOW_MS = 15_000;
+/** Sampling is refreshed once per second by default; old evidence must not be an oracle forever if polling stops. */
+export const SAMPLING_AUTHORITY_WINDOW_MS = 15_000;
 /** Persistent hook-vs-sampler contradiction beyond this window degrades the hook rung. */
 export const CROSS_RUNG_CONTRADICTION_WINDOW_MS = 10_000;
 /** Sampling-decided working→idle needs this many consecutive idle evaluations… */
