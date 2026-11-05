@@ -1086,7 +1086,7 @@ export class SeatLifecycleService {
       return { ok: false, code: "no_session", message: `Seat "${input.seatRef}" has no session to stop (checked: latest sessions row for node ${seat.logicalId}).` };
     }
     if (session.origin === "claimed") {
-      return {
+      return this.earlierHandoverRefusal(resolved.nodeId, session, "stop refuses to kill it") ?? {
         ok: false,
         code: "claimed_session",
         message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`,
@@ -1136,7 +1136,7 @@ export class SeatLifecycleService {
         if ("code" in resolved) return { ok: false, code: "selection_changed", message: "The selected seat changed." };
         const seat = this.describe(resolved);
         const session = this.latestSession(resolved.nodeId)!;
-        if (session.origin === "claimed") return { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`, guidance: "Release an adopted session with: rig unclaim" };
+        if (session.origin === "claimed") return this.earlierHandoverRefusal(resolved.nodeId, session, "stop refuses to kill it") ?? { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`, guidance: "Release an adopted session with: rig unclaim" };
         const probed = await this.probeLiveness(session.session_name, "stop refuses rather than kill blind");
         if ("code" in probed) return probed;
         const afterProbe = selection();
@@ -1179,7 +1179,7 @@ export class SeatLifecycleService {
     const mutationTargets = nonTerminal;
     for (const row of mutationTargets) {
       if (row.origin === "claimed") {
-        return {
+        return this.earlierHandoverRefusal(resolved.nodeId, row, "clean refuses to touch adopted state") ?? {
           ok: false,
           code: "claimed_session",
           message: `Session "${row.session_name}" was adopted (origin=claimed) — clean refuses to touch adopted state.`,
@@ -1871,8 +1871,9 @@ export class SeatLifecycleService {
       return { ok: false, code: "no_session", message: `Seat "${seatRef}" has no live managed session to restart (checked: latest sessions row).` };
     }
     if (session.origin === "claimed") {
-      return { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig; in-place restart refuses it.`,
-        guidance: "Release an adopted session with: rig unclaim" };
+      return this.earlierHandoverRefusal(node.id, session, "in-place restart refuses it")
+        ?? { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig; in-place restart refuses it.`,
+          guidance: "Release an adopted session with: rig unclaim" };
     }
     const probed = await this.probeLiveness(session.session_name, "in-place restart refuses rather than act on an unknown session");
     if ("code" in probed) return probed;
@@ -2261,6 +2262,24 @@ export class SeatLifecycleService {
       `SELECT id, session_name, status, origin, ${sessionCommunityHarnessSelect(this.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1`,
     ).get(nodeId) as LatestSessionRow | undefined;
     return row ?? null;
+  }
+
+  /** From 0.7.9 a fresh, fork or rebuild handover records its successor as launched (#2440); a successor from before
+   *  keeps origin=claimed. Name that case rather than suggest `rig unclaim`, which would end OpenRig's management. */
+  private earlierHandoverRefusal(nodeId: string, session: { id: string; session_name: string }, refuses: string): SeatRefusal | null {
+    if (this.latestSession(nodeId)?.id !== session.id) return null;
+    const handover = this.db.prepare(
+      "SELECT continuity_outcome, handover_at FROM nodes WHERE id = ? AND handover_result = 'complete' AND continuity_outcome IN ('fresh', 'forked', 'rebuilt')",
+    ).get(nodeId) as { continuity_outcome: string; handover_at: string | null } | undefined;
+    if (!handover) return null;
+    return {
+      ok: false,
+      code: "claimed_session",
+      message: `Session "${session.session_name}" is recorded as adopted (origin=claimed). The seat's last handover `
+        + `(${handover.continuity_outcome}${handover.handover_at ? ` at ${handover.handover_at}` : ""}) is one OpenRig launches, but a `
+        + `successor from before OpenRig 0.7.9 keeps the adopted origin — ${refuses}.`,
+      guidance: "It keeps that origin until its next launched handover or managed launch.",
+    };
   }
 
   private settingTargetLabel(target: SeatSettingTarget): string {

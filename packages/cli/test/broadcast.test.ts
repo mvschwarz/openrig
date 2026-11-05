@@ -70,6 +70,19 @@ describe("Broadcast CLI", () => {
                 { ok: false, sessionName: "c@notice-rig", error: "send failed", managedCompaction: { stage: "compacting", observed: "before_send", notice: "c@notice-rig was being compacted: /compact was submitted." } },
               ],
             }));
+          } else if (parsed.rig === "phase-rig") {
+            // #2507: a recipient whose input was attempted or written is recorded indeterminate, not failed.
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              total: 5, sent: 1, failed: 4,
+              results: [
+                { ok: true, sessionName: "a@phase-rig", inputPhase: "written", sent: true },
+                { ok: false, sessionName: "b@phase-rig", inputPhase: "not_reached", sent: false, error: "target_needs_input" },
+                { ok: false, sessionName: "c@phase-rig", inputPhase: "attempted", sent: false, error: "paste lost" },
+                { ok: false, sessionName: "d@phase-rig", inputPhase: "written", sent: false, error: "enter unconfirmed" },
+                { ok: false, sessionName: "e@phase-rig", sent: true, error: "receipt lost" },
+              ],
+            }));
           } else if (parsed.rig === "warn-rig") {
             // S2 (OPR.0.5.4.3): an unattributed broadcast's response carries the
             // sign-it notice as an additive warning; the renderer must surface it.
@@ -152,6 +165,22 @@ describe("Broadcast CLI", () => {
       "c@notice-rig: FAILED — send failed",
       "Notice: c@notice-rig was being compacted: /compact was submitted.",
       "2/3 delivered",
+    ]);
+    expect(exitCode).toBe(1);
+  });
+
+  it("broadcast prints UNCONFIRMED, not FAILED, for a recipient whose input was attempted or written; exit code unchanged", async () => {
+    const { stdout, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "phase-rig", "hello"]);
+    });
+    const check = "the text may have reached it, so check with rig capture before resending";
+    expect(stdout).toEqual([
+      "a@phase-rig: sent",
+      "b@phase-rig: FAILED — target_needs_input",
+      `c@phase-rig: UNCONFIRMED — paste lost; ${check}`,
+      `d@phase-rig: UNCONFIRMED — enter unconfirmed; ${check}`,
+      `e@phase-rig: UNCONFIRMED — receipt lost; ${check}`,
+      "1/5 delivered",
     ]);
     expect(exitCode).toBe(1);
   });
