@@ -31,7 +31,7 @@ async function scenario(mode: "shell" | "argv") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-exec-"));
   roots.push(root);
   // Exercise input arriving while a login shell is still starting, without relying on host profile timing.
-  fs.writeFileSync(path.join(root, ".profile"), "sleep 1\n");
+  fs.writeFileSync(path.join(root, ".profile"), "sleep 1\nPS1='openrig-ready> '\n");
   const serverDir = path.join(root, "server");
   const emptyDir = path.join(root, "empty");
   fs.mkdirSync(serverDir);
@@ -56,7 +56,7 @@ async function scenario(mode: "shell" | "argv") {
       let shellReady = false;
       for (let i = 0; i < 200; i++) {
         const screen = await adapter.capturePaneContent("seat a", 50);
-        if (screen && /(?:^|\n)[#$]$/.test(screen.trimEnd())) { shellReady = true; break; }
+        if (screen && /(?:^|\n)openrig-ready>$/.test(screen.trimEnd())) { shellReady = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       expect(shellReady, "fixture shell did not reach its prompt").toBe(true);
