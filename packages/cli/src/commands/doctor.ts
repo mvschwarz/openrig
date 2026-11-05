@@ -398,6 +398,12 @@ async function buildSpecConformanceCheck(deps: DoctorDeps): Promise<DoctorCheck>
   let liveIds: string[] | null;
   try { liveIds = deps.fetchLiveLogicalIds ? await deps.fetchLiveLogicalIds(rigName) : null; }
   catch (error) {
+    if (error instanceof AmbiguousLiveRigError) return {
+      name, status: "skipped",
+      message: `Multiple live rigs match '${rigName}': ${error.ids.join(", ")}; conformance unknown.`,
+      reason: "The spec name does not identify one live rig, so no topology was compared.",
+      fix: "Inspect the matching rig IDs in the rig ps --nodes -A --json output.",
+    };
     if (error instanceof ForeignLocalDaemonError) return { name, status: "fail", message: error.message };
     throw error;
   }
@@ -482,6 +488,10 @@ function readTmuxMouseMode(deps: DoctorDeps): "on" | "off" | null {
   }
 }
 
+class AmbiguousLiveRigError extends Error {
+  constructor(readonly ids: string[]) { super("Multiple live rigs share the spec name"); }
+}
+
 /** Raw topology reads retain their existing headers; the owner policy is shared with the client. */
 export async function readLiveLogicalIds(base: string, rigName: string, ownerClient = new DaemonClient(base)): Promise<string[] | null> {
   try {
@@ -489,7 +499,10 @@ export async function readLiveLogicalIds(base: string, rigName: string, ownerCli
     const rigsRes = await fetch(`${base}/api/rigs`);
     if (!rigsRes.ok) return null;
     const rigs = (await rigsRes.json()) as Array<{ id?: string; name?: string }>;
-    const rig = rigs.find((r) => r.name === rigName);
+    const matches = rigs.filter((r) => r.name === rigName);
+    if (matches.length > 1) throw new AmbiguousLiveRigError(matches.map(r => r.id ?? "(missing id)"));
+    if (matches.length === 0) return null;
+    const rig = matches[0];
     if (!rig?.id) return null;
     await ownerClient.assertLocalOwner();
     const nodesRes = await fetch(`${base}/api/rigs/${rig.id}/nodes`);
@@ -497,7 +510,7 @@ export async function readLiveLogicalIds(base: string, rigName: string, ownerCli
     const nodes = (await nodesRes.json()) as Array<{ logicalId?: string | null }>;
     return nodes.map((n) => n.logicalId ?? "");
   } catch (error) {
-    if (error instanceof ForeignLocalDaemonError) throw error;
+    if (error instanceof ForeignLocalDaemonError || error instanceof AmbiguousLiveRigError) throw error;
     return null;
   }
 }
