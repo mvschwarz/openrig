@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { configCommand } from "../src/commands/config.js";
+import { ENV_MAP, type ValidKey } from "../src/config-store.js";
 
 describe("issue #2528: config reset and set with active environment overrides", () => {
   let root: string;
@@ -12,12 +13,15 @@ describe("issue #2528: config reset and set with active environment overrides", 
 
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "opr-issue-2528-"));
-    savedEnv = {
-      OPENRIG_PORT: process.env["OPENRIG_PORT"],
-      OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS: process.env["OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS"],
-    };
-    delete process.env["OPENRIG_PORT"];
-    delete process.env["OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS"];
+    savedEnv = {};
+    for (const mapping of Object.values(ENV_MAP)) {
+      savedEnv[mapping.primary] = process.env[mapping.primary];
+      delete process.env[mapping.primary];
+      if (mapping.legacy) {
+        savedEnv[mapping.legacy] = process.env[mapping.legacy];
+        delete process.env[mapping.legacy];
+      }
+    }
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
