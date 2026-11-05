@@ -87,7 +87,7 @@ export class AgentActivityStore {
 
   /** Bound at ingress, then checked again here and at read. No event or oracle mutation. */
   observePermissionStop(input: { nodeId: string; sessionName: string; generation: string;
-    actor: unknown; at: unknown; command?: unknown; completed: boolean }): void {
+    actor: unknown; at: unknown; command?: unknown; ruleSuggestions?: unknown; completed: boolean }): void {
     try {
       const session = this._resolveSession({ nodeId: input.nodeId, sessionName: input.sessionName });
       if (!session || session.node_id !== input.nodeId || session.session_name !== input.sessionName || session.runtime !== "claude-code"

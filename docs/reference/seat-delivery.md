@@ -49,8 +49,44 @@ observation across actors, not an aggregate of pending prompts. `request_observe
 leaves the displayed actor's pending state unknown. `completed` applies only to
 that actor's later tool batch; other actors' pending state is still unknown. An
 unavailable observation proves neither a permission stop nor the absence of a
-waiting native prompt. The JSON field is `permission_stop`, and its `pending`
-value has the same observation-only scope.
+waiting native prompt. With no observation, human status omits this section;
+JSON keeps the explicit unavailable state. The JSON field is `permission_stop`,
+and its `pending` value has the same observation-only scope.
+
+An observation may also carry Claude's **suggested rules** as `suggested_rules`.
+These are read-only evidence, not applied or approved, not guaranteed effective,
+not the exact command, and not a complete list of dialog options. The supported
+subset of [Claude's permission update schema](https://code.claude.com/docs/en/hooks#permission-update-entries)
+is `addRules`, `replaceRules` and `removeRules`, preserving type, ordered rules
+(`toolName`, optional `ruleContent`), behavior and destination exactly. Strings
+are neither trimmed nor broadened; absent `ruleContent` remains distinct from
+an empty string. Mode/directory updates and malformed entries are withheld.
+
+The envelope distinguishes a missing native field from a present empty array;
+`unsupported` and `size_cut` mark incomplete evidence. An older relay without
+this field, or a failed formatter, is unavailable rather than proof of native
+absence. Bounds are eight entries, sixteen rules per entry, 128 UTF-16 code
+units per tool name, 2,048 per rule-content string, and 16,384 UTF-8 bytes of
+serialized evidence. Oversized whole entries are dropped with `size_cut`,
+never shortened into different plausible rules. Both producer and ingress
+validate these bounds independently. Terminal JSON escapes controls and
+nonprinting format/separator characters while preserving decoded string values;
+its representation can expand, so the byte bound applies to stored/transported
+evidence, not the entire formatted status output.
+
+**Suggested rule strings can contain sensitive values.** The relay sends only
+this bounded rule subset alongside the fixed descriptor. Rule content can itself
+contain sensitive command-like text; raw `tool_input`, arguments outside that
+suggestion, and provider reasons are not forwarded. It posts to `/api/activity/hooks` at the
+configured `OPENRIG_URL` (or host/port), or the discovered endpoint in
+`OPENRIG_HOME/activity-endpoint.json`. Both `GET /api/seat/status/:seatRef` and
+`GET /api/seat/status/node/:nodeId` can return the evidence. The daemon adds no
+event, log, queue or telemetry persistence for it; a caller can still capture
+status output in a transcript or file. Evidence shares the observation's
+five-minute lifetime and existing seat/actor limits, is discarded lazily on the
+next observation/status read after expiry, and is lost on restart. No rule,
+permission/configuration write, hook decision, edited input, prompt submission
+or new attention/delivery behavior is produced.
 
 Actor attribution is a convention derived from the [Claude hook schema](https://code.claude.com/docs/en/hooks#common-input-fields): an omitted or null `agent_id`
 is treated as main, a valid ID identifies a subagent or in-process teammate, and

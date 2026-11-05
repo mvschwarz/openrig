@@ -23,7 +23,8 @@ async function defaultReadStdin(): Promise<string> {
 interface SeatStatusResponse {
   permission_stop?: { state: "unavailable"; command: "unavailable"; origin: "unknown" }
     | { state: "request_observed" | "completed"; command: string; origin: "harness";
-        source: "PermissionRequest"; observed_at: string; actor: "main" | "subagent"; pending: "unknown" | false };
+        source: "PermissionRequest"; observed_at: string; actor: "main" | "subagent"; pending: "unknown" | false;
+        suggested_rules?: { state: "missing" | "present" | "unavailable"; entries: unknown[]; unsupported: boolean; size_cut: boolean } };
   seat_ref: string;
   rig_id: string;
   rig_name: string;
@@ -211,6 +212,13 @@ const LEVEL_WORDS: Record<string, string> = {
   "sends-only": "Deliberate sends from people and agents type; OpenRig's own notices are held.",
 };
 
+// JSON escapes C0; also escape C1, format/separator and default-ignorable characters.
+// Escaping the serialized representation leaves JSON.parse's rule strings unchanged.
+function terminalJson(value: unknown, space?: number): string {
+  return JSON.stringify(value, null, space).replace(/[\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu,
+    character => character.split("").map(unit => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""));
+}
+
 /** Show configured seat state, including selected account references, without claiming the running login is verified. */
 function printHuman(status: SeatStatusResponse): void {
   console.log(`Seat ${status.seat_ref}`);
@@ -252,7 +260,18 @@ function printHuman(status: SeatStatusResponse): void {
     console.log(stop.state === "completed" ? "  Displayed actor's tool batch completed; this observation is no longer pending."
       : "  Displayed actor's pending status: unknown (an observation does not establish a waiting prompt).");
     console.log("  Other actors' pending state: unknown (only the latest observation is shown).");
-  } else console.log("Permission observation unavailable; command unavailable; origin unknown; native pending status unknown.");
+    console.log("  Claude's suggested rules: read-only evidence; not applied or approved, effectiveness unknown.");
+    console.log("  These are neither the exact command nor a complete list of dialog options.");
+    const rules = stop.suggested_rules;
+    if (!rules || rules.state === "unavailable") console.log("  Suggested-rule evidence: unavailable.");
+    else if (rules.state === "missing") console.log("  Suggested-rule field: missing from the observed hook.");
+    else {
+      if (!rules.entries.length) console.log("  Supported suggested-rule entries: empty.");
+      for (const entry of rules.entries) console.log(`  ${terminalJson(entry)}`);
+    }
+    if (rules?.unsupported) console.log("  Unsupported or malformed suggested-rule evidence was withheld.");
+    if (rules?.size_cut) console.log("  Suggested-rule evidence is incomplete because of size bounds.");
+  }
   if (status.compaction) console.log(`Managed compaction (${status.compaction.stage}): ${status.compaction.detail}`);
   const reason = sessionReason(status.session_reason);
   if (reason) console.log(`Reason: ${reason}`);
@@ -560,7 +579,7 @@ Examples:
       const res = await client.get<SeatStatusResponse | SeatStatusError>(`/api/seat/status/${encodeURIComponent(seat)}`);
 
       if (opts.json) {
-        console.log(JSON.stringify(res.data, null, 2));
+        console.log(terminalJson(res.data, 2));
         if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
         return;
       }

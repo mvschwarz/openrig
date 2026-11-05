@@ -161,6 +161,54 @@ function buildPermissionStopDescriptor(input) {
   }
 }
 
+// Rule text is intentionally sensitive evidence, unlike the constant-only tool descriptor.
+// Bounds count UTF-16 code units per string and UTF-8 bytes of the serialized envelope.
+function buildPermissionRuleSuggestions(input) {
+  const unavailable = { state: "unavailable", entries: [], unsupported: false, size_cut: false };
+  try {
+    if (!isPlainObject(input)) return unavailable;
+    if (!Object.hasOwn(input, "permission_suggestions")) {
+      return { state: "missing", entries: [], unsupported: false, size_cut: false };
+    }
+    const evidence = { state: "present", entries: [], unsupported: false, size_cut: false };
+    const entries = input.permission_suggestions;
+    if (!Array.isArray(entries)) return { ...evidence, unsupported: true };
+    if (entries.length > 8) evidence.size_cut = true;
+    for (const entry of entries.slice(0, 8)) {
+      if (!isPlainObject(entry) || !["addRules", "replaceRules", "removeRules"].includes(entry.type)
+        || !["allow", "deny", "ask"].includes(entry.behavior)
+        || !["session", "localSettings", "projectSettings", "userSettings"].includes(entry.destination)
+        || !Array.isArray(entry.rules)
+        || Object.keys(entry).some(key => !["type", "rules", "behavior", "destination"].includes(key))) {
+        evidence.unsupported = true;
+        continue;
+      }
+      if (entry.rules.length > 16) { evidence.size_cut = true; continue; }
+      const rules = [];
+      let rejected = false;
+      for (const rule of entry.rules) {
+        if (!isPlainObject(rule) || typeof rule.toolName !== "string" || !rule.toolName.length
+          || Object.keys(rule).some(key => !["toolName", "ruleContent"].includes(key))
+          || (Object.hasOwn(rule, "ruleContent") && typeof rule.ruleContent !== "string")) {
+          evidence.unsupported = true; rejected = true; break;
+        }
+        if (rule.toolName.length > 128 || (Object.hasOwn(rule, "ruleContent") && rule.ruleContent.length > 2048)) {
+          evidence.size_cut = true; rejected = true; break;
+        }
+        rules.push({ toolName: rule.toolName,
+          ...(Object.hasOwn(rule, "ruleContent") ? { ruleContent: rule.ruleContent } : {}) });
+      }
+      if (rejected) continue;
+      const supported = { type: entry.type, rules, behavior: entry.behavior, destination: entry.destination };
+      if (Buffer.byteLength(JSON.stringify({ ...evidence, entries: [...evidence.entries, supported] }), "utf8") > 16384) {
+        evidence.size_cut = true; continue;
+      }
+      evidence.entries.push(supported);
+    }
+    return evidence;
+  } catch { return unavailable; }
+}
+
 module.exports = {
   MAX_DESCRIPTOR_LENGTH,
   MAX_COMMAND_INPUT_LENGTH,
@@ -169,4 +217,5 @@ module.exports = {
   BASH_EXECUTABLE_DESCRIPTORS,
   KNOWN_TOOL_DESCRIPTORS,
   buildPermissionStopDescriptor,
+  buildPermissionRuleSuggestions,
 };

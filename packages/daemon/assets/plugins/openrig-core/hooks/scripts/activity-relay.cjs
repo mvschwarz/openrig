@@ -67,14 +67,18 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
     // Passive observation only: discard all native tool data before transport. An absent/broken
     // sanitizer loses detail rather than affecting approval or the existing activity hooks.
     let descriptor = "Tool: details withheld";
+    let suggestions = { state: "unavailable", entries: [], unsupported: false, size_cut: false };
     try {
       descriptor = require("./permission-stop-descriptor.cjs").buildPermissionStopDescriptor(providerPayload);
     } catch { /* Withhold details. No provider decision is ever returned. */ }
+    try {
+      suggestions = require("./permission-stop-descriptor.cjs").buildPermissionRuleSuggestions(providerPayload);
+    } catch { /* Optional rule evidence is unavailable, not an approval or a native absence claim. */ }
     const actor = providerPayload.agent_id;
     return { sessionName, nodeId, runtime, generation, hookEvent,
       ...(actor == null ? { hookAgentId: null }
         : typeof actor === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(actor) ? { hookAgentId: actor } : {}),
-      permissionStopDescriptor: descriptor, occurredAt: now().toISOString(),
+      permissionStopDescriptor: descriptor, permissionRuleSuggestions: suggestions, occurredAt: now().toISOString(),
       relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed" };
   }
 

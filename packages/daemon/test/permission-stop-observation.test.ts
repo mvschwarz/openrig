@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { inspect } from "node:util";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
@@ -27,6 +28,93 @@ const {
 const databases: ReturnType<typeof createFullTestDb>[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); vi.restoreAllMocks(); });
 const unavailable = { state: "unavailable", command: "unavailable", origin: "unknown" };
+const suggestedEntry = { type: "replaceRules", rules: [{ toolName: "Bash", ruleContent: "  SYNTHETIC_RULE(*)\t " },
+  { toolName: "Read" }, { toolName: "Edit", ruleContent: "" }], behavior: "ask", destination: "projectSettings" };
+const suggestedEvidence = { state: "present", entries: [suggestedEntry], unsupported: false, size_cut: false };
+
+describe("independent suggested-rule ingress and memory", () => {
+  it("does not attach an older request's rules to a newer observation without rule evidence", () => {
+    let time = Date.parse("2026-11-05T01:00:00.000Z");
+    const observations = new PermissionStopObservations(() => new Date(time));
+    const identity = { nodeId: "node", generation: "generation", actor: null };
+    observations.observe({ ...identity, at: new Date(time).toISOString(), command: "Tool: Read",
+      ruleSuggestions: suggestedEvidence, completed: false });
+    expect(observations.read(identity.nodeId, identity.generation)).toMatchObject({ suggested_rules: suggestedEvidence });
+    time += 10;
+    const at = new Date(time).toISOString();
+    observations.observe({ ...identity, at, command: "Tool: Write", completed: false });
+    expect(observations.read(identity.nodeId, identity.generation)).toEqual({
+      state: "request_observed", command: "Tool: Write", origin: "harness", source: "PermissionRequest",
+      observed_at: at, actor: "main", pending: "unknown",
+    });
+  });
+
+  it("drops expired sensitive rules even while a newer completion watermark remains", () => {
+    let time = Date.parse("2026-11-05T01:00:00.000Z");
+    const observations = new PermissionStopObservations(() => new Date(time));
+    const identity = { nodeId: "node", generation: "generation", actor: null };
+    observations.observe({ ...identity, at: new Date(time).toISOString(), command: "Tool: Read",
+      ruleSuggestions: suggestedEvidence, completed: false });
+    // Positive control: inspect can see the retained sensitive evidence, not an empty Map serialization.
+    expect(inspect(observations, { depth: null })).toContain("SYNTHETIC_RULE");
+    time += 299_999;
+    observations.observe({ ...identity, at: new Date(time).toISOString(), completed: true });
+    time += 1;
+    expect(observations.read(identity.nodeId, identity.generation)).toEqual(unavailable);
+    expect(inspect(observations, { depth: null })).not.toContain("SYNTHETIC_RULE");
+  });
+
+  it("clones both input and returned evidence instead of retaining caller-owned objects", () => {
+    const at = "2026-11-05T01:00:00.000Z";
+    const observations = new PermissionStopObservations(() => new Date(at));
+    const input = structuredClone(suggestedEvidence);
+    observations.observe({ nodeId: "node", generation: "generation", actor: null, at,
+      command: "Tool: Read", ruleSuggestions: input, completed: false });
+    input.entries[0]!.rules[0]!.ruleContent = "MUTATED";
+    const read = observations.read("node", "generation");
+    expect(read).toMatchObject({ suggested_rules: suggestedEvidence });
+    if (read.state === "unavailable") throw new Error("expected an observed request");
+    read.suggested_rules!.entries[0]!.rules[0]!.ruleContent = "CHANGED_RESPONSE";
+    expect(observations.read("node", "generation")).toMatchObject({ suggested_rules: suggestedEvidence });
+  });
+
+  it.each([
+    { entry: { ...suggestedEntry, type: "setMode", mode: "auto" }, unsupported: true, size_cut: false },
+    { entry: { ...suggestedEntry, destination: "unknown" }, unsupported: true, size_cut: false },
+    { entry: { ...suggestedEntry, rules: [{ toolName: "Bash", ruleContent: null }] }, unsupported: true, size_cut: false },
+    { entry: { ...suggestedEntry, rules: [{ toolName: "x".repeat(129) }] }, unsupported: false, size_cut: true },
+    { entry: { ...suggestedEntry, rules: [{ toolName: "Bash", ruleContent: "x".repeat(2049) }] }, unsupported: false, size_cut: true },
+    { entry: { ...suggestedEntry, rules: Array(17).fill({ toolName: "Read" }) }, unsupported: false, size_cut: true },
+  ])("does not trust a producer's complete/supported claim (case %#)", ({ entry, unsupported, size_cut }) => {
+    const at = "2026-11-05T01:00:00.000Z";
+    const observations = new PermissionStopObservations(() => new Date(at));
+    observations.observe({ nodeId: "node", generation: "generation", actor: null, at, command: "Tool: Read", completed: false,
+      ruleSuggestions: { state: "present", entries: [entry], unsupported: false, size_cut: false } });
+    expect(observations.read("node", "generation")).toMatchObject({
+      suggested_rules: { state: "present", entries: [], unsupported, size_cut },
+    });
+  });
+
+  it("independently bounds collection length/UTF-8 output and rejects contradictory missing labels", () => {
+    const at = "2026-11-05T01:00:00.000Z";
+    for (const entries of [Array(9).fill(suggestedEntry),
+      Array(8).fill({ ...suggestedEntry, rules: [{ toolName: "Bash", ruleContent: "é".repeat(2048) }] })]) {
+      const observations = new PermissionStopObservations(() => new Date(at));
+      observations.observe({ nodeId: "node", generation: "generation", actor: null, at, command: "Tool: Read", completed: false,
+        ruleSuggestions: { state: "present", entries, unsupported: false, size_cut: false } });
+      const read = observations.read("node", "generation");
+      expect(read).toMatchObject({ suggested_rules: { state: "present", size_cut: true, unsupported: false } });
+      if (read.state === "unavailable") throw new Error("expected an observed request");
+      expect(Buffer.byteLength(JSON.stringify(read.suggested_rules), "utf8")).toBeLessThanOrEqual(16384);
+    }
+    const observations = new PermissionStopObservations(() => new Date(at));
+    observations.observe({ nodeId: "node", generation: "generation", actor: null, at, command: "Tool: Read", completed: false,
+      ruleSuggestions: { ...suggestedEvidence, state: "missing" } });
+    expect(observations.read("node", "generation")).toMatchObject({
+      suggested_rules: { state: "unavailable", entries: [], unsupported: true, size_cut: false },
+    });
+  });
+});
 
 describe("permission observation producer compatibility", () => {
   it.each([
@@ -131,6 +219,7 @@ describe("passive permission observation through relay, ingress and seat status"
     const wire = relay.buildOpenRigPayload(native, f.env, f.now);
     expect(wire).toEqual({ sessionName: f.sessionName, nodeId: f.node.id, runtime: "claude-code", generation: f.generation,
       hookEvent: "PermissionRequest", hookAgentId: null, permissionStopDescriptor: "Bash: git [arguments hidden]",
+      permissionRuleSuggestions: { state: "present", entries: [], unsupported: true, size_cut: false },
       occurredAt: f.now().toISOString(), relayRoute: "managed" });
     expect(JSON.stringify(native)).toBe(before);
     const changes = f.db.prepare("SELECT total_changes() AS count").get();
@@ -138,7 +227,8 @@ describe("passive permission observation through relay, ingress and seat status"
     expect(result).toEqual({ ok: true }); // No decision, updatedInput, updatedPermissions or provider output.
     const report = await f.status();
     expect(report.permission_stop).toEqual({ state: "request_observed", command: "Bash: git [arguments hidden]",
-      origin: "harness", source: "PermissionRequest", observed_at: f.now().toISOString(), actor: "main", pending: "unknown" });
+      origin: "harness", source: "PermissionRequest", observed_at: f.now().toISOString(), actor: "main", pending: "unknown",
+      suggested_rules: { state: "present", entries: [], unsupported: true, size_cut: false } });
     expect(f.oracle.getSeatState(f.node.id)).toBeNull();
     expect(f.store.getLatestForNode({ nodeId: f.node.id })).toBeNull();
     expect(f.db.prepare("SELECT total_changes() AS count").get()).toEqual(changes);
@@ -153,6 +243,70 @@ describe("passive permission observation through relay, ingress and seat status"
       expect(f.db.prepare("SELECT count(*) AS count FROM events").get()).toEqual({ count: 0 });
     },
   );
+
+  it("carries supported suggestions through both status routes without persistence, attention or decisions", async () => {
+    const f = fixture();
+    const native = { hook_event_name: "PermissionRequest", tool_name: "Read", permission_suggestions: [suggestedEntry],
+      tool_input: { file_path: "SYNTHETIC_SECRET" }, reason: "SYNTHETIC_SECRET" };
+    const wire = relay.buildOpenRigPayload(native, f.env, f.now);
+    expect(wire.permissionRuleSuggestions).toEqual(suggestedEvidence);
+    expect(JSON.stringify(wire)).not.toContain("SYNTHETIC_SECRET");
+    const before = f.db.prepare("SELECT total_changes() AS count").get();
+    expect(await f.post("PermissionRequest", wire)).toEqual({ ok: true });
+    const bySeat = await f.status();
+    const response = await f.app.request(`/seat/status/node/${f.node.id}`);
+    expect(response.status).toBe(200);
+    const byNode = await response.json();
+    expect(bySeat.permission_stop).toMatchObject({ state: "request_observed", suggested_rules: suggestedEvidence });
+    expect(byNode.permission_stop).toEqual(bySeat.permission_stop);
+    expect(f.db.prepare("SELECT total_changes() AS count").get()).toEqual(before);
+    expect(JSON.stringify(f.db.prepare("SELECT payload FROM events").all())).not.toContain("SYNTHETIC_RULE");
+    expect(f.store.getLatestForNode({ nodeId: f.node.id })).toBeNull();
+    expect(f.oracle.getSeatState(f.node.id)).toBeNull();
+  });
+
+  it.each([
+    [undefined, { state: "missing", entries: [], unsupported: false, size_cut: false }],
+    [[], { state: "present", entries: [], unsupported: false, size_cut: false }],
+    [[{ type: "setMode", mode: "auto", destination: "session" }], { state: "present", entries: [], unsupported: true, size_cut: false }],
+    [[{ ...suggestedEntry, rules: [{ toolName: "Bash", ruleContent: "x".repeat(2049) }] }],
+      { state: "present", entries: [], unsupported: false, size_cut: true }],
+  ])("carries missing/empty/unsupported/size-cut indicators end to end (case %#)", async (suggestions, expected) => {
+    const f = fixture();
+    const wire = relay.buildOpenRigPayload({ hook_event_name: "PermissionRequest", tool_name: "Read",
+      ...(suggestions === undefined ? {} : { permission_suggestions: suggestions }) }, f.env, f.now);
+    expect(wire.permissionRuleSuggestions).toEqual(expected);
+    expect(await f.post("PermissionRequest", wire)).toEqual({ ok: true });
+    expect((await f.status()).permission_stop).toMatchObject({ state: "request_observed", suggested_rules: expected });
+    expect(f.db.prepare("SELECT count(*) AS count FROM events").get()).toEqual({ count: 0 });
+  });
+
+  it("treats a malformed envelope as unavailable without rejecting an otherwise valid descriptor", async () => {
+    const f = fixture();
+    expect(await f.post("PermissionRequest", { permissionStopDescriptor: "Tool: Read", permissionRuleSuggestions: null })).toEqual({ ok: true });
+    expect((await f.status()).permission_stop).toMatchObject({ state: "request_observed", command: "Tool: Read",
+      suggested_rules: { state: "unavailable", entries: [], unsupported: true, size_cut: false } });
+    expect(f.db.prepare("SELECT count(*) AS count FROM events").get()).toEqual({ count: 0 });
+  });
+
+  it.each([
+    { runtime: "codex", permissionRuleSuggestions: suggestedEvidence },
+    { runtime: "pi", permissionRuleSuggestions: suggestedEvidence },
+    { permissionRuleSuggestions: suggestedEvidence },
+    { permissionStopDescriptor: null, permissionRuleSuggestions: suggestedEvidence },
+    { permissionStopDescriptor: "invalid", permissionRuleSuggestions: suggestedEvidence },
+    { hookEvent: "Notification", permissionRuleSuggestions: suggestedEvidence },
+    { eventFamily: "session_identity", permissionRuleSuggestions: suggestedEvidence },
+    { permission_suggestions: [suggestedEntry] },
+  ])("does not persist malformed, descriptor-missing or unsupported-runtime diagnostics (case %#)", async extra => {
+    const f = fixture();
+    const before = f.db.prepare("SELECT total_changes() AS count").get();
+    expect(await f.post("PermissionRequest", extra)).toEqual({ ok: true });
+    expect((await f.status()).permission_stop).toEqual(unavailable);
+    expect(f.db.prepare("SELECT total_changes() AS count").get()).toEqual(before);
+    expect(f.store.getLatestForNode({ nodeId: f.node.id })).toBeNull();
+    expect(f.oracle.getSeatState(f.node.id)).toBeNull();
+  });
 
   it("settles only the matching actor without joining same-tool observations", async () => {
     const f = fixture();
@@ -236,14 +390,16 @@ describe("passive permission observation through relay, ingress and seat status"
 
   it("expires and drops old-generation, retired and exited observations", async () => {
     const f = fixture();
-    await f.post("PermissionRequest", { permissionStopDescriptor: "Tool: Read" });
+    const evidence = { permissionStopDescriptor: "Tool: Read", permissionRuleSuggestions: suggestedEvidence };
+    await f.post("PermissionRequest", evidence);
+    expect((await f.status()).permission_stop).toMatchObject({ suggested_rules: suggestedEvidence });
     f.tick(300_000);
     expect((await f.status()).permission_stop).toEqual(unavailable);
-    await f.post("PermissionRequest", { permissionStopDescriptor: "Tool: Read" });
+    await f.post("PermissionRequest", evidence);
     f.registry.mintOccupantTenure(f.node.id, "handover");
     expect((await f.status()).permission_stop).toEqual(unavailable);
     const generation = f.registry.currentOccupantTenure(f.node.id)!.generationUuid;
-    await f.post("PermissionRequest", { permissionStopDescriptor: "Tool: Read", generation });
+    await f.post("PermissionRequest", { ...evidence, generation });
     expect((await f.status()).permission_stop).toMatchObject({ state: "request_observed" });
     f.db.prepare("UPDATE nodes SET occupant_lifecycle = 'retired' WHERE id = ?").run(f.node.id);
     expect((await f.status()).permission_stop).toEqual(unavailable);
@@ -255,7 +411,7 @@ describe("passive permission observation through relay, ingress and seat status"
 
   it("loses diagnostic evidence honestly on restart without storing raw native payloads", async () => {
     const f = fixture();
-    await f.post("PermissionRequest", { permissionStopDescriptor: "Tool: Read" });
+    await f.post("PermissionRequest", { permissionStopDescriptor: "Tool: Read", permissionRuleSuggestions: suggestedEvidence });
     const restarted = new AgentActivityStore({ db: f.db, eventBus: new EventBus(f.db), now: f.now,
       resolveOccupantGeneration: id => f.registry.currentOccupantTenure(id)?.generationUuid ?? null,
       isRegisteredOccupantGeneration: (id, generation) => f.registry.isOccupantGenerationRegistered(id, generation) });

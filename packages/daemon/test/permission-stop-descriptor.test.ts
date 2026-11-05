@@ -2,14 +2,75 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { buildPermissionStopDescriptor: describeStop } = require(
+const { buildPermissionStopDescriptor: describeStop, buildPermissionRuleSuggestions: describeRules } = require(
   "../assets/plugins/openrig-core/hooks/scripts/permission-stop-descriptor.cjs",
-) as { buildPermissionStopDescriptor: (input: unknown) => string };
+) as { buildPermissionStopDescriptor: (input: unknown) => string;
+  buildPermissionRuleSuggestions: (input: unknown) => { state: string; entries: unknown[]; unsupported: boolean; size_cut: boolean } };
 
 const tools = ["git", "npm", "node", "python3", "ls", "pwd", "cat", "sed", "find", "echo", "printf"];
 const generic = "Tool: details withheld";
 const shell = "Bash: details withheld";
 const bash = (command: unknown) => ({ tool_name: "Bash", tool_input: { command } });
+
+describe("read-only Claude suggested rule evidence", () => {
+  it.each([
+    ["addRules", "allow", "session"], ["replaceRules", "deny", "localSettings"],
+    ["removeRules", "ask", "projectSettings"], ["addRules", "allow", "userSettings"],
+  ])("preserves %s/%s/%s and ordered optional rule content as given", (type, behavior, destination) => {
+    const entry = { type, rules: [{ toolName: "Bash", ruleContent: "  SYNTHETIC_RULE(*)\t " },
+      { toolName: "Read" }, { toolName: "Edit", ruleContent: "" }], behavior, destination };
+    const input = { permission_suggestions: [entry], tool_input: { command: "SYNTHETIC_SECRET" }, reason: "SYNTHETIC_SECRET" };
+    const before = JSON.stringify(input);
+    expect(describeRules(input)).toEqual({ state: "present", entries: [entry], unsupported: false, size_cut: false });
+    expect(JSON.stringify(input)).toBe(before);
+    expect(JSON.stringify(describeRules(input))).not.toContain("SYNTHETIC_SECRET");
+  });
+
+  it("distinguishes missing from present-empty suggestions", () => {
+    expect(describeRules({})).toEqual({ state: "missing", entries: [], unsupported: false, size_cut: false });
+    expect(describeRules({ permission_suggestions: [] })).toEqual({ state: "present", entries: [], unsupported: false, size_cut: false });
+    expect(describeRules({ permission_suggestions: null })).toEqual({ state: "present", entries: [], unsupported: true, size_cut: false });
+  });
+
+  it.each([
+    { type: "setMode", mode: "auto", destination: "session" },
+    { type: "addDirectories", directories: ["SYNTHETIC_PATH"], destination: "session" },
+    { type: "removeDirectories", directories: [], destination: "session" },
+    { type: "futureUpdate" }, { type: "addRules", rules: [], behavior: "allow" },
+    { type: "addRules", rules: [{ toolName: "Bash", ruleContent: null }], behavior: "allow", destination: "session" },
+    { type: "addRules", rules: [], behavior: "allow", destination: "session", unknown: "SYNTHETIC_SECRET" },
+  ])("marks unsupported/malformed entries without inventing a supported rule (case %#)", entry => {
+    expect(describeRules({ permission_suggestions: [entry] })).toEqual({
+      state: "present", entries: [], unsupported: true, size_cut: false,
+    });
+  });
+
+  it.each([
+    { rules: [{ toolName: "x".repeat(129) }] },
+    { rules: [{ toolName: "Bash", ruleContent: "x".repeat(2049) }] },
+    { rules: Array.from({ length: 17 }, () => ({ toolName: "Read" })) },
+  ])("drops an entire oversized entry rather than truncating it into a rule (case %#)", extra => {
+    const entry = { type: "replaceRules", behavior: "deny", destination: "projectSettings", ...extra };
+    expect(describeRules({ permission_suggestions: [entry] })).toEqual({
+      state: "present", entries: [], unsupported: false, size_cut: true,
+    });
+  });
+
+  it("bounds entries and serialized UTF-8 bytes while preserving retained strings", () => {
+    const entry = { type: "addRules", rules: [{ toolName: "Bash" }], behavior: "ask", destination: "session" };
+    expect(describeRules({ permission_suggestions: Array(9).fill(entry) })).toEqual({
+      state: "present", entries: Array(8).fill(entry), unsupported: false, size_cut: true,
+    });
+    const large = { ...entry, rules: [{ toolName: "Bash", ruleContent: "é".repeat(2048) }] };
+    const bounded = describeRules({ permission_suggestions: Array(8).fill(large) });
+    expect(bounded.size_cut).toBe(true);
+    expect(bounded.unsupported).toBe(false);
+    expect(bounded.entries.length).toBeGreaterThan(0);
+    expect(bounded.entries.length).toBeLessThan(8);
+    expect(bounded.entries.every(item => JSON.stringify(item) === JSON.stringify(large))).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(bounded), "utf8")).toBeLessThanOrEqual(16384);
+  });
+});
 
 describe("permission stop descriptor privacy boundary", () => {
   it("rejects the whole oversized command rather than accepting its allowed prefix", () => {
