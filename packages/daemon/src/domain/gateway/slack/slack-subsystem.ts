@@ -1213,6 +1213,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // Durable inbound custody across event, click and relay files, even when inert.
       // Count records, not distinct messages; unreadable storage is null/unknown.
       ...deadLetterBacklogFields(dead, deadActions, deadForwards),
+      relayAttemptsInFlight: router?.getRelayAttemptsInFlight() ?? 0,
       // A machine with no connection of its own can take events a hub relays here; whether a hub does is
       // the hub's configuration, so this says only that it can, and how many have arrived.
       ...(router && !inboundReady ? { relayedInbound: { accepting: true, received: relayedReceived } } : {}),
