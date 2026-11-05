@@ -1551,7 +1551,7 @@ export class ConfigStore {
       const critical = getNestedValue(fileConfig, KEY_TO_PATH["health.context_pressure.critical_percent"])
         ?? getDefaultValue("health.context_pressure.critical_percent", workspaceRoot);
       if ((warning as number) >= (critical as number)) {
-        throw new Error(`Invalid context-pressure policy in the saved configuration: warning (${warning}) must be less than critical (${critical}). Unset file values use defaults; environment overrides apply when each process resolves configuration and are not part of this check.`);
+        throw new Error(`Invalid context-pressure policy for the config-file pair: warning (${warning}) must be less than critical (${critical}). Unset file values use defaults; environment overrides apply when each process resolves configuration and are not part of this check.`);
       }
     }
     mkdirSync(dirname(this.configPath), { recursive: true });
@@ -1603,7 +1603,7 @@ export class ConfigStore {
         const critical = getNestedValue(fileConfig, KEY_TO_PATH["health.context_pressure.critical_percent"])
           ?? getDefaultValue("health.context_pressure.critical_percent", workspaceRoot);
         if ((warning as number) >= (critical as number)) {
-          throw new Error(`Invalid context-pressure policy in the saved configuration: warning (${warning}) must be less than critical (${critical}). Unset file values use defaults; environment overrides apply when each process resolves configuration and are not part of this check.`);
+          throw new Error(`Invalid context-pressure policy for the config-file pair: warning (${warning}) must be less than critical (${critical}). Unset file values use defaults; environment overrides apply when each process resolves configuration and are not part of this check.`);
         }
       }
       pruneEmptyAncestors(fileConfig, parentParts);
