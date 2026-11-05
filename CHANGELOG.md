@@ -62,8 +62,8 @@ release testing: see [the OpenShell worker](#the-openshell-worker-hasnt-run-end-
   the option the agent got with its kind, and the conversation and request or
   the ask. Read the records with `rig stream list --tag runner-permission-permit`,
   or `--source <seat>`. A record has no destination, and one that can't be
-  written doesn't change the permit; with stream intake on, it also reaches the
-  queue worker's intake row, like any stream item. ([#2361](https://github.com/mvschwarz/openrig/pull/2361))
+  written doesn't change the permit. Stream intake reads past it, so it opens no
+  intake row and wakes no one. ([#2361](https://github.com/mvschwarz/openrig/pull/2361), [#2563](https://github.com/mvschwarz/openrig/pull/2563))
 - **A working beat keeps a long, quiet turn reading working.** A runner may post
   `active` / `liveness` while a prompt is outstanding and its agent is alive
   (section 4); one that sends no beats behaves as before. The Pi runner and the

@@ -68,8 +68,8 @@ runner.
   recorded once, as a stream item from the seat, naming the tool call, why no
   person answered and the option given. Read them with
   `rig stream list --tag runner-permission-permit` or `--source <seat>`. A record
-  has no destination and never changes the permit; with stream intake on, it also
-  reaches the queue worker's intake row, like any stream item.
+  has no destination and never changes the permit. Stream intake reads past it, so
+  it opens no intake row and wakes no one.
 - **The working beat:** while a prompt is outstanding and the agent is alive, a
   runner may post `active` / `liveness` so a long call keeps reading working.
   After delivering an answer or permit, it posts `active` /
