@@ -542,7 +542,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
             const base = `http://${formatDaemonHostForUrl(cfg.daemon.host ?? "127.0.0.1")}:${cfg.daemon.port ?? DEFAULT_PORT}`;
             return await readLiveLogicalIds(base, rigName);
           } catch (error) {
-            if (error instanceof ForeignLocalDaemonError) throw error;
+            if (error instanceof ForeignLocalDaemonError || error instanceof AmbiguousLiveRigError) throw error;
             return null;
           }
         },
