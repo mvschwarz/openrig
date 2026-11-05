@@ -402,7 +402,7 @@ async function buildSpecConformanceCheck(deps: DoctorDeps): Promise<DoctorCheck>
       name, status: "skipped",
       message: `Multiple live rigs match '${rigName}': ${error.ids.join(", ")}; conformance unknown.`,
       reason: "The spec name does not identify one live rig, so no topology was compared.",
-      fix: "Inspect the matching rig IDs in the rig ps --nodes -A --json output.",
+      fix: "Inspect the matching rig IDs with rig ps --json; use rig ps --nodes -A --json to inspect nodes.",
     };
     if (error instanceof ForeignLocalDaemonError) return { name, status: "fail", message: error.message };
     throw error;

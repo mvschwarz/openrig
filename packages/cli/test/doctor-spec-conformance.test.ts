@@ -63,6 +63,7 @@ describe("rig doctor — spec vs live conformance", () => {
         fetchLiveLogicalIds: name => readLiveLogicalIds("http://fixture", name, owner as never) }));
       expect(check!.status).toBe("skipped");
       expect(check!.message).toContain("first, second");
+      expect(check!.fix).toContain("rig ps --json");
       expect(fetch).toHaveBeenCalledTimes(1);
     } finally { vi.unstubAllGlobals(); }
   });
