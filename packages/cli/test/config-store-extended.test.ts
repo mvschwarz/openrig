@@ -388,6 +388,37 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(store.resolve().health.contextPressure).toEqual({ warningPercent: 95, criticalPercent: 99 });
   });
 
+  it("explains that saved context-pressure pair validation excludes environment overrides", () => {
+    const store = new ConfigStore(configPath);
+    process.env.OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT = "50";
+    expect(() => store.set("health.context_pressure.critical_percent", "80"))
+      .toThrow(/config-file pair: warning \(95\).*critical \(80\).*each process resolves configuration/);
+    expect(existsSync(configPath)).toBe(false);
+    store.set("health.context_pressure.critical_percent", "100");
+    store.set("health.context_pressure.warning_percent", "99");
+    const before = readFileSync(configPath, "utf8");
+    expect(() => store.reset("health.context_pressure.critical_percent"))
+      .toThrow(/config-file pair: warning \(99\).*critical \(99\).*each process resolves configuration/);
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
+  it("shows the file-pair explanation through the config command", async () => {
+    process.env.OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT = "50";
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const oldExitCode = process.exitCode;
+    try {
+      process.exitCode = undefined;
+      await configCommand(configPath, { probeDaemonRunning: async () => false })
+        .parseAsync(["node", "rig", "set", "health.context_pressure.critical_percent", "80"]);
+      expect(process.exitCode).toBe(1);
+      expect(error.mock.calls.flat().join(" ")).toContain("config-file pair: warning (95)");
+      expect(existsSync(configPath)).toBe(false);
+    } finally {
+      error.mockRestore();
+      process.exitCode = oldExitCode;
+    }
+  });
+
   it("S01 wake ladder exposes retry cadence, cap, unconfirmed window, and swap grace defaults", () => {
     const store = new ConfigStore(configPath);
     expect(store.resolveWithSource("queue.wake_retry_interval_seconds" as never)).toMatchObject({
