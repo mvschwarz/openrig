@@ -22,3 +22,12 @@ describe("light ink reads on light and dark terminals", () => {
     expect(createStyle("none").paint("bright", "intent")).toBe("intent");
   });
 });
+
+// Found in #2499's review: a 16-colour background is the token's colour code plus 10, so each token used as a
+// background must store a colour code (30-37, 90-97) for the band to show at all.
+describe("16-colour backgrounds", () => {
+  it.each(["selection", "markBg", "clawd", "accent"] as const)("paints a real background code for %s", (bg) => {
+    const code = Number(/^\x1b\[([0-9;]+)m/.exec(createStyle("16").paint("bright", "x", { bg }))![1]!.split(";").at(-1));
+    expect((code >= 40 && code <= 47) || (code >= 100 && code <= 107), `background SGR ${code}`).toBe(true);
+  });
+});
