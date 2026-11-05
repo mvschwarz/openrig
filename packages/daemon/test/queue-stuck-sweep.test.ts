@@ -2077,15 +2077,20 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
   const BETA = human("human-beta");
   // A registered human whose id has no human- prefix: its canonical alias (owner@kernel) cannot carry an intent.
   const PLAIN = human("owner");
+  // Feed-only correspondence owes no Slack post; a missing delivery must not obscure the unclaimed net.
+  const READER: HumanFragment = { entityId: "human-reader", class: "human", displayName: "Reader",
+    address: "human-reader@external", connectorBindings: [], prefs: {} };
   let db: Database.Database;
   let repo: QueueRepository;
+  let registeredHumans: HumanFragment[];
 
   beforeEach(() => {
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
+    registeredHumans = [OWNER, ALPHA, BETA, PLAIN, READER];
     repo = new QueueRepository(db, new EventBus(db), {
       validateRig: () => true,
-      loadHumanRegistry: () => ({ ok: true as const, entities: [OWNER, ALPHA, BETA, PLAIN] }),
+      loadHumanRegistry: () => ({ ok: true as const, entities: registeredHumans }),
       transport: { send: async () => ({ ok: true, verified: true }) },
     });
   });
@@ -2243,6 +2248,82 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
 
   const unclaimedFinding = async (qitemId: string) => (await findingsFor(qitemId))
     .filter((f) => (f.tags ?? []).includes(`stuck-sweep:unclaimed-obligation:${qitemId}`));
+
+  it("keeps an aged informational update readable for its registered human without creating recovery work", async () => {
+    const row = await repo.create({ sourceSession: "asker@r", destinationSession: READER.address,
+      body: "The requested build finished. No action or decision is needed.", summary: "Build finished",
+      evidenceRef: "https://example.test/build", humanIntent: "update", nudge: false });
+    age(row.qitemId);
+    const before = repo.getById(row.qitemId)!;
+    // This person uses the Feed, so there is no missing Slack delivery to recover.
+    expect(repo.deliveryOutcomeFor(row.qitemId)).toBeNull();
+    const result = await sweep();
+    expect(result.outcome, result.error).not.toBe("failed");
+    expect(repo.getById(row.qitemId)).toEqual(before);
+    expect(repo.list({ destinationSession: READER.address }).find((item) => item.qitemId === row.qitemId))
+      .toMatchObject({ body: row.body, state: "pending", humanIntent: "update" });
+    expect(await findingsFor(row.qitemId)).toEqual([]);
+  });
+
+  it.each(["decision", undefined] as const)("keeps an unclaimed human request eligible with intent %s", async (humanIntent) => {
+    const row = await repo.create({ sourceSession: "asker@r", destinationSession: READER.address,
+      body: "Choose option A or B.", summary: "A or B?", evidenceRef: "https://example.test/decision",
+      humanIntent, humanAlert: true, nudge: false });
+    age(row.qitemId);
+    const before = repo.getById(row.qitemId)!;
+    const result = await sweep();
+    expect(result.outcome, result.error).not.toBe("failed");
+    expect(await findingsFor(row.qitemId)).toEqual([expect.objectContaining({ destinationSession: READER.address,
+      tags: expect.arrayContaining([`stuck-sweep:unclaimed-obligation:${row.qitemId}`]) })]);
+    expect(repo.getById(row.qitemId)).toEqual(before);
+  });
+
+  it.each([false, true])("keeps an agent obligation eligible (rerouted informational intent: %s)", async (rerouted) => {
+    const row = rerouted
+      ? await repo.create({ sourceSession: "asker@r", destinationSession: READER.address, body: "Build status",
+        summary: "Build status", evidenceRef: "https://example.test/build", humanIntent: "update", nudge: false })
+      : await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "Review the build", nudge: false });
+    // Direct creates reject humanIntent on agents. Exercise the supported reroute that retains the original intent.
+    if (rerouted) repo.routeToFallback(row.qitemId, "worker@r", "Agent follow-up required");
+    age(row.qitemId);
+    const before = repo.getById(row.qitemId)!;
+    expect(before).toMatchObject({ destinationSession: "worker@r", humanIntent: rerouted ? "update" : null });
+    const result = await sweep();
+    expect(result.outcome, result.error).not.toBe("failed");
+    expect(await findingsFor(row.qitemId)).toEqual([expect.objectContaining({ destinationSession: "worker@r",
+      tags: expect.arrayContaining([`stuck-sweep:unclaimed-obligation:${row.qitemId}`]) })]);
+    expect(repo.getById(row.qitemId)).toEqual(before);
+  });
+
+  it("does not exempt an update merely because its former human address still looks human", async () => {
+    const row = await repo.create({ sourceSession: "asker@r", destinationSession: READER.address, body: "Build status",
+      summary: "Build status", evidenceRef: "https://example.test/build", humanIntent: "update", nudge: false });
+    registeredHumans = registeredHumans.filter((person) => person.entityId !== READER.entityId);
+    age(row.qitemId);
+    const before = repo.getById(row.qitemId)!;
+    const result = await sweep();
+    expect(result.outcome, result.error).not.toBe("failed");
+    expect(await findingsFor(row.qitemId)).toEqual([expect.objectContaining({ destinationSession: READER.address,
+      tags: expect.arrayContaining([`stuck-sweep:unclaimed-obligation:${row.qitemId}`]) })]);
+    expect(repo.getById(row.qitemId)).toEqual(before);
+  });
+
+  it("still reports a failed informational human notice to its asking agent", async () => {
+    const row = await repo.create({ sourceSession: "asker@r", destinationSession: OWNER.address, body: "Build status",
+      summary: "Build status", evidenceRef: "https://example.test/build", humanIntent: "update", nudge: false });
+    await repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-transport-failed notification_key=${currentKey(row.qitemId)} level=NOTICE detail=fixture-http-500` });
+    // Five minutes exercises delivery recovery without introducing the sixty-minute unclaimed condition.
+    age(row.qitemId, 5);
+    expect(repo.deliveryOutcomeFor(row.qitemId)?.outcome).toBe("transport-failed");
+    const before = repo.getById(row.qitemId)!;
+    const result = await sweep();
+    expect(result.outcome, result.error).not.toBe("failed");
+    expect(await findingsFor(row.qitemId)).toEqual([expect.objectContaining({ destinationSession: "asker@r",
+      tags: expect.arrayContaining([`stuck-sweep:undelivered-human-notice:${row.qitemId}`]),
+      body: expect.stringContaining("human notice transport-failed") })]);
+    expect(repo.getById(row.qitemId)).toEqual(before);
+  });
 
   it("a row whose wake the seat's level or hold held isn't reported as unclaimed: it's held at the seat, not stuck", async () => {
     const heldRow = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "held at a quiet seat", nudge: false });
