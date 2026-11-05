@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { createProgram } from "../src/index.js";
+import { DaemonClient } from "../src/client.js";
 import { Command } from "commander";
-import { doctorCommand, runDoctorChecks, type DoctorDeps } from "../src/commands/doctor.js";
+import { doctorCommand, runDoctorChecks, readLiveLogicalIds, type DoctorDeps } from "../src/commands/doctor.js";
 import { resolveCmuxSettingsPath } from "../src/cmux-config.js";
 
 const CMUX_SETTINGS_PATH = resolveCmuxSettingsPath();
@@ -565,9 +566,13 @@ describe("runDoctorChecks", () => {
 
   // A listener that sends an OK header and never finishes its body must not hold doctor, or setup, before anything prints.
   it("settles a /healthz body that never finishes as owner unknown within its bound, and releases the request", async () => {
-    // The port check's request carries a signal; doctor's other /healthz reads (the cmux check) don't.
+    // Isolate the port owner-body request; conditional cmux requests are covered separately.
     const signals: AbortSignal[] = [];
     const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, ownerReportTimeoutMs: 50,
+      exec: cmd => {
+        if (cmd.startsWith("cmux ")) throw new Error("fixture has no cmux");
+        return makeDeps().exec(cmd);
+      },
       fetch: async (_url: string, init?: { signal?: AbortSignal }) => {
         if (init?.signal) signals.push(init.signal);
         return { ok: true, json: () => new Promise<unknown>(() => {}) };
@@ -828,6 +833,66 @@ describe("doctor JSON HTTP deadlines", () => {
       await new Promise<void>(resolve => server.close(() => resolve()));
       await Promise.allSettled([task]);
       log.mockRestore(); process.exitCode = priorExitCode;
+      expect(server.listening).toBe(false);
+    }
+  });
+});
+
+
+describe("doctor --spec topology HTTP deadlines", () => {
+  it.each(["rig headers", "rig body", "nodes headers", "nodes body", "healthy"] as const)(
+    "returns unknown or measured conformance when the topology listener is %s", async held => {
+    const { createServer } = await import("node:http");
+    const requests: string[] = [];
+    const heldPath = held.startsWith("rig") ? "/api/rigs" : "/api/rigs/rig-id/nodes";
+    const server = createServer((req, res) => {
+      requests.push(req.url!);
+      if (held !== "healthy" && req.url === heldPath) {
+        if (held.endsWith("body")) { res.writeHead(200, { "content-type": "application/json" }); res.write("["); }
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(req.url === "/healthz" ? { ok: true, pid: 4242, euid: 1002 }
+        : req.url === "/api/rigs" ? [{ id: "rig-id", name: "fixture" }]
+        : req.url === "/api/rigs/rig-id/nodes" ? [{ logicalId: "dev.worker" }] : { available: true }));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    const base = `http://127.0.0.1:${port}`;
+    vi.stubEnv("OPENRIG_TRANSPORT_LOCAL_USER_GUARD", "true");
+    vi.stubEnv("OPENRIG_URL", ""); vi.stubEnv("RIGGED_URL", "");
+    const ownerProbe = vi.fn(async () => ({ state: "unknown" as const, reason: "fixture-unconfirmed" }));
+    const ownerClient = new DaemonClient(base, { ownerProbe });
+    const specPath = "/fixture/rig.yaml";
+    const spec = 'version: "0.2"\nname: fixture\npods:\n  - id: dev\n    label: Development\n    members:\n      - id: worker\n';
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const priorExitCode = process.exitCode;
+    const program = new Command().addCommand(doctorCommand(makeDeps({ callerUid: 1002,
+      checkPort: async () => false, specPath, readFile: path => path === specPath ? spec : null,
+      configStore: { resolve: () => ({ ...defaultConfig, daemon: { host: "127.0.0.1", port } }) },
+      fetch: (url, init) => globalThis.fetch(url, init),
+      fetchLiveLogicalIds: name => readLiveLogicalIds(base, name, ownerClient),
+    })));
+    const task = program.parseAsync(["node", "rig", "doctor", "--json", "--spec", specPath]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const outcome = await Promise.race([task.then(() => "settled"), new Promise<string>(resolve => {
+        timer = setTimeout(() => resolve("still-waiting"), 4500);
+      })]);
+      expect(["darwin", "linux"]).toContain(process.platform);
+      expect(requests).toContain(held === "healthy" ? "/api/rigs/rig-id/nodes" : heldPath);
+      expect(ownerProbe).toHaveBeenCalled();
+      console.info("[doctor spec HTTP deadline]", JSON.stringify({ platform: process.platform, held, requests, outcome }));
+      expect(outcome).toBe("settled");
+      const result = JSON.parse(String(log.mock.calls.at(-1)![0]));
+      const check = result.checks.find((c: { name: string }) => c.name === "spec_live_conformance");
+      expect(check.status).toBe(held === "healthy" ? "pass" : "skipped");
+      if (held === "healthy") expect(ownerProbe).toHaveBeenCalledTimes(2);
+    } finally {
+      clearTimeout(timer); server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await Promise.allSettled([task]);
+      log.mockRestore(); process.exitCode = priorExitCode; vi.unstubAllEnvs();
       expect(server.listening).toBe(false);
     }
   });
