@@ -55,8 +55,9 @@ export class PermissionStopObservations {
     const observation = previous ?? { observedAt: -Infinity, command: null, completedAt: -Infinity };
     if (input.completed) observation.completedAt = Math.max(observation.completedAt, at);
     else {
-      // Duplicate plugin/managed posts and late older requests cannot replace newer or settled evidence.
-      if (at <= Math.max(observation.observedAt, observation.completedAt)) return;
+      // Duplicate plugin/managed posts and late older requests cannot replace newer or settled evidence;
+      // a newer request at the same timestamp as a completion remains ambiguous (pending: "unknown").
+      if (at <= observation.observedAt || at < observation.completedAt) return;
       observation.observedAt = at;
       observation.command = input.command as string;
     }
