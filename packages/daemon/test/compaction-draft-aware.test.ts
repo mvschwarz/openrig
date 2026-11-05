@@ -324,12 +324,13 @@ describe("#2575: a post-compaction step OpenRig can't read the input box for", (
     await owedRestore(f);
     const real = f.transport.send.bind(f.transport);
     vi.spyOn(f.transport, "send").mockImplementation(async (s: string, text: string, opts?: any) => text.includes("Please respond to this normal user message now")
-      ? { ok: true, sessionName: s, sent: false, outcome: "retained", reason: "draft_input_unknown" } as any : real(s, text, opts));
+      ? { ok: true, sessionName: s, sent: false, outcome: "retained", reason: "draft_input_unknown", heldInputBox: "unknown" } as any : real(s, text, opts));
     expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false });
     const owed = f.e.getOwedRestore(seat)!;
     expect(owed).toMatchObject({ stage: "restore_prompt", held: true, lastDelivery: { ok: true, outcome: "retained" } });
     expect(owed.detail).toContain("OpenRig will retry on its existing polls.");
     expect(owed.detail).not.toContain("went in");
+    expect(owed.detail).not.toContain("goes in anyway");
   });
 
   it("after a /compact whose result was lost, an unreadable box still holds every step, however many polls", async () => {

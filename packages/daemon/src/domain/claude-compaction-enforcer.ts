@@ -852,7 +852,7 @@ export class ClaudeCompactionEnforcer {
     // The idle wait passed and the box read neither empty nor typed. A recognised draft, a hold with no reading, or any
     // other result breaks the run.
     const held = result.heldInputBox;
-    const unreadable = result.reason === "draft_input_unknown" && held && held !== "typed" && held !== "typed-with-suggestion"
+    const unreadable = !result.ok && result.reason === "draft_input_unknown" && held && held !== "typed" && held !== "typed-with-suggestion"
       ? (prior && prior.stage === stage ? prior.unreadable ?? 0 : 0) + 1 : 0;
     const lastDelivery: RestoreDeliveryAttempt = {
       stage, at: new Date(this.now()).toISOString(), ok: result.ok, reason: result.reason ?? "send_failed",
