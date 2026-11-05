@@ -8,7 +8,9 @@ import * as path from "node:path";
 import { ENV_MAP } from "../src/config-store.js";
 import { configCommand } from "../src/commands/config.js";
 
-const ENV_NAMES = [...new Set(Object.values(ENV_MAP).flatMap((e) => (e.legacy ? [e.primary, e.legacy] : [e.primary])))];
+// Every config variable, plus the removed context-packs variable that ConfigStore still refuses when it's set.
+const ENV_NAMES = [...new Set([...Object.values(ENV_MAP).flatMap((e) => (e.legacy ? [e.primary, e.legacy] : [e.primary])),
+  "OPENRIG_CONTEXT_PACKS_ROOT"])];
 
 let dir: string;
 let configPath: string;
@@ -31,6 +33,7 @@ describe("rig config set and reset beside an environment override", () => {
     configPath = path.join(dir, "config.json");
     savedEnv = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
     for (const name of ENV_NAMES) delete process.env[name];
+    process.exitCode = undefined;
   });
 
   afterEach(() => {
@@ -39,7 +42,18 @@ describe("rig config set and reset beside an environment override", () => {
       else process.env[name] = savedEnv[name];
     }
     vi.restoreAllMocks();
+    process.exitCode = undefined;
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("a whole-file reset still reports success when a removed setting's variable is set, and names it as a note", async () => {
+    fs.writeFileSync(configPath, JSON.stringify({ daemon: { port: 9000 } }));
+    process.env["OPENRIG_CONTEXT_PACKS_ROOT"] = "/old/packs";
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await run(["reset"])).toBe("Config reset to defaults.");
+    expect(process.exitCode).toBeUndefined();
+    expect(fs.existsSync(configPath)).toBe(false);
+    expect(error.mock.calls.map((c) => c.join(" ")).join("\n")).toContain("note: OPENRIG_CONTEXT_PACKS_ROOT was removed");
   });
 
   it("reset of one key names the variable that still sets it instead of calling its value the default", async () => {
