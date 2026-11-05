@@ -84,6 +84,65 @@ All three are server-sent events (`text/event-stream`):
   `queue.handed_off`, `queue.claimed`, `queue.unclaimed`, `qitem.fallback_routed`, `qitem.closure_overdue`,
   `inbox.absorbed` and `inbox.denied`.
 
+## People, asks and updates without Slack
+
+`GET /api/gateway/participants` returns the same JSON projection as `rig gateway participants --json`:
+`{ ok, participants, default, organizations, groups, warnings, participantFile }`. Pick a person by `kind: "person"`
+and use their `id` for a Feed `view`, or their `address` for the queue's `destinationSession`. The effective
+`default` is `{ id, source }`, or `{ id: null, reason }`; it does not establish who is using the client.
+Participant records omit connector credential pointers. Check `warnings` and `participantFile.error` for a partial
+registry read; an unreadable human registry returns HTTP 503. See [Gateway participants](gateway-participants.md).
+
+| Read | Meaning |
+| --- | --- |
+| `GET /api/queue/list?destinationSession=<address>&state=pending,in-progress,blocked&limit=100` | Open rows for exactly that address. `humanIntent: "update"` identifies an FYI; other values are asks. Each row has `qitemId`, `state`, `summary` and `body`. |
+| `GET /api/queue/open-human-updates?view=<person-id>&limit=20` | Open human FYIs, even when no Slack delivery receipt exists. Returns `{ items, limit, truncated, perspective? }`. |
+| `GET /api/queue/<qitemId>` and `/<qitemId>/transitions` | The current row and its history, including closed state and recorded outcome. Closing or acknowledging a row is different from delivering it. |
+| `GET /api/queue/human-updates?view=<person-id>&limit=20` | Existing delivered-update history: explicit FYIs with a recorded Slack posting receipt, including closed rows. Items add `deliveredAt` and `deliveryReceipt`. It is not the open-update inbox. |
+
+Both update lists accept integer `limit` values from 1 to 100 (default 20); invalid values return HTTP 400.
+Open FYIs are ordered by priority, then newest first. `view=all` (also the default) shows all perspectives;
+`view=default` selects the effective default person, or all when no default is available. A named view that cannot
+resolve a person has `perspective.basis: "unknown"` and no items when a registry is available. With no registered
+people there is no perspective filter: inspect `perspective` rather than assuming the requested view was applied.
+A person's view also includes instance or unassigned items when that person is the default. These are views on a
+trusted daemon, not per-person authentication or access control; existing daemon and browser access rules still apply.
+
+Always display `truncated: true` as incomplete, even if fewer than `limit` items arrive. A person-view scan examines
+at most 1,001 open updates (101 for delivered history) before filtering; older matching items may be outside that
+window. These endpoints have no pagination cursor. Reading an open update never posts it to Slack, acknowledges it,
+or manufactures a delivery receipt.
+
+For example, this Node client takes a daemon URL, a registered person id and a rig name. It uses no Slack API and
+makes only reads; use the daemon discovery and access rules above. In an ES module, `process.argv.slice(1)` is the
+argument list for `node --input-type=module -e '<code>' <url> <person-id> <rig>`:
+
+```js
+// client-people-example
+const [base, personId, rig] = process.argv.slice(1);
+async function get(path) {
+  const response = await fetch(new URL(path, base));
+  if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
+  return response.json();
+}
+const registry = await get("/api/gateway/participants");
+const person = registry.participants.find(p => p.kind === "person" && p.id === personId);
+if (!person) throw new Error("Choose a registered person id");
+const rows = await get(`/api/queue/list?destinationSession=${encodeURIComponent(person.address)}&state=pending,in-progress,blocked&limit=100`);
+const updates = await get(`/api/queue/open-human-updates?view=${encodeURIComponent(person.id)}&limit=20`);
+const receipts = await get(`/api/queue/human-updates?view=${encodeURIComponent(person.id)}&limit=20`);
+const rigHistory = await get(`/api/queue/list?rig=${encodeURIComponent(rig)}&limit=100`);
+const messages = await get(`/api/queue/outbox/list?rig=${encodeURIComponent(rig)}&limit=100`);
+console.log(JSON.stringify({ participants: registry.participants, default: registry.default,
+  warnings: registry.warnings, participantFile: registry.participantFile,
+  asks: rows.filter(row => row.humanIntent !== "update"), updates, receipts, rigHistory, messages }, null, 2));
+```
+
+The queue and outbox lists are bounded snapshots, not subscriptions. A full queue list may need a larger `limit`.
+An outbox entry's `deliveryState` reports the send attempt; only `delivered` confirms delivery. A queue transition,
+an open FYI, or a closed ask is not that receipt. The rig-wide reads and their limits are described below; the existing
+`outbox/list?senderSession=<session>` read remains available.
+
 ## Route details
 
 - **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
