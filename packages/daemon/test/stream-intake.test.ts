@@ -956,7 +956,7 @@ describe("StreamIntakeCoordinator", () => {
     db.prepare = ((sql: string) => {
       if (failPage2 && sql.includes("SELECT stream_item_id, stream_sort_key FROM stream_items")) {
         pageQueries++;
-        if (pageQueries === 2) {
+        if (pageQueries >= 2) {
           throw new Error("Simulated page 2 read failure");
         }
       }
@@ -999,26 +999,65 @@ describe("StreamIntakeCoordinator", () => {
       closureReason: "no-follow-on",
     });
 
-    // 4. Recover: clear failure and let drain re-run
+    // 4. Recover: clear failure and trigger recovery through a live emit
     failPage2 = false;
-    // @ts-expect-error accessing private method for controlled recovery test
-    await coord2.drain();
+    const recoverItem = streamStore.emit({ sourceSession: "test@s", body: "Live item 4 triggering recovery" });
     await new Promise((r) => setTimeout(r, 50));
 
-    // After recovery, item 2 and liveItem must both have been processed, and cursor advanced to liveItem
+    // After recovery, item 2, held liveItem, and recoverItem must all have been processed, and cursor advanced to recoverItem
     const cursorAfter = db.prepare("SELECT last_sort_key FROM stream_intake_cursor WHERE id = 1").get() as {
       last_sort_key: string;
     };
-    expect(cursorAfter.last_sort_key).toBe(liveItem.streamSortKey);
+    expect(cursorAfter.last_sort_key).toBe(recoverItem.streamSortKey);
 
-    // Check that item 2 was handled and then live item was handled in order
+    // Check that item 2 was handled first, then held liveItem, then recoverItem, in order
     const afterRows = queueRepo.list({ destinationSession: "queue.worker", state: "pending" });
     expect(afterRows).toHaveLength(1);
     expect(afterRows[0]!.body).toContain(item2.streamItemId);
+    expect(afterRows[0]!.body).not.toContain(liveItem.streamItemId);
+    expect(afterRows[0]!.body).not.toContain(recoverItem.streamItemId);
 
     const transitions = queueRepo.listTransitions(afterRows[0]!.qitemId);
-    const liveNote = transitions.find((t) => t.transitionNote?.includes(liveItem.streamItemId));
-    expect(liveNote).toBeDefined();
+    const observationNotes = transitions
+      .filter((t) => t.transitionNote?.startsWith("Stream observation added:"))
+      .map((t) => t.transitionNote!);
+    expect(observationNotes).toHaveLength(2);
+    expect(observationNotes[0]).toContain(liveItem.streamItemId);
+    expect(observationNotes[0]).not.toContain(recoverItem.streamItemId);
+    expect(observationNotes[1]).toContain(recoverItem.streamItemId);
+    expect(observationNotes[1]).not.toContain(liveItem.streamItemId);
+
+    // Verify each observation across the test was handled exactly once in order
+    const allRows = queueRepo.list({ destinationSession: "queue.worker" });
+    expect(allRows).toHaveLength(3);
+
+    const handledOrder = [
+      allRows.find((r) => r.body.includes(item0.streamItemId)) ? item0.streamItemId : null,
+      allRows.find((r) => r.body.includes(item1.streamItemId)) ? item1.streamItemId : null,
+      afterRows[0]!.body.includes(item2.streamItemId) ? item2.streamItemId : null,
+      observationNotes[0]!.includes(liveItem.streamItemId) ? liveItem.streamItemId : null,
+      observationNotes[1]!.includes(recoverItem.streamItemId) ? recoverItem.streamItemId : null,
+    ];
+    expect(handledOrder).toEqual([
+      item0.streamItemId,
+      item1.streamItemId,
+      item2.streamItemId,
+      liveItem.streamItemId,
+      recoverItem.streamItemId,
+    ]);
+
+    // Check that each observation was handled (either opening an intake row or added as a note) exactly once
+    const allTransitions = (
+      db.prepare("SELECT transition_note FROM queue_transitions WHERE transition_note IS NOT NULL").all() as Array<{
+        transition_note: string;
+      }>
+    ).map((t) => t.transition_note);
+
+    for (const item of [item0, item1, item2, liveItem, recoverItem]) {
+      const rowsWithItem = allRows.filter((r) => r.body.includes(item.streamItemId)).length;
+      const notesWithItem = allTransitions.filter((n) => n.includes(item.streamItemId)).length;
+      expect(rowsWithItem + notesWithItem).toBe(1);
+    }
 
     coord2.stop();
     db.prepare = origPrepare;

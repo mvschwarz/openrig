@@ -101,6 +101,9 @@ export class StreamIntakeCoordinator {
       if (!this.heldLiveItemIds.includes(streamItemId)) {
         this.heldLiveItemIds.push(streamItemId);
       }
+      if (this.catchUpIncomplete && !this.catchingUp) {
+        void this.drain();
+      }
       return;
     }
     if (!this.pendingStreamItemIdSet.has(streamItemId)) {
@@ -165,26 +168,38 @@ export class StreamIntakeCoordinator {
       }
 
       // Bound paging at the newest key that existed when catch-up started
-      const newestAtStart = this.db
-        .prepare(`SELECT MAX(stream_sort_key) AS stream_sort_key FROM stream_items WHERE archived_at IS NULL`)
-        .get() as { stream_sort_key: string | null } | undefined;
-      if (!newestAtStart?.stream_sort_key || newestAtStart.stream_sort_key <= existingCursor) {
-        completed = true;
+      let catchUpBoundKey: string;
+      try {
+        const newestAtStart = this.db
+          .prepare(`SELECT MAX(stream_sort_key) AS stream_sort_key FROM stream_items WHERE archived_at IS NULL`)
+          .get() as { stream_sort_key: string | null } | undefined;
+        if (!newestAtStart?.stream_sort_key || newestAtStart.stream_sort_key <= existingCursor) {
+          completed = true;
+          return;
+        }
+        catchUpBoundKey = newestAtStart.stream_sort_key;
+      } catch (err) {
+        console.error("[stream-intake] error querying catch-up bound:", err);
         return;
       }
-      const catchUpBoundKey = newestAtStart.stream_sort_key;
 
       let currentCursor = existingCursor;
       while (currentCursor < catchUpBoundKey) {
         if (this.stopped) return;
 
-        const items = this.db
-          .prepare(
-            `SELECT stream_item_id, stream_sort_key FROM stream_items
-             WHERE stream_sort_key > ? AND stream_sort_key <= ? AND archived_at IS NULL
-             ORDER BY stream_sort_key ASC LIMIT ?`
-          )
-          .all(currentCursor, catchUpBoundKey, this.pageSize) as Array<{ stream_item_id: string; stream_sort_key: string }>;
+        let items: Array<{ stream_item_id: string; stream_sort_key: string }>;
+        try {
+          items = this.db
+            .prepare(
+              `SELECT stream_item_id, stream_sort_key FROM stream_items
+               WHERE stream_sort_key > ? AND stream_sort_key <= ? AND archived_at IS NULL
+               ORDER BY stream_sort_key ASC LIMIT ?`
+            )
+            .all(currentCursor, catchUpBoundKey, this.pageSize) as Array<{ stream_item_id: string; stream_sort_key: string }>;
+        } catch (err) {
+          console.error("[stream-intake] error querying stream items page during catch-up:", err);
+          return;
+        }
 
         if (items.length === 0) break;
 
@@ -212,6 +227,8 @@ export class StreamIntakeCoordinator {
       }
 
       completed = true;
+    } catch (err) {
+      console.error("[stream-intake] unexpected catch-up error:", err);
     } finally {
       this.catchingUp = false;
       if (completed && !this.stopped) {
@@ -237,7 +254,11 @@ export class StreamIntakeCoordinator {
     if (this.stopped || this.processing) return;
 
     if (this.catchUpIncomplete && !this.catchingUp) {
-      await this.catchUp();
+      try {
+        await this.catchUp();
+      } catch (err) {
+        console.error("[stream-intake] error during catch-up recovery:", err);
+      }
       if (this.catchUpIncomplete) {
         return;
       }
