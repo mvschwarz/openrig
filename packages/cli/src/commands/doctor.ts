@@ -6,6 +6,7 @@ import { execSync } from "node:child_process";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { DaemonClient, ForeignLocalDaemonError, formatDaemonHostForUrl } from "../client.js";
 import { ConfigStore } from "../config-store.js";
+import { fetchWithTimeout } from "../fetch-with-timeout.js";
 import { buildWritableHomeCheck } from "../system-preflight.js";
 import {
   CMUX_SETTINGS_DISCLOSURE_PATH,
@@ -45,7 +46,7 @@ export interface DoctorDeps {
   /** The caller's effective user id, compared with the one the port's daemon reports. Absent: this process's own;
    *  null: this platform has none. */
   callerUid?: number | null;
-  /** How long each part of the port's /healthz response may take (default 2000 ms). */
+  /** How long each part of /healthz and the cmux status response may take (default 2000 ms). */
   ownerReportTimeoutMs?: number;
   /**
    * Build B — path to a rig spec to check against the RUNNING rig of the same name (`--spec`).
@@ -61,6 +62,7 @@ export interface DoctorDeps {
 }
 
 const DEFAULT_PORT = 7433;
+const DOCTOR_HTTP_TIMEOUT_MS = 2000;
 const CMUX_SOCKET_CONTROL_FIX = 'In cmux Settings > Automation, select "Automation mode" for Socket Control Mode, or set automation.socketControlMode to "automation" in ~/.config/cmux/cmux.json (older versions use ~/.config/cmux/settings.json; current cmux reads that legacy file only for keys absent from cmux.json). cmux reloads saved settings automatically; rerun `rig doctor` to re-probe without restarting the daemon.';
 
 /** The port's OpenRig daemon, judged by the OS user it reports. /healthz's pid and euid are the daemon's own report,
@@ -351,9 +353,16 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
       } finally { health.abort(); }
 
       try {
-        const cmuxRes = await fetchFn(`${daemonBase}/api/adapters/cmux/status`);
-        if (cmuxRes.ok && cmuxRes.json) {
-          const data = (await cmuxRes.json()) as { available?: boolean };
+        let data: { available?: boolean } = {};
+        const cmuxRes = await fetchWithTimeout(fetchFn as typeof fetch, `${daemonBase}/api/adapters/cmux/status`, {}, {
+          timeoutMs: deps.ownerReportTimeoutMs ?? DOCTOR_HTTP_TIMEOUT_MS,
+          timeoutMessage: "Doctor's cmux status read timed out.",
+          consumeResponse: async res => {
+            if (res.ok && res.json) data = (await res.json()) as { available?: boolean };
+            else await res.body?.cancel();
+          },
+        });
+        if (cmuxRes.ok) {
           if (data.available) {
             return { name: "cmux_daemon", status: "pass", message: "Daemon cmux control available." };
           }
@@ -512,18 +521,32 @@ class AmbiguousLiveRigError extends Error {
 export async function readLiveLogicalIds(base: string, rigName: string, ownerClient = new DaemonClient(base)): Promise<string[] | null> {
   try {
     await ownerClient.assertLocalOwner();
-    const rigsRes = await fetch(`${base}/api/rigs`);
+    let rigs: Array<{ id?: string; name?: string }> = [];
+    const rigsRes = await fetchWithTimeout(fetch, `${base}/api/rigs`, {}, {
+      timeoutMs: DOCTOR_HTTP_TIMEOUT_MS,
+      timeoutMessage: "Doctor's live rig read timed out.",
+      consumeResponse: async res => {
+        if (res.ok) rigs = (await res.json()) as typeof rigs;
+        else await res.body?.cancel();
+      },
+    });
     if (!rigsRes.ok) return null;
-    const rigs = (await rigsRes.json()) as Array<{ id?: string; name?: string }>;
     const matches = rigs.filter((r) => r.name === rigName);
     if (matches.length > 1) throw new AmbiguousLiveRigError(matches.map(r => r.id ?? "(missing id)"));
     if (matches.length === 0) return null;
     const rig = matches[0];
     if (!rig?.id) return null;
     await ownerClient.assertLocalOwner();
-    const nodesRes = await fetch(`${base}/api/rigs/${rig.id}/nodes`);
+    let nodes: Array<{ logicalId?: string | null }> = [];
+    const nodesRes = await fetchWithTimeout(fetch, `${base}/api/rigs/${rig.id}/nodes`, {}, {
+      timeoutMs: DOCTOR_HTTP_TIMEOUT_MS,
+      timeoutMessage: "Doctor's live node read timed out.",
+      consumeResponse: async res => {
+        if (res.ok) nodes = (await res.json()) as typeof nodes;
+        else await res.body?.cancel();
+      },
+    });
     if (!nodesRes.ok) return null;
-    const nodes = (await nodesRes.json()) as Array<{ logicalId?: string | null }>;
     return nodes.map((n) => n.logicalId ?? "");
   } catch (error) {
     if (error instanceof ForeignLocalDaemonError || error instanceof AmbiguousLiveRigError) throw error;
