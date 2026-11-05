@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { ConfigStore, VALID_KEYS, type ResolvedSetting, type ValidKey } from "../config-store.js";
+import { ConfigStore, ENV_MAP, VALID_KEYS, type ResolvedSetting, type ValidKey } from "../config-store.js";
 import { initWorkspaceCommand } from "./config-init-workspace.js";
 
 function formatRow(key: string, value: unknown): string {
@@ -8,6 +8,56 @@ function formatRow(key: string, value: unknown): string {
 
 function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting> {
   return store.resolveAllWithSource();
+}
+
+/**
+ * Returns an explanatory string if setting/resetting a context-pressure key caused
+ * an inverted threshold pair to be rejected and fall back to 95/99 defaults in this shell.
+ * Returns null if no pair rejection occurred.
+ */
+function getContextPressureFallbackExplanation(store: ConfigStore, key: string): string | null {
+  if (key !== "health.context_pressure.warning_percent" && key !== "health.context_pressure.critical_percent") {
+    return null;
+  }
+  const warnKey = "health.context_pressure.warning_percent" as const;
+  const critKey = "health.context_pressure.critical_percent" as const;
+  const warnEnvName = ENV_MAP[warnKey].primary;
+  const critEnvName = ENV_MAP[critKey].primary;
+  const warnEnv = process.env[warnEnvName];
+  const critEnv = process.env[critEnvName];
+
+  // Inspect the raw candidates to see if an inversion actually occurred.
+  // Warning candidate: env override if valid number, else file value or default 95.
+  // Critical candidate: env override if valid number, else file value or default 99.
+  const warnEnvNum = warnEnv !== undefined && warnEnv !== "" ? parseInt(warnEnv, 10) : NaN;
+  const critEnvNum = critEnv !== undefined && critEnv !== "" ? parseInt(critEnv, 10) : NaN;
+
+  let fileWarn: number | undefined;
+  let fileCrit: number | undefined;
+  try {
+    const raw = (store as unknown as { readConfigFile?: () => Record<string, unknown> }).readConfigFile?.();
+    if (raw && typeof raw === "object") {
+      const health = raw["health"] as Record<string, unknown> | undefined;
+      const cp = health?.["contextPressure"] as Record<string, unknown> | undefined;
+      if (typeof cp?.["warningPercent"] === "number") fileWarn = cp["warningPercent"];
+      if (typeof cp?.["criticalPercent"] === "number") fileCrit = cp["criticalPercent"];
+    }
+  } catch {
+    // If config file cannot be read, candidates will fall back to defaults
+  }
+
+  const warnCand = !isNaN(warnEnvNum) ? warnEnvNum : (fileWarn ?? 95);
+  const critCand = !isNaN(critEnvNum) ? critEnvNum : (fileCrit ?? 99);
+
+  if (warnCand >= critCand) {
+    const envSources: string[] = [];
+    if (warnEnv && !isNaN(warnEnvNum)) envSources.push(`${warnEnvName}=${warnEnv}`);
+    if (critEnv && !isNaN(critEnvNum)) envSources.push(`${critEnvName}=${critEnv}`);
+    const envDetails = envSources.length > 0 ? ` from ${envSources.join(", ")}` : "";
+    return `; inverted pair ${warnCand}/${critCand}${envDetails} falls back to 95/99 defaults in this shell`;
+  }
+
+  return null;
 }
 
 // These settings remain boot-only; capture interval/line settings reload live.
@@ -193,7 +243,13 @@ Precedence: CLI flag > environment variable > config file > default`)
     .action(async (key: string, value: string) => {
       try {
         store.set(key, value);
-        console.log(`${key} = ${store.get(key)}`);
+        const explanation = getContextPressureFallbackExplanation(store, key);
+        if (explanation) {
+          const resolved = store.resolveWithSource(key);
+          console.log(`${key} file override saved; effective value ${resolved.value} (source: default${explanation})`);
+        } else {
+          console.log(`${key} = ${store.get(key)}`);
+        }
         // SWEEP-c: boot-only key + running daemon = stale-until-restart; say so loudly.
         if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
           console.error(`note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`);
@@ -212,7 +268,13 @@ Precedence: CLI flag > environment variable > config file > default`)
       try {
         store.reset(key);
         if (key) {
-          console.log(`${key} reset to default (${store.get(key)}).`);
+          const explanation = getContextPressureFallbackExplanation(store, key);
+          if (explanation) {
+            const resolved = store.resolveWithSource(key);
+            console.log(`${key} file override cleared; effective value ${resolved.value} (source: default${explanation}).`);
+          } else {
+            console.log(`${key} reset to default (${store.get(key)}).`);
+          }
         } else {
           console.log("Config reset to defaults.");
         }
