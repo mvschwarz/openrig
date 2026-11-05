@@ -402,6 +402,41 @@ describe("Send CLI", () => {
     expect(logs.join("\n")).not.toContain("typed, never submitted");
   });
 
+  it("reports a fan-out refusal as unconfirmed alongside a successful recipient", async () => {
+    let submits = 0;
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/broadcast") return { status: 200, data: {
+          total: 2, sent: 2, failed: 0, results: [
+            { sessionName: "seat-a@rig", ok: true, outcome: "delivered" },
+            { sessionName: "seat-b@rig", ok: true, outcome: "delivered" },
+          ],
+        } };
+        if (path === "/api/transport/capture") return { status: 200, data: {
+          content: body["session"] === "seat-a@rig" ? "❯ make test" : "❯ ",
+        } };
+        if (body["submitOnly"]) {
+          submits++;
+          return { status: 409, data: { ok: false, reason: "staged_mismatch", inputPhase: "not_reached", sent: false, error: "pane changed" } };
+        }
+        throw new Error("unexpected request");
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "--to", "seat-a@rig,seat-b@rig", "make test", "--verify",
+      ]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("seat-a@rig: Delivery: unconfirmed");
+    expect(output).toContain("guarded Enter was refused (pane changed)");
+    expect(output).not.toContain("staged, not consumed");
+    expect(output).toContain("seat-b@rig: sent");
+    expect(output).toContain("1/2 delivered, 1 submission-unconfirmed");
+    expect(submits).toBe(1);
+    expect(exitCode).toBe(1);
+  });
+
   it("reports an unconfirmed post-submit recheck per recipient in fan-out JSON", async () => {
     let captures = 0, submits = 0;
     const client = {

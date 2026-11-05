@@ -1155,7 +1155,7 @@ async function runFanOutSend(params: {
     if (ec && ec.checked && ec.state === "staged") {
       if (ec.remedy === "submitted-cleared") {
         console.log(`${r.sessionName}: sent — staged at the prompt, cleared by one guarded Enter (consumed)`);
-      } else if (ec.remedy === "submit-unconfirmed") {
+      } else if (effectSubmissionUnconfirmed(ec)) {
         console.log(`${r.sessionName}: ${effectHumanLines(ec, r.sessionName)[0]}`);
       } else {
         console.log(`${r.sessionName}: staged, not consumed — ${effectHumanLines(ec, r.sessionName).slice(-1)[0]}`);
