@@ -3768,9 +3768,10 @@ export class SessionTransport {
       hookActivity.reason !== "permission_request_pending" &&
       hookActivity.reason !== "permission_prompt_cleared"
     ) {
-      // Fresh hook (within the 15s send window): authoritative for any state.
+      // Positive current Claude dialogs also veto a fresh idle hook: opening
+      // a slash-command picker need not emit another runtime hook.
       if (this.hookFreshForSend(hookActivity, now)) {
-        if (hookActivity.state === "running" && input.runtime === "claude-code") {
+        if ((hookActivity.state === "running" || hookActivity.state === "idle") && input.runtime === "claude-code") {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,
@@ -3783,7 +3784,8 @@ export class SessionTransport {
             captureObserver: privateInput ? undefined : this.captureObserver,
             binding,
           });
-          if (paneVeto.state === "needs_input") return paneVeto;
+          if (paneVeto.state === "needs_input" && (hookActivity.state !== "idle"
+            || paneVeto.reason === "selection_prompt" || paneVeto.reason === "permission_prompt")) return paneVeto;
         }
         return hookActivity;
       }
