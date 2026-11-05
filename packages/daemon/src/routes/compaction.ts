@@ -22,7 +22,7 @@ import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
  */
 export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
   const router = new Hono();
-  router.use("*", authBearerTokenMiddleware({ expectedToken: opts?.bearerToken ?? null }));
+  router.use("*", authBearerTokenMiddleware({ expectedToken: opts?.bearerToken ?? null, diagnosticContext: "terminal" }));
 
   router.post("/trigger", async (c) => {
     const enforcer = c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined;
