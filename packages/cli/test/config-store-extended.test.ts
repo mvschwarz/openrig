@@ -392,13 +392,13 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     const store = new ConfigStore(configPath);
     process.env.OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT = "50";
     expect(() => store.set("health.context_pressure.critical_percent", "80"))
-      .toThrow(/saved configuration: warning \(95\).*critical \(80\).*environment overrides apply at runtime/);
+      .toThrow(/saved configuration: warning \(95\).*critical \(80\).*each process resolves configuration/);
     expect(existsSync(configPath)).toBe(false);
     store.set("health.context_pressure.critical_percent", "100");
     store.set("health.context_pressure.warning_percent", "99");
     const before = readFileSync(configPath, "utf8");
     expect(() => store.reset("health.context_pressure.critical_percent"))
-      .toThrow(/saved configuration: warning \(99\).*critical \(99\).*environment overrides apply at runtime/);
+      .toThrow(/saved configuration: warning \(99\).*critical \(99\).*each process resolves configuration/);
     expect(readFileSync(configPath, "utf8")).toBe(before);
   });
 
