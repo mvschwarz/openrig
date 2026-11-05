@@ -73,6 +73,15 @@ export async function resolveRigHandle(
     return { kind: "passthrough", handle };
   }
 
+  return resolveRigHandleInSummaries(summaries, handle, opts);
+}
+
+/** The shared id-first/name-ambiguity rule for callers that already fetched and checked a summary. */
+export function resolveRigHandleInSummaries(
+  summaries: RigSummaryEntry[],
+  handle: string,
+  opts: { archived?: boolean } = {},
+): Exclude<HandleResolution, { kind: "passthrough" }> {
   // 1. id-exact-match first, across ALL rigs incl. archived (ids are never
   //    ambiguous; archived ids still reach the id path).
   if (summaries.some((r) => r.id === handle)) {

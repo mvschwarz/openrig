@@ -3,6 +3,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { resolveRigHandleInSummaries } from "../rig-handle.js";
 
 const LONG_RUNNING_TIMEOUT_MS = 45_000;
 
@@ -30,8 +31,12 @@ Examples:
       throw new Error(error ?? `Failed to list rigs (HTTP ${summaries.status})`);
     }
     if (!Array.isArray(summaries.data)) throw new Error("The daemon returned an invalid rig summary.");
-    const match = summaries.data.find((r) => r.name === rigRef || r.id === rigRef);
-    if (!match) throw new Error(`Rig '${rigRef}' not found`);
+    // Keep this command's existing HTTP/invalid-summary diagnostics and its one summary read.
+    const match = resolveRigHandleInSummaries(summaries.data, rigRef);
+    if (match.kind === "ambiguous") throw Object.assign(new Error(
+      `rig_ambiguous: '${rigRef}' matches ${match.ids.length} rigs (${match.ids.join(", ")}). Nothing was done; pass one of these ids instead.`,
+    ), { code: "rig_ambiguous", candidates: match.ids });
+    if (match.kind === "not_found") throw new Error(`Rig '${rigRef}' not found`);
     return match.id;
   }
 
@@ -48,7 +53,11 @@ Examples:
 
       let rigId: string;
       try { rigId = await resolveRigId(client, rig); } catch (err) {
-        console.error((err as Error).message); process.exitCode = 1; return;
+        const error = err as Error & { code?: string; candidates?: string[] };
+        if (opts.json && error.code === "rig_ambiguous") {
+          console.log(JSON.stringify({ ok: false, code: error.code, message: error.message, candidates: error.candidates }, null, 2));
+        } else console.error(error.message);
+        process.exitCode = 1; return;
       }
 
       const res = await client.get<Record<string, unknown>>(`/api/rigs/${encodeURIComponent(rigId)}/env`);
