@@ -30,9 +30,14 @@ Examples:
       throw new Error(error ?? `Failed to list rigs (HTTP ${summaries.status})`);
     }
     if (!Array.isArray(summaries.data)) throw new Error("The daemon returned an invalid rig summary.");
-    const match = summaries.data.find((r) => r.name === rigRef || r.id === rigRef);
-    if (!match) throw new Error(`Rig '${rigRef}' not found`);
-    return match.id;
+    const exactId = summaries.data.find((r) => r.id === rigRef);
+    if (exactId) return exactId.id;
+    const matches = summaries.data.filter((r) => r.name === rigRef);
+    if (matches.length > 1) {
+      throw new Error(`'${rigRef}' matches ${matches.length} rigs (${matches.map((r) => r.id).join(", ")}). Nothing was done; pass one of these ids instead.`);
+    }
+    if (matches.length === 0) throw new Error(`Rig '${rigRef}' not found`);
+    return matches[0]!.id;
   }
 
   // rig env status <rig>
