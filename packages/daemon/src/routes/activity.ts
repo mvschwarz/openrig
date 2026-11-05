@@ -583,7 +583,8 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
   // All tools in this actor's batch have resolved. An individual PostToolUse can belong to a parallel tool,
   // and a subagent's batch says nothing about the main session's permission. Only the current occupant can
   // settle a matching, older episode. Do not record an unrelated batch as an unknown hook that hides attention.
-  const permissionObservation = body.runtime === "claude-code" && body.hookEvent === "PermissionRequest";
+  const permissionObservation = body.runtime === "claude-code" && body.hookEvent === "PermissionRequest"
+    && Object.hasOwn(body, "permissionStopDescriptor");
   const claudePermission = body.runtime === "claude-code" && body.hookEvent === "Notification" && body.subtype === "permission_prompt";
   if (body.hookEvent === "PostToolBatch" || claudePermission || permissionObservation) {
     const oracle = c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined;

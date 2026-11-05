@@ -69,6 +69,14 @@ function fixture() {
 }
 
 describe("passive permission observation through relay, ingress and seat status", () => {
+  it("preserves legacy PermissionRequest activity without the new diagnostic field", async () => {
+    const f = fixture();
+    const response = await f.post("PermissionRequest");
+    expect(response).toMatchObject({ ok: true, activity: { state: "needs_input", rawEvent: "PermissionRequest" } });
+    expect((await f.status()).permission_stop).toEqual(unavailable);
+    expect(f.store.getLatestForNode({ nodeId: f.node.id })?.rawEvent).toBe("PermissionRequest");
+  });
+
   it("sanitizes before transport and does not persist secrets, mutate permissions or create attention", async () => {
     const f = fixture();
     const native = { hook_event_name: "PermissionRequest", tool_name: "Bash",
