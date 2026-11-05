@@ -194,6 +194,7 @@ async function installPackFromUrl(
     // Re-validate the on-disk staged pack, then publish atomically.
     validateContextPackManifestForInstall(join(staging, "manifest.yaml"));
     assertTreeHasNoSymlinks(staging);
+    mkdirSync(dirname(targetDir), { recursive: true });
     renameSync(staging, targetDir);
     return { targetDir, installName };
   } catch (err) {
