@@ -16,9 +16,33 @@ const require = createRequire(import.meta.url);
 const relay = require("../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs") as {
   buildOpenRigPayload: (input: object, env: object, now: () => Date) => Record<string, unknown>;
 };
+const {
+  BASH_EXECUTABLE_DESCRIPTORS, KNOWN_TOOL_DESCRIPTORS, BASH_DETAILS_WITHHELD, TOOL_DETAILS_WITHHELD,
+} = require("../assets/plugins/openrig-core/hooks/scripts/permission-stop-descriptor.cjs") as {
+  BASH_EXECUTABLE_DESCRIPTORS: Record<string, string>;
+  KNOWN_TOOL_DESCRIPTORS: Record<string, string>;
+  BASH_DETAILS_WITHHELD: string;
+  TOOL_DETAILS_WITHHELD: string;
+};
 const databases: ReturnType<typeof createFullTestDb>[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); vi.restoreAllMocks(); });
 const unavailable = { state: "unavailable", command: "unavailable", origin: "unknown" };
+
+describe("permission observation producer compatibility", () => {
+  it.each([
+    ...Object.values(BASH_EXECUTABLE_DESCRIPTORS), ...Object.values(KNOWN_TOOL_DESCRIPTORS),
+    BASH_DETAILS_WITHHELD, TOOL_DETAILS_WITHHELD,
+  ])("admits the producer descriptor %s through the independent ingress vocabulary", command => {
+    const at = "2026-11-05T01:00:00.000Z";
+    const observations = new PermissionStopObservations(() => new Date(at));
+    const identity = { nodeId: "node", generation: "generation", actor: null };
+    observations.observe({ ...identity, at, command, completed: false });
+    expect(observations.read(identity.nodeId, identity.generation)).toEqual({
+      state: "request_observed", command, origin: "harness", source: "PermissionRequest",
+      observed_at: at, actor: "main", pending: "unknown",
+    });
+  });
+});
 
 describe("permission observation source-time ordering", () => {
   it.each(["completion-first", "request-first"] as const)(
