@@ -1,21 +1,37 @@
 import { Command } from "commander";
-import { ConfigStore, VALID_KEYS, type ResolvedSetting, type ValidKey } from "../config-store.js";
+import {
+  ConfigStore,
+  VALID_KEYS,
+  type ResolvedSetting,
+  type ValidKey,
+} from "../config-store.js";
 import { initWorkspaceCommand } from "./config-init-workspace.js";
 
 function formatRow(key: string, value: unknown): string {
   return `${key.padEnd(28)} ${value}`;
 }
 
-function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting> {
+function summarizeSettings(
+  store: ConfigStore,
+): Record<ValidKey, ResolvedSetting> {
   return store.resolveAllWithSource();
 }
 
 // These settings remain boot-only; capture interval/line settings reload live.
-const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "daemon.db_conflict", "db.path", "terminal.tmux_server"];
+const BOOT_ONLY_KEYS = [
+  "daemon.port",
+  "daemon.host",
+  "daemon.db_conflict",
+  "db.path",
+  "terminal.tmux_server",
+];
 const BOOT_ONLY_PREFIXES = ["transcripts.enabled", "transcripts.path"];
 
 function isBootOnlyKey(key: string): boolean {
-  return BOOT_ONLY_KEYS.includes(key) || BOOT_ONLY_PREFIXES.some((p) => key.startsWith(p));
+  return (
+    BOOT_ONLY_KEYS.includes(key) ||
+    BOOT_ONLY_PREFIXES.some((p) => key.startsWith(p))
+  );
 }
 
 export function configCommand(
@@ -25,23 +41,32 @@ export function configCommand(
     probeDaemonRunning?: () => Promise<boolean>;
   },
 ): Command {
-  const cmd = new Command("config").description("Inspect and change OpenRig configuration");
+  const cmd = new Command("config").description(
+    "Inspect and change OpenRig configuration",
+  );
   const store = new ConfigStore(configPath);
-  const probeDaemonRunning = deps?.probeDaemonRunning ?? (async () => {
-    try {
-      const { getDaemonStatus } = await import("../daemon-lifecycle.js");
-      const { realDeps } = await import("./daemon.js");
-      const status = await getDaemonStatus(realDeps());
-      return status.state === "running";
-    } catch {
-      return false; // probe failure = no notice (never a false claim)
-    }
-  });
+  const probeDaemonRunning =
+    deps?.probeDaemonRunning ??
+    (async () => {
+      try {
+        const { getDaemonStatus } = await import("../daemon-lifecycle.js");
+        const { realDeps } = await import("./daemon.js");
+        const status = await getDaemonStatus(realDeps());
+        return status.state === "running";
+      } catch {
+        return false; // probe failure = no notice (never a false claim)
+      }
+    });
 
   cmd
     .option("--json", "JSON output for agents (resolved RiggedConfig)")
-    .option("--with-source", "Include source/default per key (honest provenance)")
-    .addHelpText("after", `
+    .option(
+      "--with-source",
+      "Include source/default per key (honest provenance)",
+    )
+    .addHelpText(
+      "after",
+      `
 Examples:
   rig config                                 # show all resolved config
   rig config --json                          # JSON RiggedConfig (structured)
@@ -128,7 +153,8 @@ Keys:
   decisions.consumers    comma-separated consumers that may call (supported: stream; default none). An unknown name makes no calls
   decisions.template_dir absolute folder of <name>.yaml templates that replace the shipped ones (default empty: shipped templates only)
 
-Precedence: CLI flag > environment variable > config file > default`)
+Precedence: CLI flag > environment variable > config file > default`,
+    )
     .action((opts: { json?: boolean; withSource?: boolean }) => {
       try {
         if (opts.withSource) {
@@ -174,7 +200,10 @@ Precedence: CLI flag > environment variable > config file > default`)
         }
         // `--with-source` is the parent command's flag; commander accepts it on
         // either side of `get`, and it asks for the same line as `--show-source`.
-        if (opts.showSource || cmd.opts<{ withSource?: boolean }>().withSource) {
+        if (
+          opts.showSource ||
+          cmd.opts<{ withSource?: boolean }>().withSource
+        ) {
           const r = store.resolveWithSource(key);
           console.log(`${r.value}\t(source: ${r.source})`);
           return;
@@ -193,11 +222,23 @@ Precedence: CLI flag > environment variable > config file > default`)
     .action(async (key: string, value: string) => {
       try {
         store.set(key, value);
-        console.log(`${key} = ${store.get(key)}`);
+        const resolved = store.resolveWithSource(key);
+        if (resolved.source === "env") {
+          console.log(
+            `${key} = ${store.get(key)} (environment override masks saved file value)`,
+          );
+        } else {
+          console.log(`${key} = ${store.get(key)}`);
+        }
         // SWEEP-c: boot-only key + running daemon = stale-until-restart; say so loudly.
         if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
-          console.error(`note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`);
-          if (key === "terminal.tmux_server") console.error("note: surviving sessions keep their previous server until deliberately stopped; rig terminal status shows the effective selection and any pending migration.");
+          console.error(
+            `note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`,
+          );
+          if (key === "terminal.tmux_server")
+            console.error(
+              "note: surviving sessions keep their previous server until deliberately stopped; rig terminal status shows the effective selection and any pending migration.",
+            );
         }
       } catch (err) {
         console.error((err as Error).message);
@@ -206,15 +247,37 @@ Precedence: CLI flag > environment variable > config file > default`)
     });
 
   const resetCmd = new Command("reset")
-    .argument("[key]", "Optional config key to reset (omit to reset entire file)")
-    .description("Clear a config override (or delete the entire file when no key given)")
+    .argument(
+      "[key]",
+      "Optional config key to reset (omit to reset entire file)",
+    )
+    .description(
+      "Clear a config override (or delete the entire file when no key given)",
+    )
     .action((key: string | undefined) => {
       try {
         store.reset(key);
         if (key) {
-          console.log(`${key} reset to default (${store.get(key)}).`);
+          const resolved = store.resolveWithSource(key);
+          if (resolved.source === "env") {
+            console.log(
+              `${key} override cleared; effective value is ${resolved.value} (from environment, default is ${resolved.defaultValue}).`,
+            );
+          } else {
+            console.log(`${key} reset to default (${resolved.value}).`);
+          }
         } else {
-          console.log("Config reset to defaults.");
+          const all = store.resolveAllWithSource();
+          const activeEnvCount = Object.values(all).filter(
+            (r) => r.source === "env",
+          ).length;
+          if (activeEnvCount > 0) {
+            console.log(
+              `Config reset to defaults (${activeEnvCount} active environment override${activeEnvCount === 1 ? "" : "s"} ${activeEnvCount === 1 ? "remains" : "remain"} in effect).`,
+            );
+          } else {
+            console.log("Config reset to defaults.");
+          }
         }
       } catch (err) {
         console.error((err as Error).message);
