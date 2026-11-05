@@ -217,7 +217,7 @@ export class RunnerPermissions {
         "**The options the agent offered:**",
         ...offered,
         "",
-        "Your choice goes to this one request, once. A reply of just yes or no counts as the agent's allow or reject. Closing this without choosing counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.",
+        "Your choice goes to this one request, once. A reply of just yes or no counts as the agent's allow or reject. Any other words choose nothing: OpenRig's default permits the request when the agent offered an allow option, and a runner that forwards your words passes them to the agent only after its turn. Closing this without choosing counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.",
       ].join("\n"),
     });
     return { ok: true, askId, created: true };
