@@ -851,9 +851,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   `policies.claude_compaction.preparation_root` (an absolute path) puts restore maps where seats
   may write. A daemon restart picks a managed compaction up where it stopped: an owed restore step
   resumes, a `/compact` that may have been sent is never sent again, and `rig compact --state`
-  shows anything stranded or owed. A map finished while the seat is busy stays armed for its next idle moment
-  through the next retry interval; `--state` shows `idleDeadlineAt`, and expiry reads `map_complete_seat_never_idle`,
-  distinct from an unfinished map's `preparation_incomplete`. `rig seat status` shows an owed restore stage and its last
+  shows anything stranded or owed. A map finished during automatic preparation stays armed for the next idle moment
+  through the next retry interval; `--state` shows `idleDeadlineAt`. In either mode, expiry reads
+  `map_complete_seat_never_idle` when the map is finished, or `preparation_incomplete` when it is not.
+  `rig seat status` shows an owed restore stage and its last
   delivery result, and repeated delivery failures open one queue item for the seat's orchestrator, or a
   person when it has none.
 - **Codex seats get `openrig-core` too: its refocus after a compaction and its skills, with no
