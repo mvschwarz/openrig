@@ -347,7 +347,7 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
       }
 
       try {
-        let data: { available?: boolean } | undefined;
+        let data: { available?: boolean } = {};
         const cmuxRes = await fetchWithTimeout(fetchFn, `${daemonBase}/api/adapters/cmux/status`, {}, {
           ...httpBudget, consumeResponse: async response => {
             if (response.ok && response.json) data = await response.json() as { available?: boolean };
