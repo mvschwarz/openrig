@@ -235,8 +235,8 @@ export class ClaudeResumeAdapter {
     }
 
     // The exact --resume identity is stronger evidence than a pane command or
-    // a version/footer heuristic. Use it only with Claude's interactive prompt
-    // visible, and after the untrusted screen classifiers have had their say.
+    // a version/footer heuristic. Use it with Claude's interactive prompt visible
+    // (or behind a shell label, below), after the untrusted screen classifiers have had their say.
     const mayBeWrappedComposer = finalProbe.status === "inconclusive"
       || (finalProbe.status === "failed" && finalProbe.code === "returned_to_shell");
     if (/(^|\n)\s*❯/.test(finalContent) && mayBeWrappedComposer) {
@@ -272,6 +272,15 @@ export class ClaudeResumeAdapter {
           code: "retry_fresh",
           message: "Claude resume failed: pane returned to shell instead of entering Claude",
         };
+      }
+      // #2508: a launch subshell that didn't exec Claude (an rc alias or function, or a fallen-back environment
+      // correction) keeps the shell as the label. A proven Claude naming this resume beneath it is the foreground
+      // runtime, as a `claude` label is, before its prompt shows.
+      const identity = await verifyClaudePaneProcess({ target: tmuxSessionName, tmux: this.tmux,
+        ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}), expectedToken: resumeToken });
+      if (identity) {
+        return { ok: true, ...(identity.process.startedAt
+          ? { launchedProcess: { pid: identity.process.pid, startedAt: identity.process.startedAt } } : {}) };
       }
       return {
         ok: false,

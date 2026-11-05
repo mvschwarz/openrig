@@ -481,6 +481,31 @@ describe("ClaudeResumeAdapter", () => {
       expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT, launchedProcess: { pid: 1235, startedAt: "Sat Jan  1 12:00:00 2000" } });
     });
 
+    // #2508: a classic resume whose launch subshell didn't exec Claude (an rc alias or function, or a launch whose
+    // environment correction fell back) leaves the shell as the pane's label. Before Claude's prompt shows, a proven
+    // Claude naming this resume beneath that subshell is the foreground runtime, as a `claude` label is.
+    it("accepts a proven Claude beneath the launch subshell before its prompt shows", async () => {
+      const tmux = mockTmux({
+        getPanePid: vi.fn(async () => 1234),
+        getPaneCommand: vi.fn(async () => "zsh"),
+        capturePaneContent: vi.fn(async () => ""),
+      });
+      const adapter = new ClaudeResumeAdapter(tmux, {
+        pollMs: 0,
+        maxWaitMs: 0,
+        sleep: async () => {},
+        listProcesses: async () => [
+          { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, command: "-zsh", executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, command: "-zsh", executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 1236, ppid: 1235, pgid: 1235, tpgid: 1235, command: "claude --permission-mode acceptEdits --resume resume-id", executableName: "claude", startedAt: "Sat Jan  1 12:00:00 2000" },
+        ],
+      });
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_id", "resume-id", "/repo");
+
+      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT, launchedProcess: { pid: 1236, startedAt: "Sat Jan  1 12:00:00 2000" } });
+    });
+
     it.each([
       ["2.1.283", "attention_required"],
       // The shell label isn't a proven idle shell: another Claude holds the foreground, so the launch is kept.
