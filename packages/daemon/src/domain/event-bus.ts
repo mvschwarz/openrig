@@ -240,7 +240,9 @@ export class EventBus {
     let cursor = startAfter;
     try {
       for (;;) {
-        const rows = this.rowsAfter(cursor);
+        const rows = this.db.prepare(
+          "SELECT seq, rig_id, node_id, type, payload, created_at FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
+        ).all(cursor, 500) as EventRow[];
         if (rows.length === 0) return;
         for (const row of rows) {
           let event: PersistedEvent;
