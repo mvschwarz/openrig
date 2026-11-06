@@ -2388,6 +2388,8 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
       const open = recoveriesFor(row.qitemId).filter((item) => ["pending", "in-progress", "blocked"].includes(item.state));
       expect(open, "one live recovery still owns the unresolved delivery").toHaveLength(1);
       const next = open[0]!;
+      if (pass === 1) expect(next).toMatchObject({ qitemId: prior.qitemId,
+        destinationSession: prior.destinationSession, state: prior.state });
       if (current) expect(next).toMatchObject({ qitemId: current.qitemId, state: current.state,
         destinationSession: current.destinationSession, body: current.body, summary: current.summary });
       current = next;
@@ -2412,10 +2414,14 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     const posted = await sweep();
     expect(posted.outcome, posted.error).not.toBe("failed");
     expect(recoveriesFor(row.qitemId).filter((item) => ["pending", "in-progress", "blocked"].includes(item.state))).toEqual([]);
+    expect(repo.getById(prior.qitemId)).toMatchObject({ state: "done" });
+    expect(repo.listTransitions(prior.qitemId).at(-1)).toMatchObject({ state: "done",
+      transitionNote: expect.stringContaining("current human ask posted") });
     expect(repo.getById(row.qitemId)).toMatchObject({ body: row.body, state: "pending", humanIntent: "update", claimedAt: null });
   });
 
   it.each([
+    { origin: "sweep", state: "pending" },
     { origin: "sweep", state: "in-progress" },
     { origin: "sweep", state: "blocked" },
     { origin: "authored", state: "pending" },
