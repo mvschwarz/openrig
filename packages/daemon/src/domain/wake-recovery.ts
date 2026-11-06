@@ -8,6 +8,13 @@ export interface WakeRecovery {
   stop(): Promise<void>;
 }
 
+/** Notifications the pass didn't replay because their seats have no session or transport, named once. */
+function waitingNote(waiting?: { notifications: number; seats: string[] }): string {
+  if (!waiting) return "";
+  const named = waiting.seats.slice(0, 10).join(", ") + (waiting.seats.length > 10 ? `, and ${waiting.seats.length - 10} more` : "");
+  return ` waiting=${waiting.notifications} (not replayed: no session or transport for ${named})`;
+}
+
 /**
  * Each recovered notification is a real, verified seat delivery, so a large current backlog takes as long as its
  * deliveries. The daemon's readiness must not wait for that: index.ts starts this pass once the daemon listens and
@@ -24,8 +31,8 @@ export function createWakeRecovery(repo: Pick<QueueRepository, "drainPendingWake
     start() {
       if (running || stopping) return;
       running = repo.drainPendingWakeIntents({ stopRequested }).then((drained) => {
-        if (drained.delivered || drained.indeterminate || drained.failed || reconciled) {
-          log.log(`wake-intent recovery sweep: delivered=${drained.delivered} indeterminate=${drained.indeterminate} failed=${drained.failed} reconciled=${reconciled}${cutShort ? " (stopped before the rest)" : ""}`);
+        if (drained.delivered || drained.indeterminate || drained.failed || reconciled || drained.waiting) {
+          log.log(`wake-intent recovery sweep: delivered=${drained.delivered} indeterminate=${drained.indeterminate} failed=${drained.failed} reconciled=${reconciled}${waitingNote(drained.waiting)}${cutShort ? " (stopped before the rest)" : ""}`);
         }
       }, (err: unknown) => {
         // Non-fatal, as before: a failed pass leaves its notifications visible and retried on the next start.

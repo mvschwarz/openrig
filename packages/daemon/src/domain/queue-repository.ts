@@ -1599,10 +1599,21 @@ export class QueueRepository {
 
   /** Recover current notifications once per pass. A snapshot horizon and seek cursor
    * prevent new arrivals or persistent failures from making this pass unbounded. `stopRequested` is checked before
-   * each delivery: a stopped pass leaves the notifications it has not attempted as they are, for the next start. */
-  async drainPendingWakeIntents(opts?: { stopRequested?: () => boolean }): Promise<{ delivered: number; indeterminate: number; failed: number; retained: number }> {
-    const tally = { delivered: 0, indeterminate: 0, failed: 0, retained: 0 };
+   * each delivery: a stopped pass leaves the notifications it has not attempted as they are, for the next start.
+   * A notification already tried for a seat that still has no session or transport would only fail again, so it isn't
+   * replayed: it stays as it is, its row stays owed, and the pass reports it as waiting. */
+  async drainPendingWakeIntents(opts?: { stopRequested?: () => boolean }): Promise<{ delivered: number; indeterminate: number; failed: number; retained: number;
+    /** Present only when a notification waits for a seat with no session or transport. */
+    waiting?: { notifications: number; seats: string[] } }> {
+    const tally: { delivered: number; indeterminate: number; failed: number; retained: number;
+      waiting?: { notifications: number; seats: string[] } } = { delivered: 0, indeterminate: 0, failed: 0, retained: 0 };
     if (!this.outbox || !this.transport) return tally;
+    const noReceiver = new Map<string, boolean>();
+    const waitingBySeat = new Map<string, number>();
+    const result = () => {
+      if (waitingBySeat.size) tally.waiting = { notifications: [...waitingBySeat.values()].reduce((a, b) => a + b, 0), seats: [...waitingBySeat.keys()] };
+      return tally;
+    };
     const BATCH = 200;
     const horizon = (this.db.prepare("SELECT COALESCE(MAX(rowid),0) AS id FROM outbox_entries").get() as { id: number }).id;
     // Retire never-attempted obsolete notifications without materializing historical intents.
@@ -1617,22 +1628,46 @@ export class QueueRepository {
     const eligible = () => !opts?.stopRequested?.();
     let cursor = 0;
     for (;;) {
-      const pending = this.db.prepare(`SELECT o.rowid AS id, o.outbox_id FROM outbox_entries o
+      const pending = this.db.prepare(`SELECT o.rowid AS id, o.outbox_id, o.destination_session, o.delivery_state FROM outbox_entries o
         JOIN queue_items q ON q.qitem_id = o.audit_pointer AND q.state = 'pending'
           AND q.destination_session = o.destination_session
         WHERE o.rowid > ? AND o.rowid <= ? AND substr(o.outbox_id, 1, ?) = ?
           AND o.delivery_state IN ('pending','failed','indeterminate') ORDER BY o.rowid LIMIT ?`)
-        .all(cursor, horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
+        .all(cursor, horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string; destination_session: string; delivery_state: string }>;
       if (pending.length === 0) break;
       for (const intent of pending) {
-        if (opts?.stopRequested?.()) return tally;
+        if (opts?.stopRequested?.()) return result();
         cursor = intent.id;
+        // A notification never tried still gets its attempt, so its row records why it didn't land.
+        if (intent.delivery_state !== "pending") {
+          const seat = intent.destination_session;
+          if (!noReceiver.has(seat)) noReceiver.set(seat, this.wakeHasNoReceiver(seat));
+          if (noReceiver.get(seat)) {
+            waitingBySeat.set(seat, (waitingBySeat.get(seat) ?? 0) + 1);
+            continue;
+          }
+        }
         const outcome = await this.deliverWakeIntent(intent.outbox_id, attempted, eligible);
         if (outcome !== "skipped") tally[outcome]++;
       }
       if (pending.length < BATCH) break; // served short batch ⇒ drained
     }
-    return tally;
+    return result();
+  }
+
+  /** Positive evidence only that a wake can't land now: no transport can hold the address, or the seat's newest
+   * session has stopped (exited, or detached because its tmux session is gone). Anything unknown may have a receiver. */
+  private wakeHasNoReceiver(destinationSession: string): boolean {
+    try {
+      const destClass = this.classifyDestinationOf(destinationSession).class;
+      if (destClass === "unroutable") return true;
+      if (destClass !== "pane-bound") return false;
+      const newest = this.db.prepare("SELECT status FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
+        .get(destinationSession) as { status: string } | undefined;
+      return newest?.status === "exited" || newest?.status === "detached";
+    } catch {
+      return false;
+    }
   }
 
   /**
