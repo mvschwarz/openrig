@@ -19,9 +19,10 @@ by default is recorded, and a runner can keep a long, quiet turn reading
 working. New stream observations go to the queue worker by default. Fresh Pi
 seats, and fresh Codex seats on Codex 0.164.0 or later, can keep OpenRig's
 guidance out of your repository's `AGENTS.md`. There are fixes across delivery,
-asks, handover, install and recovery. The OpenShell worker that wasn't usable in
-0.7.8 still isn't usable in 0.7.9; read
-[The OpenShell worker](#the-openshell-worker-in-079) before relying on it.
+asks, handover, install and recovery, many reported or contributed by people
+using OpenRig. The OpenShell worker that wasn't usable in 0.7.8 still isn't
+usable in 0.7.9; read [The OpenShell worker](#the-openshell-worker-in-079)
+before relying on it.
 
 ### Before you upgrade
 
@@ -280,37 +281,78 @@ See `docs/reference/hosted-members.md`. ([#2384](https://github.com/mvschwarz/op
 
 - **OpenShell:** the worker doesn't work in 0.7.9 (see
   [The OpenShell worker](#the-openshell-worker-in-079)). 0.7.8's requirements,
-  cost note and cleanup limits still apply,
-  including "Never grant the guest access to the daemon's main API port
-  (normally 7433)." A same-generation reconciled launch opens no viewer, so run
-  `rig environment connect` yourself; non-text startup actions aren't supported
-  on environment seats.
+  cost note and cleanup limits still apply, including "Never grant the guest
+  access to the daemon's main API port (normally 7433)." A same-generation
+  reconciled launch opens no viewer, so run `rig environment connect` yourself;
+  non-text startup actions aren't supported on environment seats.
 - **Grant-service assistants aren't woken:** "an item stays queued until its
   receiver claims it."
 - **Open updates for a person** read a 1,001-row window, so a page can come back
   short, marked `truncated`.
 - **Slack:** a private channel needs the documented route, which we don't test,
-  and direct messages aren't supported. The channel and people reads haven't
-  been run against a live Slack workspace. Redaction of the bot token from a
-  transport error can still leave a malformed token fragment shorter than six
-  characters, so review an error before sharing it.
+  and direct messages aren't supported. The channel and people reads, and a
+  click on a re-parked ask, haven't been run against a live Slack workspace in
+  our release testing. Redaction of the bot token from a transport error can
+  still leave a malformed token fragment shorter than six characters, so review
+  an error before sharing it. ([#2503](https://github.com/mvschwarz/openrig/pull/2503))
 - **SSH host status** reads `unknown` behind a ProxyJump or ProxyCommand; that
-  isn't proof the connection is broken.
+  isn't proof the connection is broken. ([#2488](https://github.com/mvschwarz/openrig/pull/2488))
 - **Shared asks:** "a click's option written before its answer row … can stand
   beside or inside the closer's answer without the first clicker's authorship."
-- **Permit records** last as long as stream retention keeps them. A permit a
-  runner makes on its own, when it can't reach OpenRig, is in its pane only. For
-  an ask opened before 0.7.9, a record may omit the option's kind.
 - **Existing seats** pick up Codex launch instructions and the single skill load
   at their next fresh launch. A `CLAUDE.md` or `AGENTS.md` that already grew
   isn't trimmed.
-- **Codex hooks after an upgrade:** Codex sessions kept open across the 0.7.8
-  upgrade showed "Hook failed — plugin contents changed; hook approval
-  required". The 0.7.9 behaviour, and hook recovery after a relaunch, haven't
-  been verified.
-- **With Node outside the login shell's PATH,** Codex seats can still report
-  `rig: command not found`; preflight now warns, and the getting-started guide
-  gives the `~/.profile` fix.
+- **Permit records** last as long as stream retention keeps them. A permit a
+  runner makes on its own, when it can't reach OpenRig, is in its pane only. For
+  an ask opened before 0.7.9, a record may omit the option's kind. ([#2361](https://github.com/mvschwarz/openrig/pull/2361))
+- **Draft-aware delivery to Claude:** on 0.7.8 with Claude Code 2.1.319,
+  deliveries to idle Claude agents, queue wakes included, were reported held at
+  an empty prompt when a narrow pane showed
+  `✔ Update installed · Restart to update` on its own line. 0.7.9 still doesn't
+  recognize that bare banner, though it recognizes `/rc` and the full versioned
+  banner. A message the draft-aware delivery path holds isn't replayed
+  automatically by that path.
+  ([#2605](https://github.com/mvschwarz/openrig/issues/2605))
+- **After a managed compaction, the restore request can stay held.** OpenRig
+  delivers each post-compaction step only when it can read the seat's input box
+  as empty. When it can't, it holds the restore request and keeps retrying on
+  its polls, so the seat can sit idle at an empty prompt with its restore not
+  yet requested. `rig compact <seat> --state` and `rig seat status` show the
+  restore as owed, and from the second failed attempt the seat's owner gets a
+  queue item naming it. To restore by hand, send the seat a restore request
+  naming its newest restore map, its restore marker and its packet, then settle
+  the owed attempt with `rig compact <seat> --cancel`; a poll can still race
+  that step. Reported on 0.7.8, and 0.7.9 behaves the same way. ([#2575](https://github.com/mvschwarz/openrig/issues/2575))
+- **Seats handed over before 0.7.9** keep their adopted origin until a later
+  launched handover or managed launch records a new session, so until then
+  `rig seat stop`, `restart` and `clean` refuse them as before. ([#2440](https://github.com/mvschwarz/openrig/pull/2440))
+- **`rig broadcast`:** an uncertain recipient's outbox receipt now reads
+  `indeterminate`, but the broadcast's own output for that recipient still says
+  FAILED. Check that seat with `rig capture` before resending. ([#2507](https://github.com/mvschwarz/openrig/pull/2507))
+- **Codex hooks after an upgrade:** Codex sessions kept running across the
+  upgrade show "Hook failed — plugin contents changed; hook approval required"
+  until relaunched. In our upgrade test from 0.7.8, one seat restarted with
+  OpenRig's managed restart showed no review afterwards.
+- **Codex seats can still report `rig: command not found`** when `rig` isn't on
+  the login shell's PATH: with Node outside it, or when npm can't install
+  globally and OpenRig is installed inside the project instead. Preflight now
+  warns at launch. In our testing the agents recovered by calling `rig` by its
+  full path; the getting-started guide describes a `~/.profile` fix, which we
+  didn't run.
+- **What we ran end to end under the runner contract:** this release's dsh
+  example runner, natively, with dsh 0.2.1-rc.2 on DeepSeek's
+  `deepseek/deepseek-v4-flash` through dsh's pi-ai OpenRouter chat-completions
+  profile, against 0.7.8 Core: two useful queue tasks, queued and multiline
+  input, a quiet tool interval of about 26 seconds that still read working,
+  allow-once and reject-once with their file effects, cancel, a return to the
+  same conversation with recall, and shutdown. The permission answers came from
+  an automated test operator, and the run's preset added `resume: true`, which
+  the shipped preset doesn't declare. dsh's own DeepSeek Messages route through
+  OpenRouter failed with HTTP 400, and the cause isn't established. Not run: a
+  missing-conversation refusal, cross-host restore, OpenShell, and other
+  adapters, models or providers. 0.7.8's release tests had already run its dsh
+  example end to end, so the 0.7.8 CHANGELOG's "No harness has run end to end
+  under the contract yet" was out of date.
 - **Fixed or changed from 0.7.8's limits:** the dsh example's `env:` names, the
   conformance check's false failures, a person's typed words, the README's
   operator address, a rebuild behind a symlink, the rebuild receipt, a click on
