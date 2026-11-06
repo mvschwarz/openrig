@@ -1440,7 +1440,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
           closureReason: "handed_off_to", closureTarget });
       }
       expect(remoteRepo.getById(successor.qitemId)?.state).toBe("pending");
-      expect(repo.getById(successor.qitemId)).toBeUndefined();
+      expect(repo.getById(successor.qitemId)).toBeNull();
       expect(repo.getById(remote.qitemId)).toMatchObject({
         closureTarget: target, handoffAdvisory: { status: "unverified", target },
       });
