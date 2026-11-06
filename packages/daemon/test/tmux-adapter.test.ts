@@ -916,11 +916,22 @@ describe("TmuxAdapter", () => {
   });
 
   describe("cancelPaneMode", () => {
-    it("sends -X cancel to the pane", async () => {
+    it("leaves every mode the pane is in with one copy-mode -q", async () => {
       const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
       const adapter = new TmuxAdapter(exec);
       expect(await adapter.cancelPaneMode("%0")).toEqual({ ok: true });
-      expect(exec).toHaveBeenCalledWith("tmux send-keys -t '%0' '-X' 'cancel'");
+      expect(exec).toHaveBeenCalledTimes(1);
+      expect(exec).toHaveBeenCalledWith("tmux copy-mode -q -t %0");
+    });
+
+    it("falls back to send-keys -X cancel where copy-mode has no -q (tmux before 3.1a)", async () => {
+      const exec = vi.fn(async (command: string) => {
+        if (command.startsWith("tmux copy-mode")) throw new Error("unknown flag -q");
+        return "";
+      });
+      const adapter = new TmuxAdapter(exec as unknown as ExecFn);
+      expect(await adapter.cancelPaneMode("%0")).toEqual({ ok: true });
+      expect(exec.mock.calls.map(([command]) => command)).toEqual(["tmux copy-mode -q -t %0", "tmux send-keys -t '%0' '-X' 'cancel'"]);
     });
   });
 
