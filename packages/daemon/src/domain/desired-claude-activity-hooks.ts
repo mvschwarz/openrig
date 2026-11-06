@@ -38,8 +38,10 @@ function agentResolvedAgainstRecordedRoots(
     const root = reanchorBuiltinStartupFile({ path, absolutePath, ownerRoot }).ownerRoot;
     if (isAbsolute(root)) roots.add(nodePath.resolve(root));
   }
+  let selfResolved = false;
   const folders = new Set([...roots].flatMap((root) => {
     const folder = nodePath.resolve(root, rel);
+    if (folder === root) selfResolved = true;
     return folder !== root && roots.has(folder) ? [folder] : [];
   }));
   const agents = [...folders]
@@ -48,7 +50,9 @@ function agentResolvedAgainstRecordedRoots(
     .flatMap((result) => result.ok && result.resolved.spec.name === resolvedSpecName ? [result] : []);
   if (agents.length !== 1) {
     return { ok: false, error: agents.length === 0
-      ? `The seat's agent spec (${resolvedSpecName ?? agentRef}) wasn't found by resolving ${agentRef} against a rig root its last launch recorded`
+      ? folders.size === 0 && selfResolved
+        ? `Saved launch records no independent source location for the seat's agent spec (${resolvedSpecName ?? agentRef}) when resolving ${agentRef} against a rig root its last launch recorded`
+        : `The seat's agent spec (${resolvedSpecName ?? agentRef}) wasn't found by resolving ${agentRef} against a rig root its last launch recorded`
       : `The seat's agent spec (${resolvedSpecName}) resolved to more than one folder: ${agents.map((agent) => agent.resolved.sourcePath).join(", ")}` };
   }
   return { ok: true, agent: agents[0]! };
