@@ -115,3 +115,67 @@ successful empty history. The CLI preserves the error body in JSON mode and exit
 1 for request errors, 2 for unavailable reads. Existing SSE and usage APIs retain
 their behavior. Collector deployment, exporters and durable store epochs are
 separate work.
+
+## Independent exporter mapping and limits
+
+OpenRig's telemetry guarantee ends at the finite HTTP/CLI read envelope above. Any
+projection of those finite reads (or of cached rig/node inventory) into
+OpenTelemetry logs, custom metrics, or spans is defined and owned by an external
+consumer or exporter—not guaranteed by OpenRig's core API.
+
+The external OTLP exporter at `smota/openrig-telemetry` applies the following
+exporter-specific mapping choices to OpenRig's source facts (other consumers may
+make different choices):
+
+- **Recorded queue-state intervals (not execution time)**: In OpenRig, queue
+  transition rows record state changes (`pending`, `in-progress`, `blocked`, and
+  departure states), not agent execution duration or model latency; the first
+  observation of an item has no prior boundary; repeated same-state rows remain
+  distinct source records; and any page carrying an ID-range or withheld-record gap
+  (`before_retained_floor`, `retained_sequence_gap`, `conflicting_transition_id`,
+  `record_byte_limit`, `historical_transitions_not_read`, truncated gap details, or
+  a boot/watermark discontinuity) cannot prove what happened in the missing range.
+  In `smota/openrig-telemetry`, the exporter pairs an entering state with a later
+  departure state to measure only the recorded interval between two observed rows
+  with valid, ordered UTC timestamps, suppresses or drops open intervals across gap
+  boundaries rather than inventing durations, and reports cumulative transition
+  counts only for rows observed from its checkpoint (including historical rows when
+  started with `start=retained`), never lifetime daemon totals.
+- **No current-owner, seat, tenure, or native-session join**: In OpenRig's finite
+  API, the `queue-transitions` stream does not join transition rows to current seat
+  owners, mutable node or rig names, occupant tenures (`tenures`), or native
+  harness sessions, and it never selects queue bodies or transition notes; each
+  transition row does include `qitemId`, `actorSession`, `closureTarget`, and
+  `originalTimestamp`. In its exported OTLP output, `smota/openrig-telemetry`
+  chooses to emit derived queue spans as root/internal observations without
+  invented parent/child trace hierarchy, cross-stream causal links, or `gen_ai.*`
+  model/token/cost attributes; places `qitemId` only on opt-in log/span attributes
+  rather than metric dimensions; and omits the source fields `actorSession`,
+  `closureTarget`, and raw `originalTimestamp` from exported OTLP logs, metrics,
+  and spans.
+- **Sampling unknowns on cached seat inventory**: OpenRig's cached rig and seat
+  inventory endpoints (`GET /api/rigs`, `GET /api/rigs?archived=only`,
+  `GET /api/rigs/:rigId/nodes`) return point-in-time daemon projections
+  (`activityState.display`, `sessionStatus`, `arbitratedNeedsInput`, and
+  `activityState.lastSwap`), not a continuous event stream or independent OS
+  process probe; intermediate activity changes or multiple occupant handovers
+  between polls are not observable from those snapshots, and initial
+  observation has no backfilled history. In OpenRig source,
+  `arbitratedNeedsInput` is a tri-state boolean (`true`, `false`, or `null`):
+  `true` means the seat needs input, `false` means it was observed clear of
+  needing input, and `null` means no evidence exists either way (it does not
+  indicate `false`). Separately, external consumers or metric mappings must
+  choose how to interpret or project this tri-state value into their own
+  metrics or counters. `smota/openrig-telemetry` polls these snapshots as
+  point-in-time observations and relies on downstream metric storage to enforce
+  freshness/staleness TTL when polling stops or a seat departs.
+
+### External OTLP exporter repository and version compatibility
+
+An independent, standalone OTLP/HTTP exporter is maintained outside OpenRig core at:
+
+- **Repository**: <https://github.com/smota/openrig-telemetry>
+
+Its repository documents installation, configuration, and supported OpenRig versions; OpenRig does not test or guarantee the exporter.
+
+OpenRig's finite telemetry reads are versioned (`schemaVersion: 1`), while cached rig and node inventory endpoints are operational projections rather than a versioned telemetry contract.
