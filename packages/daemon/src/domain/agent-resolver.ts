@@ -19,6 +19,13 @@ export interface ResolvedAgentSpec {
   advisories?: string[];
 }
 
+/** One warning per advisory of a member's agent spec and of each spec it imports, naming the member and the spec.
+ *  Paths that run rig preflight get these from it; a launch that re-resolves the spec without one reports them itself. */
+export function agentSpecAdvisoryWarnings(member: string, result: { resolved: ResolvedAgentSpec; imports: ResolvedAgentSpec[] }): string[] {
+  return [result.resolved, ...result.imports].flatMap((agentSpec) =>
+    (agentSpec.advisories ?? []).map((advisory) => `${member}: agent spec advisory (${agentSpec.spec.name}, ${agentSpec.sourcePath}): ${advisory}`));
+}
+
 export interface ResourceCollision {
   category: string;
   resourceId: string;
