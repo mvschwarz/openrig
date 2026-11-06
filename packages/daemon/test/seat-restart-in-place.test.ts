@@ -1028,7 +1028,13 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
   it("passes the running argv's network override, --no-daemon and add-dirs to the relaunch", async () => {
     const w = world({ runningArgs: `--no-daemon -m gpt-5.5 -s workspace-write -c sandbox_workspace_write.network_access=true resume --add-dir /shared/state ${TOKEN}` });
     await w.service.restartInPlace({ seatRef: SEAT, plan: true });
-    expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, addDirs: ["/shared/state"] } }]);
+    expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, nonLoginShell: false, addDirs: ["/shared/state"] } }]);
+  });
+
+  it("reads the running Codex's non-login shell choice, so the relaunch keeps it", async () => {
+    const w = world({ runningArgs: `-s workspace-write -c allow_login_shell=false resume ${TOKEN}` });
+    await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(w.builds).toEqual([{ running: { networkOverride: false, daemonOptOut: false, nonLoginShell: true, addDirs: [] } }]);
   });
 
   it("an --add-dir holding a space survives whole: the relaunch reads the exact argv, not ps's whitespace split", async () => {
@@ -1036,7 +1042,7 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
     const argv = ["/usr/local/bin/codex", "-m", "gpt-5.5", "-s", "workspace-write", "resume", TOKEN, "--add-dir", "/home/u/my repo/.git"];
     const w = world({ runningArgs: argv.slice(1).join(" "), runningArgv: argv, facts: { 200: facts({ argv }) } });
     await w.service.restartInPlace({ seatRef: SEAT, plan: true });
-    expect(w.builds).toEqual([{ running: { networkOverride: false, daemonOptOut: false, addDirs: ["/home/u/my repo/.git"] } }]);
+    expect(w.builds).toEqual([{ running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: ["/home/u/my repo/.git"] } }]);
   });
 
   it("does not plan a restart when the saved token occurs only inside an argv option value", async () => {
@@ -1081,7 +1087,7 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
     });
     const binding = { id: "", nodeId: "n", attachmentType: "tmux", tmuxSession: SEAT, tmuxWindow: null, tmuxPane: "%1",
       cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/work", codexConfigProfile: "prof", teamPermissionDefault: true } as NodeBinding;
-    const built = await adapter.buildResumeCommand(binding, { name: SEAT, resumeToken: TOKEN, running: { networkOverride: false, daemonOptOut: true, addDirs: ["/a b"] } });
+    const built = await adapter.buildResumeCommand(binding, { name: SEAT, resumeToken: TOKEN, running: { networkOverride: false, daemonOptOut: true, nonLoginShell: false, addDirs: ["/a b"] } });
     expect(probes).toEqual([]);
     expect(built).toMatchObject({ ok: true, core: expect.stringContaining("--no-daemon") });
     if (built.ok) {
@@ -1120,7 +1126,7 @@ describe("#1196 round 2: the shell branch keeps the running settings (F1)", () =
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
     expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", paneShape: "shell_backed" });
     // Built once, before anything stopped; nothing is prepared again after Codex exits.
-    expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, addDirs: ["/shared/one", "/shared/two"] } }]);
+    expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, nonLoginShell: false, addDirs: ["/shared/one", "/shared/two"] } }]);
     expect(w.launches).toHaveLength(1);
     const typed = shellWords(w.launches[0]!.command);
     expect(typed).toContain("--no-daemon");
