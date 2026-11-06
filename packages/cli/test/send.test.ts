@@ -285,6 +285,185 @@ describe("Send CLI", () => {
     expect(output).toContain("Note: sent as exact text, without the From/To envelope, because infra-ui@term-rig is a terminal seat.");
   });
 
+  it.each([
+    { json: false, missingPrompt: false }, { json: true, missingPrompt: false },
+    { json: false, missingPrompt: true }, { json: true, missingPrompt: true },
+  ])("keeps the send unresolved when the post-submit capture is unusable ($json, $missingPrompt)", async ({ json, missingPrompt }) => {
+    let captures = 0, submits = 0;
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/capture") {
+          captures++;
+          return captures === 1 ? { status: 200, data: { content: "❯ make test" } }
+            : missingPrompt ? { status: 200, data: { content: "redrawing" } }
+              : { status: 503, data: { error: "capture unavailable" } };
+        }
+        if (body["submitOnly"]) { submits++; return { status: 200, data: { ok: true } }; }
+        return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "infra-ui@term-rig", "make test", "--verify", ...(json ? ["--json"] : []),
+      ]);
+    });
+    expect(submits).toBe(1);
+    if (json) {
+      const result = JSON.parse(logs.find(line => line.trim().startsWith("{")) ?? "{}");
+      expect(result).toMatchObject({ verified: false, outcome: "submission-unconfirmed", effectCheck: { state: "staged", remedy: "submit-unconfirmed" } });
+    } else {
+      expect(logs.join("\n")).toContain("submission unconfirmed");
+      expect(logs.join("\n")).not.toContain("staged text left the prompt");
+    }
+    expect(exitCode).toBe(1);
+  });
+
+  it.each([false, true])("reports a lost guarded Enter response as unconfirmed (json: %s)", async json => {
+    let captures = 0, submits = 0;
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/capture") { captures++; return { status: 200, data: { content: "❯ make test" } }; }
+        if (body["submitOnly"]) { submits++; throw new Error("Enter response lost"); }
+        return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "infra-ui@term-rig", "make test", "--verify", ...(json ? ["--json"] : []),
+      ]);
+    });
+    expect(submits).toBe(1);
+    expect(captures).toBe(1);
+    expect(exitCode).toBe(1);
+    if (json) {
+      const result = JSON.parse(logs.find(line => line.trim().startsWith("{")) ?? "{}");
+      expect(result).toMatchObject({ verified: false, outcome: "submission-unconfirmed", effectCheck: { remedy: "submit-unconfirmed" } });
+    } else expect(logs.join("\n")).toContain("submission unconfirmed");
+  });
+
+  it.each([false, true])("reports a failed guarded Enter after attempted input as unconfirmed (json: %s)", async json => {
+    let submits = 0;
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/capture") return { status: 200, data: { content: "❯ make test" } };
+        if (body["submitOnly"]) { submits++; return { status: 500, data: { ok: false, reason: "submit_failed", inputPhase: "attempted", error: "submission unconfirmed" } }; }
+        return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "infra-ui@term-rig", "make test", "--verify", ...(json ? ["--json"] : []),
+      ]);
+    });
+    expect(submits).toBe(1);
+    expect(exitCode).toBe(1);
+    if (json) {
+      const result = JSON.parse(logs.find(line => line.trim().startsWith("{")) ?? "{}");
+      expect(result).toMatchObject({ verified: false, outcome: "submission-unconfirmed", effectCheck: { remedy: "submit-unconfirmed" } });
+    } else expect(logs.join("\n")).toContain("submission unconfirmed");
+  });
+
+  it.each([
+    [{ reason: "submit_failed", error: "older daemon" }, "submit-unconfirmed"],
+    [{ reason: "staged_mismatch", sent: false, inputPhase: "not_reached", error: "changed" }, "submit-refused"],
+  ] as const)("classifies guarded Enter failure %j as %s", async (failure, remedy) => {
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/capture") return { status: 200, data: { content: "❯ make test" } };
+        if (body["submitOnly"]) return { status: 500, data: { ok: false, ...failure } };
+        return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
+      },
+    } as unknown as DaemonClient;
+    const { logs } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "infra-ui@term-rig", "make test", "--verify", "--json",
+      ]);
+    });
+    const result = JSON.parse(logs.find(line => line.trim().startsWith("{")) ?? "{}");
+    expect(result.effectCheck.remedy).toBe(remedy);
+    expect(result.outcome).toBe("submission-unconfirmed");
+  });
+
+  it("does not claim the earlier staged text is still unconsumed after a refused Enter", async () => {
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/capture") return { status: 200, data: { content: "❯ make test" } };
+        if (body["submitOnly"]) return { status: 409, data: { ok: false, reason: "staged_mismatch", inputPhase: "not_reached", sent: false, error: "changed" } };
+        return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "infra-ui@term-rig", "make test", "--verify",
+      ]);
+    });
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("guarded Enter was refused");
+    expect(logs.join("\n")).not.toContain("typed, never submitted");
+  });
+
+  it("reports a fan-out refusal as unconfirmed alongside a successful recipient", async () => {
+    let submits = 0;
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/broadcast") return { status: 200, data: {
+          total: 2, sent: 2, failed: 0, results: [
+            { sessionName: "seat-a@rig", ok: true, outcome: "delivered" },
+            { sessionName: "seat-b@rig", ok: true, outcome: "delivered" },
+          ],
+        } };
+        if (path === "/api/transport/capture") return { status: 200, data: {
+          content: body["session"] === "seat-a@rig" ? "❯ make test" : "❯ ",
+        } };
+        if (body["submitOnly"]) {
+          submits++;
+          return { status: 409, data: { ok: false, reason: "staged_mismatch", inputPhase: "not_reached", sent: false, error: "pane changed" } };
+        }
+        throw new Error("unexpected request");
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "--to", "seat-a@rig,seat-b@rig", "make test", "--verify",
+      ]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("seat-a@rig: Delivery: unconfirmed");
+    expect(output).toContain("guarded Enter was refused (pane changed)");
+    expect(output).not.toContain("staged, not consumed");
+    expect(output).toContain("seat-b@rig: sent");
+    expect(output).toContain("1/2 delivered, 1 submission-unconfirmed");
+    expect(submits).toBe(1);
+    expect(exitCode).toBe(1);
+  });
+
+  it("reports an unconfirmed post-submit recheck per recipient in fan-out JSON", async () => {
+    let captures = 0, submits = 0;
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        if (path === "/api/transport/broadcast") return { status: 200, data: {
+          total: 1, sent: 1, failed: 0, results: [{ sessionName: "infra-ui@term-rig", ok: true, verified: true, outcome: "delivered" }],
+        } };
+        if (path === "/api/transport/capture") {
+          captures++;
+          return captures === 1 ? { status: 200, data: { content: "❯ make test" } }
+            : { status: 503, data: { error: "capture unavailable" } };
+        }
+        if (body["submitOnly"]) { submits++; return { status: 200, data: { ok: true } }; }
+        throw new Error("unexpected request");
+      },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "--to", "infra-ui@term-rig", "make test", "--verify", "--json",
+      ]);
+    });
+    const result = JSON.parse(logs.find(line => line.trim().startsWith("{")) ?? "{}");
+    expect(submits).toBe(1);
+    expect(result).toMatchObject({ sent: 0, failed: 1, results: [{ ok: false, verified: false, outcome: "submission-unconfirmed" }] });
+    expect(exitCode).toBe(1);
+  });
+
   it("--raw sends no exactText", async () => {
     await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "/help", "--raw"]);

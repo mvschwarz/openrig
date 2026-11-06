@@ -6,9 +6,9 @@ This isn't a schedule or a promise: we release often, and an item ships when a g
 To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
 Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
 
-## Released in 0.7.6
+## Released in 0.7.8
 
-[0.7.6 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.6): follow a slice's work in one terminal workspace, plus steadier daemon start and delivery. See its release notes for what shipped, known issues, upgrade instructions and contributor credits.
+[0.7.8 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.8): it lets a person answer a runner seat's permission requests, with a conformance check and an example runner to build against. See its release notes for what shipped, known issues, upgrade instructions and contributor credits.
 
 ## How to help
 

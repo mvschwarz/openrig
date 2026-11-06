@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import type { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vitest";
 import { Hono } from "hono";
 import { createDaemon } from "../src/startup.js";
@@ -135,10 +136,36 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
       slowOpRecorder: degraded,
     } as never);
     try {
-      expect(degraded.runSync("test.sync.degraded", () => "continued")).toBe("continued");
+      const worker: Worker = (degraded as any).worker;
+      const postMessage = worker.postMessage;
+      let intercepted = 0;
+      let withheldSignal: SharedArrayBuffer | undefined;
+      try {
+        worker.postMessage = (message, transferList) => {
+          if (message?.type === "append"
+            && message.record?.phase === "begin"
+            && message.record?.site === "test.sync.degraded"
+            && message.signal instanceof SharedArrayBuffer) {
+            intercepted++;
+            const { signal, ...withoutSignal } = message;
+            withheldSignal = signal;
+            // Append through the real worker, but withhold this acknowledgement.
+            return postMessage.call(worker, withoutSignal, transferList);
+          }
+          return postMessage.call(worker, message, transferList);
+        };
+        expect(degraded.runSync("test.sync.degraded", () => "continued")).toBe("continued");
+      } finally {
+        worker.postMessage = postMessage;
+      }
+      expect(intercepted).toBe(1);
+      expect(worker.postMessage).toBe(postMessage);
+      expect(withheldSignal).toBeInstanceOf(SharedArrayBuffer);
+      expect(new Int32Array(withheldSignal!)[0]).toBe(0);
       expect(degraded.snapshot()).toMatchObject({
         healthy: false,
         reason: "begin_barrier_timeout",
+        site: "test.sync.degraded",
       });
 
       const healthResponse = await daemon.app.request("/healthz");
@@ -147,12 +174,17 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
         slowOperations: {
           healthy: false,
           reason: "begin_barrier_timeout",
+          site: "test.sync.degraded",
         },
       });
       const observations = daemon.deps.streamStore!.list();
       expect(observations).toHaveLength(1);
       expect(observations[0]!.body).toContain("begin_barrier_timeout");
       expect(observations[0]!.body).toContain("test.sync.degraded");
+      await degraded.flush();
+      const degradedRecords = await readRecords(path.join(dir, "degraded.jsonl"));
+      expect(degradedRecords.filter((record) => record.phase === "begin"
+        && record.site === "test.sync.degraded")).toHaveLength(1);
     } finally {
       daemon.eventLoopMonitor.stop();
       daemon.db.close();

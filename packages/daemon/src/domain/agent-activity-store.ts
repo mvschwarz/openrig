@@ -3,6 +3,7 @@ import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
+import { PermissionStopObservations, unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
 
 export const AGENT_ACTIVITY_FRESHNESS_MS = 5 * 60 * 1000;
 
@@ -65,6 +66,7 @@ interface EventPayloadRow {
 const SOURCE_ORDER_WINDOW = 200;
 
 export class AgentActivityStore {
+  private readonly permissionStops: PermissionStopObservations;
   readonly db: Database.Database;
   private readonly eventBus: EventBus;
   private readonly now: () => Date;
@@ -77,9 +79,38 @@ export class AgentActivityStore {
     this.db = deps.db;
     this.eventBus = deps.eventBus;
     this.now = deps.now ?? (() => new Date());
+    this.permissionStops = new PermissionStopObservations(this.now);
     this.freshnessMs = deps.freshnessMs ?? AGENT_ACTIVITY_FRESHNESS_MS;
     this.resolveOccupantGeneration = deps.resolveOccupantGeneration;
     this.isRegisteredOccupantGeneration = deps.isRegisteredOccupantGeneration;
+  }
+
+  /** Bound at ingress, then checked again here and at read. No event or oracle mutation. */
+  observePermissionStop(input: { nodeId: string; sessionName: string; generation: string;
+    actor: unknown; at: unknown; command?: unknown; ruleSuggestions?: unknown; completed: boolean }): void {
+    try {
+      const session = this._resolveSession({ nodeId: input.nodeId, sessionName: input.sessionName });
+      if (!session || session.node_id !== input.nodeId || session.session_name !== input.sessionName || session.runtime !== "claude-code"
+        || this.resolveOccupantGeneration?.(input.nodeId) !== input.generation
+        || this.isRegisteredOccupantGeneration?.(input.nodeId, input.generation) !== true) return;
+      this.permissionStops.observe(input);
+    } catch { /* Optional diagnostic failure cannot change hook behavior. */ }
+  }
+
+  getPermissionStopForNode(nodeId: string, sessionName: string): PermissionStopStatus {
+    try {
+      const generation = this.resolveOccupantGeneration?.(nodeId);
+      const session = this._resolveSession({ nodeId, sessionName });
+      const status = this.db.prepare(`SELECT s.status, n.occupant_lifecycle FROM sessions s JOIN nodes n ON n.id = s.node_id
+        WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { status: string; occupant_lifecycle: string } | undefined;
+      if (!generation || !session || session.node_id !== nodeId || session.session_name !== sessionName
+        || session.runtime !== "claude-code" || status?.status !== "running" || status.occupant_lifecycle === "retired"
+        || this.isRegisteredOccupantGeneration?.(nodeId, generation) !== true) {
+        this.permissionStops.forget(nodeId);
+        return unavailablePermissionStop();
+      }
+      return this.permissionStops.read(nodeId, generation);
+    } catch { return unavailablePermissionStop(); }
   }
 
   recordHookEvent(input: HookActivityInput): RecordHookActivityResult {

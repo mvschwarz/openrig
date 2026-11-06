@@ -290,6 +290,42 @@ describe("transport routes", () => {
   //    RESOLVED recipient (the schema's typed+indexed destination_session + per-row delivery_state is a
   //    per-recipient design; a TargetSpec would poison the typed column). Same downstream-of-derivation
   //    shape as /send. ──
+  it("broadcast records an unconfirmed submission after paste as indeterminate", async () => {
+    seedRig();
+    migrate(db, [outboxEntriesSchema]);
+    db.exec("ALTER TABLE outbox_entries ADD COLUMN identity_provenance TEXT");
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux({
+      sendKeys: async () => ({ ok: false as const, code: "session_not_found", message: "Enter result lost" }),
+    }) });
+    const app = createApp({ sessionTransport: transport, outboxHandler: new OutboxHandler(db) });
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ sessions: ["dev-impl@my-rig"], text: "team update" }),
+    });
+    const body = await res.json();
+    expect(body.results[0]).toMatchObject({ ok: false, inputPhase: "written" });
+    expect(outboxRows().map(row => row["delivery_state"])).toEqual(["indeterminate"]);
+  });
+  it("broadcast distinguishes a lost text-write result from another recipient's successful send", async () => {
+    seedRig();
+    migrate(db, [outboxEntriesSchema]);
+    db.exec("ALTER TABLE outbox_entries ADD COLUMN identity_provenance TEXT");
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux({
+      sendText: async target => target.includes("dev-qa")
+        ? { ok: false as const, code: "session_not_found", message: "paste result lost" }
+        : { ok: true as const },
+    }) });
+    const app = createApp({ sessionTransport: transport, outboxHandler: new OutboxHandler(db) });
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ rig: "my-rig", text: "team update" }),
+    });
+    const body = await res.json();
+    expect(body.results.find((result: { sessionName: string }) => result.sessionName === "dev-qa@my-rig"))
+      .toMatchObject({ ok: false, inputPhase: "attempted" });
+    expect(Object.fromEntries(outboxRows().map(row => [row["destination_session"], row["delivery_state"]])))
+      .toEqual({ "dev-impl@my-rig": "delivered", "dev-qa@my-rig": "indeterminate" });
+  });
   it("A3b — a broadcast auto-records N rows, one per RESOLVED recipient (sender=derived, provenance=transport:v1, destination=each session, never the TargetSpec)", async () => {
     seedRig();
     const res = await sendApp().request("/api/transport/broadcast", {

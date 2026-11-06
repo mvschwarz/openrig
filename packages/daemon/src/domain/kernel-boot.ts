@@ -85,6 +85,10 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
     degradedTimeoutMs: deps.degradedTimeoutMs,
   });
 
+  const kernels = deps.rigRepo.findUnarchivedRigsByName("kernel");
+  const recordedVariant = kernels.length === 1
+    ? deps.rigRepo.getKernelVariantFromBootstrap(kernels[0]!.id, deps.specsDir) : null;
+
   // 1. --no-kernel opt-out (CLI flag projected via OPENRIG_NO_KERNEL).
   // VITEST env additionally short-circuits the live runtime probe
   // path so daemon-composition tests don't block 5s+ on shelled-out
@@ -98,7 +102,7 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
   if (process.env["OPENRIG_NO_KERNEL"] === "1" || (process.env["VITEST"] === "true" && !probeInjected)) {
     const reason = process.env["OPENRIG_NO_KERNEL"] === "1" ? "OPENRIG_NO_KERNEL=1" : "VITEST=true";
     log("info", `kernel-boot: ${reason} — skipping kernel auto-boot`);
-    tracker.setSkipped(reason);
+    tracker.setSkipped(reason, recordedVariant);
     return tracker;
   }
 
@@ -111,14 +115,14 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
       // Startup reconcile found none of its seats running and marked them detached: a reboot or
       // crash took it down, not `rig down` (which marks them exited). Bring it back as it was.
       log("info", "kernel-boot: kernel rig was lost (all seats detached); restoring it");
-      tracker.startBooting(null, deps.restoreLostKernel(managed.rigId), managed.seats, { existingRestore: true });
+      tracker.startBooting(recordedVariant, deps.restoreLostKernel(managed.rigId), managed.seats, { existingRestore: true });
       return tracker;
     }
     log("info", `kernel-boot: kernel rig already managed (${managed.kind}); skipping builtin boot`);
     // A stale kernel stays down on purpose; say why and how to bring it back (`rig start` prints it).
     tracker.setSkipped(managed.kind === "stale"
       ? "kernel rig already managed; it was already down before this daemon start, so it was not restored. Bring it back with: rig up kernel --existing"
-      : "kernel rig already managed");
+      : "kernel rig already managed", recordedVariant);
     if (managed.kind === "live") tracker.observeManagedKernel();
     return tracker;
   }

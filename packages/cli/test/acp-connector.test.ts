@@ -220,6 +220,40 @@ describe("rig acp run", () => {
     expect(readFileSync(run.logPath, "utf8")).not.toContain("session/new");
   });
 
+  it("reads a load error as missing only by the harness's own rule, and never starts a fresh session", async () => {
+    vi.stubEnv("FAKE_ACP_LOAD", "1");
+    vi.stubEnv("FAKE_ACP_MISSING", "claude");
+    const claudeRule = (error: { code: number; data?: unknown }, id: string) => error.code === -32002 && (error.data as { sessionId?: string })?.sessionId === id;
+    const q = memoryQueue("scenario:reply PONG");
+    const run = options({ loadSession: "sess-gone", missingSession: claudeRule });
+    expect(await runAcpAssignment(q.queue, run)).toMatchObject({ kind: "missing" });
+    expect(outcomeNote(q)).toContain('outcome missing: session sess-gone doesn\'t exist for this agent (session/load returned -32002 Resource not found {"sessionId":"sess-gone"}); no new session was started');
+    expect(readFileSync(run.logPath, "utf8")).not.toContain("session/new");
+
+    // The same agent error with no rule, or a rule it doesn't match, reads failed with the agent's own code and text.
+    vi.stubEnv("FAKE_ACP_MISSING", "codex");
+    for (const extra of [{}, { missingSession: claudeRule }]) {
+      const other = memoryQueue("scenario:reply PONG");
+      const outcome = await runAcpAssignment(other.queue, options({ loadSession: "sess-gone", ...extra }));
+      expect(outcome.kind).toBe("failed");
+      expect(outcome.summary).toBe('session/load returned error -32603 Internal error {"details":"no rollout found for thread id sess-gone"}');
+    }
+  });
+
+  it("puts the agent's reported usage and cost on the outcome with where each came from, and unknown when absent", async () => {
+    vi.stubEnv("FAKE_ACP_COST", "1");
+    vi.stubEnv("FAKE_ACP_PROMPT_USAGE", "1");
+    const q = memoryQueue("scenario:reply PONG");
+    const outcome = await runAcpAssignment(q.queue, options());
+    expect(outcome.usage).toEqual({ tokens: { total: 1500, input: 1200, output: 300, thought: undefined, cachedRead: undefined, cachedWrite: undefined }, cost: { amount: 0.00199, currency: "USD" } });
+    expect(outcomeNote(q)).toContain("Usage as the agent reported it: 1500 tokens (1200 in, 300 out), from the agent's prompt response; cost 0.00199 USD, the agent's own cumulative figure for the session (usage_update).");
+
+    vi.unstubAllEnvs();
+    const none = memoryQueue("scenario:reply PONG");
+    expect((await runAcpAssignment(none.queue, options())).usage).toEqual({});
+    expect(outcomeNote(none)).toContain("Usage as the agent reported it: tokens unknown (the agent's prompt response reported none); cost unknown (the agent reported none).");
+  });
+
   it("reports a process the agent launched that outlives the connection, without stopping it", async () => {
     const q = memoryQueue("scenario:reply PONG");
     const run = options();

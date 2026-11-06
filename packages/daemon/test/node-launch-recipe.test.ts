@@ -302,6 +302,73 @@ describe("persisted pod-aware launch recipes", () => {
     }
   });
 
+  it("a fresh restore from the recipe reports the agent spec's advisories, its own and its import's, once each", async () => {
+    db = createFullTestDb();
+    let setup!: ReturnType<typeof createTestApp>;
+    const freshLaunch = vi.fn(async (rigId: string, nodeId: string) => setup.podInstantiator.launchPersistedFresh(rigId, nodeId));
+    const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
+    const rigRoot = process.cwd();
+    const files: Record<string, string> = {
+      [`${rigRoot}/agents/impl/agent.yaml`]: `name: impl\nversion: "1.0.0"\nimports:\n  - ref: local:../shared\ndefaults:\n  effort: 3\nresources:\n  skills: []\n  guidance: []\n  subagents: []\n  plugins: []\n  runtime_resources: []\nprofiles:\n  default: {}\n`,
+      [`${rigRoot}/agents/shared/agent.yaml`]: `name: shared\nversion: "1.0.0"\ndefaults:\n  lifecycle:\n    compaction_strategy: harness_native\nresources:\n  skills: []\nprofiles: {}\n`,
+    };
+    setup = createTestApp(db, {
+      freshLaunch,
+      freshLaunchAvailable,
+      podInstantiatorFsOps: {
+        exists: (file) => file.replaceAll("\\", "/") in files,
+        readFile: (file) => files[file.replaceAll("\\", "/")]!,
+      },
+    });
+    const runtimeAdapter = {
+      runtime: "codex",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+    const rig = setup.rigRepo.createRig("advised-recipe-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)")
+      .run("pod-advised", rig.id, "dev", "Development");
+    const rigSpec: RigSpec = {
+      version: "0.2",
+      name: "advised-recipe-rig",
+      pods: [{
+        id: "dev",
+        label: "Development",
+        members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: "." }],
+        edges: [],
+      }],
+      edges: [],
+    };
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", {
+      runtime: "codex",
+      agentRef: "local:agents/impl",
+      profile: "default",
+      cwd: rigRoot,
+      podId: "pod-advised",
+      launchRecipe: { version: 1, rigRoot, rigSpec },
+    });
+    const session = setup.sessionRegistry.registerSession(node.id, "dev-impl@advised-recipe-rig");
+    setup.sessionRegistry.updateStatus(session.id, "running");
+    setup.sessionRegistry.updateBinding(node.id, { tmuxPane: "%7" });
+    const snapshot = setup.snapshotCapture.captureSnapshot(rig.id, "recipe-advised");
+    setup.sessionRegistry.updateStatus(session.id, "exited");
+
+    const result = await setup.restoreOrchestrator.restore(snapshot.id, {
+      adapters: { codex: runtimeAdapter },
+      freshLogicalIds: [node.logicalId],
+    });
+
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes.find((entry) => entry.nodeId === node.id)?.status).toBe("fresh-primed");
+    const warnings = result.result.warnings ?? [];
+    expect(warnings.filter((w) => w === `dev.impl: agent spec advisory (impl, ${rigRoot}/agents/impl): defaults.effort: non-string value "3" ignored; effort must be a text value`)).toHaveLength(1);
+    expect(warnings.filter((w) => w.startsWith(`dev.impl: agent spec advisory (shared, ${rigRoot}/agents/shared): defaults.lifecycle.compaction_strategy: "harness_native" is deprecated`))).toHaveLength(1);
+  });
+
   it.each([
     { label: "no recipe", mutate: (db: Database.Database, nodeId: string) => db.prepare("UPDATE nodes SET launch_recipe_json = NULL WHERE id = ?").run(nodeId) },
     { label: "invalid JSON", mutate: (db: Database.Database, nodeId: string) => db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run("{", nodeId) },

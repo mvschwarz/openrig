@@ -703,6 +703,12 @@ export function previewBody(
   };
 }
 
+// Mark the cut inside the body so readers that discard metadata or stderr can request the complete brief.
+// Counts use code points, like the preview.
+export function previewCutMarker(qitemId: string, shownCodePoints: number, totalCodePoints: number): string {
+  return `…[cut at ${shownCodePoints} of ${totalCodePoints} chars; rig queue show ${shellQuote(qitemId)} --full]`;
+}
+
 function isRecordWithStringBody(v: unknown): v is Record<string, unknown> & { body: string } {
   return (
     typeof v === "object" &&
@@ -1234,6 +1240,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--reopen", "Explicitly acknowledge a deliberate terminal-to-active repair; requires --state and --note")
     .option("--closure-reason <reason>", "Required for state=done. --state canceled takes no reason, except 'superseded' (with --closure-target = the successor), which records a supersession, distinct from an abandoned cancel")
     .option("--closure-target <target>", "Required for handed_off_to, escalation, and superseded; blocked_on park records use state=blocked with --blocked-on")
+    .option("--closure-required-at <iso>", "Accept a revised closure deadline on an in-progress item; keeps the claim and records the old/new time and accepting actor")
     .option("--resolution <text>", "The outcome, stored on the row and shown by rig queue show. Needs --state done, canceled, denied, failed or handed-off, and non-blank text. Stored when the update closes an open row, after anything the row already has (a fallback line, an earlier outcome); a row that is already closed keeps what it has")
     .option("--blocked-on <blocker>", "For state=blocked: the blocker — a qitem id (must exist and be live), a human seat (FR-6 park; requires summary + evidence_ref), or a typed non-qitem gate 'fold:<what>' / 'auth:<what>' / 'external:<what>'")
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
@@ -1249,6 +1256,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       reopen?: boolean;
       closureReason?: string;
       closureTarget?: string;
+      closureRequiredAt?: string;
       resolution?: string;
       blockedOn?: string;
       wakeWatchdog?: string;
@@ -1285,6 +1293,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           reopen: opts.reopen,
           closureReason: opts.closureReason,
           closureTarget: opts.closureTarget,
+          ...(opts.closureRequiredAt !== undefined ? { closureRequiredAt: opts.closureRequiredAt } : {}),
           resolution: opts.resolution,
           blockedOn: opts.blockedOn,
           wakeWatchdogId: opts.wakeWatchdog,
@@ -1675,7 +1684,10 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           ...(closingTransition === undefined ? [] : [omittedReadField("closingTransition", closingTransition)]),
         ];
         const view = readView(item, fullCommand, omitted);
-        const transformed = { ...record, body: preview, bodyBytes, bodyTruncated, readView: view };
+        const shownBody = bodyTruncated
+          ? `${preview}${previewCutMarker(qitemId, Array.from(preview).length, Array.from(item.body).length)}`
+          : preview;
+        const transformed = { ...record, body: shownBody, bodyBytes, bodyTruncated, readView: view };
         // Slice 15 P2: with output.compact on, the empty fields are left out and counted.
         const compact = compactOutputEnabled() ? compactShow(transformed) : null;
         printResult(json, compact ? compact.item : transformed, res.status);

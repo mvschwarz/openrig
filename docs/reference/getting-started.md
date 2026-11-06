@@ -76,8 +76,17 @@ You need Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude
 Code or Codex account: one is enough, since the kernel operator adapts the
 shipped `starter` team to whichever you have. On Linux, the distribution's own
 Node.js can be older (Ubuntu 24.04's is 18); install a supported version with
-[nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac
-with Apple silicon, use Node.js 22 (see the [compatibility
+[nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource.
+
+For a tarball or manual Node install on Linux, put its bin directory on PATH in
+`~/.profile`, for example `export PATH="/path/to/node/bin:$PATH"`, rather than only
+in an interactive `~/.bashrc`. Bash reads the first of `~/.bash_profile`,
+`~/.bash_login` and `~/.profile`; if one of the first two exists, source `~/.profile`
+there. Other shells use their own login file (for example, zsh's `~/.zprofile`).
+Check `bash -lc 'command -v node rig'`: both paths must appear in the output.
+Use Codex's tool shell for this check if it differs from Bash.
+
+On a Mac with Apple silicon, use Node.js 22 (see the [compatibility
 history](../releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where
 you aren't an administrator, or where Homebrew belongs to another account (its
 `brew install` is refused), install Node.js in your own home folder with
@@ -200,8 +209,9 @@ The same command without `--dry-run`,
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
-`FAILED [n/4] <command or check> (exit <code>)`. Where a provider isn't signed in yet, step 4 ends that way and
-`rig setup` lists each sign-in under "Some steps need attention". If the only remaining failures are provider
+`FAILED [n/4] <command or check> (exit <code>)` for steps 1–3. If step 4 is not ready, it reports
+`INSTALLED, SETUP NOT COMPLETE` and points to the details from `rig setup` above. Follow that output and any Fix, then rerun
+`rig setup`; the CLI does not need reinstalling. If the only remaining failures are provider
 sign-ins, the install steps finished: sign in to each selected provider as below, then continue at
 [Start the kernel](#start-the-kernel-and-check-its-state). To install only what the selected providers need, go step
 by step instead:
@@ -290,6 +300,17 @@ kernel in the background without a project starter. An absent unused provider is
 fine; if both accounts are authenticated, the kernel uses both even when your
 later project uses just one. A request to use only one provider for everything
 is a separate choice.
+
+`/api/kernel/status` retains the chosen template (`rig.yaml`,
+`rig-claude-only.yaml` or `rig-codex-only.yaml`) across daemon restarts and
+recovery, including starts with `--no-kernel`. It reads the rig's latest rig-spec
+bootstrap record, including a partial launch, so an older kernel's recorded
+selection is also available. This is the original selection; the rig's live spec
+describes its current configuration. The saved source must match a template under
+the current installation’s built-in specs directory. A custom project path with
+the same directory suffix, an old source path that can no longer be verified
+(for example, after a Node version change moves the global install), or a kernel
+without bootstrap history reports an unknown variant.
 
 **Started is not ready.** Read the `Kernel:` boot state in `rig status` and the
 individual seat state in `rig ps --nodes --rig kernel`. The view may open while
@@ -483,7 +504,7 @@ different points in the same journey:
 | What you see | Why and what to do next |
 | --- | --- |
 | Codex offers to switch to a cheaper model near a rate limit | This is Codex's own menu. Ask the person to choose in the seat's terminal; do not silently change the team's configured model. OpenRig disables Codex's startup update check for managed launches, but does not answer this model-choice menu. |
-| A missing Node.js, npm or tmux; an install download or command fails | The named prerequisite or install step did not finish. Read its error and the [platform and provider instructions](#install-and-sign-in), resolve that step, then recheck it. `FAILED [4/4]` with only selected-provider sign-ins outstanding means the package installed but those logins still need the person. |
+| A missing Node.js, npm or tmux; an install download or command fails | The named prerequisite or install step did not finish. Read its error and the [platform and provider instructions](#install-and-sign-in), resolve that step, then recheck it. `INSTALLED, SETUP NOT COMPLETE` means the CLI is installed but setup needs attention; follow its output and any Fix, then rerun `rig setup`. |
 | The installing harness refuses a tool call or asks for permission | Its native rules, sandbox or automatic permission decision apply before OpenRig can run. Claude Code's [auto mode can deny calls](https://code.claude.com/docs/en/auto-mode-config) as well as approve them. Show the specific refusal and ask the person to review it in the harness permission controls or run that named step themselves. Keep their chosen restrictions; a refused call does not prove the OpenRig command failed. |
 | Herdr or Ghostty installation is unavailable or declined | Herdr is optional for the view: `--window` uses plain tmux when Herdr is absent, and its install failure is a warning. On macOS, Terminal.app is the fallback when supported Ghostty is absent. An explicitly requested Ghostty install can fail setup; resolve that install or decline it with `--no-ghostty`, preserving earlier choices. Address separate required-tool or login failures. Existing cmux remains supported. |
 | macOS asks for Automation access, or the window action is denied | The command asks the desktop terminal app to open a new surface. Let the person answer the system prompt. Read the error and inspect any new window before retrying an uncertain action; do not silently switch apps and open a duplicate. |
@@ -1129,8 +1150,15 @@ rig up ./openrig-specs/rigs/launch/starter/rig.yaml --cwd .
 
 OpenRig's `permission_policy: builtin:yolo` setting selects
 `-s danger-full-access -a never` on fresh, resume and fork launches, replacing
-the named-profile argument. The profile recipe above remains useful when you
-want to maintain those choices in native configuration. The legacy
+the named-profile argument. That drops the whole profile, not only its sandbox
+and approval settings. To keep a named profile with full access, put full access
+in the profile itself and leave `permission_policy` absent, as in the recipe
+above. To keep it with a workspace-write or read-only posture that OpenRig
+records, use the member's `codex_permissions` (see
+[per-member Codex permissions](rig-spec.md#per-member-codex-permissions)):
+OpenRig passes `-p` and adds that envelope's flags, and for that seat the
+envelope replaces a policy posture such as `builtin:yolo`. Full access isn't an
+envelope. The legacy
 environment-only `OPENRIG_YOLO=1` path remains sandbox-only when no resolved
 policy is present. A standalone `codex --yolo` command is not an OpenRig setting.
 At full access, Codex can show its full-access and GPT-5.1 migration notices at

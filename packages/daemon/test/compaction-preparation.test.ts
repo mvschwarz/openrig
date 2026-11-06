@@ -5,8 +5,8 @@ import {compactionRoutes} from '../src/routes/compaction.js';
 import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync, existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
-import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, MANUAL_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
-import {SessionTransport} from '../src/domain/session-transport.js';
+import {ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, MANUAL_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
+import {SessionTransport, CAPTURE_READABLE_BUDGET_MS} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {TmuxAdapter} from '../src/adapters/tmux.js';
 import {ContextMonitor} from '../src/domain/context-monitor.js';
@@ -40,6 +40,75 @@ function stageMap(f:ReturnType<typeof fixture>,suffix=''){
  writeFileSync(a.mapPath+'.tmp',`# Restore map\nCurrent work and next step.\n${a.marker}${suffix}\n`);
 }
 const compacts=(f:ReturnType<typeof fixture>)=>f.writes.filter(t=>t.startsWith('/compact'));
+// Real readable capture and managed send, including the adapter's final beforePaste check.
+async function tinyPane(kind:'empty'|'unknown'|'typed'='empty',liveProbe=true){
+ const f=fixture();vi.spyOn(Date,'now').mockImplementation(()=>f.clock());
+ await f.e.maybeAutoCompact(input);stageMap(f);
+ const frame=readFileSync(join(import.meta.dirname,'fixtures/input-box/claude-code-2.1.296/openrig-seat-accept-edits-idle.txt'),'utf8').trimEnd().split('\n');
+ const row=frame.findLastIndex(line=>line.startsWith('❯'));
+ if(kind==='typed')frame[row]='❯ keep this draft';
+ const window={width:11,height:20,own:null as string|null,recorded:''};
+ const screen=()=>window.width<120?'clipped pane':kind==='unknown'?'unclassified screen':`\x1b[0m${frame.join('\n')}`;
+ const tmux=Object.assign(f.tmux,{
+  hasSession:vi.fn(async()=>true),
+  readWindow:vi.fn(async()=>({id:'@tiny',userOption:window.recorded})),
+  listPanes:vi.fn(async()=>[{id:'%1',index:0,cwd:'/project',width:window.width,height:window.height,active:true}]),
+  getWindowLocalOption:vi.fn(async()=>window.own),
+  setWindowOption:vi.fn(async(_target:string,option:string,value:string)=>{if(option==='window-size')window.own=value;else window.recorded=value;return{ok:true};}),
+  restoreWindowOption:vi.fn(async(_target:string,option:string,value:string|null)=>{if(option==='window-size')window.own=value;else window.recorded=value??'';return{ok:true};}),
+  resizeWindow:vi.fn(async(_target:string,width:number,height:number)=>{window.width=width;window.height=height;window.own='manual';return{ok:true};}),
+  getPaneCursorPosition:vi.fn(async()=>({x:kind==='typed'?17:2,y:row,width:window.width,height:window.height})),
+  capturePaneContent:vi.fn(async()=>screen()),capturePaneScreen:vi.fn(async()=>screen()),
+  sendText:vi.fn(async(_target:string,text:string,beforeInput?:()=>void,options?:{beforePaste?:()=>Promise<void>})=>{
+   try{await options?.beforePaste?.();beforeInput?.();f.writes.push(text);return{ok:true};}
+   catch(error){return{ok:false,code:(error as {code?:string}).code??'fixture_error',message:String(error)};}
+  }),
+ });
+ if(liveProbe)delete(f.transport as any).classifySendReadiness;
+ return{...f,tmux,window};
+}
+it.each(['live-pane','final-composer'])('submits managed /compact from an 11x20 pane through the %s readable read and restores the window',async gate=>{
+ const f=await tinyPane('empty',gate==='live-pane');
+ // The pre-existing readable path can classify this fixture and give the inherited sizing back.
+ expect((await f.transport.capture(seat,{inputBox:true,readable:{width:120,height:40}})).inputBox).toMatchObject({status:'empty',confidence:'high'});
+ expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
+ await f.e.maybeAutoCompact(input);
+ expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
+ expect(compacts(f)).toHaveLength(1);
+ expect(f.tmux.sendText).toHaveBeenCalledWith(seat,expect.stringMatching(/^\/compact/),expect.any(Function),expect.objectContaining({beforePaste:expect.any(Function)}));
+});
+it.each(['unknown','typed'] as const)('keeps a readable %s composer from authorizing /compact and gives its window back',async kind=>{
+ const f=await tinyPane(kind);
+ const box=(await f.transport.capture(seat,{inputBox:true,readable:{width:120,height:40}})).inputBox;
+ expect(box?.status).toBe(kind==='typed'?'typed':'no-input-box');
+ await f.e.maybeAutoCompact(input);
+ expect(compacts(f)).toHaveLength(0);
+ expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
+});
+it('submits managed /compact when readable redraw settling exceeds the ordinary one-second idle wait',async()=>{
+ const f=await tinyPane();
+ expect((await f.transport.capture(seat,{inputBox:true,readable:{width:120,height:40}})).inputBox).toMatchObject({status:'empty',confidence:'high'});
+ const screen=f.tmux.capturePaneScreen.getMockImplementation()!;
+ let looks=0;
+ f.tmux.capturePaneScreen.mockImplementation(async()=>++looks<=8?`redrawing ${looks}`:screen());
+ const started=f.clock();
+ await f.e.maybeAutoCompact(input);
+ expect(f.clock()-started).toBeGreaterThan(1000);
+ expect(looks).toBeGreaterThan(8);
+ expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
+ expect(compacts(f)).toHaveLength(1);
+});
+it.each(['incomplete-map','completed-map','cancel-after-compact'] as const)('persists the computed end reason for %s',async end=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);
+ if(end!=='incomplete-map')stageMap(f);
+ if(end==='cancel-after-compact'){await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);f.e.cancelPreparation(seat);}
+ else{f.advance(AUTO_PREP_WAIT_MS_DEFAULT+(end==='completed-map'?AUTO_RETRY_AFTER_STOP_MS_DEFAULT:0)+1);f.e.reconcilePreparations();}
+ const state=f.e.getPreparationState(seat)!;
+ const reason=end==='incomplete-map'?'preparation_incomplete':end==='completed-map'?'map_complete_seat_never_idle':'compaction_cancelled';
+ expect(state).toMatchObject({status:'stopped',reason});
+ const record=JSON.parse(readFileSync(join(dirname(state.mapPath),COMPACTION_RECORD_FILE),'utf8'));
+ expect(record.phase).toBe('ended');expect(record.reason).toBe(reason);
+});
 it('polls wait after delivered prep, ordinary real transport still circulates, exact map releases once',async()=>{
  const f=fixture();expect(AUTO_PREP_WAIT_MS_DEFAULT).toBe(25*60_000);
  await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
@@ -782,13 +851,19 @@ for (const end of ['cancel', 'disable', 'replacement'] as const) it(`automatic: 
 
 
 for(const fresh of [false,null,"below","high"] as const)it(`an armed completed map reaches the next idle boundary with usage freshness ${fresh}`,async()=>{
- const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
+ const f=fixture();
+ // The idle-wait deadline and injected sleep must advance on the same clock.
+ vi.spyOn(Date,'now').mockImplementation(()=>f.clock());
+ await f.e.maybeAutoCompact(input);stageMap(f);
  f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);f.activity('running');
  const row={node_id:'node-one',session_id:1,session_name:seat,runtime:'claude-code',cwd:null,startup_status:'ready'};
  const db={prepare:()=>({all:()=>[row]})};
  const store={readAndNormalize:()=>fresh===null?null:{availability:'known',fresh:typeof fresh==='string',usedPercentage:fresh==='below'?20:90},persist:()=>{}};
  const monitor=new ContextMonitor(db as any,store as any,undefined,f.e);
+ const beforeBusyPoll=f.clock();
  await monitor.pollOnce();expect(compacts(f)).toHaveLength(0);
+ expect(f.clock()-beforeBusyPoll).toBeLessThanOrEqual(1_000+CAPTURE_READABLE_BUDGET_MS);
+ expect(f.e.getPreparationState(seat)?.status).toBe('waiting');
  f.activity('idle');await monitor.pollOnce();
  expect(compacts(f)).toHaveLength(fresh==='below'?0:1);expect(f.writes.filter(t=>!t.startsWith('/compact'))).toHaveLength(1);
  if(fresh==='below')expect(f.e.getPreparationState(seat)?.status).toBe('waiting');

@@ -4,18 +4,23 @@ import nodePath from "node:path";
 import { SEAT_SKILL_PLUGIN_NAME, ensureSeatSkillPlugin, insideSeatStorage, insideSeatStorageFolder, recordSeatSkillWrite, seatSkillName, seatSkillPaths, writeInsideSeatStorage, type SeatSkillPaths } from "./seat-skill-storage.js";
 import { claudePathBounds } from "./native-process-lineage.js";
 import { seatAdditionPluginFolder } from "./rigspec-schema.js";
+import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 
 // OPR.0.7.0.9 — a Claude seat's own launch additions: an agent, an appended system prompt file and plugin folders.
 // Their files are copied into the seat's own storage (slice 13's seat root), never into the shared project, and a
 // launch passes the copies: the plugin folders through CLAUDE_CODE_PLUGIN_DIRS beside the seat's generated plugin,
 // the agent and the prompt file as `--agent` and `--append-system-prompt-file`. A manifest at the seat root records
 // what was asked for, each copy's source and bytes, and the prompt each conversation started with.
+// #2044 — and its plugin channels: names, not files, so nothing is copied; the record holds them and each launch passes
+// them as one `--channels` followed by the entries.
 
 /** What a seat asked for: source files, resolved to absolute paths by whoever reads the spec. */
 export interface SeatLaunchAdditionsInput {
   agentFile?: string;
   appendSystemPromptFile?: string;
   pluginDirs?: string[];
+  /** `plugin:<name>@<marketplace>` entries. */
+  pluginChannels?: string[];
 }
 
 /** What a launch passes: the seat-local copies. */
@@ -24,6 +29,8 @@ export interface SeatLaunchAdditions {
   agent?: string;
   appendSystemPromptFile?: string;
   pluginDirs: string[];
+  /** Absent in a record written before #2044, and when the seat asked for none. */
+  pluginChannels?: string[];
 }
 
 export type SeatLaunchAdditionsPrepared =
@@ -55,6 +62,8 @@ function readManifest(paths: SeatSkillPaths): Manifest | undefined {
   const shaped = isRecord(parsed) && isRecord(additions) && Array.isArray(additions["pluginDirs"])
     && additions["pluginDirs"].every((dir) => typeof dir === "string")
     && optionalString(additions["agent"]) && optionalString(additions["appendSystemPromptFile"])
+    && (additions["pluginChannels"] === undefined
+      || (Array.isArray(additions["pluginChannels"]) && additions["pluginChannels"].every((entry) => typeof entry === "string")))
     && (parsed["conversations"] === undefined || isRecord(parsed["conversations"]));
   return shaped ? parsed as unknown as Manifest : undefined;
 }
@@ -103,7 +112,8 @@ function agentName(file: string): string {
  */
 export function prepareSeatLaunchAdditions(paths: SeatSkillPaths, input: SeatLaunchAdditionsInput): SeatLaunchAdditionsPrepared {
   const pluginSources = input.pluginDirs ?? [];
-  if (!input.agentFile && !input.appendSystemPromptFile && pluginSources.length === 0) {
+  const channels = input.pluginChannels ?? [];
+  if (!input.agentFile && !input.appendSystemPromptFile && pluginSources.length === 0 && channels.length === 0) {
     const file = manifestPath(paths);
     try {
       if (insideSeatStorage(paths.root, file) && fs.existsSync(file)) fs.unlinkSync(file);
@@ -129,6 +139,12 @@ export function prepareSeatLaunchAdditions(paths: SeatSkillPaths, input: SeatLau
     return { ok: false, code: "addition_invalid", message: `addition_invalid: the agent in ${input.agentFile} is named "${agent}"; a seat's agent needs a plain name (letters, digits, . _ -); nothing was written` };
   }
 
+  // The spec refuses these too; a channel is passed to `--channels` only as a plain plugin entry identity proof reads back.
+  const badChannel = channels.find((entry) => !isClaudePluginChannel(entry));
+  if (badChannel !== undefined) {
+    return { ok: false, code: "addition_invalid", message: `addition_invalid: the plugin channel ${JSON.stringify(badChannel)} isn't plugin:<name>@<marketplace> (each name letters, digits, . _ -); nothing was written` };
+  }
+
   // A copied plugin named like the seat's own generated plugin would collide with it (same-name behaviour isn't documented).
   for (const dir of pluginSources) {
     let name: unknown;
@@ -149,7 +165,7 @@ export function prepareSeatLaunchAdditions(paths: SeatSkillPaths, input: SeatLau
       : `addition_invalid: the plugin folders ${which.join(", ")} would be copied to the same destination (additions/plugins/${clash}) and mix their files; rename one; nothing was written` };
   }
 
-  const additions: SeatLaunchAdditions = { pluginDirs: [] };
+  const additions: SeatLaunchAdditions = { pluginDirs: [], ...(channels.length > 0 ? { pluginChannels: [...channels] } : {}) };
   if (input.appendSystemPromptFile) {
     additions.appendSystemPromptFile = nodePath.join(additionsRoot(paths), "system-prompt.md");
     // The launch-time check, before any write: identity proof must be able to read this path back from `ps`.
@@ -301,7 +317,14 @@ function seatLaunchAdditionsAt(paths: SeatSkillPaths): { additions?: SeatLaunchA
     else missing.push(agentCopy);
   }
   for (const dir of manifest.additions.pluginDirs) { if (present(dir, "folder")) additions.pluginDirs.push(dir); else missing.push(dir); }
-  const any = additions.agent || additions.appendSystemPromptFile || additions.pluginDirs.length > 0;
+  // A record OpenRig wrote holds only plain plugin entries; any other value (a hand edit) is left off the launch, named.
+  const channels = manifest.additions.pluginChannels ?? [];
+  for (const entry of channels.filter((value) => !isClaudePluginChannel(value))) {
+    refused.push(`the plugin channel ${JSON.stringify(entry)} isn't plugin:<name>@<marketplace>`);
+  }
+  const passed = channels.filter(isClaudePluginChannel);
+  if (passed.length > 0) additions.pluginChannels = passed;
+  const any = additions.agent || additions.appendSystemPromptFile || additions.pluginDirs.length > 0 || passed.length > 0;
   return { ...(any ? { additions } : {}), missing, refused };
 }
 
@@ -413,6 +436,7 @@ export function carrySeatLaunchAdditions(source: SeatSkillPaths, target: SeatSki
     ...(additions.agent ? { agentFile: nodePath.join(source.pluginDir, "agents", `${additions.agent.slice(additions.agent.indexOf(":") + 1)}.md`) } : {}),
     ...(additions.appendSystemPromptFile ? { appendSystemPromptFile: additions.appendSystemPromptFile } : {}),
     pluginDirs: additions.pluginDirs,
+    ...(additions.pluginChannels ? { pluginChannels: additions.pluginChannels } : {}),
   });
   if (!prepared.ok) return { status: "not_carried", kept: false, omitted: [...omitted, prepared.message] };
   omitted.push(...(prepared.notes ?? []));
@@ -424,17 +448,29 @@ export function carrySeatLaunchAdditions(source: SeatSkillPaths, target: SeatSki
     // The copies stay kept; without the record, a resume reads the fork's starting prompt as unknown.
     omitted.push(`the source's starting-prompt record wasn't written (${(error as Error).message}), so a resume reads the fork's starting prompt as unknown`);
   }
-  const { agent, appendSystemPromptFile, pluginDirs } = prepared.additions;
-  const any = agent || appendSystemPromptFile || pluginDirs.length > 0;
+  const { agent, appendSystemPromptFile, pluginDirs, pluginChannels } = prepared.additions;
+  const any = agent || appendSystemPromptFile || pluginDirs.length > 0 || (pluginChannels?.length ?? 0) > 0;
   return { status: !any ? "not_carried" : omitted.length > 0 ? "partial" : "carried", kept: true, omitted };
+}
+
+/** Each option a Claude launch passes for a seat's additions, with its values: none without them. */
+function seatLaunchAdditionOptions(additions: SeatLaunchAdditions | undefined): Array<[flag: string, values: string[]]> {
+  const options: Array<[flag: string, values: string[]]> = [];
+  if (additions?.agent) options.push(["--agent", [additions.agent]]);
+  if (additions?.appendSystemPromptFile) options.push(["--append-system-prompt-file", [additions.appendSystemPromptFile]]);
+  // Claude's `--channels` takes every following value up to the next option; each launch path puts OpenRig's identity
+  // options after these, so the list ends where OpenRig ends it.
+  if (additions?.pluginChannels?.length) options.push(["--channels", additions.pluginChannels]);
+  return options;
 }
 
 /** The argv a Claude launch passes for a seat's additions: none without them, so the command stays byte-identical.
  *  The prompt file is followed by OpenRig's identity options, which the identity parser relies on. */
 export function seatLaunchAdditionArgs(additions: SeatLaunchAdditions | undefined): string[] {
-  if (!additions) return [];
-  return [
-    ...(additions.agent ? ["--agent", additions.agent] : []),
-    ...(additions.appendSystemPromptFile ? ["--append-system-prompt-file", additions.appendSystemPromptFile] : []),
-  ];
+  return seatLaunchAdditionOptions(additions).flatMap(([flag, values]) => [flag, ...values]);
+}
+
+/** The same options as shell text, each flag bare and each value quoted: "" without them. */
+export function seatLaunchAdditionShellArgs(additions: SeatLaunchAdditions | undefined, quote: (value: string) => string): string {
+  return seatLaunchAdditionOptions(additions).map(([flag, values]) => ` ${flag}${values.map((value) => ` ${quote(value)}`).join("")}`).join("");
 }

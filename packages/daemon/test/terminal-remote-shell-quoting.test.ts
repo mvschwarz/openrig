@@ -31,7 +31,7 @@ it.each(["inherit", "isolated"] as const)("keeps remote session names intact thr
         });
         expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(mode === "isolated"
           ? ["local", "terminal", "attach", ...(readOnly ? ["--read-only"] : []), "--", session]
-          : [`=${session}:`, "attach", ...(readOnly ? ["-r"] : ["-f", "ignore-size"]), "-t", "session-id"]);
+          : [`=${session}:`, "attach", ...(readOnly ? ["-r"] : []), "-t", "session-id"]);
         expect(view.opened[0]!.paneCommand).not.toContain("/local/only/socket");
         writeFileSync(argsFile, "");
         execFileSync("/bin/sh", ["-c", view.opened[0]!.recoveryCommand!], {

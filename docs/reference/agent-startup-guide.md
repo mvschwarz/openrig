@@ -214,7 +214,7 @@ After the files, OpenRig sends a session-identity message (rig, pod, member, log
 | Delivery Hint | When | How | Use For |
 |---------------|------|-----|---------|
 | `auto` | Depends on the file | Resolved per file: a `SKILL.md` (or content starting `# SKILL`) is `skill_install`, any other `.md` is `guidance_merge`, and any other file is `send_text` | Default — let OpenRig decide |
-| `guidance_merge` | Before harness boot | Merged as a managed block into `AGENTS.md` (Codex, Pi) or `CLAUDE.md` (Claude; `CLAUDE.local.md` with the rig's `managed_blocks: { claude-code: CLAUDE.local.md }`) | Role guidance, culture, project context |
+| `guidance_merge` | Before harness boot | Merged as a managed block into the repository `AGENTS.md` (Codex, OMP), a fresh Pi seat's own agent-directory `AGENTS.md` (see [Runtime Differences](#runtime-differences)), or `CLAUDE.md` (Claude; `CLAUDE.local.md` with the rig's `managed_blocks: { claude-code: CLAUDE.local.md }`). A fresh launch of Codex 0.164.0 or later can carry it as launch developer instructions instead (see [Codex guidance at launch](#codex-guidance-at-launch)) | Role guidance, culture, project context |
 | `skill_install` | Before harness boot | Copied to runtime's skill directory | Skills |
 | `send_text` | After harness is ready | Sent as text to agent's terminal via tmux | Boot-time grounding, identity hints, instructions to read skills |
 
@@ -367,7 +367,15 @@ Each startup file and action specifies when it applies:
 - `restore` — delivered when a seat is restored without its earlier conversation: a restore whose resume falls back to a fresh conversation, or a retried start
 - Default: `[fresh_start, restore]` (both)
 
-**An exact resume delivers neither.** When a restore reopens the seat's saved conversation (`rig up <rig> --existing` with a resume token), OpenRig types no startup actions and delivers no startup files, `restore` ones included: the conversation already has them, and typing them again would add turns to it. The one exception: a managed guidance block missing from the guidance file is put back before the harness starts.
+**An exact resume delivers neither.** When a restore reopens the seat's saved conversation (`rig up <rig> --existing` with a resume token), OpenRig types no startup actions and delivers no startup files, `restore` ones included: the conversation already has them, and typing them again would add turns to it. The one exception: the guidance file's managed blocks are brought up to date before the harness starts. A missing block is put back, and a stale one is refreshed (see below).
+
+**A seat handover does the same put-back.** Before a fresh, fork or rebuild successor starts, the handover puts the seat's missing managed guidance blocks back in its guidance file from the saved startup context. That's the rig's Claude file (`CLAUDE.md`, or `CLAUDE.local.md` when the rig uses it) for Claude, and `AGENTS.md` for Codex, Pi and omp. So a seat rebuilt into a new working directory keeps its guidance.
+
+**A block you edited by hand is never overwritten.** OpenRig records what it last wrote in each managed block, so a launch, an exact resume, a handover or a runtime switch can refresh a block whose source file changed since. The record follows the file itself, so two links to one file share it. A block you've edited since OpenRig wrote it is left as you wrote it. The start's result names it (`guidance_block_edited`), and the seat is told in one line once it's ready, or in a handover's packet. A block OpenRig has no record of writing (any block written before these records were kept) that differs from its source works like this:
+- a launch replaces it, as launches always did, and names it (`guidance_block_refreshed_unrecorded`);
+- an exact resume or a handover leaves it, and names it as possibly stale (`guidance_block_may_be_stale`).
+
+An exact resume doesn't type anything into the resumed conversation. So there, the restore result names the block (`guidanceNotes`), but the seat isn't told.
 
 Use this to avoid re-sending context that a fresh conversation doesn't need twice. For example, a one-time project briefing might only apply on `fresh_start`, while identity grounding should apply on both, so a seat that comes back fresh gets it again.
 
@@ -528,6 +536,58 @@ This separates provider files, not OS users or accounts. Project-local resources
 still use the selected project directory; shared project and system settings
 remain shared.
 
+### Codex guidance at launch
+
+On a fresh launch of Codex 0.164.0 or later, OpenRig passes a seat's managed guidance (OpenRig's start file and the
+rig's and project's context, culture and SOP files) with the launch, as `-c developer_instructions=…`, instead of
+merging it into the repository `AGENTS.md`. Neither the tracked `AGENTS.md` nor the Codex home is written for it, and
+both still load as usual. The text opens: "OpenRig seat guidance for this session follows. Where it conflicts with
+AGENTS.md guidance in the repository or the Codex home, follow AGENTS.md."
+
+A launch value replaces a configured one, so this happens only when no Codex config layer OpenRig reads sets
+`developer_instructions`. OpenRig reads:
+
+- `/etc/codex/config.toml` and `/etc/codex/managed_config.toml`;
+- the Codex home's `config.toml`, profiles included, and the selected profile's `<profile>.config.toml`;
+- each `.codex/config.toml` from the seat's working directory up.
+
+The Codex home it reads is the seat's own (a `CODEX_HOME` in its `env:`, or a recorded account switch), else the
+daemon's `CODEX_HOME`, else `~/.codex`.
+
+The guidance still goes to the repository `AGENTS.md`, as before, when:
+
+- a layer OpenRig reads sets `developer_instructions`, or can't be read. A launch warning names the file;
+- the launch resumes or forks a conversation. Developer instructions on a resume haven't been tested, and an exact
+  resume puts the guidance back in the repository `AGENTS.md`;
+- the seat is restored, even when the restore starts a new conversation. A restore keeps the guidance file its launch
+  recorded, which for Codex is the repository `AGENTS.md`;
+- a handover successor starts (fresh, fork or rebuild). Its launch carries no guidance of its own, so the handover
+  first puts the seat's missing blocks back in the repository `AGENTS.md` from its saved startup context;
+- Codex is older than 0.164.0, or its version is unknown.
+
+A seat's role still arrives as startup text, and the seat-skills line, after the person's yes, still goes to
+`AGENTS.md`.
+
+A launch that carries developer instructions writes no new blocks to the repository `AGENTS.md`. But blocks an earlier
+handover or resume left there are refreshed from their sources, by the same rule as every other managed block. That
+matters because the launch text asks Codex to follow `AGENTS.md` where the two differ.
+
+**If your shell sets `CODEX_HOME`.** When neither the seat nor the daemon declares a `CODEX_HOME`, a seat's pane keeps
+its own, and OpenRig reads `~/.codex`. A `CODEX_HOME` that only your shell startup sets (in `~/.zshrc`, for example),
+with the daemon started without it, isn't seen. A `developer_instructions` set in that home is then replaced by the
+launch value for the session. To have it checked, declare that same absolute path as `CODEX_HOME` in the member's or
+rig's `env:` (see [Launch environment](rig-spec.md#launch-environment), "A seat's own account"). OpenRig then reads
+that home at the seat's next fresh launch, and a `developer_instructions` set there keeps the repository `AGENTS.md`.
+The seat keeps the same home and login.
+
+**What it doesn't cover.** OpenRig doesn't read Codex's packaged defaults, or MDM- or enterprise-managed settings. A
+`developer_instructions` set there may be replaced for the session. Legacy MDM-managed config ranks above launch flags,
+so it can override OpenRig's guidance, and the seat then gets none of it.
+
+**Not established.** The order Codex assembles developer instructions and `AGENTS.md` in, and how it settles every
+conflict, aren't established; the opening sentence asks it to follow `AGENTS.md`. The native behaviour was observed on
+Codex 0.164.0 alone, on fresh launches without tools.
+
 ### Runtime Differences
 
 **Claude Code:**
@@ -558,7 +618,10 @@ remain shared.
 - Can self-install dependencies from instructions but timer/recurring behavior is not reliably available
 
 **Pi and OMP:**
-- Read `AGENTS.md` in the working directory; guidance is merged there, added to Pi's own system prompt
+- Read `AGENTS.md` in the working directory, added to Pi's own system prompt. Pi also reads the one in its agent
+  directory: on a fresh launch, a Pi seat's guidance is merged there, under OpenRig's state, not into the
+  repository's. When that file or its directory is a link, the repository `AGENTS.md` is used instead. A restore keeps
+  the file the seat launched with. OMP keeps its guidance in the repository `AGENTS.md`
 - Selected skills are projected into the seat's own agent directory under OpenRig's state, not into a shared
   workspace folder
 
@@ -671,6 +734,29 @@ verbatim. A higher limit keeps more detail and makes each call larger.
 When authoring startup content, note which instructions are runtime-specific. For example, an orchestrator that needs a monitoring loop should include instructions like: "If running Claude Code, use `/loop 3m` to periodically check rig health. If running Codex, check rig health at the start of each task cycle instead."
 
 ---
+
+## Files OpenRig writes into a project
+
+These are the files OpenRig writes into a seat's working directory, and what `rig down` does with each. Paths are
+relative to that directory.
+
+| Path | When OpenRig writes it | What `rig down` does |
+| --- | --- | --- |
+| Managed blocks in `CLAUDE.md` (or the rig's `managed_blocks` file, such as `CLAUDE.local.md`) or `AGENTS.md` | Each launch merges the seat's guidance blocks. A fresh Codex launch that takes developer instructions puts them in its launch text instead: in `AGENTS.md` it adds only the seat-skills line, after your yes, and refreshes blocks already there. A fresh Pi seat writes its own agent-directory `AGENTS.md` outside the project, except when that folder or file is a link: then its guidance stays in the repository `AGENTS.md`. | Removes OpenRig's blocks, current or legacy, and keeps everything else. When nothing else is left, it deletes the file if the file began with an OpenRig block, or held only blocks in an older format. A block-only file isn't proof that OpenRig created it. The seat-skills line is kept if you edited it. |
+| `.openrig/context-collector.cjs` | Claude seats, at launch. | Removes it while its bytes are still the shipped collector's; otherwise keeps it and says so. |
+| `.claude/settings.local.json` | Claude seats, at launch: OpenRig's status line and its activity hooks are merged in, separately. Your own status line is never replaced, but the activity hooks are still merged beside it. A file that doesn't parse gets neither. | Removes OpenRig's status line and hooks and keeps the file, even if `{}` is all that's left. |
+| `.claude/settings.local.json` fragments and `.mcp.json` | When a profile or spec declares `claude_settings_fragment` or `claude_mcp_fragment`. | Leaves the merged content in place. |
+| `.claude/agents/`, `.claude/plugins/<id>/`, `.claude/extensions/<id>/`; `.agents/<id>.yaml`, `.codex/plugins/<id>/`, `.agents/extensions/<id>/` | When the seat's projection includes subagents, plugins or runtime resources (Claude, then Codex). | Leaves them in place. |
+| `.claude/skills/<id>/`, `.agents/skills/<id>/` | Only for a seat without seat storage. New Claude and Codex seats keep their skills under `$OPENRIG_HOME/state/seats/`, outside the project. | Leaves them in place. |
+| The managed compaction preparation folder described in [Claude compaction preparation directory](#claude-compaction-preparation-directory), with its `.gitignore` of `*` and each attempt's `RESTORE-MAP.md` | Managed Claude compaction, unless a preparation root is configured elsewhere. | Leaves it in place. |
+| `.rigged-checkpoint.md` | A restore that didn't resume a seat's native conversation (by choice or not) and had a checkpoint to hand it. | Leaves it in place. |
+
+`rig down` leaves a file alone while another seat still uses it: a running seat of the same rig, or any seat of
+another rig that isn't archived. That is decided file by file. A guidance file is kept while another seat's
+guidance targets the same file. The Claude settings and collector are kept while another Claude seat works in that
+directory. So another rig's Codex seat keeps `AGENTS.md` without keeping `CLAUDE.md` or the Claude settings. It
+removes `.openrig/` and `.claude/` only when they are empty.
+`rig down --delete` does nothing more to project files. OpenRig doesn't edit your project's own `.gitignore`.
 
 ## Patterns and Anti-Patterns
 

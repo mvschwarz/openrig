@@ -3,7 +3,7 @@
 // operator chose instead (`rig seat set-permissions-to`), with exactly the agent's offered options as its choices; the
 // runner reads the one answer back and gives it to that same live request. With no one to ask, or an ask closed without
 // a choice, OpenRig's default is permit with the agent's own allow option; a person's no is never a grant, and only the
-// seat's opt-in (`--deny`) refuses every request.
+// seat's opt-in (`--deny`) refuses every request. Each default permit leaves one pull-only record on the stream.
 
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
@@ -13,8 +13,11 @@ import { resolveDefaultPerson } from "./gateway/participants.js";
 import { MAX_OPTION_LABEL, MAX_QUESTION_TEXT } from "./human-questions.js";
 import type { QueueItem, QueueRepository } from "./queue-repository.js";
 import type { EventBus } from "./event-bus.js";
+import type { StreamStore } from "./stream-store.js";
 
 export const RUNNER_PERMISSION_TAG = "runner-permission";
+/** The stream tag on OpenRig's record of each permit it decided by default. */
+export const RUNNER_PERMIT_TAG = "runner-permission-permit";
 const QUESTION_ID = "permission";
 const NODE_TAG = "permission-node:";
 const GENERATION_TAG = "permission-generation:";
@@ -23,7 +26,9 @@ const WITHDRAWN_NOTE = "runner-permission-withdrawn";
 const STALE_NOTE = "runner-permission-stale";
 /** The agent's own allow and reject options, kept on the ask so a person's yes or no in words maps to them. */
 const ALLOW_TAG = "permission-allow:";
+const ALLOW_KIND_TAG = "permission-allow-kind:";
 const REJECT_TAG = "permission-reject:";
+const ASK_PREFIX = "qitem-runner-permission-";
 const OPTION_ID = /^[A-Za-z0-9_-]{1,40}$/;
 const ANSWERABLE_KINDS = new Set(["allow_once", "allow_always", "reject_once", "reject_always"]);
 /** What each ACP option kind means to the agent, told to the person beside the option. */
@@ -119,6 +124,9 @@ const text = (value: unknown): string | null => typeof value === "string" && val
 const idText = (value: unknown): string | null => typeof value === "number" && Number.isFinite(value) ? String(value) : text(value);
 const clip = (value: string, max: number): string => value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 const tagValue = (item: QueueItem, prefix: string): string | null => item.tags?.find((tag) => tag.startsWith(prefix))?.slice(prefix.length) ?? null;
+/** An option as a person reads it in a record; one the agent's harness remembers says so. */
+const optionText = (name: string, kind: string | null, optionId: string): string =>
+  `${clip(name, MAX_AGENT_TEXT)} (${kind ? `${kind}, ` : ""}${optionId})${kind === "allow_always" ? `: ${NATIVE_MEANING.allow_always}` : ""}`;
 
 /** A permission ask's own seat and generation, from its create-time tags. */
 export function runnerPermissionOrigin(item: Pick<QueueItem, "tags">): { nodeId: string; generation: string } | null {
@@ -153,6 +161,8 @@ export class RunnerPermissions {
     humanRegistry: () => LoadResult;
     ownerOf: (nodeId: string) => string | null;
     currentGeneration: (nodeId: string) => string | null;
+    /** Where each default permit is recorded; without one, nothing is recorded. */
+    stream?: Pick<StreamStore, "emit">;
   }) {}
 
   /** One ask per live agent request: the same seat generation, conversation and request id always name the same ask. */
@@ -170,9 +180,19 @@ export class RunnerPermissions {
     const allow = request.options.find((option) => option.kind === "allow_once") ?? request.options.find((option) => option.kind === "allow_always");
     const reject = request.options.find((option) => option.kind === "reject_once") ?? request.options.find((option) => option.kind === "reject_always");
     // OpenRig's default is permit: when no one can be asked, the agent gets its own allow option at once.
-    const permit = (why: string): SubmitResult => allow
-      ? { ok: true, state: "permitted", optionId: allow.optionId, reason: why }
-      : { ok: false, code: "options_unsupported", message: `No one can be asked (${why}), and the agent offered no allow option to permit.` };
+    const permit = (why: string): SubmitResult => {
+      if (!allow) return { ok: false, code: "options_unsupported", message: `No one can be asked (${why}), and the agent offered no allow option to permit.` };
+      // One record per request and turn: a resubmitted request finds its record already there.
+      const key = JSON.stringify([seat.nodeId, seat.generation, request.nativeRef, request.requestId, request.turnId]);
+      this.recordPermit(`runner-permit-request-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`, seat.sessionName, seat.nodeId, () => [
+        `OpenRig permitted ${seat.sessionName}'s agent by default, without asking anyone: ${why}.`,
+        "",
+        `- **Tool call:** ${clip(request.toolCall.title ?? "a tool call", MAX_AGENT_TEXT)} (${clip(request.toolCall.kind ?? "other", MAX_AGENT_TEXT)}), as the agent described it.`,
+        `- **Option given:** ${optionText(allow.name, allow.kind, allow.optionId)}.`,
+        `- **Conversation:** ${request.nativeRef}, turn ${request.turnId}, request ${request.requestId}.`,
+      ]);
+      return { ok: true, state: "permitted", optionId: allow.optionId, reason: why };
+    };
     const owner = selected ? resolvePermissionOwner(selected, this.deps.humanRegistry) : defaultPermissionOwner(this.deps.humanRegistry);
     if (!owner.ok) return permit(selected ? `the person chosen for this seat can't be asked: ${owner.message}` : `no one can be asked: ${owner.message}`);
     const ids = new Set(request.options.map((option) => option.optionId));
@@ -205,7 +225,7 @@ export class RunnerPermissions {
         options: request.options.map((option) => ({ id: option.optionId,
           label: clip(option.kind.endsWith("_always") ? `${option.name} (remembered by the agent)` : option.name, MAX_OPTION_LABEL) })) }],
       tags: [RUNNER_PERMISSION_TAG, `${NODE_TAG}${seat.nodeId}`, `${GENERATION_TAG}${seat.generation}`, `${TURN_TAG}${request.turnId}`,
-        ...(allow ? [`${ALLOW_TAG}${allow.optionId}`] : []), ...(reject ? [`${REJECT_TAG}${reject.optionId}`] : [])],
+        ...(allow ? [`${ALLOW_TAG}${allow.optionId}`, `${ALLOW_KIND_TAG}${allow.kind}`] : []), ...(reject ? [`${REJECT_TAG}${reject.optionId}`] : [])],
       nudge: false,
       body: [
         `${seat.sessionName}'s agent asks permission for one tool call, and is waiting on it.`,
@@ -217,7 +237,7 @@ export class RunnerPermissions {
         "**The options the agent offered:**",
         ...offered,
         "",
-        "Your choice goes to this one request, once. A reply of just yes or no counts as the agent's allow or reject. Closing this without choosing counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.",
+        "Your choice goes to this one request, once. A reply of just yes or no counts as the agent's allow or reject. Any other words choose nothing: OpenRig's default permits the request when the agent offered an allow option, and a runner that forwards your words passes them to the agent only after its turn. Closing this without choosing counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.",
       ].join("\n"),
     });
     return { ok: true, askId, created: true };
@@ -255,7 +275,38 @@ export class RunnerPermissions {
     if (said === "no") return rejectId ? { ok: true, state: "answered", optionId: rejectId } : { ok: true, state: "refused", reason: "said_no" };
     if (said === "yes" && allowId) return { ok: true, state: "answered", optionId: allowId };
     // Closed without an option is no answer, so OpenRig's default applies: permit.
-    return allowId ? { ok: true, state: "permitted", optionId: allowId } : { ok: true, state: "refused", reason: "no_allow_offered" };
+    if (!allowId) return { ok: true, state: "refused", reason: "no_allow_offered" };
+    this.recordClosedAsk(asked, item, origin.nodeId, allowId);
+    return { ok: true, state: "permitted", optionId: allowId };
+  }
+
+  /** The record of a permit after an ask closed without a choice: one per ask, however often the runner reads it. */
+  private recordClosedAsk(asked: QueueItem, closed: QueueItem, nodeId: string, allowId: string): void {
+    this.recordPermit(`runner-permit-ask-${asked.qitemId.slice(ASK_PREFIX.length)}`, asked.sourceSession, nodeId, () => {
+      // Who closed it: the close itself, since later notes and delivery receipts on a closed row repeat its state.
+      const closer = this.deps.queueRepo.closingTransition(closed.qitemId, closed.state)?.actorSession ?? "someone";
+      const row = closed.qitemId === asked.qitemId ? "the ask" : `${closed.qitemId}, the row it was handed to at ${closed.destinationSession},`;
+      const label = asked.humanQuestions?.find((question) => question.id === QUESTION_ID)?.options.find((option) => option.id === allowId)?.label;
+      return [
+        `OpenRig permitted ${asked.sourceSession}'s agent by default: its permission ask ${asked.qitemId} closed without a choice.`
+          + ` ${closer} closed ${row} as ${closed.state}${closed.closureReason ? ` (${closed.closureReason})` : ""}.`,
+        "",
+        `- **Ask:** ${asked.summary ?? "a permission request"}, asked of ${asked.destinationSession}.`,
+        `- **Option given:** ${optionText(label ?? allowId, tagValue(asked, ALLOW_KIND_TAG), allowId)}.`,
+      ];
+    });
+  }
+
+  /** Best effort: a record that can't be built or written is logged, and the permit goes ahead unchanged. With no stream,
+   *  nothing is read to build one. */
+  private recordPermit(streamItemId: string, sessionName: string, nodeId: string, lines: () => string[]): void {
+    if (!this.deps.stream) return;
+    try {
+      this.deps.stream.emit({ streamItemId, sourceSession: sessionName, body: lines().join("\n"), hintType: "observation", hintUrgency: "low",
+        hintTags: [RUNNER_PERMIT_TAG, `${NODE_TAG}${nodeId}`] });
+    } catch (error) {
+      console.error(`[runner-permissions] the record of a default permit for ${sessionName} wasn't written`, error);
+    }
   }
 
   /** Wait up to `waitMs` for the ask to change, then read it. Subscribes before reading, so a change between the two isn't missed. */

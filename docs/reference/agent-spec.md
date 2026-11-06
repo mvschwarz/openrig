@@ -229,9 +229,10 @@ This gives access to the shared pool: skills such as `systematic-debugging`, `ve
 `development-team` and `test-driven-development`; the `openrig-core` plugin, which carries `openrig-user` and OpenRig's
 other skills; and runtime resources such as `claude-default-settings`, `claude-default-mcp`, `codex-default-config` and
 `claude-activity-hooks`. Agents select the ones they need via profile `uses`, for example
-`plugins: [shared:openrig-core]`. That selection projects the plugin's skills into the seat. For a Claude seat it also loads
-the plugin's hooks, through a `CLAUDE_CODE_PLUGIN_DIRS` the daemon sets for a seat that selected `openrig-core` (see
-`refocus-channel.md`); a seat that didn't select it gets neither.
+`plugins: [shared:openrig-core]`. For a Claude seat selecting the vendored `openrig-core`, the daemon loads the plugin
+itself through `CLAUDE_CODE_PLUGIN_DIRS`, including its skills and hooks, without projecting a second copy of its skills
+(see `refocus-channel.md`). Other selected plugin skills follow the projection rules below. A seat that didn't select
+`openrig-core` does not get its hooks through this selection.
 
 ---
 
@@ -373,7 +374,7 @@ version.
 | `skills` | `id`, `path` | Skill directories containing a SKILL.md. Projected by the runtime adapter. Claude and Codex seats get them in the seat's own storage, `<OpenRig home>/state/seats/<rig id>/<logical seat>/<runtime>/`, outside the project: Claude to `plugin/skills/<id>` in the seat's generated plugin, where they show as `openrig:<id>`, and Codex to `skills/<id>` beside the seat's skill catalog. A Claude or Codex seat without that storage gets `<cwd>/.claude/skills/<id>` or `<cwd>/.agents/skills/<id>`. Pi and OMP project to the seat's own agent directory under OpenRig's state. |
 | `guidance` | `id`, `path`, `target`*, `merge`* | Guidance files, merged as a managed block (see "Guidance Resources"). |
 | `subagents` | `id`, `path` | Subagent definitions. Claude copies them to `<cwd>/.claude/agents/`, Codex to `<cwd>/.agents/`; Pi and OMP don't project them. |
-| `plugins` | `id`, `source`, `plugin_type`* | Local plugin directories; selected with `uses.plugins`. `source.kind` must be `local`. `plugin_type` is `claude`, `codex` or `auto` (default): Claude projects a plugin to `<cwd>/.claude/plugins/<id>` when it is `claude`, or `auto` with a `.claude-plugin/plugin.json`; Codex projects to `<cwd>/.codex/plugins/<id>` when it is `codex`, or `auto` with a `.codex-plugin/plugin.json`. Pi and OMP don't project plugins. Neither Claude Code nor Codex reads skills from that plugin folder, so when a seat is instantiated a selected plugin's skills are also projected into the seat's skill folder under their plain names: the seat's own storage (see `skills`), or `.claude/skills/<name>` or `.agents/skills/<name>` for a seat without it. A folder already there with the same name, ignoring letter case, that OpenRig doesn't own is left alone; unless it already holds the same bytes, launch warns `plugin_skill_kept`. A skill the seat already selects by that name (from its profile, the System World or the project) keeps that source, an edited OpenRig-owned copy is kept with `plugin_skill_kept`, a retained plugin copy whose remembered source can no longer be projected is also kept with `plugin_skill_kept` (a seat selecting that plugin refreshes it at its next launch), and if the plugin skills can't be projected the seat launches without them and warns `plugin_skills_not_projected`. Hooks ship inside plugins. |
+| `plugins` | `id`, `source`, `plugin_type`* | Local plugin directories; selected with `uses.plugins`. `source.kind` must be `local`. `plugin_type` is `claude`, `codex` or `auto` (default): Claude projects a plugin to `<cwd>/.claude/plugins/<id>` when it is `claude`, or `auto` with a `.claude-plugin/plugin.json`; Codex projects to `<cwd>/.codex/plugins/<id>` when it is `codex`, or `auto` with a `.codex-plugin/plugin.json`. Pi and OMP don't project plugins. Claude Code and Codex do not read skills from that projected plugin folder, so selected plugin skills are also projected into the seat's skill folder under their plain names: the seat's own storage (see `skills`), or `.claude/skills/<name>` or `.agents/skills/<name>` for a seat without it. The exception is the vendored `openrig-core` selected by a Claude seat: Claude loads that plugin directly, skills included, so its skills are not projected a second time. A folder already there with the same name, ignoring letter case, that OpenRig doesn't own is left alone; unless it already holds the same bytes, launch warns `plugin_skill_kept`. A skill the seat already selects by that name (from its profile, the System World or the project) keeps that source, an edited OpenRig-owned copy is kept with `plugin_skill_kept`, a retained plugin copy whose remembered source can no longer be projected is also kept with `plugin_skill_kept` (a seat selecting that plugin refreshes it at its next launch), and if the plugin skills can't be projected the seat launches without them and warns `plugin_skills_not_projected`. Hooks ship inside plugins. |
 | `runtime_resources` | `id`, `path`, `runtime`, `type` | Runtime-specific resources. `runtime` and `type` are required. An entry whose `runtime` isn't the seat's runtime is skipped. Pi and OMP project none. |
 
 *Fields marked with `*` are optional.
@@ -419,6 +420,16 @@ Where a fragment's table is one the user already declares, the user's table
 wins: the managed table is dropped, their values are never merged, rewritten or
 overwritten, and the rest of the fragment still applies.
 
+**A fragment can't install a named Codex profile.** Codex versions with named
+profiles read each one from its own file, `<CODEX_HOME>/<name>.config.toml`,
+with top-level keys, and won't load a profile while `config.toml` still holds a
+legacy `[profiles.<name>]` table. A fragment only adds tables to `config.toml`,
+so neither form works there. Create the profile file yourself and select it with
+the member's `codex_config_profile`; see "Codex: select sandbox and approvals
+together" in [getting-started.md](getting-started.md#codex-select-sandbox-and-approvals-together).
+Before a launch or restore, OpenRig checks that a selected profile loads, and for
+a legacy table it names the file to move the settings into.
+
 ### Resource Path Rules
 
 - All resource paths must be safe relative paths (no `..` traversal, no absolute paths), except a plugin's
@@ -440,7 +451,7 @@ guidance:
 |-------|------|----------|---------|-------------|
 | `id` | string | yes | — | Resource identifier. A `rig-role` guidance resource is never merged; deliver a role with a `send_text` startup file. |
 | `path` | string | yes | — | Relative path to the guidance file. |
-| `target` | string | no | — | Parsed but not used: the runtime decides the file. Claude merges into the rig's `managed_blocks` file (`CLAUDE.md` by default, or `CLAUDE.local.md`); Codex, Pi and OMP merge into `<cwd>/AGENTS.md`. |
+| `target` | string | no | — | Parsed but not used: the runtime decides the file. Claude merges into the rig's `managed_blocks` file (`CLAUDE.md` by default, or `CLAUDE.local.md`); Codex, Pi and OMP merge into `<cwd>/AGENTS.md`, except that a fresh Pi seat normally uses its own agent folder's `AGENTS.md` and a fresh Codex 0.164.0+ seat normally gets launch developer instructions; the conditions are in [Codex guidance at launch](agent-startup-guide.md#codex-guidance-at-launch) and [Runtime Differences](agent-startup-guide.md#runtime-differences). |
 | `merge` | string | no | `managed_block` | Only `managed_block` is applied. Any other value, such as `append`, merges nothing. |
 
 ---

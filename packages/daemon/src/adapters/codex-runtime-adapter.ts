@@ -19,6 +19,7 @@ import type {
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
   HarnessLaunchResult,
 } from "../domain/runtime-adapter.js";
+import type { GuidanceChoice } from "../domain/runtime-adapter.js";
 // Type-only — keeps the profile-preflight module's dynamic import lazy for
 // production (no runtime import cost from this line).
 import type { CodexProfileProbeResult } from "../domain/codex-profile-preflight.js";
@@ -36,7 +37,8 @@ import { assessNativeResumeProbe, buildCodexResumeCore, hasCodexUpdateHeader, ty
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE, codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 import { resolveCodexGitAddDirs, type CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
-import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
+import { isPerSeatRoleGuidance, managedBlockText, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
+import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
 import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexSeatFolder, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
@@ -68,7 +70,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 };
 
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
-import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
+import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "../domain/seat-skill-storage.js";
 import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
 import { findTomlTable, opensTomlTable, parseTomlRoot, tomlArrayTableHeaderPath, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
 
@@ -196,6 +198,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // so each of those runs its whole setup under this one lock, one after another.
   private configLock: Promise<unknown> = Promise.resolve();
   private codexSystemConfigDir: string;
+  /** #875: the managed guidance blocks a fresh launch's startup queued for its developer instructions, per tmux session. */
+  private launchInstructions = new Map<string, Map<string, string>>();
+  /** #2456: OpenRig's record of what it last wrote in each managed guidance block (startup wires the daemon's). */
+  private managedBlockRecords: ManagedBlockRecords | undefined;
 
   /** Build the Codex launch adapter with injectable filesystem, process, and CLI seams for isolated checks. */
   constructor(deps: {
@@ -239,7 +245,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     runCodexCli?: CodexCliRunner;
     /** Where Codex's system and legacy managed config files live (default /etc/codex). */
     codexSystemConfigDir?: string;
+    /** #2456: with it, every guidance block this adapter writes is checked against the record and recorded; absent, the
+     *  plain merge, as before. */
+    managedBlockRecords?: ManagedBlockRecords;
   }) {
+    this.managedBlockRecords = deps.managedBlockRecords;
     this.resolveCorePluginDir = deps.resolveCorePluginDir;
     this.resolveCorePluginSelected = deps.resolveCorePluginSelected;
     this.runCodexCli = deps.runCodexCli ?? defaultCodexCli;
@@ -791,6 +801,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
+    if (binding.guidanceLaunchInstructions && binding.tmuxSession) this.launchInstructions.set(binding.tmuxSession, new Map());
     const projected: string[] = [];
     const warnings: string[] = [];
     const skipped: string[] = [];
@@ -803,7 +814,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
 
       try {
-        const didProject = this.projectEntry(entry, binding.cwd, warnings, binding.seatSkillsRoot, binding.seatSkillsRefused, this.homeFor(binding));
+        const didProject = this.projectEntry(entry, binding.cwd, warnings, binding.seatSkillsRoot, binding.seatSkillsRefused, this.homeFor(binding), binding);
         if (didProject) {
           projected.push(entry.effectiveId);
         } else {
@@ -833,8 +844,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
         switch (hint) {
           case "guidance_merge": {
-            const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
-            const merged = this.mergeGuidance(targetPath, file.path, content, warnings);
+            const merged = this.placeGuidance(binding.cwd, binding, file.path, content, warnings);
             if (!merged) continue; // rig-role skip: do not count as delivered
             break;
           }
@@ -949,7 +959,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
       ? this.resumeCore(prepared, opts.resumeToken, binding)
-      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}${queueStateDirArg}${modelArg}${effortArg}`;
+      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}${queueStateDirArg}${modelArg}${effortArg}${binding.guidanceLaunchInstructions ? this.developerInstructionsArg(binding.tmuxSession) : ""}`;
 
     const staged = await this.seatCommand(binding, cmd);
     if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Codex launch preparation; no native command was sent.", recovery: "attention_required" };
@@ -1370,15 +1380,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   private projectEntry(entry: ProjectionEntry, cwd: string, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string,
-    home?: string): boolean {
+    home?: string, binding?: NodeBinding): boolean {
     if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, home)) {
       return true;
     }
 
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
-      const targetPath = nodePath.join(cwd, "AGENTS.md");
       const content = this.fs.readFile(entry.absolutePath);
-      return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings, entry.absolutePath);
+      return this.placeGuidance(cwd, binding, entry.effectiveId, content, warnings, entry.absolutePath);
     }
 
     // HG-1.3 plugin runtime applicability filter (per DESIGN.md §5.1):
@@ -1529,6 +1538,78 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * propagate the skip signal so ProjectionResult and StartupDeliveryResult
    * report honest counts.
    */
+  /** #875: a block goes in with the launch's developer instructions when this fresh launch chose them (guidanceFileFor),
+   *  else into the repository AGENTS.md as before. A seat's role is skipped either way, and the seat-skills line keeps its
+   *  AGENTS.md merge: the person's yes was for that file. */
+  private placeGuidance(cwd: string, binding: NodeBinding | undefined, blockId: string, content: string, warnings: string[], sourcePath?: string): boolean {
+    const targetPath = nodePath.join(cwd, "AGENTS.md");
+    const queued = binding?.guidanceLaunchInstructions && binding.tmuxSession ? this.launchInstructions.get(binding.tmuxSession) : undefined;
+    if (!queued || blockId === SEAT_SKILLS_BOOTSTRAP_BLOCK_ID || isPerSeatRoleGuidance(blockId, sourcePath)) {
+      return this.mergeGuidance(targetPath, blockId, content, warnings, sourcePath);
+    }
+    if (blockId === "openrig-start.md") queued.delete("using-openrig.md");
+    queued.set(blockId, content);
+    // #2456: a block an earlier handover or resume left in AGENTS.md is refreshed by the same rule (the launch text asks
+    // Codex to follow AGENTS.md where the two differ); nothing new is written there.
+    writeManagedGuidanceBlock(this.fs, targetPath, blockId, content, { records: this.managedBlockRecords, onlyIfPresent: true, sourcePath, warnings });
+    return true;
+  }
+
+  /** The `-c developer_instructions` argument for a fresh launch, from the blocks its startup queued (#875). The value is a
+   *  TOML basic string (JSON's escapes, with DEL escaped too). Codex can give developer instructions more weight than AGENTS.md,
+   *  so the text asks it to keep the person's AGENTS.md guidance first. */
+  private developerInstructionsArg(tmuxSession: string): string {
+    const blocks = this.launchInstructions.get(tmuxSession);
+    this.launchInstructions.delete(tmuxSession);
+    if (!blocks || blocks.size === 0) return "";
+    const text = [LAUNCH_INSTRUCTIONS_PREAMBLE, ...[...blocks].map(([id, content]) => managedBlockText(id, content))].join("\n\n");
+    return ` -c ${shellQuote(`developer_instructions=${JSON.stringify(text).replace(/\u007f/g, "\\u007F")}`)}`;
+  }
+
+  /** #875: whether a fresh launch can carry this seat's managed guidance as developer instructions instead of writing the
+   *  repository AGENTS.md: Codex 0.164.0 or later (where `developer_instructions` is a declared key), and no visible config
+   *  layer sets one, since the launch value would replace it. Anything else, or anything unreadable, keeps AGENTS.md. */
+  guidanceFileFor(binding: NodeBinding, opts?: { resuming?: boolean }): GuidanceChoice | Promise<GuidanceChoice> {
+    // A resume or fork (untested with developer instructions) and a startup continuation (it launches nothing) keep the
+    // repository path, answered at once.
+    if (opts?.resuming || !binding.tmuxSession) return { file: null };
+    return this.freshGuidanceChoice(binding);
+  }
+
+  private async freshGuidanceChoice(binding: NodeBinding): Promise<GuidanceChoice> {
+    let version: string | undefined;
+    try { version = (await this.resolveManagedConfigSettings?.())?.codexVersion; } catch { version = undefined; }
+    if (!version || !codexAcceptsDeveloperInstructions(version)) return { file: null };
+    const configured = this.configuredDeveloperInstructions(binding);
+    if (configured) return { file: null, note: `codex: ${configured}, so this seat's managed guidance stays in its repository AGENTS.md` };
+    return { file: null, launchInstructions: true };
+  }
+
+  /** The first visible Codex config layer that sets `developer_instructions` (at any depth, profiles included) or can't be
+   *  read, as `profileRemainsReadOnly` reads the same layers. Null when none does. */
+  private configuredDeveloperInstructions(binding: NodeBinding): string | null {
+    const home = this.homeFor(binding) ?? nodePath.join(this.fs.homedir ?? os.homedir(), ".codex");
+    const layers = [
+      nodePath.join(this.codexSystemConfigDir, "config.toml"),
+      nodePath.join(home, "config.toml"),
+      ...(binding.codexConfigProfile ? [nodePath.join(home, `${binding.codexConfigProfile}.config.toml`)] : []),
+      nodePath.join(this.codexSystemConfigDir, "managed_config.toml"),
+    ];
+    for (let dir = nodePath.normalize(binding.cwd);;) {
+      layers.push(nodePath.join(dir, ".codex", "config.toml"));
+      const parent = nodePath.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    for (const path of new Set(layers)) {
+      if (!this.fs.exists(path)) continue;
+      let value: unknown;
+      try { value = parseToml(this.fs.readFile(path)); } catch { return `${path} can't be read as TOML`; }
+      if (holdsKey(value, "developer_instructions")) return `${path} sets developer_instructions`;
+    }
+    return null;
+  }
+
   private mergeGuidance(targetPath: string, blockId: string, content: string, warnings: string[], sourcePath?: string): boolean {
     // Mirrors Claude Code adapter: the `rig-role` managed block collides across
     // pod-mates because the regenerator pairs (target-file × spec) without
@@ -1543,11 +1624,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (warning) warnings.push(warning);
       return false;
     }
-    mergeManagedBlock(this.fs, targetPath, blockId, content, {
-      warnings,
+    // #2456: a block a person edited since OpenRig wrote it is kept and named, not counted as merged.
+    return writeManagedGuidanceBlock(this.fs, targetPath, blockId, content, {
+      records: this.managedBlockRecords, sourcePath, warnings,
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
     });
-    return true;
   }
 
   private detectDeliveryHint(path: string, content: string, orientation?: string): "guidance_merge" | "skill_install" | "send_text" {
@@ -2121,6 +2202,21 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string,
   }
 
   return field === "trusted_content_hash" ? lines.join("\n") : `${lines.join("\n").replace(/\n*$/, "\n")}`;
+}
+
+const LAUNCH_INSTRUCTIONS_PREAMBLE = "OpenRig seat guidance for this session follows. Where it conflicts with AGENTS.md guidance in the repository or the Codex home, follow AGENTS.md.";
+
+/** Codex 0.164.0 or later, where `developer_instructions` is a declared config key (#875). */
+export function codexAcceptsDeveloperInstructions(version: string): boolean {
+  const match = /^(\d+)\.(\d+)/.exec(version);
+  if (!match) return false;
+  return parseInt(match[1]!, 10) > 0 || parseInt(match[2]!, 10) >= 164;
+}
+
+function holdsKey(value: unknown, key: string): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((item) => holdsKey(item, key));
+  return Object.entries(value).some(([name, item]) => name === key || holdsKey(item, key));
 }
 
 export function isCodex013xOrLater(version: string): boolean {

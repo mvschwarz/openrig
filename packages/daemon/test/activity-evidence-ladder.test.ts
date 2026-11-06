@@ -132,6 +132,18 @@ describe("S19 A3 — the ladder ranks and falls honestly", () => {
 });
 
 describe("S19 A3 — AM-1: alive-and-partial degradation, visible", () => {
+  it("does not demote fresh hooks based on an expired idle sample", () => {
+    const h = makeHarness();
+    h.svc.declareRungInventory({ seatNodeId: SEAT, sessionName: SESSION }, CLAUDE_INVENTORY);
+    h.svc.reportEvidence(ev(h.clock, "window-sampling", "tmux:window-activity", "idle-at-prompt"));
+    h.clock.now += 6_000;
+    h.svc.reportEvidence(ev(h.clock, "lifecycle-hooks", "claude:hooks", "working"));
+    h.clock.now += 11_000;
+    h.svc.reportEvidence(ev(h.clock, "lifecycle-hooks", "claude:hooks", "working"));
+    const state = h.svc.getSeatState(SEAT)!;
+    expect(state.activity).toBe("working");
+    expect(state.rungs.find(rung => rung.rung === "lifecycle-hooks")?.trust).toBe("authoritative");
+  });
   it("persistent hook-vs-sampler contradiction degrades the hook rung to identity-only with a rung-health event", () => {
     const h = makeHarness();
     h.svc.declareRungInventory({ seatNodeId: SEAT, sessionName: SESSION }, CLAUDE_INVENTORY);

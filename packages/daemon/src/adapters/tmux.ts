@@ -11,6 +11,14 @@ import type { TmuxControlExec } from "./tmux-control.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
+/** tmux 3.4 escapes these dollar forms in command output even for show-options -v.
+ * Remove only its added escape; preserve an intentionally preceding backslash. */
+export function decodeTmux34Option(value: string, serverVersion: string): string {
+  return /^3\.4(?:[a-z])?$/.test(serverVersion.trim())
+    ? value.replace(/\\\$(?=[A-Za-z_{])/g, "$")
+    : value;
+}
+
 interface TmuxShellCommandOptions {
   /** Pi can send commands within the terminal byte bound directly. */
   stageIfLong?: boolean;
@@ -400,7 +408,15 @@ export class TmuxAdapter {
       // as a first start does, so it gets the same scoped environment as every later seat (#2041).
       if (!shell && (await this.startServer()).ok) shell = await this.getDefaultShell();
       if (!shell) throw new Error("Default shell unavailable");
-      if (command === undefined) command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
+      if (command === undefined) {
+        command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
+        // The server, not the connecting client, formats option output. If its version is unavailable,
+        // retain the readback unchanged rather than guessing about a user's command.
+        try {
+          const serverVersion = await this.run(["tmux", "display-message", "-p", "#{version}"]);
+          command = decodeTmux34Option(command, serverVersion);
+        } catch { /* unknown version: keep the original readback */ }
+      }
       // tmux normally copies these client values from the daemon on new-session.
       // Read its configured names, but never reuse values stored on the server.
       const updated = (await this.run(["tmux", "show-options", "-gv", "update-environment"]))
@@ -919,7 +935,16 @@ export class TmuxAdapter {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
       const checkDraft = guard?.needsInputCheck(identity);
       const policy = checkDraft || options?.beforePaste ? {
-        beforePaste: async () => { if (checkDraft) await guard!.beforeInput(identity, false, text); await options?.beforePaste?.(); },
+        // A paste the guard proves it left unsubmitted (#2429) is submitted first, under this lease, once this send's own
+        // checks pass; they then aren't run a second time.
+        beforePaste: async () => {
+          let checked = false;
+          const checks = async () => { await options?.beforePaste?.(); beforeWrite(); beforeInput?.(); checked = true; };
+          // The synchronous checks run again just before the key: the guard's re-read awaits after `checks`.
+          const enter = async () => { beforeWrite(); beforeInput?.(); return (await this.sendKeysUnchecked(pane, ["Enter"])).ok; };
+          if (checkDraft) await guard!.beforeInput(identity, false, text, { checks, enter });
+          if (!checked) await options?.beforePaste?.();
+        },
         afterPaste: async () => { if (checkDraft) await guard!.notePasted(identity, text); },
       } : undefined;
       return this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }, options?.bracketed, policy);
@@ -1456,9 +1481,25 @@ export class TmuxAdapter {
     }
   }
 
-  /** Leave the pane's current mode (copy mode) with `send-keys -X cancel`, through the same input guard as sendKeys. */
+  /** Leave every mode the pane is in, through the same input guard as sendKeys. Modes stack: copy mode can sit under
+   *  run-shell output (view-mode), a chooser, customize or clock mode, and `send-keys -X cancel` leaves only a copy or
+   *  view mode on top. `copy-mode -q` (tmux 3.1a+) leaves them all and types nothing; older tmux falls back to -X cancel. */
   async cancelPaneMode(target: string): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => { beforeWrite(); return this.sendKeysUnchecked(pane, ["-X", "cancel"]); }, false, "keys");
+    return this.guardedInput(target, async (pane, beforeWrite) => {
+      beforeWrite();
+      try {
+        await this.run(["tmux", "copy-mode", "-q", "-t", pane]);
+        return { ok: true };
+      } catch (error) {
+        // The fallback is a second write: check the guard again, as the read-only Enter fallback does, so input that
+        // arrived while copy-mode -q was pending stops it.
+        beforeWrite();
+        const fallback = await this.sendKeysUnchecked(pane, ["-X", "cancel"]);
+        if (fallback.ok) return fallback;
+        // Both failed: keep both reasons, so the refusal that reports this can name them.
+        return { ...fallback, message: `copy-mode -q: ${error instanceof Error ? error.message : String(error)}; send-keys -X cancel: ${fallback.message}` };
+      }
+    }, false, "keys");
   }
 
   /** A launch metadata read. Callers must never put credential values in terminal input. */

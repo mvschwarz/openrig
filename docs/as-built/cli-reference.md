@@ -356,6 +356,13 @@ the sections that were not read are `null`.
 | `rig host list` | `ls` | `--json` |
 | `rig host doctor <id>` | — | `--posture <profile>`<br>`--public-addr <ip>`<br>`--json` |
 
+`rig host pair` needs the target daemon to run with `OPENRIG_AUTH_BEARER_TOKEN` set,
+even when it is bound to a tailnet address and so starts without one: pairing hands
+over that token. Without it, the target's `POST /api/hosts/pair-request` answers 409
+`pair_target_no_bearer`; it answers 409 `pair_human_required` when no single
+registered person can approve (none, or several with no default; name one with
+`--human`) (`packages/daemon/src/routes/hosts.ts:167-186`).
+
 Registration makes a host visible in topology; remote FEED attention remains opt-in.
 The human-readable success output of `host add` and `host pair` now includes the FEED
 next step alongside the existing `host doctor` suggestion. For an HTTP entry named
@@ -379,7 +386,7 @@ do not establish connectivity to a live peer.
 |---|---|---|
 | `rig ps` | — | `--json`<br>`--no-cleanup`<br>`--resources`<br>`--nodes`<br>`--full`<br>`--verbose`<br>`--limit <n>`<br>`--fields <list>`<br>`--summary`<br>`--filter <key=value>`<br>`--active`<br>`--running`<br>`-A, --all-rigs`<br>`--rig <name>`<br>`--session <name>`<br>`--include-archived`<br>`--host <id>`<br>`--all-hosts`<br>`--hosts <ids>` |
 
-- `--nodes --json` — each seat carries the daemon's served `needsAttention` flag; the CLI doesn't re-derive it, and it is absent when an older daemon doesn't serve it. `arbitratedNeedsInput` and `needsInputEvidence` (`{ rung, observedAt }` or null) come with `--full`, or by name through `--fields`.
+- `--nodes --json` — each seat carries the daemon's served `needsAttention` flag; the CLI doesn't re-derive it, and it is absent when an older daemon doesn't serve it. `arbitratedNeedsInput` and `needsInputEvidence` (`{ rung, observedAt }` or null) come with `--full`, or by name through `--fields`. `startedWithoutRequired` lists the required startup files a handover's successor started without, and the compact read keeps it.
 
 ### roster
 
@@ -409,6 +416,17 @@ do not establish connectivity to a live peer.
 | `rig acp run <qitemId> <agent...>` | — | `--cwd <dir>`<br>`--permissions-to <session>`<br>`--load-session <id>`<br>`--poll-seconds <n>` |
 | `rig acp cancel <runId>` | — | — |
 | `rig acp stop <runId> [stopCommand...]` | — | — |
+
+### exec
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig exec` | — | — |
+| `rig exec harnesses` | — | `--json` |
+| `rig exec run <qitemId>` | — | `--harness <name>` **required**<br>`--cwd <dir>`<br>`--permissions-to <session>`<br>`--load-session <id>`<br>`--wait`<br>`--plan`<br>`--again`<br>`--poll-seconds <n>` |
+| `rig exec status <runIdOrQitemId>` | — | `--json` |
+| `rig exec cancel <runId>` | — | — |
+| `rig exec connector <runId>` (hidden) | — | — |
 
 ### agent
 
@@ -455,6 +473,11 @@ do not establish connectivity to a live peer.
 | `rig stream read` | — | `--limit <n>`<br>`--reader <session>`<br>`--json` |
 | `rig stream act <streamItemId>` | — | `--work <qitemId>`<br>`--decline <reason>`<br>`--duplicate <id>`<br>`--reader <session>`<br>`--json` |
 
+Stream intake: the `stream.intake` setting (default `queue.worker`, or a canonical `<seat>@<rig>`) receives each emitted item.
+It opens an intake row for that seat, which wakes it, or adds a note to that seat's intake row still pending; a `critical`
+or interrupting item makes the row urgent. `rig config set stream.intake off` keeps emits passive. A runner's
+default-permit record (tag `runner-permission-permit`) opens no row.
+
 ### queue
 
 | Invocation | Aliases | Declared options |
@@ -463,7 +486,7 @@ do not establish connectivity to a live peer.
 | `rig queue create` | — | `--source <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--body-context <ref>`<br>`--mission <id>`<br>`--slice <id>`<br>`--gate <role>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--expires-at <iso>`<br>`--id <qitemId>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--human-intent <intent>`<br>`--alert`<br>`--human-detail-file <path>`<br>`--reply-to <qitemId>`<br>`--human-questions-file <path>`<br>`--evidence-ref <path>`<br>`--host <id>`<br>`--no-nudge`<br>`--verify`<br>`--full`<br>`--json` |
 | `rig queue claim <qitemId>` | — | `--destination <session>`<br>`--full`<br>`--json` |
 | `rig queue unclaim <qitemId>` | — | `--destination <session>`<br>`--reason <text>`<br>`--full`<br>`--json` |
-| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--full`<br>`--json` |
+| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--closure-required-at <iso>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--full`<br>`--json` |
 | `rig queue block <qitemId>` | — | `--on <blocker>` **required**<br>`--actor <session>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--continuation <text>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--full`<br>`--json` |
 | `rig queue resolve <qitemId>` | — | `--decision <text>` **required**<br>`--actor <session>`<br>`--bearer <token>`<br>`--no-notify`<br>`--json` |
 | `rig queue handoff <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
@@ -631,7 +654,7 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig specs` | — | — |
-| `rig specs ls` | — | `--kind <kind>`<br>`--json` |
+| `rig specs ls` | — | `--kind <kind>`<br>`--include-builtins`<br>`--json` |
 | `rig specs show <name-or-id>` | — | `--kind <kind>`<br>`--json` |
 | `rig specs preview <name-or-id>` | — | `--kind <kind>`<br>`--json` |
 | `rig specs add <path>` | — | `--json` |

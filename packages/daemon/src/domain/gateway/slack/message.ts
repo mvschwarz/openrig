@@ -134,8 +134,9 @@ export function buildImageBlocks(mediaRefs: readonly SlackMediaRef[] | undefined
  *  exactly these (one producer, one parser: see parseQuestionAction). */
 export const QUESTION_BLOCK_PREFIX = "or-q:";
 export const OPTION_ACTION_PREFIX = "or-opt:";
-const TYPED_REPLY_HINT = "Or reply in this thread with your own answer. A typed reply submits your answer without waiting for every question to be answered.";
-const CHANNEL_REPLY_HINT = "Reply in this thread with your answer.";
+export const TYPED_REPLY_HINT = "Or reply in this thread with your own answer. A typed reply submits your answer without waiting for every question to be answered.";
+export const CHANNEL_REPLY_HINT = "Reply in this thread with your answer.";
+export const HUMAN_REQUIRED_REPLY_HINT = "Reply in this thread after this question to answer it. Earlier and extra messages still reach the agent as conversation.";
 
 /** Parse a clicked button back into its question and option ids; null if it is not ours. */
 export function parseQuestionAction(blockId: unknown, actionId: unknown): { questionId: string; optionId: string } | null {
@@ -597,7 +598,7 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
     throw new HumanMessageShapeError("Extra blocks have no complete accessible fallback. Use mediaRefs for images or author supplemental human detail.");
   }
   const replyHint = q.ownerNotificationKind === "human-required"
-    ? "Reply in this thread after this question to answer it. Earlier and extra messages still reach the agent as conversation." : null;
+    ? HUMAN_REQUIRED_REPLY_HINT : null;
   const fallback = (context: string | null, repeat: string | null = null) => [attr, headline, repeat, context, body, questionParts?.text, replyHint, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n");
   // The gate context line is supplementary: when it alone would push the complete fallback over
   // budget, the instance part alone is tried, and the line is left out only when even that

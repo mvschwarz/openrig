@@ -104,7 +104,7 @@ export function streamCommand(depsOverride?: StreamDeps): Command {
     .description("Append a stream item")
     .requiredOption("--source <session>", "Source session (e.g. dev-build@starter)")
     .requiredOption("--body <text>", "Stream item body")
-    .option("--hint-destination <session>", "Hint at intended destination seat")
+    .option("--hint-destination <session>", "Hint at intended destination seat (the queue worker routes by this hint)")
     .option("--hint-type <type>", "Hint type (e.g. review, handoff, idea)")
     .option("--hint-urgency <urgency>", "Hint urgency (routine, urgent, critical)")
     .option("--hint-tags <tags>", "Comma-separated hint tags")
@@ -112,6 +112,11 @@ export function streamCommand(depsOverride?: StreamDeps): Command {
     .option("--interrupt", "Mark item as interrupting")
     .option("--id <streamItemId>", "Idempotent stream_item_id (skip if not provided)")
     .option("--json", "JSON output for agents")
+    .addHelpText("after", `
+Stream intake is on by default: the seat named by stream.intake (queue.worker unless set)
+gets an intake row for each item, which wakes it, or a note on its intake row still pending.
+--hint-urgency critical or --interrupt makes that row urgent. The reply names only the stream item.
+To keep emits passive: rig config set stream.intake off`)
     .action(async (opts: {
       source: string;
       body: string;

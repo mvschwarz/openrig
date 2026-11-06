@@ -222,10 +222,13 @@ async function runCrossHostBroadcast(
  *  local route does, so per-target honesty prints identically. A partial
  *  fan-out sets a non-zero exit either way. */
 function renderBroadcastResults(data: Record<string, unknown>): void {
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; managedCompaction?: { notice?: unknown } }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; inputPhase?: string; sent?: boolean; managedCompaction?: { notice?: unknown } }>) ?? [];
   for (const r of results) {
     if (r.ok) {
       console.log(`${r.sessionName}: sent`);
+    } else if (r.inputPhase === "attempted" || r.inputPhase === "written" || r.sent === true) {
+      // The daemon records this recipient's receipt as indeterminate (#2507): its text or Enter may have reached it.
+      console.log(`${r.sessionName ? `${r.sessionName}: ` : ""}UNCONFIRMED — ${r.error ?? "unknown error"}; the text may have reached it, so check with rig capture before resending`);
     } else {
       // A target that resolved to no sessions has no name to report.
       console.log(`${r.sessionName ? `${r.sessionName}: ` : ""}FAILED — ${r.error ?? "unknown error"}`);

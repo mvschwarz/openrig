@@ -369,7 +369,7 @@ profiles:
     expect(hookChecks).toHaveLength(0);
   });
 
-  it("GET /api/restore-check recognizes the selected Claude activity-hook delivery", async () => {
+  it.each([false, true])("GET /api/restore-check recognizes activity delivery with optional diagnostic present=%s", async includeOptional => {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-route-hook-cwd-"));
     const settingsDir = path.join(projectDir, ".claude");
     const settingsPath = path.join(settingsDir, "settings.local.json");
@@ -384,7 +384,8 @@ profiles:
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
     const relayEvents = Object.entries(manifest.hooks)
       .filter(([, groups]) => groups.some((group) => group.hooks.some((hook) => hook.command.includes("activity-relay.cjs"))))
-      .map(([event]) => event);
+      .map(([event]) => event)
+      .filter(event => includeOptional || event !== "PermissionRequest");
     fs.writeFileSync(settingsPath, JSON.stringify({ hooks: Object.fromEntries(relayEvents.map((event) => [
       event, [{ hooks: [{ type: "command", command: `node '${relayPath}'` }] }],
     ])) }));

@@ -30,7 +30,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
   const router = new Hono();
 
   const terminalToken = opts?.bearerToken ?? null;
-  router.use("*", authBearerTokenMiddleware({ expectedToken: terminalToken }));
+  router.use("*", authBearerTokenMiddleware({ expectedToken: terminalToken, diagnosticContext: "terminal" }));
 
   const send = async (c: Context) => {
     const transport = c.get("sessionTransport" as never) as SessionTransport;
@@ -422,6 +422,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
               identityProvenance: "transport:v1",
             });
             if (r.ok) outbox.markDelivered(entry.outboxId);
+            else if (r.inputPhase === "attempted" || r.inputPhase === "written" || r.sent === true) outbox.markIndeterminate(entry.outboxId);
             else outbox.markFailed(entry.outboxId);
           } catch (err) {
             console.warn(`[transport/broadcast] outbox auto-record failed for ${r.sessionName} (fan-out already dispatched): ${(err as Error).message}`);

@@ -107,12 +107,13 @@ export class SnapshotCapture {
     const nodeStartupContext: Record<string, import("./types.js").NodeStartupSnapshot | null> = {};
     for (const node of rig.nodes) {
       const ctx = this.db.prepare("SELECT * FROM node_startup_context WHERE node_id = ?")
-        .get(node.id) as { projection_entries_json: string; resolved_files_json: string; startup_actions_json: string; runtime: string } | undefined;
+        .get(node.id) as { projection_entries_json: string; resolved_files_json: string; startup_actions_json: string; runtime: string; guidance_file?: string | null } | undefined;
       nodeStartupContext[node.id] = ctx ? {
         projectionEntries: JSON.parse(ctx.projection_entries_json),
         resolvedStartupFiles: JSON.parse(ctx.resolved_files_json),
         startupActions: JSON.parse(ctx.startup_actions_json),
         runtime: ctx.runtime,
+        ...(ctx.guidance_file ? { guidanceFile: ctx.guidance_file } : {}),
       } : null;
     }
 

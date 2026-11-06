@@ -75,7 +75,7 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
 
   // Following provisions writable local viewers under the same owner boundary
   // as ensure-viewer. Existing one-shot open keeps its current route posture.
-  app.post("/follow", authBearerTokenMiddleware({ expectedToken: opts?.bearerToken ?? null }), async c => {
+  app.post("/follow", authBearerTokenMiddleware({ expectedToken: opts?.bearerToken ?? null, diagnosticContext: "terminal" }), async c => {
     const svc = getService(c);
     if (!svc) return c.json({ ok: false, code: "terminal_service_unavailable" }, 503);
     const raw = await c.req.json().catch(() => null) as Record<string, unknown> | null;
@@ -102,7 +102,7 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
     return c.json(result, statusForOpen(result.ok, result.code));
   });
 
-  app.post("/viewer/ensure", authBearerTokenMiddleware({ expectedToken: opts?.bearerToken ?? null }), async c => {
+  app.post("/viewer/ensure", authBearerTokenMiddleware({ expectedToken: opts?.bearerToken ?? null, diagnosticContext: "terminal" }), async c => {
     const svc = getService(c);
     if (!svc) return c.json({ ok: false, code: "terminal_service_unavailable" }, 503);
     const raw = await c.req.json().catch(() => null) as Record<string, unknown> | null;

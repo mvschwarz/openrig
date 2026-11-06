@@ -120,7 +120,11 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       const secrets = join(home, "fake.env"); writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n");
       saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-TEST", secretsEnvFile: secrets, minimumLevelThatInterrupts: "NOTICE" }, home);
       posts = [];
-      wire = buildSlackGatewayWire({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry, resolveSlackHandle }, fetchImpl: async (_url, init) => { posts.push(JSON.parse(String(init?.body))); return reply({ ok: true, ts: `${posts.length}.1` }); } });
+      wire = buildSlackGatewayWire({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry, resolveSlackHandle }, fetchImpl: async (url, init) => {
+        // Thread-placement fixtures retain post requests, not the original Block Kit message used by settlement.
+        if (url.includes("conversations.history") || url.includes("conversations.replies")) return reply({ ok: true, messages: [] });
+        posts.push(JSON.parse(String(init?.body))); return reply({ ok: true, ts: `${posts.length}.1` });
+      } });
       stops.push(() => wire.stop()); wire.startServices?.();
     });
 
@@ -198,6 +202,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
         inboundMaxConnects: 1,
         fetchImpl: async (url, init) => {
           if (url.endsWith("apps.connections.open")) return reply({ ok: true, url: "wss://fake-slack/ws" });
+          if (url.includes("conversations.history") || url.includes("conversations.replies")) return reply({ ok: true, messages: [] });
           const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
           posts.push(body);
           const ts = `${posts.length}.1`;
@@ -793,7 +798,11 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       await deliver(first.qitemId);
       wire.stop();
       saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OTHER", secretsEnvFile: join(home, "fake.env"), minimumLevelThatInterrupts: "NOTICE" }, home);
-      wire = buildSlackGatewayWire({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry, resolveSlackHandle }, fetchImpl: async (_url, init) => { posts.push(JSON.parse(String(init?.body))); return reply({ ok: true, ts: `${posts.length}.1` }); } });
+      wire = buildSlackGatewayWire({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry, resolveSlackHandle }, fetchImpl: async (url, init) => {
+        // Thread-placement fixtures retain post requests, not the original Block Kit message used by settlement.
+        if (url.includes("conversations.history") || url.includes("conversations.replies")) return reply({ ok: true, messages: [] });
+        posts.push(JSON.parse(String(init?.body))); return reply({ ok: true, ts: `${posts.length}.1` });
+      } });
       stops.push(() => wire.stop()); wire.startServices?.();
       const update = await repo.create({ ...request, humanIntent: "update", replyTo: first.qitemId });
       await deliver(update.qitemId);

@@ -26,6 +26,7 @@ import { registerBundleProject, type ProjectRegistrationResult } from "./workspa
 export type BundleContentKind = "bundle" | "skills" | "plugins" | "workflowSpecs" | "contextPacks" | "agentImages" | "project";
 
 export interface BundleContentRouting {
+  warnings?: string[];
   skillsRouting?: RouteSkillsResult;
   pluginsRouting?: RoutePluginsResult;
   workflowSpecsRouting?: RouteWorkflowSpecsResult;
@@ -98,7 +99,8 @@ export async function routeBundleContents(
     tmpDir = bundleRoot;
     let manifest: Record<string, unknown> | null = null;
     try {
-      await unpack(bundlePath, bundleRoot);
+      const unpacked = await unpack(bundlePath, bundleRoot);
+      if (unpacked?.warnings?.length) routing.warnings = unpacked.warnings;
       const manifestPath = nodePath.join(bundleRoot, "bundle.yaml");
       if (fs.existsSync(manifestPath)) {
         manifest = parsePodBundleManifest(fs.readFileSync(manifestPath, "utf-8")) as Record<string, unknown>;

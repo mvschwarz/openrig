@@ -90,7 +90,8 @@ Use `codex` or `both` in place of `claude` to match the coding agents you use. A
 - it adds an OpenRig block to `~/.tmux.conf` (mouse support and longer scrollback).
 
 It doesn't start anything. It ends with a summary of what's done and what still needs you. A missing sign-in shows
-there: run `claude auth login` or `codex login`, then carry on.
+there: run `claude auth login` or `codex login`, then carry on. Setup also tries to record the selected providers
+for a new kernel's first boot; its summary warns if it could not save the choice.
 
 ### 3. Start OpenRig
 
@@ -100,7 +101,10 @@ rig status
 rig ps --nodes --rig kernel
 ```
 
-The daemon starts and boots the kernel with the coding agents you're signed in to, or both if you're signed in to both.
+On the kernel's first boot, the daemon uses the providers selected by `rig setup --providers` that are signed in.
+If no provider choice was recorded, it considers every signed-in provider. An existing kernel keeps its seats;
+changing the setup choice does not replace them. An `OPENRIG_PROVIDER_SELECTED` value in the daemon's environment
+takes precedence over the saved choice.
 
 **What starting OpenRig changes, for the coding agents you use** (paths are the usual defaults):
 - **For Codex:** hooks and trust in `~/.codex/config.toml`, when OpenRig or a Codex agent starts.

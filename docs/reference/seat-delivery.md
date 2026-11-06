@@ -10,7 +10,7 @@ type: `openrig-urgent`, `urgent-only` and `sends-only`. Sibling seats keep their
 | `off` (default) | Existing delivery and prompt checks | Existing send result |
 | `draft-aware` | Paste into a recognized empty composer; check ownership again before Enter | Hold input and retain this attempt for inspection when bookkeeping is available |
 | `openrig-urgent` | OpenRig's own messages (watchdogs, scheduled wakes, notices) and anything marked urgent type, never over a draft | Other agents' messages are held, the sender is told, and held messages stay readable |
-| `urgent-only` | Only messages marked urgent type (`rig send --urgent`, or a queue item at priority urgent or critical), never over a draft | Everything else is held, the sender is told, and held messages stay readable |
+| `urgent-only` | Only messages marked urgent type (`rig send --urgent`, `urgent: true` on `POST /api/transport/send`, or a queue item at priority urgent or critical), never over a draft | Everything else is held, the sender is told, and held messages stay readable |
 | `sends-only` | Deliberate sends from people and agents type, as with `off`; a terminal member's typing isn't protected, because its shell input can't be read | OpenRig's own notices are held. A terminal member defaults to this level |
 | `hold` | No automatic terminal input, even at an empty prompt | Retain for inspection outside the pane |
 
@@ -40,6 +40,69 @@ the wait ends, nothing is sent (exit 1, "No text was sent.") and OpenRig keeps
 nothing to send later.
 
 ## Configure and inspect
+
+### Latest permission observation
+
+`rig seat status <seat>` can show the latest observed harness permission request,
+with a fixed tool descriptor, source time and actor category. This is one latest
+observation across actors, not an aggregate of pending prompts. `request_observed`
+leaves the displayed actor's pending state unknown. `completed` applies only to
+that actor's later tool batch; other actors' pending state is still unknown. An
+unavailable observation proves neither a permission stop nor the absence of a
+waiting native prompt. With no observation, human status omits this section;
+JSON keeps the explicit unavailable state. The JSON field is `permission_stop`,
+and its `pending` value has the same observation-only scope.
+
+An observation may also carry Claude's **suggested rules** as `suggested_rules`.
+These are read-only evidence, not applied or approved, not guaranteed effective,
+not the exact command, and not a complete list of dialog options. The supported
+subset of [Claude's permission update schema](https://code.claude.com/docs/en/hooks#permission-update-entries)
+is `addRules`, `replaceRules` and `removeRules`, preserving type, ordered rules
+(`toolName`, optional `ruleContent`), behavior and destination exactly. Strings
+are neither trimmed nor broadened; absent `ruleContent` remains distinct from
+an empty string. Mode/directory updates and malformed entries are withheld.
+
+The envelope distinguishes a missing native field from a present empty array;
+`unsupported` and `size_cut` mark incomplete evidence. An older relay without
+this field, or a failed formatter, is unavailable rather than proof of native
+absence. Bounds are eight entries, sixteen rules per entry, 128 UTF-16 code
+units per tool name, 2,048 per rule-content string, and 16,384 UTF-8 bytes of
+serialized evidence. Oversized whole entries are dropped with `size_cut`,
+never shortened into different plausible rules. Both producer and ingress
+validate these bounds independently. Terminal JSON escapes controls and
+nonprinting format/separator characters while preserving decoded string values;
+its representation can expand, so the byte bound applies to stored/transported
+evidence, not the entire formatted status output.
+
+**Suggested rule strings can contain sensitive values.** The relay sends only
+this bounded rule subset alongside the fixed descriptor. Rule content can itself
+contain sensitive command-like text; raw `tool_input`, arguments outside that
+suggestion, and provider reasons are not forwarded. It posts to `/api/activity/hooks` at the
+configured `OPENRIG_URL` (or host/port), or the discovered endpoint in
+`OPENRIG_HOME/activity-endpoint.json`. Both `GET /api/seat/status/:seatRef` and
+`GET /api/seat/status/node/:nodeId` can return the evidence. The daemon adds no
+event, log, queue or telemetry persistence for it; a caller can still capture
+status output in a transcript or file. Evidence shares the observation's
+five-minute lifetime and existing seat/actor limits, is discarded lazily on the
+next observation/status read after expiry, and is lost on restart. No rule,
+permission/configuration write, hook decision, edited input, prompt submission
+or new attention/delivery behavior is produced.
+
+Actor attribution is a convention derived from the [Claude hook schema](https://code.claude.com/docs/en/hooks#common-input-fields): an omitted or null `agent_id`
+is treated as main, a valid ID identifies a subagent or in-process teammate, and
+an invalid ID is dropped rather than inferred as main. The fixtures are synthetic;
+no live PermissionRequest capture qualifies that convention on an installed native
+version. A hook denial without a source-bound guard receipt has unknown origin.
+This diagnostic adds no guard collector, permission decision or attention policy.
+
+The new PermissionRequest diagnostic is optional for activity-hook readiness.
+Every preexisting required event, relay asset and explicit hook-disable check
+still applies. An older installed plugin at the same manifest version retains
+its bytes and may not send this event: plugin-only delivery needs a future normal
+maintainer release refresh, and managed delivery needs normal reprojection. A
+manifest or green readiness check does not prove live hook execution. Raw tool
+arguments and provider reason text are withheld; diagnostic evidence is bounded,
+memory-only and expires after five minutes.
 
 ### Who may intervene
 
@@ -111,8 +174,18 @@ their existing behaviour.
 
 ### Terminal delivery
 
-Run from a seat shell with `OPENRIG_SESSION_NAME` set; the daemon derives the
-audit actor from transport identity.
+`rig seat set-typing-guard` works from an ordinary terminal as well as from a
+seat's shell. The daemon takes the recorded actor from transport identity only:
+
+- From a managed seat's shell (`OPENRIG_SESSION_NAME` set), the preference and
+  its audit entry name that seat.
+- From a terminal with no seat identity, the change applies the same way, and
+  the preference and its audit entry record the actor as
+  `unattributed (no seat identity)`.
+
+Neither case takes an actor from the request body or from the target seat's name.
+`rig seat retire-held-message` still records the seat that retired a message, so
+run it from a seat's shell.
 
 ~~~sh
 rig seat set-typing-guard dev-impl@my-rig --mode draft-aware \
@@ -131,8 +204,21 @@ to finish. The API may return HTTP 202 with `pending: true`; wait for
 and effective modes and retains the text `Typing guard: on (hold)` for hold.
 
 A held send immediately returns `outcome: "retained"`, `sent: false`, its exact
-reason (such as `draft_input_busy`) and the saved attempt's `outboxIds`. No automatic
-retry is scheduled. Each explicit draft-aware request is a new attempt, including
+reason and the saved attempt's `outboxIds`. No automatic
+retry is scheduled. The reasons are:
+
+- `typing_guard_enabled`: the seat's mode holds this send (`hold`, or a level that
+  holds this kind of message).
+- `runtime_switch_in_progress`: the seat is switching runtime.
+- In `draft-aware` mode, a refusal before any input was written:
+  `draft_input_busy` (the input holds unsubmitted text), `draft_input_unknown` (the
+  input can't be read), `draft_input_changed` (the input or its target changed during
+  the delivery), `draft_wake_superseded`, `target_needs_input`,
+  `wait_for_idle_timeout`, `target_activity_unknown`, `target_runtime_unverified`,
+  `target_runtime_not_running`, `target_runtime_conflict`, `invalid_wait_for_idle`,
+  `invalid_dangerously_interact`, `dangerously_interact_requires_reason`,
+  `prompt_override_audit_unavailable`, `transport_unavailable`, `session_missing` or
+  `tmux_unavailable`. Each explicit draft-aware request is a new attempt, including
 one with a reused `deliveryId`; the result warns older callers that this field no
 longer deduplicates input. The CLI does not generate a deduplication key.
 
@@ -230,7 +316,9 @@ refuses Enter and is not replayed. Unsupported provider layouts remain held.
 Use off when that tradeoff is unsuitable.
 
 HTTP configuration uses `POST /api/seat/set-typing-guard/:seatRef` with
-`{mode, reason}` or `{enabled, reason}`. Status and held-message routes are
+`{mode, reason}` or `{enabled, reason}`. The `X-OpenRig-Session` header, when
+present, is the recorded actor; without it the change is recorded as
+`unattributed (no seat identity)`. Status and held-message routes are
 unchanged; no RigSpec field is required.
 
 ## Verification scope

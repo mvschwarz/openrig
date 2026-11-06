@@ -1,7 +1,7 @@
 import type { TerminalActor, TerminalPolicyStore } from "./terminal-policy.js";
 import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
-import type { SessionTransport, SendResult } from "./session-transport.js";
+import { CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type SendResult } from "./session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
 import { postCompactExtraSetting } from "./managed-restore-read-access.js";
 import * as fs from "node:fs";
@@ -428,11 +428,22 @@ export interface RestoreDeliveryAttempt {
   errorClass?: string;
   failures: number;
   noticeErrorClass?: string;
+  /** Consecutive idle polls whose input box read neither empty nor typed for this step (#2575). */
+  unreadable?: number;
+  /** What the input box read: on a hold, the reading held on; on a delivery over a box OpenRig couldn't read (#2575),
+   *  that reading. Never "empty" on a delivery. */
+  inputBox?: string;
 }
+
+/** #2575: after this many consecutive idle polls that can't read the box, a post-compaction step goes ahead; a typed
+ *  draft still holds it. Waiting doesn't show the box is empty, so the delivery is recorded as over an unreadable box. */
+export const UNREADABLE_POLLS_BEFORE_DELIVERY = 2;
 export interface RestoreDeliveryFailure {
   sessionName: string;
   attemptId: string;
   mapPath: string;
+  /** The seat's restore-pending marker, which names the restore packet. */
+  markerPath?: string;
   lastDelivery: RestoreDeliveryAttempt;
 }
 
@@ -503,6 +514,8 @@ interface CompactionRecord {
    *  `compact_uncertain`: the attempt stopped after a /compact whose outcome is unknown, so its restore is owed if it ran.
    *  `done`: the post-restore audit was sent. `ended`: the attempt stopped or was cancelled. */
   phase: "preparing" | PendingPostCompactStage | "compact_uncertain" | "done" | "ended";
+  /** Diagnostic only; older records may omit the reason an attempt stopped. */
+  reason?: string;
   delivery: PreparationState["delivery"];
   deadlineAt: number | null;
   sends: number;
@@ -711,8 +724,12 @@ export class ClaudeCompactionEnforcer {
     const lastDelivery = this.records.get(sessionName)?.record.lastDelivery;
     const failed = !!lastDelivery && lastDelivery.failures > 0;
     const last = lastDelivery ? { lastDelivery } : {};
-    const failure = lastDelivery ? ` ${failed ? "Last delivery" : "waiting: seat busy"} at ${lastDelivery.at}: ${[lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass, lastDelivery.noticeErrorClass && `owner notice failed (${lastDelivery.noticeErrorClass})`].filter(Boolean).join("; ")}. OpenRig will retry on its existing polls.` : "";
-    const step = { turn_boundary: "post-compaction turn boundary", restore_prompt: "restore request", compliance_prompt: "post-restore audit" }[stage];
+    const steps = { turn_boundary: "post-compaction turn boundary", restore_prompt: "restore request", compliance_prompt: "post-restore audit" };
+    const failure = !lastDelivery ? "" : lastDelivery.reason === "delivered_over_unreadable_input_box"
+      ? ` The ${steps[lastDelivery.stage]} went in at ${lastDelivery.at} over an input box OpenRig couldn't read (it read ${lastDelivery.inputBox ?? "unknown"}); a draft there, if any, may hold its text.`
+      : ` ${failed ? "Last delivery" : "waiting: seat busy"} at ${lastDelivery.at}: ${[lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass, lastDelivery.noticeErrorClass && `owner notice failed (${lastDelivery.noticeErrorClass})`].filter(Boolean).join("; ")}. OpenRig will retry on its existing polls.${lastDelivery.unreadable
+        ? ` After ${UNREADABLE_POLLS_BEFORE_DELIVERY} idle polls that can't read the input box, the step goes in anyway; a typed draft still holds it.` : ""}`;
+    const step = steps[stage];
     if (!this.afterUncertainCompact.has(sessionName)) {
       return { stage, held: failed, ...last, detail: `OpenRig owes this seat its ${step} next, sent on a poll once the pane is idle.${failure}` };
     }
@@ -811,7 +828,8 @@ export class ClaudeCompactionEnforcer {
       if (record && lastDelivery && lastDelivery !== previous && lastDelivery.failures >= 2 && this.onRestoreDeliveryFailure) {
         void Promise.resolve().then(() => {
           if (this.records.get(input.sessionName) !== record || record.record.lastDelivery !== lastDelivery || this.pendingPostCompactRestore.get(input.sessionName) !== stage) return;
-          return this.onRestoreDeliveryFailure!({ sessionName: input.sessionName, attemptId: record.record.attemptId, mapPath: record.record.mapPath, lastDelivery });
+          return this.onRestoreDeliveryFailure!({ sessionName: input.sessionName, attemptId: record.record.attemptId, mapPath: record.record.mapPath,
+            markerPath: path.join(this.openrigHome, "compaction", "restore-pending", `${sanitizeSessionKey(input.sessionName)}.json`), lastDelivery });
         }).catch(error => {
           if (this.records.get(input.sessionName) === record && record.record.lastDelivery === lastDelivery && this.pendingPostCompactRestore.get(input.sessionName) === stage) {
             lastDelivery.noticeErrorClass = error instanceof Error ? error.name : typeof error;
@@ -825,17 +843,23 @@ export class ClaudeCompactionEnforcer {
   private recordRestoreFailure(
     session: string, stage: PendingPostCompactStage | undefined,
     record: { file: string; record: CompactionRecord } | undefined,
-    result: Pick<SendResult, "ok" | "reason" | "outcome" | "activity">, errorClass?: string,
+    result: Pick<SendResult, "ok" | "reason" | "outcome" | "activity" | "heldInputBox">, errorClass?: string,
   ): void {
     if (!stage || !record || this.records.get(session) !== record || this.pendingPostCompactRestore.get(session) !== stage) return;
     const prior = record.record.lastDelivery;
     // Active work is the expected wait between restore steps, not an undeliverable stage.
     const waiting = result.reason === "wait_for_idle_timeout" && result.activity?.state === "running";
+    // The idle wait passed and the box read neither empty nor typed. A recognised draft, a hold with no reading, or any
+    // other result breaks the run.
+    const held = result.heldInputBox;
+    const unreadable = !result.ok && result.reason === "draft_input_unknown" && held && held !== "typed" && held !== "typed-with-suggestion"
+      ? (prior && prior.stage === stage ? prior.unreadable ?? 0 : 0) + 1 : 0;
     const lastDelivery: RestoreDeliveryAttempt = {
       stage, at: new Date(this.now()).toISOString(), ok: result.ok, reason: result.reason ?? "send_failed",
       ...(result.outcome ? { outcome: result.outcome } : {}),
       ...(result.activity ? { activity: { state: result.activity.state, reason: result.activity.reason, evidenceSource: result.activity.evidenceSource } } : {}),
       ...(errorClass ? { errorClass } : {}), failures: waiting ? 0 : (prior?.failures ?? 0) + 1,
+      ...(held ? { inputBox: held } : {}), ...(unreadable ? { unreadable } : {}),
     };
     this.persist(session, record.record.attemptId, { lastDelivery });
   }
@@ -861,9 +885,14 @@ export class ClaudeCompactionEnforcer {
     const attempt = this.pendingPreCompactPrep.get(input.sessionName);
     const isCurrent = () => this.pendingPostCompactRestore.get(input.sessionName) === pendingStage
       && this.pendingPreCompactPrep.get(input.sessionName) === attempt;
+    // #2575: after enough idle polls that couldn't read the box for this step, the step goes in unless the box reads typed.
+    // Not after a /compact whose result was lost: there an Enter could submit /compact, so that check below stays strict.
+    const last = this.records.get(input.sessionName)?.record.lastDelivery;
+    const overUnreadable = !this.afterUncertainCompact.has(input.sessionName) && !!last && last.stage === pendingStage && !last.ok
+      && (last.unreadable ?? 0) >= UNREADABLE_POLLS_BEFORE_DELIVERY;
     const sendOpts = {
       openrigNotice: true as const,
-      preserveInput: true as const,
+      preserveInput: overUnreadable ? "typed" as const : true as const,
       beforeWrite: () => {
         if (!isCurrent()) throw new DeliveryGuardError("compaction_cancelled", "Managed compaction was cancelled or replaced; no further input is authorized.");
       },
@@ -919,7 +948,7 @@ export class ClaudeCompactionEnforcer {
         return { triggered: false, reason: "send_failed" };
       }
       this.pendingPostCompactRestore.set(input.sessionName, "restore_prompt");
-      this.persistStage(input.sessionName, "restore_prompt");
+      this.persistStage(input.sessionName, "restore_prompt", undefined, this.overUnreadableDelivery("turn_boundary", boundary));
       return { triggered: true };
     }
     if (pendingStage === "restore_prompt") {
@@ -949,7 +978,7 @@ export class ClaudeCompactionEnforcer {
         return { triggered: false, reason: "send_failed" };
       }
       this.pendingPostCompactRestore.set(input.sessionName, "compliance_prompt");
-      this.persistStage(input.sessionName, "compliance_prompt");
+      this.persistStage(input.sessionName, "compliance_prompt", undefined, this.overUnreadableDelivery("restore_prompt", restore));
       this.restoreCarry.delete(input.sessionName);
       // OPR.0.4.3.14 — surface manual-trigger progress (no-op for auto seats).
       this.advanceManualStage(input.sessionName, "compact-sent", "restore-sent");
@@ -982,7 +1011,7 @@ export class ClaudeCompactionEnforcer {
       }
       if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
       this.pendingPostCompactRestore.delete(input.sessionName);
-      this.persistStage(input.sessionName, "done");
+      this.persistStage(input.sessionName, "done", undefined, this.overUnreadableDelivery("compliance_prompt", compliance));
       this.records.delete(input.sessionName);
       this.afterUncertainCompact.delete(input.sessionName);
       this.lastInputBox.delete(input.sessionName);
@@ -1368,11 +1397,11 @@ export class ClaudeCompactionEnforcer {
     };
     const send = async () => {
       check();
-      // Both paths send only to an idle seat, with the same idle wait, bounded by the attempt's existing
-      // deadline. (The automatic path used to send into a seat still finishing its preparation turn.)
+      // Both paths send only to an idle seat. Include the readable observation's budget in the wait,
+      // still bounded by the attempt's existing deadline.
       // Idle comes from a live pane read: the newest hook can predate the rest of the preparation turn.
       return this.sessionTransport.send(input.sessionName, composed.command,
-        { openrigNotice: true, preserveInput: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
+        { openrigNotice: true, preserveInput: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs + CAPTURE_READABLE_BUDGET_MS, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
     };
     let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase">;
     let guardRefused = false;
@@ -1428,7 +1457,7 @@ export class ClaudeCompactionEnforcer {
    *  why it couldn't be read. Never throws. */
   private async inputBoxStatus(sessionName: string): Promise<string> {
     try {
-      const capture = await this.sessionTransport.capture(sessionName, { inputBox: true });
+      const capture = await this.sessionTransport.capture(sessionName, { inputBox: true, readable: { width: 120, height: 40 } });
       return capture.inputBox?.status ?? capture.reason ?? "unknown";
     } catch { return "unknown"; }
   }
@@ -1505,9 +1534,15 @@ export class ClaudeCompactionEnforcer {
     } catch { try { fs.rmSync(temporary, { force: true }); } catch { /* nothing to clean */ } }
   }
 
-  private persistStage(sessionName: string, phase: CompactionRecord["phase"]): void {
+  private persistStage(sessionName: string, phase: CompactionRecord["phase"], reason?: string, lastDelivery?: RestoreDeliveryAttempt): void {
     const current = this.records.get(sessionName);
-    if (current) this.persist(sessionName, current.record.attemptId, { phase, lastDelivery: undefined });
+    if (current) this.persist(sessionName, current.record.attemptId, { phase, ...(reason !== undefined ? { reason } : {}), lastDelivery });
+  }
+
+  /** A step that went in over a box OpenRig couldn't read stays on the record as that (#2575); any other advance clears it. */
+  private overUnreadableDelivery(stage: PendingPostCompactStage, result: SendResult): RestoreDeliveryAttempt | undefined {
+    return result.pastedOverInputBox ? { stage, at: new Date(this.now()).toISOString(), ok: true,
+      reason: "delivered_over_unreadable_input_box", inputBox: result.pastedOverInputBox, failures: 0 } : undefined;
   }
 
   /**
@@ -1593,7 +1628,7 @@ export class ClaudeCompactionEnforcer {
     const attempt = this.pendingPreCompactPrep.get(session);
     if ((expected && expected !== attempt) || !attempt || attempt.status === "stopped" || attempt.status === "compact-sent") return;
     attempt.status = "stopped"; attempt.reason = reason; attempt.stoppedAt = this.now(); attempt.controller.abort();
-    this.persist(session, attempt.attemptId, { phase: attempt.compact === "uncertain" ? "compact_uncertain" : "ended" });
+    this.persist(session, attempt.attemptId, { phase: attempt.compact === "uncertain" ? "compact_uncertain" : "ended", reason });
     if (attempt.mode === "manual") this.setManualStage(session, "skipped-or-failed", reason);
   }
 
@@ -1609,7 +1644,7 @@ export class ClaudeCompactionEnforcer {
         attempt.reason = "compaction_cancelled";
         attempt.controller.abort();
       }
-      this.persistStage(session, "ended");
+      this.persistStage(session, "ended", "compaction_cancelled");
       this.pendingPostCompactRestore.delete(session);
       this.pendingStageGeneration.delete(session);
       this.restoreCarry.delete(session);

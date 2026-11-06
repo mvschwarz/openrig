@@ -219,6 +219,7 @@ export interface AppDeps {
   wakeResolveService?: WakeResolveService;
   chatRepo?: ChatRepository;
   streamStore?: StreamStore;
+  streamIntakeCoordinator?: import("./domain/stream-intake.js").StreamIntakeCoordinator;
   slowOpRecorder?: SlowOperationInstrumentation;
   requestPhaseObserver?: import("./domain/request-phase-observer.js").RequestPhaseObserver;
   queueRepo?: QueueRepository;
@@ -466,6 +467,7 @@ export function createGuestActivityApp(deps: AppDeps): Hono {
     // Read only by the runner permission routes, the one other thing a grant can do on this router.
     c.set("queueRepo" as never, deps.queueRepo);
     c.set("rigRepo" as never, deps.rigRepo);
+    c.set("streamStore" as never, deps.streamStore);
     await next();
   });
   app.route("/api/activity", guestActivityRoutes);

@@ -31,6 +31,8 @@ import { join } from "node:path";
 import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode } from "./seat-launch-additions.js";
+import { heldMessagesNotice } from "./outbox-handler.js";
+import { keptGuidanceSeatLine } from "./restore-guidance.js";
 
 // Why a startup prompt's submission could not be confirmed, as told to the operator when the
 // proof line is held back.
@@ -51,7 +53,7 @@ export function startupProofHeldBackWarning(reason: string | undefined): string 
 
 type PendingForkContext = { parentToken: string; isRestore: boolean };
 export type PendingStartupContext = { eventSeq: number } & (
-  | { mode: "fresh" }
+  | { mode: "fresh"; guidanceLaunchInstructions?: true }
   | ({ mode: "fork" } & PendingForkContext)
 );
 
@@ -61,7 +63,9 @@ export function readPendingStartupContext(db: Database.Database, nodeId: string,
   if (!row) return null;
   const event = JSON.parse(row.payload);
   if (event.type !== "node.startup_failed" || event.sessionId !== sessionId) return null;
-  if (event.freshContextPending === true) return { eventSeq: row.seq, mode: "fresh" };
+  if (event.freshContextPending === true) {
+    return { eventSeq: row.seq, mode: "fresh", ...(event.guidanceLaunchInstructions === true ? { guidanceLaunchInstructions: true as const } : {}) };
+  }
   const fork = event.forkContextPending;
   if (typeof fork?.parentToken === "string" && fork.parentToken.trim() && typeof fork.isRestore === "boolean") {
     return { eventSeq: row.seq, mode: "fork", parentToken: fork.parentToken, isRestore: fork.isRestore };
@@ -421,6 +425,20 @@ export class StartupOrchestrator {
     }
     this.eventBus.emit({ type: "node.startup_pending", rigId: input.rigId, nodeId: input.nodeId, startupProof });
 
+    // #875: a fresh launch decides once where its managed guidance goes; a restore carries its saved choice (null for an
+    // older snapshot), and a continuation carries its launch's choice, so the adapter isn't asked again and an existing
+    // seat isn't silently repointed. This runs after the pending mark: a continuation claims its attempt before any await.
+    if (input.binding.guidanceFile === undefined && input.adapter.guidanceFileFor) {
+      // A continuation launches nothing, so it never chooses guidance that only a launch carries.
+      const answer = input.adapter.guidanceFileFor(input.binding, { resuming: Boolean(input.resumeToken || input.forkSource || input.skipHarnessLaunch) });
+      const chosen = answer instanceof Promise ? await answer : answer;
+      if (chosen.note) warnings.push(chosen.note);
+      const guidance = { guidanceFile: chosen.file, ...(chosen.launchInstructions ? { guidanceLaunchInstructions: true } : {}) };
+      input = { ...input, binding: { ...input.binding, ...guidance } };
+      // A failure recorded from the delivery input keeps the choice for a later continuation too.
+      deliveryInput.binding = { ...deliveryInput.binding, ...guidance };
+    }
+
     // 2. Project resources. A contained Claude resume has an intentionally empty
     // replay plan, not a newly selected profile with activity hooks removed.
     // RestoreOrchestrator already reconciled the saved activity selection before
@@ -565,8 +583,21 @@ export class StartupOrchestrator {
         JSON.stringify(input.startupActions),
         input.adapter.runtime,
       );
+      // The chosen guidance file rides with the context it was chosen for; the row above leaves it null otherwise.
+      if (input.binding.guidanceFile) {
+        this.db.prepare("UPDATE node_startup_context SET guidance_file = ? WHERE node_id = ?").run(input.binding.guidanceFile, input.nodeId);
+      }
     } catch (error) {
       return this.fail(input, "failed", [`Startup context persistence failed: ${String(error)}`], undefined, false, undefined, false, "persistence", true);
+    }
+
+    // #2456: the seat is told, in one line after it's ready, which managed blocks the adapter's guidance writes left as they
+    // are (named in this start's warnings). The line is this start's own: it's added after the startup context is saved,
+    // so a later replay doesn't send it again. A resume types nothing into the resumed conversation; its result names them.
+    const guidanceSeatLine = input.resumeToken ? undefined : keptGuidanceSeatLine(warnings);
+    if (guidanceSeatLine) {
+      input = { ...input, startupActions: [...input.startupActions, { type: "send_text", value: guidanceSeatLine, phase: "after_ready", appliesOn: [context], idempotent: true }] };
+      deliveryInput.startupActions = input.startupActions;
     }
 
     const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
@@ -1010,6 +1041,13 @@ export class StartupOrchestrator {
       : undefined;
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId, ...(submission ? { submission } : {}) });
 
+    // Held messages are never replayed, so a seat that starts with some is told once, as the launch is (#2431).
+    const heldNotice = input.binding.tmuxSession ? heldMessagesNotice(this.db, input.nodeId, input.sessionName ?? input.binding.tmuxSession) : null;
+    if (heldNotice) {
+      warnings.push(heldNotice);
+      await this.sessionTransport.send(input.binding.tmuxSession!, heldNotice, { openrigNotice: true }).catch(() => undefined);
+    }
+
     return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}), ...(routerLine ? { routerLine } : {}), ...(resumedProcess ? { resumedProcess } : {}) };
   }
 
@@ -1090,7 +1128,8 @@ export class StartupOrchestrator {
       nodeId: input.nodeId,
       error: errors.join("; "),
       sessionId: input.sessionId,
-      ...(pendingContext === true ? { freshContextPending: true }
+      // A fresh launch that carried its guidance as developer instructions says so, so its continuation keeps that choice (#875).
+      ...(pendingContext === true ? { freshContextPending: true, ...(input.binding.guidanceLaunchInstructions ? { guidanceLaunchInstructions: true } : {}) }
         : pendingContext ? { forkContextPending: pendingContext } : {}),
       ...(input.submissionDiagnostics?.length ? { submissionDiagnostics: input.submissionDiagnostics } : {}),
       ...(stage ? { stage } : {}),

@@ -1043,6 +1043,38 @@ describe("RestoreCheckService", () => {
     expect(hook?.evidence).toContain("UserPromptSubmit");
   });
 
+  it.each(["managed", "plugin", "both"])("keeps old equal-version %s delivery ready without the optional diagnostic", channel => {
+    const cwd = "/fixture-project", pluginDir = "/custom-instance/plugins/openrig-core";
+    const settingsPath = path.join(cwd, ".claude/settings.local.json");
+    const oldEvents = ["SessionStart", "UserPromptSubmit", "PostToolBatch", "Stop", "StopFailure", "Notification"];
+    const files = new Map([
+      [settingsPath, JSON.stringify({ hooks: Object.fromEntries(oldEvents.map(event => [event, [{
+        hooks: [{ type: "command", command: `node '${RELAY_PATH}'` }],
+      }]])) })],
+      [RELAY_PATH, "// old managed relay"],
+      [path.join(pluginDir, ".claude-plugin/plugin.json"), JSON.stringify({ name: "openrig-core", version: "0.1.24", hooks: "./hooks/claude.json" })],
+      [path.join(pluginDir, "hooks/claude.json"), JSON.stringify({ hooks: Object.fromEntries(oldEvents.map(event => [event, [{
+        hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs" --from-plugin' }],
+      }]])) })],
+      [path.join(pluginDir, "hooks/scripts/activity-relay.cjs"), "// old plugin relay"],
+    ]);
+    const projectionEntries = [
+      ...(channel !== "plugin" ? [{ absolutePath: "/source/activity-hooks", category: "runtime_resource", resourceType: "claude_activity_hooks" }] : []),
+      ...(channel !== "managed" ? [{ absolutePath: pluginDir, category: "plugin" }] : []),
+    ];
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ cwd })],
+      getStartupContext: () => startupContextProbe({ projectionEntries }),
+      getClaudeActivityHookEvents: () => ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolBatch", "Stop", "StopFailure", "Notification"],
+      exists: file => files.has(file) || file.endsWith("host-infra.json"),
+      readFile: file => files.get(file) ?? VALID_HOST_INFRA_DECLARATION,
+    }));
+    const hook = service.check({}).checks.find(entry => entry.check === "seat.dev-impl@test-rig.hooks");
+    expect(hook?.status).toBe("green");
+    expect(hook?.evidence).not.toContain("missing");
+    expect(files.has(path.join(pluginDir, "hooks/scripts/permission-stop-descriptor.cjs"))).toBe(false);
+  });
+
   it("does not count stale project-local commands as delivered instance hooks", () => {
     const cwd = "/project";
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
@@ -1125,7 +1157,7 @@ describe("RestoreCheckService", () => {
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({ cwd })],
       getStartupContext: () => startupContextProbe({ projectionEntries: [{ category: "plugin", absolutePath: dir }] }),
-      getClaudeActivityHookEvents: () => kind === "missing-event" ? ["Stop", "SessionStart"] : ["Stop"],
+      getClaudeActivityHookEvents: () => kind === "missing-event" ? ["Stop", "SessionStart", "PermissionRequest"] : ["Stop", "PermissionRequest"],
       exists: f => files.has(f) || f.endsWith("host-infra.json"),
       readFile: f => {
         if (kind === "unreadable-relay" && f.endsWith("activity-relay.cjs")) throw new Error("unreadable");

@@ -60,7 +60,19 @@ export function enrichRosterMember(member: RosterMember, inventory: RosterInvent
   const node = identities.size === 1 ? matches[0] : undefined;
   const sessionStatus = node ? text(node.sessionStatus) : null;
   const current = sessionStatus === "running";
-  const activity = current && object(node?.agentActivity) ? node.agentActivity : null;
+  const activities = matches.map(n => {
+    const activity = current && object(n.agentActivity) ? n.agentActivity : null;
+    return { state: text(activity?.state) ?? "unknown", reason: text(activity?.reason), sampledAt: text(activity?.sampledAt) };
+  });
+  const agreed = node && new Set(activities.map(a => JSON.stringify([a.state, a.reason]))).size === 1;
+  const times = activities.map(a => a.sampledAt);
+  const sameTime = new Set(times).size === 1;
+  const comparable = times.every((t): t is string => t !== null && Number.isFinite(Date.parse(t)));
+  // A later timestamp is meaningful only when every route supplied a comparable time.
+  const sampledAt = sameTime ? times[0] ?? null : comparable
+    ? [...times].sort((a, b) => Date.parse(b!) - Date.parse(a!) || b!.localeCompare(a!))[0] ?? null : null;
+  const activity = agreed ? { ...activities[0]!, sampledAt }
+    : { state: "unknown", reason: matches.length > 1 ? "Conflicting activity observations" : null, sampledAt: null };
   const observations = matches.map(n => modelObservation(n.modelObservation, current));
   const observation = node && new Set(observations.map(o => JSON.stringify(o))).size === 1 ? observations[0]!
     : unknownModelObservation(matches.length ? "conflicting-observations" : "host-or-seat-unavailable");
@@ -75,7 +87,7 @@ export function enrichRosterMember(member: RosterMember, inventory: RosterInvent
     observedModel: observation.model,
     modelObservation: observation,
     sessionStatus,
-    agentActivity: { state: text(activity?.state) ?? "unknown", reason: text(activity?.reason), sampledAt: text(activity?.sampledAt) },
+    agentActivity: activity,
     // A hosted member's last call to this host's MCP server, for a roster row on this host only: another host's member,
     // or one whose host can't be told, is unknown (null), never this host's record for a same-named seat. Its last ring
     // is in rig_team.

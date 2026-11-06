@@ -26,11 +26,17 @@ it("notifies the seat's owner once, updates a changed refusal without another wa
     const send = vi.fn(async () => ({ ok: true, verified: true }));
     const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true, transport: { send } });
     const failure: RestoreDeliveryFailure = { sessionName: "writer@restore-notice", attemptId: "attempt-one", mapPath: "/maps/attempt-one/RESTORE-MAP.md",
+      markerPath: "/openrig/compaction/restore-pending/writer.json",
       lastDelivery: { stage: "turn_boundary", at: "2026-01-01T00:00:00Z", ok: false, reason: "target_activity_unknown", failures: 2 } };
     await reportRestoreDeliveryFailure(db, queue, failure);
     await Promise.all([reportRestoreDeliveryFailure(db, queue, failure), reportRestoreDeliveryFailure(db, queue, failure)]);
     const id = "qitem-compaction-restore-attempt-one";
     expect(queue.getById(id)?.destinationSession).toBe("owner@restore-notice");
+    // #2575: the owner is told how to take the restore over with existing verbs, and that it isn't race-free.
+    const body = queue.getById(id)?.body ?? "";
+    expect(body).toContain("OpenRig sends the step itself after 2 idle polls, recorded as over an unreadable box. That doesn't apply after a /compact whose result was lost, where each step waits for an empty box, or on a seat whose draft-aware delivery or typing guard holds OpenRig's input: those keep holding, draft-aware delivery until the seat's mode is set to off and a typing guard until its level admits OpenRig's input.");
+    expect(body).toContain("first run rig compact 'writer@restore-notice' --cancel, so OpenRig stops owing the remaining steps (a step it is already pasting at that moment can still land)");
+    expect(body).toContain("naming the restore map, its restore-pending marker /openrig/compaction/restore-pending/writer.json and the packet the marker names.");
     expect(send).toHaveBeenCalledTimes(1);
     // A restarted reporter uses the same persisted item, not an in-memory dedup list.
     const restarted = new QueueRepository(db, new EventBus(db), { validateRig: () => true, transport: { send } });

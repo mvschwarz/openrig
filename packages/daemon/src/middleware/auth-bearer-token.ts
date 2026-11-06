@@ -54,7 +54,7 @@ export function constantTimeEqual(a: string, b: string): boolean {
  * Three-part error body shape per OpenRig honest-error-reporting
  * convention. Renders inside the route's c.json call.
  */
-function unauthorizedBody(reason: string): {
+function unauthorizedBody(reason: string, diagnosticContext?: "terminal"): {
   error: "unauthorized";
   message: string;
   what_failed: string;
@@ -63,12 +63,14 @@ function unauthorizedBody(reason: string): {
 } {
   return {
     error: "unauthorized",
-    message: `Mission Control auth failed: ${reason}`,
+    message: `${diagnosticContext === "terminal" ? "Terminal" : "Mission Control"} auth failed: ${reason}`,
     what_failed: reason,
-    why_it_matters:
-      "Mission Control write verbs require a bearer token because the daemon may be bound on a non-loopback interface (tailnet) where unauthenticated mutation would be unsafe.",
-    what_to_do:
-      "Set the auth.bearerToken field in daemon config (or OPENRIG_AUTH_BEARER_TOKEN env), restart the daemon, and resend the request with `Authorization: Bearer <token>`.",
+    why_it_matters: diagnosticContext === "terminal"
+      ? "Terminal and transport requests require the configured terminal bearer token to protect terminal access and input."
+      : "Mission Control write verbs require a bearer token because the daemon may be bound on a non-loopback interface (tailnet) where unauthenticated mutation would be unsafe.",
+    what_to_do: diagnosticContext === "terminal"
+      ? "Use the daemon's terminal bearer token with `Authorization: Bearer <token>`: OPENRIG_TERMINAL_BEARER_TOKEN, or OPENRIG_AUTH_BEARER_TOKEN when terminal auth falls back to it."
+      : "Set OPENRIG_AUTH_BEARER_TOKEN in the daemon's environment, restart the daemon, and resend the request with `Authorization: Bearer <token>`.",
   };
 }
 
@@ -79,6 +81,8 @@ export interface AuthBearerTokenOpts {
    * elsewhere ensures this only happens when bound on loopback).
    */
   expectedToken: string | null;
+  /** Diagnostic wording only; never selects or compares a token. */
+  diagnosticContext?: "terminal";
 }
 
 /**
@@ -93,7 +97,7 @@ export interface AuthBearerTokenOpts {
 export function authBearerTokenMiddleware(
   opts: AuthBearerTokenOpts,
 ): MiddlewareHandler {
-  const { expectedToken } = opts;
+  const { expectedToken, diagnosticContext } = opts;
   return async (c, next) => {
     if (expectedToken === null) {
       // Loopback-only mode (no bearer configured). Pass through.
@@ -102,18 +106,18 @@ export function authBearerTokenMiddleware(
     }
     const header = c.req.header("Authorization") ?? c.req.header("authorization");
     if (!header) {
-      return c.json(unauthorizedBody("missing Authorization header"), 401);
+      return c.json(unauthorizedBody("missing Authorization header", diagnosticContext), 401);
     }
     const match = /^Bearer\s+(.+)$/i.exec(header);
     if (!match) {
       return c.json(
-        unauthorizedBody("Authorization header must be 'Bearer <token>'"),
+        unauthorizedBody("Authorization header must be 'Bearer <token>'", diagnosticContext),
         401,
       );
     }
     const provided = match[1]!.trim();
     if (!constantTimeEqual(provided, expectedToken)) {
-      return c.json(unauthorizedBody("bearer token does not match"), 401);
+      return c.json(unauthorizedBody("bearer token does not match", diagnosticContext), 401);
     }
     await next();
   };
@@ -257,7 +261,7 @@ export async function assertBindAuthInvariant(opts: {
   if (opts.bearerToken && opts.bearerToken.length > 0) return;
   throw new AuthBearerTokenStartupError(
     `daemon refusing to start: bind host '${opts.host}'${resolvedIp ? ` (resolves to ${resolvedIp})` : ""} is not loopback or tailscale, ` +
-      `and auth.bearerToken (env OPENRIG_AUTH_BEARER_TOKEN) is empty. ` +
+      `and OPENRIG_AUTH_BEARER_TOKEN is empty. ` +
       `Either: (a) bind to 127.0.0.1 / localhost, (b) bind to a tailscale interface (100.64.0.0/10 IPv4 or fd7a:115c:a1e0::/48 IPv6), ` +
       `or (c) set OPENRIG_AUTH_BEARER_TOKEN to a non-empty value before starting the daemon.`,
   );

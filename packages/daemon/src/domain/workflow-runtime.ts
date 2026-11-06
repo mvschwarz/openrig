@@ -1227,7 +1227,7 @@ export class WorkflowRuntime {
       register(created.persistedEvent);
       nudgeTo = { qitemId: created.qitemId, session: created.destinationSession, nudge: created.nudge };
       // P34: stage the redrive packet's wake intent inside this transaction.
-      this.queueRepo.stageWakeIntent(
+      this.queueRepo.stageHandoffWake(
         created.qitemId,
         input.actorSession,
         created.destinationSession,
@@ -1442,7 +1442,7 @@ export class WorkflowRuntime {
         chainOfRecord: [occurrence.failedPacketId],
       });
       register(created.persistedEvent);
-      this.queueRepo.stageWakeIntent(created.qitemId, input.actorSession, created.destinationSession, input.identityProvenance ?? null, created.nudge);
+      this.queueRepo.stageHandoffWake(created.qitemId, input.actorSession, created.destinationSession, input.identityProvenance ?? null, created.nudge);
       this.instanceStore.bindFrontierPacket({
         instanceId: instance.instanceId,
         packetId: created.qitemId,
@@ -1648,7 +1648,7 @@ export class WorkflowRuntime {
       nudgeTo = { qitemId: created.qitemId, session: created.destinationSession, nudge: created.nudge };
       // P34 (site :992): stage the re-routed packet's wake intent in the same
       // transaction that closed the old frontier packet.
-      this.queueRepo.stageWakeIntent(
+      this.queueRepo.stageHandoffWake(
         created.qitemId,
         input.actorSession,
         created.destinationSession,

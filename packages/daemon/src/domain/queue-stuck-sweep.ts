@@ -449,6 +449,9 @@ function deliveryResolutionEvidence(
   if (quiet && !quiet.unreadable && (quiet.state === "held" || quiet.state === "released")) {
     return `source held by quiet-release job for window ${quiet.windowId}`;
   }
+  if (kind === "unclaimed-obligation" && !quiet && deps.queueRepo.isRegisteredHumanUpdate(row) && !deps.queueRepo.deliveryOutcomeFor(qitemId)) {
+    return "informational update to a registered human requires no claim";
+  }
   if (kind !== "undelivered-human-notice" && row.lastNudgeResult === "retained:typing_guard") {
     return "source wake held by the seat typing guard";
   }
@@ -727,6 +730,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // hold with no live release job is stuck: nothing will ever release it.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
       if (quiet && quiet.state !== "orphaned") continue;
+      // An explicit informational update to a currently registered human is for reading, not an obligation to claim,
+      // unless its quiet-hours hold has been orphaned before release.
+      if (!quiet && deps.queueRepo.isRegisteredHumanUpdate(row)) continue;
       // The seat's typing guard or interruption level held its wake on purpose: it's held and readable at the seat, not
       // stuck. (A handed-off baton's one held notice is the wake ladder's.)
       if (row.lastNudgeResult === "retained:typing_guard") continue;
@@ -933,9 +939,36 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
       const dedupTag = findingDedupTag(c.kind, c.row.qitemId);
       const shared = findQueueRecovery(deps.db, c.row.qitemId);
-      if (shared) {
-        const existingTags = deps.queueRepo.getById(shared.qitemId)?.tags ?? [];
+      const sharedRow = shared ? deps.queueRepo.getById(shared.qitemId) : null;
+      // A later accepted deadline can expire after the previous finding closed.
+      // Its newer time is fresh evidence even when the pickup candidate wins this row.
+      // An OPEN recovery still owns custody.
+      const renewedDeadline = c.row.state === "in-progress" && sharedRow
+        && Date.parse(c.row.closureRequiredAt ?? "") <= now.getTime()
+        && !["pending", "in-progress", "blocked"].includes(sharedRow.state)
+        && evidenceIsNewer(c.row.closureRequiredAt ?? "", sharedRow.tsUpdated);
+      if (shared && !renewedDeadline) {
+        const existingTags = sharedRow?.tags ?? [];
         for (const tag of existingTags) if (tag.startsWith("stuck-sweep:")) liveDedupTags.add(tag);
+        // Keep the original evidence as history, but do not leave it presented as
+        // the current reason when a different condition now owns this recovery.
+        // Only the sweep's own findings are mutable here; other recovery rows
+        // can share custody and must retain their author's text.
+        if (sharedRow && isFindingRow(sharedRow) && sharedRow.summary?.startsWith("Stuck sweep: ")) {
+          const currentKind = sharedRow.summary.match(/^Stuck sweep: ([a-z-]+) on /)?.[1];
+          const pickupOrDeadline = (kind: string) => kind === "stalled-after-claim" || kind === "overdue-claim";
+          const humanUpdateNotice = currentKind === "unclaimed-obligation"
+            && c.kind === "undelivered-human-notice"
+            && deps.queueRepo.isRegisteredHumanUpdate(c.row);
+          if (currentKind && currentKind !== c.kind && ((pickupOrDeadline(currentKind) && pickupOrDeadline(c.kind)) || humanUpdateNotice)) {
+            const marker = "\n\n--- Original finding (historical) ---\n";
+            const original = sharedRow.body.includes(marker) ? sharedRow.body.split(marker, 2)[1]! : sharedRow.body;
+            const body = evidenceBody(deps.db, c) + marker + original;
+            const summary = `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`;
+            deps.db.prepare("UPDATE queue_items SET body = ?, summary = ? WHERE qitem_id = ? AND body = ? AND summary = ? AND state IN ('pending', 'in-progress', 'blocked')")
+              .run(body, summary, shared.qitemId, sharedRow.body, sharedRow.summary);
+          }
+        }
         if (["pending", "in-progress", "blocked"].includes(shared.state)) findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: shared.qitemId, action: "refreshed" });
         continue;
       }
@@ -957,9 +990,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (existing && existingIsOpen) {
         // Age is derived at read time; an unchanged scan is not a transition.
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: existing.qitem_id, action: "refreshed" });
-      } else if (!existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated)) {
+      } else if (renewedDeadline || !existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated)) {
         const input = {
-          qitemId: recoveryId(deps.db, c.row.qitemId),
+          qitemId: recoveryId(deps.db, c.row.qitemId, renewedDeadline ? c.row.closureRequiredAt! : undefined),
           // The detector is machinery, not a seat: the obligation's own creator is the
           // finding's source (the workflow-exception precedent).
           sourceSession: c.row.sourceSession,

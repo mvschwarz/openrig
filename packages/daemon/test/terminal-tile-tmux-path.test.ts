@@ -24,9 +24,9 @@ describe("#707 local tiles run the tmux the daemon resolves", () => {
     mkdirSync(narrow);
     mkdirSync(elsewhere);
     const tmux = join(elsewhere, "tmux");
-    writeFileSync(tmux, '#!/bin/sh\ncase $1 in display-message) target=$4; target=${target#=}; printf "7 session-id:%s\\n" "${target%:}";; show-environment) exit 1;; attach) printf "%s\\n" "$@" > "$OPR_ARGS";; esac\n', { mode: 0o700 });
+    writeFileSync(tmux, '#!/bin/sh\ncase $1 in display-message) target=$4; target=${target#=}; printf "7 session-id:%s\\n" "${target%:}";; show-environment) exit 1;; list-clients) printf "%s\\n" $OPR_CLIENTS;; attach) printf "%s\\n" "$@" > "$OPR_ARGS";; esac\n', { mode: 0o700 });
     const argsFile = join(root, "args");
-    const env = { PATH: narrow, OPR_ARGS: argsFile };
+    const env = { PATH: narrow, OPR_ARGS: argsFile, OPR_CLIENTS: "" };
     try {
       for (const readOnly of [false, true]) {
         const bare = composeView("v", [local("seat'a", readOnly)], { resolveHost: () => null });
@@ -34,8 +34,11 @@ describe("#707 local tiles run the tmux the daemon resolves", () => {
         expect(spawnSync("/bin/sh", ["-c", bare.opened[0]!.paneCommand], { env }).status).toBe(127);
 
         const resolved = composeView("v", [local("seat'a", readOnly)], { resolveHost: () => null, localTmux: tmux });
-        execFileSync("/bin/sh", ["-c", resolved.opened[0]!.paneCommand], { env });
-        expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(["attach", ...(readOnly ? ["-r"] : ["-f", "ignore-size"]), "-t", "session-id"]);
+        // A session nobody else sizes takes the tile's size; one that already has a sizing client keeps it.
+        for (const [clients, writable] of [["", []], ["attached,ignore-size,read-only attached,focused", ["-f", "ignore-size"]], ["attached,ignore-size", []]] as const) {
+          execFileSync("/bin/sh", ["-c", resolved.opened[0]!.paneCommand], { env: { ...env, OPR_CLIENTS: clients } });
+          expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(["attach", ...(readOnly ? ["-r"] : writable), "-t", "session-id"]);
+        }
         expect(resolved.opened[0]!.readOnly).toBe(readOnly);
       }
     } finally {

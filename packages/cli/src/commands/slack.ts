@@ -251,7 +251,8 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         log(`Daemon: ${observation.state}${observation.reason ? ` (${observation.reason})` : ""}`);
         const connector = observation.connector as { configurationDigest?: string; inboundReady?: boolean; outboundReady?: boolean;
           inboundRouting?: { fallback: string; destination: string };
-          deadLetterBacklog?: number | null; deadLetterBacklogState?: string; deadLetterBacklogReason?: string;
+          settlement?: { pending: number; lastFailure: string | null };
+          deadLetterBacklog?: number | null; deadLetterBacklogState?: string; deadLetterBacklogReason?: string; relayAttemptsInFlight?: number;
           inbound?: InboundDeliveryStatus & { state?: string; generation?: number; lastEventAt?: string };
           recovery?: { state?: string; reason?: string; lastScanAt?: string; acceptedThisProcess?: number; deadLetteredThisProcess?: number;
             coverage?: { coverageStart: string; coveredThrough: string; pending?: { upper: string; nextLatest: string }; nextRetryAt?: number } | null;
@@ -261,6 +262,10 @@ export function slackCommand(deps: SlackDeps = {}): Command {
               backoff?: Record<string, number>; incomplete?: Record<string, number> };
             limits?: string[] } } | undefined;
         if (connector) {
+          if (connector.settlement) {
+            log(`  Ask edits: ${connector.settlement.pending} queued for reconciliation`);
+            if (connector.settlement.lastFailure) log(`  Last ask-edit failure: ${connector.settlement.lastFailure}`);
+          }
           if (connector.inboundRouting?.fallback === "local") log(`  Configured routing fallback: local to ${connector.inboundRouting.destination} (after forwarding, thread and channel routes)`);
           log(`  Socket: ${connector.inbound?.state ?? "unknown"}; generation ${connector.inbound?.generation ?? "unknown"}; last event ${connector.inbound?.lastEventAt ?? "unknown"}`);
           for (const line of socketDeliveryLines(connector.inbound)) log(`  ${line}`);
@@ -286,6 +291,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
               + `${reasons(threads.backoff) ? `; backing off: ${reasons(threads.backoff)}` : ""}${reasons(threads.incomplete) ? `; incomplete: ${reasons(threads.incomplete)}` : ""}`);
           }
           log(`  Recovery counts since connector start: accepted ${recovery?.acceptedThisProcess ?? "unknown"}; dead-lettered ${recovery?.deadLetteredThisProcess ?? "unknown"} (custody, not delivery)`);
+          if (connector.relayAttemptsInFlight !== undefined) log(`  Relay attempts awaiting response: ${connector.relayAttemptsInFlight} (this process, point-in-time; zero does not prove global quiescence)`);
           if (connector.deadLetterBacklogState !== undefined) {
             const scope = "inbound messages, reactions and click answers";
             if (connector.deadLetterBacklogState === "unknown") {

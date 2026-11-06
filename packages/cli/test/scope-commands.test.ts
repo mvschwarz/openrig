@@ -678,6 +678,17 @@ describe("rig scope mission ls (HG-8)", () => {
     const names = parsed.missions.map((m: { name: string }) => m.name).sort();
     expect(names).toEqual(["backlog", "release-0.3.2"]);
   });
+
+  it("counts a mission's shipped slices apart from its active ones (#2427)", async () => {
+    for (const nn of ["02-shipped-a", "03-shipped-b"]) {
+      writeFile(path.join(env.missionsRoot, "release-0.3.2", "slices", nn, "README.md"), `---\nid: OPR.0.3.2.${nn[1]}\nstatus: shipped\n---\n# ${nn}\n`);
+    }
+    const text = await run(["mission", "ls"], env.missionsRoot);
+    expect(text.stdout).toContain("release-0.3.2    OPR.0.3.2    active=1  shipped=2  closed=0");
+    const json = JSON.parse((await run(["mission", "ls", "--json"], env.missionsRoot)).stdout);
+    expect(json.missions.find((m: { name: string }) => m.name === "release-0.3.2"))
+      .toMatchObject({ activeSliceCount: 1, shippedSliceCount: 2, closedSliceCount: 0 });
+  });
 });
 
 describe("rig scope mission show", () => {

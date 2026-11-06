@@ -62,7 +62,8 @@ describe("quoted approval text above Claude's current input box", () => {
       expect(classifyPaneActivity(pane).state).toBe("attention");
       expect(classifyPaneActivity(pane, { runtime: "codex" }).state).toBe("attention");
     }
-    // No timer row: an idle seat quoting prompt text is not told apart from a prompt above the input box, so it stays refused.
+    // No timer row: quoted prompt text that carries its choices ("› 1. Yes, proceed") is not told apart from a prompt above
+    // the input box, so it stays refused. A bare quoted question is history (see the finished-reply cells below).
     for (const options of [{ runtime: "claude-code" }, { runtime: "claude-code", currentClaudeDialogueOnly: true }]) {
       expect(classifyPaneActivity(idle, options).state).toBe("attention");
     }
@@ -101,8 +102,44 @@ describe("in a tall pane, with Claude's input box drawn high above blank rows", 
   });
 });
 
+// A finished Claude seat whose last reply quotes a permission question, with no choices after it, above its complete
+// empty input box and mode bar. Every native menu draws its numbered choices after the question (the 2.1.300 excerpts
+// show `> 1. Yes`), so a bare question there is history. The native menus drawn above the same input box with their
+// choices (a constructed layout, as promptAboveInput is) still read as attention.
+const finishedQuoting = ["● Done. The prompt it showed read: Do you want to proceed?", ...input(null)].join("\n");
+const finishedPlain = ["● Done.", ...input(null)].join("\n");
+const menusAboveInput: Record<string, string> = Object.fromEntries((["bash", "edit", "webFetch"] as const)
+  .map(name => [name, [permission[name]!, ...input(null)].join("\n")]));
+const verdict = (pane: string, options: Parameters<typeof classifyPaneActivity>[1]) => {
+  const { state, reason } = classifyPaneActivity(pane, options);
+  return { state, reason };
+};
+
+describe("a permission question a finished Claude reply quotes, above its empty input box", () => {
+  it("is history: the read is the same as the screen without that line", () => {
+    for (const options of [{ runtime: "claude-code" }, { runtime: "claude-code", currentClaudeDialogueOnly: true }]) {
+      for (const [quoting, plain] of [[finishedQuoting, finishedPlain], [tall(finishedQuoting), tall(finishedPlain)]] as const) {
+        expect(verdict(quoting, options).state, JSON.stringify(options)).not.toBe("attention");
+        expect(verdict(quoting, options), JSON.stringify(options)).toEqual(verdict(plain, options));
+      }
+    }
+  });
+
+  it.each(Object.entries(menusAboveInput))("a native %s menu with its choices above the input box still reads as attention", (_name, pane) => {
+    for (const options of [{ runtime: "claude-code" }, { runtime: "claude-code", currentClaudeDialogueOnly: true }, {}]) {
+      expect(classifyPaneActivity(pane, options).state, JSON.stringify(options)).toBe("attention");
+      expect(classifyPaneActivity(tall(pane), options).state, JSON.stringify(options)).toBe("attention");
+    }
+  });
+
+  it("changes nothing without the Claude runtime: a bare listed question still reads as attention", () => {
+    expect(classifyPaneActivity(finishedQuoting)).toMatchObject({ state: "attention", reason: "permission_prompt" });
+    expect(classifyPaneActivity(finishedQuoting, { runtime: "codex" })).toMatchObject({ state: "attention", reason: "permission_prompt" });
+  });
+});
+
 describe("a send to a working Claude seat with quoted approval text", () => {
-  async function send(pane: string, hookEvent: "UserPromptSubmit" | null) {
+  async function send(pane: string, hookEvent: "UserPromptSubmit" | "Stop" | null, hookAgeMs = 1_000) {
     const db = createFullTestDb();
     try {
       const repo = new RigRepository(db), registry = new SessionRegistry(db), rig = repo.createRig("quoted-test");
@@ -117,9 +154,10 @@ describe("a send to a working Claude seat with quoted approval text", () => {
         resolveOccupantGeneration: id => registry.currentOccupantTenure(id)?.generationUuid ?? null,
         isRegisteredOccupantGeneration: (id, g) => Boolean(db.prepare("SELECT 1 FROM occupant_tenures WHERE node_id=? AND generation_uuid=?").get(id, g)),
       });
-      // A fresh running hook (1 s old) takes the #1864 path; none takes the ordinary pane probe.
+      // A fresh running hook (1 s old) takes the #1864 path; a send-stale idle hook takes the stale-idle veto; none takes
+      // the ordinary pane probe.
       if (hookEvent) expect(store.recordHookEvent({ runtime: "claude-code", sessionName: name, hookEvent, generation,
-        occurredAt: new Date(now.getTime() - 1_000).toISOString() }).ok).toBe(true);
+        occurredAt: new Date(now.getTime() - hookAgeMs).toISOString() }).ok).toBe(true);
       const paste = vi.fn(async () => ({ ok: true as const })), enter = vi.fn(async () => ({ ok: true as const }));
       const adapter = { hasSession: async () => true, probeSession: async () => ({ state: "present" as const }),
         getPaneCommand: async () => "claude", getPanePid: async () => null, listPanes: async () => [],
@@ -154,4 +192,15 @@ describe("a send to a working Claude seat with quoted approval text", () => {
         expect(pasted).toBe(0);
       }
     });
+
+  it("delivers to a finished seat quoting a bare question through a send-stale idle hook; a native menu above the box is refused", async () => {
+    const delivered = await send(finishedQuoting, "Stop", 90_000);
+    expect(delivered.result.ok, JSON.stringify(delivered.result)).toBe(true);
+    expect(delivered.pasted).toBe(1);
+    for (const pane of [menusAboveInput.bash!, tall(menusAboveInput.edit!)]) {
+      const refused = await send(pane, "Stop", 90_000);
+      expect(refused.result).toMatchObject({ ok: false, reason: "target_needs_input" });
+      expect(refused.pasted).toBe(0);
+    }
+  });
 });

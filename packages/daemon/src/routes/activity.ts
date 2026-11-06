@@ -7,6 +7,7 @@ import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import { hookEventState, isRunnerExit } from "../domain/agent-activity-store.js";
 import { WorkingLivenessGate, isWorkingLivenessBeat, workingLivenessSeconds, type WorkingLivenessIgnored } from "../domain/working-liveness.js";
 import type { EventBus } from "../domain/event-bus.js";
+import type { StreamStore } from "../domain/stream-store.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
 import { ActivityGrantStore, grantGeneration, type ActivityGrant } from "../domain/activity-grants.js";
 import { RunnerPermissions, parseRunnerPermissionRequest, type RunnerPermissionSeat } from "../domain/runner-permissions.js";
@@ -310,7 +311,7 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
   } catch {
     return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
   }
-  if (grant && (body === null || typeof body !== "object" || Array.isArray(body))) {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
     return c.json({ ok: false, code: "invalid_json", error: "Request body must be a JSON object." }, 400);
   }
 
@@ -320,6 +321,11 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     if ("refused" in bound) return bound.refused;
     body = bound.body;
   }
+
+  const permissionDiagnostic = ["permissionStopDescriptor", "permissionRuleSuggestions", "permission_suggestions"]
+    .some(key => Object.hasOwn(body, key));
+  if (permissionDiagnostic && (body.runtime !== "claude-code" || body.hookEvent !== "PermissionRequest"
+    || body.eventFamily !== undefined)) return c.json({ ok: true });
 
   // Slice 16: a runtime switch's staged successor (before commit) and retired predecessor (after) don't speak for the
   // seat. The staged successor's native identity is kept on the switch record, which the commit applies.
@@ -583,8 +589,9 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
   // All tools in this actor's batch have resolved. An individual PostToolUse can belong to a parallel tool,
   // and a subagent's batch says nothing about the main session's permission. Only the current occupant can
   // settle a matching, older episode. Do not record an unrelated batch as an unknown hook that hides attention.
+  const permissionObservation = permissionDiagnostic;
   const claudePermission = body.runtime === "claude-code" && body.hookEvent === "Notification" && body.subtype === "permission_prompt";
-  if (body.hookEvent === "PostToolBatch" || claudePermission) {
+  if (body.hookEvent === "PostToolBatch" || claudePermission || permissionObservation) {
     const oracle = c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined;
     const registry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
     const sessionName = stringOrNull(body.sessionName);
@@ -605,6 +612,18 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       && generation !== null && current?.generationUuid === generation
       && (hookAgentId === null || (typeof hookAgentId === "string" && hookAgentId.trim().length > 0))
       && occurredAt !== null && Number.isFinite(Date.parse(occurredAt));
+    if ((permissionObservation || body.hookEvent === "PostToolBatch") && attributable
+      && (body.nodeId == null || body.nodeId === seat!.nodeId)) {
+      try {
+        store.observePermissionStop({ nodeId: seat!.nodeId, sessionName: seat!.sessionName, generation: generation!,
+          actor: hookAgentId, at: occurredAt, command: body.permissionStopDescriptor,
+          ...(Object.hasOwn(body, "permissionRuleSuggestions") ? { ruleSuggestions: body.permissionRuleSuggestions } : {}),
+          completed: body.hookEvent === "PostToolBatch" });
+      } catch { /* Optional observation never suppresses the existing completion behavior. */ }
+    }
+    // This event adds a diagnostic only. It must not create/clear attention, change activity,
+    // write raw provider fields to events, or produce a permission decision.
+    if (permissionObservation) return c.json({ ok: true });
     if (body.hookEvent === "PostToolBatch") {
       if (attributable && oracle && !oracle.hasRungInventory(seat!.nodeId, seat!.sessionName)) {
         // The completion may be this occupant's first hook to reach the daemon.
@@ -768,7 +787,8 @@ function permissionContext(c: Context, installTokenAccepted: boolean): Permissio
   const rigRepo = (c.get("rigRepo" as never) as RigRepository | undefined) ?? new RigRepository(store.db);
   const permissions = new RunnerPermissions({ db: store.db, queueRepo, eventBus, humanRegistry: () => queueRepo.humanRegistry(),
     ownerOf: (nodeId) => rigRepo.getNodePermissionsTo(nodeId),
-    currentGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null });
+    currentGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+    stream: c.get("streamStore" as never) as StreamStore | undefined });
   return { store, grant: principal.grant, registry, permissions };
 }
 

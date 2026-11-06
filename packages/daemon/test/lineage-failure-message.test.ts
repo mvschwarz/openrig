@@ -46,6 +46,44 @@ async function detail(...args: Parameters<typeof check>): Promise<string> {
   return result.ok ? "" : result.detail;
 }
 
+it("does not rebind Codex identity if the pane respawns after process observation", async () => {
+  const db = createFullTestDb(); databases.push(db);
+  const repo = new RigRepository(db), registry = new SessionRegistry(db);
+  const rig = repo.createRig("pane-replaced"), name = "worker@pane-replaced";
+  const node = repo.addNode(rig.id, "worker", { role: "worker", runtime: "codex" });
+  registry.registerSession(node.id, name);
+  const tmux = {
+    listPanes: vi.fn(async () => [{ id: "%1" }] as never),
+    getPanePid: vi.fn().mockResolvedValueOnce(100).mockResolvedValueOnce(100).mockResolvedValueOnce(100).mockResolvedValue(200),
+    getPaneCommand: vi.fn(async () => "sh"),
+  };
+  const result = await rebindAndVerifyPaneIdentity({ db, sessionRegistry: registry, tmux, nodeId: node.id,
+    sessionName: name, runtime: "codex", expectedResumeToken: STORED, requireExactResumeLineage: true,
+    listProcesses: async () => [shell, codex("resume", STORED)] });
+  expect(result.ok).toBe(false);
+  expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(node.id)).toEqual({ verdict: "mismatch" });
+});
+
+it("does not verify a Claude pane replaced after strict resume process observation", async () => {
+  const db = createFullTestDb(); databases.push(db);
+  const repo = new RigRepository(db), registry = new SessionRegistry(db);
+  const rig = repo.createRig("claude-pane-replaced"), name = "worker@claude-pane-replaced";
+  const node = repo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+  registry.registerSession(node.id, name);
+  const tmux = {
+    listPanes: vi.fn(async () => [{ id: "%1" }] as never),
+    getPanePid: vi.fn().mockResolvedValueOnce(100).mockResolvedValue(200),
+    getPaneCommand: vi.fn(async () => "claude"),
+  };
+  const process: NativeProcessRow = { pid: 100, ppid: 1, pgid: 100, tpgid: 100,
+    command: `claude --resume ${STORED}`, executableName: "claude", startedAt };
+  const result = await rebindAndVerifyPaneIdentity({ db, sessionRegistry: registry, tmux, nodeId: node.id,
+    sessionName: name, runtime: "claude-code", expectedResumeToken: STORED, requireExactResumeLineage: true,
+    listProcesses: async () => [process] });
+  expect(result.ok).toBe(false);
+  expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(node.id)).toEqual({ verdict: "mismatch" });
+});
+
 describe("a failed lineage check names the check, not the pane label", () => {
   it("Claude launched with another conversation: says it does not match the record, and does not print what it read", async () => {
     const text = await detail("claude-code", [shell, claude(RUNNING)]);

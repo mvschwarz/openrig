@@ -11,10 +11,15 @@ import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } fr
 import { planPermissionAccount, type PermissionAccount } from "./permission-account.js";
 import { seatAccountHome, RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } from "./seat-runtime-home.js";
 import { claudeSeatTokenFallbackNotice, claudeSeatTokenFileProblem, readClaudeSeatTokenRef } from "./claude-seat-token.js";
+import { unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
+import type { AgentActivityStore } from "./agent-activity-store.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
 export interface SeatStatus {
+  /** Latest bounded observation across actors, not aggregate pending state or proof a guard ran.
+   * Completion applies only to the displayed actor; other actors' pending state is unknown. */
+  permission_stop?: PermissionStopStatus;
   compaction?: ObservedCompaction & { owedRestore: ReturnType<ClaudeCompactionEnforcer["getOwedRestore"]> };
   seat_ref: string;
   rig_id: string;
@@ -76,8 +81,11 @@ export class SeatStatusService {
   private rigRepo: RigRepository;
   private env: NodeJS.ProcessEnv;
   private compactionEnforcer?: Pick<ClaudeCompactionEnforcer, "recoverSeat" | "observedCompaction" | "getOwedRestore">;
+  private activityStore?: Pick<AgentActivityStore, "getPermissionStopForNode">;
 
-  constructor(deps: { rigRepo: RigRepository; env?: NodeJS.ProcessEnv; compactionEnforcer?: SeatStatusService["compactionEnforcer"] }) {
+  constructor(deps: { rigRepo: RigRepository; env?: NodeJS.ProcessEnv; compactionEnforcer?: SeatStatusService["compactionEnforcer"];
+    activityStore?: SeatStatusService["activityStore"] }) {
+    this.activityStore = deps.activityStore;
     this.compactionEnforcer = deps.compactionEnforcer;
     this.rigRepo = deps.rigRepo;
     this.env = deps.env ?? process.env;
@@ -147,6 +155,7 @@ export class SeatStatusService {
 
   private projectStatus(seatRef: string, entry: NodeInventoryEntry): SeatStatus {
     return {
+      permission_stop: this.permissionStopStatus(entry),
       ...this.compactionStatus(entry),
       seat_ref: seatRef,
       rig_id: entry.rigId,
@@ -173,6 +182,15 @@ export class SeatStatusService {
       permissions: this.permissionStatus(entry.nodeId, entry.runtime, entry.canonicalSessionName ?? deriveCanonicalFromEntry(entry) ?? seatRef),
       terminalPolicy: this.terminalPolicyStatus(entry.nodeId, entry.runtime),
     };
+  }
+
+  private permissionStopStatus(entry: NodeInventoryEntry): PermissionStopStatus {
+    try {
+      const observed = entry.canonicalSessionName ? this.activityStore?.getPermissionStopForNode(entry.nodeId, entry.canonicalSessionName) : undefined;
+      return entry.occupantLifecycle === "active" && entry.sessionStatus === "running" ? observed ?? unavailablePermissionStop()
+        : unavailablePermissionStop();
+    }
+    catch { return unavailablePermissionStop(); }
   }
 
   private compactionStatus(entry: NodeInventoryEntry): Pick<SeatStatus, "compaction"> {

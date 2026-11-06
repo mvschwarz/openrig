@@ -21,6 +21,9 @@ import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.j
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { SeatRuntimeSwitchService, runtimeSwitchSummary } from "../src/domain/seat-runtime-switch-service.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
@@ -378,6 +381,20 @@ describe("live seat runtime switch", () => {
     expect(declareOccupantSwap).toHaveBeenCalledWith(nodeId, row.successor_generation);
   });
 
+  it("tells the successor of messages held for the seat once per activation attempt, and names them in the switch's warnings (#2431)", async () => {
+    db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql); // as the guard suites add the held-message store
+    new OutboxHandler(db).retain({ outboxId: "held-1", senderSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "Real work for you" },
+      { nodeId, session: SEAT, occupant: null, pane: null });
+    const svc = service();
+    successorConfirms(svc);
+
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Codex usage limit" });
+
+    const notice = `1 held message was kept for this seat and not delivered: read it with rig seat held-messages ${SEAT}.`;
+    expect(result).toMatchObject({ ok: true, changed: true, recoveryPending: false, warnings: expect.arrayContaining([notice]) });
+    expect(typed.filter((t) => t.text.includes(notice))).toEqual([{ target: SEAT, text: expect.stringMatching(/You now hold dev-impl@seat-rig on claude-code/) }]);
+  });
+
   it.each([undefined, "none"] as const)("carries retained Claude rules and MCP selection (%s) into the target successor", async claudeMcp => {
     const rules = { allow: ["Read(./work/**)"], deny: ["Read(./private/**)"] };
     db.prepare("UPDATE nodes SET claude_permissions_json=? WHERE id=?").run(JSON.stringify(rules), nodeId);
@@ -434,6 +451,43 @@ describe("live seat runtime switch", () => {
     expect(handover).toMatch(/predecessor screen tail/);
     expect(handover).toMatch(/The seat's open queue work \(1 rows/);
     expect(handover).toMatch(new RegExp(`rig seat set-runtime dev\\.impl@seat-rig --confirm ${openSwitch()!.id} --note`));
+  });
+
+  it("resolves the authored recap from the bound session folder when the logical ID is dotted (#2579)", async () => {
+    const { resolveAuthoredRecapPointer } = await import("../src/domain/context-packs/seat-recap-store.js");
+    const topologyRoot = path.join(home, "topology");
+    const seatDir = path.join(topologyRoot, "rigs", "seat-rig", "seats", "dev-impl");
+    fs.mkdirSync(seatDir, { recursive: true });
+    fs.writeFileSync(path.join(seatDir, "RECAP.md"), "# Current position\n");
+    const authoredRecapResolver = vi.fn((seatRef: string) => resolveAuthoredRecapPointer(seatRef, topologyRoot));
+    const svc = service({ authoredRecapResolver });
+    successorConfirms(svc);
+
+    await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "better fit" });
+
+    const handover = typed.find((t) => t.target.startsWith("openrig-switch-"))!.text;
+    expect(authoredRecapResolver).toHaveBeenCalledWith(SEAT);
+    expect(handover).toContain("--- Authored seat recap: seat:RECAP.md ---");
+    expect(handover).not.toContain("no RECAP.md on the seat tree");
+  });
+
+  // #2456: a guidance block the preparation kept is named in the successor's first turn as well as the switch's result, as a
+  // start tells its seat and a handover its packet.
+  it.each([true, false])("the handover names a guidance block the preparation kept (kept: %s), as the result does (#2456)", async (kept) => {
+    const note = "guidance_block_edited: /project/CLAUDE.md: culture.md was edited by hand since OpenRig wrote it, so it wasn't refreshed from /spec/culture.md";
+    const claude = adapter("claude-code");
+    vi.mocked(claude.deliverStartup).mockResolvedValue({ delivered: 0, failed: [], ...(kept ? { warnings: [note] } : {}) } as never);
+    const svc = service({ runtimeAdapters: { codex: adapter("codex"), "claude-code": claude } });
+    successorConfirms(svc);
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "better fit" });
+    const handover = typed.find((t) => t.target.startsWith("openrig-switch-"))!.text;
+    if (kept) {
+      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([note]) });
+      expect(handover).toContain(`OpenRig guidance note: ${note}.`);
+    } else {
+      expect(result).toMatchObject({ ok: true });
+      expect(handover).not.toContain("OpenRig guidance note");
+    }
   });
 
   it("a Claude Code seat moves to Codex, with an explicit Codex profile", async () => {

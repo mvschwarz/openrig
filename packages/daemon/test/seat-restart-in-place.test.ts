@@ -558,6 +558,21 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     w.db.prepare("UPDATE sessions SET origin = 'claimed' WHERE id = ?").run(w.session.id);
     expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "claimed_session" });
   });
+
+  it("names a seat handed over before 0.7.9 instead of pointing at rig unclaim", async () => {
+    const w = world();
+    w.db.prepare("UPDATE sessions SET origin = 'claimed' WHERE id = ?").run(w.session.id);
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true }))
+      .toMatchObject({ ok: false, code: "claimed_session", guidance: "Release an adopted session with: rig unclaim" });
+    w.db.prepare("UPDATE nodes SET continuity_outcome = 'rebuilt', handover_result = 'complete', handover_at = ? WHERE id = ?")
+      .run("2026-11-01T10:00:00.000Z", w.node.id);
+    const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(result).toMatchObject({ ok: false, code: "claimed_session",
+      guidance: "It keeps that origin until its next launched handover or managed launch." });
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.message).toContain("last handover (rebuilt at 2026-11-01T10:00:00.000Z)");
+    expect(result.message).toContain("in-place restart refuses it");
+  });
 });
 
 describe("rig seat restart --keep-conversation: conflicting retained native-thread evidence", () => {

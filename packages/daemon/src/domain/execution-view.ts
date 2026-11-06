@@ -643,46 +643,78 @@ interface ReviewArtifactFact {
   artifactType: string | null;
 }
 
-/** Read review drops co-located with this slice, plus the legacy global registry
- * when no catalogued project was selected. Both sources keep the same slice and
- * built-commit join; unbound global artifacts cannot establish project review. */
-function scanReviewArtifacts(rigsRoot: string, sliceDirOrId: string[], proofDir: string, includeGlobal: boolean): ReviewArtifactFact[] | Indeterminate {
-  const out: ReviewArtifactFact[] = [];
-  let readable = false;
-  const scanDirectory = (dir: string, local: boolean) => {
-    let files: string[];
-    try {
-      files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
-      readable = true;
-    } catch { return; }
-    for (const f of files) {
-      let raw: string;
-      try { raw = fs.readFileSync(path.join(dir, f), "utf8"); }
-      catch { continue; }
-      const fm = parseFrontmatter(raw);
-      const sliceVal = typeof fm["slice"] === "string" ? fm["slice"] : null;
-      if (!sliceVal || !sliceDirOrId.includes(sliceVal)) continue;
-      const artifactType = typeof fm["artifact_type"] === "string" ? fm["artifact_type"] : null;
-      // A local QA/guard drop does not become a review leg merely by living in proof/.
-      if (local && !["rev1-r1", "rev1-r2", "adjudication"].includes(artifactType ?? "")) continue;
-      out.push({ path: path.join(dir, f),
-        verdict: typeof fm["verdict"] === "string" ? fm["verdict"] : INDETERMINATE,
-        candidateSha: typeof fm["candidate_sha"] === "string" ? fm["candidate_sha"] : null,
-        artifactType });
-    }
-  };
-  scanDirectory(proofDir, true);
-  if (includeGlobal) {
-    let rigs: string[] = [];
-    try { rigs = fs.readdirSync(rigsRoot); readable = true; } catch { /* Local proof remains usable. */ }
-    for (const rig of rigs) {
-      const stateDir = path.join(rigsRoot, rig, "state");
-      let entries: string[];
-      try { entries = fs.readdirSync(stateDir); } catch { continue; }
-      for (const entry of entries.filter((e) => e.startsWith("review"))) scanDirectory(path.join(stateDir, entry), false);
+/** One parsed review drop, before it is joined to a slice. */
+interface ReviewDrop extends ReviewArtifactFact { slice: string | null }
+
+/** The legacy global registry, listed and parsed once per execution-view read. */
+interface ReviewRegistry { readable: boolean; drops: ReviewDrop[] }
+
+/** Files read, or time spent, before the registry read yields to the event loop. Both are soft. */
+const REGISTRY_SLICE_FILES = 32;
+const REGISTRY_SLICE_MS = 8;
+
+function readReviewDrop(file: string): ReviewDrop | null {
+  let raw: string;
+  try { raw = fs.readFileSync(file, "utf8"); }
+  catch { return null; }
+  const fm = parseFrontmatter(raw);
+  return { path: file,
+    verdict: typeof fm["verdict"] === "string" ? fm["verdict"] : INDETERMINATE,
+    candidateSha: typeof fm["candidate_sha"] === "string" ? fm["candidate_sha"] : null,
+    artifactType: typeof fm["artifact_type"] === "string" ? fm["artifact_type"] : null,
+    slice: typeof fm["slice"] === "string" ? fm["slice"] : null };
+}
+
+function listReviewFiles(dir: string): string[] | null {
+  try { return fs.readdirSync(dir).filter((f) => f.endsWith(".md")).map((f) => path.join(dir, f)); }
+  catch { return null; }
+}
+
+/** Every rig's `state/review*` drops, in the order a per-slice scan met them. Every slice of one read joins this same
+ *  list, so the registry is read once per read, not once per slice; it yields between files so other work runs. */
+async function readReviewRegistry(rigsRoot: string): Promise<ReviewRegistry> {
+  let rigs: string[];
+  try { rigs = fs.readdirSync(rigsRoot); } catch { return { readable: false, drops: [] }; }
+  const drops: ReviewDrop[] = [];
+  let read = 0;
+  let sliceStart = performance.now();
+  for (const rig of rigs) {
+    const stateDir = path.join(rigsRoot, rig, "state");
+    let entries: string[];
+    try { entries = fs.readdirSync(stateDir); } catch { continue; }
+    for (const entry of entries.filter((e) => e.startsWith("review"))) {
+      for (const file of listReviewFiles(path.join(stateDir, entry)) ?? []) {
+        if (read >= REGISTRY_SLICE_FILES || performance.now() - sliceStart >= REGISTRY_SLICE_MS) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          read = 0;
+          sliceStart = performance.now();
+        }
+        read++;
+        const drop = readReviewDrop(file);
+        if (drop) drops.push(drop);
+      }
     }
   }
-  return readable ? out : INDETERMINATE;
+  return { readable: true, drops };
+}
+
+/** Read review drops co-located with this slice, plus the legacy global registry
+ * when no catalogued project was selected (`registry` is null for a project-scoped read). Both sources keep the same slice and
+ * built-commit join; unbound global artifacts cannot establish project review. */
+function scanReviewArtifacts(registry: ReviewRegistry | null, sliceDirOrId: string[], proofDir: string): ReviewArtifactFact[] | Indeterminate {
+  const out: ReviewArtifactFact[] = [];
+  const join = (drops: ReviewDrop[], local: boolean) => {
+    for (const { slice, ...fact } of drops) {
+      if (!slice || !sliceDirOrId.includes(slice)) continue;
+      // A local QA/guard drop does not become a review leg merely by living in proof/.
+      if (local && !["rev1-r1", "rev1-r2", "adjudication"].includes(fact.artifactType ?? "")) continue;
+      out.push(fact);
+    }
+  };
+  const localFiles = listReviewFiles(proofDir);
+  join((localFiles ?? []).map(readReviewDrop).filter((drop): drop is ReviewDrop => drop !== null), true);
+  if (registry) join(registry.drops, false);
+  return localFiles !== null || registry?.readable ? out : INDETERMINATE;
 }
 
 type Rung =
@@ -938,6 +970,8 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   // ---- Q4 ladder (also feeds Q2's deps-folded) ----
   const rigsRoot = (deps.rigsRoot ?? resolveLegacyTopologyRigsRoot)();
   const commitCache = new Map<string, string | null>();
+  // Read on first use and shared by every slice of this read; the next read lists the registry again.
+  let registryRead: Promise<ReviewRegistry> | undefined;
   const ladderOf = async (facts: SliceFacts): Promise<Record<string, unknown>> => {
     const fm = facts.frontmatter;
     const locked: Rung = typeof fm["approved-spec-at"] === "string"
@@ -979,7 +1013,8 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     // tags, full shas, annotated fields) join by RESOLVED commit; malformed,
     // ambiguous, or non-resolving inputs are excluded with the reason carried —
     // they neither clear nor poison.
-    const artifacts = scanReviewArtifacts(rigsRoot, [facts.dir, ...(typeof facts.id === "string" ? [facts.id] : [])], path.join(path.dirname(facts.specPath), "proof"), !opts?.project);
+    const registry = opts?.project ? null : await (registryRead ??= readReviewRegistry(rigsRoot));
+    const artifacts = scanReviewArtifacts(registry, [facts.dir, ...(typeof facts.id === "string" ? [facts.id] : [])], path.join(path.dirname(facts.specPath), "proof"));
     let reviewed: Record<string, unknown>;
     if (artifacts === INDETERMINATE) {
       reviewed = { value: INDETERMINATE, basis: opts?.project ? `slice-local review-artifact root unreadable (${path.dirname(facts.specPath)}/proof)` : `review-artifact roots unreadable (slice proof/ and ${rigsRoot})`, legs: [] };

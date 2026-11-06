@@ -157,7 +157,10 @@ function readQueueWhoami(timeout = lookupTimeout()) {
       });
     }
   }
-  if (result.error) return { unknown: `queue whoami failed: ${result.error.message}` };
+  // A lookup that timed out (a slow daemon) says nothing about this seat's work: the trace shows it as an advisory gap (#2581).
+  if (result.error) {
+    return { unknown: `queue whoami failed: ${result.error.message}`, timedOut: result.error.code === "ETIMEDOUT" };
+  }
   if (result.status !== 0 || !result.stdout || !result.stdout.trim()) {
     return { unknown: `queue whoami exited ${result.status ?? "without a status"} with no answer` };
   }
@@ -243,6 +246,7 @@ function renderTrace() {
     "--trees", trees,
     "--depth", process.env.OPENRIG_REFOCUS_DEPTH || "light",
     "--check",
+    "--unresolved-work-advisory",
   ];
   if (process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE) {
     args.push("--topology-start", process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE);
@@ -277,7 +281,10 @@ function renderTrace() {
   if (work.start && (explicitStart || !evidence)) args.push("--work-start", work.start);
   else if (evidence) args.push("--work-candidates", "-");
   else if (work.basis) args.push("--work-basis", work.basis);
-  else if (work.unknown) args.push("--work-unknown", work.unknown);
+  else if (work.unknown) {
+    args.push("--work-unknown", work.unknown);
+    if (work.timedOut) args.push("--work-unknown-timed-out");
+  }
   // With an explicit start, the evidence supplies only held and next work.
   if (explicitStart && evidence) args.push("--work-candidates", "-");
   const env = traceEnv(trees);

@@ -210,7 +210,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
       listProcesses: input.listProcesses, expectedToken: expectedResumeToken,
       requireResume: input.requireExactResumeLineage === true, requireArgv: true });
     const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
-    if (native?.panePid === pid && currentPanes.length === 1 && currentPanes[0]?.id === pane.id) lineageMatch = native.process;
+    const currentPid = await input.tmux.getPanePid(pane.id).catch(() => null);
+    if (native?.panePid === pid && currentPid === pid && currentPanes.length === 1 && currentPanes[0]?.id === pane.id) lineageMatch = native.process;
   } else if (claudeProcessProof) {
     // A known token always requires exact proof. Only non-strict, tokenless
     // shell wrappers may use runtime occupancy; this never proves resume continuity.
@@ -233,6 +234,11 @@ export async function rebindAndVerifyPaneIdentity(input: {
         expectedResumeToken!,
         input.resumeRotation,
       );
+      if (lineageMatch) {
+        const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
+        const currentPid = await input.tmux.getPanePid(pane.id).catch(() => null);
+        if (currentPanes.length !== 1 || currentPanes[0]?.id !== pane.id || currentPid !== pid) lineageMatch = null;
+      }
     } catch {
       // Missing process evidence is ambiguity, never positive identity.
     }

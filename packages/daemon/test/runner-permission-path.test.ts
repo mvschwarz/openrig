@@ -16,6 +16,7 @@ import { MissionControlActionLog } from "../src/domain/mission-control/mission-c
 import { missionControlRoutes } from "../src/routes/mission-control.js";
 import { activityRoutes, guestActivityRoutes } from "../src/routes/activity.js";
 import { ActivityGrantStore } from "../src/domain/activity-grants.js";
+import { StreamStore } from "../src/domain/stream-store.js";
 import { createGuestActivityApp, type AppDeps } from "../src/server.js";
 
 const PERSON = "mike@external", OTHER_PERSON = "dana@external", SEAT = "dev-runner@perm-rig", INSTALL = "install-token";
@@ -32,7 +33,7 @@ const OPTIONS = [
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 
-function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: boolean; people?: string[] } = {}) {
+function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: boolean; people?: string[]; brokenStream?: boolean } = {}) {
   const people = options.people ? { ok: true as const, entities: options.people.map(person) } : registry;
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
@@ -57,6 +58,8 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
   const store = new AgentActivityStore({ db, eventBus: bus,
     resolveOccupantGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (id, generation) => sessions.isOccupantGenerationRegistered(id, generation) });
+  const stream = new StreamStore(db, bus);
+  const streamStore = options.brokenStream ? { emit: () => { throw new Error("the stream can't be written"); } } : stream;
   // The seat's optional answer override; set it directly so each test reads one path. With none, the default person answers.
   const owner = options.owner === undefined ? PERSON : options.owner;
   if (owner) {
@@ -71,13 +74,15 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
     c.set("queueRepo" as never, queueRepo as never);
     c.set("rigRepo" as never, rigs as never);
     c.set("missionControlWriteContract" as never, contract as never);
+    c.set("streamStore" as never, streamStore as never);
     await next();
   });
   app.route("/api/activity", options.guest ? guestActivityRoutes : activityRoutes);
   app.route("/api/mission-control", missionControlRoutes());
   // The guest listener's own app, as the daemon builds it; a person still answers on the main app.
   const activityApp = options.realGuest
-    ? createGuestActivityApp({ rigRepo: rigs, sessionRegistry: sessions, eventBus: bus, agentActivityStore: store, queueRepo, activityHookToken: INSTALL } as AppDeps)
+    ? createGuestActivityApp({ rigRepo: rigs, sessionRegistry: sessions, eventBus: bus, agentActivityStore: store, queueRepo, activityHookToken: INSTALL,
+      streamStore } as unknown as AppDeps)
     : app;
 
   const generation = () => sessions.currentOccupantTenure(runner.id)!.generationUuid;
@@ -100,8 +105,10 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
   const waitsOnPerson = () => latestHookWaitsOnPerson(store.getLatestForNode({ nodeId: runner.id, sessionName: SEAT }), "synth");
   const rowsToSeat = () => (db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE destination_session = ?").get(SEAT) as { n: number }).n;
   const grants = new ActivityGrantStore(db);
+  /** OpenRig's pull-only records of the permits it decided by default. */
+  const permits = () => stream.list({ hintTag: "runner-permission-permit", limit: 100 });
   return { db, runner, other, sessions, queueRepo, contract, nudges, generation, submit, read, withdraw, answer, waitsOnPerson, rowsToSeat, grants,
-    relaunch: () => occupy(runner.id, SEAT, "handover") };
+    permits, relaunch: () => occupy(runner.id, SEAT, "handover") };
 }
 
 describe("a runner seat's answered permission path", () => {
@@ -147,6 +154,7 @@ describe("a runner seat's answered permission path", () => {
     expect(ask.humanQuestions?.[0]?.options.map((option) => option.id)).toEqual(["allow", "always", "reject"]);
     expect(ask.body).toContain("Edit src/app.ts");
     expect(ask.body).toMatch(/Always allow \(allow_always, always\): the agent's harness remembers this choice/);
+    expect(ask.body).toContain("Your choice goes to this one request, once. A reply of just yes or no counts as the agent's allow or reject. Any other words choose nothing: OpenRig's default permits the request when the agent offered an allow option, and a runner that forwards your words passes them to the agent only after its turn. Closing this without choosing counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.");
     expect(f.waitsOnPerson()).toBe(true);
     expect(await f.read(String(submitted.body.askId))).toMatchObject({ status: 200, body: { state: "pending" } });
     expect(await f.answer(String(submitted.body.askId), { optionId: "always" })).toMatchObject({ status: 200 });
@@ -481,5 +489,122 @@ describe("a runner seat's answered permission path", () => {
     expect(byGrant).toMatchObject({ status: 200, body: { state: "stale" } });
     expect(byGrant.body.optionId).toBeUndefined();
     expect(await f.read(askId)).toMatchObject({ status: 200, body: { state: "stale" } });
+  });
+});
+
+// R1: a permit OpenRig decides by default, with no one asked or an ask closed without a choice, leaves one pull-only
+// record on the stream: the seat, the tool call, why, and the option the agent got. It wakes no one, and the permit
+// itself is unchanged.
+describe("a default permit's record", () => {
+  it("records who was permitted, for what, why and with which option when no one can be asked, and wakes no one", async () => {
+    const f = fixture({ owner: null, people: [] });
+    expect(await f.submit()).toMatchObject({ status: 200, body: { ok: true, state: "permitted", optionId: "allow" } });
+    const records = f.permits();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ sourceSession: SEAT, hintDestination: null, interrupt: false });
+    expect(records[0]!.body).toContain("Edit src/app.ts (edit)");
+    expect(records[0]!.body).toContain("no one can be asked");
+    expect(records[0]!.body).toContain("Allow (allow_once, allow)");
+    expect(records[0]!.body).toContain("conversation-1, turn 1, request 7");
+    expect(f.rowsToSeat()).toBe(0);
+    expect(f.nudges).toHaveLength(0);
+  });
+
+  it("records a permit made through the guest listener with a seat grant", async () => {
+    const f = fixture({ realGuest: true, owner: null, people: [] });
+    const grant = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "test" });
+    expect(await f.submit({ nodeId: undefined, generation: undefined }, grant.token)).toMatchObject({ status: 200, body: { state: "permitted", optionId: "allow" } });
+    expect(f.permits()).toHaveLength(1);
+  });
+
+  it("records a resubmitted request once", async () => {
+    const f = fixture({ owner: null, people: [] });
+    await f.submit();
+    await f.submit();
+    expect(f.permits()).toHaveLength(1);
+  });
+
+  it("records options a person can't be shown, and says when the option it gave is remembered by the agent's harness", async () => {
+    const f = fixture();
+    const options = ["a", "b", "c", "d"].map((id) => ({ optionId: `reject-${id}`, name: id, kind: "reject_once" }))
+      .concat([{ optionId: "always", name: "Always", kind: "allow_always" }]);
+    expect(await f.submit({ options })).toMatchObject({ body: { state: "permitted", optionId: "always" } });
+    const records = f.permits();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.body).toContain("can't be shown to a person");
+    expect(records[0]!.body).toMatch(/Always \(allow_always, always\): the agent's harness remembers this choice/);
+  });
+
+  it("records an ask closed without a choice once, however often the runner reads it", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    expect(f.permits()).toHaveLength(0);
+    await f.contract.act({ verb: "drop", qitemId: askId, actorSession: PERSON, reason: "from the Feed" } as never);
+    expect(await f.read(askId)).toMatchObject({ body: { state: "permitted", optionId: "allow" } });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "permitted", optionId: "allow" } });
+    const records = f.permits();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ sourceSession: SEAT, hintDestination: null, interrupt: false });
+    expect(records[0]!.body).toContain(askId);
+    expect(records[0]!.body).toContain(PERSON);
+    expect(records[0]!.body).toContain("allow_once");
+  });
+
+  it("names who closed the ask, not whoever added a later receipt to the closed row", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    await f.contract.act({ verb: "drop", qitemId: askId, actorSession: PERSON, reason: "from the Feed" } as never);
+    f.queueRepo.transitionLog.append({ qitemId: askId, state: f.queueRepo.getById(askId)!.state, actorSession: "queue@system",
+      transitionNote: "a later delivery receipt" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "permitted", optionId: "allow" } });
+    const records = f.permits();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.body).toContain(`${PERSON} closed the ask`);
+    expect(records[0]!.body).not.toContain("queue@system");
+  });
+
+  it("permits as before when the record's details can't be read", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    await f.contract.act({ verb: "drop", qitemId: askId, actorSession: PERSON, reason: "from the Feed" } as never);
+    f.queueRepo.closingTransition = () => { throw new Error("the transition log can't be read"); };
+    expect(await f.read(askId)).toMatchObject({ status: 200, body: { state: "permitted", optionId: "allow" } });
+    expect(f.permits()).toHaveLength(0);
+  });
+
+  it("records an agent seat's row closed as failed, which permits", async () => {
+    const f = fixture();
+    const SEAT_B = "dev-other@perm-rig";
+    const askId = String((await f.submit()).body.askId);
+    await f.contract.act({ verb: "route", qitemId: askId, actorSession: PERSON, destinationSession: SEAT_B, reason: "the other seat decides", notify: false } as never);
+    const seatRow = f.queueRepo.list({ limit: 100 }).find((row) => row.destinationSession === SEAT_B && row.handedOffFrom === askId)!;
+    f.queueRepo.update({ qitemId: seatRow.qitemId, actorSession: SEAT_B, state: "failed", transitionNote: "couldn't decide" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "permitted", optionId: "allow" } });
+    const records = f.permits();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.body).toContain(seatRow.qitemId);
+    expect(records[0]!.body).toContain(SEAT_B);
+    expect(records[0]!.body).toContain("failed");
+  });
+
+  it.each([
+    ["a click", { optionId: "allow" }],
+    ["a typed yes", { decision: "yes" }],
+    ["a typed no", { decision: "no" }],
+  ])("records nothing when the person answered with %s", async (_case, choice) => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    expect(await f.answer(askId, choice)).toMatchObject({ status: 200 });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered" } });
+    expect(f.permits()).toHaveLength(0);
+  });
+
+  it("permits exactly as before when the record can't be written", async () => {
+    const f = fixture({ owner: null, people: [], brokenStream: true });
+    expect(await f.submit()).toMatchObject({ status: 200, body: { ok: true, state: "permitted", optionId: "allow" } });
+    const asked = fixture({ brokenStream: true });
+    const askId = String((await asked.submit()).body.askId);
+    await asked.contract.act({ verb: "drop", qitemId: askId, actorSession: PERSON, reason: "from the Feed" } as never);
+    expect(await asked.read(askId)).toMatchObject({ status: 200, body: { state: "permitted", optionId: "allow" } });
   });
 });

@@ -99,8 +99,24 @@ So after installing, compare the granted scopes Slack shows for the app with all
 `rig slack manifest --json` lists.
 
 The app subscribes to messages in public channels it is a member of (`message.channels`), to
-mentions of the app (`app_mention`), and to emoji reactions (`reaction_added`). It does not request
-direct-message or private-channel access.
+mentions of the app (`app_mention`), and to emoji reactions (`reaction_added`). The manifest does
+not request direct-message or private-channel access.
+
+### Using a private channel
+
+The connector doesn't check whether a channel is public or private, so a private channel can be
+the default channel or a mapped one once the app can read it. OpenRig doesn't test this setup. In
+the app's settings:
+
+1. Under **OAuth & Permissions**, add the bot scopes `groups:history` (read messages in private
+   channels the app is in) and `groups:read` (read a private channel's details; `rig slack verify`
+   needs it to confirm the app is a member).
+2. Under **Event Subscriptions**, subscribe to the bot event `message.groups`.
+3. Reinstall the app to the workspace, then invite it to the private channel.
+4. To have `rig slack verify` require the new scopes too, run
+   `rig slack setup --required-scopes chat:write,channels:history,channels:read,groups:history,groups:read`.
+
+Direct messages are not supported.
 
 A reaction added to an ask reaches the agent that asked, as a note naming who reacted and with
 which emoji; the agent decides what it means. Every message OpenRig posted for the ask counts:
@@ -166,6 +182,9 @@ rig slack channel-map list
 rig slack channel-map remove pr@my-rig
 ```
 
+A client can offer the channels to choose from with `GET /api/gateway/slack/channels`, which lists the public
+channels the bot token can see, with their ids ([Writing a daemon client](daemon-http-clients.md#route-details)).
+
 - **Which channel an item posts to.** The item's seat is matched exactly first (`pr@my-rig`),
   then its rig (`my-rig`). Anything unmapped posts to the default channel, so a config
   without a map behaves exactly as before. Aggregate delivery digests have no single seat and
@@ -221,8 +240,9 @@ configuration matches the file.
 
 The map is stored as `channelMap` in `slack-connector.json`, as a list of `{ "match", "channel" }`
 entries, each with an optional `"inbound"` seat. Saving refuses any other field. A field written by a newer OpenRig is ignored when the
-connector reads the file, and `rig slack status` names it. Private channels and direct messages
-are not supported targets.
+connector reads the file, and `rig slack status` names it. A private channel can be a target once
+the app has the private-channel scopes ([Using a private channel](#using-a-private-channel)).
+Direct messages are not supported targets.
 
 ## Named bots (optional)
 
@@ -329,8 +349,7 @@ decisions, and posts its own replies.
 - **Changing forwarding entries is not a drain or cancellation:** relays already retained keep
   their original host and remain visible in `rig slack status`, even after the last entry is
   removed. An enabled connector retries them; disabling it pauses retry without deleting them.
-  Let relays finish before removing a forward entry. A zero dead-letter backlog alone does not
-  prove they have drained: it does not count relay HTTP requests still in flight.
+  Let relays finish before removing a forward entry; `rig slack status` shows local in-flight attempts separately from retained records, but zero does not prove global quiescence.
 - **Who answered:** every post starts `From <seat> on <machine>`, using the machine's host id (set
   it with `host.name`).
 - **The hub's own channels** are handled on the hub, as before. A channel can be relayed to one
@@ -365,6 +384,36 @@ Quiet hours hold a person's routine asks while they're on, and post them once th
 - **If quiet hours can't be read,** nothing is posted to that person until they can.
 
 ## Reconnect recovery and status
+
+When a posted ask is answered, closed, canceled or replaced elsewhere, the connector edits its
+original primary message with the status, time, actor and closure note. Buttons become option
+text and the answer hint disappears; the remaining content and reconciliation marker stay as
+posted. Supplemental messages are unchanged. This adds no post or reaction and needs no agent
+turn. Separate resolution notices retain their existing behavior.
+
+A deliberately reopened direct ask says **Open again**; its options remain as text. If it has
+no committed answer, it tells the person to reply in its thread. Otherwise it says **Earlier
+answer retained**: reopening does not accept a second answer. Earlier replaced parks remain
+historical; **Asked again** does not claim that the later ask has been posted. Edits reconcile
+the current state again after awaited Slack calls, so an obsolete close is not recorded as the
+current result after a reopen.
+
+Edits follow committed queue changes, with a startup catch-up for posted asks on retained queue
+rows. Each primary costs one exact-message read and one `chat.update`. The serial edit worker
+uses the recovery budget helpers (four calls, 100 entries, 15 seconds) and waits for the next
+budget window when exhausted. Slack's per-method `Retry-After` is retained across restarts.
+Only an acknowledged edit gets a success receipt. `rig slack status` shows queued reconciliation
+and the last edit failure. Transient failures retry with increasing waits, capped at an hour,
+behind other queued work. Permanent Slack failures (such as missing scope, a deleted original,
+an archived channel or an uneditable message) remain unfinished and are retried only on the next
+connector start. They do not keep consuming edit capacity. These edit calls have their own
+budget, separate from missed-message scanning below.
+
+The baseline already includes public-channel history access and `chat:write`. Private-channel
+reads may require `groups:history`, which the baseline does not grant; a refused read never
+counts as an edit. An unavailable/deleted original cannot be replaced by a new post. Startup
+catch-up cannot edit rows already removed by queue retention or posts without their original
+notification receipt and channel stamp.
 
 The daemon scans available top-level messages and replies broadcast with **Also send to
 channel** in the channels this machine owns: its default channel and its channel map's, except a

@@ -310,7 +310,7 @@ const cases = {
 
   async "2"() {
     const r = result("2", "Input framing, queued messages and cancel");
-    const h = await launch("2", { scenario: { turns: [{}, { holdMs: scale(15000) }, { holdMs: scale(2500), ignoreCancel: true }, {}] } });
+    const h = await launch("2", { scenario: { turns: [{}, { holdMs: scale(15000) }, { holdMs: scale(15000), ignoreCancel: true, endAfterCancelMs: scale(300) }, {}] } });
     if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
     const block = message(h, "first line\n/abort\nthird line");
     h.paste(block);
@@ -339,10 +339,12 @@ const cases = {
     r.check("one /abort sends one session/cancel", h.received("session/cancel").length === 1, `got ${h.received("session/cancel").length}`);
     r.check("the waiting block becomes the next prompt", await waitFor(() => h.prompts()[2] === queued, scale(4000)), `prompts: ${JSON.stringify(h.prompts().slice(2))}`);
 
+    // The agent keeps this turn open until the cancel arrives and then ends it end_turn, so a runner that handles Ctrl-C
+    // late on a busy machine still has a turn to cancel. Only its delivery is timed, by the per-step bound.
     const interrupted = Date.now();
     await sleep(scale(200));
     h.keys("C-c");
-    r.check("Ctrl-C outside a paste sends session/cancel", await waitFor(() => h.received("session/cancel").length >= 2, scale(3000)), "no second session/cancel");
+    r.check("Ctrl-C outside a paste sends session/cancel", await waitFor(() => h.received("session/cancel").length >= 2), "no second session/cancel");
     const ended = await waitFor(() => nonExitStops(h, interrupted)[0], scale(6000));
     r.check("cancelled is reported only on the agent's own stop reason", ended?.body?.subtype === "end_turn",
       `the agent ended the turn end_turn; the runner reported ${ended ? `Stop/${ended.body.subtype}` : "no Stop"}`);

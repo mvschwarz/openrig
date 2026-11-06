@@ -149,6 +149,27 @@ describe("POST /api/hosts/add — the narrow named add seam", () => {
     }
   });
 
+  it("GET /api/hosts dials where ssh resolves an ssh host (alias and port), and reads unknown behind a ProxyJump", async () => {
+    const server = net.createServer((sock) => sock.destroy());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const bin = mkdtempSync(join(tmpdir(), "hosts-ssh-bin-"));
+    const savedPath = process.env["PATH"];
+    try {
+      const { port } = server.address() as net.AddressInfo;
+      // A stand-in `ssh -G`: the alias resolves to this listener; the other host sits behind a jump.
+      writeFileSync(join(bin, "ssh"), `#!/bin/sh\ncase "$*" in\n  *devbox*) printf 'hostname 127.0.0.1\\nport ${port}\\n' ;;\n  *) printf 'hostname jumpy\\nport 22\\nproxyjump bastion\\n' ;;\nesac\n`, { mode: 0o755 });
+      process.env["PATH"] = `${bin}:${savedPath}`;
+      writeFileSync(join(home, "hosts.yaml"), "hosts:\n  - id: devbox\n    transport: ssh\n    target: devbox\n  - id: jumpy\n    transport: ssh\n    target: jumpy\n");
+      const res = await app.request("/api/hosts", { headers: auth });
+      const body = (await res.json()) as { hosts: Array<{ id: string; status: string }> };
+      expect(body.hosts.map((h) => [h.id, h.status])).toEqual([["devbox", "reachable"], ["jumpy", "unknown"]]);
+    } finally {
+      process.env["PATH"] = savedPath;
+      rmSync(bin, { recursive: true, force: true });
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("writes a valid entry through the writer twin and the CLI-visible registry file", async () => {
     const res = await app.request("/api/hosts/add", {
       method: "POST",

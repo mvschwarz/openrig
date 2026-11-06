@@ -60,6 +60,7 @@ const RIG_REVIEW = {
 describe("Specs CLI", () => {
   let server: http.Server;
   let port: number;
+  let lastLibraryUrl = "";
   const libraryRequests: string[] = [];
 
   beforeAll(async () => {
@@ -68,6 +69,7 @@ describe("Specs CLI", () => {
       libraryRequests.push(rawUrl);
       const url = decodeURIComponent(rawUrl);
       if (url === "/api/specs/library" || url.startsWith("/api/specs/library?")) {
+        lastLibraryUrl = url;
         res.writeHead(200, { "Content-Type": "application/json" });
         const kind = new URL(`http://localhost${url}`).searchParams.get("kind");
         const filtered = kind ? LIBRARY_ENTRIES.filter((e) => e.kind === kind) : LIBRARY_ENTRIES;
@@ -137,6 +139,13 @@ describe("Specs CLI", () => {
     expect(parsed.length).toBe(2);
   });
 
+  it("requests hidden built-ins only when explicitly asked", async () => {
+    await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--include-builtins", "--kind", "rig"]); });
+    const params = new URL(`http://localhost${lastLibraryUrl}`).searchParams;
+    expect(params.get("kind")).toBe("rig");
+    expect(params.get("include_builtins")).toBe("true");
+  });
+
   it("specs ls --kind warns on unrecognized kind and still queries daemon", async () => {
     const requestStart = libraryRequests.length;
     const { stdout, stderr, exitCode } = await captureOutputs(async () => {
@@ -163,6 +172,16 @@ describe("Specs CLI", () => {
     const requestStart = libraryRequests.length;
     await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", "rig#draft"]);
     expect(libraryRequests.slice(requestStart)).toContain("/api/specs/library?kind=rig%23draft");
+  });
+
+  it("filters an unknown kind even when built-ins are requested", async () => {
+    const { stdout, stderr } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", "rig&kind=agent", "--include-builtins", "--json"]);
+    });
+    expect(stderr.join("\n")).toContain("Warning: unrecognized --kind");
+    expect(JSON.parse(stdout.join("\n"))).toEqual([]);
+    expect(new URL(`http://localhost${libraryRequests.at(-1)}`).searchParams.get("kind")).toBe("rig&kind=agent");
+    expect(new URL(`http://localhost${libraryRequests.at(-1)}`).searchParams.get("include_builtins")).toBe("true");
   });
 
   it.each(["rig", "agent", "workflow"])("specs ls --kind %s runs without warning", async (kind) => {
@@ -231,7 +250,7 @@ describe("Specs CLI", () => {
   it("specs show --kind resolves same-name rig/workflow entries", async () => {
     const dupServer = http.createServer((req, res) => {
       const url = decodeURIComponent(req.url ?? "");
-      if (url === "/api/specs/library?kind=rig") {
+      if (url.startsWith("/api/specs/library?kind=rig")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify([{ ...LIBRARY_ENTRIES[0], id: "rig-same", kind: "rig", name: "conveyor" }]));
       } else {
