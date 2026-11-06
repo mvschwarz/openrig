@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -263,4 +263,62 @@ describe("W2b exact-set notify envelope", () => {
     expect(received).toHaveLength(1);
     expect(received[0]).toMatchObject({ type: "rig.deleted", rigId: "rig-that-does-not-exist" });
   });
+  it("drains a committed tail in bounded SQL pages without reordering nested or poison events", () => {
+    const received: PersistedEvent[] = [], second: number[] = [], transactions: boolean[] = [];
+    bus.subscribe((event) => {
+      received.push(event);
+      transactions.push(db.inTransaction);
+      if (event.type !== "view.changed") return;
+      if (event.viewName === "tail-0") bus.emit({ type: "view.changed", viewName: "nested-emit", cause: "subscriber" });
+      if (event.viewName === "tail-998") bus.withNotifyEnvelope(register => register(persisted("nested-envelope")));
+    });
+    bus.subscribe(event => second.push(event.seq));
+
+    // Count rows returned by the real SQLite reads, so slicing an unbounded result cannot pass.
+    const readSizes: number[] = [], prepare = db.prepare.bind(db);
+    const reads = vi.spyOn(db, "prepare").mockImplementation(sql => {
+      const statement = prepare(sql);
+      if (/FROM events WHERE seq > \? ORDER BY seq/.test(sql)) {
+        const all = statement.all.bind(statement);
+        vi.spyOn(statement, "all").mockImplementation((...params: unknown[]) => {
+          const rows = all(...params);
+          readSizes.push(rows.length);
+          return rows;
+        });
+      }
+      return statement;
+    });
+    let poisonSeq = 0;
+    try {
+      bus.withNotifyEnvelope(register => {
+        for (let i = 0; i < 1002; i++) {
+          register(persisted(`tail-${i}`));
+          if (i === 498) poisonSeq = Number(db.prepare("INSERT INTO events (type, payload) VALUES (?, ?)")
+            .run("malformed.fixture", "{not-json").lastInsertRowid);
+        }
+        expect(received).toEqual([]);
+      });
+      bus.withNotifyEnvelope(() => undefined); // A second drain must not redeliver committed rows.
+    } finally {
+      reads.mockRestore();
+    }
+
+    const stored = db.prepare("SELECT seq FROM events WHERE seq != ? ORDER BY seq").all(poisonSeq) as Array<{ seq: number }>;
+    const expected = stored.map(row => row.seq);
+    expect(received.map(event => event.seq)).toEqual(expected);
+    expect(second).toEqual(expected);
+    expect(expected).toHaveLength(1005); // 1002 originals, two nested events and one poison notification.
+    expect(transactions.some(Boolean)).toBe(false);
+    expect(received.filter(event => event.type === "event.delivery_poisoned")).toHaveLength(1);
+    expect(bus.getNotifyDrainStatus()).toMatchObject({
+      state: "unparseable", watermark: expected.at(-1), lastPoison: { seq: poisonSeq, error: "invalid event payload JSON" },
+    });
+    // replayAll remains a full replay; the new bound belongs only to notification draining.
+    const replay = bus.replayAll(poisonSeq).map(event => event.seq);
+    expect(replay).toEqual(expected.filter(seq => seq > poisonSeq));
+    expect(replay.length).toBeGreaterThan(500);
+    expect(Math.max(...readSizes)).toBeLessThanOrEqual(500);
+    expect(readSizes.filter(size => size > 0).length).toBeGreaterThan(2);
+  });
+
 });
