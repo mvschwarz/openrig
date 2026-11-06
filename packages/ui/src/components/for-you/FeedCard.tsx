@@ -424,22 +424,23 @@ export function FeedCard({
   };
   const qitemViewerData = qitemViewerDataFromItem(card, queueItem);
   const payload = card.source.payload ?? {};
+  const isRemote = Boolean(card.hostId && card.hostId !== "local");
   // Remote cards must use their origin's payload, not a same-id local queue row.
-  const localItem = !card.hostId || card.hostId === "local" ? queueItem : undefined;
+  const localItem = !isRemote ? queueItem : undefined;
   const rawQuestions =
     Array.isArray(localItem?.humanQuestions) && localItem.humanQuestions.length > 0
       ? localItem.humanQuestions
       : payload.humanQuestions;
   const rawAnswers = localItem?.humanAnswers ?? payload.humanAnswers;
-  const parsedQuestions = normalizeHumanQuestions(rawQuestions);
-  const parsedAnswers = normalizeHumanAnswers(rawAnswers);
+  const parsedQuestions = !isRemote ? normalizeHumanQuestions(rawQuestions) : [];
+  const parsedAnswers = !isRemote ? normalizeHumanAnswers(rawAnswers) : {};
   const hasQuestions = (Array.isArray(payload.humanQuestions) && payload.humanQuestions.length > 0)
     || (Array.isArray(localItem?.humanQuestions) && localItem.humanQuestions.length > 0);
   // Event cards can arrive before the queue read. Do not offer a closing action until it resolves.
   const questionsKnown = localItem !== undefined || Object.hasOwn(payload, "humanQuestions");
   const permissionTags = localItem ? localItem.tags : payload.tags;
   const isRunnerPermission = Array.isArray(permissionTags) && permissionTags.includes("runner-permission");
-  const hasQuestionControls = hasQuestions && parsedQuestions.length > 0 && !isRunnerPermission;
+  const hasQuestionControls = !isRemote && hasQuestions && parsedQuestions.length > 0 && !isRunnerPermission;
   const body = compactQueueBody(queueItem?.body || card.body);
   const tags = queueItem?.tags ?? qitemViewerData?.tags ?? [];
   const source = qitemViewerData?.source ?? card.authorSession;
@@ -598,7 +599,6 @@ export function FeedCard({
                   actorSession={actorSession}
                   recipientSession={destination}
                   askerSession={source}
-                  hostId={card.hostId}
                   questions={parsedQuestions}
                   initialAnswers={parsedAnswers}
                   queueItem={localItem}

@@ -1,9 +1,13 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2 } from "lucide-react";
 
 import type { QueueItemDetail } from "../../hooks/useSlices.js";
-import { retainAttentionItemInSession } from "../../hooks/useAttentionItems.js";
+import {
+  retainAttentionItemInSession,
+  type AttentionData,
+  type AttentionQueueItem,
+} from "../../hooks/useAttentionItems.js";
 import {
   useMissionControlAction,
   type MissionControlActionInput,
@@ -126,21 +130,35 @@ const STATE_LABELS: Record<string, string> = {
   expired: "expired",
 };
 
+interface SavedOutcome {
+  outcome: "recorded" | "answered";
+  unanswered: string[];
+  message?: string;
+  notClosed?: boolean;
+  code?: string;
+}
+
+interface ActionErrorSummary {
+  code?: string;
+  originCode?: string;
+  message: string;
+  source: "option" | "words" | "resend";
+  unknown?: boolean;
+}
+
 interface SessionAskSnapshot {
   answers: HumanAnswersRecord;
   revision?: string;
   queueItemRevisionAtSave?: string | null;
-  lastOutcome?: MissionControlActionResult["answer"] | null;
+  lastOutcome?: SavedOutcome | null;
   settled?: {
     refreshedItem: QueueItemDetail | null;
     fallbackState?: string | null;
-    error?: { code?: string; originCode?: string; message: string; source: "option" | "words" | "resend" } | null;
+    error?: ActionErrorSummary | null;
   } | null;
 }
 
 const sessionAskSnapshots = new Map<string, SessionAskSnapshot>();
-const askSessionKey = (qitemId: string, hostId?: string) =>
-  `${hostId && hostId !== "local" ? hostId : "local"}:${qitemId}`;
 
 export function clearQuestionAskSessionSnapshots(): void {
   sessionAskSnapshots.clear();
@@ -175,7 +193,6 @@ export interface FeedCardQuestionAskProps {
   actorSession: string;
   recipientSession?: string;
   askerSession?: string;
-  hostId?: string;
   questions: HumanQuestionItem[];
   initialAnswers: HumanAnswersRecord;
   queueItem?: QueueItemDetail;
@@ -187,19 +204,29 @@ export function FeedCardQuestionAsk({
   actorSession,
   recipientSession,
   askerSession,
-  hostId,
   questions,
   initialAnswers,
   queueItem,
 }: FeedCardQuestionAskProps) {
   const queryClient = useQueryClient();
   const mutation = useMissionControlAction();
-  const sessionKey = askSessionKey(qitemId, hostId);
-  const cached = sessionAskSnapshots.get(sessionKey);
+
+  const propRev = queueItem?.decisionRevision ?? undefined;
+  const propStateLower = queueItem?.state?.toLowerCase();
+  const propIsTerminal = Boolean(propStateLower && TERMINAL_STATES.has(propStateLower));
+  const rawCached = sessionAskSnapshots.get(qitemId);
+  const isCachedStale = Boolean(
+    rawCached &&
+      ((propRev && propRev !== rawCached.revision && propRev !== rawCached.queueItemRevisionAtSave) ||
+        (rawCached.settled && propStateLower && !propIsTerminal && (!propRev || propRev !== rawCached.revision))),
+  );
+  if (isCachedStale) {
+    sessionAskSnapshots.delete(qitemId);
+  }
+  const cached = isCachedStale ? undefined : rawCached;
 
   const [localAnswers, setLocalAnswers] = useState<HumanAnswersRecord>(() => cached?.answers ?? {});
   const [localRevision, setLocalRevision] = useState<string | undefined>(() => {
-    const propRev = queueItem?.decisionRevision ?? undefined;
     if (cached?.revision) {
       return propRev && propRev !== cached.queueItemRevisionAtSave ? propRev : cached.revision;
     }
@@ -207,15 +234,8 @@ export function FeedCardQuestionAsk({
   });
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
   const [ownWordsText, setOwnWordsText] = useState("");
-  const [lastOutcome, setLastOutcome] = useState<MissionControlActionResult["answer"] | null>(
-    () => cached?.lastOutcome ?? null,
-  );
-  const [actionError, setActionError] = useState<{
-    code?: string;
-    originCode?: string;
-    message: string;
-    source: "option" | "words" | "resend";
-  } | null>(() => cached?.settled?.error ?? null);
+  const [lastOutcome, setLastOutcome] = useState<SavedOutcome | null>(() => cached?.lastOutcome ?? null);
+  const [actionError, setActionError] = useState<ActionErrorSummary | null>(() => cached?.settled?.error ?? null);
   const [settledState, setSettledState] = useState<{
     refreshing: boolean;
     refreshedItem: QueueItemDetail | null;
@@ -226,13 +246,66 @@ export function FeedCardQuestionAsk({
       : null,
   );
 
+  const prevPropRevRef = useRef(propRev);
+  const prevPropStateRef = useRef(propStateLower);
+  useEffect(() => {
+    const revChanged = propRev !== prevPropRevRef.current;
+    const stateChanged = propStateLower !== prevPropStateRef.current;
+    if (!revChanged && !stateChanged) return;
+    prevPropRevRef.current = propRev;
+    prevPropStateRef.current = propStateLower;
+
+    const currentSnap = sessionAskSnapshots.get(qitemId);
+    const matchesSaved =
+      currentSnap && (propRev === currentSnap.revision || propRev === currentSnap.queueItemRevisionAtSave);
+    const reopenedFromSettled = Boolean((settledState || currentSnap?.settled) && propStateLower && !propIsTerminal);
+
+    if (reopenedFromSettled || (propRev && !matchesSaved && propRev !== localRevision)) {
+      sessionAskSnapshots.delete(qitemId);
+      setLocalRevision(propRev);
+      setLocalAnswers({});
+      setLastOutcome(null);
+      setSettledState(null);
+      setActionError(null);
+    } else if (propRev && !localRevision) {
+      setLocalRevision(propRev);
+    }
+  }, [propRev, propStateLower, propIsTerminal, qitemId, localRevision, settledState]);
+
   const saveSnapshot = (patch: Partial<SessionAskSnapshot>) => {
-    const prev = sessionAskSnapshots.get(sessionKey) ?? { answers: localAnswers, revision: localRevision };
-    sessionAskSnapshots.set(sessionKey, {
+    const prev = sessionAskSnapshots.get(qitemId) ?? { answers: localAnswers, revision: localRevision };
+    sessionAskSnapshots.set(qitemId, {
       ...prev,
       queueItemRevisionAtSave: queueItem?.decisionRevision ?? null,
       ...patch,
     });
+  };
+
+  const findAttentionItemToRetain = (): AttentionQueueItem | null => {
+    const queries = queryClient.getQueriesData<AttentionData>({ queryKey: ["attention-items"] });
+    for (const [, data] of queries) {
+      const found = data?.items?.find((i) => i.qitemId === qitemId && (!i.hostId || i.hostId === "local"));
+      if (found) return found;
+    }
+    if (!queueItem) return null;
+    return {
+      qitemId: queueItem.qitemId,
+      tsCreated: queueItem.tsCreated,
+      tsUpdated: queueItem.tsUpdated,
+      sourceSession: queueItem.sourceSession,
+      destinationSession: queueItem.destinationSession,
+      state: queueItem.state,
+      priority: queueItem.priority,
+      tier: queueItem.tier,
+      tags: queueItem.tags,
+      blockedOn: queueItem.blockedOn ?? null,
+      handedOffTo: queueItem.handedOffTo ?? null,
+      handedOffFrom: queueItem.handedOffFrom ?? null,
+      body: queueItem.body,
+      summary: queueItem.summary ?? null,
+      humanQuestions: queueItem.humanQuestions,
+      humanAnswers: queueItem.humanAnswers ?? null,
+    };
   };
 
   const operationIdsRef = useRef<Map<string, string>>(new Map());
@@ -244,29 +317,70 @@ export function FeedCardQuestionAsk({
     return next;
   };
 
-  const isRemote = Boolean(hostId && hostId !== "local");
   const mergedAnswers: HumanAnswersRecord = {
     ...initialAnswers,
     ...normalizeHumanAnswers(queueItem?.humanAnswers),
     ...localAnswers,
   };
-  const effectiveRevision = !isRemote ? (localRevision ?? (queueItem?.decisionRevision ?? undefined)) : undefined;
+  const effectiveRevision = localRevision ?? propRev;
+  const hasRevision = typeof effectiveRevision === "string" && effectiveRevision.length > 0;
   const totalQuestions = questions.length;
   const answeredCount = questions.filter((q) => ownAnswer(mergedAnswers, q.id) !== undefined).length;
   const allAnswered = totalQuestions > 0 && answeredCount === totalQuestions;
   const askerLabel = askerSession ?? "the asker";
   const requestActorSession =
     recipientSession && isHumanSeatSessionRef(recipientSession) ? recipientSession : actorSession;
-  const identityText = isRemote
-    ? `Answering as ${requestActorSession} from host ${hostId}`
-    : `Answering as ${actorSession}${
-        recipientSession && recipientSession !== actorSession ? ` on ${recipientSession}'s ask` : ""
-      }`;
+  const identityText = `Answering as human@host (unattributed)${
+    recipientSession && recipientSession !== "human@host" ? ` on ${recipientSession}'s ask` : ""
+  }`;
+
+  async function fetchCurrentQueueItem(): Promise<QueueItemDetail | null> {
+    try {
+      return await queryClient.fetchQuery({
+        queryKey: ["queue", "item", qitemId],
+        queryFn: async () => {
+          const res = await fetch(`/api/queue/${encodeURIComponent(qitemId)}`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return (await res.json()) as QueueItemDetail;
+        },
+        staleTime: 0,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async function refreshFromUnknown() {
+    setSettledState((prev) => ({ refreshing: true, refreshedItem: prev?.refreshedItem ?? queueItem ?? null }));
+    const refreshed = await fetchCurrentQueueItem();
+    void queryClient.invalidateQueries({ queryKey: ["attention-items"] });
+    if (!refreshed) {
+      setSettledState(null);
+      return;
+    }
+    setActionError(null);
+    const nextRev = refreshed.decisionRevision ?? undefined;
+    const nextAnswers = normalizeHumanAnswers(refreshed.humanAnswers);
+    setLocalRevision(nextRev);
+    setLocalAnswers(nextAnswers);
+    const refreshedState = refreshed.state?.toLowerCase();
+    if (refreshedState && TERMINAL_STATES.has(refreshedState)) {
+      setSettledState({ refreshing: false, refreshedItem: refreshed, fallbackState: refreshedState });
+      saveSnapshot({
+        answers: nextAnswers,
+        revision: nextRev,
+        settled: { refreshedItem: refreshed, fallbackState: refreshedState, error: null },
+      });
+    } else {
+      setSettledState(null);
+      saveSnapshot({ answers: nextAnswers, revision: nextRev, settled: null });
+    }
+  }
 
   async function refreshQueueRow(
     err: Error & { code?: string; details?: unknown },
     originCode: string,
-    errSummary?: { code?: string; originCode?: string; message: string; source: "option" | "words" | "resend" } | null,
+    errSummary?: ActionErrorSummary | null,
   ) {
     const details = isRecord(err.details) ? err.details : undefined;
     const fallbackState = typeof details?.state === "string" ? details.state : null;
@@ -277,22 +391,7 @@ export function FeedCardQuestionAsk({
     void queryClient.invalidateQueries({ queryKey: ["attention-items"] });
     void queryClient.invalidateQueries({ queryKey: ["mission-control", "audit"] });
 
-    let refreshed: QueueItemDetail | null = null;
-    if (!isRemote) {
-      try {
-        refreshed = await queryClient.fetchQuery({
-          queryKey: ["queue", "item", qitemId],
-          queryFn: async () => {
-            const res = await fetch(`/api/queue/${encodeURIComponent(qitemId)}`);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return (await res.json()) as QueueItemDetail;
-          },
-          staleTime: 0,
-        });
-      } catch {
-        // Fall back to cached queueItem if direct fetch fails.
-      }
-    }
+    const refreshed = await fetchCurrentQueueItem();
 
     const nextRev =
       refreshed?.decisionRevision ?? (typeof details?.currentRevision === "string" ? details.currentRevision : undefined);
@@ -311,7 +410,6 @@ export function FeedCardQuestionAsk({
     const effectiveItem = refreshed ?? queueItem ?? null;
     const effectiveState = (refreshed?.state ?? fallbackState ?? queueItem?.state ?? "pending").toLowerCase();
     if (
-      !isRemote &&
       originCode === "decision_revision_changed" &&
       (effectiveState === "pending" || effectiveState === "in-progress")
     ) {
@@ -320,7 +418,10 @@ export function FeedCardQuestionAsk({
       return;
     }
     setSettledState({ refreshing: false, refreshedItem: effectiveItem, fallbackState });
-    saveSnapshot({ settled: { refreshedItem: effectiveItem, fallbackState, error: errSummary ?? null } });
+    saveSnapshot({
+      revision: nextRev ?? localRevision,
+      settled: { refreshedItem: effectiveItem, fallbackState, error: errSummary ?? null },
+    });
   }
 
   function submitAnswer(
@@ -330,14 +431,14 @@ export function FeedCardQuestionAsk({
     optimisticUpdate?: (prev: HumanAnswersRecord) => HumanAnswersRecord,
     onDone?: () => void,
   ) {
-    if (mutation.isPending || settledState) return;
+    if (mutation.isPending || settledState || !hasRevision) return;
     let operationId: string;
     try {
-      retainAttentionItemInSession(qitemId, hostId);
+      retainAttentionItemInSession(qitemId, findAttentionItemToRetain());
       operationId = getOperationId(signature);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setActionError({ message: msg, source });
+      setActionError({ message: msg, source, unknown: false });
       return;
     }
     setActionError(null);
@@ -347,18 +448,18 @@ export function FeedCardQuestionAsk({
         qitemId,
         actorSession: requestActorSession,
         ...fields,
-        ...(effectiveRevision !== undefined ? { expectedRevision: effectiveRevision } : {}),
-        ...(!isRemote ? { authority: "primary-user" } : {}),
+        expectedRevision: effectiveRevision,
+        authority: "primary-user",
         auditNotes: { operationId },
-        ...(isRemote && hostId ? { hostId } : {}),
       },
       {
         onSuccess: (result: MissionControlActionResult) => {
           operationIdsRef.current.delete(signature);
           setActionError(null);
+          const nextRev = result.decisionRevision ?? localRevision;
           if (result.decisionRevision) {
             setLocalRevision(result.decisionRevision);
-            if (!isRemote && queueItem) {
+            if (queueItem) {
               queryClient.setQueryData<QueueItemDetail | null>(["queue", "item", qitemId], (old) =>
                 old ? { ...old, decisionRevision: result.decisionRevision } : old,
               );
@@ -374,7 +475,23 @@ export function FeedCardQuestionAsk({
             setLocalAnswers(updatedAnswers);
           }
           const closedState = typeof closed?.state === "string" ? closed.state.toLowerCase() : undefined;
-          const inferredOutcome: MissionControlActionResult["answer"] =
+          const closedReason = typeof closed?.closureReason === "string" ? closed.closureReason : null;
+          if (!result.answer && closedState && TERMINAL_STATES.has(closedState)) {
+            const wasAnswered = DONE_STATES.has(closedState) && (!closedReason || !NON_ANSWER_REASONS.has(closedReason));
+            if (!wasAnswered) {
+              const closedDetail = closed as unknown as QueueItemDetail;
+              setLastOutcome(null);
+              setSettledState({ refreshing: false, refreshedItem: closedDetail, fallbackState: closedState });
+              saveSnapshot({
+                answers: updatedAnswers,
+                revision: nextRev,
+                lastOutcome: null,
+                settled: { refreshedItem: closedDetail, fallbackState: closedState, error: null },
+              });
+              return;
+            }
+          }
+          const inferredOutcome: SavedOutcome =
             result.answer ??
             (closedState && !TERMINAL_STATES.has(closedState)
               ? {
@@ -387,7 +504,7 @@ export function FeedCardQuestionAsk({
           setLastOutcome(inferredOutcome);
           saveSnapshot({
             answers: updatedAnswers,
-            revision: result.decisionRevision ?? localRevision,
+            revision: nextRev,
             lastOutcome: inferredOutcome,
           });
           onDone?.();
@@ -398,16 +515,49 @@ export function FeedCardQuestionAsk({
             details?: unknown;
           };
           const details = isRecord(typedErr.details) ? typedErr.details : undefined;
-          const originCode =
-            typedErr.code === "remote_action_failed" && typeof details?.detail === "string" && details.detail
-              ? details.detail
-              : typedErr.code;
-          const errSummary = { code: originCode, originCode, message: typedErr.message, source };
+          const originCode = typedErr.code;
+          const replyQitemId = typeof details?.replyQitemId === "string" ? details.replyQitemId : undefined;
+
+          if (originCode === "answer_not_closed" && replyQitemId) {
+            let updatedAnswers = mergedAnswers;
+            if (optimisticUpdate) {
+              updatedAnswers = optimisticUpdate(localAnswers);
+              setLocalAnswers(updatedAnswers);
+            }
+            const returnedOutcome: SavedOutcome = {
+              outcome: "answered",
+              unanswered: [],
+              message: typedErr.message,
+              notClosed: true,
+              code: originCode,
+            };
+            setActionError(null);
+            setLastOutcome(returnedOutcome);
+            saveSnapshot({
+              answers: updatedAnswers,
+              revision: localRevision,
+              lastOutcome: returnedOutcome,
+            });
+            onDone?.();
+            void refreshQueueRow(typedErr, originCode, null);
+            return;
+          }
+
+          const isUnknown = !details;
+          const errSummary: ActionErrorSummary = {
+            code: originCode,
+            originCode,
+            message: typedErr.message,
+            source,
+            unknown: isUnknown,
+          };
           setActionError(errSummary);
-          if (originCode === "answer_not_closed" && source === "option" && optimisticUpdate) {
-            const next = optimisticUpdate(localAnswers);
-            setLocalAnswers(next);
-            saveSnapshot({ answers: next });
+          if (originCode === "answer_not_closed" && source !== "words") {
+            const next = optimisticUpdate ? optimisticUpdate(localAnswers) : localAnswers;
+            if (optimisticUpdate) setLocalAnswers(next);
+            const recordedOutcome: SavedOutcome = { outcome: "recorded", unanswered: [] };
+            setLastOutcome(recordedOutcome);
+            saveSnapshot({ answers: next, lastOutcome: recordedOutcome });
           }
           if (
             originCode === "qitem_already_terminal" ||
@@ -443,6 +593,16 @@ export function FeedCardQuestionAsk({
             {actionError.code}
           </div>
         ) : null}
+        {actionError.unknown ? (
+          <button
+            type="button"
+            data-testid={`feed-card-answer-refresh-${cardId}`}
+            onClick={() => void refreshFromUnknown()}
+            className="mt-1 min-h-[36px] border border-on-error-container px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-on-error-container hover:opacity-80"
+          >
+            Refresh request state
+          </button>
+        ) : null}
       </div>
     ) : null;
 
@@ -453,10 +613,21 @@ export function FeedCardQuestionAsk({
         {identityHeader}
         <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-on-surface">
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" strokeWidth={1.8} />
-          <span>Answered and sent to {askerLabel}.</span>
+          <span>
+            {lastOutcome.notClosed
+              ? `Answered and returned to ${askerLabel}; this ask didn't close.`
+              : `Answered and sent to ${askerLabel}.`}
+          </span>
         </div>
         {lastOutcome.message ? (
-          <p className="font-body text-[12px] leading-relaxed text-on-surface break-words">{lastOutcome.message}</p>
+          <p data-testid={`feed-card-answer-receipt-message-${cardId}`} className="font-body text-[12px] leading-relaxed text-on-surface break-words">
+            {lastOutcome.message}
+          </p>
+        ) : null}
+        {lastOutcome.code ? (
+          <div data-testid={`feed-card-answer-error-code-${cardId}`} className="font-mono text-[10px] text-on-surface-variant break-words">
+            {lastOutcome.code}
+          </div>
         ) : null}
         {pairs.length > 0 ? (
           <dl className="space-y-1 pt-1 font-body text-[12px] text-on-surface">
@@ -472,12 +643,13 @@ export function FeedCardQuestionAsk({
     );
   }
 
-  const queueStateLower = queueItem?.state?.toLowerCase();
-  const isQueueTerminal = Boolean(!isRemote && queueStateLower && TERMINAL_STATES.has(queueStateLower));
+  const isQueueTerminal = Boolean(propStateLower && TERMINAL_STATES.has(propStateLower));
   if ((settledState && !settledState.refreshing) || isQueueTerminal) {
-    const settledHeadline = isRemote
-      ? "This request is no longer waiting."
-      : settledElsewhereHeadline(settledState?.refreshedItem ?? queueItem, questions, settledState?.fallbackState);
+    const settledHeadline = settledElsewhereHeadline(
+      settledState?.refreshedItem ?? queueItem,
+      questions,
+      settledState?.fallbackState,
+    );
     return (
       <div data-testid={`feed-card-answer-settled-${cardId}`} className="w-full space-y-2 border border-outline-variant bg-surface-lowest/55 p-3">
         {identityHeader}
@@ -489,7 +661,7 @@ export function FeedCardQuestionAsk({
     );
   }
 
-  const controlsDisabled = mutation.isPending || Boolean(settledState?.refreshing);
+  const controlsDisabled = mutation.isPending || Boolean(settledState?.refreshing) || !hasRevision;
   const statusLine = settledState?.refreshing
     ? "Refreshing request state..."
     : mutation.isPending
@@ -500,14 +672,17 @@ export function FeedCardQuestionAsk({
           ? `Recorded. ${answeredCount} of ${totalQuestions} answered. Not sent yet.`
           : answeredCount > 0
             ? `${answeredCount} of ${totalQuestions} answered. Not sent yet.`
-            : totalQuestions === 1
-              ? `Your answer goes to ${askerLabel} when answered.`
-              : `Your answers go to ${askerLabel} when all ${totalQuestions} are answered.`;
-  const errorLeadIn =
-    actionError?.source === "words"
-      ? "Nothing was sent. Your text is still here."
-      : actionError?.originCode === "answer_not_closed" || allAnswered
-        ? "Your choices are recorded."
+            : !hasRevision
+              ? "Loading request state..."
+              : totalQuestions === 1
+                ? `Your answer goes to ${askerLabel} when answered.`
+                : `Your answers go to ${askerLabel} when all ${totalQuestions} are answered.`;
+  const errorLeadIn = actionError?.unknown
+    ? "Outcome unknown — couldn't confirm whether your answer went through."
+    : actionError?.originCode === "answer_not_closed" && actionError?.source !== "words"
+      ? "Your choices are recorded."
+      : actionError?.source === "words"
+        ? "Not recorded or sent. Your text is still here."
         : "Answer not recorded.";
 
   return (
@@ -575,6 +750,11 @@ export function FeedCardQuestionAsk({
         <p role="status" aria-live="polite" data-testid={`feed-card-answer-status-${cardId}`} className="font-mono text-[10px] text-on-surface-variant break-words">
           {statusLine}
         </p>
+        {lastOutcome?.message ? (
+          <p data-testid={`feed-card-answer-outcome-message-${cardId}`} className="font-body text-[11px] leading-relaxed text-on-surface break-words">
+            {lastOutcome.message}
+          </p>
+        ) : null}
         {allAnswered ? (
           <button
             type="button"

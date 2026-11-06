@@ -1,13 +1,19 @@
 /**
  * @vitest-environment jsdom
  */
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
 import { FeedCard } from "../src/components/for-you/FeedCard.js";
 import { clearQuestionAskSessionSnapshots } from "../src/components/for-you/FeedCardQuestionAsk.js";
+import {
+  clearRetainedAttentionItems,
+  retainAttentionItemInSession,
+  useAttentionItems,
+  type AttentionQueueItem,
+} from "../src/hooks/useAttentionItems.js";
 import type { FeedCard as FeedCardModel } from "../src/lib/feed-classifier.js";
 import type { QueueItemDetail } from "../src/hooks/useSlices.js";
 import { attentionItemToFeedCard } from "../src/lib/attention-feed.js";
@@ -87,6 +93,19 @@ function makeQuestionCard(
   };
 }
 
+function makeQueueItem(overrides?: Partial<QueueItemDetail>): QueueItemDetail {
+  return {
+    qitemId: "q-ask-1",
+    sourceSession: "lead@demo",
+    destinationSession: "human@host",
+    state: "pending",
+    decisionRevision: "rev-1",
+    humanQuestions: TWO_QUESTIONS,
+    humanAnswers: null,
+    ...overrides,
+  } as unknown as QueueItemDetail;
+}
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -106,6 +125,7 @@ function renderWithQuery(node: ReactNode, queryClient?: QueryClient) {
 beforeEach(() => {
   vi.restoreAllMocks();
   clearQuestionAskSessionSnapshots();
+  clearRetainedAttentionItems();
 });
 
 afterEach(() => {
@@ -113,25 +133,82 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("For You — answering an ask's structured questions (#2407)", () => {
-  it("shows who is answering, on whose ask, and from which host, plus recommended badge", () => {
+describe("For You — answering an ask's structured questions (#2407 / #2612)", () => {
+  it("shows human@host (unattributed) identity on local cards and keeps the #2415 TUI hint without answer controls on remote cards", () => {
     const localCard = makeQuestionCard({}, { destinationSession: "alex@external" });
-    const localView = renderWithQuery(<FeedCard card={localCard} />);
+    const localView = renderWithQuery(
+      <FeedCard card={localCard} queueItem={makeQueueItem({ destinationSession: "alex@external" })} />,
+    );
     expect(
       localView.getByTestId("feed-card-answer-identity-queue-attention-q-ask-1").textContent,
-    ).toBe("Answering as human@host on alex@external's ask");
+    ).toBe("Answering as human@host (unattributed) on alex@external's ask");
+
+    const stableBtn = localView.getByTestId("feed-card-option-channel-stable");
+    expect(stableBtn.textContent).toContain("Stable · RECOMMENDED");
+    expect(stableBtn.className).toContain("min-h-[44px]");
+    expect(localView.queryByTestId("mc-verb-approve")).toBeNull();
+    cleanup();
+
+    const directHumanView = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
+    expect(
+      directHumanView.getByTestId("feed-card-answer-identity-queue-attention-q-ask-1").textContent,
+    ).toBe("Answering as human@host (unattributed)");
     cleanup();
 
     const remoteCard = makeQuestionCard({ hostId: "box-west" }, { destinationSession: "alex@external" });
-    const view = renderWithQuery(<FeedCard card={remoteCard} />);
-    expect(
-      view.getByTestId("feed-card-answer-identity-queue-attention-q-ask-1").textContent,
-    ).toBe("Answering as alex@external from host box-west");
+    const remoteView = renderWithQuery(<FeedCard card={remoteCard} />);
+    expect(remoteView.queryByTestId("feed-card-questions-queue-attention-q-ask-1")).toBeNull();
+    expect(remoteView.queryByTestId("feed-card-option-channel-stable")).toBeNull();
+    expect(remoteView.container.textContent).toContain(
+      "This ask has questions. Answer in the TUI on host box-west (rig tui).",
+    );
+    expect(remoteView.container.textContent).not.toContain("tell lead@demo in Chat");
+  });
 
+  it("keeps controls disabled until local queueItem loads decisionRevision, and sends expectedRevision on every answer", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return jsonResponse({
+          actionId: "a-1",
+          verb: "answer",
+          qitemId: "q-ask-1",
+          closedQitem: { qitemId: "q-ask-1", state: "pending", humanAnswers: { channel: "stable" } },
+          createdQitemId: null,
+          notifyAttempted: false,
+          notifyResult: null,
+          auditedAt: "2026-11-06T00:01:00Z",
+          decisionRevision: "rev-2",
+          answer: { outcome: "recorded", unanswered: ["Hold the changelog until docs land?"] },
+        });
+      }),
+    );
+
+    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} />);
     const stableBtn = view.getByTestId("feed-card-option-channel-stable");
-    expect(stableBtn.textContent).toContain("Stable · RECOMMENDED");
-    expect(stableBtn.className).toContain("min-h-[44px]");
-    expect(view.queryByTestId("mc-verb-approve")).toBeNull();
+    const ownWordsToggle = view.getByTestId("feed-card-own-words-toggle-queue-attention-q-ask-1");
+
+    expect(stableBtn.hasAttribute("disabled")).toBe(true);
+    expect(ownWordsToggle.hasAttribute("disabled")).toBe(true);
+    expect(view.getByTestId("feed-card-answer-status-queue-attention-q-ask-1").textContent).toBe(
+      "Loading request state...",
+    );
+
+    fireEvent.click(stableBtn);
+    expect(calls).toHaveLength(0);
+
+    view.rerender(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })}>
+        <FeedCard card={makeQuestionCard()} queueItem={makeQueueItem({ decisionRevision: "rev-loaded-1" })} />
+      </QueryClientProvider>,
+    );
+
+    expect(view.getByTestId("feed-card-option-channel-stable").hasAttribute("disabled")).toBe(false);
+    fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]!.expectedRevision).toBe("rev-loaded-1");
   });
 
   it("records each option click (outcome=recorded) and closes on the last question (outcome=answered) with expectedRevision and operationId", async () => {
@@ -168,22 +245,12 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
           notifyResult: null,
           auditedAt: "2026-11-06T00:01:05Z",
           decisionRevision: "rev-3",
-          answer: { outcome: "answered", unanswered: [] },
+          answer: { outcome: "answered", unanswered: [], message: "Already answered; no new reply was sent." },
         });
       }),
     );
 
-    const queueItem = {
-      qitemId: "q-ask-1",
-      sourceSession: "lead@demo",
-      destinationSession: "human@host",
-      state: "pending",
-      decisionRevision: "rev-1",
-      humanQuestions: TWO_QUESTIONS,
-      humanAnswers: null,
-    } as unknown as QueueItemDetail;
-
-    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={queueItem} />);
+    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
 
     fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
     await waitFor(() => expect(calls).toHaveLength(1));
@@ -220,6 +287,7 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
     await waitFor(() => {
       const receipt = view.getByTestId("feed-card-answer-receipt-queue-attention-q-ask-1");
       expect(receipt.textContent).toContain("Answered and sent to lead@demo.");
+      expect(receipt.textContent).toContain("Already answered; no new reply was sent.");
       expect(receipt.textContent).toContain("Which channel ships first?: Stable");
       expect(receipt.textContent).toContain("Hold the changelog until docs land?: No");
     });
@@ -244,6 +312,7 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
           notifyAttempted: false,
           notifyResult: null,
           auditedAt: "2026-11-06T00:02:00Z",
+          decisionRevision: "rev-2",
           answer: { outcome: "answered", unanswered: [] },
         });
       }),
@@ -267,7 +336,9 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
       humanAnswers: { channel: "beta", changelog: "yes" },
     });
 
-    const view = renderWithQuery(<FeedCard card={card} />);
+    const view = renderWithQuery(
+      <FeedCard card={card} queueItem={makeQueueItem({ humanAnswers: { channel: "beta", changelog: "yes" } })} />,
+    );
     expect(view.getByTestId("feed-card-answer-status-queue-attention-q-ask-1").textContent).toBe(
       "All answered and recorded. Not sent yet.",
     );
@@ -277,20 +348,34 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
 
     fireEvent.click(sendBtn);
     await waitFor(() => expect(calls).toHaveLength(1));
-    expect(calls[0]).toMatchObject({ verb: "answer", qitemId: "q-ask-1", actorSession: "human@host" });
+    expect(calls[0]).toMatchObject({
+      verb: "answer",
+      qitemId: "q-ask-1",
+      actorSession: "human@host",
+      expectedRevision: "rev-1",
+    });
     expect("questionId" in calls[0]!).toBe(false);
     expect("optionId" in calls[0]!).toBe(false);
     expect("decision" in calls[0]!).toBe(false);
   });
 
-  it("answers in your own words (decision), and preserves typed text + shows wrapped error + code on failure", async () => {
+  it("answers in your own words (decision), and distinguishes unrecorded failure, answer_not_closed with replyQitemId, closed-without-answer, and unknown outcome with refresh", async () => {
     const calls: Array<Record<string, unknown>> = [];
-    let shouldFail = true;
+    let mode: "unrecordedFail" | "returnedNotClosed" | "closedWithoutAnswer" | "unknownNetwork" = "unrecordedFail";
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        if (String(url).includes("/api/queue/q-ask-1")) {
+          return jsonResponse({
+            qitemId: "q-ask-1",
+            state: "pending",
+            decisionRevision: "rev-refreshed",
+            humanQuestions: TWO_QUESTIONS,
+            humanAnswers: { channel: "beta" },
+          });
+        }
         calls.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-        if (shouldFail) {
+        if (mode === "unrecordedFail") {
           return jsonResponse(
             {
               error: "answer_not_closed",
@@ -300,48 +385,66 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
             409,
           );
         }
-        return jsonResponse({
-          actionId: "a-words",
-          verb: "answer",
-          qitemId: "q-ask-1",
-          closedQitem: { qitemId: "q-ask-1", state: "done" },
-          createdQitemId: "q-reply-3",
-          notifyAttempted: false,
-          notifyResult: null,
-          auditedAt: "2026-11-06T00:03:00Z",
-          answer: { outcome: "answered", unanswered: [] },
-        });
+        if (mode === "returnedNotClosed") {
+          return jsonResponse(
+            {
+              error: "answer_not_closed",
+              message:
+                "The answer went back to lead@demo as q-reply-9, but qitem q-ask-1 didn't close: it changed meanwhile.",
+              qitemId: "q-ask-1",
+              replyQitemId: "q-reply-9",
+            },
+            409,
+          );
+        }
+        if (mode === "closedWithoutAnswer") {
+          return jsonResponse({
+            actionId: "a-reconciled-canceled",
+            verb: "answer",
+            qitemId: "q-ask-1",
+            reconciled: true,
+            decisionRevision: "rev-canceled",
+            closedQitem: {
+              qitemId: "q-ask-1",
+              state: "canceled",
+              closureReason: "canceled",
+              humanAnswers: { channel: "stable" },
+            },
+            createdQitemId: null,
+            notifyAttempted: false,
+            notifyResult: null,
+            auditedAt: "2026-11-06T00:03:00Z",
+          });
+        }
+        throw new TypeError("Failed to fetch");
       }),
     );
 
-    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} />);
+    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
 
     fireEvent.click(view.getByTestId("feed-card-own-words-toggle-queue-attention-q-ask-1"));
     const input = view.getByTestId("feed-card-own-words-input-queue-attention-q-ask-1") as HTMLTextAreaElement;
     const sendBtn = view.getByTestId("feed-card-own-words-send-queue-attention-q-ask-1");
 
-    expect(sendBtn.hasAttribute("disabled")).toBe(true);
     fireEvent.change(input, { target: { value: "Ship beta first; stable waits for Friday." } });
-    expect(sendBtn.hasAttribute("disabled")).toBe(false);
-
     fireEvent.click(sendBtn);
     await waitFor(() => expect(calls).toHaveLength(1));
 
     await waitFor(() => {
       const errAlert = view.getByTestId("feed-card-answer-error-queue-attention-q-ask-1");
-      expect(errAlert.textContent).toContain("Nothing was sent. Your text is still here.");
-      const errMsg = view.getByTestId("feed-card-answer-error-message-queue-attention-q-ask-1");
-      expect(errMsg.textContent).toContain(
+      expect(errAlert.textContent).toContain("Not recorded or sent. Your text is still here.");
+      expect(view.getByTestId("feed-card-answer-error-message-queue-attention-q-ask-1").textContent).toContain(
         "Returning the answer to lead@demo failed (disk full), so q-ask-1 wasn't closed.",
       );
-      expect(errMsg.className).not.toContain("truncate");
       expect(view.getByTestId("feed-card-answer-error-code-queue-attention-q-ask-1").textContent).toBe(
         "answer_not_closed",
       );
     });
     expect(input.value).toBe("Ship beta first; stable waits for Friday.");
 
-    shouldFail = false;
+    // 2. When answer_not_closed carries replyQitemId, the answer went back and the ask didn't close:
+    //    show the answered-and-returned receipt with the daemon's own message (never "Not sent").
+    mode = "returnedNotClosed";
     fireEvent.click(sendBtn);
     await waitFor(() => expect(calls).toHaveLength(2));
     expect((calls[1]!.auditNotes as Record<string, unknown>).operationId).toBe(
@@ -350,10 +453,45 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
 
     await waitFor(() => {
       const receipt = view.getByTestId("feed-card-answer-receipt-queue-attention-q-ask-1");
-      expect(receipt.textContent).toContain("Answered and sent to lead@demo.");
+      expect(receipt.textContent).toContain("Answered and returned to lead@demo; this ask didn't close.");
       expect(receipt.textContent).toContain(
-        "Which channel ships first?: Ship beta first; stable waits for Friday.",
+        "The answer went back to lead@demo as q-reply-9, but qitem q-ask-1 didn't close: it changed meanwhile.",
       );
+      expect(view.getByTestId("feed-card-answer-error-code-queue-attention-q-ask-1").textContent).toBe(
+        "answer_not_closed",
+      );
+    });
+    cleanup();
+    clearQuestionAskSessionSnapshots();
+
+    // 3. When a response has no 'answer' and closedQitem is in a non-answered closed state (canceled),
+    //    render closed-without-an-answer ("This request is dropped now."), never "Answered and sent".
+    mode = "closedWithoutAnswer";
+    const canceledView = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
+    fireEvent.click(canceledView.getByTestId("feed-card-option-channel-stable"));
+    await waitFor(() => {
+      const settled = canceledView.getByTestId("feed-card-answer-settled-queue-attention-q-ask-1");
+      expect(settled.textContent).toContain("This request is dropped now.");
+      expect(settled.textContent).not.toContain("Answered and sent");
+    });
+    cleanup();
+    clearQuestionAskSessionSnapshots();
+
+    // 4. When connection is lost (or response isn't JSON), report outcome unknown and offer a refresh button.
+    mode = "unknownNetwork";
+    const unknownView = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
+    fireEvent.click(unknownView.getByTestId("feed-card-option-channel-stable"));
+    await waitFor(() => {
+      const alert = unknownView.getByTestId("feed-card-answer-error-queue-attention-q-ask-1");
+      expect(alert.textContent).toContain("Outcome unknown — couldn't confirm whether your answer went through.");
+      expect(alert.textContent).not.toContain("Nothing was sent");
+      expect(alert.textContent).not.toContain("Answer not recorded");
+    });
+    const refreshBtn = unknownView.getByTestId("feed-card-answer-refresh-queue-attention-q-ask-1");
+    fireEvent.click(refreshBtn);
+    await waitFor(() => {
+      expect(unknownView.queryByTestId("feed-card-answer-error-queue-attention-q-ask-1")).toBeNull();
+      expect(unknownView.getByTestId("feed-card-option-channel-beta").getAttribute("data-selected")).toBe("true");
     });
   });
 
@@ -388,7 +526,7 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
       }),
     );
 
-    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} />);
+    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
     fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
 
     await waitFor(() => {
@@ -434,16 +572,7 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
       }),
     );
 
-    const queueItem = {
-      qitemId: "q-ask-1",
-      sourceSession: "lead@demo",
-      destinationSession: "human@host",
-      state: "pending",
-      decisionRevision: "rev-1",
-      humanQuestions: TWO_QUESTIONS,
-    } as unknown as QueueItemDetail;
-
-    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={queueItem} />);
+    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
     fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
 
     await waitFor(() => {
@@ -459,96 +588,68 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
     expect(view.queryByTestId("feed-card-send-answers-queue-attention-q-ask-1")).toBeNull();
   });
 
-  it("forwards recipient actorSession and hostId on a remote card and unwraps remote_action_failed error details", async () => {
-    const calls: Array<Record<string, unknown>> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
-        if (String(url).includes("/api/mission-control/action")) {
-          calls.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-          return jsonResponse(
-            {
-              error: "remote_action_failed",
-              hostId: "remote-lab",
-              failureClass: "remote-error",
-              remoteStatus: 409,
-              detail: "answer_not_closed",
-            },
-            502,
-          );
-        }
-        return jsonResponse({});
-      }),
-    );
-
-    const card = makeQuestionCard(
-      { hostId: "remote-lab" },
-      { qitemId: "q-remote-1", sourceSession: "lead@t-remote", destinationSession: "tester@external" },
-    );
-
-    const view = renderWithQuery(<FeedCard card={card} />);
-    fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
-
-    await waitFor(() => expect(calls).toHaveLength(1));
-    expect(calls[0]).toMatchObject({
-      verb: "answer",
-      qitemId: "q-remote-1",
-      actorSession: "tester@external",
-      hostId: "remote-lab",
-      questionId: "channel",
-      optionId: "stable",
-    });
-    expect("authority" in calls[0]!).toBe(false);
-
-    await waitFor(() => {
-      expect(view.getByTestId("feed-card-answer-error-code-queue-attention-q-ask-1").textContent).toBe(
-        "answer_not_closed",
-      );
-      expect(view.getByTestId("feed-card-answer-error-message-queue-attention-q-ask-1").textContent).toBe(
-        "remote_action_failed · answer_not_closed · remote status 409",
-      );
-    });
-  });
-
-  it("shows 'This request is no longer waiting.' + code on a remote card when qitem_already_terminal returns", async () => {
+  it("lets fresh queue data win over session-saved state when a cancelled ask is reopened (in-place and on remount)", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: RequestInfo | URL) => {
         if (String(url).includes("/api/mission-control/action")) {
           return jsonResponse(
             {
-              error: "remote_action_failed",
-              hostId: "remote-lab",
-              failureClass: "remote-error",
-              remoteStatus: 409,
-              detail: "qitem_already_terminal",
+              error: "qitem_already_terminal",
+              message: "qitem q-ask-1 is canceled, not waiting on an answer.",
+              state: "canceled",
             },
-            502,
+            409,
           );
         }
-        return jsonResponse({});
+        return jsonResponse({
+          qitemId: "q-ask-1",
+          state: "canceled",
+          closureReason: "canceled",
+          decisionRevision: "rev-canceled-2",
+          humanQuestions: TWO_QUESTIONS,
+          humanAnswers: null,
+        });
       }),
     );
 
-    const card = makeQuestionCard(
-      { hostId: "remote-lab" },
-      { qitemId: "q-remote-2", sourceSession: "lead@t-remote", destinationSession: "tester@external" },
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const view = renderWithQuery(
+      <FeedCard card={makeQuestionCard()} queueItem={makeQueueItem({ decisionRevision: "rev-open-1" })} />,
+      qc,
     );
 
-    const view = renderWithQuery(<FeedCard card={card} />);
     fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
-
     await waitFor(() => {
-      const settled = view.getByTestId("feed-card-answer-settled-queue-attention-q-ask-1");
-      expect(settled.textContent).toContain("This request is no longer waiting.");
-      expect(settled.textContent).toContain(
-        "remote_action_failed · qitem_already_terminal · remote status 409",
-      );
-      expect(view.getByTestId("feed-card-answer-error-code-queue-attention-q-ask-1").textContent).toBe(
-        "qitem_already_terminal",
+      expect(view.getByTestId("feed-card-answer-settled-queue-attention-q-ask-1").textContent).toContain(
+        "This request is dropped now.",
       );
     });
-    expect(view.queryByTestId("feed-card-option-channel-stable")).toBeNull();
+
+    // Remount with the same cancelled revision: stays settled
+    cleanup();
+    const stillCancelled = renderWithQuery(
+      <FeedCard
+        card={makeQuestionCard()}
+        queueItem={makeQueueItem({ state: "canceled", closureReason: "canceled", decisionRevision: "rev-canceled-2" })}
+      />,
+      qc,
+    );
+    expect(stillCancelled.getByTestId("feed-card-answer-settled-queue-attention-q-ask-1")).toBeTruthy();
+
+    // Reopen the ask with a newer revision ("rev-reopened-3"): fresh state replaces saved settled state and restores controls
+    stillCancelled.rerender(
+      <QueryClientProvider client={qc}>
+        <FeedCard
+          card={makeQuestionCard()}
+          queueItem={makeQueueItem({ state: "pending", closureReason: null, decisionRevision: "rev-reopened-3" })}
+        />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => {
+      expect(stillCancelled.queryByTestId("feed-card-answer-settled-queue-attention-q-ask-1")).toBeNull();
+      expect(stillCancelled.getByTestId("feed-card-option-channel-stable").hasAttribute("disabled")).toBe(false);
+    });
   });
 
   it("keeps recorded-not-sent status on a reconciled retry when closedQitem is still pending, and preserves receipt on remount", async () => {
@@ -586,7 +687,7 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
       }),
     );
 
-    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} />);
+    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
     fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
 
     await waitFor(() => {
@@ -603,7 +704,7 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
     });
     cleanup();
 
-    const remountedAsk = renderWithQuery(<FeedCard card={makeQuestionCard()} />);
+    const remountedAsk = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
     expect(remountedAsk.getByTestId("feed-card-answer-receipt-queue-attention-q-ask-1").textContent).toContain(
       "Answered and sent to lead@demo.",
     );
@@ -611,17 +712,14 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
     cleanup();
 
     // Remounting a done ask with humanAnswers renders settled view (not live buttons or 'SEND ANSWERS')
-    const doneItem = {
+    const doneItem = makeQueueItem({
       qitemId: "q-done-1",
-      sourceSession: "lead@demo",
-      destinationSession: "human@host",
       state: "done",
       closureReason: "canceled",
       closureTarget: "no-follow-on",
       closingTransition: { actorSession: "lead@demo", closureReason: "canceled", closureTarget: "no-follow-on", state: "done" },
-      humanQuestions: TWO_QUESTIONS,
       humanAnswers: { channel: "stable", changelog: "yes" },
-    } as unknown as QueueItemDetail;
+    });
     const doneView = renderWithQuery(
       <FeedCard card={makeQuestionCard({ id: "queue-attention-q-done-1" }, { qitemId: "q-done-1" })} queueItem={doneItem} />,
     );
@@ -631,7 +729,7 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
     expect(doneView.queryByTestId("feed-card-send-answers-queue-attention-q-done-1")).toBeNull();
   });
 
-  it("refreshes the queue row and offers SEND ANSWERS TO <asker> when the final option tap fails with answer_not_closed", async () => {
+  it("refreshes the queue row and offers SEND ANSWERS TO <asker> when the final option tap fails with answer_not_closed (without replyQitemId)", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: RequestInfo | URL) => {
@@ -658,7 +756,9 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
     );
 
     const singleQCard = makeQuestionCard({}, { humanQuestions: [TWO_QUESTIONS[0]] });
-    const view = renderWithQuery(<FeedCard card={singleQCard} />);
+    const view = renderWithQuery(
+      <FeedCard card={singleQCard} queueItem={makeQueueItem({ humanQuestions: [TWO_QUESTIONS[0]] })} />,
+    );
     fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
 
     await waitFor(() => {
@@ -672,7 +772,61 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
     });
   });
 
-  it("handles insecure context without crypto.randomUUID, plain-text 500 error, failed refetch on decision_revision_changed, and stale queueItem revision on remount", async () => {
+  it("keeps the session attention cache bounded to only answered asks within the 50-item cap", async () => {
+    const makeAttItem = (id: string): AttentionQueueItem => ({
+      qitemId: id,
+      tsCreated: "2026-11-06T00:00:00Z",
+      tsUpdated: "2026-11-06T00:00:00Z",
+      sourceSession: "lead@demo",
+      destinationSession: "human@host",
+      state: "pending",
+      priority: "normal",
+      tier: null,
+      tags: null,
+      blockedOn: null,
+      handedOffTo: null,
+      handedOffFrom: null,
+      body: `Item ${id}`,
+    });
+
+    let serverItems = Array.from({ length: 50 }, (_, i) => makeAttItem(`q-${i + 1}`));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(serverItems)),
+    );
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    );
+
+    const { result } = renderHook(() => useAttentionItems(50, false), { wrapper });
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(50));
+
+    // Only retain q-1 (the ask the user answered); q-2 is merely seen and must NOT be retained
+    retainAttentionItemInSession("q-1", serverItems[0]);
+
+    // Server next returns q-3..q-52 (50 items; both q-1 and q-2 are no longer on the server list)
+    serverItems = Array.from({ length: 50 }, (_, i) => makeAttItem(`q-${i + 3}`));
+    await result.current.refetch();
+
+    await waitFor(() => {
+      const ids = result.current.data!.items.map((i) => i.qitemId);
+      // Capped at 50 items total (not 51)
+      expect(ids).toHaveLength(50);
+    });
+
+    // When server has fewer than 50 items (e.g. q-3..q-10), q-1 is retained and q-2 (unanswered) is not
+    serverItems = Array.from({ length: 8 }, (_, i) => makeAttItem(`q-${i + 3}`));
+    await result.current.refetch();
+    await waitFor(() => {
+      const ids = result.current.data!.items.map((i) => i.qitemId);
+      expect(ids).toContain("q-1");
+      expect(ids).not.toContain("q-2");
+    });
+  });
+
+  it("handles insecure context without crypto.randomUUID, plain-text 502 error, failed refetch on decision_revision_changed, and stale queueItem revision on remount", async () => {
     const origCrypto = globalThis.crypto;
     vi.stubGlobal("crypto", {
       getRandomValues: (arr: Uint8Array) => origCrypto.getRandomValues(arr),
@@ -718,14 +872,7 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
       }),
     );
 
-    const staleQueueItem = {
-      qitemId: "q-ask-1",
-      sourceSession: "lead@demo",
-      destinationSession: "human@host",
-      state: "pending",
-      decisionRevision: "rev-1",
-      humanQuestions: TWO_QUESTIONS,
-    } as unknown as QueueItemDetail;
+    const staleQueueItem = makeQueueItem({ decisionRevision: "rev-1" });
 
     const qc = new QueryClient({
       defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -744,6 +891,7 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
       expect(view.getByTestId("feed-card-answer-error-message-queue-attention-q-ask-1").textContent).toBe(
         "HTTP 502: Gateway Timeout: upstream unavailable",
       );
+      expect(view.getByTestId("feed-card-answer-refresh-queue-attention-q-ask-1")).toBeTruthy();
     });
 
     // 2. Retry reuses the same getRandomValues operationId and reconciles (refreshing queue + attention)

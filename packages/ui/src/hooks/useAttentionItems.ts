@@ -99,26 +99,39 @@ async function fetchAggregatedAttention(limit?: number): Promise<AttentionData> 
  * instead of the single-host list. Callers pass true ONLY when a remote
  * host subscription is enabled — zero-config stays on the legacy wire.
  */
-const seenAttentionItems = new Map<string, AttentionQueueItem>();
-const retainedAttentionKeys = new Set<string>();
-const attentionKey = (qitemId: string, hostId?: string | null) =>
-  `${hostId && hostId !== "local" ? hostId : "local"}:${qitemId}`;
+const MAX_RETAINED_ATTENTION_ITEMS = 50;
+const retainedAttentionItems = new Map<string, AttentionQueueItem>();
 
-export function retainAttentionItemInSession(qitemId: string, hostId?: string | null): void {
-  retainedAttentionKeys.add(attentionKey(qitemId, hostId));
+export function retainAttentionItemInSession(qitemId: string, item?: AttentionQueueItem | null): void {
+  const next = item ?? retainedAttentionItems.get(qitemId);
+  if (!next) return;
+  retainedAttentionItems.delete(qitemId);
+  if (retainedAttentionItems.size >= MAX_RETAINED_ATTENTION_ITEMS) {
+    const oldestKey = retainedAttentionItems.keys().next().value;
+    if (oldestKey !== undefined) retainedAttentionItems.delete(oldestKey);
+  }
+  retainedAttentionItems.set(qitemId, next);
 }
 
-function mergeRetained(items: AttentionQueueItem[], aggregated: boolean): AttentionQueueItem[] {
-  const present = new Set(items.map((i) => {
-    const key = attentionKey(i.qitemId, i.hostId);
-    seenAttentionItems.set(key, i);
-    return key;
-  }));
-  const extra = [...retainedAttentionKeys]
-    .filter((k) => !present.has(k) && (aggregated || k.startsWith("local:")))
-    .map((k) => seenAttentionItems.get(k))
-    .filter((i): i is AttentionQueueItem => Boolean(i));
-  return extra.length ? [...items, ...extra] : items;
+export function clearRetainedAttentionItems(): void {
+  retainedAttentionItems.clear();
+}
+
+function mergeRetained(items: AttentionQueueItem[], limit: number | undefined, aggregated: boolean): AttentionQueueItem[] {
+  const present = new Set<string>();
+  for (const item of items) {
+    if (!item.hostId || item.hostId === "local") {
+      present.add(item.qitemId);
+      if (retainedAttentionItems.has(item.qitemId)) {
+        retainedAttentionItems.set(item.qitemId, item);
+      }
+    }
+  }
+  const extra = [...retainedAttentionItems.values()].filter(
+    (item) => !present.has(item.qitemId) && (aggregated || !item.hostId || item.hostId === "local"),
+  );
+  const combined = extra.length ? [...items, ...extra] : items;
+  return limit !== undefined ? combined.slice(0, limit) : combined;
 }
 
 export function useAttentionItems(limit: number = 50, aggregated: boolean = false) {
@@ -127,10 +140,10 @@ export function useAttentionItems(limit: number = 50, aggregated: boolean = fals
     queryFn: aggregated
       ? async () => {
           const data = await fetchAggregatedAttention(limit);
-          return { items: mergeRetained(data.items, true), hosts: data.hosts };
+          return { items: mergeRetained(data.items, limit, true), hosts: data.hosts };
         }
       : async () => ({
-          items: mergeRetained(await fetchAttentionItems(limit), false),
+          items: mergeRetained(await fetchAttentionItems(limit), limit, false),
           hosts: [],
         }),
     staleTime: 15_000,

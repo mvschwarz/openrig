@@ -85,18 +85,13 @@ async function postAction(input: MissionControlActionInput): Promise<MissionCont
     headers: { "Content-Type": "application/json", ...missionControlAuthHeaders() },
     body: JSON.stringify(input),
   });
+  const rawText = await res.text();
   let body: unknown;
-  let rawText = "";
-  if (res.ok) {
-    body = await res.json();
-  } else {
-    rawText = await res.text();
-    if (rawText) {
-      try {
-        body = JSON.parse(rawText);
-      } catch {
-        body = undefined;
-      }
+  if (rawText) {
+    try {
+      body = JSON.parse(rawText);
+    } catch {
+      body = undefined;
     }
   }
   if (!res.ok) {
@@ -106,16 +101,7 @@ async function postAction(input: MissionControlActionInput): Promise<MissionCont
     if (typeof body === "object" && body) {
       message = `HTTP ${res.status}`;
       const record = body as Record<string, unknown>;
-      if (record.error === "remote_action_failed") {
-        const parts = ["remote_action_failed"];
-        if (typeof record.detail === "string" && record.detail.length > 0) {
-          parts.push(record.detail);
-        }
-        if (typeof record.remoteStatus === "number") {
-          parts.push(`remote status ${record.remoteStatus}`);
-        }
-        message = parts.join(" · ");
-      } else if (typeof record.message === "string" && record.message.length > 0) {
+      if (typeof record.message === "string" && record.message.length > 0) {
         message = record.message;
       }
       if (typeof record.error === "string" && record.error.length > 0) {
@@ -126,6 +112,9 @@ async function postAction(input: MissionControlActionInput): Promise<MissionCont
     if (code) err.code = code;
     err.details = body;
     throw err;
+  }
+  if (!body || typeof body !== "object") {
+    throw new Error("Invalid JSON response from action endpoint");
   }
   return body as MissionControlActionResult;
 }
