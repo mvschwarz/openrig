@@ -26,6 +26,11 @@
 > answer, reboot recovery, and the model OpenRig observes. Any other runner, provider or path is unqualified until
 > it's shown.
 >
+> **Since 0.7.8, on one stack:** the dsh example runner has run with a real dsh 0.2.1-rc.2 on dsh's pi-ai OpenRouter
+> chat-completions profile with `deepseek/deepseek-v4-flash`: queue work, activity, an allow-once and a reject-once
+> answered by an automated test operator, cancel, and an exact return with resume added to a copy of the preset. A
+> missing conversation's refusal hasn't been run, and the preset still declares no resume.
+>
 > Release status and pinned references are in the [joined author guide](author-contracts.md). The
 > [community presets reference](community-harness-presets.md) describes the implemented fields, including the runner
 > preset's exception for approvals; this chapter also labels runner-author behavior that isn't qualified.
