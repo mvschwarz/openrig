@@ -608,6 +608,15 @@ describe("Codex runtime adapter", () => {
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedFreshLaunchCommand());
   });
 
+  it("launch.codex_login_shell on keeps Codex's own login shells: the fresh launch has no non-login flag", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: () => [], sleep: async () => {}, codexLoginShell: () => true });
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedFreshLaunchCommand().replace(" -c 'allow_login_shell=false'", ""));
+  });
+
   it("launchHarness passes the requested Codex model on fresh launch", async () => {
     const tmux = mockTmux();
     const adapter = new CodexRuntimeAdapter({

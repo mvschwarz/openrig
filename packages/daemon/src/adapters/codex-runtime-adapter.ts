@@ -180,6 +180,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // #275: Codex's own answer on whether the plain floor may get network access. Startup wires the
   // real reader; absent keeps every invocation unchanged.
   private readNetworkDefault?: CodexNetworkDefaultReader;
+  // launch.codex_login_shell: true keeps Codex's own login shells for tool commands. Absent: off.
+  private codexLoginShell?: () => boolean;
   // Issue #121: git metadata dirs for the `--add-dir`s of fresh, resume and fork (a linked worktree's `.git` is a file).
   // Default = the real resolver; tests may inject a controlled one.
   private resolveGitAddDirs: CodexGitAddDirResolver;
@@ -234,6 +236,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     profileFingerprint?: (path: string) => Promise<ProfileFingerprint>;
     detectDaemonSupport?: CodexDaemonSupportDetector;
     readNetworkDefault?: CodexNetworkDefaultReader;
+    codexLoginShell?: () => boolean;
     resolveGitAddDirs?: CodexGitAddDirResolver;
     /** The seat's own topology folder, ready to write (its LEARNED.md and recap). Absent: no seat folder is added. */
     prepareSeatFolder?: PrepareCodexSeatFolder;
@@ -271,6 +274,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.launchPath = deps.launchPath;
     this.detectDaemonSupport = deps.detectDaemonSupport;
     this.readNetworkDefault = deps.readNetworkDefault;
+    this.codexLoginShell = deps.codexLoginShell;
     this.resolveGitAddDirs = deps.resolveGitAddDirs ?? resolveCodexGitAddDirs;
     this.activityRelayPath = deps.activityRelayPath;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
@@ -1141,7 +1145,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut } : appliedLaunch;
     return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonOptOut, daemonArg, networkArg,
-      loginShellArg: codexNonLoginShellArg };
+      loginShellArg: this.codexLoginShell?.() ? "" : codexNonLoginShellArg };
   }
 
   private resumeCore(prepared: PreparedCodexLaunch, resumeToken: string, binding: NodeBinding): string {

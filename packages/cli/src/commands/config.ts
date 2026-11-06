@@ -104,6 +104,11 @@ Keys:
   retention.*            enabled, transitions_days, watchdog_days,
                          watchdog_keep_per_job, batch_size
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
+  launch.codex_login_shell  let managed Codex seats run tool commands in login shells, Codex's own default (default off)
+                         Off, tool commands keep the seat's own environment, so OpenRig's command folder stays on PATH
+                         and plain rig works wherever OpenRig is installed. Turn on if a seat's pane doesn't start a
+                         login shell (a tmux default-command) and its tools need setup only your login files make.
+                         Then a login file that sets PATH outright can hide rig. Applies at each seat's next launch.
   terminal.inherit_tmux_environment  inherit stored tmux global values for new agents and successors (default off)
                          POSIX launches otherwise start from daemon + seat environment, preserving shell startup.
                          Turn on for custom setups that intentionally rely on tmux globals. Running agents are unchanged.

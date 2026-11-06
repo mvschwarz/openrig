@@ -73,6 +73,14 @@ describe("CodexResumeAdapter", () => {
       expect(sendText.mock.invocationCallOrder[0]).toBeLessThan(sendKeys.mock.invocationCallOrder[0]!);
     });
 
+    it("launch.codex_login_shell on: the legacy resume keeps Codex's own login shells", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({ sendText, sendKeys: vi.fn(async () => ({ ok: true as const })) });
+      const adapter = new CodexResumeAdapter(tmux, { codexLoginShell: () => true });
+      await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'uuid-123'");
+    });
+
     it("0.5.2-07: a SPEC-pinned model threads -m onto the legacy codex resume command", async () => {
       const sendText = vi.fn(async () => ({ ok: true as const }));
       const sendKeys = vi.fn(async () => ({ ok: true as const }));

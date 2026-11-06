@@ -112,6 +112,7 @@ export const SETTINGS_VALID_KEYS = [
   "skills.router_line.enabled",
   "onboarding.default_pack.enabled",
   "launch.non_interruptive",
+  "launch.codex_login_shell",
   "health.context_pressure.warning_percent",
   "health.context_pressure.critical_percent",
   "files.allowlist",
@@ -273,6 +274,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "skills.router_line.enabled": { primary: "OPENRIG_SKILLS_ROUTER_LINE_ENABLED" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   "launch.non_interruptive": { primary: "OPENRIG_LAUNCH_NON_INTERRUPTIVE" },
+  "launch.codex_login_shell": { primary: "OPENRIG_LAUNCH_CODEX_LOGIN_SHELL" },
   "health.context_pressure.warning_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT" },
   "health.context_pressure.critical_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_CRITICAL_PERCENT" },
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST" },
@@ -380,6 +382,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "skills.router_line.enabled": ["skills", "routerLine", "enabled"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "launch.non_interruptive": ["launch", "nonInterruptive"],
+  "launch.codex_login_shell": ["launch", "codexLoginShell"],
   "health.context_pressure.warning_percent": ["health", "contextPressure", "warningPercent"],
   "health.context_pressure.critical_percent": ["health", "contextPressure", "criticalPercent"],
   "files.allowlist": ["files", "allowlist"],
@@ -677,6 +680,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "skills.router_line.enabled": return false;
     case "onboarding.default_pack.enabled": return true;
     case "launch.non_interruptive": return false;
+    case "launch.codex_login_shell": return false;
     case "health.context_pressure.warning_percent": return 95;
     case "health.context_pressure.critical_percent": return 99;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
