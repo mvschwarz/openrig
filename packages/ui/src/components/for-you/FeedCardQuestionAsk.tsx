@@ -342,7 +342,7 @@ export function FeedCardQuestionAsk({
     if (!isTerminalOrigin && !opts?.fromUnknown && !opts?.fromLoadRetry) return;
     const effectiveItem = refreshed ?? queueItem ?? null;
     const effectiveState = normToken(refreshed?.state ?? fallbackState ?? queueItem?.state ?? "pending");
-    if (!TERMINAL_STATES.has(effectiveState)) {
+    if (opts?.code !== "qitem_already_terminal" && !TERMINAL_STATES.has(effectiveState)) {
       setSettledState(null);
       saveSnapshot({ revision: nextRev ?? localRevision, settled: null });
       return;

@@ -515,11 +515,24 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
   });
 
   it("refreshes the queue row on qitem_already_terminal and shows actual non-answered state (e.g. dropped) without offering to resend", async () => {
+    let mode: "withState" | "noStateFailedRefetch" = "withState";
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: RequestInfo | URL) => {
         const u = String(url);
         if (u.includes("/api/mission-control/action")) {
+          if (mode === "noStateFailedRefetch") {
+            return jsonResponse(
+              {
+                error: "qitem_already_terminal",
+                message: "qitem q-ask-1 was already answered by alex@external (q-reply-2).",
+                qitemId: "q-ask-1",
+                answeredBy: "alex@external",
+                replyQitemId: "q-reply-2",
+              },
+              409,
+            );
+          }
           return jsonResponse(
             {
               error: "qitem_already_terminal",
@@ -531,6 +544,9 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
           );
         }
         if (u.includes("/api/queue/q-ask-1")) {
+          if (mode === "noStateFailedRefetch") {
+            return new Response("Service Unavailable", { status: 503 });
+          }
           return jsonResponse({
             qitemId: "q-ask-1",
             state: "done",
@@ -557,6 +573,19 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     });
     expect(view.queryByTestId("feed-card-option-channel-stable")).toBeNull();
     expect(view.queryByTestId("feed-card-send-answers-queue-attention-q-ask-1")).toBeNull();
+
+    // Even when qitem_already_terminal has no details.state (answeredByAnother form) and the refetch fails,
+    // the card must stay settled and never restore live answer buttons.
+    cleanup();
+    clearQuestionAskSessionSnapshots();
+    mode = "noStateFailedRefetch";
+    const noStateView = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
+    fireEvent.click(noStateView.getByTestId("feed-card-option-channel-stable"));
+    await waitFor(() => {
+      const settled = noStateView.getByTestId("feed-card-answer-settled-queue-attention-q-ask-1");
+      expect(settled.textContent).toContain("qitem q-ask-1 was already answered by alex@external (q-reply-2).");
+    });
+    expect(noStateView.queryByTestId("feed-card-option-channel-stable")).toBeNull();
   });
 
   it("refreshes the queue row on decision_revision_changed when another person settled the ask and shows their recorded answer", async () => {
@@ -854,7 +883,7 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     });
 
     const calls: Array<Record<string, unknown>> = [];
-    let mode: "plain500" | "reconciled" | "revChangedDone" = "plain500";
+    let mode: "plain500" | "json500" | "reconciled" | "revChangedDone" = "plain500";
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -862,6 +891,9 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
           calls.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
           if (mode === "plain500") {
             return new Response("Gateway Timeout: upstream unavailable", { status: 502 });
+          }
+          if (mode === "json500") {
+            return jsonResponse({ error: "internal_error", message: "SQLite busy" }, 500);
           }
           if (mode === "reconciled") {
             return jsonResponse({
@@ -915,11 +947,24 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
       expect(view.getByTestId("feed-card-answer-refresh-queue-attention-q-ask-1")).toBeTruthy();
     });
 
+    // 1b. JSON 500 error with error code is also treated as unknown outcome (with refresh button)
+    mode = "json500";
+    fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await waitFor(() => {
+      const alert = view.getByTestId("feed-card-answer-error-queue-attention-q-ask-1");
+      expect(alert.textContent).toContain("Outcome unknown — couldn't confirm whether your answer went through.");
+      expect(view.getByTestId("feed-card-answer-error-message-queue-attention-q-ask-1").textContent).toBe(
+        "SQLite busy",
+      );
+      expect(view.getByTestId("feed-card-answer-refresh-queue-attention-q-ask-1")).toBeTruthy();
+    });
+
     // 2. Retry reuses the same getRandomValues operationId and reconciles (refreshing queue + attention)
     mode = "reconciled";
     fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
-    await waitFor(() => expect(calls).toHaveLength(2));
-    expect((calls[1]!.auditNotes as Record<string, unknown>).operationId).toBe(firstOpId);
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect((calls[2]!.auditNotes as Record<string, unknown>).operationId).toBe(firstOpId);
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["queue", "item", "q-ask-1"] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["attention-items"] });
 
@@ -930,8 +975,8 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     mode = "revChangedDone";
     const remounted = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={staleQueueItem} />, qc);
     fireEvent.click(remounted.getByTestId("feed-card-option-changelog-no"));
-    await waitFor(() => expect(calls).toHaveLength(3));
-    expect(calls[2]!.expectedRevision).toBe("rev-2");
+    await waitFor(() => expect(calls).toHaveLength(4));
+    expect(calls[3]!.expectedRevision).toBe("rev-2");
 
     await waitFor(() => {
       expect(remounted.getByTestId("feed-card-answer-settled-queue-attention-q-ask-1")).toBeTruthy();
