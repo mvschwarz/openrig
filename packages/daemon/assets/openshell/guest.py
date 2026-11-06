@@ -169,8 +169,9 @@ def launch(root):
                 "OPENRIG_ENVIRONMENT_BINDING": value["bindingId"]})
     if safe(root, "control/provider-api-ref").exists():
         atomic(root, "native/settings.json", json.dumps({"apiKeyHelper": "cat /sandbox/openrig/control/provider-api-ref"}).encode())
-    # Provider-owned injection may supply these native endpoint references. No host environment is copied.
-    for name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"):
+    # Preserve the guest exec's provider and CA references without broad environment inheritance.
+    for name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE",
+                 "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
         if name in os.environ:
             env[name] = os.environ[name]
     argv = ["/usr/local/bin/claude", "--resume" if value.get("resumeToken") else "--session-id", value["nativeId"], "--strict-mcp-config", "--mcp-config", str(safe(root, "control/coordination.json"))]
