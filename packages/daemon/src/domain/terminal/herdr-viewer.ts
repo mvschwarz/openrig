@@ -204,7 +204,7 @@ export class HerdrViewer {
       // shared attach wrapper may be its parent; no mutable title/agent label.
       const argv = entry.argv;
       const server = argv.slice(6); // tileAttachArgv: sh,-c,script,name,session,tmux,...server
-      // A writable tile drops ignore-size when its session has no other sizing client (tile-attach).
+      // Recognize legacy ignore-size writable clients as well as current sizing attaches.
       const flags = entry.readOnly ? [["-r"]] : [["-f", "ignore-size"], []];
       const targetName = argv[4]!;
       const verified = info?.foreground_processes?.some(p => {

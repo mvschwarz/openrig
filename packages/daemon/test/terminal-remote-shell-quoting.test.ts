@@ -39,7 +39,7 @@ it.each(["inherit", "isolated"] as const)("keeps remote session names intact thr
         });
         expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(mode === "isolated"
           ? ["local", "terminal", "attach", ...(readOnly ? ["--read-only"] : []), "--", session]
-          : ["attach", ...(readOnly ? ["-r"] : ["-f", "ignore-size"]), "-t", session]);
+          : ["attach", ...(readOnly ? ["-r"] : []), "-t", session]);
       }
     }
   } finally {
