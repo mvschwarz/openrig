@@ -67,9 +67,14 @@ export class PiResumeAdapter {
     resolvedPosture?: "floor" | "full_bypass" | "auto",
     // The seat's resolved effort, sent as Pi's --thinking (OMP unchanged).
     effort?: string | null,
+    launchWrapper?: readonly string[],
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: `${this.label} resume not available` };
+    }
+    const wrapped = launchWrapper?.length ? launchWrapper : undefined;
+    if (wrapped && (this.runtime !== "pi" || !this.options.seatLaunchEnvironment)) {
+      return { ok: false, code: "resume_failed", message: "launch_wrapper support unavailable; no agent started." };
     }
     const sessionFile = resumeToken!;
 
@@ -77,6 +82,15 @@ export class PiResumeAdapter {
       // The honest zero-session outcome: the caller's retry_fresh mapping
       // realizes the awaiting-decision stop-and-ask (BR-6).
       return { ok: false, code: "retry_fresh", message: `${this.label} resume failed: the persisted session file no longer exists` };
+    }
+
+    let resolvedWrapper: string[] | undefined;
+    if (wrapped) {
+      try {
+        resolvedWrapper = this.options.seatLaunchEnvironment!.resolveLaunchWrapper(wrapped);
+      } catch {
+        return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." };
+      }
     }
 
     const seat = piSeatPaths(this.paths.stateRoot, tmuxSessionName);
@@ -117,6 +131,7 @@ export class PiResumeAdapter {
       launchId,
       usageFacts: this.runtime === "pi" && (this.options.usageFactsEnabled?.() ?? false),
       openRouterCharge: this.runtime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
+      ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
     });
 
     const command = this.runtime === "pi" && this.options.seatLaunchEnvironment

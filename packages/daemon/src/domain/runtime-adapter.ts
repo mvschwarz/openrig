@@ -28,6 +28,7 @@ export interface NodeBinding extends Binding {
   accountToken?: import("./claude-seat-token.js").ClaudeSeatTokenRef | null;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
+  launchWrapper?: readonly string[];
   /** A Codex seat's own permission envelope, read live; emitted instead of the posture decision. */
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Rebuild only: a process/conversation-bound native predecessor policy. */

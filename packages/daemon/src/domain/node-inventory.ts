@@ -32,6 +32,7 @@ import { communityHarnessLabel } from "./community-harness-presets.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
+import { isLaunchWrapperRuntime, parseStoredLaunchWrapper } from "./launch-wrapper.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 
 // -- Row types for SQL results --
@@ -50,6 +51,7 @@ interface InventoryRow {
   effort_choice: string | null;
   codex_config_profile: string | null;
   claude_mcp: ClaudeMcp | null;
+  launch_wrapper: string | null;
   agent_ref: string | null;
   profile: string | null;
   cwd: string | null;
@@ -654,6 +656,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${nodeColumnOrNull("effort_choice")} as effort_choice,
       ${codexConfigProfileSelect} as codex_config_profile,
       ${nodeColumnOrNull("claude_mcp")} as claude_mcp,
+      ${nodeColumnOrNull("launch_wrapper")} as launch_wrapper,
       n.agent_ref,
       n.profile,
       n.cwd,
@@ -741,6 +744,10 @@ function buildInventoryEntry(
   ctx: InventoryBuildContext,
 ): NodeInventoryEntry {
   const { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts } = ctx;
+  const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.node_id} launch_wrapper`);
+  if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
+    throw new Error(`Seat ${row.node_id} launch_wrapper: only valid when runtime is "pi" or "codex"`);
+  }
   const effortResolution = resolveSeatEffort({ effort: row.effort, effortChoice: row.effort_choice });
   // FS-1 W1.3 S1 — O(1) lookup into the once-per-rig restore-outcome map
   // (byte-identical to the prior per-node deriveRestoreOutcome; "n-a" when a node
@@ -790,6 +797,7 @@ function buildInventoryEntry(
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
     ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: row.session_community_runner === 1 }) } : {}),
+    ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
     // An explicit down records a failed start's rolled-back session without changing its superseded status.

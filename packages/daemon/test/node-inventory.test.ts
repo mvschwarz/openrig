@@ -1212,3 +1212,57 @@ describe("node detail reports a guidance block's installed file only from eviden
     } finally { fs.rmSync(moved, { recursive: true, force: true }); }
   });
 });
+
+describe("Node inventory launchWrapper projection (#2328)", () => {
+  let db: Database.Database;
+  beforeEach(() => { db = createFullTestDb(); });
+  afterEach(() => { db.close(); });
+
+  it("projects launchWrapper array in getNodeInventory, getNodeInventoryForAllRigs, and getNodeDetail when configured and omits when absent or cleared", () => {
+    const repo = new RigRepository(db);
+    const rig = repo.createRig("wrapper-inv-rig");
+    const wrapped = repo.addNode(rig.id, "dev.pi-wrapped", {
+      runtime: "pi",
+      cwd: "/project",
+      launchWrapper: ["mtn", "sandbox", "exec", "--seat", "synthetic", "--"],
+    });
+    const unwrapped = repo.addNode(rig.id, "dev.codex-plain", {
+      runtime: "codex",
+      cwd: "/project",
+    });
+
+    const entries = getNodeInventory(db, rig.id);
+    const wrappedEntry = entries.find((e) => e.nodeId === wrapped.id)!;
+    const unwrappedEntry = entries.find((e) => e.nodeId === unwrapped.id)!;
+
+    expect(wrappedEntry.launchWrapper).toEqual(["mtn", "sandbox", "exec", "--seat", "synthetic", "--"]);
+    expect(unwrappedEntry.launchWrapper).toBeUndefined();
+    expect("launchWrapper" in unwrappedEntry).toBe(false);
+
+    const allRigsMap = getNodeInventoryForAllRigs(db);
+    expect(allRigsMap.get(rig.id)?.find((e) => e.nodeId === wrapped.id)?.launchWrapper).toEqual([
+      "mtn", "sandbox", "exec", "--seat", "synthetic", "--",
+    ]);
+    expect("launchWrapper" in (allRigsMap.get(rig.id)?.find((e) => e.nodeId === unwrapped.id) ?? {})).toBe(false);
+
+    const detail = getNodeDetail(db, rig.id, "dev.pi-wrapped");
+    expect(detail?.launchWrapper).toEqual(["mtn", "sandbox", "exec", "--seat", "synthetic", "--"]);
+
+    repo.setNodeLaunchWrapper(wrapped.id, []);
+    const clearedEntry = getNodeInventory(db, rig.id).find((e) => e.nodeId === wrapped.id)!;
+    expect(clearedEntry.launchWrapper).toBeUndefined();
+    expect("launchWrapper" in clearedEntry).toBe(false);
+  });
+
+  it("fails closed when stored launch_wrapper is malformed or attached to an unsupported runtime", () => {
+    const repo = new RigRepository(db);
+    const rig = repo.createRig("bad-wrapper-inv-rig");
+    const node = repo.addNode(rig.id, "dev.codex", { runtime: "codex", cwd: "/project" });
+    db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("[]", node.id);
+    expect(() => getNodeInventory(db, rig.id)).toThrow(/launch_wrapper/);
+
+    db.prepare("UPDATE nodes SET runtime = 'claude-code', launch_wrapper = ? WHERE id = ?")
+      .run('["mtn","--"]', node.id);
+    expect(() => getNodeInventory(db, rig.id)).toThrow(/pi|codex/i);
+  });
+});

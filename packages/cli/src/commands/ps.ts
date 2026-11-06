@@ -88,6 +88,8 @@ interface NodeEntry {
   storedSessionStatus?: string | null;
   /** A community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
+  /** Configured literal argv prefix wrapping local built-in Pi/Codex launches; omitted when absent. */
+  launchWrapper?: string[];
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
    *  NEVER derived from terminalActive. */
   hasAssignedWork?: boolean;
@@ -217,6 +219,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "nodeKind",
   "runtime",
   "communityHarness",
+  "launchWrapper",
   "model",
   "modelObservation",
   "sessionStatus",
@@ -733,6 +736,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // 15 claude-code seats — see formatDeclaredModel for the render rule.
       runtime: n.runtime ?? null,
       ...(n.communityHarness ? { communityHarness: n.communityHarness } : {}),
+      ...(n.launchWrapper?.length ? { launchWrapper: n.launchWrapper } : {}),
       model: n.model ?? null,
       // Compact tuple: [literal model, evidence source, native record time].
       // Full JSON / --fields retain the complete labelled object and occupant generation.
@@ -930,7 +934,7 @@ contextUsage.percent, contextUsage.state (with --nodes). Other keys are rejected
 activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
-podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarness, model, sessionStatus,
+podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarness, launchWrapper, model, sessionStatus,
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,

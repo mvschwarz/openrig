@@ -5689,4 +5689,164 @@ describe("RestoreOrchestrator", () => {
       expect(delivered).toEqual([]);
     });
   });
+
+  describe("launch_wrapper native resume, fail-closed, and snapshot retention", () => {
+    it("passes current launch_wrapper as the new LAST arg after effort on Pi native resume and after beforeNativeDispatch (with undefined padding) on Codex native resume", async () => {
+      const rig = rigRepo.createRig("r99");
+      const piNode = rigRepo.addNode(rig.id, "pi-worker", {
+        role: "worker",
+        runtime: "pi",
+        cwd: "/repo/pi",
+        model: "pi-model",
+        effort: "high",
+        launchWrapper: ["rtk", "--pi-wrap"],
+      });
+      const codexNode = rigRepo.addNode(rig.id, "codex-worker", {
+        role: "worker",
+        runtime: "codex",
+        cwd: "/repo/codex",
+        model: "gpt-5",
+        launchWrapper: ["rtk", "--codex-wrap"],
+      });
+
+      const piSess = sessionRegistry.registerSession(piNode.id, "r99-pi-worker");
+      db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+        .run("pi_session_file", "/tmp/pi-session.jsonl", "resume_if_possible", piSess.id);
+      sessionRegistry.updateStatus(piSess.id, "running");
+
+      const codexSess = sessionRegistry.registerSession(codexNode.id, "r99-codex-worker");
+      db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+        .run("codex_id", "codex-tok-123", "resume_if_possible", codexSess.id);
+      sessionRegistry.updateStatus(codexSess.id, "running");
+
+      const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+      sessionRegistry.updateStatus(piSess.id, "exited");
+      sessionRegistry.updateStatus(codexSess.id, "exited");
+
+      const piResume = {
+        canResume: vi.fn((type: string | null, token: string | null) => type === "pi_session_file" && !!token),
+        resume: vi.fn(async () => ({ ok: true as const })),
+      } as unknown as PiResumeAdapter;
+      const codexResume = mockCodexResume({ ok: true as const });
+
+      const orch = createOrchestrator({
+        pi: piResume,
+        codex: codexResume,
+        listProcesses: nativeLineage("codex", "codex-tok-123"),
+      });
+
+      const result = await orch.restore(snap.id);
+      expect(result.ok).toBe(true);
+
+      // Pi resume: (sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort, launchWrapper)
+      const piCall = (piResume.resume as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect(piCall).toBeDefined();
+      expect(piCall).toHaveLength(8);
+      expect(piCall[6]).toBe("high");
+      expect(piCall[7]).toEqual(["rtk", "--pi-wrap"]);
+
+      // Codex resume: 7 base args + 7 tail args (effort, nonInterruptive, kernelAuthority, teamPermissionDefault, seatCodexHome, codexPermissions, beforeNativeDispatch) + launchWrapper at index 14
+      const codexCall = (codexResume.resume as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect(codexCall).toBeDefined();
+      expect(codexCall).toHaveLength(15);
+      expect(codexCall[0]).toBe("r99-codex-worker");
+      expect(codexCall[1]).toBe("codex_id");
+      expect(codexCall[2]).toBe("codex-tok-123");
+      expect(codexCall[3]).toBe("/repo/codex");
+      expect(codexCall[6]).toBe("gpt-5");
+      // Tail indices 0..6 (overall 7..13): effort=null at 7, teamPermissionDefault=true at 10, indices 11..13 padded with undefined
+      expect(codexCall[7]).toBeNull();
+      expect(codexCall[8]).toBe(false);
+      expect(codexCall[9]).toBe(false);
+      expect(codexCall[10]).toBe(true);
+      expect(codexCall[11]).toBeUndefined();
+      expect(codexCall[12]).toBeUndefined();
+      expect(codexCall[13]).toBeUndefined();
+      expect(codexCall[14]).toEqual(["rtk", "--codex-wrap"]);
+    });
+
+    it("fails closed before native dispatch when stored launch_wrapper is unreadable/corrupt", async () => {
+      const rig = rigRepo.createRig("r99");
+      const codexNode = rigRepo.addNode(rig.id, "worker-b", { role: "worker", runtime: "codex", cwd: "/repo" });
+      const piNode = rigRepo.addNode(rig.id, "worker-pi", { role: "worker", runtime: "pi", cwd: "/repo" });
+      db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("{corrupt-json", codexNode.id);
+      db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("[]", piNode.id);
+
+      const codexResume = mockCodexResume({ ok: true as const });
+      const piResume = {
+        canResume: vi.fn(() => true),
+        resume: vi.fn(async () => ({ ok: true as const })),
+      } as unknown as PiResumeAdapter;
+      const orch = createOrchestrator({
+        claude: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as ClaudeResumeAdapter,
+        codex: codexResume,
+        pi: piResume,
+      });
+
+      const codexAttempt = await (orch as any).attemptResume(
+        codexNode.id,
+        "r99-worker-b",
+        "codex_id",
+        "codex-tok-corrupt",
+        "/repo",
+        null,
+        "gpt-5",
+        "floor",
+      );
+      expect(codexAttempt).toMatchObject({
+        kind: "failed",
+        message: expect.stringMatching(/^Permission selection:.*launch_wrapper/),
+      });
+      expect(codexResume.resume).not.toHaveBeenCalled();
+
+      (orch as any).codexResume.canResume = vi.fn(() => false);
+      const piAttempt = await (orch as any).attemptResume(
+        piNode.id,
+        "r99-worker-pi",
+        "pi_session_file",
+        "/tmp/pi.jsonl",
+        "/repo",
+        null,
+        "pi-model",
+        "floor",
+      );
+      expect(piAttempt).toMatchObject({
+        kind: "failed",
+        message: expect.stringMatching(/^Permission selection:.*launch_wrapper/),
+      });
+      expect(piResume.resume).not.toHaveBeenCalled();
+    });
+
+    it("older snapshots captured without launchWrapper never erase the current row's launch_wrapper", async () => {
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker-b", role: "worker", runtime: "codex", cwd: "/repo" }],
+        edges: [],
+        resumeType: "codex_id",
+        resumeToken: "codex-tok-older-snap",
+      });
+      const nodeId = snap.data.nodes[0]!.id;
+      // Ensure snapshot node payload has no launchWrapper (simulating older snapshot before wrapper was set)
+      const olderSnap = updateSnapshotData(snap, (data) => {
+        for (const n of data.nodes) delete n.launchWrapper;
+      });
+      db.prepare("UPDATE sessions SET status = 'exited'").run();
+
+      // Current live row now has a launch_wrapper
+      rigRepo.setNodeLaunchWrapper(nodeId, ["rtk", "--live-row"]);
+      expect(rigRepo.getRig(snap.rigId)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--live-row"]);
+
+      const codexResume = mockCodexResume({ ok: true as const });
+      const orch = createOrchestrator({
+        codex: codexResume,
+        listProcesses: nativeLineage("codex", "codex-tok-older-snap"),
+      });
+      const result = await orch.restore(olderSnap.id);
+      expect(result.ok).toBe(true);
+
+      // Current row's launch_wrapper is preserved and passed to resume
+      expect(rigRepo.getRig(snap.rigId)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--live-row"]);
+      const codexCall = (codexResume.resume as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect(codexCall[14]).toEqual(["rtk", "--live-row"]);
+    });
+  });
 });

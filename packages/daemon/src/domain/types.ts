@@ -38,6 +38,8 @@ export interface Node {
   advisor?: string | null;
   /** Claude MCP loading for this seat; null/absent preserves the provider default. */
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp | null;
+  /** Optional argv prefix wrapping local built-in Pi/Codex launches; null/absent = none. */
+  launchWrapper?: string[] | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -787,6 +789,8 @@ export interface NodeInventoryEntry {
   agentRef: string | null;
   profile: string | null;
   codexConfigProfile?: string | null;
+  /** Optional argv prefix wrapping local built-in Pi/Codex launches; null/absent = none. */
+  launchWrapper?: string[];
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF, or null when none is attached. */
   permissionPolicy?: string | null;
   resolvedSpecName: string | null;
@@ -1132,6 +1136,8 @@ export interface LegacyRigSpecNode {
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
+  /** Optional argv prefix wrapping local built-in Pi/Codex launches (`[]` explicitly clears). */
+  launchWrapper?: string[];
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1257,6 +1263,8 @@ export interface RigSpecPodMember {
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   /** A Codex member's own permission envelope; the seat's live record afterwards. */
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
+  /** Optional argv prefix wrapping local built-in Pi/Codex launches (`[]` explicitly clears). */
+  launchWrapper?: string[];
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;

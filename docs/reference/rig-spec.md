@@ -2,7 +2,7 @@
 
 Version: 0.2 (pod-aware)
 Last validated against code: 2026-10-07, at the 0.6.6 cut `2620dea8` (whole document at `fcaf1f8e`; changes to its sources since then checked)
-Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/startup-validation.ts`, `packages/daemon/src/domain/permission-policy/policy-ref.ts`, `packages/daemon/src/domain/profile-resolver.ts`, `packages/daemon/src/domain/rigspec-preflight.ts`, `packages/daemon/src/adapters/kernel-authority.ts`, `packages/daemon/src/domain/native-permission-store.ts`, `packages/daemon/src/domain/codex-team-workspace.ts`
+Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/launch-wrapper.ts`, `packages/daemon/src/domain/startup-validation.ts`, `packages/daemon/src/domain/permission-policy/policy-ref.ts`, `packages/daemon/src/domain/profile-resolver.ts`, `packages/daemon/src/domain/rigspec-preflight.ts`, `packages/daemon/src/adapters/kernel-authority.ts`, `packages/daemon/src/domain/native-permission-store.ts`, `packages/daemon/src/domain/codex-team-workspace.ts`
 
 This is the canonical reference for the pod-aware RigSpec YAML format. Every field, validation rule, and default documented here was traced from the actual parser and validator code, not from prior documentation.
 
@@ -750,6 +750,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `effort` | string | no | — | Reasoning effort override, trimmed. Claude gets `--effort`, Codex `-c model_reasoning_effort=…`, Pi `--thinking` (see "Pi" below). A non-string value is ignored with an advisory. |
 | `advisor` | string | no | — | Claude-only Advisor model for this seat. Overrides the AgentSpec profile/default; blank or non-string values are ignored with an advisory. |
 | `claude_mcp` | `none` | no | normal loading | Claude members only. Disable MCP server loading for this agent on every launch and resume. Omit the field to keep Claude's normal configuration; see [Claude MCP loading](#claude-mcp-loading-runtime-claude-code). |
+| `launch_wrapper` | string[] | no | — | Local built-in `pi` and `codex` members only. Literal argument prefix prepended before the managed launch command on fresh launch, relaunch, rebuild, resume, fork, restore and handover; `[]` explicitly clears a stored wrapper when re-applying an authored spec, while omitting the key leaves an existing seat's stored choice unchanged. See [Launch wrapper](#launch-wrapper-runtime-pi-and-codex). |
 | `permission_policy` | string | no | — | Member-level permission policy; overrides the rig's. Not valid on terminal members. |
 | `env` | map | no | — | Launch environment for this seat, laid over the rig's `env`. Same rules as the rig-level field. Valid on terminal members too. See "Launch environment" below. |
 | `agent_file` | string | no | — | Claude members only. A Claude agent definition (a `.md` file with `name` in its frontmatter) for this seat. It's copied into the seat's own storage and launched as `--agent openrig:<name>`. A path beside the spec: no `..`, not absolute. |
@@ -886,6 +887,26 @@ This requires a Claude Code version that supports `--advisor`. OpenRig never wri
 `advisorModel` to user or project settings. Members sharing a checkout can therefore
 choose different Advisors. When Advisor is unset, no flag is emitted and Claude's
 own defaults/settings apply. Other runtimes ignore this field.
+
+### Launch wrapper (`runtime: pi` and `codex`)
+
+Set `launch_wrapper` on a local built-in `pi` or `codex` member to prefix its managed launch command with a literal argv vector:
+
+```yaml
+members:
+  - id: impl
+    agent_ref: local:agents/impl
+    profile: default
+    runtime: codex
+    cwd: .
+    launch_wrapper: ["launcher", "exec", "--profile", "seat-a", "--"]
+```
+
+- **Scope and literal argv:** Supported only on local built-in `runtime: pi` and `runtime: codex` members (and legacy flat `pi`/`codex` nodes); other runtimes (`claude-code`, `omp`, `terminal`, `stub` and community harnesses) reject the field, including `[]`. There is no rig-level, pod-level or fork inheritance: a fork uses its target member's own `launch_wrapper`. Every element must be a string without NUL, CR or LF characters and is quoted literally with `shellQuote`, preserving argument order, spaces, quotes, shell metacharacters and empty non-executable arguments without shell or template expansion.
+- **Executable resolution and `exec` contract:** `launch_wrapper[0]` must be a non-empty bare command filename on the daemon's launch `PATH` or an absolute path (no relative paths with slashes such as `./x` or `../x`, no `/` in a bare name, and no shell aliases or functions). Preflight and launch resolve `launch_wrapper[0]` to an executable file using the daemon's launch `PATH` and daemon working directory (before the seat's `rig` bin directory is prepended). For `codex`, the prefix appears immediately before the resolved Codex entry (`'<abs node>' '<abs codex.js>' …` or `'<abs codex>' …`) inside the public seat environment envelope, preserving the session's TTY stdio. For `pi`, OpenRig's host runner stays host-side and unwrapped (`node <pi-runner.js> …`), preserving its RPC lifecycle, sidecars, and status reporting; the wrapper prefixes the resolved Pi child executable (`pi --mode rpc`) inside that runner, and the child's stdio pipes preserve RPC stdin, stdout, and stderr (not a TTY). The wrapper must prepare its environment and `exec` the target command in place so the child process preserves working directory, child stdio pipes (for Pi) or TTY stdio (for Codex), OpenRig session/identity environment, process lineage, exit status and signals; supervising wrappers that keep a parent process are unsupported.
+- **Fail-closed (never unwraps):** When a wrapper is selected, OpenRig applies it across fresh launch, relaunch, rebuild, native resume, fork, restore, handover successor and `pi`↔`codex` runtime switches, and never falls back to bare launch. For `codex`, wrapper resolution and launch environment assembly occur within the shell prefix: if the pane shell is non-POSIX (`nu`, `fish`, etc.), OpenRig session identity is missing or mismatched, `SeatLaunchEnvironment` is unavailable, or `launch_wrapper[0]` is missing or unexecutable, Codex launch fails closed (`OpenRig: launch_wrapper unavailable; no agent started.`). For `pi`, wrapper lookup resolves against the daemon launch `PATH` and daemon working directory before state creation or process dispatch, failing closed before pending launch state if `launch_wrapper[0]` cannot be resolved or executed; runtime child wrapper failures are subsequently reported via the host runner sidecars and markers. If Pi encounters a long launch command (`launch_path_too_long`), it retries execution using the raw host runner command; because that command carries the exact same child wrapper arguments, the Pi child executable never runs unwrapped. In both runtimes, malformed stored wrapper metadata fails closed during reads.
+- **Persistence, `[]` clear vs absent retain, and recreation:** On a new seat, omitting `launch_wrapper` or declaring `launch_wrapper: []` stores no wrapper (`NULL`). When an authored spec is applied to an existing seat, omitting `launch_wrapper` retains the seat's stored wrapper, `launch_wrapper: []` explicitly clears it, and a non-empty array replaces it. A rig that is recreated or imported, including a replacement import, creates new nodes from the incoming spec and uses only what that spec declares, so omitting the field gives the new seat no wrapper. Stored wrapper definitions remain strictly validated; corrupted wrapper rows fail closed during reads without silent unwrap. Restoring an older snapshot that predates `launch_wrapper` preserves the seat's current stored wrapper. First-start retry (`rig launch <rig> <member>`) compares the retained declaration with the node row and refuses to add, change or remove a wrapper on retry. Switching a wrapped seat to an unsupported runtime (`claude-code`, `omp`, etc.) is refused before side effects. There is no live `rig seat` edit verb or management route for `launch_wrapper`; to change or clear a wrapper, edit the `RigSpec` (use `launch_wrapper: []` to clear) and use the supported create/recreate/apply flow. Export (`rig export`) and cached node inventory / `rig ps --nodes --json` (including `--full` and `--fields launchWrapper`) include `launch_wrapper` / `launchWrapper` when configured and omit it when absent.
+- **Boundary and limits:** A `launch_wrapper` is only an argv prefix. Configuring or observing a prefix is **not** proof of sandbox isolation, tooling availability, memory wiring or governance enforcement; verify the wrapper's own guarantees and the runtime independently.
 
 ### Pi (`runtime: pi`)
 
@@ -1302,6 +1323,7 @@ spec can pass `rig spec validate` and then fail at preflight or import. Run
 24. Startup action `idempotent` is a required boolean.
 25. Non-idempotent actions must not include `restore` in `applies_on`.
 26. `applies_on` values must be from: `fresh_start`, `restore`.
+27. `launch_wrapper` is valid only on `pi` and `codex` members (`[]` included); it must be an array of strings without NUL/CR/LF, and `launch_wrapper[0]` (when non-empty) must be an absolute path or a bare command name on the daemon `PATH`.
 
 ---
 

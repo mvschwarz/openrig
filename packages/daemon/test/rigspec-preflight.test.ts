@@ -672,4 +672,140 @@ describe("seat login-shell PATH warning", () => {
       expect(exec.mock.calls.map(([command]) => command).filter(isLookup)).toEqual([]);
     } finally { db.close(); }
   });
+
+  it("validates launch_wrapper[0] against daemon PATH for pi and codex members", async () => {
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+
+    // 1. Missing or directory wrapper executable on daemon PATH -> preflight error (fail closed)
+    for (const badExec of ["definitely-missing-wrapper-bin-xyz987", "/usr/bin/"]) {
+      const missingYaml = makeRigYaml({
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{
+            id: "impl",
+            agentRef: "local:agents/impl",
+            profile: "default",
+            runtime: "codex",
+            cwd: ".",
+            launchWrapper: [badExec, "--flag"],
+          }],
+          edges: [],
+        }],
+      });
+      const missingResult = await rigPreflight({
+        rigSpecYaml: missingYaml,
+        rigRoot: RIG_ROOT,
+        fsOps: mockFs(files),
+        materializeOnly: true,
+      });
+      expect(missingResult.ready).toBe(false);
+      expect(missingResult.errors).toContain(
+        `dev.impl: Seat launch requires ${badExec} on the daemon launch PATH.`,
+      );
+    }
+
+    // 2. Resolvable wrapper executable on daemon PATH (/bin/sh and dot-segment /bin/../bin/sh) -> passes preflight
+    for (const wrapper of [["/bin/sh", "-c"], ["/bin/../bin/sh", "-c"]]) {
+      const validYaml = makeRigYaml({
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{
+            id: "impl",
+            agentRef: "local:agents/impl",
+            profile: "default",
+            runtime: "pi",
+            cwd: ".",
+            launchWrapper: wrapper,
+          }],
+          edges: [],
+        }],
+      });
+      const validResult = await rigPreflight({
+        rigSpecYaml: validYaml,
+        rigRoot: RIG_ROOT,
+        fsOps: mockFs(files),
+        materializeOnly: true,
+      });
+      expect(validResult.ready, JSON.stringify(validResult.errors)).toBe(true);
+      expect(validResult.errors).toEqual([]);
+    }
+
+    // 3. Relative PATH entry in process.env.PATH resolves against daemon process.cwd(), not member cwd
+    const tmpRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-preflight-wrapper-cwd-"));
+    const origCwd = process.cwd();
+    const origPath = process.env.PATH;
+    try {
+      const daemonDir = nodePath.join(tmpRoot, "daemon-cwd");
+      const memberDir = nodePath.join(tmpRoot, "member-cwd");
+      fs.mkdirSync(nodePath.join(daemonDir, "rel-bin"), { recursive: true });
+      fs.mkdirSync(nodePath.join(memberDir, "rel-bin"), { recursive: true });
+
+      const daemonWrapper = nodePath.join(daemonDir, "rel-bin", "daemon-only-wrapper");
+      fs.writeFileSync(daemonWrapper, "#!/bin/sh\nexec \"$@\"\n", { mode: 0o755 });
+      const memberWrapper = nodePath.join(memberDir, "rel-bin", "member-only-wrapper");
+      fs.writeFileSync(memberWrapper, "#!/bin/sh\nexec \"$@\"\n", { mode: 0o755 });
+
+      process.chdir(daemonDir);
+      process.env.PATH = `rel-bin${nodePath.delimiter}${origPath ?? ""}`;
+
+      const daemonScopedYaml = makeRigYaml({
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{
+            id: "impl",
+            agentRef: "local:agents/impl",
+            profile: "default",
+            runtime: "codex",
+            cwd: memberDir,
+            launchWrapper: ["daemon-only-wrapper", "--"],
+          }],
+          edges: [],
+        }],
+      });
+      const daemonScopedResult = await rigPreflight({
+        rigSpecYaml: daemonScopedYaml,
+        rigRoot: RIG_ROOT,
+        fsOps: mockFs(files),
+        materializeOnly: true,
+      });
+      expect(daemonScopedResult.ready, JSON.stringify(daemonScopedResult.errors)).toBe(true);
+      expect(daemonScopedResult.errors).toEqual([]);
+
+      const memberScopedYaml = makeRigYaml({
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{
+            id: "impl",
+            agentRef: "local:agents/impl",
+            profile: "default",
+            runtime: "codex",
+            cwd: memberDir,
+            launchWrapper: ["member-only-wrapper", "--"],
+          }],
+          edges: [],
+        }],
+      });
+      const memberScopedResult = await rigPreflight({
+        rigSpecYaml: memberScopedYaml,
+        rigRoot: RIG_ROOT,
+        fsOps: mockFs(files),
+        materializeOnly: true,
+      });
+      expect(memberScopedResult.ready).toBe(false);
+      expect(memberScopedResult.errors).toContain(
+        "dev.impl: Seat launch requires member-only-wrapper on the daemon launch PATH.",
+      );
+    } finally {
+      process.chdir(origCwd);
+      if (origPath === undefined) delete process.env.PATH;
+      else process.env.PATH = origPath;
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
 });

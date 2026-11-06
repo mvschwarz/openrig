@@ -1047,6 +1047,46 @@ describe("parseRunnerArgs", () => {
     expect(parsed.model).toBe("--approve");
     expect(parsed.trust).toBe("approve");
   });
+
+  it("parses repeated --launch-wrapper-arg tokens with literal spaces, quotes, leading --, and empty strings", () => {
+    const wrapper = ["/abs/bin/wrapper", "space arg", "quote's", "$UNEXPANDED", "--", "--approve", "--runtime", ""];
+    const argv = [...base, "--no-approve", ...wrapper.flatMap((arg) => ["--launch-wrapper-arg", arg])];
+    const parsed = parseRunnerArgs(argv);
+    expect(parsed.launchWrapper).toEqual(wrapper);
+    expect(parsed.trust).toBe("no-approve");
+  });
+
+  it.each([
+    ["dangling flag without value", [...base, "--no-approve", "--launch-wrapper-arg"], /--launch-wrapper-arg requires a value/],
+    ["OMP runtime with wrapper", [...base, "--runtime", "omp", "--approval-mode", "yolo", "--launch-wrapper-arg", "/bin/sh"], /only supported for the Pi runtime/],
+    ["relative bare wrapper[0]", [...base, "--no-approve", "--launch-wrapper-arg", "bare-wrapper"], /absolute/],
+    ["relative dot wrapper[0]", [...base, "--no-approve", "--launch-wrapper-arg", "./wrapper"], /absolute/],
+    ["empty wrapper[0]", [...base, "--no-approve", "--launch-wrapper-arg", ""], /non-empty/],
+    ["whitespace wrapper[0]", [...base, "--no-approve", "--launch-wrapper-arg", "   "], /non-empty/],
+    ["NUL in wrapper arg", [...base, "--no-approve", "--launch-wrapper-arg", "/bin/sh", "--launch-wrapper-arg", "bad\0arg"], /NUL, CR, or LF/],
+    ["LF in wrapper arg", [...base, "--no-approve", "--launch-wrapper-arg", "/bin/sh", "--launch-wrapper-arg", "bad\narg"], /NUL, CR, or LF/],
+  ])("rejects malformed --launch-wrapper-arg (%s)", (_label, argv, pattern) => {
+    expect(() => parseRunnerArgs(argv)).toThrow(pattern);
+  });
+});
+
+describe("buildPiRunnerCommand launchWrapper", () => {
+  const cmdBase = { runnerEntryPath: "/r.js", sessionName: SESSION, stateRoot: "/sr", cwd: "/work", trust: "no-approve" as const, launchId: "L1" };
+
+  it("keeps unconfigured and empty launchWrapper byte-identical and serializes repeated --launch-wrapper-arg tokens for Pi only", () => {
+    const baseline = buildPiRunnerCommand(cmdBase);
+    expect(buildPiRunnerCommand({ ...cmdBase, launchWrapper: [] })).toBe(baseline);
+    expect(baseline).not.toContain("--launch-wrapper-arg");
+
+    const wrapper = ["/abs/wrapper", "space arg", "quote's", "--", "--flag", ""];
+    const wrappedCmd = buildPiRunnerCommand({ ...cmdBase, launchWrapper: wrapper });
+    expect(wrappedCmd).toBe(
+      `${baseline} --launch-wrapper-arg '/abs/wrapper' --launch-wrapper-arg 'space arg' --launch-wrapper-arg 'quote'"'"'s' --launch-wrapper-arg '--' --launch-wrapper-arg '--flag' --launch-wrapper-arg ''`,
+    );
+
+    const ompBaseline = buildPiRunnerCommand({ ...cmdBase, runtime: "omp" });
+    expect(buildPiRunnerCommand({ ...cmdBase, runtime: "omp", launchWrapper: wrapper })).toBe(ompBaseline);
+  });
 });
 
 describe("--thinking in the runner command and the pi child argv", () => {

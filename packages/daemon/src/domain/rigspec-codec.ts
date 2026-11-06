@@ -169,6 +169,7 @@ export class RigSpecCodec {
         if (m.claudeTokenRef) member["claude_token"] = { label: m.claudeTokenRef.label, file: m.claudeTokenRef.tokenFile };
         if (m.claudeMcp !== undefined) member["claude_mcp"] = m.claudeMcp;
         if (m.codexPermissions !== undefined) member["codex_permissions"] = m.codexPermissions;
+        if (m.launchWrapper !== undefined) member["launch_wrapper"] = [...m.launchWrapper];
         if (m.agentFile) member["agent_file"] = m.agentFile;
         if (m.appendSystemPromptFile) member["append_system_prompt_file"] = m.appendSystemPromptFile;
         if (m.pluginDirs?.length) member["plugin_dirs"] = m.pluginDirs;
@@ -253,6 +254,7 @@ export class LegacyRigSpecCodec {
         if (node.claudeTokenRef) n["claude_token"] = { label: node.claudeTokenRef.label, file: node.claudeTokenRef.tokenFile };
         if (node.claudeMcp !== undefined) n["claude_mcp"] = node.claudeMcp;
         if (node.codexPermissions !== undefined) n["codex_permissions"] = node.codexPermissions;
+        if (node.launchWrapper !== undefined) n["launch_wrapper"] = [...node.launchWrapper];
         if (node.cwd != null) n["cwd"] = node.cwd;
         if (node.surfaceHint != null) n["surface_hint"] = node.surfaceHint;
         if (node.workspace != null) n["workspace"] = node.workspace;

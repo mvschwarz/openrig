@@ -2,17 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-
-function setupDb(): Database.Database {
-  return createFullTestDb();
-}
+import { readSeatLaunchWrapper } from "../src/domain/launch-wrapper.js";
 
 describe("RigRepository", () => {
   let db: Database.Database;
   let repo: RigRepository;
 
   beforeEach(() => {
-    db = setupDb();
+    db = createFullTestDb();
     repo = new RigRepository(db);
   });
 
@@ -264,7 +261,7 @@ describe("RigRepository.findLatestUsableSnapshot (L2)", () => {
   let repo: RigRepository;
 
   beforeEach(() => {
-    db = setupDb();
+    db = createFullTestDb();
     repo = new RigRepository(db);
   });
 
@@ -355,5 +352,152 @@ describe("RigRepository.findLatestUsableSnapshot (L2)", () => {
     const result = repo.findLatestUsableSnapshot(rig.id);
     expect(result).not.toBeNull();
     expect(result!.id).toBe("snap-new");
+  });
+});
+
+describe("RigRepository launch_wrapper persistence (#2328)", () => {
+  let db: Database.Database;
+  let repo: RigRepository;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    repo = new RigRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it.each(["pi", "codex"])("persists non-empty launchWrapper on %s seat and omits when absent or []", (runtime) => {
+    const rig = repo.createRig("wrapper-rig");
+    const wrapped = repo.addNode(rig.id, `wrapped-${runtime}`, {
+      runtime,
+      launchWrapper: ["mtn", "sandbox", "exec", "", "--seat", "miles", "--"],
+    });
+    expect(wrapped.launchWrapper).toEqual(["mtn", "sandbox", "exec", "", "--seat", "miles", "--"]);
+    expect(readSeatLaunchWrapper(db, wrapped.id)).toEqual(["mtn", "sandbox", "exec", "", "--seat", "miles", "--"]);
+
+    const explicitEmpty = repo.addNode(rig.id, `empty-${runtime}`, {
+      runtime,
+      launchWrapper: [],
+    });
+    expect(explicitEmpty.launchWrapper).toBeUndefined();
+    expect("launchWrapper" in explicitEmpty).toBe(false);
+    expect(readSeatLaunchWrapper(db, explicitEmpty.id)).toBeUndefined();
+    const rawEmptyRow = db.prepare("SELECT launch_wrapper FROM nodes WHERE id = ?").get(explicitEmpty.id) as { launch_wrapper: string | null };
+    expect(rawEmptyRow.launch_wrapper).toBeNull();
+
+    const absent = repo.addNode(rig.id, `absent-${runtime}`, { runtime });
+    expect(absent.launchWrapper).toBeUndefined();
+    expect("launchWrapper" in absent).toBe(false);
+    expect(readSeatLaunchWrapper(db, absent.id)).toBeUndefined();
+  });
+
+  it("supports setNodeLaunchWrapper update and clear (via null or []) to canonical SQL NULL", () => {
+    const rig = repo.createRig("wrapper-set-rig");
+    const node = repo.addNode(rig.id, "worker", { runtime: "codex" });
+    expect(repo.setNodeLaunchWrapper(node.id, ["mtn", "--"])).toBe(true);
+    expect(repo.getRig(rig.id)!.nodes[0]!.launchWrapper).toEqual(["mtn", "--"]);
+    expect(readSeatLaunchWrapper(db, node.id)).toEqual(["mtn", "--"]);
+
+    expect(repo.setNodeLaunchWrapper(node.id, [])).toBe(true);
+    const afterEmptyClear = repo.getRig(rig.id)!.nodes[0]!;
+    expect(afterEmptyClear.launchWrapper).toBeUndefined();
+    expect("launchWrapper" in afterEmptyClear).toBe(false);
+    expect((db.prepare("SELECT launch_wrapper FROM nodes WHERE id = ?").get(node.id) as { launch_wrapper: string | null }).launch_wrapper).toBeNull();
+
+    expect(repo.setNodeLaunchWrapper(node.id, ["/usr/bin/env", "--"])).toBe(true);
+    expect(repo.getRig(rig.id)!.nodes[0]!.launchWrapper).toEqual(["/usr/bin/env", "--"]);
+    expect(repo.setNodeLaunchWrapper(node.id, null)).toBe(true);
+    expect(readSeatLaunchWrapper(db, node.id)).toBeUndefined();
+  });
+
+  it.each(["claude-code", "omp", "terminal"])("rejects launchWrapper on %s at addNode and setNodeLaunchWrapper", (runtime) => {
+    const rig = repo.createRig("bad-runtime-rig");
+    expect(() => repo.addNode(rig.id, "bad-nonempty", { runtime, launchWrapper: ["mtn"] })).toThrow(/pi|codex/i);
+    expect(() => repo.addNode(rig.id, "bad-empty", { runtime, launchWrapper: [] })).toThrow(/pi|codex/i);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM nodes WHERE rig_id = ?").get(rig.id)).toEqual({ count: 0 });
+
+    const node = repo.addNode(rig.id, "existing", { runtime });
+    expect(() => repo.setNodeLaunchWrapper(node.id, ["mtn"])).toThrow(/pi|codex/i);
+    expect(() => repo.setNodeLaunchWrapper(node.id, [])).toThrow(/pi|codex/i);
+  });
+
+  it("rejects invalid launchWrapper argv at addNode and setNodeLaunchWrapper", () => {
+    const rig = repo.createRig("bad-argv-rig");
+    const node = repo.addNode(rig.id, "good-node", { runtime: "pi" });
+    for (const bad of [
+      [""],
+      ["   "],
+      ["./relative"],
+      ["../relative"],
+      ["a/b"],
+      ["bad\narg"],
+      ["bad\0arg"],
+      ["bad\rarg"],
+      ["mtn", "bad\narg"],
+    ]) {
+      expect(() => repo.addNode(rig.id, "bad-node", { runtime: "pi", launchWrapper: bad }), JSON.stringify(bad)).toThrow();
+      expect(() => repo.setNodeLaunchWrapper(node.id, bad), JSON.stringify(bad)).toThrow();
+    }
+  });
+
+  it.each([
+    "[]",
+    "corrupt-json",
+    '{"cmd":"mtn"}',
+    '"mtn"',
+    "null",
+    '[""]',
+    '["./rel"]',
+    '["mtn","bad\\narg"]',
+  ])("throws on malformed or non-canonical stored launch_wrapper %s instead of silently unwrapping", (corrupt) => {
+    const rig = repo.createRig("corrupt-rig");
+    const node = repo.addNode(rig.id, "worker", { runtime: "codex", launchWrapper: ["mtn"] });
+    db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(corrupt, node.id);
+    expect(() => readSeatLaunchWrapper(db, node.id)).toThrow();
+    expect(() => repo.getRig(rig.id)).toThrow();
+  });
+
+  it("throws when stored launch_wrapper is present on an unsupported runtime row", () => {
+    const rig = repo.createRig("corrupt-runtime-rig");
+    const node = repo.addNode(rig.id, "claude-worker", { runtime: "claude-code" });
+    db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run('["mtn","--"]', node.id);
+    expect(() => readSeatLaunchWrapper(db, node.id)).toThrow(/pi|codex/i);
+    expect(() => repo.getRig(rig.id)).toThrow(/pi|codex/i);
+  });
+
+  it("validates launchWrapper in stored launch_recipe_json via getNodeLaunchRecipe", () => {
+    const rig = repo.createRig("recipe-rig");
+    const baseSpec = {
+      version: "0.2",
+      name: "recipe-rig",
+      pods: [{
+        id: "dev",
+        label: "Dev",
+        members: [{
+          id: "worker",
+          agentRef: "local:agents/worker",
+          profile: "default",
+          runtime: "codex",
+          cwd: ".",
+          launchWrapper: ["mtn", "--"],
+        }],
+        edges: [],
+      }],
+      edges: [],
+    };
+    const node = repo.addNode(rig.id, "dev.worker", {
+      runtime: "codex",
+      launchWrapper: ["mtn", "--"],
+      launchRecipe: { version: 1, rigRoot: "/tmp", rigSpec: baseSpec },
+    });
+    expect(repo.getNodeLaunchRecipe(node.id)?.rigSpec.pods[0]!.members[0]!.launchWrapper).toEqual(["mtn", "--"]);
+
+    const badRuntimeSpec = structuredClone(baseSpec);
+    badRuntimeSpec.pods[0]!.members[0]!.runtime = "claude-code";
+    db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?")
+      .run(JSON.stringify({ version: 1, rigRoot: "/tmp", rigSpec: badRuntimeSpec }), node.id);
+    expect(repo.getNodeLaunchRecipe(node.id)).toBeNull();
   });
 });
