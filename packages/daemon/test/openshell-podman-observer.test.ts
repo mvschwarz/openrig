@@ -16,14 +16,14 @@ async function fixture() {
   const id = "compute-one", workloadId = "a".repeat(64), supervisorId = "b".repeat(64);
   let rows: Record<string, any>[] = [{ Id: workloadId, Names: ["workload"], Labels: { "openshell.managed": "true", "openshell.ai/sandbox-id": id, "openshell.ai/isolation-role": "sandbox", "openshell.ai/sandbox-workspace": "workspace" } },
     { Id: supervisorId, Names: [`openshell-supervisor-${id}`], Labels: {} }];
-  let volumeStatus = 404;
+  let volumeStatus = 200;
   const paths: string[] = [];
   const observer = new OpenShellPodmanObserver(async (_socket, path) => {
     paths.push(path);
-    if (path.startsWith("/libpod/containers/json")) return { status: 200, body: rows };
-    if (path.startsWith("/libpod/containers/")) return { status: 200, body: { Id: path.includes(workloadId) ? workloadId : supervisorId,
+    if (path.startsWith("/containers/json")) return { status: 200, body: rows };
+    if (path.startsWith("/containers/")) return { status: 200, body: { Id: path.includes(workloadId) ? workloadId : supervisorId,
       Mounts: [`openshell-sandbox-${id}-workspace`, `openshell-control-${id}`, `openshell-channel-${id}`].map(Name => ({ Type: "volume", Name })) } };
-    return { status: volumeStatus, body: {} };
+    return { status: volumeStatus, body: { Volumes: [], Warnings: [] } };
   });
   const binding = { resource: { id }, placement: { workspace: "workspace" } } as EnvironmentBinding;
   return { observer, binding, socket, paths, disappear: () => { rows = [{ Id: "c".repeat(64), Names: ["unrelated"], Labels: {} }]; }, failVolume: () => { volumeStatus = 500; } };
@@ -32,7 +32,7 @@ it.skipIf(!supported)("captures exact local workload/supervisor/volumes then ign
   const f = await fixture(), selected = await f.observer.capture(f.binding, f.socket);
   expect(selected).toMatchObject({ resourceId: "compute-one", workloadId: "a".repeat(64), supervisorId: "b".repeat(64) });
   f.disappear(); expect(await f.observer.observe(f.binding, selected)).toEqual({ workload: false, supervisor: false, volumes: false });
-  expect(f.paths.every(path => path.startsWith("/libpod/containers/") || path.startsWith("/libpod/volumes/"))).toBe(true);
+  expect(f.paths.every(path => path.startsWith("/containers/") || path === "/volumes")).toBe(true);
 });
 it.skipIf(!supported)("does not treat an engine error or missing original inventory as cleanup", async () => {
   const f = await fixture(), selected = await f.observer.capture(f.binding, f.socket); f.disappear(); f.failVolume();
