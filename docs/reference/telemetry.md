@@ -113,5 +113,174 @@ Malformed cursors/options return HTTP 400 `telemetry_invalid_request`.
 Schema/read/source failures return HTTP 503 `telemetry_read_unavailable`, never a
 successful empty history. The CLI preserves the error body in JSON mode and exits
 1 for request errors, 2 for unavailable reads. Existing SSE and usage APIs retain
-their behavior. Collector deployment, exporters and durable store epochs are
-separate work.
+their behavior. Durable store epochs remain separate work.
+
+## Reference OTLP queue-transition log exporter
+
+`docs/reference/telemetry-otlp.mjs` is an optional, dependency-free Node.js
+reference exporter that polls one daemon source namespace's
+`/api/telemetry/v1/queue-transitions` stream and forwards allowlisted transition
+observations and named coverage gaps to a local OTLP/HTTP JSON logs receiver
+(`POST .../v1/logs`). It keeps one bounded page/batch in flight and uses only
+Node.js builtins.
+
+The daemon copies `.md` files from `docs/reference/` to `$OPENRIG_HOME/reference/`
+on startup; the runnable `.mjs` script is invoked from a repository checkout at
+`docs/reference/telemetry-otlp.mjs` or from an installed `@openrig/cli` package at
+`daemon/docs/reference/telemetry-otlp.mjs`:
+
+```sh
+# From a repository checkout (one bounded poll/export step)
+node docs/reference/telemetry-otlp.mjs \
+  --source http://127.0.0.1:7433 \
+  --endpoint http://127.0.0.1:4318/v1/logs \
+  --checkpoint /var/tmp/openrig-telemetry-checkpoint.json \
+  --namespace example-source \
+  --start retained \
+  --once
+
+# From an installed @openrig/cli package
+RIG_PKG_ROOT="$(dirname "$(realpath "$(command -v rig)")")/.."
+node "$RIG_PKG_ROOT/daemon/docs/reference/telemetry-otlp.mjs" \
+  --source http://127.0.0.1:7433 \
+  --endpoint http://127.0.0.1:4318/v1/logs \
+  --checkpoint /var/tmp/openrig-telemetry-checkpoint.json \
+  --namespace example-source
+```
+
+### Minimal local OpenTelemetry Collector pipeline
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+```
+
+### CLI flags and bounds
+
+| Flag | Bound / default | Purpose |
+| --- | --- | --- |
+| `--source <url>` | Required (`http:`/`https:`, no credentials/query; default daemon port `7433`) | Daemon root URL or exact `/api/telemetry/v1/queue-transitions` URL |
+| `--endpoint <url>` | Required (`http:`/`https:`, path ending in `/v1/logs`, no credentials/query) | Complete OTLP/HTTP JSON logs receiver URL |
+| `--checkpoint <path>` | Required (regular file, compact JSON `<= 256 KiB`, one process per file) | Durable checkpoint and pending-batch file path |
+| `--namespace <name>` | Required (`1..128` ASCII identifier bytes `[A-Za-z0-9._:-]`) | Source namespace bound to resource/scope and checkpoint |
+| `--start <mode>` | `latest` (default) or `retained` (bound into checkpoint config; keep same on resume) | Initial window mode when no checkpoint cursor exists |
+| `--qitem <id>` | Optional (`1..256` printable bytes) | Exact source `qitemId` filter bound to the checkpoint |
+| `--include-qitem-id` | Optional flag (default `false`) | Opt in to exporting `openrig.qitem.id` on transition records |
+| `--limit <n>` | `1..128` (default `128`) | Source rows scanned per page |
+| `--once` | Optional flag (default `false`) | Run exactly one bounded page/replay step and exit |
+| `--poll-ms <ms>` | `10..60000` (default `5000`) | Idle poll interval in continuous mode |
+| `--timeout-ms <ms>` | `50..30000` (default `5000`) | Per-request timeout for source `GET` (`<= 128 KiB`) and OTLP `POST` (`<= 64 KiB` response) |
+| `--retry-ms <ms>` | `1..10000` (default `250`) | Base exponential backoff delay for retryable OTLP failures |
+| `--max-retry-ms <ms>` | `10..60000` (default `5000`, `>= --retry-ms`) | Upper bound for backoff and `Retry-After` headers |
+| `--max-retries <n>` | `0..10` (default `3`) | Retry count for `429`/`502`/`503`/`504` and network/timeout errors |
+| `--on-permanent-error <mode>` | `stop` (default) or `drop` | Stop with blocked pending batch or visibly drop on non-retryable HTTP `4xx`/`5xx` |
+| `--help`, `-h` | Optional flag | Print usage instructions and exit `0` without connecting |
+
+### OTLP logs mapping and privacy allowlists
+
+Each exported batch (`<= 256 KiB`, at most 161 log records) emits one `resourceLogs`
+entry with `service.name = "openrig-telemetry-exporter"`, `service.namespace`,
+`openrig.source.namespace`, `openrig.source.boot_epoch`, and optional safe
+`openrig.source.host_id`, under instrumentation scope
+`openrig.telemetry.queue_transitions` (`version: "1"`).
+
+- **Transition records** (`body.stringValue = "openrig.queue.transition"`, `INFO`):
+  - `timeUnixNano` is set **only** when `row.createdAt` is a valid UTC ISO-8601
+    timestamp; invalid source timestamps omit `timeUnixNano` and emit a separate
+    `invalid_timestamp` gap record. `observedTimeUnixNano` always records the page's
+    `observedAt` timestamp.
+  - Attributes are restricted to `openrig.record.kind = "queue_transition"`,
+    `openrig.stream = "queue-transitions"`, decimal string `openrig.transition.id`
+    (never converted through `Number`), allowlisted `openrig.queue.state`,
+    allowlisted `openrig.identity.provenance`, allowlisted
+    `openrig.queue.closure_reason`, opt-in `openrig.qitem.id`,
+    `openrig.coverage.status`, `openrig.coverage.history_completeness = "unknown"`,
+    and boolean `openrig.delivery.replayed`.
+  - Queue bodies, transition notes, `actorSession`, `closureTarget`, raw
+    `originalTimestamp`, file paths, environment variables, credentials, invented
+    `traceId`/`spanId` parentage, and current-owner/seat joins are never exported or
+    written to checkpoints.
+  - **Operational metadata note**: `namespace`, `source.hostId`, `source.bootEpoch`,
+    and decimal `transitionId` / gap IDs remain exported in OTLP resource and record
+    attributes. Raw `qitemId` is exported only when `--include-qitem-id` is set, and
+    any `--qitem` filter value is stored locally inside the `0600` checkpoint file to
+    verify configuration continuity.
+- **Coverage gap records** (`body.stringValue = "openrig.telemetry.gap"`, `WARN`):
+  - Carry `observedTimeUnixNano` only (no source event timestamp), with
+    `openrig.record.kind = "coverage_gap"`, allowlisted `openrig.gap.code`, optional
+    decimal string `openrig.gap.id`, `openrig.gap.from`, `openrig.gap.through`, and
+    allowlisted `openrig.gap.field`. When `coverage.gapDetailsTruncated` is true, an
+    additional `gap_details_truncated` record reports `openrig.gap.total_count` and
+    `openrig.gap.omitted_count`. Unknown schema versions, stream names, or gap codes
+    fail visibly (`TelemetrySourceError`) rather than silently skipping records.
+
+### Checkpoints, discontinuities, and receiver outcomes
+
+- **Single process and supervisor model**: Run at most one exporter process per
+  `--checkpoint` file (no cross-process file lock is provided). `--once` processes
+  exactly one bounded page or pending replay step. Continuous mode exits with code `1`
+  on source errors or after bounded OTLP retries (`--max-retries`) are exhausted; use
+  an external process supervisor to restart it.
+- **Atomic pending checkpoint before export**: When a page produces log records, the
+  exporter writes compact JSON (`<= 256 KiB`) containing `pending` (the sanitized
+  OTLP batch, `recordCount`, and proposed `nextCursor`) via `fsync` + atomic rename
+  **before** sending `POST /v1/logs`. The committed `cursor` advances and `pending`
+  clears only after a resolved export outcome.
+- **Pause and replay on transient failure**: While `pending` is non-null, source
+  polling pauses. After a transient network/timeout or retryable status failure, the
+  next run replays the persisted `pending` batch with
+  `openrig.delivery.replayed = true`, acknowledging possible duplicate delivery after
+  an ambiguous receiver ack rather than claiming exactly-once delivery.
+- **Configuration binding**: The checkpoint binds `namespace`, `sourceUrl`,
+  `endpointUrl`, `start`, `qitemId`, and `includeQitemId` (keep the same `--start`
+  flag when resuming an existing checkpoint). Malformed, oversized, or mismatched
+  checkpoints fail visibly (`TelemetryCheckpointError`) without resetting.
+- **Empty filtered pages**: When a filtered page scans rows but produces zero
+  transition and gap records, the exporter advances and persists `nextCursor`
+  immediately without sending an empty OTLP batch.
+- **Daemon boot and watermark discontinuities**: When the source reports
+  `boot_boundary_history_unverified` or `watermark_regression_history_unverified`
+  with a fresh `restartCursor`, the exporter persists and exports that named gap
+  record first, then adopts `restartCursor` at the new high watermark, intentionally
+  skipping the unverified missed interval while preserving
+  `sequenceSpaceId: null` and `historyCompleteness: "unknown"`.
+- **OTLP HTTP outcomes**: Both the daemon source and the OTLP receiver must return
+  HTTP `200` with `Content-Type: application/json`. HTTP `200` `{}` resolves as
+  `exported`. HTTP `200` with protocol `partialSuccess` resolves as `partial_success`
+  without whole-batch retry and without echoing raw `errorMessage` strings into
+  diagnostics. HTTP `429`/`502`/`503`/`504` and network/timeout errors retry up to
+  `--max-retries`, honoring `Retry-After` within `--max-retry-ms`. Per the OTLP/HTTP
+  specification, all other HTTP `4xx` and `5xx` status codes (`400..599` except
+  `429`/`502`/`503`/`504`) are non-retryable permanent rejections
+  (`otlp_permanent_rejection`): they never echo raw response bodies, and under default
+  `--on-permanent-error stop` they record `pending.blocked` so subsequent normal runs
+  stop immediately without automatically resubmitting the rejected batch (recover by
+  correcting the receiver or running explicitly with `--on-permanent-error drop` to
+  discard the rejected `4xx`/`5xx` batch and advance). Received nonconforming
+  responses — unexpected non-`200` `1xx`–`3xx` (`otlp_unexpected_status`), non-JSON
+  `Content-Type` on `200` (`otlp_invalid_content_type`), malformed `200` JSON or
+  `partialSuccess` (`otlp_invalid_response`), and oversized `> 64 KiB` responses
+  (`otlp_response_too_large`) — are distinguished from missing network acks: they also
+  record `pending.blocked` to pause automatic resubmission while keeping the committed
+  cursor unchanged, and `--on-permanent-error drop` never silently checkpoints
+  uncertain response data away. To discard a batch paused on response uncertainty
+  after inspecting and fixing the receiver/proxy, start with a new `--checkpoint` path
+  and `--start latest` so the skipped history is recorded as an explicit
+  `historical_transitions_not_read` gap.
