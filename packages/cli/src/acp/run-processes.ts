@@ -9,9 +9,10 @@ export const RUN_MARKER = "OPENRIG_ACP_RUN";
 /** Only the pid: on macOS the listing carries the environment, which may hold secrets, so nothing else leaves here. */
 export interface RunProcess { pid: number }
 
-/** The caller's processes carrying this run's marker. Linux reads /proc; elsewhere `ps e` shows own environments. */
-export async function findRunProcesses(runId: string): Promise<RunProcess[]> {
-  const marker = `${RUN_MARKER}=${runId}`;
+/** The caller's processes carrying this run's marker (`rig exec` names its connector's own). Linux reads /proc;
+ *  elsewhere `ps e` shows own environments. */
+export async function findRunProcesses(runId: string, markerName = RUN_MARKER): Promise<RunProcess[]> {
+  const marker = `${markerName}=${runId}`;
   if (process.platform === "linux") {
     const found: RunProcess[] = [];
     for (const entry of await readdir("/proc")) {

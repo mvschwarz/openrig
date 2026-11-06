@@ -417,6 +417,17 @@ do not establish connectivity to a live peer.
 | `rig acp cancel <runId>` | — | — |
 | `rig acp stop <runId> [stopCommand...]` | — | — |
 
+### exec
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig exec` | — | — |
+| `rig exec harnesses` | — | `--json` |
+| `rig exec run <qitemId>` | — | `--harness <name>` **required**<br>`--cwd <dir>`<br>`--permissions-to <session>`<br>`--load-session <id>`<br>`--wait`<br>`--plan`<br>`--again`<br>`--poll-seconds <n>` |
+| `rig exec status <runIdOrQitemId>` | — | `--json` |
+| `rig exec cancel <runId>` | — | — |
+| `rig exec connector <runId>` (hidden) | — | — |
+
 ### agent
 
 | Invocation | Aliases | Declared options |

@@ -42,6 +42,7 @@ export const COMMAND_LOADERS: ReadonlyMap<string, Load> = new Map<string, Load>(
   ["roster", async () => (await import("./commands/roster.js")).rosterCommand()],
   ["mcp", async () => (await import("./commands/mcp.js")).mcpCommand()],
   ["acp", async () => (await import("./commands/acp.js")).acpCommand()],
+  ["exec", async () => (await import("./commands/exec.js")).execCommand()],
   ["agent", async () => (await import("./commands/agent.js")).agentCommand()],
   ["spec", async () => (await import("./commands/rig.js")).rigCommand()],
   ["transcript", async () => (await import("./commands/transcript.js")).transcriptCommand()],
