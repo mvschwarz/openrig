@@ -426,9 +426,6 @@ function deliveryResolutionEvidence(
     }
   }
   if (deps.queueRepo.humanNotificationPostedThisEpisode(qitemId)) return "current human ask posted";
-  if (kind === "unclaimed-obligation" && deps.queueRepo.isRegisteredHumanUpdate(row) && !deps.queueRepo.deliveryOutcomeFor(qitemId)) {
-    return "informational update to a registered human requires no claim";
-  }
   if (kind === "undelivered-human-notice") {
     const notification = deps.queueRepo.transitionLog.latestOwnerNotificationForQitem(qitemId);
     // Park and resolution notices have their own current ledger; a row-scoped
@@ -451,6 +448,9 @@ function deliveryResolutionEvidence(
   const quiet = quietHoldCustody(deps.db, qitemId, now);
   if (quiet && !quiet.unreadable && (quiet.state === "held" || quiet.state === "released")) {
     return `source held by quiet-release job for window ${quiet.windowId}`;
+  }
+  if (kind === "unclaimed-obligation" && !quiet && deps.queueRepo.isRegisteredHumanUpdate(row) && !deps.queueRepo.deliveryOutcomeFor(qitemId)) {
+    return "informational update to a registered human requires no claim";
   }
   if (kind !== "undelivered-human-notice" && row.lastNudgeResult === "retained:typing_guard") {
     return "source wake held by the seat typing guard";
@@ -725,13 +725,14 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (deps.queueRepo.humanNotificationPostedThisEpisode(row.qitemId)) continue;
       // An ask placed on Steering without an alert waits on its person there by design; a finding would alert them.
       if (deps.queueRepo.humanAskWithoutAlert(row.qitemId)) continue;
-      // An explicit informational update to a currently registered human is for reading, not an obligation to claim.
-      if (deps.queueRepo.isRegisteredHumanUpdate(row)) continue;
       // Quiet hours: a held ask whose window's release job is live waits on that job, and one already released waits on
       // its post; neither is stuck. A release whose post failed is reported once, by the undelivered-wake loop above. A
       // hold with no live release job is stuck: nothing will ever release it.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
       if (quiet && quiet.state !== "orphaned") continue;
+      // An explicit informational update to a currently registered human is for reading, not an obligation to claim,
+      // unless its quiet-hours hold has been orphaned before release.
+      if (!quiet && deps.queueRepo.isRegisteredHumanUpdate(row)) continue;
       // The seat's typing guard or interruption level held its wake on purpose: it's held and readable at the seat, not
       // stuck. (A handed-off baton's one held notice is the wake ladder's.)
       if (row.lastNudgeResult === "retained:typing_guard") continue;
