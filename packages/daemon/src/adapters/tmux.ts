@@ -1491,6 +1491,9 @@ export class TmuxAdapter {
         await this.run(["tmux", "copy-mode", "-q", "-t", pane]);
         return { ok: true };
       } catch (error) {
+        // The fallback is a second write: check the guard again, as the read-only Enter fallback does, so input that
+        // arrived while copy-mode -q was pending stops it.
+        beforeWrite();
         const fallback = await this.sendKeysUnchecked(pane, ["-X", "cancel"]);
         if (fallback.ok) return fallback;
         // Both failed: keep both reasons, so the refusal that reports this can name them.
