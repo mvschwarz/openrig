@@ -425,10 +425,10 @@ function deliveryResolutionEvidence(
       if (row.lastNudgeResult?.startsWith("wake-accepted:")) return "source wake accepted by its hosted trigger";
     }
   }
-  if (kind === "unclaimed-obligation" && deps.queueRepo.isRegisteredHumanUpdate(row)) {
+  if (deps.queueRepo.humanNotificationPostedThisEpisode(qitemId)) return "current human ask posted";
+  if (kind === "unclaimed-obligation" && deps.queueRepo.isRegisteredHumanUpdate(row) && !deps.queueRepo.deliveryOutcomeFor(qitemId)) {
     return "informational update to a registered human requires no claim";
   }
-  if (deps.queueRepo.humanNotificationPostedThisEpisode(qitemId)) return "current human ask posted";
   if (kind === "undelivered-human-notice") {
     const notification = deps.queueRepo.transitionLog.latestOwnerNotificationForQitem(qitemId);
     // Park and resolution notices have their own current ledger; a row-scoped
@@ -956,7 +956,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         if (sharedRow && isFindingRow(sharedRow) && sharedRow.summary?.startsWith("Stuck sweep: ")) {
           const currentKind = sharedRow.summary.match(/^Stuck sweep: ([a-z-]+) on /)?.[1];
           const pickupOrDeadline = (kind: string) => kind === "stalled-after-claim" || kind === "overdue-claim";
-          if (currentKind && currentKind !== c.kind && pickupOrDeadline(currentKind) && pickupOrDeadline(c.kind)) {
+          const humanUpdateNotice = currentKind === "unclaimed-obligation"
+            && c.kind === "undelivered-human-notice"
+            && deps.queueRepo.isRegisteredHumanUpdate(c.row);
+          if (currentKind && currentKind !== c.kind && ((pickupOrDeadline(currentKind) && pickupOrDeadline(c.kind)) || humanUpdateNotice)) {
             const marker = "\n\n--- Original finding (historical) ---\n";
             const original = sharedRow.body.includes(marker) ? sharedRow.body.split(marker, 2)[1]! : sharedRow.body;
             const body = evidenceBody(deps.db, c) + marker + original;
