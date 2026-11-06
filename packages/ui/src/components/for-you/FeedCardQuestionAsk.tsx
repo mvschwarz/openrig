@@ -94,7 +94,6 @@ export function formatRecordedAnswers(
 
 const normToken = (s?: string | null) =>
   (s ?? "").toLowerCase().replace("cancelled", "canceled").replace("handed_off", "handed-off");
-const DONE_STATES = new Set(["done", "closed", "completed"]);
 const TERMINAL_STATES = new Set(["done", "closed", "completed", "canceled", "denied", "expired", "handed-off", "routed"]);
 const STATE_LABELS: Record<string, string> = {
   denied: "denied",
@@ -154,17 +153,10 @@ function settledElsewhereHeadline(
   questions: readonly HumanQuestionItem[],
   fallbackState?: string | null,
 ): string {
-  const answers = normalizeHumanAnswers(item?.humanAnswers);
-  const pairs = formatRecordedAnswers(questions, answers);
-  const hasAnswerRecord =
-    questions.length > 0 &&
-    (pairs.length === questions.length || Object.values(answers).some((v) => typeof v !== "string"));
+  const pairs = formatRecordedAnswers(questions, normalizeHumanAnswers(item?.humanAnswers));
   const state = normToken(item?.state ?? item?.closingTransition?.state ?? item?.closingTransition?.toState ?? fallbackState ?? "closed");
   const rawReason = item?.closureReason ?? item?.closingTransition?.closureReason ?? item?.closingTransition?.reason ?? null;
   const reason = rawReason ? normToken(rawReason).replace("_", "-") : null;
-  if (DONE_STATES.has(state) && !(reason && STATE_LABELS[reason]) && hasAnswerRecord && pairs.length > 0) {
-    return `Already answered. Recorded: ${pairs.map((p) => `${p.question}: ${p.answerText}`).join("; ")}.`;
-  }
   const label = (reason && STATE_LABELS[reason]) ?? STATE_LABELS[state] ?? state;
   const actor = item?.closingTransition?.actorSession;
   const target = item?.handedOffTo ?? item?.closureTarget ?? item?.closingTransition?.closureTarget;
@@ -172,7 +164,8 @@ function settledElsewhereHeadline(
     actor ? `by ${actor}` : null,
     target && target !== "no-follow-on" ? (label === "handed off" || label === "routed" ? `to ${target}` : `(${target})`) : null,
   ].filter(Boolean);
-  return `This request is ${label} now${parts.length ? ` ${parts.join(" ")}` : ""}.`;
+  const recorded = pairs.length > 0 ? ` Recorded: ${pairs.map((p) => `${p.question}: ${p.answerText}`).join("; ")}.` : "";
+  return `This request is ${label} now${parts.length ? ` ${parts.join(" ")}` : ""}.${recorded}`;
 }
 
 export interface FeedCardQuestionAskProps {

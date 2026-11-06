@@ -629,8 +629,9 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     await waitFor(() => {
       const settled = view.getByTestId("feed-card-answer-settled-queue-attention-q-ask-1");
       expect(settled.textContent).toContain(
-        "Already answered. Recorded: Which channel ships first?: Nightly; Hold the changelog until docs land?: Yes.",
+        "This request is done now. Recorded: Which channel ships first?: Nightly; Hold the changelog until docs land?: Yes.",
       );
+      expect(settled.textContent).not.toContain("Already answered");
       expect(view.getByTestId("feed-card-answer-error-code-queue-attention-q-ask-1").textContent).toBe(
         "decision_revision_changed",
       );
@@ -829,8 +830,8 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     expect(plainCloseView.queryByTestId("feed-card-answer-receipt-queue-attention-q-ask-1")).toBeNull();
     cleanup();
 
-    // Conversely, when a done ask carries a complete answer record (closureReason="no-follow-on"),
-    // settledElsewhereHeadline renders "Already answered. Recorded: ...".
+    // When a done ask carries recorded answers, settledElsewhereHeadline shows the settled state plus "Recorded: ..."
+    // and never says "Already answered".
     const directReplyDone = makeQueueItem({
       qitemId: "q-done-direct",
       state: "done",
@@ -848,9 +849,11 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     const directView = renderWithQuery(
       <FeedCard card={makeQuestionCard({ id: "queue-attention-q-done-direct" }, { qitemId: "q-done-direct" })} queueItem={directReplyDone} />,
     );
-    expect(directView.getByTestId("feed-card-answer-settled-queue-attention-q-done-direct").textContent).toContain(
-      "Already answered. Recorded: Which channel ships first?: Stable; Hold the changelog until docs land?: Yes.",
+    const directSettled = directView.getByTestId("feed-card-answer-settled-queue-attention-q-done-direct");
+    expect(directSettled.textContent).toContain(
+      "This request is done now by human@host. Recorded: Which channel ships first?: Stable; Hold the changelog until docs land?: Yes.",
     );
+    expect(directSettled.textContent).not.toContain("Already answered");
     cleanup();
 
     // Negative check: an unanswered ask closed with an ordinary note starting "reply from ..." must NOT say
@@ -878,10 +881,23 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
   });
 
   it("refreshes the queue row and offers SEND ANSWERS TO <asker> when the final option tap fails with answer_not_closed (without replyQitemId)", async () => {
+    let phase: "notClosed" | "closedPlainDone" = "notClosed";
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: RequestInfo | URL) => {
         if (String(url).includes("/api/mission-control/action")) {
+          if (phase === "closedPlainDone") {
+            return jsonResponse(
+              {
+                error: "decision_revision_changed",
+                message: "qitem q-ask-1 changed since this revision was read, so nothing was written.",
+                currentRevision: "rev-done-3",
+                state: "done",
+                humanAnswers: { channel: "stable" },
+              },
+              409,
+            );
+          }
           return jsonResponse(
             {
               error: "answer_not_closed",
@@ -891,6 +907,23 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
           );
         }
         if (String(url).includes("/api/queue/q-ask-1")) {
+          if (phase === "closedPlainDone") {
+            return jsonResponse({
+              qitemId: "q-ask-1",
+              state: "done",
+              closureReason: "no-follow-on",
+              closureTarget: "no-follow-on",
+              decisionRevision: "rev-done-3",
+              closingTransition: {
+                actorSession: "lead@demo",
+                closureReason: "no-follow-on",
+                closureTarget: "no-follow-on",
+                state: "done",
+              },
+              humanQuestions: [TWO_QUESTIONS[0]],
+              humanAnswers: { channel: "stable" },
+            });
+          }
           return jsonResponse({
             qitemId: "q-ask-1",
             state: "pending",
@@ -918,6 +951,21 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
       );
       expect(view.getByTestId("feed-card-option-channel-stable").getAttribute("data-selected")).toBe("true");
     });
+
+    // Item-5 sequence: all choices were recorded but never returned (answer_not_closed, no reply),
+    // then someone else closes the ask plainly (done / no-follow-on). Clicking "Send answers" must show
+    // "This request is done now by lead@demo. Recorded: ...", never "Already answered" and never "Answered and sent".
+    phase = "closedPlainDone";
+    fireEvent.click(view.getByTestId("feed-card-send-answers-queue-attention-q-ask-1"));
+    await waitFor(() => {
+      const settled = view.getByTestId("feed-card-answer-settled-queue-attention-q-ask-1");
+      expect(settled.textContent).toContain(
+        "This request is done now by lead@demo. Recorded: Which channel ships first?: Stable.",
+      );
+      expect(settled.textContent).not.toContain("Already answered");
+      expect(settled.textContent).not.toContain("Answered and sent");
+    });
+    expect(view.queryByTestId("feed-card-answer-receipt-queue-attention-q-ask-1")).toBeNull();
   });
 
   it("keeps the session attention cache bounded, prioritizes live asks over kept receipts, and evicts session snapshots with receipts", async () => {
