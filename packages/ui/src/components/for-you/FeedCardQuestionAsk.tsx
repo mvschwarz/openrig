@@ -104,10 +104,6 @@ const STATE_LABELS: Record<string, string> = {
   routed: "routed",
   expired: "expired",
 };
-const hasAnsweredEvidence = (item: QueueItemDetail | null | undefined, rawReason?: string | null) =>
-  rawReason === "direct_human_reply" ||
-  (typeof item?.closingTransition?.transitionNote === "string" &&
-    /^(?:direct human reply|reply from )/i.test(item.closingTransition.transitionNote));
 
 const BTN_BASE_CLASS =
   "min-h-[44px] px-3 py-2 border font-mono text-[10px] uppercase tracking-wider break-words whitespace-normal disabled:opacity-50";
@@ -158,13 +154,16 @@ function settledElsewhereHeadline(
   questions: readonly HumanQuestionItem[],
   fallbackState?: string | null,
 ): string {
-  const pairs = formatRecordedAnswers(questions, normalizeHumanAnswers(item?.humanAnswers));
+  const answers = normalizeHumanAnswers(item?.humanAnswers);
+  const pairs = formatRecordedAnswers(questions, answers);
+  const hasAnswerRecord =
+    questions.length > 0 &&
+    (pairs.length === questions.length || Object.values(answers).some((v) => typeof v !== "string"));
   const state = normToken(item?.state ?? item?.closingTransition?.state ?? item?.closingTransition?.toState ?? fallbackState ?? "closed");
   const rawReason = item?.closureReason ?? item?.closingTransition?.closureReason ?? item?.closingTransition?.reason ?? null;
   const reason = rawReason ? normToken(rawReason).replace("_", "-") : null;
-  if (DONE_STATES.has(state) && hasAnsweredEvidence(item, rawReason)) {
-    if (pairs.length > 0) return `Already answered. Recorded: ${pairs.map((p) => `${p.question}: ${p.answerText}`).join("; ")}.`;
-    return "Already answered.";
+  if (DONE_STATES.has(state) && !(reason && STATE_LABELS[reason]) && hasAnswerRecord && pairs.length > 0) {
+    return `Already answered. Recorded: ${pairs.map((p) => `${p.question}: ${p.answerText}`).join("; ")}.`;
   }
   const label = (reason && STATE_LABELS[reason]) ?? STATE_LABELS[state] ?? state;
   const actor = item?.closingTransition?.actorSession;

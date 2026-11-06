@@ -613,7 +613,7 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
           return jsonResponse({
             qitemId: "q-ask-1",
             state: "done",
-            closureReason: "direct_human_reply",
+            closureReason: "no-follow-on",
             decisionRevision: "rev-9",
             humanQuestions: TWO_QUESTIONS,
             humanAnswers: { channel: "nightly", changelog: "yes" },
@@ -829,8 +829,8 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     expect(plainCloseView.queryByTestId("feed-card-answer-receipt-queue-attention-q-ask-1")).toBeNull();
     cleanup();
 
-    // Conversely, when closingTransition carries closeDirectAsk's transitionNote ("direct human reply (...)"),
-    // settledElsewhereHeadline recognizes the affirmative return evidence even with closureReason="no-follow-on".
+    // Conversely, when a done ask carries a complete answer record (closureReason="no-follow-on"),
+    // settledElsewhereHeadline renders "Already answered. Recorded: ...".
     const directReplyDone = makeQueueItem({
       qitemId: "q-done-direct",
       state: "done",
@@ -851,6 +851,30 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     expect(directView.getByTestId("feed-card-answer-settled-queue-attention-q-done-direct").textContent).toContain(
       "Already answered. Recorded: Which channel ships first?: Stable; Hold the changelog until docs land?: Yes.",
     );
+    cleanup();
+
+    // Negative check: an unanswered ask closed with an ordinary note starting "reply from ..." must NOT say
+    // "Already answered", and instead renders the plain settled state ("This request is done now...").
+    const ordinaryNoteDone = makeQueueItem({
+      qitemId: "q-done-note",
+      state: "done",
+      closureReason: "no-follow-on",
+      closureTarget: "no-follow-on",
+      closingTransition: {
+        actorSession: "lead@demo",
+        closureReason: "no-follow-on",
+        closureTarget: "no-follow-on",
+        state: "done",
+        transitionNote: "reply from Alice is no longer needed; the request is obsolete",
+      },
+      humanAnswers: null,
+    });
+    const ordinaryNoteView = renderWithQuery(
+      <FeedCard card={makeQuestionCard({ id: "queue-attention-q-done-note" }, { qitemId: "q-done-note" })} queueItem={ordinaryNoteDone} />,
+    );
+    const ordinaryNoteSettled = ordinaryNoteView.getByTestId("feed-card-answer-settled-queue-attention-q-done-note");
+    expect(ordinaryNoteSettled.textContent).toContain("This request is done now by lead@demo.");
+    expect(ordinaryNoteSettled.textContent).not.toContain("Already answered");
   });
 
   it("refreshes the queue row and offers SEND ANSWERS TO <asker> when the final option tap fails with answer_not_closed (without replyQitemId)", async () => {
