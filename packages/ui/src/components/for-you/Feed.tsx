@@ -180,7 +180,7 @@ export function hydratedCardKind(
   // signals are enforced at the write path, guessing is worse than reading.
   if (item.tier === "human-gate") return "approval";
   const state = item.state.toLowerCase();
-  if (state === "done" || state === "closed" || state === "completed") return "shipped";
+  if ((state === "done" || state === "closed" || state === "completed") && !isQueueDerivedFeedCard(card)) return "shipped";
   if (isHumanSeat(item.destinationSession)) return "action-required";
   return card.kind;
 }

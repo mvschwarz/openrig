@@ -27,6 +27,8 @@ import { useQuery } from "@tanstack/react-query";
 export interface AttentionQueueItem {
   /** Structured questions already included in the queue API response. */
   humanQuestions?: unknown[] | null;
+  /** Recorded human answers already included in the queue API response. */
+  humanAnswers?: Record<string, unknown> | null;
   qitemId: string;
   tsCreated: string;
   tsUpdated: string;
@@ -97,12 +99,40 @@ async function fetchAggregatedAttention(limit?: number): Promise<AttentionData> 
  * instead of the single-host list. Callers pass true ONLY when a remote
  * host subscription is enabled — zero-config stays on the legacy wire.
  */
+const seenAttentionItems = new Map<string, AttentionQueueItem>();
+const retainedAttentionKeys = new Set<string>();
+const attentionKey = (qitemId: string, hostId?: string | null) =>
+  `${hostId && hostId !== "local" ? hostId : "local"}:${qitemId}`;
+
+export function retainAttentionItemInSession(qitemId: string, hostId?: string | null): void {
+  retainedAttentionKeys.add(attentionKey(qitemId, hostId));
+}
+
+function mergeRetained(items: AttentionQueueItem[], aggregated: boolean): AttentionQueueItem[] {
+  const present = new Set(items.map((i) => {
+    const key = attentionKey(i.qitemId, i.hostId);
+    seenAttentionItems.set(key, i);
+    return key;
+  }));
+  const extra = [...retainedAttentionKeys]
+    .filter((k) => !present.has(k) && (aggregated || k.startsWith("local:")))
+    .map((k) => seenAttentionItems.get(k))
+    .filter((i): i is AttentionQueueItem => Boolean(i));
+  return extra.length ? [...items, ...extra] : items;
+}
+
 export function useAttentionItems(limit: number = 50, aggregated: boolean = false) {
   return useQuery<AttentionData>({
     queryKey: ["attention-items", limit, aggregated],
     queryFn: aggregated
-      ? () => fetchAggregatedAttention(limit)
-      : async () => ({ items: await fetchAttentionItems(limit), hosts: [] }),
+      ? async () => {
+          const data = await fetchAggregatedAttention(limit);
+          return { items: mergeRetained(data.items, true), hosts: data.hosts };
+        }
+      : async () => ({
+          items: mergeRetained(await fetchAttentionItems(limit), false),
+          hosts: [],
+        }),
     staleTime: 15_000,
     // HG-8: 'always' (not `true`) — see file header comment.
     refetchOnWindowFocus: "always",
