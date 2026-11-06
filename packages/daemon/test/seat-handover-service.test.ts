@@ -1072,6 +1072,69 @@ describe("SeatHandoverService", () => {
     expect(sleeps).toContain(200);
   });
 
+  it.each((["fresh", "rebuild"] as const).flatMap(source =>
+    (["clear", "staged", "unreadable", "edited", "unrelated"] as const).map(screen => ({ source, screen })),
+  ))("#1544 $source packet submission with $screen composer evidence", async ({ source, screen }) => {
+    const { node } = seedSeat({ runtime: "claude-code" });
+    const bindingBefore = sessionRegistry.getBindingForNode(node.id);
+    const sleeps: number[] = [];
+    const reads: Array<string | null> = [];
+    let packet = "";
+    let enters = 0;
+    const frame = (text: string) => `Claude Code v2.1.303\n${text.split("\n").map((line, i) => `${i === 0 ? "❯" : " "} ${line}`).join("\n")}\n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)`;
+    const visible = () => screen === "unreadable" ? null : frame(screen === "clear" ? ""
+      : screen === "staged" ? packet : screen === "edited" ? `${packet}\nEdited by the operator.` : "Unrelated operator draft.");
+    capturePaneScreen.mockImplementation(async () => {
+      if (!packet) return "predecessor screen tail";
+      const pane = visible();
+      reads.push(pane);
+      if (reads.length > 8) throw new Error("fixture exceeded the finite submission observation budget");
+      return pane;
+    });
+    sendText.mockImplementation(async (_session: string, text: string) => { packet = text; return { ok: true }; });
+    sendKeys.mockImplementation(async (_session: string, keys: string[]) => { if (packet && keys.includes("Enter")) enters++; return { ok: true }; });
+    launchHarness.mockResolvedValue({ ok: true, resumeToken: "22222222-2222-4222-8222-222222222222", resumeType: "claude_id" });
+    const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+      tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
+      now: () => new Date("2026-04-24T18:30:00.000Z"), newSuccessorId: () => "01SUCCID0",
+      contextUsageStore: { readSidecar } as never, predecessorRecapResolver: resolvePredecessorRecap as never,
+      rebuildPrimingResolver: () => ({ artifacts: [{ address: "/fixture-seat/RECAP.md", label: "authored recap" }] }),
+      rebuildArtifactExists: () => true, readinessTimeoutMs: 50, sleep: async ms => { sleeps.push(ms); },
+    });
+    const result = await handover.handover({ seatRef: "dev-impl@seat-rig", source, reason: "submission evidence" });
+    const bindingAfter = sessionRegistry.getBindingForNode(node.id);
+    const candidates = db.prepare("SELECT status,claimed_node_id FROM discovered_sessions").all();
+    const completed = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed'").all() as Array<{ payload: string }>;
+    console.info("ISSUE1544_SUBMISSION", JSON.stringify({ source, screen, result, enters, sleeps, reads,
+      visibleAfter: visible(), bindingBefore, bindingAfter, candidates, completed: completed.map(row => JSON.parse(row.payload)) }));
+    expect(packet).toContain(source === "rebuild" ? "# Seat rebuild handover" : "OpenRig seat handover");
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sleeps[0]).toBe(200);
+    expect(killSession).not.toHaveBeenCalled();
+    expect.soft(result.ok && result.result.sideEffects.startupContextDelivered,
+      "delivery requires a clear composer, not only successful paste and Enter").toBe(screen === "clear");
+    if (screen === "staged") {
+      expect.soft(result, "a packet still staged after the bounded retry must not finalize").toMatchObject({ ok: false, code: "context_delivery_failed" });
+      expect.soft(bindingAfter).toEqual(bindingBefore);
+      expect.soft(candidates).toEqual([expect.objectContaining({ status: "vanished", claimed_node_id: null })]);
+      expect.soft(completed).toEqual([]);
+      expect.soft(enters).toBe(2);
+      return;
+    }
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+    if (!result.ok) return;
+    expect(bindingAfter).toMatchObject({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9" });
+    expect(candidates).toEqual([expect.objectContaining({ status: "claimed", claimed_node_id: node.id })]);
+    expect(completed).toHaveLength(1);
+    expect(enters, "no repeated Enter against unreadable, edited or unrelated input").toBe(1);
+    if (screen === "clear") expect(result.result.restorePacket).toBeUndefined();
+    else {
+      const reason = screen === "unreadable" ? "the input box could not be observed" : "the input box did not clearly show the prompt as submitted";
+      expect.soft(result.result.restorePacket).toEqual({ status: "unconfirmed", reason });
+      expect.soft(JSON.parse(completed[0]!.payload).restorePacket).toEqual({ status: "unconfirmed", reason });
+    }
+  });
+
   it("recap leg (B16): the resolver runs BEFORE the successor launches (the successor overwrites the name-keyed sidecar)", async () => {
     seedSeat({ runtime: "codex" });
     resolvePredecessorRecap.mockReturnValue({ recap: [{ role: "user", content: "pre-launch read" }], recordPath: "/p/a.jsonl" });
