@@ -133,8 +133,13 @@ check timed out after 5 seconds, so no team work ran. Don't rely on this path in
 
 ### Known limits
 
-- **No harness has run end to end under the contract yet.** The dsh example and
-  the conformance check were checked against stand-ins.
+- ~~**No harness has run end to end under the contract yet.** The dsh example and
+  the conformance check were checked against stand-ins.~~ *Corrected after
+  release:* 0.7.8's release testing ran a real dsh 0.2.1-rc.2 through the
+  shipped dsh example runner for a person's allow-once and reject-once, and
+  through an outside runner, dsh-seat 0.3.0, for launch, queue work, multiline
+  input, activity, cancel and exact resume. The conformance check itself runs
+  against a stand-in agent.
 - **The answer owner is a registered person.** "A colleague's answer is
   followed on this host. If the ask is handed to another host, the request
   waits, shown as needs input, until the agent's turn ends."
