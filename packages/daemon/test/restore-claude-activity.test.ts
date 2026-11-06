@@ -736,13 +736,23 @@ profiles:
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
 
-  it("reports unknown when the real agent file is missing", async () => {
-    const { result } = await restoreWithRealSpec(true, false);
+  it.each([
+    { ref: "path" as const, evidence: "Current agent specification could not be resolved" },
+    { ref: "local" as const, evidence: "wasn't found" },
+  ])("reports an absent agent file for a $ref reference", async ({ ref, evidence }) => {
+    const { f, result } = await restoreWithRealSpec(true, false, ref);
+    expect(fs.existsSync(path.join(root, "spec/agent.yaml"))).toBe(false);
+    const desired = createDesiredClaudeActivityHooksReader(db, { exists: fs.existsSync, readFile: p => fs.readFileSync(p, "utf8") })(f.node.id);
+    expect(desired).toMatchObject({ status: "unknown", evidence: expect.stringContaining(evidence) });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(owned()).toEqual([]);
-    expect(result.result.warnings.some((w) => w.includes("could not be determined"))).toBe(true);
+    expect(result.result.warnings.some((w) => w.includes("could not be determined") && w.includes(evidence)),
+      JSON.stringify(result.result.warnings)).toBe(true);
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toEqual(f.saved);
+    expect(settings().hooks.Stop).toContainEqual(userHook);
+    expect(settings().env).toEqual(originalSettings.env);
   });
 
   // #1530 follow-up: a local: agent (a shipped-spec seat) resolves as at launch, against the rig root its saved launch
@@ -915,6 +925,10 @@ pods:
     const read = createDesiredClaudeActivityHooksReader(db, readerFs);
     const desired = read(node.id);
     expect.soft(desired, "saved rig guidance is not proof of the added agent's source").toMatchObject({ status: "unknown" });
+    expect.soft(desired, "a present same-name file lacks independent source evidence, rather than being absent").toMatchObject({
+      evidence: expect.stringMatching(/independent.*source|source.*independent/i),
+    });
+    if (desired.status === "unknown") expect.soft(desired.evidence).not.toContain("wasn't found");
     const session = registry.getSessionsForRig(rigId).find(s => s.nodeId === node.id)!;
     registry.updateResumeToken(session.id, "claude_id", token);
     const snap = capture.captureSnapshot(rigId, "manual", { intendedNodeIds: [node.id] });
@@ -929,6 +943,9 @@ pods:
     }).check({});
     const hookCheck = check.checks.find(item => item.check === `seat.${session.sessionName}.hooks`);
     expect.soft(hookCheck, "restore-check must expose unknown selection").toMatchObject({ status: "yellow", evidence: expect.stringContaining("unknown") });
+    expect.soft(hookCheck, "restore-check must explain missing independent source evidence").toMatchObject({
+      evidence: expect.stringMatching(/independent.*source|source.*independent/i),
+    });
     registry.updateStatus(session.id, "exited");
     db.prepare("DELETE FROM bindings WHERE node_id=?").run(node.id);
     const result = await restore({ rig: rigs.getRig(rigId)!.rig, node, snap, saved }, adapter, () => {}, read);
@@ -936,6 +953,9 @@ pods:
     if (!result.ok) return;
     expect.soft(owned(), "the old root must not project hooks into the added seat").toEqual([]);
     expect.soft(result.result.warnings.some(w => w.startsWith("Restore activity hooks:") && w.includes("could not be determined")),
+      JSON.stringify(result.result.warnings)).toBe(true);
+    expect.soft(result.result.warnings.some(w => w.startsWith("Restore activity hooks:")
+      && /independent.*source|source.*independent/i.test(w) && !w.includes("wasn't found")),
       JSON.stringify(result.result.warnings)).toBe(true);
     expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(node.id)).toEqual(saved);
     expect(settings().hooks.Stop).toContainEqual(userHook);
