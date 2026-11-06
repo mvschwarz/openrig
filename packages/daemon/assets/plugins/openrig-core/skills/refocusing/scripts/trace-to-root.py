@@ -505,6 +505,7 @@ def main():
     parser.add_argument("--work-start")
     parser.add_argument("--work-basis", help="the daemon's reason no current work node was named")
     parser.add_argument("--work-unknown", help="why the current work node could not be read")
+    parser.add_argument("--unresolved-work-advisory", action="store_true", help="show unresolved typed work as an advisory with broad orientation")
     parser.add_argument("--check", action="store_true", help="exit nonzero on trace or notes resolution failure; rendered text is unchanged")
     parser.add_argument("--packet", action="store_true", help="carry duties and notes as text by section, with old-notes cues")
     parser.add_argument("--work-candidates", help="labelled work evidence as JSON (a path, or - for stdin), from `rig queue whoami --work-candidates`")
@@ -547,6 +548,11 @@ def main():
             elif args.work_basis == NO_CURRENT_BATON_BASIS:
                 sections.append(render_work(root, root, args.depth, failures, packet=args.packet, fallback=(
                     f"no current typed baton ({args.work_basis}). Showing the project-level chain from the work root: "
+                    "a broad orientation, not evidence of a current mission")))
+            elif args.unresolved_work_advisory and args.work_basis and args.work_basis.startswith("typed work did not resolve: "):
+                sections.append(f"## WORK TRACE\nTRACE GAP — no single current work node: {args.work_basis}")
+                sections.append(render_work(root, root, args.depth, failures, packet=args.packet, fallback=(
+                    "typed work could not be resolved. Showing the project-level chain from the work root: "
                     "a broad orientation, not evidence of a current mission")))
             elif args.work_basis:
                 sections.append(gap(f"## WORK TRACE\nTRACE GAP — no single current work node: {args.work_basis}"))
