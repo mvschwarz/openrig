@@ -899,7 +899,7 @@ profiles:
       startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux }),
       fsOps: { exists: fs.existsSync, readFile: p => fs.readFileSync(p, "utf8") },
       adapters: { "claude-code": adapter }, onboardingEnabledResolver: () => false, exec: async () => "" });
-    const materialized = await instantiator.materialize(`version: "0.2"
+    const authoredYaml = `version: "0.2"
 name: origin-1530
 ${startupFiles ? "culture_file: CULTURE.md" : ""}
 pods:
@@ -911,10 +911,19 @@ pods:
         agent_ref: ${placement === "ordinary" ? "local:." : "builtin:terminal"}
         profile: ${placement === "ordinary" ? "default" : "none"}
         cwd: ${cwd}
-`, originalRoot);
+`;
+    const materialized = await instantiator.materialize(authoredYaml, originalRoot);
     expect(materialized.ok, JSON.stringify(materialized)).toBe(true);
     if (!materialized.ok) return;
     const rigId = materialized.result.rigId;
+    if (placement === "ordinary") {
+      const launched = await instantiator.launchMaterialized(authoredYaml, originalRoot, rigId);
+      expect(launched.ok, JSON.stringify(launched)).toBe(true);
+      if (!launched.ok) return;
+      expect(launched.result.nodes, JSON.stringify(launched)).toEqual([
+        expect.objectContaining({ logicalId: "p.seat", status: "launched" }),
+      ]);
+    }
     if (placement === "added") {
       const added = await instantiator.addMemberToPod(rigId, "p", {
         id: "seat", runtime: "claude-code", agent_ref: "local:.", profile: "default", cwd,
@@ -927,6 +936,10 @@ pods:
     expect(node).toMatchObject({ agentRef: "local:.", resolvedSpecName: "impl" });
     const recordedRecipe = rigs.getNodeLaunchRecipe(node.id);
     expect(recordedRecipe).toMatchObject({ version: 1, rigRoot: actualRoot });
+    const persisted = db.prepare("SELECT resolved_files_json FROM node_startup_context WHERE node_id=?").get(node.id);
+    expect(persisted).toBeDefined();
+    // Explicit legacy empty-files control, after real first-launch persistence; built-in files may have been saved.
+    if (!startupFiles) db.prepare("UPDATE node_startup_context SET resolved_files_json = ? WHERE node_id=?").run("[]", node.id);
     const saved = db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(node.id) as {
       runtime: string; resolved_files_json: string; projection_entries_json: string; startup_actions_json: string;
     };
@@ -999,7 +1012,7 @@ pods:
     expect(settings().hooks.Stop).toContainEqual(userHook);
     expect(settings().env).toEqual(originalSettings.env);
     expect(tmux.sendText).toHaveBeenCalledTimes(sentAtRestore);
-    console.info("PR2617_RECIPE", { placement, recipe, specExists, startupFiles, actualSelection: selects, oldRootSelection: !selects,
+    console.info("PR2617_RECIPE", { placement, recipe, specExists, startupFiles, legacyEmptyFiles: !startupFiles, actualSelection: selects, oldRootSelection: !selects,
       savedOwnerRoots: files.map(file => file.ownerRoot), desired, hookCheck,
       projectedHookCount: owned().length, warnings: result.result.warnings, savedContextUnchanged: true });
   });
