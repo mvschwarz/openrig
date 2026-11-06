@@ -1,4 +1,5 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
+import { isLaunchWrapperRuntime, sameLaunchWrapper } from "./launch-wrapper.js";
 import nodePath from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
@@ -936,6 +937,7 @@ export class PodRigInstantiator {
         member: { ...context.member, agentRef: live.agentRef ?? "", profile: live.profile ?? "default", runtime: live.runtime ?? "",
           model: live.model ?? undefined, effort: live.effort ?? undefined, advisor: live.advisor ?? undefined,
           claudeMcp: live.runtime === "claude-code" ? live.claudeMcp ?? undefined : undefined,
+          launchWrapper: isLaunchWrapperRuntime(live.runtime) ? (live.launchWrapper ?? []) : undefined,
           codexConfigProfile: live.codexConfigProfile ?? undefined, cwd: live.cwd ?? context.member.cwd,
           env: live.env ?? undefined, restorePolicy: live.restorePolicy ?? undefined, sessionSource: live.sessionSource ?? undefined,
           permissionPolicy: undefined },
@@ -965,6 +967,7 @@ export class PodRigInstantiator {
     const changed = (["agentRef", "profile", "runtime", "model", "effort", "advisor", "codexConfigProfile"] as const)
       .filter(key => !isDeepStrictEqual(saved.member[key] ?? null, context.member[key] ?? null));
     const changes: string[] = [...changed];
+    if (!sameLaunchWrapper(saved.member.launchWrapper, context.member.launchWrapper)) changes.push("launchWrapper");
     if (saved.effortChoice && saved.effortChoice !== (context.member.effort ?? null)) changes.push("saved effort choice");
     if (saved.policyRef !== (context.member.permissionPolicy ?? null)
       || saved.rigPolicyRef !== (source.spec.permissionPolicy ?? null)) changes.push("permission policy");
@@ -1344,7 +1347,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1360,7 +1363,7 @@ export class PodRigInstantiator {
     const same = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
     if (`${pod.id}.${member.id}` !== node.logicalId || !same(member.agentRef, node.agentRef) || !same(member.profile, node.profile)
       || !same(member.runtime, node.runtime) || !same(member.role, node.role) || !same(member.label, node.label) || !same(member.codexConfigProfile, node.codexConfigProfile)
-      || !same(member.permissionPolicy, node.permissionPolicy) || !same(member.claudeMcp, node.claudeMcp)) return refuse("Member source disagrees with the retained seat identity or policy.");
+      || !same(member.permissionPolicy, node.permissionPolicy) || !same(member.claudeMcp, node.claudeMcp) || !sameLaunchWrapper(member.launchWrapper, node.launchWrapper)) return refuse("Member source disagrees with the retained seat identity or policy.");
     const resolved = resolveAgentRef(member.agentRef, rigRoot, this.deps.fsOps);
     if (!resolved.ok) return refuse(resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error);
     if (!node.resolvedSpecHash || resolved.resolved.hash !== node.resolvedSpecHash) return refuse("Agent source hash differs from the failed first start.");
@@ -1690,6 +1693,7 @@ export class PodRigInstantiator {
             claudeTokenRef: member.claudeTokenRef,
             claudeMcp: member.claudeMcp,
             codexPermissions: member.codexPermissions,
+            launchWrapper: member.launchWrapper,
             env: member.env,
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
@@ -2084,6 +2088,7 @@ export class PodRigInstantiator {
       claudeTokenRef: input.member.claudeTokenRef,
       claudeMcp: input.member.claudeMcp,
       codexPermissions: input.member.codexPermissions,
+      launchWrapper: input.member.launchWrapper,
       env: input.member.env,
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,
@@ -2181,6 +2186,7 @@ export class PodRigInstantiator {
     const member = {
       ...context.member,
       claudeMcp: node.runtime === "claude-code" ? node.claudeMcp ?? undefined : undefined,
+      launchWrapper: isLaunchWrapperRuntime(node.runtime) ? (node.launchWrapper ?? []) : undefined,
       ...(node.model !== null ? { model: node.model } : {}),
       ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),
       ...(node.codexConfigProfile !== null && node.codexConfigProfile !== undefined
@@ -2753,6 +2759,12 @@ export class PodRigInstantiator {
     // Apply the authored selection only after accepting the launch and resolving its startup sources.
     // An already-bound seat, failed tmux launch or unresolved source must keep the previous choice.
     if (input.member.runtime === "claude-code") this.deps.rigRepo.setNodeClaudeMcp(input.nodeId, input.member.claudeMcp ?? null);
+    if (isLaunchWrapperRuntime(input.member.runtime) && input.member.launchWrapper !== undefined) {
+      this.deps.rigRepo.setNodeLaunchWrapper(
+        input.nodeId,
+        input.member.launchWrapper.length > 0 ? input.member.launchWrapper : null,
+      );
+    }
 
     const startupResult = await this.deps.startupOrchestrator.startNode({
       rigId: input.rigId,

@@ -505,4 +505,39 @@ describe("RigSpecExporter (pod-aware)", () => {
     const result = PodRigSpecSchema.validate(parsed);
     expect(result.valid).toBe(true);
   });
+
+  it("exports selected launch_wrapper array for pi and codex pod members only and round-trips through codec/schema", () => {
+    const { rig, n2, devPod } = seedPodRig();
+    const nPi = rigRepo.addNode(rig.id, "dev.pi-seat", {
+      runtime: "pi",
+      podId: devPod.id,
+      agentRef: "local:agents/pi-seat",
+      profile: "default",
+      cwd: ".",
+      launchWrapper: ["rtk", "--pi-wrap"],
+    });
+    rigRepo.setNodeLaunchWrapper(n2.id, ["rtk", "--codex-wrap"]);
+
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const devMembers = exported.pods.find((p) => p.id === "dev")!.members;
+    expect(devMembers.find((m) => m.id === "impl")?.launchWrapper).toBeUndefined();
+    expect(devMembers.find((m) => m.id === "qa")?.launchWrapper).toEqual(["rtk", "--codex-wrap"]);
+    expect(devMembers.find((m) => m.id === "pi-seat")?.launchWrapper).toEqual(["rtk", "--pi-wrap"]);
+
+    const yaml = PodRigSpecCodec.serialize(exported);
+    const parsed = PodRigSpecCodec.parse(yaml);
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const normalized = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    const normalizedDev = normalized.pods.find((p) => p.id === "dev")!.members;
+    expect(normalizedDev.find((m) => m.id === "qa")?.launchWrapper).toEqual(["rtk", "--codex-wrap"]);
+    expect(normalizedDev.find((m) => m.id === "pi-seat")?.launchWrapper).toEqual(["rtk", "--pi-wrap"]);
+
+    // Explicitly cleared wrapper omits launchWrapper on export
+    rigRepo.setNodeLaunchWrapper(n2.id, null);
+    rigRepo.setNodeLaunchWrapper(nPi.id, null);
+    const exportedAfterClear = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const clearedMembers = exportedAfterClear.pods.find((p) => p.id === "dev")!.members;
+    expect(clearedMembers.find((m) => m.id === "qa")?.launchWrapper).toBeUndefined();
+    expect(clearedMembers.find((m) => m.id === "pi-seat")?.launchWrapper).toBeUndefined();
+  });
 });

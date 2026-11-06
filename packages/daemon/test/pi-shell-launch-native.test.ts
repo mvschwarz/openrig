@@ -9,6 +9,8 @@ import { describe, expect, it, vi } from "vitest";
 import { TmuxAdapter, type TmuxFileOps } from "../src/adapters/tmux.js";
 import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
 import { PiResumeAdapter } from "../src/adapters/pi-resume.js";
+import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
+import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 import { buildPiRunnerCommand, piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
 
@@ -167,6 +169,431 @@ setInterval(() => {}, 1000);
     } finally {
       await run("tmux", ["-S", socket, "kill-server"]).catch(() => {});
       if (routeServer?.listening) await new Promise<void>(resolve => routeServer.close(() => resolve()));
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it.each(["fresh", "fork", "resume", "staged-long"] as const)("executes launch_wrapper in native tmux for Pi %s with intact pid, argv, cwd, tty, env, exit and signal", async mode => {
+    const launchMode = mode === "staged-long" ? "fresh" : mode;
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wrapper-native-"));
+    const socket = path.join(temp, "tmux.sock");
+    const session = "pi-wrapped";
+    const cwd = path.join(temp, "work dir with 'quotes'");
+    const stateRoot = path.join(temp, "state");
+    const daemonBin = path.join(temp, "daemon-bin");
+    const userBin = path.join(temp, "user-bin");
+    for (const d of [cwd, stateRoot, daemonBin, userBin]) fs.mkdirSync(d, { recursive: true });
+
+    const wrapperRecordPath = path.join(temp, "wrapper-record.json");
+    const signalRecordPath = path.join(temp, "signal-record.json");
+    // Decoy wrapper in userBin proves daemon PATH resolution wins over pane rc PATH.
+    fs.writeFileSync(path.join(userBin, "generic-wrapper"), "#!/bin/sh\necho wrong-user-wrapper >&2\nexit 88\n", { mode: 0o700 });
+    fs.writeFileSync(path.join(daemonBin, "generic-wrapper"), `#!/bin/sh
+WRAPPER_SH_PID="$$" node -e '
+  const fs = require("node:fs"), tty = require("node:tty");
+  const argv = process.argv.slice(1);
+  const sep = argv.indexOf("--");
+  fs.writeFileSync(${JSON.stringify(wrapperRecordPath)}, JSON.stringify({
+    wrapperPid: Number(process.env.WRAPPER_SH_PID),
+    helperPpid: process.ppid,
+    wrapperArgs: argv.slice(0, sep),
+    execArgv: argv.slice(sep + 1),
+    cwd: process.cwd(),
+    tty: [0, 1, 2].map(fd => tty.isatty(fd)),
+    env: {
+      nodeId: process.env.OPENRIG_NODE_ID,
+      sessionName: process.env.OPENRIG_SESSION_NAME,
+      runtime: process.env.OPENRIG_RUNTIME,
+      generation: process.env.OPENRIG_OCCUPANT_GENERATION,
+      home: process.env.OPENRIG_HOME,
+      path: process.env.PATH,
+    },
+  }));
+' -- "$@"
+while [ "$#" -gt 0 ]; do
+  arg="$1"; shift
+  [ "$arg" = "--" ] && break
+done
+exec "$@"
+`, { mode: 0o700 });
+
+    const cli = path.join(temp, "paired-cli");
+    fs.writeFileSync(cli, `#!${process.execPath}\nconsole.log(JSON.stringify({cli:"paired",node:process.env.OPENRIG_NODE_ID,generation:process.env.OPENRIG_OCCUPANT_GENERATION,runtime:process.env.OPENRIG_RUNTIME,agentDir:process.env.PI_CODING_AGENT_DIR,sessionsDir:process.env.PI_CODING_AGENT_SESSION_DIR}));\n`, { mode: 0o700 });
+
+    const runner = path.join(temp, "offline-runner.cjs");
+    fs.writeFileSync(runner, `const fs = require('node:fs'), path = require('node:path'), tty = require('node:tty');
+(async () => {
+  const args = process.argv.slice(2); const at = flag => args[args.indexOf(flag) + 1];
+  const stateRoot = at('--state-root'), name = at('--session-name');
+  const dir = path.join(stateRoot, name); fs.mkdirSync(dir, { recursive: true });
+  const sessionFile = args.includes('--session') ? at('--session') : path.join(dir, 'sessions', 'child.jsonl');
+  const { buildPiChildEnv } = await import(${JSON.stringify(pathToFileURL(path.resolve(import.meta.dirname, "../dist/adapters/pi-runner-protocol.js")).href)});
+  const childEnv = buildPiChildEnv(process.env, { agentDir: path.join(dir, 'agent'), sessionsDir: path.join(dir, 'sessions'), model: at('--model') });
+  const whoami = JSON.parse(require('node:child_process').execFileSync('rig', ['whoami'], { env: childEnv, encoding: 'utf8', timeout: 3000 }));
+  fs.writeFileSync(path.join(dir, 'received.json'), JSON.stringify({
+    runnerPid: process.pid,
+    cwd: process.cwd(),
+    argCwd: at('--cwd'),
+    sessionFile,
+    args,
+    tty: [0, 1, 2].map(fd => tty.isatty(fd)),
+    whoami,
+  }));
+  const finish = (sig, code) => {
+    fs.writeFileSync(${JSON.stringify(signalRecordPath)}, JSON.stringify({ signal: sig, code, pid: process.pid }));
+    fs.writeFileSync(path.join(dir, 'runner-state.json'), JSON.stringify({
+      ready: false, launchId: at('--launch-id'), sessionFile, sessionId: 'offline',
+      updatedAt: new Date().toISOString(), exited: { code, at: new Date().toISOString() },
+    }));
+    process.exit(code);
+  };
+  process.on('SIGINT', () => finish('SIGINT', 130));
+  process.on('SIGTERM', () => finish('SIGTERM', 143));
+  fs.writeFileSync(path.join(dir, 'runner-state.json'), JSON.stringify({
+    ready: true, launchId: at('--launch-id'), sessionFile, sessionId: 'offline', updatedAt: new Date().toISOString(),
+  }));
+  setInterval(() => {}, 1000);
+})().catch(e => { console.error(e); process.exitCode = 1; });\n`);
+
+    const parent = path.join(stateRoot, session, "sessions", "parent.jsonl");
+    fs.mkdirSync(path.dirname(parent), { recursive: true });
+    fs.writeFileSync(parent, "fixture\n");
+
+    const sessionEnv = {
+      PATH: `${daemonBin}:${process.env.PATH ?? ""}`,
+      OPENRIG_HOME: path.join(temp, "instance"),
+      OPENRIG_URL: "http://127.0.0.1:7433",
+      OPENRIG_NODE_ID: "fixture-node",
+      OPENRIG_SESSION_NAME: session,
+      OPENRIG_RUNTIME: "pi",
+      OPENRIG_OCCUPANT_GENERATION: "existing-generation",
+    };
+    const rc = path.join(temp, "pane.rc");
+    fs.writeFileSync(rc, `export PATH=${quote(userBin + ":" + (process.env.PATH ?? ""))}\nprintf ready > ${quote(path.join(temp, "rc-ready"))}\n`);
+
+    const fsOps = {
+      readFile: (p: string) => fs.readFileSync(p, "utf8"),
+      writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
+      exists: fs.existsSync,
+      mkdirp: (p: string) => { fs.mkdirSync(p, { recursive: true }); },
+    };
+    const wrapper = ["generic-wrapper", "arg with spaces", "quote's", "$UNEXPANDED;false", "", "--"];
+    const model = mode === "staged-long" ? "provider/model-" + "m".repeat(1200) : "provider/model-short";
+
+    try {
+      await run("tmux", [
+        "-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", session,
+        ...Object.entries(sessionEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+        `/bin/bash --noprofile --rcfile ${quote(rc)} -i`,
+      ]);
+      for (let i = 0; i < 100 && !fs.existsSync(path.join(temp, "rc-ready")); i++) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      const tmux = new TmuxAdapter(async command => (await exec(command.replace(/^tmux /, `tmux -S ${quote(socket)} `), { cwd })).stdout);
+      const seatLaunchEnvironment = new SeatLaunchEnvironment(tmux, sessionEnv, cwd, cli);
+
+      if (launchMode === "resume") {
+        const adapter = new PiResumeAdapter(tmux, fsOps, { stateRoot, runnerEntryPath: runner }, {
+          seatLaunchEnvironment, maxWaitMs: 4000, pollMs: 25, newLaunchId: () => "attempt",
+        });
+        const result = await adapter.resume(session, "pi_session_file", parent, cwd, model, "floor", "high", wrapper);
+        expect(result).toMatchObject({ ok: true });
+      } else {
+        const adapter = new PiRuntimeAdapter({
+          tmux, fsOps, stateRoot, runnerEntryPath: runner, seatLaunchEnvironment,
+          sleep: () => new Promise(resolve => setTimeout(resolve, 25)), newLaunchId: () => "attempt",
+        });
+        const result = await adapter.launchHarness(
+          { tmuxSession: session, cwd, model, effort: "high", nodeId: "fixture-node", launchGeneration: "reserved-generation", launchWrapper: wrapper } as never,
+          { name: session, ...(launchMode === "fork" ? { forkSource: { kind: "native_id" as const, value: parent } } : {}) },
+        );
+        expect(result).toMatchObject({ ok: true });
+      }
+
+      const wrapperRec = JSON.parse(fs.readFileSync(wrapperRecordPath, "utf8"));
+      const received = JSON.parse(fs.readFileSync(path.join(stateRoot, session, "received.json"), "utf8"));
+      // Exec replacement: wrapper PID equals runner process.pid (no intermediate supervisor process)
+      expect(wrapperRec.wrapperPid).toBe(received.runnerPid);
+      expect(wrapperRec.wrapperArgs).toEqual(["arg with spaces", "quote's", "$UNEXPANDED;false", ""]);
+      expect(wrapperRec.execArgv[0]).toBe("node");
+      expect(wrapperRec.execArgv[1]).toBe(runner);
+      expect(wrapperRec.tty).toEqual([true, true, true]);
+      expect(received.tty).toEqual([true, true, true]);
+      expect(received.argCwd).toBe(cwd);
+      expect(received.whoami).toEqual({
+        cli: "paired",
+        node: "fixture-node",
+        generation: launchMode === "resume" ? "existing-generation" : "reserved-generation",
+        runtime: "pi",
+        agentDir: piSeatPaths(stateRoot, session).agentDir,
+        sessionsDir: piSeatPaths(stateRoot, session).sessionsDir,
+      });
+
+      const readiness = new PiRuntimeAdapter({ tmux, fsOps, stateRoot, runnerEntryPath: runner });
+      const binding = { tmuxSession: session, cwd } as never;
+      expect(await readiness.checkReady(binding)).toEqual({ ready: true });
+
+      process.kill(received.runnerPid, "SIGTERM");
+      for (let i = 0; i < 100 && !fs.existsSync(signalRecordPath); i++) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      expect(JSON.parse(fs.readFileSync(signalRecordPath, "utf8"))).toEqual({
+        signal: "SIGTERM",
+        code: 143,
+        pid: received.runnerPid,
+      });
+      for (let i = 0; i < 100 && (await tmux.getPaneCommand(session)) === "node"; i++) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      expect(await readiness.checkReady(binding)).toMatchObject({ ready: false, code: "runner_exited" });
+    } finally {
+      await run("tmux", ["-S", socket, "kill-server"]).catch(() => {});
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it.each(["missing-wrapper", "failing-wrapper-exit-7", "non-exec-zero-exit", "long-tmpdir-too-long"] as const)("fails closed in native tmux on %s without starting bare Pi runner", async failure => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wrapper-fail-"));
+    const socket = path.join(temp, "tmux.sock");
+    const session = "pi-fail";
+    const cwd = path.join(temp, "work");
+    const stateRoot = path.join(temp, "state");
+    const daemonBin = path.join(temp, "daemon-bin");
+    for (const d of [cwd, stateRoot, daemonBin]) fs.mkdirSync(d, { recursive: true });
+
+    fs.writeFileSync(path.join(daemonBin, "fail-wrapper"), "#!/bin/sh\necho wrapper-failed-7 >&2\nexit 7\n", { mode: 0o700 });
+    fs.writeFileSync(path.join(daemonBin, "zero-wrapper"), "#!/bin/sh\necho wrapper-exited-0-without-exec\nexit 0\n", { mode: 0o700 });
+    fs.writeFileSync(path.join(daemonBin, "ok-wrapper"), "#!/bin/sh\nshift\nexec \"$@\"\n", { mode: 0o700 });
+
+    const cli = path.join(temp, "paired-cli");
+    fs.writeFileSync(cli, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const runner = path.join(temp, "offline-runner.cjs");
+    fs.writeFileSync(runner, `const fs = require('node:fs'), path = require('node:path');
+const args = process.argv.slice(2); const at = f => args[args.indexOf(f) + 1];
+const dir = path.join(at('--state-root'), at('--session-name'));
+fs.mkdirSync(dir, { recursive: true });
+fs.writeFileSync(path.join(dir, 'received.json'), 'bare-runner-should-never-start');\n`);
+
+    const sessionEnv = {
+      PATH: `${daemonBin}:${process.env.PATH ?? ""}`,
+      OPENRIG_HOME: path.join(temp, "instance"),
+      OPENRIG_URL: "http://127.0.0.1:7433",
+      OPENRIG_NODE_ID: "fixture-node",
+      OPENRIG_SESSION_NAME: session,
+      OPENRIG_RUNTIME: "pi",
+      OPENRIG_OCCUPANT_GENERATION: "gen-1",
+    };
+    const fsOps = {
+      readFile: (p: string) => fs.readFileSync(p, "utf8"),
+      writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
+      exists: fs.existsSync,
+      mkdirp: (p: string) => { fs.mkdirSync(p, { recursive: true }); },
+    };
+
+    try {
+      await run("tmux", [
+        "-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", session,
+        ...Object.entries(sessionEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+        "/bin/bash --noprofile --norc -i",
+      ]);
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      let fileOps: TmuxFileOps | undefined;
+      if (failure === "long-tmpdir-too-long") {
+        const longTmpdir = path.join(temp, ...Array.from({ length: 9 }, () => "t".repeat(60)));
+        fs.mkdirSync(longTmpdir, { recursive: true });
+        let n = 0;
+        fileOps = {
+          tmpName: () => path.join(longTmpdir, `launch-${n++}.tmp`),
+          bufferName: () => `buf-${n++}`,
+          writeFile: (p, text, options) => fs.promises.writeFile(p, text, options),
+          unlink: p => fs.promises.unlink(p),
+        };
+      }
+      const tmux = new TmuxAdapter(async command => (await exec(command.replace(/^tmux /, `tmux -S ${quote(socket)} `))).stdout, fileOps);
+      const send = vi.spyOn(tmux, "sendShellCommand");
+      const seatLaunchEnvironment = new SeatLaunchEnvironment(tmux, sessionEnv, cwd, cli);
+
+      const wrapper =
+        failure === "missing-wrapper" ? ["no-such-wrapper", "--"]
+        : failure === "failing-wrapper-exit-7" ? ["fail-wrapper", "--"]
+        : failure === "non-exec-zero-exit" ? ["zero-wrapper", "--"]
+        : ["ok-wrapper", "--"];
+      const model = failure === "long-tmpdir-too-long" ? "provider/model-" + "m".repeat(500) : "provider/short";
+
+      let attempts = 0;
+      const adapter = new PiRuntimeAdapter({
+        tmux, fsOps, stateRoot, runnerEntryPath: runner, seatLaunchEnvironment,
+        sleep: async () => { if (++attempts > 5) { const s = piSeatPaths(stateRoot, session).runnerStatePath; fs.writeFileSync(s, JSON.stringify({ ready: false, launchId: "attempt", updatedAt: "t", exited: { code: 1, at: "t" } })); } else await new Promise(r => setTimeout(r, 20)); },
+        newLaunchId: () => "attempt",
+      });
+      const result = await adapter.launchHarness(
+        { tmuxSession: session, cwd, model, nodeId: "fixture-node", launchGeneration: "gen-1", launchWrapper: wrapper } as never,
+        { name: session },
+      );
+      expect(result.ok).toBe(false);
+      if (failure === "long-tmpdir-too-long") {
+        // Must NOT retry bare command on launch_path_too_long when launchWrapper is selected
+        expect(send).toHaveBeenCalledTimes(1);
+      }
+      expect(fs.existsSync(path.join(stateRoot, session, "received.json"))).toBe(false);
+      expect((await adapter.checkReady({ tmuxSession: session, cwd } as never)).ready).toBe(false);
+    } finally {
+      await run("tmux", ["-S", socket, "kill-server"]).catch(() => {});
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it.each(["fresh", "fork", "resume"] as const)("executes launch_wrapper in native tmux for Codex %s with resolved interpreter+entry, intact pid, cwd, tty, env and exit code", async mode => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-wrapper-native-"));
+    const socket = path.join(temp, "tmux.sock");
+    const session = "codex-wrapped";
+    const cwd = path.join(temp, "codex work 'quotes'");
+    const daemonBin = path.join(temp, "daemon-bin");
+    const userBin = path.join(temp, "user-bin");
+    for (const d of [cwd, daemonBin, userBin]) fs.mkdirSync(d, { recursive: true });
+
+    const wrapperRecordPath = path.join(temp, "codex-wrapper-record.json");
+    const codexRecordPath = path.join(temp, "codex-record.json");
+    const codexExitFile = path.join(temp, "codex-exit.json");
+
+    fs.writeFileSync(path.join(userBin, "generic-wrapper"), "#!/bin/sh\nexit 91\n", { mode: 0o700 });
+    fs.writeFileSync(path.join(userBin, "codex"), "#!/bin/sh\nexit 92\n", { mode: 0o700 });
+    fs.symlinkSync(process.execPath, path.join(daemonBin, "node"));
+
+    fs.writeFileSync(path.join(daemonBin, "generic-wrapper"), `#!/bin/sh
+WRAPPER_SH_PID="$$" node -e '
+  const fs = require("node:fs"), tty = require("node:tty");
+  const argv = process.argv.slice(1);
+  const sep = argv.indexOf("--");
+  fs.writeFileSync(${JSON.stringify(wrapperRecordPath)}, JSON.stringify({
+    wrapperPid: Number(process.env.WRAPPER_SH_PID),
+    wrapperArgs: argv.slice(0, sep),
+    execArgv: argv.slice(sep + 1),
+    cwd: process.cwd(),
+    tty: [0, 1, 2].map(fd => tty.isatty(fd)),
+    nodeId: process.env.OPENRIG_NODE_ID,
+    sessionName: process.env.OPENRIG_SESSION_NAME,
+    runtime: process.env.OPENRIG_RUNTIME,
+    generation: process.env.OPENRIG_OCCUPANT_GENERATION,
+  }));
+' -- "$@"
+while [ "$#" -gt 0 ]; do
+  arg="$1"; shift
+  [ "$arg" = "--" ] && break
+done
+exec "$@"
+`, { mode: 0o700 });
+
+    const codexBin = path.join(daemonBin, "codex");
+    fs.writeFileSync(codexBin, `#!/usr/bin/env node
+const fs = require("node:fs"), tty = require("node:tty");
+if (process.argv.includes("--help")) {
+  console.log("Usage: codex\\n  --no-daemon");
+  process.exit(0);
+}
+function writeJsonAtomic(targetPath, data) {
+  const tmp = \`\${targetPath}.tmp.\${process.pid}.\${Date.now()}\`;
+  fs.writeFileSync(tmp, JSON.stringify(data));
+  fs.renameSync(tmp, targetPath);
+}
+process.on("SIGUSR2", () => {
+  writeJsonAtomic(${JSON.stringify(codexExitFile)}, { code: 13, pid: process.pid });
+  process.exit(13);
+});
+writeJsonAtomic(${JSON.stringify(codexRecordPath)}, {
+  codexPid: process.pid,
+  signalHandlerReady: true,
+  nodeExecPath: process.execPath,
+  scriptPath: process.argv[1],
+  args: process.argv.slice(2),
+  cwd: process.cwd(),
+  tty: [0, 1, 2].map(fd => tty.isatty(fd)),
+  nodeId: process.env.OPENRIG_NODE_ID,
+  sessionName: process.env.OPENRIG_SESSION_NAME,
+  runtime: process.env.OPENRIG_RUNTIME,
+  generation: process.env.OPENRIG_OCCUPANT_GENERATION,
+});
+console.log("OpenAI Codex (v0.0.0)\\n› Ask Codex to do anything");
+setInterval(() => {}, 1000);
+`, { mode: 0o700 });
+
+    const cli = path.join(temp, "paired-cli");
+    fs.writeFileSync(cli, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+
+    const sessionEnv = {
+      PATH: `${daemonBin}:${process.env.PATH ?? ""}`,
+      OPENRIG_HOME: path.join(temp, "instance"),
+      OPENRIG_URL: "http://127.0.0.1:7433",
+      OPENRIG_NODE_ID: "codex-node",
+      OPENRIG_SESSION_NAME: session,
+      OPENRIG_RUNTIME: "codex",
+      OPENRIG_OCCUPANT_GENERATION: "codex-gen-1",
+    };
+
+    try {
+      await run("tmux", [
+        "-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", session, "-c", cwd,
+        ...Object.entries(sessionEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+        "/bin/bash --noprofile --norc -i",
+      ]);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const tmux = new TmuxAdapter(async command => (await exec(command.replace(/^tmux /, `tmux -S ${quote(socket)} `), { cwd })).stdout);
+      const seatLaunchEnvironment = new SeatLaunchEnvironment(tmux, sessionEnv, cwd, cli);
+      const wrapper = ["generic-wrapper", "literal $ARG", "--"];
+
+      if (mode === "resume") {
+        const adapter = new CodexResumeAdapter(tmux, {
+          seatLaunchEnvironment, launchPath: sessionEnv.PATH, maxWaitMs: 4000, pollMs: 25,
+          detectDaemonSupport: async () => ({ kind: "supported" }),
+        });
+        const res = await adapter.resume(session, "codex_id", "thread-123", cwd, undefined, "floor", "gpt-5", "high", false, false, false, undefined, undefined, undefined, wrapper);
+        expect(res).toMatchObject({ ok: true });
+      } else {
+        const adapter = new CodexRuntimeAdapter({
+          tmux, seatLaunchEnvironment, launchPath: sessionEnv.PATH,
+          detectDaemonSupport: async () => ({ kind: "supported" }),
+          resolveGitAddDirs: async () => [],
+          listProcesses: () => [],
+          sleep: () => new Promise(resolve => setTimeout(resolve, 25)),
+          fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, homedir: temp },
+        });
+        vi.spyOn(adapter as any, "dismissSkippableCodexUpdatePrompt").mockResolvedValue(undefined);
+        vi.spyOn(adapter as any, "captureFreshThreadId").mockResolvedValue("fresh-id");
+        vi.spyOn(adapter as any, "captureVerifiedForkId").mockResolvedValue("fork-id");
+        const res = await adapter.launchHarness(
+          { id: "b", nodeId: "codex-node", tmuxSession: session, tmuxPane: "%1", tmuxWindow: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd, launchGeneration: "codex-gen-2", launchWrapper: wrapper },
+          { name: session, ...(mode === "fork" ? { forkSource: { kind: "native_id", value: "parent-id" } } : {}) },
+        );
+        expect(res).toMatchObject({ ok: true });
+      }
+
+      for (let i = 0; i < 100 && !fs.existsSync(codexRecordPath); i++) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      const wrapperRec = JSON.parse(fs.readFileSync(wrapperRecordPath, "utf8"));
+      const codexRec = JSON.parse(fs.readFileSync(codexRecordPath, "utf8"));
+      expect(wrapperRec.wrapperPid).toBe(codexRec.codexPid);
+      expect(wrapperRec.wrapperArgs).toEqual(["literal $ARG"]);
+      expect(wrapperRec.execArgv[0]).toBe(path.join(daemonBin, "node"));
+      expect(wrapperRec.execArgv[1]).toBe(codexBin);
+      expect(wrapperRec.cwd).toBe(cwd);
+      expect(codexRec.cwd).toBe(cwd);
+      expect(wrapperRec.tty).toEqual([true, true, true]);
+      expect(codexRec.tty).toEqual([true, true, true]);
+      expect(codexRec.nodeId).toBe("codex-node");
+      expect(codexRec.sessionName).toBe(session);
+      expect(codexRec.runtime).toBe("codex");
+      expect(codexRec.generation).toBe(mode === "resume" ? "codex-gen-1" : "codex-gen-2");
+
+      process.kill(codexRec.codexPid, "SIGUSR2");
+      for (let i = 0; i < 100 && !fs.existsSync(codexExitFile); i++) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      expect(codexRec.signalHandlerReady).toBe(true);
+      expect(JSON.parse(fs.readFileSync(codexExitFile, "utf8"))).toEqual({ code: 13, pid: codexRec.codexPid });
+    } finally {
+      await run("tmux", ["-S", socket, "kill-server"]).catch(() => {});
       fs.rmSync(temp, { recursive: true, force: true });
     }
   }, 10_000);

@@ -234,6 +234,10 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
   ): Promise<HarnessLaunchResult> {
+    const wrapped = binding.launchWrapper?.length ? binding.launchWrapper : undefined;
+    if (wrapped && (this.runtime !== "pi" || !this.seatLaunchEnvironment)) {
+      return { ok: false, error: "launch_wrapper support unavailable; no agent started." };
+    }
     if (!binding.tmuxSession) {
       return { ok: false, error: `No tmux session bound — cannot launch the ${this.runtime === "pi" ? "Pi" : "OMP"} harness` };
     }
@@ -311,12 +315,12 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     });
 
     const command = this.runtime === "pi" && this.seatLaunchEnvironment
-      ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
+      ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, ...(wrapped ? { launchWrapper: wrapped } : {}) })
       : cmd;
     // Stage long commands without leaving a shell above the live runner.
     let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
     // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
-    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd) {
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd && !wrapped) {
       textResult = await this.tmux.sendShellCommand(sessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
     }
     if (!textResult.ok) {

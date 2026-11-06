@@ -12,6 +12,7 @@ import { ensureSeatSkillPlugin, hasSeatSkillRecords, rehydrateSeatSkills, seatSk
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
+import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import type { RigRepository } from "./rig-repository.js";
 import { resolvePermissionPolicyAttachment } from "./permission-policy/policy-ref.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
@@ -2461,6 +2462,7 @@ export class RestoreOrchestrator {
     let teamPermissionDefault = false;
     let claudePermissions: import("./claude-permission-rules.js").ClaudePermissionRules | undefined;
     let claudeMcp: ClaudeMcp | undefined;
+    let launchWrapper: string[] | undefined;
     let codexPermissions: import("./codex-member-permissions.js").CodexMemberPermissions | undefined;
     let permissionMode: string | undefined;
     try {
@@ -2471,6 +2473,7 @@ export class RestoreOrchestrator {
       teamPermissionDefault = override.teamPermissionDefault === true;
       claudePermissions = override.claudePermissions;
       claudeMcp = runtime === "claude-code" ? readSeatClaudeMcp(this.db, nodeId) : undefined;
+      launchWrapper = isLaunchWrapperRuntime(runtime) ? readSeatLaunchWrapper(this.db, nodeId) : undefined;
       codexPermissions = override.codexPermissions;
       resolvedPosture = override.launchPosture ?? resolvedPosture;
       permissionMode = override.permissionMode ?? (resolvedPosture === "auto" && runtime === "claude-code" ? "auto" : undefined);
@@ -2527,9 +2530,12 @@ export class RestoreOrchestrator {
         ? [...launchTail, ...Array(4 - launchTail.length).fill(undefined), seatHome, ...(codexPermissions !== undefined ? [codexPermissions] : [])]
         : launchTail;
       const guardedCodexTail = beforeNative ? [...codexTail, ...Array(Math.max(0, 6 - codexTail.length)).fill(undefined), beforeNative] : codexTail;
+      const wrappedCodexTail = launchWrapper?.length
+        ? [...guardedCodexTail, ...Array(Math.max(0, 7 - guardedCodexTail.length)).fill(undefined), launchWrapper]
+        : guardedCodexTail;
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
       const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model,
-        ...(guardedCodexTail as [...typeof launchTail, seatCodexHome?: string, codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions, beforeNativeDispatch?: () => boolean]));
+        ...(wrappedCodexTail as [...typeof launchTail, seatCodexHome?: string, codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions, beforeNativeDispatch?: () => boolean, launchWrapper?: readonly string[]]));
       if (result.ok) {
         const notice = nonInterruptiveNotice("codex", { nonInterruptive, launchPosture: codexPermissions ? undefined : resolvedPosture, permissionMode });
         if (notice) warnings?.push(`${sessionName}: ${notice}`);
@@ -2555,7 +2561,16 @@ export class RestoreOrchestrator {
     // session file returns retry_fresh, which the caller maps to the
     // awaiting-decision stop-and-ask — never a silent fresh start (BR-6).
     if (this.piResume?.canResume(resumeType, resumeToken)) {
-      const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort);
+      const result = await this.piResume.resume(
+        sessionName,
+        resumeType,
+        resumeToken,
+        cwd,
+        model,
+        resolvedPosture,
+        effort,
+        ...(launchWrapper?.length ? ([launchWrapper] as const) : []),
+      );
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };

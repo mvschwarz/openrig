@@ -67,9 +67,14 @@ export class PiResumeAdapter {
     resolvedPosture?: "floor" | "full_bypass" | "auto",
     // The seat's resolved effort, sent as Pi's --thinking (OMP unchanged).
     effort?: string | null,
+    launchWrapper?: readonly string[],
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: `${this.label} resume not available` };
+    }
+    const wrapped = launchWrapper?.length ? launchWrapper : undefined;
+    if (wrapped && (this.runtime !== "pi" || !this.options.seatLaunchEnvironment)) {
+      return { ok: false, code: "resume_failed", message: "launch_wrapper support unavailable; no agent started." };
     }
     const sessionFile = resumeToken!;
 
@@ -120,12 +125,12 @@ export class PiResumeAdapter {
     });
 
     const command = this.runtime === "pi" && this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime })
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime, ...(wrapped ? { launchWrapper: wrapped } : {}) })
       : cmd;
     // Short commands retain the direct path; long commands exec from a private script.
     let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
     // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
-    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd) {
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd && !wrapped) {
       textResult = await this.tmux.sendShellCommand(tmuxSessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
     }
     if (!textResult.ok) {

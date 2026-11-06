@@ -652,4 +652,62 @@ describe("seat login-shell PATH warning", () => {
       expect(exec.mock.calls.map(([command]) => command).filter(isLookup)).toEqual([]);
     } finally { db.close(); }
   });
+
+  it("validates launch_wrapper[0] against daemon PATH for pi and codex members", async () => {
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+
+    // 1. Missing wrapper executable on daemon PATH -> preflight error
+    const missingYaml = makeRigYaml({
+      pods: [{
+        id: "dev",
+        label: "Dev",
+        members: [{
+          id: "impl",
+          agentRef: "local:agents/impl",
+          profile: "default",
+          runtime: "codex",
+          cwd: ".",
+          launchWrapper: ["definitely-missing-wrapper-bin-xyz987", "--flag"],
+        }],
+        edges: [],
+      }],
+    });
+    const missingResult = await rigPreflight({
+      rigSpecYaml: missingYaml,
+      rigRoot: RIG_ROOT,
+      fsOps: mockFs(files),
+      materializeOnly: true,
+    });
+    expect(missingResult.ready).toBe(false);
+    expect(missingResult.errors).toContain(
+      "dev.impl: Seat launch requires definitely-missing-wrapper-bin-xyz987 on the daemon launch PATH.",
+    );
+
+    // 2. Resolvable wrapper executable on daemon PATH (/bin/sh) -> passes preflight
+    const validYaml = makeRigYaml({
+      pods: [{
+        id: "dev",
+        label: "Dev",
+        members: [{
+          id: "impl",
+          agentRef: "local:agents/impl",
+          profile: "default",
+          runtime: "pi",
+          cwd: ".",
+          launchWrapper: ["/bin/sh", "-c"],
+        }],
+        edges: [],
+      }],
+    });
+    const validResult = await rigPreflight({
+      rigSpecYaml: validYaml,
+      rigRoot: RIG_ROOT,
+      fsOps: mockFs(files),
+      materializeOnly: true,
+    });
+    expect(validResult.ready, JSON.stringify(validResult.errors)).toBe(true);
+    expect(validResult.errors).toEqual([]);
+  });
 });

@@ -1,5 +1,6 @@
 import { readClaudePermissionRules } from "./claude-permission-rules.js";
 import { readCodexMemberPermissions } from "./codex-member-permissions.js";
+import { isLaunchWrapperRuntime } from "./launch-wrapper.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { PodRepository } from "./pod-repository.js";
@@ -232,6 +233,7 @@ export class RigSpecExporter {
         if (node.effort) member.effort = node.effort;
         if (node.advisor) member.advisor = node.advisor;
         if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
+        if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) member.launchWrapper = node.launchWrapper;
         // #2044: unlike the copied files, a seat's plugin channels are names the record keeps as the spec gave them, so
         // an export carries the ones its launch passes.
         const channels = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.rigRepo.db, node.id).additions?.pluginChannels : undefined;

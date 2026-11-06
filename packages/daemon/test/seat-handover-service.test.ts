@@ -1763,4 +1763,38 @@ describe("SeatHandoverService", () => {
     expect(result.ok).toBe(true);
     expect((launchHarness.mock.calls[0]![0] as { effort?: string }).effort).toBe("high");
   });
+
+  it("carries the seat's persisted launch_wrapper onto the handover successor binding", async () => {
+    const { node } = seedSeat({ runtime: "codex" });
+    rigRepo.setNodeLaunchWrapper(node.id, ["rtk", "--handover"]);
+    const result = await service.handover({
+      seatRef: "dev-impl@seat-rig",
+      reason: "context-wall",
+      source: "fresh",
+      operator: "orch-lead@seat-rig",
+    });
+    expect(result.ok).toBe(true);
+    expect((launchHarness.mock.calls[0]![0] as { launchWrapper?: string[] }).launchWrapper).toEqual(["rtk", "--handover"]);
+  });
+
+  it("fails closed before cutover when the seat's stored launch_wrapper is corrupt", async () => {
+    const { node } = seedSeat({ runtime: "codex" });
+    capturePaneScreen.mockImplementationOnce(async () => {
+      db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("{corrupt", node.id);
+      return "predecessor screen tail";
+    });
+    const result = await service.handover({
+      seatRef: "dev-impl@seat-rig",
+      reason: "context-wall",
+      source: "fresh",
+      operator: "orch-lead@seat-rig",
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      code: "successor_create_failed",
+    });
+    expect((result as { message: string }).message).toMatch(/Permission selection:.*launch_wrapper/);
+    expect(respawnPane).not.toHaveBeenCalled();
+    expect(launchHarness).not.toHaveBeenCalled();
+  });
 });

@@ -11,6 +11,8 @@ import { deriveCanonicalSessionName, deriveSessionName, tmuxRenamedSessionError,
 import { shellQuote } from "../adapters/shell-quote.js";
 import { mergeSeatEnv, type SeatEnv } from "./seat-env.js";
 import { withoutRuntimeHomes } from "./seat-runtime-home.js";
+import { isLaunchWrapperRuntime } from "./launch-wrapper.js";
+import { launchExecutable } from "./seat-launch-environment.js";
 
 const RUNTIME_COMMANDS: Record<string, string> = {
   "claude-code": "claude --version",
@@ -443,6 +445,13 @@ async function preflightMembers(
       const cwdError = getOpenRigInstallCwdError(configResult.config.cwd, preflightCtx.cwdOverride);
       if (cwdError) {
         errors.push(`${pod.id}.${member.id}: ${cwdError}`);
+      }
+      if (isLaunchWrapperRuntime(member.runtime) && member.launchWrapper && member.launchWrapper.length > 0) {
+        try {
+          launchExecutable(member.launchWrapper[0]!, process.env.PATH ?? "", configResult.config.cwd);
+        } catch (err) {
+          errors.push(`${pod.id}.${member.id}: ${(err as Error).message}`);
+        }
       }
     }
   }

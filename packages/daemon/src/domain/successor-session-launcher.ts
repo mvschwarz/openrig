@@ -79,6 +79,7 @@ export interface SuccessorNode {
   /** OPR.0.7.0.9: the seat's own launch additions (copies in its seat storage), populated by the caller. The successor
    *  is the same seat, so its launch passes them as an original launch does; absent = none. */
   launchAdditions?: import("./seat-launch-additions.js").SeatLaunchAdditions;
+  launchWrapper?: readonly string[];
 }
 
 /** Slice 16: what a staged runtime-switch successor's launch adds to an ordinary successor launch. */
@@ -432,6 +433,7 @@ export class SuccessorSessionLauncher {
       codexConfigProfile: node.codexConfigProfile ?? undefined,
       codexRebuildPermissions: node.codexRebuildPermissions,
       ...(node.launchAdditions ? { launchAdditions: node.launchAdditions } : {}),
+      ...(node.launchWrapper?.length ? { launchWrapper: node.launchWrapper } : {}),
       ...(staged?.binding ?? {}),
     };
 

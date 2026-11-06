@@ -888,6 +888,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (binding.accountHome !== undefined && !this.seatLaunchEnvironment) {
       return { ok: false, error: "Isolated account-home launch support is unavailable; no agent started." };
     }
+    if (binding.launchWrapper?.length && !this.seatLaunchEnvironment) {
+      return { ok: false, error: "launch_wrapper support unavailable; no agent started." };
+    }
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session bound — cannot launch Codex harness" };
     }
@@ -993,14 +996,23 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    *  for a caller that runs it itself (a respawned direct-native pane). Nothing is sent to the pane. */
   async buildResumeCommand(
     binding: NodeBinding,
-    opts: { name: string; resumeToken: string; running?: RunningCodexLaunch },
+    opts: { name: string; resumeToken: string; running?: RunningCodexLaunch; launchShell?: string },
   ): Promise<{ ok: true; command: string; core: string; appliedLaunch: AppliedLaunchObservation } | { ok: false; error: string }> {
+    if (binding.launchWrapper?.length && !this.seatLaunchEnvironment) {
+      return { ok: false, error: "launch_wrapper support unavailable; no agent started." };
+    }
     if (!binding.tmuxSession) return { ok: false, error: "No tmux session bound — cannot build a Codex resume command" };
     // Building a resume command (the in-place restart's) never installs the core plugin.
     const prepared = await this.prepareLaunch(binding, opts.name, opts.running, { installCorePlugin: false });
     if (!prepared.ok) return prepared;
     const core = this.resumeCore(prepared, opts.resumeToken, binding);
-    return { ok: true, command: await this.seatCommand(binding, core), core, appliedLaunch: prepared.appliedLaunch };
+    let command: string;
+    try {
+      command = await this.seatCommand(binding, core, opts.launchShell);
+    } catch {
+      return { ok: false, error: "launch_wrapper unavailable; no agent started." };
+    }
+    return { ok: true, command, core, appliedLaunch: prepared.appliedLaunch };
   }
 
   /** Type a command buildResumeCommand built into the pane's shell, then verify the resume as launchHarness
@@ -1146,9 +1158,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       + gitDirArg + seatFolderArg;
   }
 
-  private async seatCommand(binding: NodeBinding, cmd: string): Promise<string> {
+  private async seatCommand(binding: NodeBinding, cmd: string, launchShell?: string): Promise<string> {
     return this.seatLaunchEnvironment
-      ? await this.seatLaunchEnvironment.command(binding.tmuxSession!, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome } : {}), ...this.ownHomeCommandOpt(binding) })
+      ? await this.seatLaunchEnvironment.command(binding.tmuxSession!, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome } : {}), ...(binding.launchWrapper?.length ? { launchWrapper: binding.launchWrapper } : {}), ...(launchShell !== undefined ? { launchShell } : {}), ...this.ownHomeCommandOpt(binding) })
       : this.launchCommand(cmd, this.homeFor(binding));
   }
 

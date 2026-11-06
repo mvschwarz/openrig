@@ -2910,4 +2910,93 @@ describe("StartupOrchestrator", () => {
     expect(deliveredFiles).toContain("guidance/role.md");
     expect(deliveredFiles).toContain("openrig-start.md");
   });
+
+  describe("launch_wrapper injection in StartupOrchestrator.startNode", () => {
+    function ensureLaunchWrapperColumn(): void {
+      const cols = db.pragma("table_info(nodes)") as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === "launch_wrapper")) {
+        db.exec("ALTER TABLE nodes ADD COLUMN launch_wrapper TEXT;");
+      }
+    }
+
+    it.each(["pi", "codex"] as const)("reads current DB launch_wrapper for %s fresh, resume, fork and rebuild, overriding stale binding", async runtime => {
+      ensureLaunchWrapperColumn();
+      const rig = rigRepo.createRig("wrapper-rig");
+      const parentNode = rigRepo.addNode(rig.id, "parent", { runtime, launchWrapper: ["parent-wrapper", "--"] });
+      const targetNode = rigRepo.addNode(rig.id, "target", { runtime, launchWrapper: ["target-wrapper", "--seat", "target", "--"] });
+      const session = sessionRegistry.registerSession(targetNode.id, `r01-${runtime}`);
+      sessionRegistry.updateStatus(session.id, "running");
+
+      const observedBindings: NodeBinding[] = [];
+      const adapter = mockAdapter({
+        runtime,
+        launchHarness: vi.fn(async (binding, opts) => {
+          observedBindings.push(binding);
+          return {
+            ok: true,
+            resumeToken: opts.resumeToken ?? "new-token",
+            resumeType: runtime === "pi" ? "pi_session_file" : "codex_id",
+          };
+        }),
+      });
+      const orch = createOrchestrator();
+      const baseSeed = { rigId: rig.id, nodeId: targetNode.id, sessionId: session.id };
+      const baseBinding = { ...makeBinding(), nodeId: targetNode.id, tmuxSession: `r01-${runtime}` };
+
+      // 1. Fresh launch injects target node's DB launch_wrapper
+      const freshRes = await orch.startNode(makeInput(baseSeed, { adapter, binding: baseBinding }));
+      expect(freshRes.ok).toBe(true);
+      expect(observedBindings.at(-1)?.launchWrapper).toEqual(["target-wrapper", "--seat", "target", "--"]);
+
+      // 2. Fork launch reads target node's DB launch_wrapper, never parent node's
+      expect(parentNode.id).not.toBe(targetNode.id);
+      const forkRes = await orch.startNode(makeInput(baseSeed, {
+        adapter,
+        binding: baseBinding,
+        forkSource: { kind: "native_id", value: "parent-session-id" },
+      }));
+      expect(forkRes.ok).toBe(true);
+      expect(observedBindings.at(-1)?.launchWrapper).toEqual(["target-wrapper", "--seat", "target", "--"]);
+
+      // 3. Clearing DB row overrides stale launchWrapper on input.binding
+      rigRepo.setNodeLaunchWrapper(targetNode.id, null);
+      const clearedRes = await orch.startNode(makeInput(baseSeed, {
+        adapter,
+        binding: { ...baseBinding, launchWrapper: ["stale-wrapper", "--"] },
+      }));
+      expect(clearedRes.ok).toBe(true);
+      expect(observedBindings.at(-1)?.launchWrapper).toBeUndefined();
+      expect("launchWrapper" in (observedBindings.at(-1) ?? {})).toBe(false);
+    });
+
+    it.each([
+      ["non-canonical empty array", "[]"],
+      ["corrupt JSON", "{not-json"],
+      ["relative executable", '["./relative-wrapper","--"]'],
+      ["newline in arg", '["valid-wrapper","bad\\narg"]'],
+    ])("fails closed at permission_selection before projection or launch when stored launch_wrapper is %s", async (_label, badStored) => {
+      ensureLaunchWrapperColumn();
+      const rig = rigRepo.createRig("bad-wrapper-rig");
+      const node = rigRepo.addNode(rig.id, "impl", { runtime: "codex" });
+      const session = sessionRegistry.registerSession(node.id, "r01-bad");
+      sessionRegistry.updateStatus(session.id, "running");
+
+      db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(badStored, node.id);
+
+      const adapter = mockAdapter({ runtime: "codex" });
+      const orch = createOrchestrator();
+      const result = await orch.startNode(makeInput(
+        { rigId: rig.id, nodeId: node.id, sessionId: session.id },
+        { adapter, binding: { ...makeBinding(), nodeId: node.id, tmuxSession: "r01-bad" } },
+      ));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.startupStatus).toBe("failed");
+        expect(result.errors[0]).toMatch(/^Permission selection: Seat .* launch_wrapper/);
+      }
+      expect(adapter.project).not.toHaveBeenCalled();
+      expect(adapter.deliverStartup).not.toHaveBeenCalled();
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+    });
+  });
 });

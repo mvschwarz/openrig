@@ -789,6 +789,8 @@ export interface NodeInventoryEntry {
   agentRef: string | null;
   profile: string | null;
   codexConfigProfile?: string | null;
+  /** Optional argv prefix wrapping local built-in Pi/Codex launches; null/absent = none. */
+  launchWrapper?: string[];
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF, or null when none is attached. */
   permissionPolicy?: string | null;
   resolvedSpecName: string | null;

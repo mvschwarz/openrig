@@ -632,4 +632,33 @@ describe("SuccessorSessionLauncher", () => {
       expect(command).toBe("/bin/sh");
     });
   });
+
+  describe("launch_wrapper forwarding", () => {
+    it("forwards node.launchWrapper on binding for createSuccessor and stageSuccessor", async () => {
+      const created = await launcher().createSuccessor({
+        node: { id: "node-1", runtime: "codex", cwd: "/w", launchWrapper: ["rtk", "--succ"] },
+        departingSessionName: "dev-impl@rig",
+      });
+      expect(created.ok).toBe(true);
+      expect(launchHarness.mock.calls[0]?.[0]).toMatchObject({
+        nodeId: "node-1",
+        launchWrapper: ["rtk", "--succ"],
+      });
+
+      launchHarness.mockClear();
+      const staged = await launcher().stageSuccessor({
+        node: { id: "node-1", runtime: "codex", cwd: "/w", launchWrapper: ["rtk", "--staged"] },
+        canonicalSession: "dev-impl@rig",
+        stagingSession: "openrig-switch-1",
+        occupantGeneration: "gen-1",
+        onPaneCreated: () => {},
+        staged: { prepare: async () => [] },
+      });
+      expect(staged.ok).toBe(true);
+      expect(launchHarness.mock.calls[0]?.[0]).toMatchObject({
+        nodeId: "node-1",
+        launchWrapper: ["rtk", "--staged"],
+      });
+    });
+  });
 });
