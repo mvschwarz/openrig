@@ -61,6 +61,16 @@ function makeCtx(overrides?: Partial<ResolutionContext>): ResolutionContext {
 }
 
 describe("Profile resolver + precedence engine", () => {
+  it("reports a non-string skill in the selected profile without rejecting an unused profile", () => {
+    const raw = { name: "test-agent", version: "1.0", profiles: { default: { uses: {} }, malformed: { uses: { skills: [42] } } } };
+    const spec = normalizeAgentSpec(raw);
+    const baseSpec = makeResolved(spec);
+    expect(resolveNodeConfig(makeCtx({ baseSpec })).ok).toBe(true);
+    const result = resolveNodeConfig(makeCtx({ baseSpec, profileName: "malformed" }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toContain('Profile "malformed" has a non-string skill ID');
+  });
+
   it("resolves a scalar selection and reports a missing selected scalar", () => {
     const raw = { name: "test-agent", version: "1.0", resources: { guidance: [{ id: "guide", path: "guide.md" }] }, profiles: { default: { uses: { guidance: "guide" } }, unused: { uses: { guidance: "missing" } } } };
     const spec = normalizeAgentSpec(raw);
