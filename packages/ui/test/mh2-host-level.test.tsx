@@ -689,7 +689,7 @@ describe("rev1-r2 B1/B2 — remote action gates (topology table / terminal grid 
   });
 
   it("seat page remote (B1+B2): host-keyed detail fetch, NO bare local URL, actions row read-only, inline terminal gated, ZERO POSTs", async () => {
-    wireB1Fetch();
+    wireB1Fetch("vps-a");
     renderPrimed(() => <LiveNodeDetails rigId="r1" logicalId="a1" />, "vps-a");
     await waitFor(() => expect(screen.getByTestId("live-node-actions-remote-readonly")).toBeTruthy());
     // B1: no local action affordances, terminal honestly gated
