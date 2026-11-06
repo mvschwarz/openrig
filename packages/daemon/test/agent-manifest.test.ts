@@ -79,7 +79,7 @@ describe("AgentSpec manifest parser + validator", () => {
   it("advises on malformed selections and normalizes scalar IDs", () => {
     const base = { name: "example", version: "1.0" };
     expect(validateAgentSpec({ ...base, profiles: { default: { uses: "skills" } } }).advisories)
-      .toContain("profiles.default.uses: expected an object");
+      .toContain("profiles.default.uses: expected an object; ignored");
     for (const category of ["skills", "guidance", "subagents", "plugins", "runtime_resources"]) {
       const result = validateAgentSpec({ ...base, profiles: { default: { uses: { [category]: "review" } } } });
       expect(result.valid).toBe(true);
@@ -87,14 +87,14 @@ describe("AgentSpec manifest parser + validator", () => {
     }
     const invalidEntry = validateAgentSpec({ ...base, profiles: { default: { uses: { skills: [null, ""] } } } });
     expect(invalidEntry.advisories).toEqual([
-      "profiles.default.uses.skills[0]: expected a non-empty resource ID",
-      "profiles.default.uses.skills[1]: expected a non-empty resource ID",
+      "profiles.default.uses.skills[0]: expected a non-empty resource ID; a member using this profile fails to launch",
+      "profiles.default.uses.skills[1]: expected a non-empty resource ID; a member using this profile fails to launch",
     ]);
     expect(invalidEntry.valid).toBe(true);
     for (const malformed of ["", 42, false, { id: "review" }]) {
       const result = validateAgentSpec({ ...base, profiles: { default: { uses: { skills: malformed } } } });
       expect(result.valid).toBe(true);
-      expect(result.advisories).toContain("profiles.default.uses.skills: expected an array of resource IDs");
+      expect(result.advisories).toContain("profiles.default.uses.skills: expected an array of resource IDs; ignored");
     }
     expect(normalizeAgentSpec({ ...base, profiles: { default: { uses: { skills: [null, ""] } } } }).profiles["default"]!.uses.skills).toEqual([null, ""]);
     expect(validateAgentSpec({ ...base, profiles: { default: { uses: { skills: ["review"] } } } }).valid).toBe(true);
@@ -103,6 +103,29 @@ describe("AgentSpec manifest parser + validator", () => {
     expect(validateAgentSpec({ ...base, profiles: { default: { uses: ["review"] } } }).valid).toBe(true);
     const raw = { ...base, profiles: { default: { uses: { skills: "review", guidance: "guide", subagents: "agent", plugins: "plugin", runtime_resources: "runtime" } } } };
     expect(normalizeAgentSpec(raw).profiles["default"]!.uses).toEqual({ skills: ["review"], guidance: ["guide"], subagents: ["agent"], plugins: ["plugin"], runtimeResources: ["runtime"] });
+  });
+
+  it("advises on an unknown uses key, keeps the spec valid, and selects nothing from it", () => {
+    const base = { name: "example", version: "1.0" };
+    const raw = { ...base, profiles: { default: { uses: { skils: ["review"] } } } };
+    const result = validateAgentSpec(raw);
+    expect(result.valid).toBe(true);
+    expect(result.advisories).toEqual(["profiles.default.uses.skils: unknown key ignored; known keys are skills, guidance, subagents, plugins, runtime_resources"]);
+    expect(normalizeAgentSpec(raw).profiles["default"]!.uses.skills).toEqual([]);
+  });
+
+  it("gives no unknown-key advisory for the five known uses keys", () => {
+    const result = validateAgentSpec({ name: "example", version: "1.0",
+      profiles: { default: { uses: { skills: [], guidance: [], subagents: [], plugins: [], runtime_resources: [] } } } });
+    expect(result.valid).toBe(true);
+    expect(result.advisories).toBeUndefined();
+  });
+
+  it("keeps the legacy uses.hooks key an error, without a second unknown-key advisory", () => {
+    const result = validateAgentSpec({ name: "example", version: "1.0", profiles: { default: { uses: { hooks: ["h"] } } } });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.startsWith("profiles.default.uses.hooks: removed"))).toBe(true);
+    expect(result.advisories ?? []).not.toContainEqual(expect.stringContaining("uses.hooks: unknown key"));
   });
 
   // T1: valid agent.yaml parses and normalizes with correct defaults
