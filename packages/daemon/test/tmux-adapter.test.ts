@@ -916,11 +916,75 @@ describe("TmuxAdapter", () => {
   });
 
   describe("cancelPaneMode", () => {
-    it("sends -X cancel to the pane", async () => {
+    it("leaves every mode the pane is in with one copy-mode -q", async () => {
       const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
       const adapter = new TmuxAdapter(exec);
       expect(await adapter.cancelPaneMode("%0")).toEqual({ ok: true });
-      expect(exec).toHaveBeenCalledWith("tmux send-keys -t '%0' '-X' 'cancel'");
+      expect(exec).toHaveBeenCalledTimes(1);
+      expect(exec).toHaveBeenCalledWith("tmux copy-mode -q -t %0");
+    });
+
+    it("falls back to send-keys -X cancel where copy-mode has no -q (tmux before 3.1a)", async () => {
+      const exec = vi.fn(async (command: string) => {
+        if (command.startsWith("tmux copy-mode")) throw new Error("unknown flag -q");
+        return "";
+      });
+      const adapter = new TmuxAdapter(exec as unknown as ExecFn);
+      expect(await adapter.cancelPaneMode("%0")).toEqual({ ok: true });
+      expect(exec.mock.calls.map(([command]) => command)).toEqual(["tmux copy-mode -q -t %0", "tmux send-keys -t '%0' '-X' 'cancel'"]);
+    });
+
+    it("keeps both reasons when copy-mode -q and the fallback both fail", async () => {
+      const exec = vi.fn(async (command: string) => {
+        throw new Error(command.startsWith("tmux copy-mode") ? "unknown flag -q" : "not in a mode");
+      });
+      const result = await new TmuxAdapter(exec as unknown as ExecFn).cancelPaneMode("%0");
+      expect(result).toMatchObject({ ok: false, message: "copy-mode -q: unknown flag -q; send-keys -X cancel: not in a mode" });
+    });
+
+    describe("under the input guard", () => {
+      const TARGET = { nodeId: "n1", session: "dev@rig", occupant: "o1", pane: "%1" };
+      const HUMAN = "Human input arrived during this delivery. No further automatic input was written.";
+
+      // copy-mode -q waits until released, then fails (as on tmux before 3.1a); the guard refuses once a person has typed.
+      function guarded() {
+        let human = false;
+        let release!: () => void;
+        const pending = new Promise<void>((done) => { release = done; });
+        const exec = vi.fn<ExecFn>(async (cmd: string) => {
+          if (cmd.startsWith("tmux list-panes")) return "%1|0|/w|80|24|1\n";
+          if (cmd.startsWith("tmux copy-mode")) { await pending; throw new Error(`Command failed: ${cmd}\nunknown flag -q`); }
+          return "";
+        });
+        const checkInput = vi.fn(() => { if (human) throw new DeliveryGuardError("draft_input_changed", HUMAN); });
+        const adapter = new TmuxAdapter(exec);
+        adapter.deliveryGuard = {
+          maybeTarget: () => TARGET, target: () => TARGET, ownsLifecycle: () => false, needsInputCheck: () => false, checkInput,
+          input: (_name: string, fn: () => Promise<unknown>) => fn(), attachInputInspection: () => {},
+        } as unknown as SeatDeliveryGuard;
+        const cmds = () => exec.mock.calls.map(([cmd]) => cmd).filter((cmd) => !cmd.startsWith("tmux list-panes"));
+        return { adapter, checkInput, cmds, release, type: () => { human = true; } };
+      }
+
+      it("input that arrives while copy-mode -q is pending stops the -X cancel fallback", async () => {
+        const g = guarded();
+        const result = g.adapter.cancelPaneMode("dev@rig");
+        await vi.waitFor(() => expect(g.cmds()).toEqual(["tmux copy-mode -q -t %1"]));
+        g.type();
+        g.release();
+        expect(await result).toEqual({ ok: false, code: "draft_input_changed", message: HUMAN });
+        expect(g.checkInput).toHaveBeenCalledTimes(2);
+        expect(g.cmds()).toEqual(["tmux copy-mode -q -t %1"]);
+      });
+
+      it("with no input meanwhile, the fallback goes out after the guard is checked again", async () => {
+        const g = guarded();
+        const result = g.adapter.cancelPaneMode("dev@rig");
+        g.release();
+        expect(await result).toEqual({ ok: true });
+        expect(g.checkInput).toHaveBeenCalledTimes(2);
+        expect(g.cmds()).toEqual(["tmux copy-mode -q -t %1", "tmux send-keys -t '%1' '-X' 'cancel'"]);
+      });
     });
   });
 

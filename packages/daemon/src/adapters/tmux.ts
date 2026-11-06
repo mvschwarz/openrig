@@ -1481,9 +1481,25 @@ export class TmuxAdapter {
     }
   }
 
-  /** Leave the pane's current mode (copy mode) with `send-keys -X cancel`, through the same input guard as sendKeys. */
+  /** Leave every mode the pane is in, through the same input guard as sendKeys. Modes stack: copy mode can sit under
+   *  run-shell output (view-mode), a chooser, customize or clock mode, and `send-keys -X cancel` leaves only a copy or
+   *  view mode on top. `copy-mode -q` (tmux 3.1a+) leaves them all and types nothing; older tmux falls back to -X cancel. */
   async cancelPaneMode(target: string): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => { beforeWrite(); return this.sendKeysUnchecked(pane, ["-X", "cancel"]); }, false, "keys");
+    return this.guardedInput(target, async (pane, beforeWrite) => {
+      beforeWrite();
+      try {
+        await this.run(["tmux", "copy-mode", "-q", "-t", pane]);
+        return { ok: true };
+      } catch (error) {
+        // The fallback is a second write: check the guard again, as the read-only Enter fallback does, so input that
+        // arrived while copy-mode -q was pending stops it.
+        beforeWrite();
+        const fallback = await this.sendKeysUnchecked(pane, ["-X", "cancel"]);
+        if (fallback.ok) return fallback;
+        // Both failed: keep both reasons, so the refusal that reports this can name them.
+        return { ...fallback, message: `copy-mode -q: ${error instanceof Error ? error.message : String(error)}; send-keys -X cancel: ${fallback.message}` };
+      }
+    }, false, "keys");
   }
 
   /** A launch metadata read. Callers must never put credential values in terminal input. */

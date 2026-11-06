@@ -2891,8 +2891,9 @@ export class SessionTransport {
     };
     // #331: with mouse on, scrolling a seat pane puts it in tmux copy mode. A paste still reaches
     // the input there, but copy mode swallows the Enter, so the send would report ok while the
-    // text sits unsubmitted. Leave the mode once (send-keys -X cancel) and deliver; fail before
-    // typing anything only if the pane still reads as in a mode. An unknown answer keeps today's path.
+    // text sits unsubmitted. Leave every mode the pane is in (copy-mode -q) and deliver; fail before
+    // typing anything only if the pane still reads as in a mode, with the reason the exit failed.
+    // An unknown answer keeps today's path.
     const readPaneInMode = async (): Promise<boolean | null> => {
       try {
         return typeof this.tmuxAdapter.isPaneInMode === "function" ? await this.tmuxAdapter.isPaneInMode(readTarget) : null;
@@ -2900,12 +2901,15 @@ export class SessionTransport {
     };
     const leavePaneMode = async (outcome: string): Promise<SendResult | null> => {
       if (await readPaneInMode() !== true) return null;
+      let failure = "";
+      const failed = (message: string) => { failure = ` Leaving it failed: ${message.trim().replace(/\s+/g, " ").replace(/\.$/, "")}.`; };
       try {
-        if (typeof this.tmuxAdapter.cancelPaneMode === "function") await this.tmuxAdapter.cancelPaneMode(readTarget);
-      } catch { /* the re-read below decides */ }
+        const left = typeof this.tmuxAdapter.cancelPaneMode === "function" ? await this.tmuxAdapter.cancelPaneMode(readTarget) : undefined;
+        if (left && !left.ok) failed(left.message);
+      } catch (error) { failed(error instanceof Error ? error.message : String(error)); }
       if (await readPaneInMode() !== true) return null;
       return { ok: false, sessionName, sent: false, reason: "pane_in_mode",
-        error: `'${sessionName}' is in a tmux mode (such as copy mode) and could not leave it, so Enter would not reach the agent. ${outcome}` };
+        error: `'${sessionName}' is in a tmux mode (such as copy mode) and could not leave it, so Enter would not reach the agent.${failure} ${outcome}` };
     };
     // S01/S02 P2 observation context, frozen at attempt entry before any await.
     const observed = this.captureObserver && !opts?.dangerouslyInteract ? {

@@ -12,6 +12,7 @@ import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, 
 import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
+import { withRecoveryIndex } from "./queue-recovery.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
 import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
@@ -4204,6 +4205,10 @@ export class QueueRepository {
   list(opts?: QueueListOptions & { compact?: false }): QueueItem[];
   list(opts?: QueueListOptions): Array<QueueItem | CompactQueueItem>;
   list(opts?: QueueListOptions): Array<QueueItem | CompactQueueItem> {
+    // one recovery index for the whole listing (built on first use) instead of one json_each scan per row
+    return withRecoveryIndex(this.db, () => this.listRows(opts));
+  }
+  private listRows(opts?: QueueListOptions): Array<QueueItem | CompactQueueItem> {
     const limit = opts?.limit ?? 100;
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -4611,6 +4616,17 @@ export class QueueRepository {
       const registry = this.loadHumanRegistryFn();
       if (registry.ok ? registry.entities.length !== 0 : registry.noHumans !== true) return false;
       return this.classifyDestinationOf(row.destinationSession).class === "unroutable";
+    } catch { return false; }
+  }
+
+  /** #514 — a pending explicit informational update addressed to a currently registered human
+   *  (external or canonical alias, regardless of terminal transport) is correspondence for reading,
+   *  not an obligation to claim. Registry unavailable/unregistered and agent destinations read false. */
+  isRegisteredHumanUpdate(row: Pick<QueueItem, "state" | "humanIntent" | "destinationSession">): boolean {
+    if (row.state !== "pending" || row.humanIntent !== "update") return false;
+    try {
+      const registry = this.loadHumanRegistryFn();
+      return registry.ok && resolveRegisteredHumanAddress(row.destinationSession, registry.entities) !== null;
     } catch { return false; }
   }
 
@@ -5125,15 +5141,22 @@ export class QueueRepository {
       // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
       const posted = view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId, listed);
       const onSteering = !posted && view.state === "pending" && this.humanAskWithoutAlert(qitemId, listed);
-      const row = !posted && !onSteering ? this.db.prepare(`SELECT state, ${this.hasHumanIntentColumn ? "human_intent" : "NULL AS human_intent"}, destination_session, last_nudge_result FROM queue_items WHERE qitem_id = ?`).get(qitemId) as { state: QueueItem["state"]; human_intent: QueueItem["humanIntent"]; destination_session: string; last_nudge_result: string | null } | undefined : undefined;
-      const noticeOutcome = listed ? listed.ledger?.outcome : this.deliveryOutcomeFor(qitemId)?.outcome;
-      const localOnly = !!row && noticeOutcome !== "never-posted" && noticeOutcome !== "transport-failed"
+      const row = view.state === "pending" && !onSteering
+        ? this.db.prepare(`SELECT state, ${this.hasHumanIntentColumn ? "human_intent" : "NULL AS human_intent"}, destination_session, last_nudge_result FROM queue_items WHERE qitem_id = ?`).get(qitemId) as { state: QueueItem["state"]; human_intent: QueueItem["humanIntent"]; destination_session: string; last_nudge_result: string | null } | undefined
+        : undefined;
+      const humanUpdate = !!row && this.isRegisteredHumanUpdate({ state: row.state, humanIntent: row.human_intent, destinationSession: row.destination_session });
+      const noticeOutcome = !posted && !onSteering ? (listed ? listed.ledger?.outcome : this.deliveryOutcomeFor(qitemId)?.outcome) : undefined;
+      const localOnly = !!row && !posted && !humanUpdate && noticeOutcome !== "never-posted" && noticeOutcome !== "transport-failed"
         && this.isLocalHumanDecisionWithoutGateway({ state: row.state, humanIntent: row.human_intent, destinationSession: row.destination_session, lastNudgeResult: row.last_nudge_result });
       const awaitingHuman = posted || onSteering || localOnly;
-      if (awaitingHuman) {
+      if (awaitingHuman || humanUpdate) {
         view.nextBackstop = { owner: view.owner, mechanism: localOnly ? "local attention feed (no registered human gateway)" : onSteering
           ? "none (on Steering for the human, with no Slack alert; awaiting their decision)"
-          : "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
+          : humanUpdate
+            ? posted
+              ? "none (posted to the human; informational correspondence requires no claim)"
+              : "none (informational correspondence to the human; no claim required)"
+            : "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
       }
       // Quiet hours: a held ask is owned by its window's release job until it posts.
       const quiet = awaitingHuman ? null : quietCustodyBackstop(view.owner, quietHoldCustody(this.db, qitemId));
@@ -5143,7 +5166,7 @@ export class QueueRepository {
       }
       const recovery = readWakeLadderBackstop(this.db, qitemId, target => this.acceptsDestination(target));
       if (recovery && !localOnly) {
-        if (!awaitingHuman) view.laterBackstop = { ...view.nextBackstop, note: "Conditional safety net; current delivery/recovery ownership is evaluated first." };
+        if (!awaitingHuman && !humanUpdate) view.laterBackstop = { ...view.nextBackstop, note: "Conditional safety net; current delivery/recovery ownership is evaluated first." };
         view.nextBackstop = recovery;
       } else if (!awaitingHuman && view.state === "pending" && (this.db.prepare("SELECT last_nudge_result FROM queue_items WHERE qitem_id = ?")
         .get(qitemId) as { last_nudge_result: string | null } | undefined)?.last_nudge_result === "retained:typing_guard") {
