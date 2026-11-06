@@ -13,7 +13,8 @@ import time
 
 writable, readonly = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 tmux = shutil.which("tmux")
-with tempfile.TemporaryDirectory(prefix="tile-size-", dir="/tmp") as temporary:
+# Honor TMPDIR: CI permits socket connections only inside its isolated IPC root.
+with tempfile.TemporaryDirectory(prefix="tile-size-") as temporary:
     root = os.path.realpath(temporary)
     socket = root + "/s"
     env = {"HOME": root, "PATH": os.environ["PATH"], "TERM": "xterm-256color", "LC_ALL": "C"}
