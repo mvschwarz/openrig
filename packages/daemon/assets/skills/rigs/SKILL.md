@@ -53,9 +53,16 @@ person needs in their project or home folder and name that path.
   network access, such as Codex's default one. Re-run that one command with network access before you tell the person
   to sign in again or fix anything.
 - **Install:** `npm install -g @openrig/cli`, then `rig setup --providers codex` (or `claude`, or `both`: the harness
-  the person uses). Setup checks Node, tmux and the logins. It installs tmux (with Homebrew, when present) or the chosen
-  harness (with npm) if either is missing, installs Herdr for the OpenRig view unless they decline it (`--no-herdr`),
-  and adds an OpenRig block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`.
+  the person uses). If the global install fails because npm's global prefix isn't writable (often a system Node with
+  prefix `/usr`), first point npm's prefix at a folder the person owns whose `bin` is on their login PATH, for example
+  `npm config set prefix ~/.local` when `~/.local/bin` is on it; say first that this changes their npm settings, and
+  their shell profile if `~/.local/bin` isn't on the login PATH. If they use a Node version manager such as nvm,
+  install with its Node instead; nvm refuses an npm `prefix` setting. Install inside the project only if neither is
+  possible: Codex seats can then report `rig: command not found`. Setting and checking the login PATH: "Before you
+  start" in https://github.com/mvschwarz/openrig/blob/main/docs/reference/getting-started.md#before-you-start. Setup
+  checks Node, tmux and the logins. It installs tmux (with Homebrew, when present) or the chosen harness (with npm) if
+  either is missing, installs Herdr for the OpenRig view unless they decline it (`--no-herdr`), and adds an OpenRig
+  block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`.
 - **Then go on to step 2:** say it's installed and ask what they want worked on, and in which repository. A plain
   "install OpenRig" includes this. Stop here only if they say not to start a team.
 - **If something fails:** `rig context get help` is the help guide for the installed version. If `rig` itself won't
