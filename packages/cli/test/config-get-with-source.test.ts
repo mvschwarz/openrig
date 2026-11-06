@@ -5,10 +5,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { configCommand } from "../src/commands/config.js";
+import { ENV_MAP } from "../src/config-store.js";
 
 let dir: string;
 let configPath: string;
-let savedPort: string | undefined;
 
 async function run(args: string[]): Promise<string> {
   const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -25,14 +25,14 @@ describe("rig config get --with-source", () => {
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "config-get-with-source-"));
     configPath = path.join(dir, "config.json");
-    savedPort = process.env["OPENRIG_PORT"];
-    delete process.env["OPENRIG_PORT"];
+    for (const { primary, legacy } of Object.values(ENV_MAP)) {
+      vi.stubEnv(primary, undefined);
+      if (legacy) vi.stubEnv(legacy, undefined);
+    }
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
-    if (savedPort === undefined) delete process.env["OPENRIG_PORT"];
-    else process.env["OPENRIG_PORT"] = savedPort;
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
