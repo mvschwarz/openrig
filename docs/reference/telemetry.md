@@ -159,45 +159,23 @@ make different choices):
   (`activityState.display`, `sessionStatus`, `arbitratedNeedsInput`, and
   `activityState.lastSwap`), not a continuous event stream or independent OS
   process probe; intermediate activity changes or multiple occupant handovers
-  between polls are not observable from those snapshots, initial observation has no
-  backfilled history, and `arbitratedNeedsInput: null` indicates no evidence-backed
-  input count rather than zero. `smota/openrig-telemetry` polls these snapshots as
+  between polls are not observable from those snapshots, and initial
+  observation has no backfilled history. In OpenRig source,
+  `arbitratedNeedsInput` is a tri-state boolean (`true`, `false`, or `null`):
+  `true` means the seat needs input, `false` means it was observed clear of
+  needing input, and `null` means no evidence exists either way (it does not
+  indicate `false`). Separately, external consumers or metric mappings must
+  choose how to interpret or project this tri-state value into their own
+  metrics or counters. `smota/openrig-telemetry` polls these snapshots as
   point-in-time observations and relies on downstream metric storage to enforce
   freshness/staleness TTL when polling stops or a seat departs.
 
 ### External OTLP exporter repository and version compatibility
 
-An independent, standalone OTLP/HTTP exporter and its installation, CLI flag,
-checkpoint operation, and OpenTelemetry Collector/backend configuration
-documentation are maintained outside OpenRig core at:
+An independent, standalone OTLP/HTTP exporter is maintained outside OpenRig core at:
 
 - **Repository**: <https://github.com/smota/openrig-telemetry>
-- **Initial complete review branch**: `feat/coordination-telemetry`
-  (<https://github.com/smota/openrig-telemetry/tree/feat/coordination-telemetry>)
 
-Compatibility policy between `smota/openrig-telemetry` and OpenRig:
+Its repository documents installation, configuration, and supported OpenRig versions; OpenRig does not test or guarantee the exporter.
 
-- **Source-verified release profile (`v0.7.1`–`v0.7.8` and inspected `main`)**: The
-  complete source surface used by the external exporter—the finite
-  `GET /api/telemetry/v1/queue-transitions` contract (`schemaVersion: 1`,
-  introduced in `v0.6.6`) together with cached node inventory fields
-  `sessionStatus`, `activityState.display`, `activityState.lastSwap`, and
-  `arbitratedNeedsInput` (introduced in `v0.7.1`)—is verified in OpenRig source
-  across tagged releases **`v0.7.1` through `v0.7.8`** (`0.7.1`–`0.7.8`) and
-  inspected `main` commit `ff49a2c3622c15b4ebe2326ced71f52498f83510`. Releases
-  `v0.7.0` and earlier lack `arbitratedNeedsInput` and are not supported for the
-  full seat-inventory mapping; compatibility is not claimed as an unbounded
-  `>= 0.7.0` range, for uninspected `main` commits, or for unverified future
-  releases.
-- **Finite contract stability vs. cached inventory projection**: The finite
-  telemetry engine (`finite-telemetry.ts`) is source-identical across `v0.7.1`
-  through `v0.7.8` and inspected `main` commit
-  `ff49a2c3622c15b4ebe2326ced71f52498f83510`, and is explicitly versioned by
-  `schemaVersion: 1`. Cached rig and node inventory endpoints are operational
-  projections rather than an automatically versioned finite telemetry contract, so
-  the external exporter pins and verifies its expected wire shapes via independent
-  contract fixtures.
-- **Runtime proof scope**: Live daemon + OpenTelemetry Collector runtime validation
-  is recorded against the local OpenRig `0.7.1` runtime alongside contract-fixture
-  verification in CI, rather than live binary execution against every tagged
-  release.
+OpenRig's finite telemetry reads are versioned (`schemaVersion: 1`), while cached rig and node inventory endpoints are operational projections rather than a versioned telemetry contract.
