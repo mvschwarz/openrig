@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DaemonClient } from "../client.js";
@@ -164,7 +164,8 @@ export interface ExecRun {
 
 const now = () => new Date().toISOString();
 const runPath = (runId: string) => join(runsDir(), `${runId}.json`);
-const rowPath = (qitemId: string) => join(runsDir(), "rows", `${qitemId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+/** A row's claims: one file per generation, `000001.json` upward, each published whole and never removed. */
+const rowDir = (qitemId: string) => join(runsDir(), "rows", qitemId.replace(/[^A-Za-z0-9._-]/g, "_"));
 
 export function readRun(runId: string): ExecRun | undefined {
   const run = readJson(runPath(runId)) as ExecRun | undefined;
@@ -177,52 +178,61 @@ function writeRun(run: ExecRun): void {
   renameSync(tmp, runPath(run.runId));
 }
 
-export const rowRun = (qitemId: string): string | undefined => {
-  const runId = readJson(rowPath(qitemId))?.runId;
-  return typeof runId === "string" ? runId : undefined;
-};
+function topClaim(qitemId: string): { generation: number; runId?: string } | undefined {
+  let names: string[];
+  try { names = readdirSync(rowDir(qitemId)); } catch { return undefined; }
+  const generation = Math.max(0, ...names.filter((name) => /^\d{6}\.json$/.test(name)).map((name) => Number(name.slice(0, 6))));
+  if (generation === 0) return undefined;
+  const runId = readJson(join(rowDir(qitemId), `${String(generation).padStart(6, "0")}.json`))?.runId;
+  return { generation, runId: typeof runId === "string" ? runId : undefined };
+}
 
-/** Makes `runId` the row's run, atomically against a concurrent start: only when the row has none, or replacing
- *  exactly `previous`. */
-export function claimRow(qitemId: string, runId: string, previous?: string): boolean {
-  const index = rowPath(qitemId);
-  mkdirSync(dirname(index), { recursive: true });
-  if (previous) {
-    const aside = `${index}.${previous}.replaced`;
-    try { renameSync(index, aside); } catch { return false; } // another caller replaced it first
-    if (readJson(aside)?.runId !== previous) { renameSync(aside, index); return false; }
-  }
-  let fd: number;
-  try { fd = openSync(index, "wx"); } catch (error) {
+export const rowRun = (qitemId: string): string | undefined => topClaim(qitemId)?.runId;
+
+/** Makes `runId` the row's run: when the row has none, or when its current run is exactly `previous`. The next
+ *  generation's file is published with a hard link, which fails if it exists, so of two callers that read the same
+ *  current run only one claims, and nothing is ever moved aside. `afterRead` lets a test act between the read and
+ *  the publish. */
+export function claimRow(qitemId: string, runId: string, previous?: string, afterRead?: () => void): boolean {
+  const dir = rowDir(qitemId);
+  mkdirSync(dir, { recursive: true });
+  const top = topClaim(qitemId);
+  if (top?.runId !== previous) return false;
+  afterRead?.();
+  const draft = join(dir, `.${runId}.${process.pid}.tmp`);
+  writeFileSync(draft, `${JSON.stringify({ runId, qitemId, replaces: previous ?? null })}\n`);
+  try {
+    linkSync(draft, join(dir, `${String((top?.generation ?? 0) + 1).padStart(6, "0")}.json`));
+    return true;
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw error;
-  }
-  try { writeFileSync(fd, `${JSON.stringify({ runId, qitemId })}\n`); } finally { closeSync(fd); }
-  return true;
+  } finally { rmSync(draft, { force: true }); }
 }
 
 type Liveness = "live" | "dead" | "unknown";
 
-/** Live while its recorded process is still the one that recorded itself, or while a process carries its connector
- *  marker (the window before the connector records its own pid). */
+/** A started run is live while its recorded process is still the one that recorded itself. A requested run is live
+ *  only while a process carries its connector marker: the record then names the requester, which isn't the connector
+ *  and may itself be waiting. */
 async function liveness(run: ExecRun): Promise<Liveness> {
   if (run.endedAt) return "dead";
-  if (run.processStart !== undefined && processStart(run.pid) === run.processStart) return "live";
+  if (run.state !== "requested" && run.processStart !== undefined && processStart(run.pid) === run.processStart) return "live";
   const found = await findRunProcesses(run.runId, CONNECTOR_MARKER).catch(() => undefined);
   return found === undefined ? "unknown" : found.length > 0 ? "live" : "dead";
 }
 
 /** A run whose connector is gone without recording an outcome reads interrupted, outcome unknown, with one row note. */
-export async function reconcileRun(run: ExecRun, queue?: () => Promise<AcpQueue | undefined>): Promise<ExecRun> {
+export async function reconcileRun(run: ExecRun, queue?: () => Promise<AcpQueue | undefined>, connectorExit?: string): Promise<ExecRun> {
   if (run.endedAt || (await liveness(run)) !== "dead") return run;
   const current = readRun(run.runId) ?? run;
-  if (current.endedAt) return current;
+  if (current.endedAt || (current.state !== run.state && (await liveness(current)) !== "dead")) return current;
   const left = await findRunProcesses(run.runId, RUN_MARKER).catch(() => undefined);
   const agent = left === undefined ? "whether an agent process remains is unknown (the process table couldn't be read)"
     : left.length === 0 ? "no process carrying the run's marker remains"
       : `${left.length} process(es) carrying the run's marker still run (${left.map((p) => p.pid).join(", ")})`;
   const summary = current.state === "requested"
-    ? `interrupted before its connector started, so no turn was sent; ${agent}`
+    ? `interrupted: its connector ${connectorExit ?? "isn't running"} and never recorded itself, so no turn was sent; ${agent}; its log is ${current.connectorLog}`
     : `interrupted: its connector ended without recording an outcome, so the outcome is unknown; ${agent}`;
   const ended: ExecRun = { ...current, state: "interrupted", outcome: "unknown", summary, endedAt: now() };
   writeRun(ended);
@@ -250,6 +260,12 @@ export function describeRun(run: ExecRun): string {
 export async function runExecConnector(runId: string, queue: AcpQueue | undefined): Promise<number> {
   const run = readRun(runId);
   if (!run) { console.error(`No rig exec run ${runId} on this machine`); return 1; }
+  // Only the connector `rig exec run` started for this record runs it, once: anything else would send the row's task a
+  // second time. The record is left untouched.
+  if (run.state !== "requested" || process.env[CONNECTOR_MARKER] !== runId) {
+    console.error(`${runId} is ${run.state}${run.state === "requested" ? ", and this process wasn't started for it" : ""}; rig exec connector runs only the run rig exec run started it for`);
+    return 1;
+  }
   delete process.env[CONNECTOR_MARKER]; // the agent doesn't inherit it; this process's own environment still shows it
   // Before the run names this process, so a `rig exec cancel` that reads the record can't reach a default SIGINT.
   let cancel!: () => void;
@@ -289,9 +305,12 @@ export interface ExecDeps {
   connectorCommand?: (runId: string) => string[];
   pollMs?: number;
   startWaitMs?: number;
+  /** Tests only: acts between the row-claim read and its publish, as a concurrent caller would. */
+  beforeClaim?: () => void;
 }
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+const exitFor = (run: ExecRun) => (run.outcome === "completed" ? 0 : 2);
 
 export function execCommand(deps: ExecDeps = {}): Command {
   const cmd = new Command("exec").description("Run a queue row's task on a named harness (Claude Code or Codex over ACP) in a connector that outlives the command, with the outcome kept on the row");
@@ -327,7 +346,13 @@ export function execCommand(deps: ExecDeps = {}): Command {
       return;
     }
     console.log(describeRun(result));
-    process.exitCode = result.outcome === "completed" ? 0 : 2;
+    process.exitCode = exitFor(result);
+  };
+  /** Every path that holds the row's run ends here: a run that has ended exits by its outcome (0 completed, 2 any
+   *  other), --wait waits for one still going (3 if the waiter leaves), and without --wait a run still going exits 0. */
+  const report = async (run: ExecRun, wait: boolean | undefined) => {
+    if (run.endedAt) process.exitCode = exitFor(run);
+    else if (wait) finish(await waitForEnd(run.runId), run.runId);
   };
 
   cmd
@@ -401,7 +426,7 @@ Guide: rig context get reference/acp-agents.md`)
         }
         if (!opts.again) {
           console.log(`${qitemId} already has a run, so the task isn't sent twice:\n${describeRun(run)}\nOnce it has ended, --again starts another turn on this row.`);
-          if (opts.wait && !run.endedAt) finish(await waitForEnd(run.runId), run.runId);
+          await report(run, opts.wait);
           return;
         }
       }
@@ -420,33 +445,40 @@ Guide: rig context get reference/acp-agents.md`)
         transcript: join(runsDir(), `${runId}.jsonl`), connectorLog: join(runsDir(), `${runId}.connector.log`),
       };
       writeRun(run);
-      if (!claimRow(qitemId, runId, previousId)) {
+      if (!claimRow(qitemId, runId, previousId, deps.beforeClaim)) {
         rmSync(runPath(runId), { force: true });
-        console.log(`${qitemId} was started by another caller as ${rowRun(qitemId) ?? "another run"}; the task isn't sent twice`);
+        const winnerId = rowRun(qitemId);
+        const winner = winnerId ? readRun(winnerId) : undefined;
+        console.log(`${qitemId} was started by another caller as ${winnerId ?? "another run"}, so the task isn't sent twice${winner ? `:\n${describeRun(winner)}` : ""}`);
+        if (winner) await report(winner, opts.wait);
+        else process.exitCode = 1;
         return;
       }
 
       const log = openSync(run.connectorLog, "a");
       const [file, ...args] = connectorCommand(runId);
       let spawnError: Error | undefined;
+      let connectorExit: string | undefined;
       try {
         const child = spawn(file!, args, { detached: true, stdio: ["ignore", log, log], env: { ...process.env, [CONNECTOR_MARKER]: runId } });
         child.once("error", (error) => { spawnError = error; });
+        child.once("exit", (code, signal) => { connectorExit = `exited (code ${code ?? "none"}, signal ${signal ?? "none"})`; });
         child.unref();
       } finally { closeSync(log); }
       let current: ExecRun = run;
       for (const deadline = Date.now() + (deps.startWaitMs ?? 10_000); Date.now() < deadline; await sleep(50)) {
         current = readRun(runId) ?? current;
-        if (current.state !== "requested" || spawnError) break;
+        if (current.state !== "requested" || spawnError || connectorExit) break;
       }
       if (spawnError && current.state === "requested") {
         current = { ...current, state: "finished", outcome: "failed", summary: `the connector couldn't be started: ${spawnError.message}`, endedAt: now() };
         writeRun(current);
+      } else if (connectorExit && current.state === "requested") {
+        current = await reconcileRun(current, async () => queue, connectorExit);
       }
       console.log(`[rig exec] ${runId} for ${qitemId} on ${harness.name}: ${current.endedAt ? `ended, outcome ${current.outcome}: ${current.summary}` : current.state === "started" ? "started" : "requested; its connector hasn't recorded itself yet"}`);
       console.log(`  rig exec status ${runId} shows it; rig exec cancel ${runId} cancels it.`);
-      if (opts.wait && !current.endedAt) finish(await waitForEnd(runId), runId);
-      else if (current.endedAt) process.exitCode = 2;
+      await report(current, opts.wait);
     });
 
   cmd

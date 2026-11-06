@@ -97,6 +97,8 @@ rig exec cancel <runId>
   reads `failed`, with the agent's code and message, and no new session is started either way.
 - **The outcome is the agent's report.** `finished` with `completed` means the turn ended; accepting the work stays
   with you, on the row. `--wait` exits 0 for `completed`, 2 for any other outcome, and 3 when you stop waiting.
+  Without `--wait`, a run that has already ended exits the same way, and one still going exits 0. Either way the code
+  follows the row's run, including one another caller started.
 - **Permissions:** the agent keeps its own mode, and `rig exec` adds no policy; your environment passes through.
   `rig exec harnesses` lists what each harness reads.
 

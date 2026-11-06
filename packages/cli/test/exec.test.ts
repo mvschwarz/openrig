@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { processStart } from "../src/commands/acp.js";
 import { claimRow, HARNESSES, resolveHarness, rowRun, type ExecRun } from "../src/commands/exec.js";
 import { readRows, writeRows } from "./fixtures/exec-file-queue.js";
 
@@ -12,6 +13,7 @@ import { readRows, writeRows } from "./fixtures/exec-file-queue.js";
 
 const FAKE_AGENT = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
 const RUNNER = fileURLToPath(new URL("./fixtures/exec-cli-runner.ts", import.meta.url));
+const CONNECTOR_ENTRY = fileURLToPath(new URL("./fixtures/exec-connector-entry.ts", import.meta.url));
 const SEAT = "builder@studio";
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const fn of cleanup.splice(0)) fn(); });
@@ -42,7 +44,7 @@ function setup(body = "scenario:reply PONG", env: Record<string, string> = {}) {
     ...process.env, OPENRIG_HOME: home, OPENRIG_SESSION_NAME: SEAT, EXEC_QUEUE_FILE: queueFile,
     PATH: [join(home, "node_modules", ".bin"), dirname(process.execPath), process.env.PATH].join(delimiter), ...env,
   };
-  for (const name of ["FAKE_ACP_LOAD", "FAKE_ACP_MISSING", "FAKE_ACP_COMPANION_PID_FILE", "FAKE_ACP_COST", "FAKE_ACP_PROMPT_USAGE", "FAKE_ACP_IGNORE_EOF"]) if (!(name in env)) delete runEnv[name];
+  for (const name of ["FAKE_ACP_LOAD", "FAKE_ACP_MISSING", "FAKE_ACP_COMPANION_PID_FILE", "FAKE_ACP_COST", "FAKE_ACP_PROMPT_USAGE", "FAKE_ACP_IGNORE_EOF", "EXEC_TEST_CONNECTOR", "EXEC_TEST_WINNER", "OPENRIG_EXEC_CONNECTOR"]) if (!(name in env)) delete runEnv[name];
   return { home, env: runEnv, queueFile };
 }
 type Home = ReturnType<typeof setup>;
@@ -74,6 +76,23 @@ const ended = (h: Home, runId: string) => until(() => { const run = runFile(h, r
 const notes = (h: Home) => readRows(h.queueFile)["qitem-task"]!.notes;
 const runIds = (h: Home) => readdirSync(join(h.home, "acp", "runs")).filter((f) => /^exec-[^.]+\.json$/.test(f)).map((f) => f.slice(0, -5));
 const startedId = (out: string) => /\[rig exec\] (exec-\S+) for qitem-task/.exec(out)?.[1];
+const withEnv = (h: Home, env: Record<string, string>): Home => ({ ...h, env: { ...h.env, ...env } });
+function withHome<T>(h: Home, fn: () => T): T {
+  const previous = process.env.OPENRIG_HOME;
+  process.env.OPENRIG_HOME = h.home;
+  try { return fn(); } finally { if (previous === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = previous; }
+}
+/** A run record as rig exec writes one, for the states a test needs. */
+function record(h: Home, runId: string, fields: Partial<ExecRun>): string {
+  const runs = join(h.home, "acp", "runs");
+  mkdirSync(runs, { recursive: true });
+  const file = join(runs, `${runId}.json`);
+  writeFileSync(file, JSON.stringify({
+    runId, qitemId: "qitem-task", harness: "claude", agent: ["claude-agent-acp"], cwd: h.home, self: SEAT, pollMs: 1000, native: "x",
+    state: "started", pid: 1, requestedAt: "2026-11-06T00:00:00Z", transcript: join(runs, `${runId}.jsonl`), connectorLog: join(runs, `${runId}.connector.log`), ...fields,
+  }));
+  return readFileSync(file, "utf8");
+}
 
 describe("rig exec", () => {
   it("finds each harness's adapter and native versions, and names the install when it's missing", () => {
@@ -182,6 +201,78 @@ describe("rig exec", () => {
       if (previous === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = previous;
     }
   });
+
+  it("lets only one of two callers that read the same current run claim the row, and a fresh start never claims during a replacement", () => {
+    withHome(setup(), () => {
+      expect(claimRow("qitem-task", "exec-p")).toBe(true);
+      let inWindow: boolean | undefined;
+      // A and B both read exec-p as the row's run; B publishes inside A's window, so A's publish fails.
+      expect(claimRow("qitem-task", "exec-a", "exec-p", () => { inWindow = claimRow("qitem-task", "exec-b", "exec-p"); })).toBe(false);
+      expect(inWindow).toBe(true);
+      expect(rowRun("qitem-task")).toBe("exec-b");
+      // A fresh start inside a replacement's window still sees the row's run, so it never claims.
+      expect(claimRow("qitem-task", "exec-c", "exec-b", () => { inWindow = claimRow("qitem-task", "exec-x"); })).toBe(true);
+      expect(inWindow).toBe(false);
+      expect(rowRun("qitem-task")).toBe("exec-c");
+      // Two fresh starts on a row with no run: the one that publishes first wins.
+      expect(claimRow("qitem-new", "exec-1", undefined, () => { inWindow = claimRow("qitem-new", "exec-2"); })).toBe(false);
+      expect(inWindow).toBe(true);
+      expect(rowRun("qitem-new")).toBe("exec-2");
+    });
+  });
+
+  it("exits by the run's outcome on every path: an ended run returned again, a run that ended before the first look, and a losing caller", async () => {
+    const failed = setup("scenario:error");
+    const first = startedId((await rig(failed, ["run", "qitem-task", "--harness", "claude"])).out)!;
+    expect((await ended(failed, first)).outcome).toBe("failed");
+    const again = await rig(failed, ["run", "qitem-task", "--harness", "claude", "--wait"]);
+    expect(again.out).toContain("qitem-task already has a run, so the task isn't sent twice");
+    expect(again.code).toBe(2);
+    expect((await rig(failed, ["run", "qitem-task", "--harness", "claude"])).code).toBe(2);
+
+    const quick = await rig(withEnv(setup(), { EXEC_TEST_CONNECTOR: "instant" }), ["run", "qitem-task", "--harness", "claude"]);
+    expect(quick.out).toMatch(/for qitem-task on claude: ended, outcome completed/);
+    expect(quick.code).toBe(0);
+
+    for (const [outcome, code] of [["failed", 2], ["completed", 0]] as const) {
+      const lost = withEnv(setup(), { EXEC_TEST_WINNER: outcome });
+      const loser = await rig(lost, ["run", "qitem-task", "--harness", "claude", "--wait"]);
+      expect(loser.out).toContain("qitem-task was started by another caller as exec-winner, so the task isn't sent twice");
+      expect(loser.out).toContain(`finished, outcome ${outcome}`);
+      expect(loser.code).toBe(code);
+      expect(runIds(lost)).toEqual(["exec-winner"]); // the losing caller's own record is gone, and nothing else started
+    }
+  }, 60_000);
+
+  it("ends a run interrupted when its connector dies before recording itself, even while a waiter or requester lives", async () => {
+    const h = setup();
+    const died = await rig(withEnv(h, { EXEC_TEST_CONNECTOR: "die" }), ["run", "qitem-task", "--harness", "claude", "--wait"]);
+    expect(died.code).toBe(2);
+    expect(died.out).toContain("interrupted: its connector exited (code 3, signal none) and never recorded itself, so no turn was sent");
+    expect(runFile(h, startedId(died.out)!)).toMatchObject({ state: "interrupted", outcome: "unknown" });
+
+    // A requested record names its requester; a live requester with no connector is not a live run.
+    const other = setup();
+    record(other, "exec-orphan", { state: "requested", pid: process.pid, processStart: processStart(process.pid) });
+    const status = await rig(other, ["status", "exec-orphan"]);
+    expect(status.out).toContain("interrupted: its connector isn't running and never recorded itself, so no turn was sent");
+  }, 40_000);
+
+  it("the connector entry runs only the requested run it was started for, and leaves any other record untouched", async () => {
+    const h = setup();
+    const done = record(h, "exec-done", { state: "finished", outcome: "completed", endedAt: "2026-11-06T00:00:05Z" });
+    const waiting = record(h, "exec-waiting", { state: "requested" });
+    const connector = async (runId: string, marker?: string) => {
+      const child = spawn(process.execPath, ["--import", "tsx", CONNECTOR_ENTRY, runId], { env: { ...h.env, ...(marker ? { OPENRIG_EXEC_CONNECTOR: marker } : {}) }, stdio: "ignore" });
+      return new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+    };
+    expect(await connector("exec-done", "exec-done")).toBe(1);
+    expect(await connector("exec-waiting")).toBe(1);
+    expect(await connector("exec-waiting", "exec-other")).toBe(1);
+    expect(readFileSync(join(h.home, "acp", "runs", "exec-done.json"), "utf8")).toBe(done);
+    expect(readFileSync(join(h.home, "acp", "runs", "exec-waiting.json"), "utf8")).toBe(waiting);
+    expect(notes(h)).toEqual([]);
+  }, 40_000);
 
   it("reads a run whose connector died, or whose pid now names another process, as interrupted, with one note", async () => {
     const h = setup();
