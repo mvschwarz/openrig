@@ -34,7 +34,6 @@ import { deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffT
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
-import { resolveRegisteredHumanAddress } from "./gateway/human-registry.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
@@ -426,6 +425,9 @@ function deliveryResolutionEvidence(
       if (row.lastNudgeResult?.startsWith("wake-accepted:")) return "source wake accepted by its hosted trigger";
     }
   }
+  if (kind === "unclaimed-obligation" && deps.queueRepo.isRegisteredHumanUpdate(row)) {
+    return "informational update to a registered human requires no claim";
+  }
   if (deps.queueRepo.humanNotificationPostedThisEpisode(qitemId)) return "current human ask posted";
   if (kind === "undelivered-human-notice") {
     const notification = deps.queueRepo.transitionLog.latestOwnerNotificationForQitem(qitemId);
@@ -724,10 +726,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // An ask placed on Steering without an alert waits on its person there by design; a finding would alert them.
       if (deps.queueRepo.humanAskWithoutAlert(row.qitemId)) continue;
       // An explicit informational update to a currently registered human is for reading, not an obligation to claim.
-      if (row.humanIntent === "update") {
-        const registry = deps.queueRepo.humanRegistry();
-        if (registry.ok && resolveRegisteredHumanAddress(row.destinationSession, registry.entities) !== null) continue;
-      }
+      if (deps.queueRepo.isRegisteredHumanUpdate(row)) continue;
       // Quiet hours: a held ask whose window's release job is live waits on that job, and one already released waits on
       // its post; neither is stuck. A release whose post failed is reported once, by the undelivered-wake loop above. A
       // hold with no live release job is stuck: nothing will ever release it.
