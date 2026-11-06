@@ -380,6 +380,13 @@ async function preflightMembers(
         }
       }
 
+      // Agent spec advisories (non-blocking): the base spec's and each import's, one warning each.
+      for (const agentSpec of [resolveResult.resolved, ...resolveResult.imports]) {
+        for (const advisory of agentSpec.advisories ?? []) {
+          warnings.push(`${pod.id}.${member.id}: agent spec advisory (${agentSpec.spec.name}, ${agentSpec.sourcePath}): ${advisory}`);
+        }
+      }
+
       // Resolve profile via resolveNodeConfig
       const ctx: ResolutionContext = {
         baseSpec: resolveResult.resolved,

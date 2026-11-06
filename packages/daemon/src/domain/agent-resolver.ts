@@ -15,6 +15,8 @@ export interface ResolvedAgentSpec {
   spec: AgentSpec;
   sourcePath: string;
   hash: string;
+  /** The spec's non-blocking validation advisories, when it has any; a launch shows them as warnings. */
+  advisories?: string[];
 }
 
 export interface ResourceCollision {
@@ -177,7 +179,7 @@ function loadSpec(
 
   return {
     ok: true,
-    resolved: { spec, sourcePath: dirPath, hash },
+    resolved: { spec, sourcePath: dirPath, hash, ...(validation.advisories?.length ? { advisories: validation.advisories } : {}) },
   };
 }
 
