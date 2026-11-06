@@ -23,6 +23,12 @@ import type { ProjectionEntry, ProjectionPlan } from "../src/domain/projection-p
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { MANAGED_BLOCK_START } from "../src/domain/managed-blocks.js";
+import { PodRepository } from "../src/domain/pod-repository.js";
+import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
+import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
+import { createDesiredClaudeActivityHooksReader, resolveDesiredClaudeActivityHooks } from "../src/domain/desired-claude-activity-hooks.js";
+import { RestoreCheckService } from "../src/domain/restore-check-service.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 
 // Real snapshot/restore/startup/projection and settings files; only terminal and
 // native launch/readiness are simulated. No Claude, provider or daemon is started.
@@ -836,5 +842,106 @@ profiles:
         orientation: "role", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }]));
     const read = createDesiredClaudeActivityHooksReader(db, { exists: fs.existsSync, readFile: (p) => fs.readFileSync(p, "utf8") });
     expect(read(node.id)).toMatchObject({ status: "unknown" });
+  });
+
+  it.each([false, true])("an added local:. seat without agent startup files cannot borrow its old rig root's selection (actual=%s)", async selects => {
+    const originalRoot = path.join(root, "original-rig");
+    const actualRoot = path.join(root, "added-agent");
+    const writeAgent = (dir: string, selected: boolean) => {
+      fs.mkdirSync(path.join(dir, "runtime"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "runtime/activity.json"), "{}\n");
+      fs.writeFileSync(path.join(dir, "agent.yaml"), `name: impl
+version: "1.0.0"
+resources:
+  runtime_resources:
+    - id: activity
+      path: runtime/activity.json
+      runtime: claude-code
+      type: claude_activity_hooks
+profiles:
+  default:
+    uses:
+      runtime_resources: ${selected ? "[activity]" : "[]"}
+`);
+    };
+    writeAgent(originalRoot, !selects);
+    // Start without hooks, then change the current profile after its real launch
+    // was saved, as for an upgraded seat whose saved selection predates hooks.
+    writeAgent(actualRoot, false);
+    fs.writeFileSync(path.join(originalRoot, "CULTURE.md"), "Original rig culture.\n");
+    const nodeLauncher = new NodeLauncher({ db, rigRepo: rigs, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux });
+    const instantiator = new PodRigInstantiator({ db, rigRepo: rigs, podRepo: new PodRepository(db), sessionRegistry: registry,
+      eventBus: events, nodeLauncher, tmuxAdapter: tmux,
+      startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux }),
+      fsOps: { exists: fs.existsSync, readFile: p => fs.readFileSync(p, "utf8") },
+      adapters: { "claude-code": adapter }, onboardingEnabledResolver: () => false, exec: async () => "" });
+    const materialized = await instantiator.materialize(`version: "0.2"
+name: origin-1530
+culture_file: CULTURE.md
+pods:
+  - id: p
+    label: Builders
+    members:
+      - id: existing
+        runtime: terminal
+        agent_ref: builtin:terminal
+        profile: none
+        cwd: ${cwd}
+`, originalRoot);
+    expect(materialized.ok, JSON.stringify(materialized)).toBe(true);
+    if (!materialized.ok) return;
+    const rigId = materialized.result.rigId;
+    const added = await instantiator.addMemberToPod(rigId, "p", {
+      id: "seat", runtime: "claude-code", agent_ref: "local:.", profile: "default", cwd,
+    }, actualRoot);
+    expect(added.ok, JSON.stringify(added)).toBe(true);
+    if (!added.ok) return;
+    expect(added.result.node.status, JSON.stringify(added)).not.toBe("failed");
+    const node = rigs.getRig(rigId)!.nodes.find(n => n.id === added.result.node.nodeId)!;
+    expect(node).toMatchObject({ agentRef: "local:.", resolvedSpecName: "impl" });
+    const saved = db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(node.id) as {
+      runtime: string; resolved_files_json: string; projection_entries_json: string; startup_actions_json: string;
+    };
+    expect(saved).toBeDefined();
+    const files = JSON.parse(saved.resolved_files_json) as Array<{ ownerRoot: string; absolutePath: string }>;
+    expect(files).toContainEqual(expect.objectContaining({ ownerRoot: originalRoot, absolutePath: path.join(originalRoot, "CULTURE.md") }));
+    expect(files.some(file => file.ownerRoot === actualRoot)).toBe(false);
+    expect(JSON.parse(saved.projection_entries_json).some((entry: ProjectionEntry) => entry.resourceType === "claude_activity_hooks")).toBe(false);
+    expect(owned()).toEqual([]);
+    writeAgent(actualRoot, selects);
+    const readerFs = { exists: fs.existsSync, readFile: (p: string) => fs.readFileSync(p, "utf8") };
+    expect(resolveDesiredClaudeActivityHooks(`path:${actualRoot}`, "default", readerFs)).toEqual({ status: "known", selected: selects });
+    expect(resolveDesiredClaudeActivityHooks(`path:${originalRoot}`, "default", readerFs)).toEqual({ status: "known", selected: !selects });
+    const read = createDesiredClaudeActivityHooksReader(db, readerFs);
+    const desired = read(node.id);
+    expect.soft(desired, "saved rig guidance is not proof of the added agent's source").toMatchObject({ status: "unknown" });
+    const session = registry.getSessionsForRig(rigId).find(s => s.nodeId === node.id)!;
+    registry.updateResumeToken(session.id, "claude_id", token);
+    const snap = capture.captureSnapshot(rigId, "manual", { intendedNodeIds: [node.id] });
+    const check = new RestoreCheckService({ stateDir: path.join(root, "state"),
+      listRigs: () => [{ rigId, name: "origin-1530" }], getNodeInventory: id => getNodeInventory(db, id),
+      getStartupContext: () => ({ status: "ok", runtime: saved.runtime,
+        resolvedStartupFiles: JSON.parse(saved.resolved_files_json), projectionEntries: JSON.parse(saved.projection_entries_json) }),
+      hasSnapshot: () => true, getRestoreInputs: () => ({ snapshot: snap, servicesRecord: null }),
+      probeDaemonHealth: () => ({ healthy: true, evidence: "isolated fixture" }),
+      probeQueueStore: () => ({ available: true, evidence: "isolated SQLite" }),
+      exists: readerFs.exists, readFile: readerFs.readFile, getDesiredClaudeActivityHooks: read,
+    }).check({});
+    const hookCheck = check.checks.find(item => item.check === `seat.${session.sessionName}.hooks`);
+    expect.soft(hookCheck, "restore-check must expose unknown selection").toMatchObject({ status: "yellow", evidence: expect.stringContaining("unknown") });
+    registry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id=?").run(node.id);
+    const result = await restore({ rig: rigs.getRig(rigId)!.rig, node, snap, saved }, adapter, () => {}, read);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    expect.soft(owned(), "the old root must not project hooks into the added seat").toEqual([]);
+    expect.soft(result.result.warnings.some(w => w.startsWith("Restore activity hooks:") && w.includes("could not be determined")),
+      JSON.stringify(result.result.warnings)).toBe(true);
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(node.id)).toEqual(saved);
+    expect(settings().hooks.Stop).toContainEqual(userHook);
+    expect(settings().env).toEqual(originalSettings.env);
+    console.info("ORIGIN1530_SAVED_ADD", { actualSelection: selects, oldRootSelection: !selects,
+      savedOwnerRoots: files.map(file => file.ownerRoot), desired, hookCheck,
+      projectedHookCount: owned().length, savedContextUnchanged: true });
   });
 });
