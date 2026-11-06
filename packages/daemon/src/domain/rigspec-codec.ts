@@ -254,6 +254,7 @@ export class LegacyRigSpecCodec {
         if (node.claudeTokenRef) n["claude_token"] = { label: node.claudeTokenRef.label, file: node.claudeTokenRef.tokenFile };
         if (node.claudeMcp !== undefined) n["claude_mcp"] = node.claudeMcp;
         if (node.codexPermissions !== undefined) n["codex_permissions"] = node.codexPermissions;
+        if (node.launchWrapper !== undefined) n["launch_wrapper"] = [...node.launchWrapper];
         if (node.cwd != null) n["cwd"] = node.cwd;
         if (node.surfaceHint != null) n["surface_hint"] = node.surfaceHint;
         if (node.workspace != null) n["workspace"] = node.workspace;

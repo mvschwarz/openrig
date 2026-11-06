@@ -127,6 +127,7 @@ export class RigInstantiator {
             claudeTokenRef: specNode.claudeTokenRef,
             claudeMcp: specNode.claudeMcp,
             codexPermissions: specNode.codexPermissions,
+            launchWrapper: specNode.launchWrapper,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,

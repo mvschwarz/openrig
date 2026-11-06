@@ -241,6 +241,68 @@ describe("RigSpecExporter", () => {
     expect(result.valid).toBe(true);
   });
 
+  it("exports launch_wrapper on legacy flat pi and codex nodes, omits cleared/absent, and round-trips through codec/schema/reimport", () => {
+    const rig = rigRepo.createRig("legacy-wrapper-export");
+    const piArgv = ["mtn", "sandbox", "exec", "", "--pi-seat", "alpha", "--"];
+    const codexArgv = ["/usr/local/bin/codex-wrap", "--codex-seat", "beta", "--"];
+    rigRepo.addNode(rig.id, "orchestrator", {
+      runtime: "claude-code",
+      cwd: "/repo",
+    });
+    const piNode = rigRepo.addNode(rig.id, "pi-worker", {
+      runtime: "pi",
+      cwd: "/repo",
+      launchWrapper: piArgv,
+    });
+    const codexNode = rigRepo.addNode(rig.id, "codex-worker", {
+      runtime: "codex",
+      cwd: "/repo",
+      launchWrapper: codexArgv,
+    });
+    rigRepo.addNode(rig.id, "pi-cleared", {
+      runtime: "pi",
+      cwd: "/repo",
+      launchWrapper: [],
+    });
+
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").LegacyRigSpec;
+    expect(exported.nodes.find((n) => n.id === "orchestrator")?.launchWrapper).toBeUndefined();
+    expect(exported.nodes.find((n) => n.id === "pi-worker")?.launchWrapper).toEqual(piArgv);
+    expect(exported.nodes.find((n) => n.id === "codex-worker")?.launchWrapper).toEqual(codexArgv);
+    expect(exported.nodes.find((n) => n.id === "pi-cleared")?.launchWrapper).toBeUndefined();
+
+    const yaml = RigSpecCodec.serialize(exported);
+    const parsed = RigSpecCodec.parse(yaml);
+    expect(RigSpecSchema.validate(parsed)).toEqual({ valid: true, errors: [] });
+    const reimportedSpec = RigSpecSchema.normalize(parsed);
+    expect(reimportedSpec.nodes.find((n) => n.id === "pi-worker")?.launchWrapper).toEqual(piArgv);
+    expect(reimportedSpec.nodes.find((n) => n.id === "codex-worker")?.launchWrapper).toEqual(codexArgv);
+    expect(reimportedSpec.nodes.find((n) => n.id === "orchestrator")?.launchWrapper).toBeUndefined();
+    expect(reimportedSpec.nodes.find((n) => n.id === "pi-cleared")?.launchWrapper).toBeUndefined();
+
+    // Re-materialize from normalized spec into DB and verify round-trip persistence
+    const reimportedRig = rigRepo.createRig("legacy-wrapper-reimported");
+    for (const specNode of reimportedSpec.nodes) {
+      rigRepo.addNode(reimportedRig.id, specNode.id, {
+        runtime: specNode.runtime,
+        cwd: specNode.cwd,
+        launchWrapper: specNode.launchWrapper,
+      });
+    }
+    const storedReimported = rigRepo.getRig(reimportedRig.id)!;
+    expect(storedReimported.nodes.find((n) => n.logicalId === "pi-worker")?.launchWrapper).toEqual(piArgv);
+    expect(storedReimported.nodes.find((n) => n.logicalId === "codex-worker")?.launchWrapper).toEqual(codexArgv);
+    expect(storedReimported.nodes.find((n) => n.logicalId === "orchestrator")?.launchWrapper).toBeUndefined();
+    expect(storedReimported.nodes.find((n) => n.logicalId === "pi-cleared")?.launchWrapper).toBeUndefined();
+
+    // Explicitly clearing stored wrappers omits launchWrapper on subsequent legacy export
+    rigRepo.setNodeLaunchWrapper(piNode.id, null);
+    rigRepo.setNodeLaunchWrapper(codexNode.id, null);
+    const exportedAfterClear = exporter.exportRig(rig.id) as import("../src/domain/types.js").LegacyRigSpec;
+    expect(exportedAfterClear.nodes.find((n) => n.id === "pi-worker")?.launchWrapper).toBeUndefined();
+    expect(exportedAfterClear.nodes.find((n) => n.id === "codex-worker")?.launchWrapper).toBeUndefined();
+  });
+
   it("constructor throws on mismatched db handles", () => {
     const otherDb = setupDb();
     const otherRepo = new RigRepository(otherDb);

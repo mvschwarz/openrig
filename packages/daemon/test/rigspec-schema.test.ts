@@ -789,6 +789,11 @@ describe("member launch_wrapper (#2328)", () => {
     const absSpec = withMember(runtime, { launch_wrapper: absArgv });
     expect(RigSpecSchema.validate(absSpec)).toEqual({ valid: true, errors: [] });
     expect(RigSpecSchema.normalize(absSpec).pods[0]!.members[0]!.launchWrapper).toEqual(absArgv);
+
+    const dotSegmentArgv = ["/a/../b", "--flag"];
+    const dotSegmentSpec = withMember(runtime, { launch_wrapper: dotSegmentArgv });
+    expect(RigSpecSchema.validate(dotSegmentSpec)).toEqual({ valid: true, errors: [] });
+    expect(RigSpecSchema.normalize(dotSegmentSpec).pods[0]!.members[0]!.launchWrapper).toEqual(dotSegmentArgv);
   });
 
   it.each(["pi", "codex"])("accepts [] as explicit clear on %s and retains [] in normalize", (runtime) => {
@@ -836,11 +841,6 @@ describe("member launch_wrapper (#2328)", () => {
       ["../wrapper"],
       ["bin/wrapper"],
       ["~/wrapper"],
-      ["."],
-      [".."],
-      ["/usr/bin/"],
-      ["/usr/../bin/wrapper"],
-      ["wrapper\\cmd"],
       ["wrap\0per"],
       ["wrap\nper"],
       ["wrap\rper"],
@@ -862,6 +862,7 @@ describe("member launch_wrapper (#2328)", () => {
     const { validateLaunchWrapper, parseStoredLaunchWrapper, sameLaunchWrapper } = await import("../src/domain/launch-wrapper.js");
     expect(validateLaunchWrapper([])).toEqual([]);
     expect(validateLaunchWrapper(["mtn", "", "--"])).toEqual(["mtn", "", "--"]);
+    expect(validateLaunchWrapper(["/a/../b", "--"])).toEqual(["/a/../b", "--"]);
     expect(parseStoredLaunchWrapper(null)).toBeUndefined();
     expect(parseStoredLaunchWrapper(undefined)).toBeUndefined();
     expect(parseStoredLaunchWrapper('["mtn","--"]')).toEqual(["mtn", "--"]);
@@ -876,5 +877,92 @@ describe("member launch_wrapper (#2328)", () => {
     expect(sameLaunchWrapper(["mtn", "--"], ["mtn"])).toBe(false);
     expect(sameLaunchWrapper(["mtn"], [])).toBe(false);
     expect(sameLaunchWrapper(["mtn"], null)).toBe(false);
+  });
+});
+
+describe("legacy flat node launch_wrapper (#2328)", () => {
+  const withLegacyNode = (runtime: string, fields: Record<string, unknown>) => ({
+    schema_version: 1,
+    name: "legacy-wrapper-rig",
+    version: "1.0.0",
+    nodes: [
+      {
+        id: "worker",
+        runtime,
+        cwd: "/workspace",
+        ...fields,
+      },
+    ],
+    edges: [],
+  });
+
+  it.each(["pi", "codex"])("accepts literal argv with bare, absolute, or dot-segment executable, empty non-executable args, spaces and metacharacters on flat %s node", (runtime) => {
+    const argv = ["mtn", "sandbox", "exec", "", "--flag='quoted $VAR ; | &'", "--"];
+    const spec = withLegacyNode(runtime, { launch_wrapper: argv });
+    expect(LegacyRigSpecSchema.validate(spec)).toEqual({ valid: true, errors: [] });
+    const normalized = LegacyRigSpecSchema.normalize(spec);
+    expect(normalized.nodes[0]!.launchWrapper).toEqual(argv);
+
+    const absArgv = ["/usr/local/bin/mtn-wrapper", "--seat", "miles"];
+    const absSpec = withLegacyNode(runtime, { launch_wrapper: absArgv });
+    expect(LegacyRigSpecSchema.validate(absSpec)).toEqual({ valid: true, errors: [] });
+    expect(LegacyRigSpecSchema.normalize(absSpec).nodes[0]!.launchWrapper).toEqual(absArgv);
+
+    const dotSegmentArgv = ["/a/../b", "--flag"];
+    const dotSegmentSpec = withLegacyNode(runtime, { launch_wrapper: dotSegmentArgv });
+    expect(LegacyRigSpecSchema.validate(dotSegmentSpec)).toEqual({ valid: true, errors: [] });
+    expect(LegacyRigSpecSchema.normalize(dotSegmentSpec).nodes[0]!.launchWrapper).toEqual(dotSegmentArgv);
+  });
+
+  it.each(["pi", "codex"])("accepts [] as explicit clear on flat %s node and retains [] in normalize", (runtime) => {
+    const spec = withLegacyNode(runtime, { launch_wrapper: [] });
+    expect(LegacyRigSpecSchema.validate(spec)).toEqual({ valid: true, errors: [] });
+    const node = LegacyRigSpecSchema.normalize(spec).nodes[0]!;
+    expect(node.launchWrapper).toEqual([]);
+  });
+
+  it.each(["pi", "codex"])("omits launchWrapper when launch_wrapper is absent on flat %s node", (runtime) => {
+    const spec = withLegacyNode(runtime, {});
+    expect(LegacyRigSpecSchema.validate(spec)).toEqual({ valid: true, errors: [] });
+    const node = LegacyRigSpecSchema.normalize(spec).nodes[0]!;
+    expect(node.launchWrapper).toBeUndefined();
+    expect("launchWrapper" in node).toBe(false);
+  });
+
+  it.each(["claude-code", "omp", "terminal", "stub"])("rejects launch_wrapper (including []) on unsupported flat runtime %s", (runtime) => {
+    for (const value of [["mtn", "--"], []]) {
+      const result = LegacyRigSpecSchema.validate(withLegacyNode(runtime, { launch_wrapper: value }));
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('nodes.worker.launch_wrapper: only valid when runtime is "pi" or "codex"');
+    }
+  });
+
+  it("rejects invalid launch_wrapper values on flat nodes (null, non-array, empty/relative executable, NUL/CR/LF, non-string elements)", () => {
+    const invalidValues: unknown[] = [
+      null,
+      "mtn --",
+      42,
+      true,
+      { executable: "mtn" },
+      [""],
+      ["   "],
+      ["", "--"],
+      ["./wrapper"],
+      ["../wrapper"],
+      ["bin/wrapper"],
+      ["wrap\0per"],
+      ["wrap\nper"],
+      ["wrap\rper"],
+      ["mtn", "bad\0arg"],
+      ["mtn", "bad\narg"],
+      ["mtn", "bad\rarg"],
+      ["mtn", 123],
+      ["mtn", null],
+    ];
+    for (const badValue of invalidValues) {
+      const result = LegacyRigSpecSchema.validate(withLegacyNode("codex", { launch_wrapper: badValue }));
+      expect(result.valid, JSON.stringify(badValue)).toBe(false);
+      expect(result.errors.join(" "), JSON.stringify(badValue)).toContain("nodes.worker.launch_wrapper");
+    }
   });
 });

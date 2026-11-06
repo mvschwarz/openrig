@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
+import { RigSpecSchema, LegacyRigSpecSchema } from "../src/domain/rigspec-schema.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -102,10 +102,10 @@ describe("RigSpec and startup guide launch_wrapper documentation (#2328)", () =>
     expect(doc).toMatch(/non-POSIX/i);
     expect(doc).toMatch(/daemon.*PATH/i);
     expect(doc).toMatch(/must prepare its environment and `exec`|must `exec`|execs the/i);
-    expect(doc).toMatch(/OpenRig's RPC runner|OpenRig's node runner|Pi runner/i);
-    expect(doc).toMatch(/not.*inner `pi` binary directly|not `pi` directly/i);
+    expect(doc).toMatch(/host runner stays host-side and unwrapped|OpenRig's RPC runner|OpenRig's node runner|Pi runner/i);
+    expect(doc).toMatch(/prefixes the resolved Pi child executable|inner `pi` binary/i);
     expect(doc).toMatch(/launch_path_too_long/);
-    expect(doc).toMatch(/never falls back to.*unwrapped|never retries or falls back/i);
+    expect(doc).toMatch(/never runs unwrapped|never falls back to.*unwrapped|never retries or falls back/i);
     expect(doc).toMatch(/not(?:\*\*)?\s+proof of[\s\S]*isolation[\s\S]*tooling[\s\S]*memory[\s\S]*governance/i);
   });
 
@@ -160,13 +160,46 @@ describe("RigSpec and startup guide launch_wrapper documentation (#2328)", () =>
     expect(RigSpecSchema.validate(cleared).valid).toBe(true);
     const normalizedCleared = RigSpecSchema.normalize(cleared);
     expect(normalizedCleared.pods[0]?.members[0]?.launchWrapper).toEqual([]);
+
+    for (const runtime of ["pi", "codex"] as const) {
+      const legacyConfigured = {
+        schema_version: 1,
+        name: "legacy-test-rig",
+        version: "1.0.0",
+        nodes: [
+          {
+            id: "impl",
+            runtime,
+            cwd: ".",
+            launch_wrapper: ["mtn", "sandbox", "exec", "--seat", "synthetic", "--"],
+          },
+        ],
+        edges: [],
+      };
+      expect(LegacyRigSpecSchema.validate(legacyConfigured).valid).toBe(true);
+      expect(LegacyRigSpecSchema.normalize(legacyConfigured).nodes[0]?.launchWrapper).toEqual([
+        "mtn",
+        "sandbox",
+        "exec",
+        "--seat",
+        "synthetic",
+        "--",
+      ]);
+
+      const legacyCleared = {
+        ...legacyConfigured,
+        nodes: [{ ...legacyConfigured.nodes[0]!, launch_wrapper: [] }],
+      };
+      expect(LegacyRigSpecSchema.validate(legacyCleared).valid).toBe(true);
+      expect(LegacyRigSpecSchema.normalize(legacyCleared).nodes[0]?.launchWrapper).toEqual([]);
+    }
   });
 
   it("documents launch_wrapper in agent-startup-guide.md what-a-seat-is-set-to table", () => {
     const guide = startupGuideDoc();
     expect(guide).toContain("launch_wrapper");
     expect(guide).toContain("launchWrapper");
-    expect(guide).toMatch(/OpenRig's Pi runner/i);
+    expect(guide).toMatch(/OpenRig's host runner|OpenRig's Pi runner/i);
     expect(guide).toMatch(/not proof of isolation, tooling, memory or governance/i);
   });
 });

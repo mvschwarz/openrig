@@ -272,6 +272,15 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       }
     }
 
+    let resolvedWrapper: string[] | undefined;
+    if (wrapped) {
+      try {
+        resolvedWrapper = this.seatLaunchEnvironment!.resolveLaunchWrapper(wrapped);
+      } catch {
+        return { ok: false, error: "launch_wrapper unavailable; no agent started." };
+      }
+    }
+
     const sessionName = binding.tmuxSession;
     const paths = piSeatPaths(this.stateRoot, sessionName);
     this.fs.mkdirp(paths.agentDir);
@@ -312,15 +321,16 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       launchId,
       usageFacts: this.runtime === "pi" && this.usageFactsEnabled(),
       openRouterCharge: this.runtime === "pi" && this.openRouterChargeEnabled(),
+      ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
     });
 
     const command = this.runtime === "pi" && this.seatLaunchEnvironment
-      ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, ...(wrapped ? { launchWrapper: wrapped } : {}) })
+      ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
       : cmd;
     // Stage long commands without leaving a shell above the live runner.
     let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
     // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
-    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd && !wrapped) {
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd) {
       textResult = await this.tmux.sendShellCommand(sessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
     }
     if (!textResult.ok) {

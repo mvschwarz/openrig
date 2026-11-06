@@ -84,6 +84,15 @@ export class PiResumeAdapter {
       return { ok: false, code: "retry_fresh", message: `${this.label} resume failed: the persisted session file no longer exists` };
     }
 
+    let resolvedWrapper: string[] | undefined;
+    if (wrapped) {
+      try {
+        resolvedWrapper = this.options.seatLaunchEnvironment!.resolveLaunchWrapper(wrapped);
+      } catch {
+        return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." };
+      }
+    }
+
     const seat = piSeatPaths(this.paths.stateRoot, tmuxSessionName);
     this.fs.mkdirp(seat.agentDir);
     this.fs.mkdirp(seat.sessionsDir);
@@ -122,15 +131,16 @@ export class PiResumeAdapter {
       launchId,
       usageFacts: this.runtime === "pi" && (this.options.usageFactsEnabled?.() ?? false),
       openRouterCharge: this.runtime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
+      ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
     });
 
     const command = this.runtime === "pi" && this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime, ...(wrapped ? { launchWrapper: wrapped } : {}) })
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime })
       : cmd;
     // Short commands retain the direct path; long commands exec from a private script.
     let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
     // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
-    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd && !wrapped) {
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd) {
       textResult = await this.tmux.sendShellCommand(tmuxSessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
     }
     if (!textResult.ok) {

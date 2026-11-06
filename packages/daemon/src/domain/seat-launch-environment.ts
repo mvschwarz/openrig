@@ -75,6 +75,14 @@ export function launchExecutable(name: string, searchPath: string, cwd: string):
   throw new Error(`Seat launch requires ${name} on the daemon launch PATH.`);
 }
 
+/** Resolve and validate a `launch_wrapper` argv against the daemon launch PATH and daemon cwd. */
+export function resolveLaunchWrapperArgv(wrapper: readonly string[], searchPath: string, cwd: string): string[] {
+  if (!searchPath) throw new Error("Seat launch requires a daemon launch PATH.");
+  const validated = validateLaunchWrapper([...wrapper]);
+  if (validated.length === 0) throw new Error("launch_wrapper: must not be an empty array");
+  return [launchExecutable(validated[0]!, searchPath, cwd), ...validated.slice(1)];
+}
+
 /** Reassert only public seat metadata after shell startup. Session identity is
  * read from tmux's launch environment; a successor's reserved identity wins.
  * Credentials stay in the inherited channel. An explicitly selected Codex home
@@ -87,6 +95,10 @@ export class SeatLaunchEnvironment {
     private readonly cliPath?: string,
     private readonly codexHome?: string,
     private readonly selectedAccountHome?: (nodeId: string, runtime: string, ignoreAccountHome?: boolean) => string | undefined) {}
+
+  resolveLaunchWrapper(wrapper: readonly string[]): string[] {
+    return resolveLaunchWrapperArgv(wrapper, this.sessionEnv.PATH ?? "", this.daemonCwd);
+  }
 
   private rigBin(): string {
     const cli = realpathSync(this.cliPath ?? pairedCli());
@@ -157,10 +169,10 @@ export class SeatLaunchEnvironment {
       }
       let prefix = "";
       if (wrapped) {
-        if (!isLaunchWrapperRuntime(target.runtime)) throw new Error("Unsupported launch_wrapper runtime.");
-        if (!searchPath) throw new Error("Seat launch requires a daemon launch PATH.");
-        const validated = validateLaunchWrapper([...wrapped]);
-        prefix = validated.map((arg, index) => shellQuote(index === 0 ? launchExecutable(arg, searchPath, target.codexCwd ?? this.daemonCwd) : arg)).join(" ") + " ";
+        if (!isLaunchWrapperRuntime(target.runtime) || target.runtime !== "codex") {
+          throw new Error("Unsupported launch_wrapper runtime.");
+        }
+        prefix = this.resolveLaunchWrapper(wrapped).map((arg) => shellQuote(arg)).join(" ") + " ";
       }
       const binDir = this.rigBin();
       const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });

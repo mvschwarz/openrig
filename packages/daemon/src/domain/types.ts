@@ -1136,6 +1136,8 @@ export interface LegacyRigSpecNode {
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
+  /** Optional argv prefix wrapping local built-in Pi/Codex launches (`[]` explicitly clears). */
+  launchWrapper?: string[];
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;

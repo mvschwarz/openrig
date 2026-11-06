@@ -29,6 +29,7 @@ import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { credentialTaint, judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, type PiCredentialEvidence } from "./pi-readiness.js";
 import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary, type PiUsageFact } from "../domain/pi-usage-facts.js";
+import { validateLaunchWrapper } from "../domain/launch-wrapper.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, type ChargeProvenance } from "./pi-openrouter-charge.js";
 import { OMP_MAX_FRAME_BYTES, OmpFrameDecoder, ompProtocolV2Limit } from "./omp-rpc-frame.js";
 import {
@@ -986,6 +987,8 @@ interface RunnerArgs {
   /** OPR.0.7.0.2: report usage facts from persisted entries (the daemon passes it when usage.pi_cost_facts is on). */
   usageFacts?: boolean;
   openRouterCharge?: boolean;
+  /** Pi only: resolved launch_wrapper argv (wrapper[0] must be an absolute path). */
+  launchWrapper?: string[];
 }
 
 export function parseRunnerArgs(argv: string[]): RunnerArgs {
@@ -1017,6 +1020,11 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       case "--fork": args.forkRef = next(); break;
       case "--usage-facts": args.usageFacts = true; break;
       case "--openrouter-charge": args.openRouterCharge = true; break;
+      case "--launch-wrapper-arg": {
+        const arg = next();
+        (args.launchWrapper ??= []).push(arg);
+        break;
+      }
       case "--approve": args.trust = "approve"; break;
       case "--no-approve": args.trust = "no-approve"; break;
       case "--approval-mode": {
@@ -1040,6 +1048,16 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
     throw new Error("an explicit trust flag is required: --approve or --no-approve");
   }
   if (args.sessionFile && args.forkRef) throw new Error("--session and --fork are mutually exclusive");
+  if (args.launchWrapper) {
+    if (args.runtime === "omp") {
+      throw new Error("--launch-wrapper-arg is only supported for the Pi runtime");
+    }
+    const validated = validateLaunchWrapper(args.launchWrapper);
+    if (!validated[0] || !nodePath.isAbsolute(validated[0])) {
+      throw new Error(`launch_wrapper[0]: runner requires an absolute executable path (got ${JSON.stringify(validated[0] ?? "")})`);
+    }
+    args.launchWrapper = validated;
+  }
   return args as RunnerArgs;
 }
 
@@ -1258,14 +1276,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   console.log(`[${runtime}-runner] starting ${runtime} --mode rpc (seat ${args.sessionName})`);
   console.log(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
 
-  // OMP runs under a per-seat HOME. A HOME-dependent launcher on PATH (a mise
-  // shim) cannot find its target there, so resolve the real binary first,
-  // with the runner's own environment.
+  // OMP runs under a per-seat HOME, and wrapped Pi launches hand the resolved
+  // Pi binary to the wrapper so a HOME-dependent launcher on PATH (a mise
+  // shim) is resolved first with the runner's own environment. Unwrapped Pi
+  // stays bare "pi".
   let command: string = runtime;
-  if (runtime === "omp") {
-    const resolved = resolveRuntimeExecutable("omp", process.env);
+  if (runtime === "omp" || args.launchWrapper?.length) {
+    const resolved = resolveRuntimeExecutable(runtime, process.env);
     if (!resolved.ok) {
-      console.error(`[omp-runner] ERROR launch: ${resolved.error}`);
+      console.error(`[${runtime}-runner] ERROR launch: ${resolved.error}`);
       // Record the exit for this launch so the adapter fails it now instead
       // of waiting out its readiness timeout. The durable cursor survives.
       const at = new Date().toISOString();
@@ -1301,7 +1320,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // (or was added after it, and is then seen by the next one).
   const launchCredentialEvidence = args.openRouterCharge === true && runtime === "pi" ? credentialEvidence() : undefined;
 
-  const child = spawn(command, childArgs, {
+  const spawnFile = args.launchWrapper?.length ? args.launchWrapper[0]! : command;
+  const spawnArgs = args.launchWrapper?.length ? [...args.launchWrapper.slice(1), command, ...childArgs] : childArgs;
+  const child = spawn(spawnFile, spawnArgs, {
     cwd: args.cwd,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
@@ -1437,6 +1458,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (stderrTail.length > OMP_STDERR_TAIL_LINES) stderrTail.shift();
     if (runtime === "pi" && !core.isReady() && !reportedPiCapability) {
       const detail = piLaunchCapabilityError(command, args.trust, line, () => {
+        if (args.launchWrapper?.length) return "";
         const version = spawnSync(command, ["--version"], { cwd: args.cwd, env: childEnv, encoding: "utf8",
           timeout: 3000, killSignal: "SIGKILL", maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] });
         if (version.error || version.status !== 0) return "";
@@ -1453,7 +1475,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   if (runtime === "pi") {
     child.on("error", (err) => {
-      console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn pi: ${err.message}`);
+      console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn ${args.launchWrapper?.length ? `launch_wrapper (${spawnFile})` : "pi"}: ${err.message}`);
       const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;
       core.handlePiExit(code);
       input.close();

@@ -150,6 +150,7 @@ export class RigSpecExporter {
       if (node.runtime === "claude-code" && node.claudeTokenRef && !node.accountHome && node.claudeTokenRef.kind !== "api-key") specNode.claudeTokenRef = node.claudeTokenRef;
       const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.db, node.id) : undefined;
       if (envelope !== undefined) specNode.codexPermissions = envelope;
+      if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) specNode.launchWrapper = node.launchWrapper;
       if (node.cwd) specNode.cwd = node.cwd;
       if (node.surfaceHint) specNode.surfaceHint = node.surfaceHint;
       if (node.workspace) specNode.workspace = node.workspace;

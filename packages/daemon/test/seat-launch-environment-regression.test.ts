@@ -4,7 +4,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { SeatLaunchEnvironment, launchExecutable, publicSeatEnvironment } from "../src/domain/seat-launch-environment.js";
+import { SeatLaunchEnvironment, launchExecutable, publicSeatEnvironment, resolveLaunchWrapperArgv } from "../src/domain/seat-launch-environment.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { codexDaemonSupportProbe } from "../src/domain/codex-daemon-support.js";
@@ -169,6 +169,7 @@ it.each([
   "nu-shell",
   "fish-shell",
   "unknown-shell",
+  "unsupported-runtime-pi",
   "unsupported-runtime-claude",
   "unsupported-runtime-omp",
   "unsupported-runtime-terminal",
@@ -182,7 +183,7 @@ it.each([
   f.exe(path.join(f.cwd, "valid-wrapper"), "#!/bin/sh\nexec \"$@\"\n");
 
   let wrapper: string[] = ["valid-wrapper", "--"];
-  let runtime: string | undefined = "pi";
+  let runtime: string | undefined = "codex";
   let nodeId = "node";
   let launch = f.launch;
 
@@ -208,6 +209,7 @@ it.each([
   if (failure === "nu-shell") f.tmux.getPaneCommand.mockResolvedValue("nu");
   if (failure === "fish-shell") { f.tmux.getPaneCommand.mockResolvedValue("fish"); runtime = "codex"; }
   if (failure === "unknown-shell") f.tmux.getPaneCommand.mockResolvedValue("unknown");
+  if (failure === "unsupported-runtime-pi") runtime = "pi";
   if (failure === "unsupported-runtime-claude") runtime = "claude-code";
   if (failure === "unsupported-runtime-omp") runtime = "omp";
   if (failure === "unsupported-runtime-terminal") runtime = "terminal";
@@ -225,4 +227,15 @@ it.each([
   expect(result).not.toContain("codex --no-daemon");
   expect(f.warn).toHaveBeenCalledTimes(1);
   expect(JSON.stringify(f.warn.mock.calls)).not.toContain("secret-value");
+});
+
+it("resolveLaunchWrapperArgv rejects empty PATH or empty array and resolves wrapper[0] on daemonCwd", () => {
+  const f = fixture();
+  f.exe(path.join(f.shared, "valid-wrapper"), "#!/bin/sh\nexec \"$@\"\n");
+  expect(resolveLaunchWrapperArgv(["valid-wrapper", "--"], f.env.PATH, f.root)).toEqual([
+    path.join(f.shared, "valid-wrapper"),
+    "--",
+  ]);
+  expect(() => resolveLaunchWrapperArgv(["valid-wrapper"], "", f.root)).toThrow(/daemon launch PATH/);
+  expect(() => resolveLaunchWrapperArgv([], f.env.PATH, f.root)).toThrow(/empty/);
 });

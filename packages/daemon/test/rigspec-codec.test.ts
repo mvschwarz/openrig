@@ -357,4 +357,57 @@ describe("LegacyRigSpecCodec", () => {
     const normalized = LegacyRigSpecSchema.normalize(parsed);
     expect(normalized.nodes[0]!.effort).toBe("high");
   });
+
+  it("legacy node launch_wrapper round-trips non-empty argv on pi and codex, retains explicit [], and omits absent", () => {
+    const piArgv = ["mtn", "sandbox", "exec", "", "--flag='quoted $VAR ;'", "--"];
+    const codexArgv = ["/usr/local/bin/codex-wrap", "--seat", "qa", "--"];
+    const legacyWithWrapper: LegacyRigSpec = {
+      schemaVersion: 1,
+      name: "legacy-wrapper-rig",
+      version: "1.0.0",
+      nodes: [
+        { id: "orch", runtime: "claude-code", cwd: "/workspace" },
+        { id: "pi-worker", runtime: "pi", cwd: "/workspace", launchWrapper: piArgv },
+        { id: "codex-worker", runtime: "codex", cwd: "/workspace", launchWrapper: codexArgv },
+      ],
+      edges: [],
+    };
+
+    const yaml = LegacyRigSpecCodec.serialize(legacyWithWrapper);
+    expect(yaml).toContain("launch_wrapper:");
+    const parsed = LegacyRigSpecCodec.parse(yaml);
+    expect(LegacyRigSpecSchema.validate(parsed)).toEqual({ valid: true, errors: [] });
+    const normalized = LegacyRigSpecSchema.normalize(parsed);
+    expect(normalized.nodes[0]!.launchWrapper).toBeUndefined();
+    expect("launchWrapper" in normalized.nodes[0]!).toBe(false);
+    expect(normalized.nodes[1]!.launchWrapper).toEqual(piArgv);
+    expect(normalized.nodes[2]!.launchWrapper).toEqual(codexArgv);
+
+    const legacyWithClear: LegacyRigSpec = {
+      schemaVersion: 1,
+      name: "legacy-wrapper-clear-rig",
+      version: "1.0.0",
+      nodes: [
+        { id: "pi-clear", runtime: "pi", cwd: "/workspace", launchWrapper: [] },
+        { id: "codex-clear", runtime: "codex", cwd: "/workspace", launchWrapper: [] },
+      ],
+      edges: [],
+    };
+    const clearYaml = LegacyRigSpecCodec.serialize(legacyWithClear);
+    expect(clearYaml).toContain("launch_wrapper: []");
+    const clearParsed = LegacyRigSpecCodec.parse(clearYaml);
+    expect(LegacyRigSpecSchema.validate(clearParsed)).toEqual({ valid: true, errors: [] });
+    const clearNormalized = LegacyRigSpecSchema.normalize(clearParsed);
+    expect(clearNormalized.nodes[0]!.launchWrapper).toEqual([]);
+    expect(clearNormalized.nodes[1]!.launchWrapper).toEqual([]);
+
+    const defaultYaml = LegacyRigSpecCodec.serialize({
+      schemaVersion: 1,
+      name: "legacy-no-wrapper",
+      version: "1.0.0",
+      nodes: [{ id: "worker", runtime: "codex", cwd: "/workspace" }],
+      edges: [],
+    });
+    expect(defaultYaml).not.toContain("launch_wrapper");
+  });
 });

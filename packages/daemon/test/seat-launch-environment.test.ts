@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer } from "node:http";
 import Database from "better-sqlite3";
-import { SeatLaunchEnvironment, publicSeatEnvironment } from "../src/domain/seat-launch-environment.js";
+import { SeatLaunchEnvironment, publicSeatEnvironment, resolveLaunchWrapperArgv } from "../src/domain/seat-launch-environment.js";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
@@ -243,5 +243,42 @@ describe.skipIf(process.platform === "win32")("seat launch environment after she
     });
     expect(unwrapped).toContain(`${shellQuote(path.join(f.bin, "codex"))} -s workspace-write resume 'native-id'`);
     expect(unwrapped).not.toContain("test-wrapper");
+  });
+
+  it("resolveLaunchWrapperArgv and SeatLaunchEnvironment.resolveLaunchWrapper use daemonCwd (not codexCwd) as the single PATH authority and reject Pi shell prefixing", async () => {
+    const f = fixture();
+    f.identity.OPENRIG_RUNTIME = "codex";
+    vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue("bash");
+
+    const daemonRelBin = path.join(f.root, "rel-wrapper-bin");
+    const seatRelBin = path.join(f.binding.cwd, "rel-wrapper-bin");
+    mkdirSync(daemonRelBin, { recursive: true });
+    mkdirSync(seatRelBin, { recursive: true });
+    const daemonWrapper = path.join(daemonRelBin, "rel-wrapper");
+    const seatWrapper = path.join(seatRelBin, "rel-wrapper");
+    writeFileSync(daemonWrapper, "#!/bin/sh\nexec \"$@\"\n", { mode: 0o700 });
+    writeFileSync(seatWrapper, "#!/bin/sh\necho wrong-seat-cwd-wrapper >&2; exit 95\n", { mode: 0o700 });
+    writeFileSync(path.join(f.binding.cwd, "rel-wrapper-bin", "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+
+    f.env.PATH = `rel-wrapper-bin:${f.bin}:/usr/bin:/bin`;
+    const wrapper = ["rel-wrapper", "arg 1", "--"];
+
+    expect(resolveLaunchWrapperArgv(wrapper, f.env.PATH, f.root)).toEqual([daemonWrapper, "arg 1", "--"]);
+    expect(f.launch.resolveLaunchWrapper(wrapper)).toEqual([daemonWrapper, "arg 1", "--"]);
+
+    const codexCmd = await f.launch.command("seat@rig", "codex --no-daemon", {
+      codexCwd: f.binding.cwd,
+      runtime: "codex",
+      launchWrapper: wrapper,
+    });
+    expect(codexCmd).toContain(`${shellQuote(daemonWrapper)} 'arg 1' '--'`);
+    expect(codexCmd).not.toContain(seatWrapper);
+
+    // Passing launchWrapper to SeatLaunchEnvironment.command for runtime "pi" fails closed so shell prefixing cannot re-enter.
+    const piRefusal = await f.launch.command("seat@rig", "node '/runner.js'", {
+      runtime: "pi",
+      launchWrapper: wrapper,
+    });
+    expect(piRefusal).toBe("printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false");
   });
 });

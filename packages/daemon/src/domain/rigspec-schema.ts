@@ -1459,6 +1459,13 @@ export class LegacyRigSpecSchema {
           try { validateCodexMemberPermissions(node["codex_permissions"], `nodes.${nodeWhere}.codex_permissions`); }
           catch (error) { errors.push((error as Error).message); }
         }
+        if (node["launch_wrapper"] !== undefined) {
+          if (node["runtime"] !== "pi" && node["runtime"] !== "codex") {
+            errors.push(`nodes.${nodeWhere}.launch_wrapper: only valid when runtime is "pi" or "codex"`);
+          }
+          try { validateLaunchWrapper(node["launch_wrapper"], `nodes.${nodeWhere}.launch_wrapper`); }
+          catch (error) { errors.push((error as Error).message); }
+        }
         if (node["effort"] !== undefined) {
           if (typeof node["effort"] !== "string" || !node["effort"].trim()) {
             advisories.push(`nodes.${nodeWhere}.effort: non-string value "${node["effort"]}" ignored; effort must be a text value`);
@@ -1527,6 +1534,7 @@ export class LegacyRigSpecSchema {
       ...(n["claude_token"] === undefined ? {} : { claudeTokenRef: specClaudeTokenRef(n["claude_token"], "claude_token") }),
       ...(n["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(n["claude_mcp"]) }),
       ...(n["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(n["codex_permissions"]) }),
+      ...(n["launch_wrapper"] === undefined ? {} : { launchWrapper: validateLaunchWrapper(n["launch_wrapper"]) }),
       cwd: (n["cwd"] as string) ?? undefined,
       surfaceHint: (n["surface_hint"] as string) ?? undefined,
       workspace: (n["workspace"] as string) ?? undefined,

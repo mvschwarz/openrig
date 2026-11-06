@@ -8,14 +8,7 @@ export function isLaunchWrapperRuntime(runtime: unknown): runtime is "pi" | "cod
 
 function isValidWrapperExecutable(executable: string): boolean {
   if (executable.trim().length === 0) return false;
-  if (executable.includes("\\")) return false;
-  if (executable.startsWith("/")) {
-    if (executable.endsWith("/")) return false;
-    const segments = executable.split("/");
-    return !segments.some((segment) => segment === "." || segment === "..");
-  }
-  if (executable === "." || executable === ".." || executable.startsWith("~")) return false;
-  return !executable.includes("/");
+  return executable.startsWith("/") || !executable.includes("/");
 }
 
 /**
