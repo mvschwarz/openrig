@@ -252,7 +252,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         const connector = observation.connector as { configurationDigest?: string; inboundReady?: boolean; outboundReady?: boolean;
           inboundRouting?: { fallback: string; destination: string };
           settlement?: { pending: number; lastFailure: string | null };
-          deadLetterBacklog?: number | null; deadLetterBacklogState?: string; deadLetterBacklogReason?: string;
+          deadLetterBacklog?: number | null; deadLetterBacklogState?: string; deadLetterBacklogReason?: string; relayAttemptsInFlight?: number;
           inbound?: InboundDeliveryStatus & { state?: string; generation?: number; lastEventAt?: string };
           recovery?: { state?: string; reason?: string; lastScanAt?: string; acceptedThisProcess?: number; deadLetteredThisProcess?: number;
             coverage?: { coverageStart: string; coveredThrough: string; pending?: { upper: string; nextLatest: string }; nextRetryAt?: number } | null;
@@ -291,6 +291,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
               + `${reasons(threads.backoff) ? `; backing off: ${reasons(threads.backoff)}` : ""}${reasons(threads.incomplete) ? `; incomplete: ${reasons(threads.incomplete)}` : ""}`);
           }
           log(`  Recovery counts since connector start: accepted ${recovery?.acceptedThisProcess ?? "unknown"}; dead-lettered ${recovery?.deadLetteredThisProcess ?? "unknown"} (custody, not delivery)`);
+          if (connector.relayAttemptsInFlight !== undefined) log(`  Relay attempts awaiting response: ${connector.relayAttemptsInFlight} (this process, point-in-time; zero does not prove global quiescence)`);
           if (connector.deadLetterBacklogState !== undefined) {
             const scope = "inbound messages, reactions and click answers";
             if (connector.deadLetterBacklogState === "unknown") {

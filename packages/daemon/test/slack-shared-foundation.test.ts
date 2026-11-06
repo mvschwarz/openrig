@@ -2,7 +2,7 @@
 // rig's representative or a configured seat; a person's top-level message becomes the root its answer
 // lands under; the hub relays a channel another machine owns, keeps a failed relay and retries it;
 // the receiving route takes a relayed envelope; and every post names the machine it comes from.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -164,6 +164,31 @@ describe("the hub relays a channel another machine owns", () => {
     return { r, rows, forwardDeadLetter };
   }
   const message = (channel: string): SocketEnvelope => ({ envelope_id: "e1", type: "events_api", payload: { event: { type: "message", user: "U1", text: "hi", ts: "700.1", channel } } });
+
+  it("counts only pending live and retry relay attempts, including failed sends", async () => {
+    let finish!: (result: { ok: false; error: string } | { ok: true }) => void;
+    const h = hub(() => new Promise((resolve) => { finish = resolve; }));
+    const live = handleEnvelope(message("C0VPS04"), () => {}, h.r);
+    await vi.waitFor(() => expect(h.r.getRelayAttemptsInFlight()).toBe(1));
+    expect(h.forwardDeadLetter.readAll()).toHaveLength(0);
+    finish({ ok: false, error: "synthetic failure" });
+    await live;
+    expect(h.r.getRelayAttemptsInFlight()).toBe(0);
+    expect(h.forwardDeadLetter.readAll()).toHaveLength(1);
+    const retry = h.r.retryDeadLetters();
+    await vi.waitFor(() => expect(h.r.getRelayAttemptsInFlight()).toBe(1));
+    expect(h.forwardDeadLetter.readAll()).toHaveLength(1);
+    finish({ ok: true });
+    await retry;
+    expect(h.r.getRelayAttemptsInFlight()).toBe(0);
+    expect(h.forwardDeadLetter.readAll()).toHaveLength(0);
+  });
+
+  it("clears the attempt count when the transport throws", async () => {
+    const h = hub(async () => { throw new Error("synthetic error"); });
+    await expect(h.r.forwardEnvelope("vps04", message("C0VPS04"))).rejects.toThrow("synthetic error");
+    expect(h.r.getRelayAttemptsInFlight()).toBe(0);
+  });
 
   it("sends a message, a reaction and a click for that channel there, untouched, and handles nothing here", async () => {
     const sent: Array<[string, SocketEnvelope]> = [];

@@ -349,8 +349,7 @@ decisions, and posts its own replies.
 - **Changing forwarding entries is not a drain or cancellation:** relays already retained keep
   their original host and remain visible in `rig slack status`, even after the last entry is
   removed. An enabled connector retries them; disabling it pauses retry without deleting them.
-  Let relays finish before removing a forward entry. A zero dead-letter backlog alone does not
-  prove they have drained: it does not count relay HTTP requests still in flight.
+  Let relays finish before removing a forward entry; `rig slack status` shows local in-flight attempts separately from retained records, but zero does not prove global quiescence.
 - **Who answered:** every post starts `From <seat> on <machine>`, using the machine's host id (set
   it with `host.name`).
 - **The hub's own channels** are handled on the hub, as before. A channel can be relayed to one

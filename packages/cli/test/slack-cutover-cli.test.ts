@@ -138,13 +138,15 @@ describe("S10 CLI cutover — config surfaces survive on the daemon-homed module
     { name: "enabled bot-only relay receiver", outboundReady: true, inboundReady: false, paused: false },
   ])("shows configured routing and retained retry state on a $name", async ({ outboundReady, inboundReady, paused }) => {
     const { deps, logs } = makeDeps({ clientFactory: () => ({ get: async <T>() => ({ status: 200,
-      data: { state: "active", connector: { outboundReady, inboundReady, inboundRouting: { fallback: "local", destination: "ops@hub" }, inbound: { state: "not-configured" }, deadLetterBacklog: 6, deadLetterBacklogState: "ok" } } as T }) }) });
+      data: { state: "active", connector: { outboundReady, inboundReady, inboundRouting: { fallback: "local", destination: "ops@hub" }, inbound: { state: "not-configured" }, deadLetterBacklog: 6, deadLetterBacklogState: "ok", relayAttemptsInFlight: 2 } } as T }) }) });
     await run(slackCommand(deps), ["status"]);
     expect(logs.join("\n")).toContain("Configured routing fallback: local to ops@hub (after forwarding, thread and channel routes)");
     expect(logs.join("\n")).toContain(paused ? "6 retained record(s); retry paused" : "6 retained record(s) awaiting retry");
+    expect(logs.join("\n")).toContain("Relay attempts awaiting response: 2 (this process, point-in-time; zero does not prove global quiescence)");
     logs.length = 0;
     await run(slackCommand(deps), ["status", "--json"]);
     expect(JSON.parse(logs[0]!).observation.connector.inboundRouting).toEqual({ fallback: "local", destination: "ops@hub" });
+    expect(JSON.parse(logs[0]!).observation.connector.relayAttemptsInFlight).toBe(2);
   });
 });
 
