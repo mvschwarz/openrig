@@ -360,10 +360,13 @@ export interface ExecDeps {
   startWaitMs?: number;
   /** Tests only: acts between the row-claim read and its publish, as a concurrent caller would. */
   beforeClaim?: () => void;
+  /** Tests only: runs right after the CLI has told its caller about the run, as a process descheduled there would. */
+  afterAnnounce?: () => void;
 }
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 const exitFor = (run: ExecRun) => (run.outcome === "completed" ? 0 : 2);
+type Waiter = { left: boolean; leave: () => void };
 
 export function execCommand(deps: ExecDeps = {}): Command {
   const cmd = new Command("exec").description("Run a queue row's task on a named harness (Claude Code or Codex over ACP) in a connector that outlives the command, with the outcome kept on the row");
@@ -376,21 +379,25 @@ export function execCommand(deps: ExecDeps = {}): Command {
     ?? ((runId: string) => [process.execPath, fileURLToPath(new URL("../index.js", import.meta.url)), "exec", "connector", runId]);
   const pollMs = deps.pollMs ?? 1000;
 
-  /** Polls the run file. Leaving (Ctrl-C) stops only the wait; the connector is in its own session and keeps running. */
-  const waitForEnd = async (runId: string): Promise<ExecRun | "left"> => {
-    let left = false;
-    const leave = () => { left = true; };
-    process.on("SIGINT", leave);
-    try {
-      for (let polls = 1; ; polls++) {
-        const run = readRun(runId);
-        if (!run) throw new Error(`the record of ${runId} is gone`);
-        if (run.endedAt) return run;
-        if (left) return "left";
-        if (polls % 5 === 0) { const checked = await reconcileRun(run, queueFor); if (checked.endedAt) return checked; }
-        await sleep(pollMs);
-      }
-    } finally { process.removeListener("SIGINT", leave); }
+  /** The wait's own Ctrl-C, armed before the CLI tells its caller anything about the run, so a Ctrl-C from then on
+   *  only stops the wait: armed later, one landing just after the announcement met the default and killed the CLI. The
+   *  connector is in its own session either way. */
+  const armWait = (wait: boolean | undefined): Waiter | undefined => {
+    if (!wait) return undefined;
+    const waiter: Waiter = { left: false, leave: () => { waiter.left = true; } };
+    process.on("SIGINT", waiter.leave);
+    return waiter;
+  };
+  /** Polls the run file until it ends, or until the waiter leaves. */
+  const waitForEnd = async (runId: string, waiter: Waiter): Promise<ExecRun | "left"> => {
+    for (let polls = 1; ; polls++) {
+      const run = readRun(runId);
+      if (!run) throw new Error(`the record of ${runId} is gone`);
+      if (run.endedAt) return run;
+      if (waiter.left) return "left";
+      if (polls % 5 === 0) { const checked = await reconcileRun(run, queueFor); if (checked.endedAt) return checked; }
+      await sleep(pollMs);
+    }
   };
   const finish = (result: ExecRun | "left", runId: string) => {
     if (result === "left") {
@@ -403,9 +410,11 @@ export function execCommand(deps: ExecDeps = {}): Command {
   };
   /** Every path that holds the row's run ends here: a run that has ended exits by its outcome (0 completed, 2 any
    *  other), --wait waits for one still going (3 if the waiter leaves), and without --wait a run still going exits 0. */
-  const report = async (run: ExecRun, wait: boolean | undefined) => {
-    if (run.endedAt) process.exitCode = exitFor(run);
-    else if (wait) finish(await waitForEnd(run.runId), run.runId);
+  const report = async (run: ExecRun, waiter: Waiter | undefined) => {
+    try {
+      if (run.endedAt) process.exitCode = exitFor(run);
+      else if (waiter) finish(await waitForEnd(run.runId, waiter), run.runId);
+    } finally { if (waiter) process.removeListener("SIGINT", waiter.leave); }
   };
 
   cmd
@@ -478,8 +487,9 @@ Guide: rig context get reference/acp-agents.md`)
           return;
         }
         if (!opts.again) {
+          const waiter = armWait(opts.wait);
           console.log(`${qitemId} already has a run, so the task isn't sent twice:\n${describeRun(run)}\nOnce it has ended, --again starts another turn on this row.`);
-          await report(run, opts.wait);
+          await report(run, waiter);
           return;
         }
       }
@@ -502,8 +512,9 @@ Guide: rig context get reference/acp-agents.md`)
         rmSync(runPath(runId), { force: true });
         const winnerId = rowRun(qitemId);
         const winner = winnerId ? readRun(winnerId) : undefined;
+        const waiter = winner ? armWait(opts.wait) : undefined;
         console.log(`${qitemId} was started by another caller as ${winnerId ?? "another run"}, so the task isn't sent twice${winner ? `:\n${describeRun(winner)}` : ""}`);
-        if (winner) await report(winner, opts.wait);
+        if (winner) await report(winner, waiter);
         else process.exitCode = 1;
         return;
       }
@@ -518,10 +529,11 @@ Guide: rig context get reference/acp-agents.md`)
         child.once("exit", (code, signal) => { connectorExit = `exited (code ${code ?? "none"}, signal ${signal ?? "none"})`; });
         child.unref();
       } finally { closeSync(log); }
+      const waiter = armWait(opts.wait);
       let current: ExecRun = run;
       for (const deadline = Date.now() + (deps.startWaitMs ?? 10_000); Date.now() < deadline; await sleep(50)) {
         current = readRun(runId) ?? current;
-        if (current.state !== "requested" || spawnError || connectorExit) break;
+        if (current.state !== "requested" || spawnError || connectorExit || waiter?.left) break;
       }
       if (spawnError && current.state === "requested") {
         current = (await settleRun(current, { state: "finished", outcome: "failed", summary: `the connector couldn't be started: ${spawnError.message}`, endedAt: now() })).run;
@@ -530,7 +542,8 @@ Guide: rig context get reference/acp-agents.md`)
       }
       console.log(`[rig exec] ${runId} for ${qitemId} on ${harness.name}: ${current.endedAt ? `ended, outcome ${current.outcome}: ${current.summary}` : current.state === "started" ? "started" : "requested; its connector hasn't recorded itself yet"}`);
       console.log(`  rig exec status ${runId} shows it; rig exec cancel ${runId} cancels it.`);
-      await report(current, opts.wait);
+      deps.afterAnnounce?.();
+      await report(current, waiter);
     });
 
   cmd
