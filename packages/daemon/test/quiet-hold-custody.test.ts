@@ -177,8 +177,13 @@ describe("custody of asks held for quiet hours", () => {
     expect(finding.state).toBe("pending");
     const history = repo.listTransitions(finding.qitemId);
     const stored = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
-    const r = await sweep();
+    // The finding predates a larger reporting window; falling outside it isn't resolution.
+    const now = LATER();
+    expect(Date.parse(row.tsCreated)).toBeGreaterThan(now.getTime() - 180 * 60_000);
+    const r = await runStuckSweep({ db, queueRepo: repo, unclaimedAgeMinutes: 180, now,
+      resolveOrchestrator: () => "orch@r", log: () => {} });
     expect(r.outcome, r.error).not.toBe("failed");
+    expect(findingFor(r, row).filter((f) => f.action !== "closed")).toEqual([]);
     expect.soft(repo.getById(finding.qitemId)?.state).toBe("pending");
     expect.soft(repo.listTransitions(finding.qitemId).slice(history.length)
       .some((t) => t.transitionNote?.includes("informational update to a registered human requires no claim"))).toBe(false);
