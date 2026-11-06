@@ -317,7 +317,7 @@ export class RigInstantiator {
 import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS } from "./rigspec-schema.js";
 import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
-import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
+import { resolveAgentRef, type AgentResolverFsOps, agentSpecAdvisoryWarnings } from "./agent-resolver.js";
 import { resolveAdvisorModel, selectedPluginPaths, type ResolutionResult } from "./profile-resolver.js";
 import { resolveNodeConfigAsync, withNodeConfigResolver } from "./profile-resolution-worker.js";
 import { resolveStartup } from "./startup-resolver.js";
@@ -1394,7 +1394,9 @@ export class PodRigInstantiator {
     const result = await this.launchExistingAgentMember({ rigId, nodeId, qualifiedId: node.logicalId, rigSpec, rigRoot, pod, member,
       resolveResult: resolved, configResult: launchConfig, keepRecordedAdditions: true });
     if (result.status !== "launched") return { ok: false, code: result.status, message: result.error ?? "First-start retry did not reach readiness." };
-    return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
+    // The preflight above covers the whole rig and isn't returned; this member's agent spec advisories are.
+    const warnings = [...agentSpecAdvisoryWarnings(node.logicalId, resolved), ...(result.warnings ?? [])];
+    return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: warnings.length ? warnings : result.warnings };
   }
 
   async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
@@ -2118,6 +2120,7 @@ export class PodRigInstantiator {
     nodeId: string;
     cwdOverride?: string;
     envOverride?: SeatEnv;
+    resolveResult?: ReturnType<typeof resolveAgentRef>;
   }) {
     return this.launchBinding(input);
   }
@@ -2142,6 +2145,8 @@ export class PodRigInstantiator {
     cwdOverride?: string;
     envOverride?: SeatEnv;
     keepRecordedAdditions?: boolean;
+    /** An agent spec the caller already resolved for this launch. */
+    resolveResult?: ReturnType<typeof resolveAgentRef>;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
     return input.member.agentRef === "builtin:terminal"
       ? this.launchExistingTerminalMember(input)
@@ -2201,7 +2206,10 @@ export class PodRigInstantiator {
       ...(node.sessionSource !== null && node.sessionSource !== undefined ? { sessionSource: node.sessionSource } : {}),
     };
 
-    return this.launchValidatedMember({
+    // A fresh launch from the recipe runs no rig preflight, so the agent spec it resolves reports its own advisories.
+    // The launch uses this same resolution rather than reading the spec again.
+    const resolveResult = member.agentRef === "builtin:terminal" ? undefined : resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
+    const launched = await this.launchValidatedMember({
       rigId,
       rigSpec: recipe.rigSpec,
       rigRoot: recipe.rigRoot,
@@ -2212,7 +2220,10 @@ export class PodRigInstantiator {
       // Preserve the resolved cwd from materialization, including a prior
       // --cwd-override, rather than silently falling back to process cwd.
       cwdOverride: node.cwd ?? undefined,
+      resolveResult,
     });
+    const advisories = resolveResult?.ok ? agentSpecAdvisoryWarnings(node.logicalId, resolveResult) : [];
+    return advisories.length ? { ...launched, warnings: [...advisories, ...(launched.warnings ?? [])] } : launched;
   }
 
   /** Whether a persisted recipe contains enough validated source to attempt a fresh launch. */

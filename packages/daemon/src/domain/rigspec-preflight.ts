@@ -148,7 +148,7 @@ export class RigSpecPreflight {
 
 import { RigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema } from "./rigspec-schema.js";
-import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
+import { resolveAgentRef, type AgentResolverFsOps, agentSpecAdvisoryWarnings } from "./agent-resolver.js";
 import type { ResolutionContext, ResolutionResult } from "./profile-resolver.js";
 import { withNodeConfigResolver } from "./profile-resolution-worker.js";
 import { releaseScanCache } from "./skill-discovery.js";
@@ -381,6 +381,9 @@ async function preflightMembers(
           // import/import collisions will be caught by profile resolver below
         }
       }
+
+      // Agent spec advisories (non-blocking): the base spec's and each import's, one warning each.
+      warnings.push(...agentSpecAdvisoryWarnings(`${pod.id}.${member.id}`, resolveResult));
 
       // Resolve profile via resolveNodeConfig
       const ctx: ResolutionContext = {
