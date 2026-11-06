@@ -3,7 +3,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2 } from "lucide-react";
 
 import type { QueueItemDetail } from "../../hooks/useSlices.js";
-import { retainAttentionItemInSession, type AttentionData, type AttentionQueueItem } from "../../hooks/useAttentionItems.js";
+import {
+  MAX_RETAINED_ATTENTION_ITEMS,
+  onRetainedAttentionEvict,
+  retainAttentionItemInSession,
+  type AttentionData,
+  type AttentionQueueItem,
+} from "../../hooks/useAttentionItems.js";
 import {
   useMissionControlAction,
   type MissionControlActionInput,
@@ -90,7 +96,6 @@ const normToken = (s?: string | null) =>
   (s ?? "").toLowerCase().replace("cancelled", "canceled").replace("handed_off", "handed-off");
 const DONE_STATES = new Set(["done", "closed", "completed"]);
 const TERMINAL_STATES = new Set(["done", "closed", "completed", "canceled", "denied", "expired", "handed-off", "routed"]);
-const NON_ANSWER_REASONS = new Set(["denied", "canceled", "expired", "handed-off-to", "handed-off", "routed"]);
 const STATE_LABELS: Record<string, string> = {
   denied: "denied",
   canceled: "dropped",
@@ -99,8 +104,10 @@ const STATE_LABELS: Record<string, string> = {
   routed: "routed",
   expired: "expired",
 };
-const isAnsweredClose = (state: string, reason?: string | null) =>
-  DONE_STATES.has(state) && (!reason || !NON_ANSWER_REASONS.has(normToken(reason).replace("_", "-")));
+const hasAnsweredEvidence = (item: QueueItemDetail | null | undefined, rawReason?: string | null) =>
+  rawReason === "direct_human_reply" ||
+  (typeof item?.closingTransition?.transitionNote === "string" &&
+    /^(?:direct human reply|reply from )/i.test(item.closingTransition.transitionNote));
 
 const BTN_BASE_CLASS =
   "min-h-[44px] px-3 py-2 border font-mono text-[10px] uppercase tracking-wider break-words whitespace-normal disabled:opacity-50";
@@ -135,8 +142,15 @@ interface SessionAskSnapshot {
 }
 
 const sessionAskSnapshots = new Map<string, SessionAskSnapshot>();
+onRetainedAttentionEvict((evictedId) => {
+  if (evictedId === undefined) sessionAskSnapshots.clear();
+  else sessionAskSnapshots.delete(evictedId);
+});
 export function clearQuestionAskSessionSnapshots(): void {
   sessionAskSnapshots.clear();
+}
+export function hasQuestionAskSessionSnapshot(qitemId: string): boolean {
+  return sessionAskSnapshots.has(qitemId);
 }
 
 function settledElsewhereHeadline(
@@ -148,9 +162,9 @@ function settledElsewhereHeadline(
   const state = normToken(item?.state ?? item?.closingTransition?.state ?? item?.closingTransition?.toState ?? fallbackState ?? "closed");
   const rawReason = item?.closureReason ?? item?.closingTransition?.closureReason ?? item?.closingTransition?.reason ?? null;
   const reason = rawReason ? normToken(rawReason).replace("_", "-") : null;
-  if (isAnsweredClose(state, reason)) {
+  if (DONE_STATES.has(state) && hasAnsweredEvidence(item, rawReason)) {
     if (pairs.length > 0) return `Already answered. Recorded: ${pairs.map((p) => `${p.question}: ${p.answerText}`).join("; ")}.`;
-    if (rawReason === "direct_human_reply") return "Already answered.";
+    return "Already answered.";
   }
   const label = (reason && STATE_LABELS[reason]) ?? STATE_LABELS[state] ?? state;
   const actor = item?.closingTransition?.actorSession;
@@ -249,6 +263,11 @@ export function FeedCardQuestionAsk({
 
   const saveSnapshot = (patch: Partial<SessionAskSnapshot>) => {
     const prev = sessionAskSnapshots.get(qitemId) ?? { answers: localAnswers, revision: localRevision };
+    sessionAskSnapshots.delete(qitemId);
+    if (sessionAskSnapshots.size >= MAX_RETAINED_ATTENTION_ITEMS) {
+      const oldestKey = sessionAskSnapshots.keys().next().value;
+      if (oldestKey !== undefined) sessionAskSnapshots.delete(oldestKey);
+    }
     sessionAskSnapshots.set(qitemId, { ...prev, queueItemRevisionAtSave: queueItem?.decisionRevision ?? null, ...patch });
   };
 
@@ -420,7 +439,7 @@ export function FeedCardQuestionAsk({
           } else {
             updatedAnswers = applyOptimistic();
           }
-          if (!result.answer && closedState && TERMINAL_STATES.has(closedState) && !isAnsweredClose(closedState, closedReason)) {
+          if (result.answer?.outcome !== "answered" && closedState && TERMINAL_STATES.has(closedState)) {
             const closedDetail = closed as unknown as QueueItemDetail;
             setLastOutcome(null);
             setSettledState({ refreshing: false, refreshedItem: closedDetail, fallbackState: closedState });
@@ -433,15 +452,12 @@ export function FeedCardQuestionAsk({
             return;
           }
           const inferredOutcome: SavedOutcome =
-            result.answer ??
-            (closedState && !TERMINAL_STATES.has(closedState)
-              ? {
-                  outcome: "recorded",
-                  unanswered: questions
-                    .filter((q) => ownAnswer({ ...mergedAnswers, ...updatedAnswers }, q.id) === undefined)
-                    .map((q) => q.question),
-                }
-              : { outcome: "answered", unanswered: [] });
+            result.answer ?? {
+              outcome: "recorded",
+              unanswered: questions
+                .filter((q) => ownAnswer({ ...mergedAnswers, ...updatedAnswers }, q.id) === undefined)
+                .map((q) => q.question),
+            };
           setLastOutcome(inferredOutcome);
           saveSnapshot({
             answers: updatedAnswers,

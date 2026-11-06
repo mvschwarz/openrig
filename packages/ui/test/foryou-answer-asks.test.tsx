@@ -7,7 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
 import { FeedCard } from "../src/components/for-you/FeedCard.js";
-import { clearQuestionAskSessionSnapshots } from "../src/components/for-you/FeedCardQuestionAsk.js";
+import {
+  clearQuestionAskSessionSnapshots,
+  hasQuestionAskSessionSnapshot,
+} from "../src/components/for-you/FeedCardQuestionAsk.js";
 import {
   clearRetainedAttentionItems,
   retainAttentionItemInSession,
@@ -775,6 +778,79 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     expect(settled.textContent).toContain("This request is dropped now by lead@demo.");
     expect(settled.textContent).not.toContain("no-follow-on");
     expect(doneView.queryByTestId("feed-card-send-answers-queue-attention-q-done-1")).toBeNull();
+    cleanup();
+
+    // When a partial answer (1 of 2) was recorded on the server, its HTTP response was lost, and someone else
+    // closes the ask normally (state: "done", closureReason: "no-follow-on"), a reconciled retry (which returns
+    // closedQitem with no 'answer' field) must show the settled state ("This request is done now.") and NEVER
+    // infer "Answered and sent" or "Already answered".
+    clearQuestionAskSessionSnapshots();
+    let plainCloseMode: "lostNetwork" | "reconciledPlainClose" = "lostNetwork";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        if (plainCloseMode === "lostNetwork") {
+          throw new Error("Failed to fetch");
+        }
+        return jsonResponse({
+          actionId: "a-rec-plain-done",
+          verb: "answer",
+          qitemId: "q-ask-1",
+          reconciled: true,
+          decisionRevision: "rev-done-plain",
+          closedQitem: {
+            qitemId: "q-ask-1",
+            state: "done",
+            closureReason: "no-follow-on",
+            closureTarget: "no-follow-on",
+            humanAnswers: { channel: "stable" },
+          },
+          createdQitemId: null,
+          notifyAttempted: false,
+          notifyResult: null,
+          auditedAt: "2026-11-06T00:02:00Z",
+        });
+      }),
+    );
+
+    const plainCloseView = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
+    fireEvent.click(plainCloseView.getByTestId("feed-card-option-channel-stable"));
+    await waitFor(() => {
+      expect(plainCloseView.getByTestId("feed-card-answer-error-queue-attention-q-ask-1")).toBeTruthy();
+    });
+    plainCloseMode = "reconciledPlainClose";
+    fireEvent.click(plainCloseView.getByTestId("feed-card-option-channel-stable"));
+    await waitFor(() => {
+      const plainSettled = plainCloseView.getByTestId("feed-card-answer-settled-queue-attention-q-ask-1");
+      expect(plainSettled.textContent).toContain("This request is done now.");
+      expect(plainSettled.textContent).not.toContain("Answered and sent");
+      expect(plainSettled.textContent).not.toContain("Already answered");
+    });
+    expect(plainCloseView.queryByTestId("feed-card-answer-receipt-queue-attention-q-ask-1")).toBeNull();
+    cleanup();
+
+    // Conversely, when closingTransition carries closeDirectAsk's transitionNote ("direct human reply (...)"),
+    // settledElsewhereHeadline recognizes the affirmative return evidence even with closureReason="no-follow-on".
+    const directReplyDone = makeQueueItem({
+      qitemId: "q-done-direct",
+      state: "done",
+      closureReason: "no-follow-on",
+      closureTarget: "no-follow-on",
+      closingTransition: {
+        actorSession: "human@host",
+        closureReason: "no-follow-on",
+        closureTarget: "no-follow-on",
+        state: "done",
+        transitionNote: "direct human reply (q-reply-9); 2 answer(s) recorded",
+      },
+      humanAnswers: { channel: "stable", changelog: "yes" },
+    });
+    const directView = renderWithQuery(
+      <FeedCard card={makeQuestionCard({ id: "queue-attention-q-done-direct" }, { qitemId: "q-done-direct" })} queueItem={directReplyDone} />,
+    );
+    expect(directView.getByTestId("feed-card-answer-settled-queue-attention-q-done-direct").textContent).toContain(
+      "Already answered. Recorded: Which channel ships first?: Stable; Hold the changelog until docs land?: Yes.",
+    );
   });
 
   it("refreshes the queue row and offers SEND ANSWERS TO <asker> when the final option tap fails with answer_not_closed (without replyQitemId)", async () => {
@@ -820,7 +896,7 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     });
   });
 
-  it("keeps the session attention cache bounded to only answered asks within the 50-item cap", async () => {
+  it("keeps the session attention cache bounded, prioritizes live asks over kept receipts, and evicts session snapshots with receipts", async () => {
     const makeAttItem = (id: string): AttentionQueueItem => ({
       qitemId: id,
       tsCreated: "2026-11-06T00:00:00Z",
@@ -835,15 +911,32 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
       handedOffTo: null,
       handedOffFrom: null,
       body: `Item ${id}`,
+      humanQuestions: [TWO_QUESTIONS[0]],
     });
 
     let serverItems = Array.from({ length: 50 }, (_, i) => makeAttItem(`q-${i + 1}`));
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse(serverItems)),
+      vi.fn(async (url: RequestInfo | URL) => {
+        if (String(url).includes("/api/mission-control/action")) {
+          return jsonResponse({
+            actionId: "a-ret",
+            verb: "answer",
+            qitemId: "q-1",
+            decisionRevision: "rev-2",
+            closedQitem: { qitemId: "q-1", state: "done", humanAnswers: { channel: "stable" } },
+            createdQitemId: "q-reply-1",
+            notifyAttempted: false,
+            notifyResult: null,
+            auditedAt: "2026-11-06T00:01:00Z",
+            answer: { outcome: "answered", unanswered: [] },
+          });
+        }
+        return jsonResponse(serverItems);
+      }),
     );
 
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={qc}>{children}</QueryClientProvider>
     );
@@ -851,28 +944,89 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     const { result } = renderHook(() => useAttentionItems(50, false), { wrapper });
     await waitFor(() => expect(result.current.data?.items).toHaveLength(50));
 
-    // Only retain q-1 (the ask the user answered); q-2 is merely seen and must NOT be retained
-    retainAttentionItemInSession("q-1", serverItems[0]);
-
-    // Server next returns q-3..q-52 (50 items; both q-1 and q-2 are no longer on the server list)
-    serverItems = Array.from({ length: 50 }, (_, i) => makeAttItem(`q-${i + 3}`));
-    await result.current.refetch();
-
+    // Render q-1 and q-2 cards; submit an answer on q-1 through the component while leaving q-2 untouched
+    const cardView = render(
+      <QueryClientProvider client={qc}>
+        <FeedCard
+          card={makeQuestionCard({ id: "queue-attention-q-1" }, { qitemId: "q-1", humanQuestions: [TWO_QUESTIONS[0]] })}
+          queueItem={makeQueueItem({ qitemId: "q-1", humanQuestions: [TWO_QUESTIONS[0]] })}
+        />
+        <FeedCard
+          card={makeQuestionCard({ id: "queue-attention-q-2" }, { qitemId: "q-2", humanQuestions: [TWO_QUESTIONS[0]] })}
+          queueItem={makeQueueItem({ qitemId: "q-2", humanQuestions: [TWO_QUESTIONS[0]] })}
+        />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(cardView.getAllByTestId("feed-card-option-channel-stable")[0]!);
     await waitFor(() => {
-      const ids = result.current.data!.items.map((i) => i.qitemId);
-      // Capped at 50 items total (not 51), while keeping the retained answered ask q-1 visible
-      expect(ids).toHaveLength(50);
-      expect(ids).toContain("q-1");
-      expect(ids).not.toContain("q-2");
+      expect(cardView.getByTestId("feed-card-answer-receipt-queue-attention-q-1")).toBeTruthy();
     });
+    expect(hasQuestionAskSessionSnapshot("q-1")).toBe(true);
+    expect(hasQuestionAskSessionSnapshot("q-2")).toBe(false);
 
-    // When server has fewer than 50 items (e.g. q-3..q-10), q-1 is retained and q-2 (unanswered) is not
+    // When server has spare room (e.g. 8 live items q-3..q-10), answered q-1 is retained and untouched q-2 is not
     serverItems = Array.from({ length: 8 }, (_, i) => makeAttItem(`q-${i + 3}`));
     await result.current.refetch();
     await waitFor(() => {
       const ids = result.current.data!.items.map((i) => i.qitemId);
       expect(ids).toContain("q-1");
       expect(ids).not.toContain("q-2");
+    });
+
+    // When 50 receipts are kept (q-1..q-50) and 1 new live ask arrives (q-live-new),
+    // the live ask gets priority at the front (never pushed out by kept receipts),
+    // the total stays capped at 50, and the oldest receipt (q-1) + its snapshot are evicted.
+    for (let i = 2; i <= 50; i++) {
+      retainAttentionItemInSession(`q-${i}`, makeAttItem(`q-${i}`));
+    }
+    serverItems = [makeAttItem("q-live-new")];
+    await result.current.refetch();
+    await waitFor(() => {
+      const ids = result.current.data!.items.map((i) => i.qitemId);
+      expect(ids).toHaveLength(50);
+      expect(ids[0]).toBe("q-live-new");
+      expect(ids).not.toContain("q-1");
+      expect(ids).toContain("q-2");
+      expect(ids).toContain("q-50");
+    });
+    expect(hasQuestionAskSessionSnapshot("q-1")).toBe(false);
+
+    // When 50 live asks arrive (q-live-1..q-live-50), all 50 live asks show and old receipts are dropped.
+    serverItems = Array.from({ length: 50 }, (_, i) => makeAttItem(`q-live-${i + 1}`));
+    await result.current.refetch();
+    await waitFor(() => {
+      const ids = result.current.data!.items.map((i) => i.qitemId);
+      expect(ids).toEqual(Array.from({ length: 50 }, (_, i) => `q-live-${i + 1}`));
+    });
+  });
+
+  it("formats remote_action_failed with detail and remote status on failed remote Approve", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          {
+            error: "remote_action_failed",
+            detail: "upstream timeout",
+            remoteStatus: 504,
+          },
+          502,
+        ),
+      ),
+    );
+
+    const remoteApproveCard: FeedCardModel = {
+      ...makeQuestionCard(
+        { id: "queue-attention-box-west-q-rem-1", hostId: "box-west" },
+        { qitemId: "q-rem-1", hostId: "box-west", humanQuestions: null },
+      ),
+    };
+    const view = renderWithQuery(<FeedCard card={remoteApproveCard} />);
+    fireEvent.click(view.getByTestId("mc-verb-approve"));
+    await waitFor(() => {
+      expect(view.getByTestId("mc-verb-error").textContent).toBe(
+        "remote_action_failed · upstream timeout · remote status 504",
+      );
     });
   });
 

@@ -400,6 +400,7 @@ export interface QueueItemDetail {
     reason?: string | null;
     toState?: string | null;
     ts?: string | null;
+    transitionNote?: string | null;
   } | null;
   qitemId: string;
   tsCreated: string;

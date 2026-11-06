@@ -99,8 +99,17 @@ async function fetchAggregatedAttention(limit?: number): Promise<AttentionData> 
  * instead of the single-host list. Callers pass true ONLY when a remote
  * host subscription is enabled — zero-config stays on the legacy wire.
  */
-const MAX_RETAINED_ATTENTION_ITEMS = 50;
+export const MAX_RETAINED_ATTENTION_ITEMS = 50;
 const retainedAttentionItems = new Map<string, AttentionQueueItem>();
+const evictionListeners = new Set<(qitemId?: string) => void>();
+
+export function onRetainedAttentionEvict(fn: (qitemId?: string) => void): void {
+  evictionListeners.add(fn);
+}
+
+function notifyEvict(qitemId?: string): void {
+  for (const fn of evictionListeners) fn(qitemId);
+}
 
 export function retainAttentionItemInSession(qitemId: string, item?: AttentionQueueItem | null): void {
   const next = item ?? retainedAttentionItems.get(qitemId);
@@ -108,13 +117,17 @@ export function retainAttentionItemInSession(qitemId: string, item?: AttentionQu
   retainedAttentionItems.delete(qitemId);
   if (retainedAttentionItems.size >= MAX_RETAINED_ATTENTION_ITEMS) {
     const oldestKey = retainedAttentionItems.keys().next().value;
-    if (oldestKey !== undefined) retainedAttentionItems.delete(oldestKey);
+    if (oldestKey !== undefined) {
+      retainedAttentionItems.delete(oldestKey);
+      notifyEvict(oldestKey);
+    }
   }
   retainedAttentionItems.set(qitemId, next);
 }
 
 export function clearRetainedAttentionItems(): void {
   retainedAttentionItems.clear();
+  notifyEvict();
 }
 
 function mergeRetained(items: AttentionQueueItem[], limit: number | undefined, aggregated: boolean): AttentionQueueItem[] {
@@ -132,8 +145,15 @@ function mergeRetained(items: AttentionQueueItem[], limit: number | undefined, a
   );
   if (!extra.length) return limit !== undefined ? items.slice(0, limit) : items;
   if (limit === undefined) return [...items, ...extra];
-  const keptExtra = extra.slice(-limit);
-  return [...items.slice(0, Math.max(0, limit - keptExtra.length)), ...keptExtra];
+  const live = items.slice(0, Math.max(0, limit));
+  const spare = Math.max(0, limit - live.length);
+  const dropCount = Math.max(0, extra.length - spare);
+  for (let i = 0; i < dropCount; i++) {
+    const droppedId = extra[i]!.qitemId;
+    retainedAttentionItems.delete(droppedId);
+    notifyEvict(droppedId);
+  }
+  return spare > 0 ? [...live, ...extra.slice(dropCount)] : live;
 }
 
 export function useAttentionItems(limit: number = 50, aggregated: boolean = false) {

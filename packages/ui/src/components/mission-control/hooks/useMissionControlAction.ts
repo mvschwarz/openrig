@@ -101,7 +101,16 @@ async function postAction(input: MissionControlActionInput): Promise<MissionCont
     if (typeof body === "object" && body) {
       message = `HTTP ${res.status}`;
       const record = body as Record<string, unknown>;
-      if (typeof record.message === "string" && record.message.length > 0) {
+      if (record.error === "remote_action_failed") {
+        const parts = ["remote_action_failed"];
+        if (typeof record.detail === "string" && record.detail.length > 0) {
+          parts.push(record.detail);
+        }
+        if (typeof record.remoteStatus === "number") {
+          parts.push(`remote status ${record.remoteStatus}`);
+        }
+        message = parts.join(" · ");
+      } else if (typeof record.message === "string" && record.message.length > 0) {
         message = record.message;
       }
       if (typeof record.error === "string" && record.error.length > 0) {
