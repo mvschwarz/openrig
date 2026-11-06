@@ -419,6 +419,16 @@ Where a fragment's table is one the user already declares, the user's table
 wins: the managed table is dropped, their values are never merged, rewritten or
 overwritten, and the rest of the fragment still applies.
 
+**A fragment can't install a named Codex profile.** Codex versions with named
+profiles read each one from its own file, `<CODEX_HOME>/<name>.config.toml`,
+with top-level keys, and won't load a profile while `config.toml` still holds a
+legacy `[profiles.<name>]` table. A fragment only adds tables to `config.toml`,
+so neither form works there. Create the profile file yourself and select it with
+the member's `codex_config_profile`; see "Codex: select sandbox and approvals
+together" in [getting-started.md](getting-started.md#codex-select-sandbox-and-approvals-together).
+Before a launch or restore, OpenRig checks that a selected profile loads, and for
+a legacy table it names the file to move the settings into.
+
 ### Resource Path Rules
 
 - All resource paths must be safe relative paths (no `..` traversal, no absolute paths), except a plugin's
