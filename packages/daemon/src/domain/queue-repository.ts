@@ -12,6 +12,7 @@ import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, 
 import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
+import { withRecoveryIndex } from "./queue-recovery.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
 import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
@@ -4204,6 +4205,10 @@ export class QueueRepository {
   list(opts?: QueueListOptions & { compact?: false }): QueueItem[];
   list(opts?: QueueListOptions): Array<QueueItem | CompactQueueItem>;
   list(opts?: QueueListOptions): Array<QueueItem | CompactQueueItem> {
+    // one recovery index for the whole listing (built on first use) instead of one json_each scan per row
+    return withRecoveryIndex(this.db, () => this.listRows(opts));
+  }
+  private listRows(opts?: QueueListOptions): Array<QueueItem | CompactQueueItem> {
     const limit = opts?.limit ?? 100;
     const conditions: string[] = [];
     const params: unknown[] = [];

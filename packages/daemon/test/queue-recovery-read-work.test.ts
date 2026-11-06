@@ -4,7 +4,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { findQueueRecovery, recoveryTag } from "../src/domain/queue-recovery.js";
+import { findQueueRecovery, recoveryTag, RECOVERY_INDEX_SQL } from "../src/domain/queue-recovery.js";
 import { queueRecoveryOwnsWake, readWakeLadderBackstop } from "../src/domain/queue-wake-ladder.js";
 
 describe("recovery lookup work and fresh disposition", () => {
@@ -88,7 +88,9 @@ describe("recovery lookup work and fresh disposition", () => {
     expect(findQueueRecovery(db, "source")?.qitemId).toBe("disposition");
     const prepare = db.prepare.bind(db);
     vi.spyOn(db, "prepare").mockImplementation(sql => {
-      if (sql.includes("json_each(tags)") && sql.includes("ts_updated DESC, qitem_id DESC LIMIT 1")) throw new Error("fixture lookup unavailable");
+      // the per-row lookup, or the listing's one-pass recovery index (withRecoveryIndex) that replaces it in a list
+      if ((sql.includes("json_each(tags)") && sql.includes("ts_updated DESC, qitem_id DESC LIMIT 1"))
+        || sql === RECOVERY_INDEX_SQL) throw new Error("fixture lookup unavailable");
       return prepare(sql);
     });
     expect(() => repo.getById("source")).toThrow("fixture lookup unavailable");
