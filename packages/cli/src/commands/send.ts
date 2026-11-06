@@ -391,10 +391,10 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       }
       const isFanOut = fanModes.length === 1;
 
-      // Slice-03 Atom 6b: --context is single-seat LOCAL in v1 (fan-out and
-      // cross-host --context are follow-ons). Reject loudly rather than silently
-      // dropping the requested context.
-      if (opts.context && (isFanOut || opts.host)) {
+      // --context is single-seat LOCAL in v1. Reject fan-out here; the
+      // cross-host check follows target resolution so a self-qualified target
+      // can override a persisted remote selection.
+      if (opts.context && isFanOut) {
         console.error("--context is supported on a single-seat LOCAL send in v1 (not with --to/--pod/--rig or --host).");
         process.exitCode = 1;
         return;
@@ -467,14 +467,10 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       session = targetResolution.target;
       const crossHostHint = targetResolution.hint;
       if (targetResolution.warning) console.error(targetResolution.warning);
-      opts.host = explicitHost ?? targetResolution.sugarHost ?? opts.host;
+      opts.host = targetResolution.localHost ? undefined : explicitHost ?? targetResolution.sugarHost ?? opts.host;
 
-      // Atom 6b QA fix (root cause): re-reject --context on the cross-host path
-      // AFTER the agent@rig@host sugar host folds into opts.host. The early guard
-      // runs before resolveCrossHostTarget, so it cannot see the sugar host — the
-      // hole that let a sugar-form --context reach the remote argv (shipping a
-      // literal null with no message, or silently dropping the context with one).
-      // --context is single-seat LOCAL in v1; it is never handed to a remote send.
+      // Reject --context after resolving the target, before a remote send can
+      // silently drop the context or forward an empty message.
       if (opts.context && opts.host) {
         console.error("--context is supported on a LOCAL send in v1 (not with --host or an agent@rig@host cross-host target).");
         process.exitCode = 1;
