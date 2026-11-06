@@ -1420,51 +1420,23 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
   });
 
-  it("MANUAL REMOTE HANDOFF: a registered-host successor stays unverified without a recovery row; a missing local successor is still found", async () => {
-    const remoteDb = new Database(":memory:");
-    migrate(remoteDb, ALL_MIGRATIONS);
-    const remoteRepo = new QueueRepository(remoteDb, new EventBus(remoteDb), {
-      validateRig: () => true,
-      loadHumanRegistry: () => ({ ok: true, entities: [] }),
-    });
-    try {
-      const successor = await remoteRepo.create({
-        qitemId: "qitem-manual-remote-successor",
-        sourceSession: "worker@r", destinationSession: "next@r2", body: "transferred work",
-      });
-      const remote = await mkRow();
-      const local = await mkRow();
-      const target = `${successor.qitemId}@mm2-parent`;
-      for (const [row, closureTarget] of [[remote, target], [local, "qitem-missing-local"]] as const) {
-        repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done",
-          closureReason: "handed_off_to", closureTarget });
-      }
-      expect(remoteRepo.getById(successor.qitemId)?.state).toBe("pending");
-      expect(repo.getById(successor.qitemId)).toBeNull();
-      expect(repo.getById(remote.qitemId)).toMatchObject({
-        closureTarget: target, handoffAdvisory: { status: "unverified", target },
-      });
-      await runSweep({ isRegisteredHost: (h: string) => h === "mm2-parent" });
-      const localFindings = await findingsFor(local.qitemId);
-      expect(localFindings).toHaveLength(1);
-      expect(localFindings[0]!.body).toContain("qitem-missing-local");
-      expect(await findingsFor(remote.qitemId)).toHaveLength(0);
-      expect(repo.getById(remote.qitemId)?.handoffAdvisory?.status).toBe("unverified");
-    } finally {
-      remoteDb.close();
-    }
-  });
-
-  it("MIXED HOST CUSTODY: a remote claim does not hide a missing same-store fan-out target", async () => {
+  it("FORGED HOST-QUALIFIED IS NOT TRUSTED: a generic close writing a registered-host-shaped target without the derived key stays verification-required", async () => {
+    // The generic update route accepts arbitrary closureTarget — a registered
+    // host SUFFIX alone is syntax, not forward provenance. Only the id the
+    // cross-host close derives from (source row, handed_off_to, host) counts.
     const row = await mkRow();
-    const foreign = "qitem-manual-remote-successor@mm2-parent";
-    repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done",
-      closureReason: "handed_off_to", closureTarget: `${foreign},qitem-missing-local` });
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: "qitem-xh-0123456789abcdef@mm2-parent",
+    });
     await runSweep({ isRegisteredHost: (h: string) => h === "mm2-parent" });
     const findings = await findingsFor(row.qitemId);
     expect(findings).toHaveLength(1);
-    expect(findings[0]!.body).toContain("- qitem-missing-local\n");
-    expect(findings[0]!.body).not.toContain(`- ${foreign}\n`);
+    expect(findings[0]!.body).toContain("qitem-xh-0123456789abcdef@mm2-parent");
+    expect(findings[0]!.body).toMatch(/verification.required|indeterminate/i);
   });
 
   it.each(["done", "handed-off"] as const)("DISPOSITION SURVIVES RETENTION: verified custody remains quiet after archiving (%s)", async (state) => {
