@@ -1,5 +1,5 @@
 import type { DaemonClient } from "../daemon-client.js";
-import { windowProvider } from "./open-window.js";
+import { windowTarget, type WindowTarget } from "./open-window.js";
 import type { ExplorerRow, FleetSnapshot, ViewState } from "../types.js";
 import { wrapDetailLines, type ContentLine } from "../detail.js";
 
@@ -38,7 +38,8 @@ export interface TerminalRead {
   error?: string;
 }
 
-export async function readTerminals(client: DaemonClient, view?: string | null, provider: () => Promise<"herdr" | "rex" | "cmux"> = windowProvider): Promise<TerminalRead> {
+export async function readTerminals(client: DaemonClient, view?: string | null,
+  provider: () => Promise<WindowTarget | WindowTarget["provider"]> = () => windowTarget()): Promise<TerminalRead> {
   const result: TerminalRead = { catalog: [], preview: null };
   // Display the endpoint without URL credentials, query parameters or fragments.
   try { result.daemonTarget = new URL(client.baseUrl).origin; } catch { /* unavailable target */ }
@@ -50,7 +51,11 @@ export async function readTerminals(client: DaemonClient, view?: string | null, 
       ...listing.rigs.map(name => ({ view: `rig:${name}`, name, kind: "derived" as const, members: [] })),
     ].map(entry => ({ ...entry, readinessUnverified: true, ready: 0, absent: 0, degraded: 0, pages: 0 }));
     result.catalogLoaded = true;
-    if (view) result.preview = await client.previewTerminal(view, await provider());
+    if (view) {
+      const target = await provider();
+      // herdr-app carries its client; the other providers are named as before.
+      result.preview = await client.previewTerminal(view, typeof target === "string" || target.provider !== "herdr-app" ? (typeof target === "string" ? target : target.provider) as "herdr" | "rex" | "cmux" : target);
+    }
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
   }
@@ -87,7 +92,7 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
     return wrapDetailLines(lines, width);
   }
   if (!preview) {
-    lines.push({ text: "Browse and preview are passive. Choose a view, then Open terminals to request a desktop window." });
+    lines.push({ text: "Browse and preview are passive. Choose a view, then Open terminals: a desktop window, or inside herdr-app a Rig view in this window." });
     for (const kind of ["saved", "derived"] as const) {
       const entries = read.catalog.filter(e => e.kind === kind && `${e.name} ${e.members.join(" ")}`.toLowerCase().includes(state.filter.toLowerCase()));
       const open = kind === "saved" || state.expanded.includes("terminals:derived") || !!state.filter;
@@ -136,7 +141,10 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
   });
   lines.push({ text: "Auto-layout: equal cells, at most 9 members per page. Blank cells fill incomplete rectangles. Saved views store membership only; no custom geometry editor." });
   for (const member of [...plan.absent, ...plan.degraded]) lines.push({ text: `Unavailable · ${member.seat}: ${member.reason}` });
-  if (page.length) {
+  if (page.length && preview.provider === "herdr-app") {
+    // The view opens in the herdr-app window this TUI runs in: no desktop window, no attach-by-hand recipe.
+    lines.push({ text: "Opens here: a new Rig view in this herdr-app window, beside your tabs, switched from the strip above them. Nothing needs a desktop display or SSH. Existing conversations stay in place." });
+  } else if (page.length) {
     lines.push({ text: "On a desktop, opens a new terminal tab or window: a Rex session when run inside Rex, a new cmux workspace when run inside cmux, Herdr if installed, otherwise the same layout in plain tmux." });
     lines.push({ text: `Run this TUI on the selected daemon's desktop (${read.daemonTarget ?? "address unreported"}). Existing conversations stay in place.` });
     lines.push({ text: `Headless or remote: open a NEW terminal/tab on the machine running the selected daemon (${read.daemonTarget ?? "address unreported"}), then attach with one command below per terminal. Existing conversations stay in place.` });

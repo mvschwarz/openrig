@@ -1,0 +1,20 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "error-select-unknown-stack",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"do\":\"layout.select\",\"args\":{\"stack\":\"no-such-stack\",\"child\":\"main\"}}\n"
+  },
+  "reply": {
+    "line": "{\"error\":\"no stack \\\"no-such-stack\\\" with a child \\\"main\\\"\"}\n",
+    "json": {
+      "error": "no stack \"no-such-stack\" with a child \"main\""
+    }
+  },
+  "elapsed_ms": 0,
+  "notes": "Select in a stack the shown layout does not have."
+}

@@ -24,10 +24,35 @@ import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { resolveHerdrAppHome } from "@openrig/daemon/herdr-app";
 
 export interface TerminalDeps extends StatusDeps {
   windowDeps?: WindowDeps;
   attachTmux?: (target: TmuxAttachment) => Promise<number>;
+  /** This process's environment (herdr-app context); injectable for tests. */
+  env?: NodeJS.ProcessEnv;
+  socketExists?: (path: string) => boolean;
+}
+
+/**
+ * The herdr-app client a command addresses, or null when it doesn't use herdr-app: named with `--provider herdr-app`;
+ * or, with neither `--provider` nor `--window`, chosen by running in a herdr-core terminal whose herdr-app window
+ * serves this machine (its socket file is a hint; the daemon opens nothing unless the window answers). `--window`
+ * always means a desktop window.
+ */
+export function herdrAppClient(opts: { provider?: string; window?: boolean; appHome?: string }, deps: TerminalDeps):
+  { appHome: string } | null {
+  const env = deps.env ?? process.env;
+  const named = opts.provider?.trim();
+  let chosen = named === "herdr-app";
+  if (!named && !opts.window) {
+    const exists = deps.socketExists ?? existsSync;
+    chosen = !!env["HC_TERMINAL_ID"] && !!env["HC_TERMINAL_SOCKET"] && exists(join(resolveHerdrAppHome(env), "herdr-app.sock"));
+  }
+  if (!chosen) return null;
+  return { appHome: opts.appHome ? resolve(opts.appHome) : resolveHerdrAppHome(env) };
 }
 export interface FollowControls {
   enabled: boolean; maxTiles?: number; graceMs?: number; focusRetentionMs?: number;
@@ -133,9 +158,10 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .command("open")
     .argument("<view>", "a rig name, pod:<rig>/<pod>, seat:<rig>/<logical-id>, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
-    .option("--provider <name>", "herdr, cmux or rex: open in the running provider without a desktop window; each open adds a new workspace (inside Herdr, --window reuses a matching one); tmux requires --window. Inside Rex, the default opens in Rex")
+    .option("--provider <name>", "herdr, herdr-app, cmux or rex: open in the running provider without a desktop window; each open adds a new workspace, or in herdr-app a Rig view (inside Herdr, --window reuses a matching one); tmux requires --window. Inside Rex, the default opens in Rex")
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
-    .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
+    .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted, unless a herdr-app terminal selects herdr-app)")
+    .option("--app-home <dir>", "herdr-app: the client to open in (default: herdr-app's own home, from HERDR_APP_HOME or ~/.config/herdr-app)")
     .option("--expected-plan <id>", "Open only if the view still matches this preview")
     .option("--follow", "Keep one qitem:<id>, slice:<id-or-name> or mission:<id> workspace following current obligation owners (Linux/macOS Herdr protocol 22)")
     .option("--no-follow", "Stop following and keep the existing workspace and tiles as a fixed layout")
@@ -148,7 +174,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .option("--grace-ms <ms>", "Departure grace, default 4000, at most 60000", Number)
     .option("--focus-retention-ms <ms>", "Extra focused-reading retention, default 12000, at most 300000", Number)
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string;
+    .action(async (view: string, opts: { provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string; appHome?: string;
       follow?: boolean; maxTiles?: number; pin?: string[]; unpin?: string[]; suppress?: string[]; unsuppress?: string[];
       suppressionMs?: number; graceMs?: number; focusRetentionMs?: number }) => {
       const deps = getDeps();
@@ -157,7 +183,17 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
       const hasControls = [maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs].some(v => v !== undefined);
       const following: FollowControls | undefined = opts.follow !== undefined || hasControls
         ? { enabled: opts.follow !== false, maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs } : undefined;
+      const herdrApp = herdrAppClient(opts, deps);
       await withClient(deps, async (client) => {
+        if (herdrApp) {
+          // herdr-app: a fresh Rig view in that client's own window, through the daemon. No desktop window.
+          if (following) { printResult(opts.json ?? false, { ok: false, provider: "herdr-app", code: "follow_unsupported", error: "Following isn't available in herdr-app yet; open the view without --follow." }, 400); return; }
+          const res = await client.post<OpenViewResult>("/api/terminal/open", { view, provider: "herdr-app", herdrApp,
+            ...(opts.expectedPlan !== undefined ? { expectedPlan: opts.expectedPlan } : {}) }, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
+          if (!Array.isArray(res.data?.opened)) { printResult(opts.json ?? false, res.data, res.status); return; }
+          printOpen(opts.json ?? false, res.data, res.status);
+          return;
+        }
         // Herdr's control socket can answer with no desktop client attached.
         // The default requests a desktop; an explicit provider reuses its workspace.
         if (following?.enabled !== false && (opts.window || !opts.provider)) {
@@ -204,17 +240,37 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     });
 
   cmd
+    .command("close <view>")
+    .description("Close a herdr-app Rig view (rv-…): its cells leave the layout, then only its own viewers end; seats keep running")
+    .option("--app-home <dir>", "herdr-app home the view is in (default: herdr-app's own)")
+    .option("--json", "JSON output for agents")
+    .action(async (view: string, opts: { appHome?: string; json?: boolean }) => {
+      const deps = getDeps();
+      const env = deps.env ?? process.env;
+      await withClient(deps, async (client) => {
+        const res = await client.post<OpenViewResult>("/api/terminal/close", { view, provider: "herdr-app",
+          herdrApp: { appHome: opts.appHome ? resolve(opts.appHome) : resolveHerdrAppHome(env) } }, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
+        if (opts.json) { printResult(true, res.data, res.status); return; }
+        console.log(res.data?.ok ? `Closed Rig view ${view}.` : `Not closed: ${res.data?.error ?? `HTTP ${res.status}`}`);
+        for (const note of res.data?.notes ?? []) console.log(`  ${note}`);
+        if (res.status >= 400) process.exitCode = 1;
+      });
+    });
+
+  cmd
     .command("status")
     .description("Show terminal provider availability + liveness (doctor)")
-    .option("--provider <name>", "restrict to one provider (herdr / cmux / rex)")
+    .option("--provider <name>", "restrict to one provider (herdr / herdr-app / cmux / rex)")
     .option("--session <name>", "Inspect a named Herdr session on the daemon's host")
+    .option("--app-home <dir>", "herdr-app: the client to inspect (default: herdr-app's own home)")
     .option("--json", "JSON output for agents")
-    .action(async (opts: { provider?: string; session?: string; json?: boolean }) => {
+    .action(async (opts: { provider?: string; session?: string; appHome?: string; json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         let path = opts.provider
           ? `/api/terminal/status?provider=${encodeURIComponent(opts.provider)}`
           : "/api/terminal/status";
+        if (opts.provider === "herdr-app") path += `&appHome=${encodeURIComponent(opts.appHome ? resolve(opts.appHome) : resolveHerdrAppHome(deps.env ?? process.env))}`;
         const session = opts.session?.trim();
         if (session !== undefined) path += `${opts.provider ? "&" : "?"}session=${encodeURIComponent(session)}`;
         const res = await client.get<{ session?: string; error?: string }>(path);

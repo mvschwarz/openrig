@@ -93,6 +93,9 @@ export interface ProviderStatus {
   capabilities: Record<string, boolean>;
   /** Herdr endpoint the local desktop client must attach to. */
   launch?: { socketPath: string; session?: string };
+  /** herdr-app: the herdr-core this daemon starts and ends viewers in. The app at that home must run on the same core:
+   *  terminal addresses are per core. */
+  core?: { session: string; socket?: string };
   /** The provider server's identity, so a caller can tell whether it talks to the same server (Rex). */
   server?: { instanceId: string };
 }

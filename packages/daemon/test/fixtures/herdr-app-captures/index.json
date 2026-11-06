@@ -1,0 +1,217 @@
+[
+  {
+    "file": "01-status-initial.json",
+    "name": "status-initial",
+    "channel": "app-socket"
+  },
+  {
+    "file": "02-commands.json",
+    "name": "commands",
+    "channel": "app-socket"
+  },
+  {
+    "file": "03-ls-initial.json",
+    "name": "ls-initial",
+    "channel": "app-socket"
+  },
+  {
+    "file": "04-space-new.json",
+    "name": "space-new",
+    "channel": "app-socket"
+  },
+  {
+    "file": "05-hc-run-adopt-new-space.json",
+    "name": "hc-run-adopt-new-space",
+    "channel": "hc-cli"
+  },
+  {
+    "file": "06-ls-after-adopt-new-space.json",
+    "name": "ls-after-adopt-new-space",
+    "channel": "app-socket"
+  },
+  {
+    "file": "07-hc-run-adopt-new-tab.json",
+    "name": "hc-run-adopt-new-tab",
+    "channel": "hc-cli"
+  },
+  {
+    "file": "08-ls-after-adopt-new-tab.json",
+    "name": "ls-after-adopt-new-tab",
+    "channel": "app-socket"
+  },
+  {
+    "file": "09-pane-split-argv-hidden-tab.json",
+    "name": "pane-split-argv-hidden-tab",
+    "channel": "app-socket"
+  },
+  {
+    "file": "10-pane-split-mod-hidden-tab.json",
+    "name": "pane-split-mod-hidden-tab",
+    "channel": "app-socket"
+  },
+  {
+    "file": "11-pane-split-argv-second.json",
+    "name": "pane-split-argv-second",
+    "channel": "app-socket"
+  },
+  {
+    "file": "12-hc-get-foreground.json",
+    "name": "hc-get-foreground",
+    "channel": "hc-cli"
+  },
+  {
+    "file": "13-hc-ls.json",
+    "name": "hc-ls",
+    "channel": "hc-cli"
+  },
+  {
+    "file": "14-hc-label.json",
+    "name": "hc-label",
+    "channel": "hc-cli"
+  },
+  {
+    "file": "15-tab-settle.json",
+    "name": "tab-settle",
+    "channel": "app-socket"
+  },
+  {
+    "file": "16-tab-unsettle.json",
+    "name": "tab-unsettle",
+    "channel": "app-socket"
+  },
+  {
+    "file": "17-tab-select.json",
+    "name": "tab-select",
+    "channel": "app-socket"
+  },
+  {
+    "file": "18-terminal-park.json",
+    "name": "terminal-park",
+    "channel": "app-socket"
+  },
+  {
+    "file": "19-hc-get-after-park.json",
+    "name": "hc-get-after-park",
+    "channel": "hc-cli"
+  },
+  {
+    "file": "20-pane-close.json",
+    "name": "pane-close",
+    "channel": "app-socket"
+  },
+  {
+    "file": "21-hc-get-after-close.json",
+    "name": "hc-get-after-close",
+    "channel": "hc-cli"
+  },
+  {
+    "file": "22-pane-split-last-viewer.json",
+    "name": "pane-split-last-viewer",
+    "channel": "app-socket"
+  },
+  {
+    "file": "23-pane-close-last-viewer-with-status.json",
+    "name": "pane-close-last-viewer-with-status",
+    "channel": "app-socket"
+  },
+  {
+    "file": "24-pane-close-last-pane-of-tab.json",
+    "name": "pane-close-last-pane-of-tab",
+    "channel": "app-socket"
+  },
+  {
+    "file": "25-layout-switch-missing.json",
+    "name": "layout-switch-missing",
+    "channel": "app-socket"
+  },
+  {
+    "file": "26-layout-switch-rig.json",
+    "name": "layout-switch-rig",
+    "channel": "app-socket"
+  },
+  {
+    "file": "27-layout-select-view.json",
+    "name": "layout-select-view",
+    "channel": "app-socket"
+  },
+  {
+    "file": "28-layout-select-written-back.json",
+    "name": "layout-select-written-back",
+    "channel": "file"
+  },
+  {
+    "file": "29-error-select-unknown-child.json",
+    "name": "error-select-unknown-child",
+    "channel": "app-socket"
+  },
+  {
+    "file": "30-error-select-unknown-stack.json",
+    "name": "error-select-unknown-stack",
+    "channel": "app-socket"
+  },
+  {
+    "file": "31-layout-rewrite-while-shown.json",
+    "name": "layout-rewrite-while-shown",
+    "channel": "file"
+  },
+  {
+    "file": "32-layout-rewrite-rejected.json",
+    "name": "layout-rewrite-rejected",
+    "channel": "file"
+  },
+  {
+    "file": "33-layout-switch-main.json",
+    "name": "layout-switch-main",
+    "channel": "app-socket"
+  },
+  {
+    "file": "34-error-unknown-command.json",
+    "name": "error-unknown-command",
+    "channel": "app-socket"
+  },
+  {
+    "file": "35-error-missing-required.json",
+    "name": "error-missing-required",
+    "channel": "app-socket"
+  },
+  {
+    "file": "36-error-unknown-pane.json",
+    "name": "error-unknown-pane",
+    "channel": "app-socket"
+  },
+  {
+    "file": "37-error-unknown-tab.json",
+    "name": "error-unknown-tab",
+    "channel": "app-socket"
+  },
+  {
+    "file": "38-error-bad-json.json",
+    "name": "error-bad-json",
+    "channel": "app-socket"
+  },
+  {
+    "file": "39-hc-error-unknown-terminal.json",
+    "name": "hc-error-unknown-terminal",
+    "channel": "hc-cli"
+  },
+  {
+    "file": "40-timeout-window-busy.json",
+    "name": "timeout-window-busy",
+    "channel": "app-socket"
+  },
+  {
+    "file": "41-timeout-do-applied-later.json",
+    "name": "timeout-do-applied-later",
+    "channel": "app-socket"
+  },
+  {
+    "file": "42-uncertain-no-reply.json",
+    "name": "uncertain-no-reply",
+    "channel": "app-socket"
+  },
+  {
+    "file": "43-status-final.json",
+    "name": "status-final",
+    "channel": "app-socket"
+  }
+]

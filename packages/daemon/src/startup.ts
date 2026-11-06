@@ -110,7 +110,7 @@ import { SeatStructuralActivityService } from "./domain/seat-structural-activity
 import { deriveSelfHostIdSource, SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./domain/seat-identity-store.js";
 import { DaemonLifecycleStore } from "./domain/daemon-lifecycle-store.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setSelfHostId, setSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
@@ -178,7 +178,7 @@ import { createAppWithWebSocket, type AppDeps } from "./server.js";
 import { ProviderServiceImpl } from "./domain/provider/provider-service-impl.js";
 import { collectClaudeSignalsFromProviderUsageDirectory } from "./domain/provider/claude-usage-reader.js";
 import { legacyProviderUsageDirectory, providerUsageDirectory } from "./domain/telemetry-state-paths.js";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
@@ -2185,6 +2185,60 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       rex: new RexAdapter({ transport: createRexCliTransport(opts?.rexRun ? { run: opts.rexRun, binary: () => "rex" } : {}) }),
     };
 
+    // herdr-app: one provider per client (app home), created on first use. Viewers carry this instance's label, so a
+    // second OpenRig daemon never claims them; one `hc events` watcher brings every client's layout in line when a
+    // viewer ends outside OpenRig.
+    const { HerdrAppProvider, execTmux } = await import("./domain/terminal/herdr-app-provider.js");
+    const { HerdrAppClientFiles } = await import("./domain/terminal/herdr-app-state.js");
+    const { HerdrAppClient, createAppSocketExchange, createHcRunner, herdrAppSocketPath, resolveHerdrAppHome } = await import("./domain/terminal/herdr-app-transport.js");
+    const { installRigMods, describeModInstall } = await import("./domain/terminal/herdr-app-install.js");
+    const herdrAppDir = nodePath.join(OPENRIG_HOME, "private", "herdr-app");
+    const herdrAppInstance = createHash("sha256").update(nodePath.resolve(OPENRIG_HOME)).digest("hex").slice(0, 12);
+    const herdrAppHc = createHcRunner();
+    const herdrAppProviders = new Map<string, InstanceType<typeof HerdrAppProvider>>();
+    let herdrAppEvents: import("node:child_process").ChildProcess | null = null;
+    let herdrAppReconcile: ReturnType<typeof setTimeout> | null = null;
+    const watchHerdrApp = () => {
+      if (herdrAppEvents) return;
+      const child = spawn("hc", ["events", "--json", "--label", `openrig.daemon=${herdrAppInstance}`], { stdio: ["ignore", "pipe", "ignore"], env: { ...process.env } });
+      herdrAppEvents = child;
+      child.stdout?.on("data", () => {
+        if (herdrAppReconcile) return;
+        herdrAppReconcile = setTimeout(() => {
+          herdrAppReconcile = null;
+          for (const provider of herdrAppProviders.values()) void provider.reconcile().catch(() => {});
+        }, 200);
+        herdrAppReconcile.unref?.();
+      });
+      child.on("error", () => {});
+      child.on("exit", () => { herdrAppEvents = null; setTimeout(watchHerdrApp, 5_000).unref?.(); });
+      child.unref();
+    };
+    const resolveHerdrAppProvider = (target: { appHome?: string }) => {
+      const appHome = target.appHome ? target.appHome : resolveHerdrAppHome(process.env);
+      if (!nodePath.isAbsolute(appHome) || appHome.includes("\0")) return null;
+      const key = nodePath.resolve(appHome);
+      let provider = herdrAppProviders.get(key);
+      if (!provider) {
+        fs.mkdirSync(nodePath.join(herdrAppDir, "viewers"), { recursive: true });
+        provider = new HerdrAppProvider({
+          files: new HerdrAppClientFiles(key, nodePath.join(herdrAppDir, "clients")),
+          app: new HerdrAppClient(createAppSocketExchange(herdrAppSocketPath(key))),
+          hc: herdrAppHc,
+          daemonInstance: herdrAppInstance,
+          viewerCwd: nodePath.join(herdrAppDir, "viewers"),
+          ensureMods: async () => {
+            const installed = await installRigMods(key);
+            return installed.ok ? { ok: true } : { ok: false, error: describeModInstall(installed) };
+          },
+          runTmux: execTmux,
+        });
+        herdrAppProviders.set(key, provider);
+        watchHerdrApp();
+      }
+      return provider;
+    };
+
     const scopeTasks = deps.sliceIndexer ? createScopedTaskResolver(db, deps.sliceIndexer, address =>
       resolveLocalTaskSeat(db, address, getSelfHostId(), sessionRegistry.resolveAddress(address)?.nodeId),
       () => deps.proofSourceWatch?.observation().state === "watching") : null;
@@ -2192,6 +2246,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       eventBus,
       resolveProvider: (name) => providerMap[name] ?? null,
       resolveSessionProvider: (name, session) => name === "herdr" ? herdrSessionProvider(session) : null,
+      resolveHerdrAppProvider,
       viewsStore: new TerminalViewsStore(),
       listRigSeatsBatch: (names) => {
         const rigs = rigRepo.listRigs();

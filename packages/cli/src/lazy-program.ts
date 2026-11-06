@@ -37,6 +37,7 @@ export const COMMAND_LOADERS: ReadonlyMap<string, Load> = new Map<string, Load>(
   ["down", async () => (await import("./commands/down.js")).downCommand()],
   ["archive", async () => (await import("./commands/archive.js")).archiveCommand()],
   ["unarchive", async () => (await import("./commands/unarchive.js")).unarchiveCommand()],
+  ["herdr", async () => (await import("./commands/herdr.js")).herdrCommand()],
   ["host", async () => (await import("./commands/host.js")).hostCommand()],
   ["ps", async () => (await import("./commands/ps.js")).psCommand()],
   ["roster", async () => (await import("./commands/roster.js")).rosterCommand()],

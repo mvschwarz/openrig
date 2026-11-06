@@ -28,6 +28,7 @@ plugin it.
 
 ```bash
 rig terminal open <view> [--provider herdr|cmux|rex] [--json]   # herdr is the default provider
+rig terminal open <view> --provider herdr-app                    # in the herdr-app window this runs in (rig herdr install first)
 rig terminal views [--json]                                     # list openable views (saved + derived)
 rig terminal status [--provider] [--json]                       # provider liveness / health
 ```

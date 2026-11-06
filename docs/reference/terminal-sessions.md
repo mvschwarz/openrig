@@ -153,6 +153,11 @@ timed out, OpenRig closes nothing: the result says `rex_outcome_unknown`, or
 adds a note when other pages opened, and names the session to check in Rex
 before retrying. `rig terminal status` gives Rex about a second to answer.
 
+## herdr-app
+
+`--provider herdr-app` (or a TUI or shell running in a herdr-app terminal) opens a view as a Rig view inside that
+herdr-app window, with no desktop window. See [OpenRig views in herdr-app](herdr-app.md).
+
 ## HTTP API
 
 - `POST /api/terminal/open`: `{ view, provider?: "herdr", session?: string, expectedPlan?: string }`.

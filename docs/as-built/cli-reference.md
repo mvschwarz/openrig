@@ -342,6 +342,16 @@ the sections that were not read are `null`.
 |---|---|---|
 | `rig unarchive <rig>` | — | `--json` |
 
+### herdr
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig herdr` | — | — |
+| `rig herdr install` | — | `--app-home <dir>`<br>`--keys`<br>`--remove`<br>`--json` |
+
+Installs OpenRig's herdr-app mods (and, with `--keys`, its cell navigation keys); see
+[herdr-app](../reference/herdr-app.md).
+
 ### host
 
 | Invocation | Aliases | Declared options |
@@ -569,13 +579,16 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
+| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--app-home <dir>`<br>`--expected-plan <id>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
-| `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--json` |
+| `rig terminal close <view>` | — | `--app-home <dir>`<br>`--json` |
+| `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--app-home <dir>`<br>`--json` |
 | `rig terminal attach <session>` | — | `--read-only` |
 
 See [named terminal sessions](../reference/terminal-sessions.md) to select a
 Herdr session per request, including session-bound previews and window reuse.
+herdr-app views (`--provider herdr-app`, `close`, `--app-home`) are in
+[herdr-app](../reference/herdr-app.md).
 
 ### watchdog
 

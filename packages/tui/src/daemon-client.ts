@@ -444,12 +444,16 @@ export class DaemonClient {
    *  Rex's layout from inside Rex and otherwise Herdr's (falling back to plain tmux), or, from inside cmux, through
    *  `rig terminal open --provider cmux`. Preview with the provider it will use: its planId is the open's expected plan.
    *  A provider-less preview may pick cmux, whose plan the window opener never matches. */
-  async previewTerminal(view: string, provider: "herdr" | "rex" | "cmux" = "herdr"): Promise<import("./terminals/terminal-model.js").TerminalPreview> {
-    // The interactive TUI has a TTY; measure each preview again after a resize. Unknown stays narrow. The cmux open sends
-    // no width, and a wide one changes the kernel view's layout and so its plan, so a cmux preview sends none either.
-    const columns = provider !== "cmux" && process.stdout.isTTY ? process.stdout.columns : undefined;
+  async previewTerminal(view: string, target: import("./terminals/open-window.js").WindowTarget | "herdr" | "rex" | "cmux" = { provider: "herdr" }): Promise<import("./terminals/terminal-model.js").TerminalPreview> {
+    const t = typeof target === "string" ? { provider: target } : target;
+    // The interactive TUI has a TTY; measure each preview again after a resize. Unknown stays narrow. The cmux and
+    // herdr-app opens send no width (the view opens in that app's window, not at this TUI's width), and a wide one
+    // changes the kernel view's layout and so its plan, so their previews send none either.
+    const columns = t.provider !== "cmux" && t.provider !== "herdr-app" && process.stdout.isTTY ? process.stdout.columns : undefined;
     const viewport = Number.isSafeInteger(columns) && columns! > 0 ? `&viewportColumns=${columns}` : "";
-    return await this.get(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${provider}${viewport}`) as import("./terminals/terminal-model.js").TerminalPreview;
+    // herdr-app's plan belongs to one client: the preview names the same app home the open will.
+    const client = t.provider === "herdr-app" ? `&appHome=${encodeURIComponent(t.appHome)}` : "";
+    return await this.get(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${t.provider}${viewport}${client}`) as import("./terminals/terminal-model.js").TerminalPreview;
   }
   async openTerminal(view: string, expectedPlan?: string): Promise<TerminalOpenResult> {
     const result = (await this.post(`/api/terminal/open`, { view, ...(expectedPlan !== undefined ? { expectedPlan } : {}) })) as TerminalOpenResult;

@@ -1,0 +1,20 @@
+{
+  "schema": "herdr-app-capture/v1",
+  "name": "error-unknown-pane",
+  "channel": "app-socket",
+  "app_version": "herdr-app 0.1.13",
+  "core_version": "hc 0.1.18",
+  "captured_at": "2026-11-05T05:43:34Z",
+  "sandbox": "herdr-app headless sandbox",
+  "request": {
+    "line": "{\"do\":\"pane.split\",\"args\":{\"direction\":\"right\",\"pane\":\"p-does-not-exist\",\"argv\":[\"true\"]}}\n"
+  },
+  "reply": {
+    "line": "{\"error\":\"no pane \\\"p-does-not-exist\\\"\"}\n",
+    "json": {
+      "error": "no pane \"p-does-not-exist\""
+    }
+  },
+  "elapsed_ms": 1,
+  "notes": "A pane id the window does not know."
+}
