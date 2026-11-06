@@ -62,6 +62,76 @@ shared one running; stop your own with its own command.
 - `failed`: the agent returned an error. The row keeps its original code, message and data.
 - `cancelled`, `stopped`: as above.
 
+## Claude Code and Codex, through their ACP adapters
+
+Both have maintained ACP adapters. What follows was checked on 2026-11-06 with OpenRig 0.7.8: one small file task per
+case, with `claude-haiku-5-5` and with `gpt-6.1-sol` at low effort. Other models weren't checked.
+
+Install the adapters once; running them through `npx` adds about 10 seconds a turn:
+
+```sh
+npm install --prefix <dir> @agentclientprotocol/claude-agent-acp@0.101.0 @agentclientprotocol/codex-acp@2.5.0
+export PATH="<dir>/node_modules/.bin:$PATH"
+
+rig acp run <row> --cwd <work folder> -- env CLAUDE_CODE_EXECUTABLE=<your claude> ANTHROPIC_MODEL=<model> claude-agent-acp
+rig acp run <row> --cwd <work folder> -- codex-acp
+```
+
+**Which versions run.** The binding note on the row names the adapter and its version.
+- `claude-agent-acp` 0.101.0 runs Claude Code through the Claude Agent SDK 0.3.318. With `CLAUDE_CODE_EXECUTABLE` set,
+  it runs that `claude`, with that `claude`'s own login; the check ran Claude Code 2.1.310 this way. Without it, an npm
+  install runs the Claude binary from the SDK's platform package (Claude Code 2.1.318, by the SDK's package metadata),
+  which wasn't checked; installing with `--omit=optional` leaves that binary out. The adapter also loads your
+  Claude configuration, skills included.
+- `codex-acp` 2.5.0 depends on `@openai/codex` `^0.165.0`, and 0.165.0 was the only release in that range when this
+  was checked. A later install can resolve a newer 0.165 release; `npm ls @openai/codex` in `<dir>` shows yours. It uses
+  the machine's existing Codex login.
+- `@zed-industries/claude-code-acp` and `@zed-industries/codex-acp` are deprecated on npm in favour of these. The zed
+  `codex-acp` 0.16.0's Codex was too old for the model in the check.
+
+**Permissions.** Each agent keeps its own permission mode, and OpenRig adds no restriction. In the check, neither
+asked anything for file writes or shell commands: Claude started in `auto` mode and Codex in `workspace-write`. To
+have the agent ask, so that each request becomes a permission row:
+- **Claude:** give it a dedicated `CLAUDE_CONFIG_DIR` whose settings set `permissions.defaultMode` to `"default"`.
+- **Codex:** set `INITIAL_AGENT_MODE=read-only` in its environment. Approval and sandbox keys in `CODEX_CONFIG` didn't
+  make it ask.
+
+These are the settings the check used to make the agents ask. Whether to use them is the caller's choice; they're not a
+recommended default. Send permission rows to a seat that can be woken: a row to a `terminal` seat sets off the stuck
+sweep.
+
+**Answers differ between the two.**
+- **Claude** offers `allow-once`, `allow-with-updates` (allow always) and `reject`. `reject` refuses that one action,
+  and the turn carries on.
+- **Codex** offers `allow_once`, `accept_execpolicy_amendment` (allow always) and `cancel`. Its only refusal, `cancel`,
+  ends the whole turn, and the outcome is `cancelled`.
+
+**Continuing, and a session that doesn't exist.**
+- **Continuing:** `--load-session` continued an earlier session on a second row with both adapters.
+- **A made-up session id:** both refused it and started nothing, but they report it differently. Claude returns
+  `-32002 Resource not found`, and Codex returns `-32603 Internal error` with "no rollout found" in its data. The row
+  shows `failed` with the agent's own error. Neither code by itself means a missing session, so read the message.
+
+**A completed turn isn't finished work.** In the check, Claude was asked to run a command and wait for it. It moved the
+command into a background task, said it would report when it finished, and ended the turn `completed`. The task died
+with the adapter, and its file never appeared. Check the work itself before you close the row. Long and background
+work weren't checked.
+
+**Cancel.** `rig acp cancel` was acknowledged in 20-30 ms for both. Straight after, Claude's run reported `incomplete`
+with one process still running, which was gone a few seconds later; Codex's reported `settled`. An acknowledgement
+isn't a finished shutdown, and it says nothing about further spend.
+
+**Usage and cost.** Claude's adapter reports token usage and a cost in USD; Codex's reports tokens only. Both are in
+the run's log file, not on the row.
+
+**Not checked:**
+- long or multi-tool tasks, and background work;
+- concurrent runs;
+- `rig acp stop` with a real stop command;
+- an adapter that crashes mid-turn;
+- continuing after a daemon restart;
+- MCP servers.
+
 ## Notes for specific agents
 
 - **OpenClaw:** `openclaw acp` is a bridge to a running OpenClaw Gateway, so start the Gateway first, then run, for
