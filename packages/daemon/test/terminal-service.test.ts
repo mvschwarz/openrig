@@ -164,8 +164,8 @@ describe("TerminalService — view resolution + one-shape result", () => {
     expect(notes).toContain("Can you see the team?");
     expect(notes).toContain("does not confirm");
     if (unavailable) {
-      expect(result.notes).toContain("dev.driver: env -u TMUX '/opt/tools/tmux' attach -f ignore-size -t 'dev-driver@acme-build'");
-      expect(result.notes).toContain("rev.r1: env -u TMUX '/opt/tools/tmux' attach -f ignore-size -t 'rev-r1@acme-build'");
+      expect(result.notes).toContain("dev.driver: env -u TMUX '/opt/tools/tmux' attach -t 'dev-driver@acme-build'");
+      expect(result.notes).toContain("rev.r1: env -u TMUX '/opt/tools/tmux' attach -t 'rev-r1@acme-build'");
       expect(notes).toContain("include every command in full, unchanged");
     } else {
       expect(notes).not.toContain("attach -t");
@@ -467,7 +467,7 @@ describe("default saved kernel conversations", () => {
     expect(result.opened).toEqual(unavailable ? [] : ["operator-bound", "tui-bound", "advisor-bound"]);
     expect(result.notes?.join("\n")).toContain("Default kernel view:");
     expect(result.notes?.join("\n")).not.toMatch(/lead pane|Can you see the team/);
-    if (unavailable) expect(result.notes).toContain("operator: env -u TMUX tmux attach -f ignore-size -t 'operator-bound'");
+    if (unavailable) expect(result.notes).toContain("operator: env -u TMUX tmux attach -t 'operator-bound'");
   });
 
   it.each(["herdr", "cmux"])("offers existing conversation attachments when %s is unavailable", async providerName => {
@@ -482,8 +482,8 @@ describe("default saved kernel conversations", () => {
     const result = await new TerminalService(deps).openView({ view: "saved:kernel", provider: providerName });
     expect(result).toMatchObject({ ok: false, opened: [], code: `${providerName}_unavailable` });
     expect(result.absent.map(member => member.seat)).toContain("advisor-bound");
-    expect(result.notes).toContain("operator: env -u TMUX tmux attach -f ignore-size -t 'operator-bound'");
-    expect(result.notes).toContain("dashboard: env -u TMUX tmux attach -f ignore-size -t 'actual-tui'");
+    expect(result.notes).toContain("operator: env -u TMUX tmux attach -t 'operator-bound'");
+    expect(result.notes).toContain("dashboard: env -u TMUX tmux attach -t 'actual-tui'");
     expect(result.notes).toContain("Original provider detail");
     expect(result.notes!.join("\n")).not.toContain("attach -t 'advisor-bound'");
     expect(result.notes!.join("\n")).not.toContain("queue-bound");
