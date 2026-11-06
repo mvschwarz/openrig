@@ -1150,8 +1150,15 @@ rig up ./openrig-specs/rigs/launch/starter/rig.yaml --cwd .
 
 OpenRig's `permission_policy: builtin:yolo` setting selects
 `-s danger-full-access -a never` on fresh, resume and fork launches, replacing
-the named-profile argument. The profile recipe above remains useful when you
-want to maintain those choices in native configuration. The legacy
+the named-profile argument. That drops the whole profile, not only its sandbox
+and approval settings. To keep a named profile with full access, put full access
+in the profile itself and leave `permission_policy` absent, as in the recipe
+above. To keep it with a workspace-write or read-only posture that OpenRig
+records, use the member's `codex_permissions` (see
+[per-member Codex permissions](rig-spec.md#per-member-codex-permissions)):
+OpenRig passes `-p` and adds that envelope's flags, and for that seat the
+envelope replaces a policy posture such as `builtin:yolo`. Full access isn't an
+envelope. The legacy
 environment-only `OPENRIG_YOLO=1` path remains sandbox-only when no resolved
 policy is present. A standalone `codex --yolo` command is not an OpenRig setting.
 At full access, Codex can show its full-access and GPT-5.1 migration notices at
