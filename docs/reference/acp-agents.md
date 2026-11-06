@@ -13,7 +13,8 @@ The row's notes get, in order:
 - **progress,** about once a minute (tool calls so far, output so far); the full transcript is in the run's log file, named on the row;
 - **each permission request and its answer** (below);
 - **the outcome:** `completed`, `stopped` (for example `max_tokens`), `cancelled`, `failed` or `unknown`, with the
-  agent's output;
+  agent's output and the tokens and cost it reported, each labelled with where it came from (unknown when it reported
+  none);
 - **what happened to the agent's processes** after the run ended.
 
 The outcome is the agent's report, not a judgment of the work. The row stays open and yours: read the result, then
@@ -142,8 +143,41 @@ the run's log file, not on the row.
 - **Continuing a session:** `--load-session <id>` continues an earlier session when the agent advertises loading. If it
   doesn't, or the load fails, the run reports that and starts nothing new.
 
+## Running it in the background: `rig exec`
+
+`rig exec` runs the same single turn on a named harness, `claude` or `codex`, through that harness's ACP adapter, in a
+connector that outlives the command:
+
+```sh
+rig exec harnesses                               # the adapter and native versions installed here, and how each differs
+rig exec run <row> --harness claude --plan       # what would run, with versions; starts nothing
+rig exec run <row> --harness claude [--wait]     # start it; --wait waits here for the outcome
+rig exec status <runId|row>                      # state, outcome, usage and cost, and what still runs
+rig exec cancel <runId>
+```
+
+- **The connector owns the run.** Closing the terminal, or leaving `--wait` with Ctrl-C, doesn't stop it. Its record
+  in `$OPENRIG_HOME/acp/runs/` holds its process and its state: `requested`, `started`, `finished` or `interrupted`.
+  The row gets the same notes as with `rig acp run`.
+- **One run per row.** Running it again returns the row's run, still going or ended, instead of sending the task
+  twice. `--again` starts another turn once that run has ended.
+- **Interrupted.** A run whose connector died without recording an outcome reads `interrupted`, outcome unknown, with
+  one note on the row, the next time `status`, `run` or `--wait` looks at it. Whether any of the agent's processes
+  remain is said there too.
+- **Missing.** With `--load-session`, a session reads `missing` only on the adapter's own evidence: for Claude,
+  `-32002` naming that session; for Codex, its "no rollout found for thread id" error for that session. Any other error
+  reads `failed`, with the agent's code and message, and no new session is started either way.
+- **The outcome is the agent's report.** `finished` with `completed` means the turn ended; accepting the work stays
+  with you, on the row. `--wait` exits 0 for `completed`, 2 for any other outcome, and 3 when you stop waiting.
+  Without `--wait`, a run that has already ended exits the same way, and one still going exits 0. Either way the code
+  follows the row's run, including one another caller started.
+- **Permissions:** the agent keeps its own mode, and `rig exec` adds no policy; your environment passes through.
+  `rig exec harnesses` lists what each harness reads.
+
+`rig acp run` is unchanged: it stays in your terminal for the length of the turn.
+
 ## Limits
 
 - One run is one turn for one row.
 - The client offers the agent no file-system or terminal methods; the agent works in its own environment.
-- Spend is whatever the agent's provider charges; OpenRig doesn't measure it.
+- Spend is whatever the agent's provider charges. OpenRig doesn't measure it; it records only what the agent reports.

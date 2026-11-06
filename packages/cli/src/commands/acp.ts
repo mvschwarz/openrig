@@ -12,8 +12,8 @@ import { findRunProcesses } from "../acp/run-processes.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
-const runsDir = () => join(getOpenRigHome(), "acp", "runs");
-const newId = (prefix: string, bytes: number) => `${prefix}-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(bytes).toString("hex")}`;
+export const runsDir = () => join(getOpenRigHome(), "acp", "runs");
+export const newId = (prefix: string, bytes: number) => `${prefix}-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(bytes).toString("hex")}`;
 
 interface RunFile { runId: string; qitemId: string; pid: number; processStart?: string; agent: string[]; startedAt: string; endedAt?: string }
 
