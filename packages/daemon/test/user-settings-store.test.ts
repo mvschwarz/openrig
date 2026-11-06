@@ -123,6 +123,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "skills.router_line.enabled",
       "onboarding.default_pack.enabled",
       "launch.non_interruptive",
+      "launch.codex_login_shell",
       "health.context_pressure.warning_percent",
       "health.context_pressure.critical_percent",
       "files.allowlist", "progress.scan_roots",
