@@ -434,6 +434,15 @@ profiles:
     expect(result.errors.some((e) => e.includes("nonexistent") && e.includes("not found"))).toBe(true);
   });
 
+  it("shows an unknown uses key as a launch warning, and stays ready", async () => {
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skils: [review]`,
+    };
+    const result = await rigPreflight({ rigSpecYaml: makeRigYaml(), rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    expect(result.ready).toBe(true);
+    expect(result.warnings).toContain(`dev.impl: agent spec advisory (impl, ${RIG_ROOT}/agents/impl): profiles.default.uses.skils: unknown key ignored; known keys are skills, guidance, subagents, plugins, runtime_resources`);
+  });
+
   it("shows an agent spec's advisories, its own and its imports', as launch warnings, and stays ready", async () => {
     const files: Record<string, string> = {
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: `name: impl\nversion: "1.0.0"\nimports:\n  - ref: local:../shared\ndefaults:\n  effort: 3\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []`,

@@ -288,7 +288,8 @@ Each array contains resource IDs. These can be:
 - **Qualified** (`shared:systematic-debugging`) — resolves against a specific imported spec's resources
 
 The `uses` categories are: `skills`, `guidance`, `subagents`, `plugins`, `runtime_resources`. A `uses.hooks` key, even an
-empty list, is refused: hooks ship inside plugins.
+empty list, is refused: hooks ship inside plugins. Any other key selects nothing and gets a validation advisory, shown at
+launch and by `rig agent validate`, so a typo such as `skils` doesn't go unnoticed.
 
 **Skills resolve more widely than other resources.** For Claude Code and Codex seats, a skill ID that no declared
 resource provides is looked up at launch in the project's runtime skill folder in the seat's cwd (`<cwd>/.claude/skills` or

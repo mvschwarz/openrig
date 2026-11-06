@@ -304,7 +304,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
       if (profileRaw && typeof profileRaw === "object") {
         const p = profileRaw as Record<string, unknown>;
         if (p["uses"] != null && (typeof p["uses"] !== "object" || (Array.isArray(p["uses"]) && p["uses"].length > 0))) {
-          advisories.push(`profiles.${profileName}.uses: expected an object`);
+          advisories.push(`profiles.${profileName}.uses: expected an object; ignored`);
         } else if (p["uses"] && typeof p["uses"] === "object") {
           const uses = p["uses"] as Record<string, unknown>;
 
@@ -314,20 +314,27 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
             errors.push(`profiles.${profileName}.uses.hooks: removed in plugin-primitive (Phase 3a). Reference plugins via profiles.${profileName}.uses.plugins[] instead.`);
           }
 
-          for (const category of ["skills", "guidance", "subagents", "plugins", "runtime_resources"]) {
+          // Any other key selects nothing; say so rather than ignore it silently (a typo such as "skils").
+          for (const key of Object.keys(uses)) {
+            if (key !== "hooks" && !USES_CATEGORIES.includes(key)) {
+              advisories.push(`profiles.${profileName}.uses.${key}: unknown key ignored; known keys are ${USES_CATEGORIES.join(", ")}`);
+            }
+          }
+
+          for (const category of USES_CATEGORIES) {
             const refs = uses[category];
             if (typeof refs === "string" && refs.trim()) {
               advisories.push(`profiles.${profileName}.uses.${category}: scalar ID accepted; use a list instead`);
               continue;
             }
             if (refs != null && !Array.isArray(refs)) {
-              advisories.push(`profiles.${profileName}.uses.${category}: expected an array of resource IDs`);
+              advisories.push(`profiles.${profileName}.uses.${category}: expected an array of resource IDs; ignored`);
               continue;
             }
             if (Array.isArray(refs)) {
               for (const [index, ref] of refs.entries()) {
                 if (typeof ref !== "string" || !ref.trim()) {
-                  advisories.push(`profiles.${profileName}.uses.${category}[${index}]: expected a non-empty resource ID`);
+                  advisories.push(`profiles.${profileName}.uses.${category}[${index}]: expected a non-empty resource ID; a member using this profile fails to launch`);
                   continue;
                 }
                 // Qualified refs (namespace:id) are accepted for later resolution
@@ -535,6 +542,9 @@ function validatePluginResources(entries: Array<Record<string, unknown>>): strin
   }
   return errors;
 }
+
+/** The resource categories a profile's `uses` selects from. */
+const USES_CATEGORIES = ["skills", "guidance", "subagents", "plugins", "runtime_resources"];
 
 function normalizeUses(value: unknown): string[] {
   if (Array.isArray(value)) return value as string[];
