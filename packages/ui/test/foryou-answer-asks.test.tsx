@@ -671,4 +671,102 @@ describe("For You — answering an ask's structured questions (#2407)", () => {
       expect(view.getByTestId("feed-card-option-channel-stable").getAttribute("data-selected")).toBe("true");
     });
   });
+
+  it("handles insecure context without crypto.randomUUID, plain-text 500 error, failed refetch on decision_revision_changed, and stale queueItem revision on remount", async () => {
+    const origCrypto = globalThis.crypto;
+    vi.stubGlobal("crypto", {
+      getRandomValues: (arr: Uint8Array) => origCrypto.getRandomValues(arr),
+    });
+
+    const calls: Array<Record<string, unknown>> = [];
+    let mode: "plain500" | "reconciled" | "revChangedDone" = "plain500";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        if (String(url).includes("/api/mission-control/action")) {
+          calls.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (mode === "plain500") {
+            return new Response("Gateway Timeout: upstream unavailable", { status: 502 });
+          }
+          if (mode === "reconciled") {
+            return jsonResponse({
+              actionId: "a-rec-http",
+              verb: "answer",
+              qitemId: "q-ask-1",
+              reconciled: true,
+              decisionRevision: "rev-2",
+              closedQitem: { qitemId: "q-ask-1", state: "pending", humanAnswers: { channel: "stable" } },
+              createdQitemId: null,
+              notifyAttempted: false,
+              notifyResult: null,
+              auditedAt: "2026-11-06T00:01:00Z",
+            });
+          }
+          return jsonResponse(
+            {
+              error: "decision_revision_changed",
+              message: "qitem q-ask-1 changed since this revision was read.",
+              currentRevision: "rev-9",
+              state: "done",
+              humanAnswers: { channel: "beta", changelog: "no" },
+            },
+            409,
+          );
+        }
+        // Simulate failed refetch on /api/queue/q-ask-1
+        return new Response("Service Unavailable", { status: 503 });
+      }),
+    );
+
+    const staleQueueItem = {
+      qitemId: "q-ask-1",
+      sourceSession: "lead@demo",
+      destinationSession: "human@host",
+      state: "pending",
+      decisionRevision: "rev-1",
+      humanQuestions: TWO_QUESTIONS,
+    } as unknown as QueueItemDetail;
+
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+
+    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={staleQueueItem} />, qc);
+
+    // 1. Plain-text 502 error + getRandomValues operationId
+    fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    const firstOpId = (calls[0]!.auditNotes as Record<string, unknown>).operationId as string;
+    expect(firstOpId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+
+    await waitFor(() => {
+      expect(view.getByTestId("feed-card-answer-error-message-queue-attention-q-ask-1").textContent).toBe(
+        "HTTP 502: Gateway Timeout: upstream unavailable",
+      );
+    });
+
+    // 2. Retry reuses the same getRandomValues operationId and reconciles (refreshing queue + attention)
+    mode = "reconciled";
+    fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect((calls[1]!.auditNotes as Record<string, unknown>).operationId).toBe(firstOpId);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["queue", "item", "q-ask-1"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["attention-items"] });
+
+    // 3. Unmount and remount while staleQueueItem still carries decisionRevision="rev-1":
+    //    must send updated expectedRevision="rev-2" (not stale "rev-1") and when decision_revision_changed
+    //    returns state="done" with a failed 503 refetch, must stay settled instead of re-enabling controls.
+    cleanup();
+    mode = "revChangedDone";
+    const remounted = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={staleQueueItem} />, qc);
+    fireEvent.click(remounted.getByTestId("feed-card-option-changelog-no"));
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls[2]!.expectedRevision).toBe("rev-2");
+
+    await waitFor(() => {
+      expect(remounted.getByTestId("feed-card-answer-settled-queue-attention-q-ask-1")).toBeTruthy();
+    });
+    expect(remounted.queryByTestId("feed-card-option-changelog-no")).toBeNull();
+  });
 });

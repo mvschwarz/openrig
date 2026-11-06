@@ -57,17 +57,54 @@ export interface MissionControlActionResult {
   answer?: MissionControlAnswerOutcome;
 }
 
+const TERMINAL_QUEUE_STATES = new Set([
+  "done",
+  "closed",
+  "completed",
+  "canceled",
+  "cancelled",
+  "denied",
+  "expired",
+  "handed-off",
+  "handed_off",
+  "routed",
+]);
+
+function isRecordedAnswerResult(result: MissionControlActionResult): boolean {
+  if (result.answer) return result.answer.outcome === "recorded";
+  if (result.reconciled && typeof result.closedQitem === "object" && result.closedQitem) {
+    const state = (result.closedQitem as Record<string, unknown>).state;
+    return typeof state === "string" && !TERMINAL_QUEUE_STATES.has(state.toLowerCase());
+  }
+  return false;
+}
+
 async function postAction(input: MissionControlActionInput): Promise<MissionControlActionResult> {
   const res = await fetch("/api/mission-control/action", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...missionControlAuthHeaders() },
     body: JSON.stringify(input),
   });
-  const body = await res.json();
+  let body: unknown;
+  let rawText = "";
+  if (res.ok) {
+    body = await res.json();
+  } else {
+    rawText = await res.text();
+    if (rawText) {
+      try {
+        body = JSON.parse(rawText);
+      } catch {
+        body = undefined;
+      }
+    }
+  }
   if (!res.ok) {
-    let message = `HTTP ${res.status}`;
+    const trimmedText = rawText.trim();
+    let message = trimmedText ? `HTTP ${res.status}: ${trimmedText}` : `HTTP ${res.status}`;
     let code: string | undefined;
     if (typeof body === "object" && body) {
+      message = `HTTP ${res.status}`;
       const record = body as Record<string, unknown>;
       if (record.error === "remote_action_failed") {
         const parts = ["remote_action_failed"];
@@ -102,13 +139,14 @@ export function useMissionControlAction() {
       // post-action state without a manual refresh.
       queryClient.invalidateQueries({ queryKey: ["mission-control", "view"] });
       queryClient.invalidateQueries({ queryKey: ["mission-control", "audit"] });
-      if (input.verb !== "answer" || result.answer?.outcome === "recorded") {
+      const isRecorded = isRecordedAnswerResult(result);
+      if (input.verb !== "answer" || isRecorded) {
         queryClient.invalidateQueries({ queryKey: ["queue", "item", input.qitemId] });
       }
       if (result.createdQitemId) {
         queryClient.invalidateQueries({ queryKey: ["queue", "item", result.createdQitemId] });
       }
-      if (result.answer?.outcome === "recorded") {
+      if (isRecorded) {
         queryClient.invalidateQueries({ queryKey: ["attention-items"] });
       }
       queryClient.invalidateQueries({ queryKey: ["slices"] });

@@ -34,6 +34,20 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 const ownAnswer = (answers: HumanAnswersRecord | null | undefined, id: string) =>
   answers && Object.prototype.hasOwnProperty.call(answers, id) ? answers[id] : undefined;
 
+function generateOperationId(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  if (c && typeof c.getRandomValues === "function") {
+    const b = new Uint8Array(16);
+    c.getRandomValues(b);
+    b[6] = (b[6]! & 0x0f) | 0x40;
+    b[8] = (b[8]! & 0x3f) | 0x80;
+    const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  }
+  return `op-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
 export function normalizeHumanQuestions(raw: unknown): HumanQuestionItem[] {
   if (!Array.isArray(raw) || raw.length === 0) return [];
   const out: HumanQuestionItem[] = [];
@@ -115,6 +129,7 @@ const STATE_LABELS: Record<string, string> = {
 interface SessionAskSnapshot {
   answers: HumanAnswersRecord;
   revision?: string;
+  queueItemRevisionAtSave?: string | null;
   lastOutcome?: MissionControlActionResult["answer"] | null;
   settled?: {
     refreshedItem: QueueItemDetail | null;
@@ -183,9 +198,13 @@ export function FeedCardQuestionAsk({
   const cached = sessionAskSnapshots.get(sessionKey);
 
   const [localAnswers, setLocalAnswers] = useState<HumanAnswersRecord>(() => cached?.answers ?? {});
-  const [localRevision, setLocalRevision] = useState<string | undefined>(
-    () => queueItem?.decisionRevision ?? cached?.revision ?? undefined,
-  );
+  const [localRevision, setLocalRevision] = useState<string | undefined>(() => {
+    const propRev = queueItem?.decisionRevision ?? undefined;
+    if (cached?.revision) {
+      return propRev && propRev !== cached.queueItemRevisionAtSave ? propRev : cached.revision;
+    }
+    return propRev;
+  });
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
   const [ownWordsText, setOwnWordsText] = useState("");
   const [lastOutcome, setLastOutcome] = useState<MissionControlActionResult["answer"] | null>(
@@ -209,14 +228,18 @@ export function FeedCardQuestionAsk({
 
   const saveSnapshot = (patch: Partial<SessionAskSnapshot>) => {
     const prev = sessionAskSnapshots.get(sessionKey) ?? { answers: localAnswers, revision: localRevision };
-    sessionAskSnapshots.set(sessionKey, { ...prev, ...patch });
+    sessionAskSnapshots.set(sessionKey, {
+      ...prev,
+      queueItemRevisionAtSave: queueItem?.decisionRevision ?? null,
+      ...patch,
+    });
   };
 
   const operationIdsRef = useRef<Map<string, string>>(new Map());
   const getOperationId = (sig: string) => {
     const existing = operationIdsRef.current.get(sig);
     if (existing) return existing;
-    const next = crypto.randomUUID();
+    const next = generateOperationId();
     operationIdsRef.current.set(sig, next);
     return next;
   };
@@ -286,7 +309,7 @@ export function FeedCardQuestionAsk({
 
     if (!isTerminalOrigin) return;
     const effectiveItem = refreshed ?? queueItem ?? null;
-    const effectiveState = (effectiveItem?.state ?? fallbackState ?? "pending").toLowerCase();
+    const effectiveState = (refreshed?.state ?? fallbackState ?? queueItem?.state ?? "pending").toLowerCase();
     if (
       !isRemote &&
       originCode === "decision_revision_changed" &&
@@ -308,8 +331,15 @@ export function FeedCardQuestionAsk({
     onDone?: () => void,
   ) {
     if (mutation.isPending || settledState) return;
-    retainAttentionItemInSession(qitemId, hostId);
-    const operationId = getOperationId(signature);
+    let operationId: string;
+    try {
+      retainAttentionItemInSession(qitemId, hostId);
+      operationId = getOperationId(signature);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setActionError({ message: msg, source });
+      return;
+    }
     setActionError(null);
     mutation.mutate(
       {
@@ -326,7 +356,14 @@ export function FeedCardQuestionAsk({
         onSuccess: (result: MissionControlActionResult) => {
           operationIdsRef.current.delete(signature);
           setActionError(null);
-          if (result.decisionRevision) setLocalRevision(result.decisionRevision);
+          if (result.decisionRevision) {
+            setLocalRevision(result.decisionRevision);
+            if (!isRemote && queueItem) {
+              queryClient.setQueryData<QueueItemDetail | null>(["queue", "item", qitemId], (old) =>
+                old ? { ...old, decisionRevision: result.decisionRevision } : old,
+              );
+            }
+          }
           const closed = isRecord(result.closedQitem) ? result.closedQitem : null;
           let updatedAnswers = mergedAnswers;
           if (closed?.humanAnswers) {
