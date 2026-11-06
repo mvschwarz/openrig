@@ -161,6 +161,10 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     return { ok: false, errors: [`Profile "${profileName}" not found in spec "${spec.name}". Available: ${Object.keys(spec.profiles).join(", ") || "(none)"}` ] };
   }
 
+  if (profile.uses.skills.some((ref) => typeof ref !== "string")) {
+    return { ok: false, errors: [`Profile "${profileName}" has a non-string skill ID`] };
+  }
+
   // 2. Build combined resource pool
   const pool = buildResourcePool(baseSpec, importedSpecs);
 
