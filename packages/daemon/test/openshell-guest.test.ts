@@ -128,3 +128,50 @@ it("requires a verified first input before publishing a launch that selected it"
   expect(await command(root, "--prepare", "--first-input-required")).toEqual({ ok: false, code: "environment_descriptor_invalid" });
   expect(() => readFileSync(join(root, "control", "launch.json"))).toThrow();
 });
+
+it.each([true, false])("the guest launch preserves only supplied CA references (supplied=%s)", async supplied => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "openshell-ca-"))); roots.push(root);
+  mkdirSync(join(root, "control"));
+  const ca = {
+    NODE_EXTRA_CA_CERTS: "/example/provider-ca.crt",
+    SSL_CERT_FILE: "/example/guest-ca-bundle.crt",
+    REQUESTS_CA_BUNDLE: "/example/guest-ca-bundle.crt",
+    CURL_CA_BUNDLE: "/example/guest-ca-bundle.crt",
+  };
+  const script = `import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location("guest",sys.argv[1]); g=importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+root=sys.argv[2]
+g.atomic(root,"control/launch.json",json.dumps({"version":1,"bindingId":"binding-one","generation":"generation-one","nativeId":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","files":[]}).encode())
+g.atomic(root,"control/activity.json",json.dumps({"OPENRIG_URL":"http://guest.test:7782","OPENRIG_ACTIVITY_HOOK_TOKEN":"fixture-token","OPENRIG_NODE_ID":"node-one","OPENRIG_SESSION_NAME":"worker@test","OPENRIG_OCCUPANT_GENERATION":"generation-one"}).encode())
+class Captured(Exception): pass
+class Child:
+ pid=123
+ def wait(self): raise Captured()
+def spawn(argv,**kwargs):
+ print(json.dumps({"argv":argv,"env":kwargs["env"]})); return Child()
+g.subprocess.Popen=spawn; g.process_start=lambda pid:"start"
+try: g.launch(root)
+except Captured: pass
+`;
+  const result = JSON.parse((await run("python3", ["-c", script, helper, root], {
+    timeout: 5000,
+    env: {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      ANTHROPIC_BASE_URL: "https://provider.test",
+      ANTHROPIC_API_KEY: "fixture-provider-key",
+      UNRELATED_SECRET: "must-not-inherit",
+      NODE_TLS_REJECT_UNAUTHORIZED: "0",
+      ...(supplied ? ca : {}),
+    },
+  })).stdout);
+  expect(result.argv[0]).toBe("/usr/local/bin/claude");
+  expect(result.env).toMatchObject({
+    HOME: join(root, "native"), CLAUDE_CONFIG_DIR: join(root, "native"),
+    OPENRIG_ENVIRONMENT_BINDING: "binding-one", OPENRIG_OCCUPANT_GENERATION: "generation-one",
+    ANTHROPIC_BASE_URL: "https://provider.test", ANTHROPIC_API_KEY: "fixture-provider-key",
+  });
+  expect(result.env).not.toHaveProperty("UNRELATED_SECRET");
+  expect(result.env).not.toHaveProperty("NODE_TLS_REJECT_UNAUTHORIZED");
+  if (supplied) expect(result.env).toMatchObject(ca);
+  else for (const name of Object.keys(ca)) expect(result.env).not.toHaveProperty(name);
+});

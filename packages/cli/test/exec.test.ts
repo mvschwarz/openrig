@@ -44,7 +44,7 @@ function setup(body = "scenario:reply PONG", env: Record<string, string> = {}) {
     ...process.env, OPENRIG_HOME: home, OPENRIG_SESSION_NAME: SEAT, EXEC_QUEUE_FILE: queueFile,
     PATH: [join(home, "node_modules", ".bin"), dirname(process.execPath), process.env.PATH].join(delimiter), ...env,
   };
-  for (const name of ["FAKE_ACP_LOAD", "FAKE_ACP_MISSING", "FAKE_ACP_COMPANION_PID_FILE", "FAKE_ACP_COST", "FAKE_ACP_PROMPT_USAGE", "FAKE_ACP_IGNORE_EOF", "EXEC_TEST_CONNECTOR", "EXEC_TEST_WINNER", "EXEC_TEST_HOOK", "OPENRIG_EXEC_CONNECTOR"]) if (!(name in env)) delete runEnv[name];
+  for (const name of ["FAKE_ACP_LOAD", "FAKE_ACP_MISSING", "FAKE_ACP_COMPANION_PID_FILE", "FAKE_ACP_COST", "FAKE_ACP_PROMPT_USAGE", "FAKE_ACP_IGNORE_EOF", "EXEC_TEST_CONNECTOR", "EXEC_TEST_WINNER", "EXEC_TEST_HOOK", "EXEC_TEST_STALL_MS", "OPENRIG_EXEC_CONNECTOR"]) if (!(name in env)) delete runEnv[name];
   return { home, env: runEnv, queueFile };
 }
 type Home = ReturnType<typeof setup>;
@@ -163,6 +163,16 @@ describe("rig exec", () => {
     const run = await ended(h, startedId(waiter.out())!);
     expect(run.outcome).toBe("completed");
     expect(notes(h).join("\n")).not.toContain("cancel requested");
+  }, 40_000);
+
+  it("a Ctrl-C that lands just after the run is announced, while the CLI is stalled there, still stops only the wait", async () => {
+    const h = withEnv(setup("scenario:slow"), { EXEC_TEST_STALL_MS: "1500" });
+    const waiter = start(h, ["run", "qitem-task", "--harness", "codex", "--wait"], { group: true });
+    await until(() => (/for qitem-task on codex: started/.test(waiter.out()) ? true : undefined));
+    process.kill(-waiter.child.pid!, "SIGINT"); // arrives during the stall, before the CLI's next step
+    expect(await waiter.exited).toBe(3);
+    expect(waiter.out()).toMatch(/stopped waiting; exec-\S+ keeps running/);
+    expect((await ended(h, startedId(waiter.out())!)).outcome).toBe("completed");
   }, 40_000);
 
   it("starts a row's task once: a second start or a retry returns the same run, and --again starts another after it ends", async () => {
