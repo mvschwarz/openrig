@@ -453,6 +453,24 @@ describe("live seat runtime switch", () => {
     expect(handover).toMatch(new RegExp(`rig seat set-runtime dev\\.impl@seat-rig --confirm ${openSwitch()!.id} --note`));
   });
 
+  it("resolves the authored recap from the bound session folder when the logical ID is dotted (#2579)", async () => {
+    const { resolveAuthoredRecapPointer } = await import("../src/domain/context-packs/seat-recap-store.js");
+    const topologyRoot = path.join(home, "topology");
+    const seatDir = path.join(topologyRoot, "rigs", "seat-rig", "seats", "dev-impl");
+    fs.mkdirSync(seatDir, { recursive: true });
+    fs.writeFileSync(path.join(seatDir, "RECAP.md"), "# Current position\n");
+    const authoredRecapResolver = vi.fn((seatRef: string) => resolveAuthoredRecapPointer(seatRef, topologyRoot));
+    const svc = service({ authoredRecapResolver });
+    successorConfirms(svc);
+
+    await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "better fit" });
+
+    const handover = typed.find((t) => t.target.startsWith("openrig-switch-"))!.text;
+    expect(authoredRecapResolver).toHaveBeenCalledWith(SEAT);
+    expect(handover).toContain("--- Authored seat recap: seat:RECAP.md ---");
+    expect(handover).not.toContain("no RECAP.md on the seat tree");
+  });
+
   // #2456: a guidance block the preparation kept is named in the successor's first turn as well as the switch's result, as a
   // start tells its seat and a handover its packet.
   it.each([true, false])("the handover names a guidance block the preparation kept (kept: %s), as the result does (#2456)", async (kept) => {

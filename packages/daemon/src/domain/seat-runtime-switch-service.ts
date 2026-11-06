@@ -360,7 +360,8 @@ export class SeatRuntimeSwitchService {
     // Facts the handover carries, read while the predecessor still holds the seat.
     const screen = await tmux.capturePaneScreen(ctx.predecessorPane).catch(() => null);
     const recap = this.deps.predecessorRecapResolver?.({ nodeId: node.id, runtime: node.runtime, sessionName });
-    const authored = this.deps.authoredRecapResolver?.(ctx.seatRef);
+    // Recap directories follow the bound canonical session member, which may differ from the logical ID.
+    const authored = this.deps.authoredRecapResolver?.(sessionName);
     const id = ulid();
     const row: Pick<SwitchRow, "id" | "staging_session"> = { id, staging_session: `openrig-switch-${id.toLowerCase()}` };
     const stamp = () => this.now().toISOString();
