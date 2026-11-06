@@ -70,7 +70,11 @@ function createMockDaemon() {
       let body = "";
       req.on("data", (c: Buffer) => { body += c.toString(); });
       req.on("end", () => {
-        if (body.includes("INVALID")) {
+        if (body.includes("ADVISED")) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          const invalid = body.includes("ADVISED-INVALID");
+          res.end(JSON.stringify({ valid: !invalid, errors: invalid ? ["name is required"] : [], advisories: ['defaults.effort: non-string value "3" ignored; effort must be a text value'] }));
+        } else if (body.includes("INVALID")) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ valid: false, errors: ["name is required", "missing runtime"] }));
         } else {
@@ -126,6 +130,16 @@ describe("rig agent", () => {
     expect(output).toContain("my-agent");
     expect(output).toContain("v1.2.0");
     expect(exitCode).toBeUndefined();
+  });
+
+  it("agent validate prints each advisory, valid or not, and an advisory never fails it", async () => {
+    for (const [content, exit] of [["name: my-agent\nversion: 1.2.0\n# ADVISED\n", undefined], ["# ADVISED-INVALID\n", 1]] as const) {
+      const program = new Command();
+      program.addCommand(agentCommand(agentDeps(content)));
+      const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", "agent", "validate", "agent.yaml"]));
+      expect(logs).toContain('⚠ agent spec advisory: defaults.effort: non-string value "3" ignored; effort must be a text value');
+      expect(exitCode).toBe(exit);
+    }
   });
 
   // T2: rig agent validate invalid spec -> exit 1, output contains error
