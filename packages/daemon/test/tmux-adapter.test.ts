@@ -960,7 +960,7 @@ describe("TmuxAdapter", () => {
         const adapter = new TmuxAdapter(exec);
         adapter.deliveryGuard = {
           maybeTarget: () => TARGET, target: () => TARGET, ownsLifecycle: () => false, needsInputCheck: () => false, checkInput,
-          input: (_name: string, fn: () => Promise<unknown>) => fn(),
+          input: (_name: string, fn: () => Promise<unknown>) => fn(), attachInputInspection: () => {},
         } as unknown as SeatDeliveryGuard;
         const cmds = () => exec.mock.calls.map(([cmd]) => cmd).filter((cmd) => !cmd.startsWith("tmux list-panes"));
         return { adapter, checkInput, cmds, release, type: () => { human = true; } };
