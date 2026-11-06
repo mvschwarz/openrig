@@ -51,6 +51,7 @@ describe("psmux PowerShell launch staging", () => {
     await adapter.getPaneCommand(pane.id);
     expect(calls.at(-1)?.slice(0, 3)).toEqual(["tmux", "-t", "=seat-a:.%1"]);
     expect(calls.at(-1)).toContain("%1");
+    expect(adapter.supportsPaneProcessBatch).toBe(false);
     expect(await adapter.readAllPaneProcesses()).toBeNull();
   });
   it("stages a native script and sends only its short invocation", async () => {

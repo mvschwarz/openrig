@@ -15,7 +15,7 @@ import { readClaudeModelObservation, readCodexModelObservation } from "../src/do
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { vi.restoreAllMocks(); for (const fn of cleanup.splice(0).reverse()) fn(); });
-function fixture(runtime = "claude-code", expandedRecord = false) {
+function fixture(runtime = "claude-code", expandedRecord = false, batch = true) {
   const db = createFullTestDb(); cleanup.push(() => db.close());
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "observed-model-"))); cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const rigs = new RigRepository(db), sessions = new SessionRegistry(db), identities = new SeatIdentityStore(db);
@@ -44,7 +44,7 @@ function fixture(runtime = "claude-code", expandedRecord = false) {
   const reader = new CurrentModelReader({ sessions, identities,
     context: { readSidecar: () => ({ ok: true, data: { session_id: id, session_name: "editor@studio", transcript_path: path, sampled_at: stamp, occupant_generation: tenure.generationUuid } }) } as never,
     codexRollout: () => path, piRunner: () => ({ state: { ready: true, launchId: "launch", sessionFile: expandedRecord ? realpathSync.native(path) : path }, sessionsDir: dir, entryPath: `${dir}/pi-runner.mjs`, stateRoot: dir }),
-    readAllPaneProcesses, census, now: () => boot + 60_000, native: { getPanePid, listProcesses: () => census.list(), readThreadIdByPid: thread },
+    readAllPaneProcesses: batch ? readAllPaneProcesses : undefined, census, now: () => boot + 60_000, native: { getPanePid, listProcesses: () => census.list(), readThreadIdByPid: thread },
   });
   const input = { nodeId: node.id, canonicalSessionName: "editor@studio", runtime, sessionStatus: "running" };
   return { db, dir, rigs, rig, node, sessions, identities, session, tenure, boot, stamp, path, id, claudeRecord, reader, input, list, getPanePid, thread, processRows, readAllPaneProcesses };
@@ -222,6 +222,13 @@ it("r2: batches inventory pane reads and shares one census without per-seat tmux
   expect(f.getPanePid).not.toHaveBeenCalled(); expect(f.list).toHaveBeenCalledTimes(1);
   await f.reader.observeInventory([{ ...f.input, sessionStatus: "stopped" }, { ...f.input, runtime: "stub" }]);
   expect(f.readAllPaneProcesses).toHaveBeenCalledTimes(2);
+});
+
+it("observes inventory with scoped pane reads when the terminal has no safe batch", async () => {
+  const f = fixture("claude-code", false, false);
+  expect(await f.reader.observeInventory([f.input])).toMatchObject([{ status: "observed", model: "response-model" }]);
+  expect(f.readAllPaneProcesses).not.toHaveBeenCalled();
+  expect(f.getPanePid.mock.calls.length).toBeGreaterThanOrEqual(2);
 });
 
 it("r2: uses the bulk path on repeated actual inventory requests and skips unchanged transcript reads", async () => {

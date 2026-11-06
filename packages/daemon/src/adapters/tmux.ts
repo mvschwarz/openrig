@@ -645,6 +645,9 @@ export class TmuxAdapter {
   private readonly serverArgs: readonly string[];
   private readonly terminalKind: "tmux" | "psmux";
 
+  /** psmux pane IDs are scoped to their session, so global pane batches are ambiguous. */
+  get supportsPaneProcessBatch(): boolean { return this.terminalKind !== "psmux"; }
+
   private async nativeRaw(argv: string[], env?: Readonly<Record<string, string | undefined>>): Promise<string> {
     if (!this.argvExec || (env && !this.argvExec.supportsEnvironment)) throw new Error("Native session-name mapping requires argv transport");
     const targeted = this.serverArgs.length ? [argv[0]!, ...this.serverArgs, ...argv.slice(1)] : argv;

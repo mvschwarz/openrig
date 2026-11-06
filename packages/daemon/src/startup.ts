@@ -1352,7 +1352,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const currentModelReader = new CurrentModelReader({
     sessions: sessionRegistry, identities: new SeatIdentityStore(db), context: contextUsageStore,
     census: modelCensus,
-    readAllPaneProcesses: () => tmuxAdapter.readAllPaneProcesses(),
+    readAllPaneProcesses: tmuxAdapter.supportsPaneProcessBatch ? () => tmuxAdapter.readAllPaneProcesses() : undefined,
     native: {
       getPanePid: async (target) => tmuxAdapter.getPanePid ? tmuxAdapter.getPanePid(target) : null,
       listProcesses: () => modelCensus.list(),
