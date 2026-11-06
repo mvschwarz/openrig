@@ -303,7 +303,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
     for (const [profileName, profileRaw] of Object.entries(obj["profiles"] as Record<string, unknown>)) {
       if (profileRaw && typeof profileRaw === "object") {
         const p = profileRaw as Record<string, unknown>;
-        if (p["uses"] != null && (typeof p["uses"] !== "object" || Array.isArray(p["uses"]))) {
+        if (p["uses"] != null && (typeof p["uses"] !== "object" || (Array.isArray(p["uses"]) && p["uses"].length > 0))) {
           errors.push(`profiles.${profileName}.uses: must be an object`);
         } else if (p["uses"] && typeof p["uses"] === "object") {
           const uses = p["uses"] as Record<string, unknown>;

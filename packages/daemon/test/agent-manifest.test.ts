@@ -92,6 +92,8 @@ describe("AgentSpec manifest parser + validator", () => {
     ]);
     expect(validateAgentSpec({ ...base, profiles: { default: { uses: { skills: ["review"] } } } }).valid).toBe(true);
     expect(validateAgentSpec({ ...base, profiles: { default: { uses: null }, other: { uses: { skills: null } } } }).valid).toBe(true);
+    expect(validateAgentSpec({ ...base, profiles: { default: { uses: [] } } }).valid).toBe(true);
+    expect(validateAgentSpec({ ...base, profiles: { default: { uses: ["review"] } } }).valid).toBe(false);
   });
 
   // T1: valid agent.yaml parses and normalizes with correct defaults
