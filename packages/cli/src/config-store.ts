@@ -14,7 +14,7 @@ import {
 
 export interface RiggedConfig {
   specs: { builtinsVisible: boolean };
-  launch: { nonInterruptive: boolean };
+  launch: { nonInterruptive: boolean; codexLoginShell: boolean };
   daemon: { port: number; host: string; dbConflict?: "warn" | "stop" };
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer.
   // OPR.0.4.6.MH1 FR-4 — the own-host display name (default "localhost").
@@ -267,7 +267,7 @@ const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigP
 );
 
 const DEFAULTS = {
-  launch: { nonInterruptive: false },
+  launch: { nonInterruptive: false, codexLoginShell: false },
   daemon: { port: 7433, host: "127.0.0.1", dbConflict: "warn" },
   // OPR.0.4.6.MH1 FR-1 — "local" ≡ no remote selection (LOCAL_HOST_ID).
   // FR-4 — own-host display name; default "localhost" (PRD-named).
@@ -470,6 +470,7 @@ export const VALID_KEYS = [
   "skills.router_line.enabled",
   "onboarding.default_pack.enabled",
   "launch.non_interruptive",
+  "launch.codex_login_shell",
   "health.context_pressure.warning_percent",
   "health.context_pressure.critical_percent",
   "files.allowlist",
@@ -598,6 +599,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "skills.router_line.enabled": { primary: "OPENRIG_SKILLS_ROUTER_LINE_ENABLED" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   "launch.non_interruptive": { primary: "OPENRIG_LAUNCH_NON_INTERRUPTIVE" },
+  "launch.codex_login_shell": { primary: "OPENRIG_LAUNCH_CODEX_LOGIN_SHELL" },
   "health.context_pressure.warning_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT" },
   "health.context_pressure.critical_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_CRITICAL_PERCENT" },
   // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
@@ -707,6 +709,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "skills.router_line.enabled": ["skills", "routerLine", "enabled"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "launch.non_interruptive": ["launch", "nonInterruptive"],
+  "launch.codex_login_shell": ["launch", "codexLoginShell"],
   "health.context_pressure.warning_percent": ["health", "contextPressure", "warningPercent"],
   "health.context_pressure.critical_percent": ["health", "contextPressure", "criticalPercent"],
   "files.allowlist": ["files", "allowlist"],
@@ -1329,7 +1332,7 @@ export class ConfigStore {
           auditLog: v("feed.subscriptions.audit_log") as boolean,
         },
       },
-      launch: { nonInterruptive: v("launch.non_interruptive") as boolean },
+      launch: { nonInterruptive: v("launch.non_interruptive") as boolean, codexLoginShell: v("launch.codex_login_shell") as boolean },
       runtime: {
         readinessTimeoutSeconds: v("runtime.readiness_timeout_seconds") as number,
         codex: {
