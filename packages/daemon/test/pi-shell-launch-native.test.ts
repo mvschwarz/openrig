@@ -416,8 +416,10 @@ await main();
     const daemonBin = path.join(temp, "daemon-bin");
     for (const d of [cwd, stateRoot, daemonBin]) fs.mkdirSync(d, { recursive: true });
 
-    fs.writeFileSync(path.join(daemonBin, "fail-wrapper"), "#!/bin/sh\necho wrapper-failed-7 >&2\nexit 7\n", { mode: 0o700 });
-    fs.writeFileSync(path.join(daemonBin, "zero-wrapper"), "#!/bin/sh\necho wrapper-exited-0-without-exec\nexit 0\n", { mode: 0o700 });
+    // The runner keeps the child's stderr, so each wrapper leaves its own marker: a 127 then names its cause.
+    const wrapperRanPath = path.join(temp, "wrapper-ran.marker");
+    fs.writeFileSync(path.join(daemonBin, "fail-wrapper"), `#!/bin/sh\nprintf wrapper-failed-7 > ${quote(wrapperRanPath)}\necho wrapper-failed-7 >&2\nexit 7\n`, { mode: 0o700 });
+    fs.writeFileSync(path.join(daemonBin, "zero-wrapper"), `#!/bin/sh\nprintf wrapper-exited-0-without-exec > ${quote(wrapperRanPath)}\necho wrapper-exited-0-without-exec\nexit 0\n`, { mode: 0o700 });
     const okWrapper = path.join(daemonBin, "ok-wrapper");
     fs.writeFileSync(okWrapper, "#!/bin/sh\nshift\nexec \"$@\"\n", { mode: 0o700 });
 
@@ -447,6 +449,8 @@ await main();
       OPENRIG_RUNTIME: "pi",
       OPENRIG_OCCUPANT_GENERATION: "gen-1",
     };
+    const rc = path.join(temp, "pane.rc");
+    fs.writeFileSync(rc, `export PATH=${quote(sessionEnv.PATH)}\nprintf ready > ${quote(path.join(temp, "rc-ready"))}\n`);
     const fsOps = {
       readFile: (p: string) => fs.readFileSync(p, "utf8"),
       writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
@@ -458,9 +462,12 @@ await main();
       await run("tmux", [
         "-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", session,
         ...Object.entries(sessionEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
-        "/bin/bash --noprofile --norc -i",
+        `/bin/bash --noprofile --rcfile ${quote(rc)} -i`,
       ]);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      for (let i = 0; i < 100 && !fs.existsSync(path.join(temp, "rc-ready")); i++) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      expect(fs.existsSync(path.join(temp, "rc-ready"))).toBe(true);
 
       let fileOps: TmuxFileOps | undefined;
       if (failure === "long-tmpdir-too-long") {
@@ -495,6 +502,7 @@ await main();
         { name: session },
       );
       expect(result.ok).toBe(false);
+      expect(fs.existsSync(barePiRanPath)).toBe(false);
       if (failure === "missing-wrapper") {
         expect(result.error).toBe("launch_wrapper unavailable; no agent started.");
         expect(send).not.toHaveBeenCalled();
@@ -507,9 +515,12 @@ await main();
       } else {
         const state = JSON.parse(fs.readFileSync(piSeatPaths(stateRoot, session).runnerStatePath, "utf8"));
         expect(state.ready).toBe(false);
-        expect(state.exited.code).toBe(failure === "failing-wrapper-exit-7" ? 7 : 0);
+        // The pane holds the runner's error line when the wrapper never ran.
+        const pane = await tmux.capturePaneContent(session, 200);
+        const marker = failure === "failing-wrapper-exit-7" ? "wrapper-failed-7" : "wrapper-exited-0-without-exec";
+        expect(fs.existsSync(wrapperRanPath) ? fs.readFileSync(wrapperRanPath, "utf8") : `wrapper never ran; pane:\n${pane}`).toBe(marker);
+        expect(state.exited.code, `pane:\n${pane}`).toBe(failure === "failing-wrapper-exit-7" ? 7 : 0);
       }
-      expect(fs.existsSync(barePiRanPath)).toBe(false);
       expect((await adapter.checkReady({ tmuxSession: session, cwd } as never)).ready).toBe(false);
     } finally {
       await run("tmux", ["-S", socket, "kill-server"]).catch(() => {});
