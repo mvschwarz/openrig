@@ -303,7 +303,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
     for (const [profileName, profileRaw] of Object.entries(obj["profiles"] as Record<string, unknown>)) {
       if (profileRaw && typeof profileRaw === "object") {
         const p = profileRaw as Record<string, unknown>;
-        if (p["uses"] !== undefined && (p["uses"] === null || typeof p["uses"] !== "object" || Array.isArray(p["uses"]))) {
+        if (p["uses"] != null && (typeof p["uses"] !== "object" || Array.isArray(p["uses"]))) {
           errors.push(`profiles.${profileName}.uses: must be an object`);
         } else if (p["uses"] && typeof p["uses"] === "object") {
           const uses = p["uses"] as Record<string, unknown>;
@@ -316,7 +316,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
 
           for (const category of ["skills", "guidance", "subagents", "plugins", "runtime_resources"]) {
             const refs = uses[category];
-            if (refs !== undefined && !Array.isArray(refs)) {
+            if (refs != null && !Array.isArray(refs)) {
               errors.push(`profiles.${profileName}.uses.${category}: must be an array of resource IDs`);
               continue;
             }

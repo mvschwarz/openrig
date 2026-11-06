@@ -91,6 +91,7 @@ describe("AgentSpec manifest parser + validator", () => {
       "profiles.default.uses.skills[1]: must be a non-empty resource ID",
     ]);
     expect(validateAgentSpec({ ...base, profiles: { default: { uses: { skills: ["review"] } } } }).valid).toBe(true);
+    expect(validateAgentSpec({ ...base, profiles: { default: { uses: null }, other: { uses: { skills: null } } } }).valid).toBe(true);
   });
 
   // T1: valid agent.yaml parses and normalizes with correct defaults
