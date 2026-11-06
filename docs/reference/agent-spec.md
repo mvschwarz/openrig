@@ -289,7 +289,10 @@ Each array contains resource IDs. These can be:
 
 The `uses` categories are: `skills`, `guidance`, `subagents`, `plugins`, `runtime_resources`. A `uses.hooks` key, even an
 empty list, is refused: hooks ship inside plugins. Any other key selects nothing and gets a validation advisory, shown at
-launch and by `rig agent validate`, so a typo such as `skils` doesn't go unnoticed.
+launch and by `rig agent validate`, so a typo such as `skils` doesn't go unnoticed. A single value written in place of a
+category's list (`skills: vault-user`) is read as a one-item list, with an advisory suggesting list syntax, and resolves
+exactly like that list: when the profile is selected, a resource that isn't available fails that member's resolution with
+"not found in resource pool".
 
 **Skills resolve more widely than other resources.** For Claude Code and Codex seats, a skill ID that no declared
 resource provides is looked up at launch in the project's runtime skill folder in the seat's cwd (`<cwd>/.claude/skills` or
