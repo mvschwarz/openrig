@@ -17,8 +17,10 @@ describe.skipIf(process.platform === "win32")("native tmux: leaving a pane's mod
     const socket = join(scratch, "s");
     const env = { ...process.env }; delete env.TMUX; delete env.TMUX_TMPDIR;
     const tmux = async (args: string[]) => (await run("tmux", ["-S", socket, ...args], { env })).stdout;
+    // No shell prompt: the pane prints its lines and then sleeps, so its screen stops changing once "line 35" is drawn.
     const pane = (await tmux(["-f", "/dev/null", "new-session", "-d", "-P", "-F", "#{pane_id}", "-x", "100", "-y", "30",
-      "sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35; do echo line $i; done; exec sh'"])).trim();
+      "sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35; do echo line $i; done; exec sleep 600'"])).trim();
+    await vi.waitFor(async () => expect(await tmux(["capture-pane", "-p", "-t", pane])).toContain("line 35"), { timeout: 5000, interval: 25 });
     const adapter = new TmuxAdapter(async () => { throw new Error("Native fixture requires argv execution"); }, undefined,
       async args => tmux(args.slice(1)));
     const modes = async () => Number((await tmux(["display-message", "-p", "-t", pane, "#{pane_in_mode}"])).trim());
