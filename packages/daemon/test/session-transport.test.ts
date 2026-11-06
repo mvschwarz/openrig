@@ -732,6 +732,19 @@ describe("SessionTransport", () => {
       expect(callOrder).toEqual(["cancelPaneMode"]);
     });
 
+    it("says why leaving the mode failed when tmux or the input guard refused it", async () => {
+      seedCanonicalRig();
+      const callOrder: string[] = [];
+      const tmux = modalPane({ leaves: false, callOrder });
+      tmux.cancelPaneMode = async () => { callOrder.push("cancelPaneMode"); return { ok: false, code: "unknown", message: "not in a mode" }; };
+
+      const result = await createTransport(tmux).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "pane_in_mode", sent: false });
+      expect(result.error).toContain("Leaving it failed: not in a mode.");
+      expect(result.error).toContain("No text was sent.");
+      expect(callOrder).toEqual(["cancelPaneMode"]);
+    });
+
     it("sends no submitOnly Enter when the pane cannot leave the mode", async () => {
       seedCanonicalRig();
       const callOrder: string[] = [];
