@@ -77,15 +77,17 @@ describe("custody of asks held for quiet hours", () => {
     return w;
   }
   let n = 0;
-  const ask = () => repo.create({ sourceSession: "asker@r", destinationSession: "person@external", body: `Question ${++n}: pick one`,
-    summary: `Pick ${n}`, evidenceRef: `/proof/${n}.md`, humanIntent: "decision", humanAlert: true, nudge: false } as never) as Promise<QueueItem>;
+  const ask = (humanIntent: "decision" | "update" = "decision") => repo.create({ sourceSession: "asker@r", destinationSession: "person@external",
+    body: humanIntent === "decision" ? `Question ${++n}: pick one` : `Build ${++n} finished; no decision needed`,
+    summary: humanIntent === "decision" ? `Pick ${n}` : `Build ${n} finished`, evidenceRef: `/proof/${n}.md`,
+    humanIntent, humanAlert: humanIntent === "decision", nudge: false } as never) as Promise<QueueItem>;
   const alertFor = async (row: QueueItem) =>
     (await makeQueuePorts(repo, { loadHumanRegistry: registry } as never).listHumanAlerts({ minimumLevel: "RECORD" })).find((a) => a.qitemId === row.qitemId)!;
   const quietOn = () => { const now = new Date(); quiet.setUntil("person", { until: new Date(now.getTime() + 24 * 3_600_000), timezone: "UTC", setBy: "t", now }); };
   const releaseJobs = () => new WatchdogJobsRepository(db).listActive().filter((j) => j.policy === QUIET_RELEASE_POLICY);
-  async function held(): Promise<QueueItem> {
+  async function held(humanIntent: "decision" | "update" = "decision"): Promise<QueueItem> {
     quietOn();
-    const row = await ask();
+    const row = await ask(humanIntent);
     const w = wire();
     const alert = await alertFor(row);
     w.dispatcher.dispatch(OUTBOUND_OP, alert.destinationSession!, toPayload(alert));
@@ -106,12 +108,15 @@ describe("custody of asks held for quiet hours", () => {
     resolveOrchestrator: () => "orch@r", attemptWake: async () => "verified", log: () => {} });
   const ladderTouched = (row: QueueItem) => repo.listTransitions(row.qitemId).some((t) => t.actorSession === "wake-ladder@system");
 
-  it("a healthy hold aged past the thresholds is held: no stuck finding, and the waiting view says held by quiet hours until the boundary", async () => {
-    const row = await held();
+  it.each(["decision", "update"] as const)("a healthy %s hold aged past the thresholds is held: no stuck finding, and the waiting view says held by quiet hours until the boundary", async (humanIntent) => {
+    const row = await held(humanIntent);
+    const stored = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
     expect(findingFor(await sweep(), row)).toEqual([]);
     const view = repo.waitingView(row.qitemId)!;
     expect(view.nextBackstop).toMatchObject({ mechanism: expect.stringMatching(/^quiet-release:/), dueAt: quiet.quietStateFor("person", new Date()).nextBoundary!.at });
     expect(String((view.nextBackstop as { note?: string }).note)).toMatch(/^Held by quiet hours until /);
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", humanIntent, claimedAt: null });
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(stored);
   });
 
   it("a healthy hold isn't counted as picked up, and the wake ladder leaves it to its release job", async () => {
@@ -146,15 +151,48 @@ describe("custody of asks held for quiet hours", () => {
     }
   });
 
-  it("a hold whose release job was stopped from outside (the only way one loses its job) is found, by the sweep and by the ladder", async () => {
-    const row = await held();
+  it.each(["decision", "update"] as const)("a %s hold whose release job was stopped from outside (the only way one loses its job) is found, by the sweep and by the ladder", async (humanIntent) => {
+    const row = await held(humanIntent);
     asBaton(row);
     new WatchdogJobsRepository(db).markTerminal(releaseJobs()[0]!.jobId, "test: the job went away");
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "orphaned" });
+    const stored = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
     const r = await sweep();
-    expect(findingFor(r, row).length).toBeGreaterThan(0);
-    expect(findingWhy(row)).toMatch(/held for quiet hours .* no release job is live/);
+    expect(r.outcome, r.error).not.toBe("failed");
+    expect.soft(findingFor(r, row).length).toBeGreaterThan(0);
+    expect.soft(findingWhy(row)).toMatch(/held for quiet hours .* no release job is live/);
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(stored);
+    expect(posts).toHaveLength(0);
     await ladder();
     expect(ladderTouched(row), "an orphaned hold isn't pickup, so the ladder takes it up").toBe(true);
+  });
+
+  it("an orphaned update hold keeps its existing unclaimed finding open without informational resolution", async () => {
+    const row = await held("update");
+    new WatchdogJobsRepository(db).markTerminal(releaseJobs()[0]!.jobId, "test: the job went away");
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "orphaned" });
+    expect(repo.deliveryOutcomeFor(row.qitemId)).toBeNull();
+    const finding = await repo.create({ sourceSession: "asker@r", destinationSession: "orch@r", body: "prior unclaimed hold evidence", nudge: false,
+      tags: ["stuck-sweep-finding", `stuck-sweep:unclaimed-obligation:${row.qitemId}`, `recovery-for:${row.qitemId}`] });
+    expect(finding.state).toBe("pending");
+    const history = repo.listTransitions(finding.qitemId);
+    const stored = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    // The finding predates a larger reporting window; falling outside it isn't resolution.
+    const now = LATER();
+    expect(Date.parse(row.tsCreated)).toBeGreaterThan(now.getTime() - 180 * 60_000);
+    const r = await runStuckSweep({ db, queueRepo: repo, unclaimedAgeMinutes: 180, now,
+      resolveOrchestrator: () => "orch@r", log: () => {} });
+    expect(r.outcome, r.error).not.toBe("failed");
+    expect(findingFor(r, row).filter((f) => f.action !== "closed")).toEqual([]);
+    expect.soft(repo.getById(finding.qitemId)?.state).toBe("pending");
+    expect.soft(repo.listTransitions(finding.qitemId).slice(history.length)
+      .some((t) => t.transitionNote?.includes("informational update to a registered human requires no claim"))).toBe(false);
+    expect(repo.getById(finding.qitemId)?.body).toContain(finding.body);
+    expect(repo.listTransitions(finding.qitemId).slice(0, history.length)).toEqual(history);
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(stored);
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", humanIntent: "update", claimedAt: null });
+    expect(repo.deliveryOutcomeFor(row.qitemId)).toBeNull();
+    expect(posts).toHaveLength(0);
   });
 
   it("a release dispatched but never posted whose job is gone is orphaned and found, not left waiting for transport", async () => {

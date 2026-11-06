@@ -449,6 +449,9 @@ function deliveryResolutionEvidence(
   if (quiet && !quiet.unreadable && (quiet.state === "held" || quiet.state === "released")) {
     return `source held by quiet-release job for window ${quiet.windowId}`;
   }
+  if (kind === "unclaimed-obligation" && !quiet && deps.queueRepo.isRegisteredHumanUpdate(row) && !deps.queueRepo.deliveryOutcomeFor(qitemId)) {
+    return "informational update to a registered human requires no claim";
+  }
   if (kind !== "undelivered-human-notice" && row.lastNudgeResult === "retained:typing_guard") {
     return "source wake held by the seat typing guard";
   }
@@ -727,6 +730,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // hold with no live release job is stuck: nothing will ever release it.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
       if (quiet && quiet.state !== "orphaned") continue;
+      // An explicit informational update to a currently registered human is for reading, not an obligation to claim,
+      // unless its quiet-hours hold has been orphaned before release.
+      if (!quiet && deps.queueRepo.isRegisteredHumanUpdate(row)) continue;
       // The seat's typing guard or interruption level held its wake on purpose: it's held and readable at the seat, not
       // stuck. (A handed-off baton's one held notice is the wake ladder's.)
       if (row.lastNudgeResult === "retained:typing_guard") continue;
@@ -951,7 +957,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         if (sharedRow && isFindingRow(sharedRow) && sharedRow.summary?.startsWith("Stuck sweep: ")) {
           const currentKind = sharedRow.summary.match(/^Stuck sweep: ([a-z-]+) on /)?.[1];
           const pickupOrDeadline = (kind: string) => kind === "stalled-after-claim" || kind === "overdue-claim";
-          if (currentKind && currentKind !== c.kind && pickupOrDeadline(currentKind) && pickupOrDeadline(c.kind)) {
+          const humanUpdateNotice = currentKind === "unclaimed-obligation"
+            && c.kind === "undelivered-human-notice"
+            && deps.queueRepo.isRegisteredHumanUpdate(c.row);
+          if (currentKind && currentKind !== c.kind && ((pickupOrDeadline(currentKind) && pickupOrDeadline(c.kind)) || humanUpdateNotice)) {
             const marker = "\n\n--- Original finding (historical) ---\n";
             const original = sharedRow.body.includes(marker) ? sharedRow.body.split(marker, 2)[1]! : sharedRow.body;
             const body = evidenceBody(deps.db, c) + marker + original;
