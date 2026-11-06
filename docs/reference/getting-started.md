@@ -270,6 +270,17 @@ opt in with
 `rig config set terminal.inherit_tmux_environment true`. Setup points out this option
 when it detects custom tmux configuration; it never enables it automatically. The setting
 applies to future launches and successors, not running agents or your personal tmux server.
+
+Managed Codex seats run tool commands in a non-login shell: OpenRig passes Codex
+`-c allow_login_shell=false`. Tool commands inherit the environment their pane's shell set up,
+OpenRig's command folder included, so plain `rig` works however OpenRig was installed.
+Inherited setup isn't re-run for each command. Setup that lives only in login or rc files, such as
+lines in `~/.bashrc` that your login file doesn't source, or a tmux `default-command` that doesn't
+start a login shell, may be missing from tool commands, and so may shell functions and aliases.
+To defer to Codex's own setting instead, run `rig config set launch.codex_login_shell true`. That
+omits OpenRig's override rather than forcing login shells, and a login file that sets `PATH`
+outright can then hide `rig`. It applies at each seat's next launch; a restart in place keeps
+the running choice.
 If the scoped environment cannot be prepared, launch keeps its previous environment and
 reports a warning in fresh launch results and the daemon log. For handovers, check
 that log for this warning. This is not a promise that shell startup cannot add or override values.
