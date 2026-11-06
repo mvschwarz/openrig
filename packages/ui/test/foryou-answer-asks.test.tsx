@@ -856,6 +856,33 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     expect(directSettled.textContent).not.toContain("Already answered");
     cleanup();
 
+    // A typed reply ending in "." does not produce a double period at the end of "Recorded: ...".
+    const typedPunctDone = makeQueueItem({
+      qitemId: "q-done-typed-punct",
+      state: "done",
+      closureReason: "no-follow-on",
+      closureTarget: "no-follow-on",
+      closingTransition: {
+        actorSession: "human@host",
+        closureReason: "no-follow-on",
+        closureTarget: "no-follow-on",
+        state: "done",
+      },
+      humanAnswers: { channel: { kind: "typed-reply", text: "Stable after the Friday window." } },
+    });
+    const typedPunctView = renderWithQuery(
+      <FeedCard
+        card={makeQuestionCard({ id: "queue-attention-q-done-typed-punct" }, { qitemId: "q-done-typed-punct" })}
+        queueItem={typedPunctDone}
+      />,
+    );
+    const typedPunctSettled = typedPunctView.getByTestId("feed-card-answer-settled-queue-attention-q-done-typed-punct");
+    expect(typedPunctSettled.textContent).toContain(
+      "This request is done now by human@host. Recorded: Which channel ships first?: Stable after the Friday window.",
+    );
+    expect(typedPunctSettled.textContent).not.toContain("window..");
+    cleanup();
+
     // Negative check: an unanswered ask closed with an ordinary note starting "reply from ..." must NOT say
     // "Already answered", and instead renders the plain settled state ("This request is done now...").
     const ordinaryNoteDone = makeQueueItem({

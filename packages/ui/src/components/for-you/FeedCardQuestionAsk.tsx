@@ -164,7 +164,8 @@ function settledElsewhereHeadline(
     actor ? `by ${actor}` : null,
     target && target !== "no-follow-on" ? (label === "handed off" || label === "routed" ? `to ${target}` : `(${target})`) : null,
   ].filter(Boolean);
-  const recorded = pairs.length > 0 ? ` Recorded: ${pairs.map((p) => `${p.question}: ${p.answerText}`).join("; ")}.` : "";
+  const joined = pairs.map((p) => `${p.question}: ${p.answerText}`).join("; ");
+  const recorded = pairs.length > 0 ? ` Recorded: ${joined}${/[.!?]$/.test(joined) ? "" : "."}` : "";
   return `This request is ${label} now${parts.length ? ` ${parts.join(" ")}` : ""}.${recorded}`;
 }
 
