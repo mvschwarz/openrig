@@ -30,7 +30,7 @@ import { resolveOperatorSeat, resolveRecoveryAgentSeat, resolveSessionNodeId } f
 import { nodeExecutorStoppedReason } from "./node-inventory.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import type Database from "better-sqlite3";
-import { deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
+import { hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
@@ -189,15 +189,11 @@ export interface StuckSweepDeps {
   custodyWindowHours?: number;
   now?: Date;
   log?: (line: string) => void;
-  /** Is this host id (or observed self-id) present in the operator's hosts registry?
-   *  One of TWO conjunct conditions for the proof-at-write disposition — the other is
-   *  that the successor id recomputes through `deriveCrossHostSuccessorId` from the
-   *  row's own fields, because the cross-host close (routes/queue.ts) creates the
-   *  successor on that host FIRST and records the derived `<id>@<host>` only after that
-   *  create succeeded, while the generic update path can store any string. Registry
-   *  membership alone never suppresses. Injectable for tests; default reads the local
-   *  hosts.yaml once per sweep pass, and an unavailable registry degrades honestly to
-   *  verification-required (more indeterminate findings, never a false verdict). */
+  /** Is the explicitly named successor host in the operator's registry? A known-host
+   *  claim stays unverified on the row's handoffAdvisory instead of creating a local
+   *  recovery obligation. This is context, not proof of remote transfer or pickup.
+   *  Default reads hosts.yaml once per pass; unknown/unreadable hosts still need
+   *  verification. Injectable for tests. */
   isRegisteredHost?: (hostId: string) => boolean;
   /** How long a ladder marker suppresses re-reporting, in minutes. Default: half an hour,
    *  or two of the owning ladder's own retry intervals, whichever is longer. Injectable for
@@ -260,7 +256,7 @@ function custodyVerifiedTargets(db: Database.Database, qitemId: string): Set<str
   return verified;
 }
 
-/** Default registry view for the proof-at-write arm: the operator's hosts.yaml, read
+/** Default registry view for named successor hosts: the operator's hosts.yaml, read
  *  lazily once per sweep pass. Registry unavailable → NO host is registered → every
  *  host-qualified target stays verification-required (honest degradation, logged once). */
 function defaultIsRegisteredHost(log: (line: string) => void): (hostId: string) => boolean {
@@ -758,13 +754,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // qitems or seat-address targets (closure_reason = 'handed_off_to'). A local miss is
     // never proof of absence: the successor may live in another registered host's database.
     // Comma fan-out is checked member-by-member and only unresolved members are reported.
-    // Three dispositions satisfy a member without a local hit / check:
-    // (1) proof-at-write — a REGISTERED host qualifier whose successor id RECOMPUTES
-    // from this row's own (qitem_id, handed_off_to, host) through the same deterministic
-    // derivation the cross-host close uses. The close path records that key only AFTER
-    // its forwarded successor-create succeeded, and the generic update path (which
-    // accepts arbitrary closure targets) cannot accidentally synthesize the sha256-derived
-    // id — registered-host SYNTAX alone is never trusted;
+    // Three dispositions avoid a local recovery obligation:
+    // (1) an explicit REGISTERED host qualifier names another store. A generic close
+    // remains an unverified claim in handoffAdvisory; no remote lookup or acceptance
+    // is inferred. The closer can use the existing qitem-id@host closureTarget form;
     // (2) linked local successor for seat targets — a row in the local store whose
     // destination matches the target seat and carries this source row's lineage (either
     // handed_off_from or chain_of_record); and
@@ -830,12 +823,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           const at = target.indexOf("@");
           if (at !== -1) {
             const hostId = target.slice(at + 1);
-            const successorId = target.slice(0, at);
-            return !(
-              isRegisteredHost(hostId) &&
-              row.handedOffTo !== null &&
-              successorId === deriveCrossHostSuccessorId(row.qitemId, row.handedOffTo, hostId)
-            );
+            return !isRegisteredHost(hostId);
           }
           if (target === row.qitemId) return true;
           return !deps.queueRepo.getById(target);
