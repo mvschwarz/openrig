@@ -3,11 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2 } from "lucide-react";
 
 import type { QueueItemDetail } from "../../hooks/useSlices.js";
-import {
-  retainAttentionItemInSession,
-  type AttentionData,
-  type AttentionQueueItem,
-} from "../../hooks/useAttentionItems.js";
+import { retainAttentionItemInSession, type AttentionData, type AttentionQueueItem } from "../../hooks/useAttentionItems.js";
 import {
   useMissionControlAction,
   type MissionControlActionInput,
@@ -40,29 +36,20 @@ const ownAnswer = (answers: HumanAnswersRecord | null | undefined, id: string) =
 
 function generateOperationId(): string {
   const c = globalThis.crypto;
-  if (c && typeof c.randomUUID === "function") return c.randomUUID();
-  if (c && typeof c.getRandomValues === "function") {
-    const b = new Uint8Array(16);
-    c.getRandomValues(b);
-    b[6] = (b[6]! & 0x0f) | 0x40;
-    b[8] = (b[8]! & 0x3f) | 0x80;
-    const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
-  }
-  return `op-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  if (typeof c.randomUUID === "function") return c.randomUUID();
+  const b = new Uint8Array(16);
+  c.getRandomValues(b);
+  b[6] = (b[6]! & 0x0f) | 0x40;
+  b[8] = (b[8]! & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
 export function normalizeHumanQuestions(raw: unknown): HumanQuestionItem[] {
   if (!Array.isArray(raw) || raw.length === 0) return [];
   const out: HumanQuestionItem[] = [];
   for (const entry of raw) {
-    if (
-      !isRecord(entry) ||
-      typeof entry.id !== "string" ||
-      typeof entry.question !== "string" ||
-      !Array.isArray(entry.options) ||
-      entry.options.length === 0
-    ) {
+    if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.question !== "string" || !Array.isArray(entry.options) || entry.options.length === 0) {
       return [];
     }
     const options: HumanQuestionOptionItem[] = [];
@@ -99,36 +86,26 @@ export function formatRecordedAnswers(
   });
 }
 
+const normToken = (s?: string | null) =>
+  (s ?? "").toLowerCase().replace("cancelled", "canceled").replace("handed_off", "handed-off");
 const DONE_STATES = new Set(["done", "closed", "completed"]);
-const TERMINAL_STATES = new Set([
-  "done",
-  "closed",
-  "completed",
-  "canceled",
-  "cancelled",
-  "denied",
-  "expired",
-  "handed-off",
-  "handed_off",
-  "routed",
-]);
-const NON_ANSWER_REASONS = new Set([
-  "denied",
-  "canceled",
-  "cancelled",
-  "expired",
-  "handed_off_to",
-  "routed",
-]);
+const TERMINAL_STATES = new Set(["done", "closed", "completed", "canceled", "denied", "expired", "handed-off", "routed"]);
+const NON_ANSWER_REASONS = new Set(["denied", "canceled", "expired", "handed-off-to", "handed-off", "routed"]);
 const STATE_LABELS: Record<string, string> = {
   denied: "denied",
   canceled: "dropped",
-  cancelled: "dropped",
-  handed_off_to: "handed off",
+  "handed-off-to": "handed off",
   "handed-off": "handed off",
   routed: "routed",
   expired: "expired",
 };
+const isAnsweredClose = (state: string, reason?: string | null) =>
+  DONE_STATES.has(state) && (!reason || !NON_ANSWER_REASONS.has(normToken(reason).replace("_", "-")));
+
+const BTN_BASE_CLASS =
+  "min-h-[44px] px-3 py-2 border font-mono text-[10px] uppercase tracking-wider break-words whitespace-normal disabled:opacity-50";
+const ACTION_BTN_CLASS =
+  "w-full min-[360px]:w-auto min-h-[44px] px-3 py-1 font-mono text-[10px] uppercase disabled:opacity-50";
 
 interface SavedOutcome {
   outcome: "recorded" | "answered";
@@ -140,7 +117,6 @@ interface SavedOutcome {
 
 interface ActionErrorSummary {
   code?: string;
-  originCode?: string;
   message: string;
   source: "option" | "words" | "resend";
   unknown?: boolean;
@@ -159,7 +135,6 @@ interface SessionAskSnapshot {
 }
 
 const sessionAskSnapshots = new Map<string, SessionAskSnapshot>();
-
 export function clearQuestionAskSessionSnapshots(): void {
   sessionAskSnapshots.clear();
 }
@@ -170,13 +145,13 @@ function settledElsewhereHeadline(
   fallbackState?: string | null,
 ): string {
   const pairs = formatRecordedAnswers(questions, normalizeHumanAnswers(item?.humanAnswers));
-  const state = (item?.state ?? item?.closingTransition?.state ?? item?.closingTransition?.toState ?? fallbackState ?? "closed").toLowerCase();
-  const reason = item?.closureReason ?? item?.closingTransition?.closureReason ?? item?.closingTransition?.reason ?? null;
-  const isAnswered = DONE_STATES.has(state) && (!reason || !NON_ANSWER_REASONS.has(reason));
-  if (isAnswered && pairs.length > 0) {
-    return `Already answered. Recorded: ${pairs.map((p) => `${p.question}: ${p.answerText}`).join("; ")}.`;
+  const state = normToken(item?.state ?? item?.closingTransition?.state ?? item?.closingTransition?.toState ?? fallbackState ?? "closed");
+  const rawReason = item?.closureReason ?? item?.closingTransition?.closureReason ?? item?.closingTransition?.reason ?? null;
+  const reason = rawReason ? normToken(rawReason).replace("_", "-") : null;
+  if (isAnsweredClose(state, reason)) {
+    if (pairs.length > 0) return `Already answered. Recorded: ${pairs.map((p) => `${p.question}: ${p.answerText}`).join("; ")}.`;
+    if (rawReason === "direct_human_reply") return "Already answered.";
   }
-  if (isAnswered && reason === "direct_human_reply") return "Already answered.";
   const label = (reason && STATE_LABELS[reason]) ?? STATE_LABELS[state] ?? state;
   const actor = item?.closingTransition?.actorSession;
   const target = item?.handedOffTo ?? item?.closureTarget ?? item?.closingTransition?.closureTarget;
@@ -212,53 +187,53 @@ export function FeedCardQuestionAsk({
   const mutation = useMissionControlAction();
 
   const propRev = queueItem?.decisionRevision ?? undefined;
-  const propStateLower = queueItem?.state?.toLowerCase();
+  const propStateLower = normToken(queueItem?.state);
   const propIsTerminal = Boolean(propStateLower && TERMINAL_STATES.has(propStateLower));
   const rawCached = sessionAskSnapshots.get(qitemId);
+  const cachedSettledTerminal = Boolean(
+    rawCached?.settled?.refreshedItem?.state && TERMINAL_STATES.has(normToken(rawCached.settled.refreshedItem.state)),
+  );
   const isCachedStale = Boolean(
     rawCached &&
       ((propRev && propRev !== rawCached.revision && propRev !== rawCached.queueItemRevisionAtSave) ||
-        (rawCached.settled && propStateLower && !propIsTerminal && (!propRev || propRev !== rawCached.revision))),
+        (rawCached.settled &&
+          propStateLower &&
+          !propIsTerminal &&
+          (cachedSettledTerminal || !propRev || (propRev !== rawCached.revision && propRev !== rawCached.queueItemRevisionAtSave)))),
   );
-  if (isCachedStale) {
-    sessionAskSnapshots.delete(qitemId);
-  }
+  if (isCachedStale) sessionAskSnapshots.delete(qitemId);
   const cached = isCachedStale ? undefined : rawCached;
 
   const [localAnswers, setLocalAnswers] = useState<HumanAnswersRecord>(() => cached?.answers ?? {});
-  const [localRevision, setLocalRevision] = useState<string | undefined>(() => {
-    if (cached?.revision) {
-      return propRev && propRev !== cached.queueItemRevisionAtSave ? propRev : cached.revision;
-    }
-    return propRev;
-  });
+  const [localRevision, setLocalRevision] = useState<string | undefined>(() =>
+    cached?.revision ? (propRev && propRev !== cached.queueItemRevisionAtSave ? propRev : cached.revision) : propRev,
+  );
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
   const [ownWordsText, setOwnWordsText] = useState("");
   const [lastOutcome, setLastOutcome] = useState<SavedOutcome | null>(() => cached?.lastOutcome ?? null);
   const [actionError, setActionError] = useState<ActionErrorSummary | null>(() => cached?.settled?.error ?? null);
+  const [revisionLoadFailed, setRevisionLoadFailed] = useState(false);
   const [settledState, setSettledState] = useState<{
     refreshing: boolean;
     refreshedItem: QueueItemDetail | null;
     fallbackState?: string | null;
-  } | null>(() =>
-    cached?.settled
-      ? { refreshing: false, refreshedItem: cached.settled.refreshedItem, fallbackState: cached.settled.fallbackState }
-      : null,
-  );
+  } | null>(() => (cached?.settled ? { refreshing: false, refreshedItem: cached.settled.refreshedItem, fallbackState: cached.settled.fallbackState } : null));
 
   const prevPropRevRef = useRef(propRev);
   const prevPropStateRef = useRef(propStateLower);
   useEffect(() => {
-    const revChanged = propRev !== prevPropRevRef.current;
-    const stateChanged = propStateLower !== prevPropStateRef.current;
-    if (!revChanged && !stateChanged) return;
+    if (propRev === prevPropRevRef.current && propStateLower === prevPropStateRef.current) return;
+    const prevWasTerminal = Boolean(prevPropStateRef.current && TERMINAL_STATES.has(prevPropStateRef.current));
     prevPropRevRef.current = propRev;
     prevPropStateRef.current = propStateLower;
 
     const currentSnap = sessionAskSnapshots.get(qitemId);
-    const matchesSaved =
-      currentSnap && (propRev === currentSnap.revision || propRev === currentSnap.queueItemRevisionAtSave);
-    const reopenedFromSettled = Boolean((settledState || currentSnap?.settled) && propStateLower && !propIsTerminal);
+    const matchesSaved = Boolean(
+      currentSnap && propRev && (propRev === currentSnap.revision || propRev === currentSnap.queueItemRevisionAtSave),
+    );
+    const reopenedFromSettled = Boolean(
+      (settledState || currentSnap?.settled) && propStateLower && !propIsTerminal && (prevWasTerminal || !matchesSaved),
+    );
 
     if (reopenedFromSettled || (propRev && !matchesSaved && propRev !== localRevision)) {
       sessionAskSnapshots.delete(qitemId);
@@ -274,38 +249,17 @@ export function FeedCardQuestionAsk({
 
   const saveSnapshot = (patch: Partial<SessionAskSnapshot>) => {
     const prev = sessionAskSnapshots.get(qitemId) ?? { answers: localAnswers, revision: localRevision };
-    sessionAskSnapshots.set(qitemId, {
-      ...prev,
-      queueItemRevisionAtSave: queueItem?.decisionRevision ?? null,
-      ...patch,
-    });
+    sessionAskSnapshots.set(qitemId, { ...prev, queueItemRevisionAtSave: queueItem?.decisionRevision ?? null, ...patch });
   };
 
   const findAttentionItemToRetain = (): AttentionQueueItem | null => {
-    const queries = queryClient.getQueriesData<AttentionData>({ queryKey: ["attention-items"] });
-    for (const [, data] of queries) {
+    for (const [, data] of queryClient.getQueriesData<AttentionData>({ queryKey: ["attention-items"] })) {
       const found = data?.items?.find((i) => i.qitemId === qitemId && (!i.hostId || i.hostId === "local"));
       if (found) return found;
     }
-    if (!queueItem) return null;
-    return {
-      qitemId: queueItem.qitemId,
-      tsCreated: queueItem.tsCreated,
-      tsUpdated: queueItem.tsUpdated,
-      sourceSession: queueItem.sourceSession,
-      destinationSession: queueItem.destinationSession,
-      state: queueItem.state,
-      priority: queueItem.priority,
-      tier: queueItem.tier,
-      tags: queueItem.tags,
-      blockedOn: queueItem.blockedOn ?? null,
-      handedOffTo: queueItem.handedOffTo ?? null,
-      handedOffFrom: queueItem.handedOffFrom ?? null,
-      body: queueItem.body,
-      summary: queueItem.summary ?? null,
-      humanQuestions: queueItem.humanQuestions,
-      humanAnswers: queueItem.humanAnswers ?? null,
-    };
+    return queueItem
+      ? ({ ...queueItem, blockedOn: queueItem.blockedOn ?? null, handedOffTo: queueItem.handedOffTo ?? null, handedOffFrom: queueItem.handedOffFrom ?? null } as AttentionQueueItem)
+      : null;
   };
 
   const operationIdsRef = useRef<Map<string, string>>(new Map());
@@ -317,26 +271,34 @@ export function FeedCardQuestionAsk({
     return next;
   };
 
-  const mergedAnswers: HumanAnswersRecord = {
-    ...initialAnswers,
-    ...normalizeHumanAnswers(queueItem?.humanAnswers),
-    ...localAnswers,
-  };
+  const mergedAnswers: HumanAnswersRecord = { ...initialAnswers, ...normalizeHumanAnswers(queueItem?.humanAnswers), ...localAnswers };
   const effectiveRevision = localRevision ?? propRev;
   const hasRevision = typeof effectiveRevision === "string" && effectiveRevision.length > 0;
   const totalQuestions = questions.length;
   const answeredCount = questions.filter((q) => ownAnswer(mergedAnswers, q.id) !== undefined).length;
   const allAnswered = totalQuestions > 0 && answeredCount === totalQuestions;
   const askerLabel = askerSession ?? "the asker";
-  const requestActorSession =
-    recipientSession && isHumanSeatSessionRef(recipientSession) ? recipientSession : actorSession;
-  const identityText = `Answering as human@host (unattributed)${
-    recipientSession && recipientSession !== "human@host" ? ` on ${recipientSession}'s ask` : ""
-  }`;
+  const requestActorSession = recipientSession && isHumanSeatSessionRef(recipientSession) ? recipientSession : actorSession;
+  const identityText = `Answering as human@host (unattributed)${recipientSession && recipientSession !== "human@host" ? ` on ${recipientSession}'s ask` : ""}`;
 
-  async function fetchCurrentQueueItem(): Promise<QueueItemDetail | null> {
+  async function refreshQueueRow(opts?: {
+    code?: string;
+    details?: Record<string, unknown>;
+    errSummary?: ActionErrorSummary | null;
+    fromUnknown?: boolean;
+    fromLoadRetry?: boolean;
+  }) {
+    const fallbackState = typeof opts?.details?.state === "string" ? opts.details.state : null;
+    const isTerminalOrigin = opts?.code === "qitem_already_terminal" || opts?.code === "decision_revision_changed";
+    if (isTerminalOrigin || opts?.fromUnknown || opts?.fromLoadRetry) {
+      setSettledState((prev) => ({ refreshing: true, refreshedItem: prev?.refreshedItem ?? queueItem ?? null, fallbackState }));
+    }
+    void queryClient.invalidateQueries({ queryKey: ["attention-items"] });
+    void queryClient.invalidateQueries({ queryKey: ["mission-control", "audit"] });
+
+    let refreshed: QueueItemDetail | null = null;
     try {
-      return await queryClient.fetchQuery({
+      refreshed = await queryClient.fetchQuery({
         queryKey: ["queue", "item", qitemId],
         queryFn: async () => {
           const res = await fetch(`/api/queue/${encodeURIComponent(qitemId)}`);
@@ -346,82 +308,47 @@ export function FeedCardQuestionAsk({
         staleTime: 0,
       });
     } catch {
-      return null;
+      refreshed = null;
     }
-  }
 
-  async function refreshFromUnknown() {
-    setSettledState((prev) => ({ refreshing: true, refreshedItem: prev?.refreshedItem ?? queueItem ?? null }));
-    const refreshed = await fetchCurrentQueueItem();
-    void queryClient.invalidateQueries({ queryKey: ["attention-items"] });
-    if (!refreshed) {
-      setSettledState(null);
-      return;
+    if (opts?.fromLoadRetry) {
+      setRevisionLoadFailed(!refreshed?.decisionRevision);
     }
-    setActionError(null);
-    const nextRev = refreshed.decisionRevision ?? undefined;
-    const nextAnswers = normalizeHumanAnswers(refreshed.humanAnswers);
-    setLocalRevision(nextRev);
-    setLocalAnswers(nextAnswers);
-    const refreshedState = refreshed.state?.toLowerCase();
-    if (refreshedState && TERMINAL_STATES.has(refreshedState)) {
-      setSettledState({ refreshing: false, refreshedItem: refreshed, fallbackState: refreshedState });
-      saveSnapshot({
-        answers: nextAnswers,
-        revision: nextRev,
-        settled: { refreshedItem: refreshed, fallbackState: refreshedState, error: null },
-      });
-    } else {
-      setSettledState(null);
-      saveSnapshot({ answers: nextAnswers, revision: nextRev, settled: null });
+
+    if (opts?.fromUnknown) {
+      if (!refreshed) {
+        setSettledState(null);
+        setActionError((prev) =>
+          prev ? { ...prev, message: "Could not refresh request state. Check connection and try again." } : prev,
+        );
+        return;
+      }
+      setActionError(null);
     }
-  }
 
-  async function refreshQueueRow(
-    err: Error & { code?: string; details?: unknown },
-    originCode: string,
-    errSummary?: ActionErrorSummary | null,
-  ) {
-    const details = isRecord(err.details) ? err.details : undefined;
-    const fallbackState = typeof details?.state === "string" ? details.state : null;
-    const isTerminalOrigin = originCode === "qitem_already_terminal" || originCode === "decision_revision_changed";
-    if (isTerminalOrigin) {
-      setSettledState({ refreshing: true, refreshedItem: queueItem ?? null, fallbackState });
-    }
-    void queryClient.invalidateQueries({ queryKey: ["attention-items"] });
-    void queryClient.invalidateQueries({ queryKey: ["mission-control", "audit"] });
-
-    const refreshed = await fetchCurrentQueueItem();
-
-    const nextRev =
-      refreshed?.decisionRevision ?? (typeof details?.currentRevision === "string" ? details.currentRevision : undefined);
+    const nextRev = refreshed?.decisionRevision ?? (typeof opts?.details?.currentRevision === "string" ? opts.details.currentRevision : undefined);
     if (nextRev) {
+      setRevisionLoadFailed(false);
       setLocalRevision(nextRev);
       saveSnapshot({ revision: nextRev });
     }
-    const nextAnswers = refreshed?.humanAnswers ?? details?.humanAnswers;
+    const nextAnswers = refreshed?.humanAnswers ?? opts?.details?.humanAnswers;
     if (nextAnswers) {
       const normalized = normalizeHumanAnswers(nextAnswers);
       setLocalAnswers(normalized);
       saveSnapshot({ answers: normalized });
     }
 
-    if (!isTerminalOrigin) return;
+    if (!isTerminalOrigin && !opts?.fromUnknown && !opts?.fromLoadRetry) return;
     const effectiveItem = refreshed ?? queueItem ?? null;
-    const effectiveState = (refreshed?.state ?? fallbackState ?? queueItem?.state ?? "pending").toLowerCase();
-    if (
-      originCode === "decision_revision_changed" &&
-      (effectiveState === "pending" || effectiveState === "in-progress")
-    ) {
+    const effectiveState = normToken(refreshed?.state ?? fallbackState ?? queueItem?.state ?? "pending");
+    if (!TERMINAL_STATES.has(effectiveState)) {
       setSettledState(null);
-      saveSnapshot({ settled: null });
+      saveSnapshot({ revision: nextRev ?? localRevision, settled: null });
       return;
     }
     setSettledState({ refreshing: false, refreshedItem: effectiveItem, fallbackState });
-    saveSnapshot({
-      revision: nextRev ?? localRevision,
-      settled: { refreshedItem: effectiveItem, fallbackState, error: errSummary ?? null },
-    });
+    saveSnapshot({ revision: nextRev ?? localRevision, settled: { refreshedItem: effectiveItem, fallbackState, error: opts?.errSummary ?? null } });
   }
 
   function submitAnswer(
@@ -437,11 +364,17 @@ export function FeedCardQuestionAsk({
       retainAttentionItemInSession(qitemId, findAttentionItemToRetain());
       operationId = getOperationId(signature);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setActionError({ message: msg, source, unknown: false });
+      setActionError({ message: err instanceof Error ? err.message : String(err), source, unknown: false });
       return;
     }
     setActionError(null);
+    const applyOptimistic = () => {
+      if (!optimisticUpdate) return mergedAnswers;
+      const next = optimisticUpdate(localAnswers);
+      setLocalAnswers(next);
+      return next;
+    };
+
     mutation.mutate(
       {
         verb: "answer",
@@ -456,40 +389,48 @@ export function FeedCardQuestionAsk({
         onSuccess: (result: MissionControlActionResult) => {
           operationIdsRef.current.delete(signature);
           setActionError(null);
-          const nextRev = result.decisionRevision ?? localRevision;
-          if (result.decisionRevision) {
-            setLocalRevision(result.decisionRevision);
-            if (queueItem) {
-              queryClient.setQueryData<QueueItemDetail | null>(["queue", "item", qitemId], (old) =>
-                old ? { ...old, decisionRevision: result.decisionRevision } : old,
-              );
-            }
-          }
           const closed = isRecord(result.closedQitem) ? result.closedQitem : null;
+          const closedStateRaw = typeof closed?.state === "string" ? closed.state : undefined;
+          const closedState = closedStateRaw ? normToken(closedStateRaw) : undefined;
+          const closedReason = typeof closed?.closureReason === "string" ? closed.closureReason : null;
+          const closedTarget = typeof closed?.closureTarget === "string" ? closed.closureTarget : undefined;
+          const nextRev =
+            result.decisionRevision ??
+            (typeof closed?.decisionRevision === "string" ? closed.decisionRevision : undefined) ??
+            localRevision;
+          if (nextRev) setLocalRevision(nextRev);
+          if (queueItem || queryClient.getQueryData(["queue", "item", qitemId])) {
+            queryClient.setQueryData<QueueItemDetail | null>(["queue", "item", qitemId], (old) =>
+              old
+                ? {
+                    ...old,
+                    ...(nextRev ? { decisionRevision: nextRev } : {}),
+                    ...(closedStateRaw ? { state: closedStateRaw } : {}),
+                    ...(closedReason !== null ? { closureReason: closedReason } : {}),
+                    ...(closedTarget !== undefined ? { closureTarget: closedTarget } : {}),
+                    ...(closed?.humanAnswers ? { humanAnswers: closed.humanAnswers as Record<string, unknown> } : {}),
+                  }
+                : old,
+            );
+          }
           let updatedAnswers = mergedAnswers;
           if (closed?.humanAnswers) {
             updatedAnswers = normalizeHumanAnswers(closed.humanAnswers);
             setLocalAnswers(updatedAnswers);
-          } else if (optimisticUpdate) {
-            updatedAnswers = optimisticUpdate(localAnswers);
-            setLocalAnswers(updatedAnswers);
+          } else {
+            updatedAnswers = applyOptimistic();
           }
-          const closedState = typeof closed?.state === "string" ? closed.state.toLowerCase() : undefined;
-          const closedReason = typeof closed?.closureReason === "string" ? closed.closureReason : null;
-          if (!result.answer && closedState && TERMINAL_STATES.has(closedState)) {
-            const wasAnswered = DONE_STATES.has(closedState) && (!closedReason || !NON_ANSWER_REASONS.has(closedReason));
-            if (!wasAnswered) {
-              const closedDetail = closed as unknown as QueueItemDetail;
-              setLastOutcome(null);
-              setSettledState({ refreshing: false, refreshedItem: closedDetail, fallbackState: closedState });
-              saveSnapshot({
-                answers: updatedAnswers,
-                revision: nextRev,
-                lastOutcome: null,
-                settled: { refreshedItem: closedDetail, fallbackState: closedState, error: null },
-              });
-              return;
-            }
+          if (!result.answer && closedState && TERMINAL_STATES.has(closedState) && !isAnsweredClose(closedState, closedReason)) {
+            const closedDetail = closed as unknown as QueueItemDetail;
+            setLastOutcome(null);
+            setSettledState({ refreshing: false, refreshedItem: closedDetail, fallbackState: closedState });
+            saveSnapshot({
+              answers: updatedAnswers,
+              revision: nextRev,
+              lastOutcome: null,
+              settled: { refreshedItem: closedDetail, fallbackState: closedState, error: null },
+            });
+            return;
           }
           const inferredOutcome: SavedOutcome =
             result.answer ??
@@ -512,59 +453,36 @@ export function FeedCardQuestionAsk({
         onError: (err: unknown) => {
           const typedErr = (err instanceof Error ? err : new Error(String(err))) as Error & {
             code?: string;
+            status?: number;
             details?: unknown;
           };
           const details = isRecord(typedErr.details) ? typedErr.details : undefined;
-          const originCode = typedErr.code;
-          const replyQitemId = typeof details?.replyQitemId === "string" ? details.replyQitemId : undefined;
+          const code = typedErr.code;
 
-          if (originCode === "answer_not_closed" && replyQitemId) {
-            let updatedAnswers = mergedAnswers;
-            if (optimisticUpdate) {
-              updatedAnswers = optimisticUpdate(localAnswers);
-              setLocalAnswers(updatedAnswers);
+          if (code === "answer_not_closed") {
+            if (typeof details?.replyQitemId === "string") {
+              const updatedAnswers = applyOptimistic();
+              const returnedOutcome: SavedOutcome = { outcome: "answered", unanswered: [], message: typedErr.message, notClosed: true, code };
+              setActionError(null);
+              setLastOutcome(returnedOutcome);
+              saveSnapshot({ answers: updatedAnswers, revision: localRevision, lastOutcome: returnedOutcome });
+              onDone?.();
+              void refreshQueueRow({ code, details });
+              return;
             }
-            const returnedOutcome: SavedOutcome = {
-              outcome: "answered",
-              unanswered: [],
-              message: typedErr.message,
-              notClosed: true,
-              code: originCode,
-            };
-            setActionError(null);
-            setLastOutcome(returnedOutcome);
-            saveSnapshot({
-              answers: updatedAnswers,
-              revision: localRevision,
-              lastOutcome: returnedOutcome,
-            });
-            onDone?.();
-            void refreshQueueRow(typedErr, originCode, null);
-            return;
+            if (source !== "words") {
+              const updatedAnswers = applyOptimistic();
+              const recordedOutcome: SavedOutcome = { outcome: "recorded", unanswered: [] };
+              setLastOutcome(recordedOutcome);
+              saveSnapshot({ answers: updatedAnswers, lastOutcome: recordedOutcome });
+            }
           }
 
-          const isUnknown = !details;
-          const errSummary: ActionErrorSummary = {
-            code: originCode,
-            originCode,
-            message: typedErr.message,
-            source,
-            unknown: isUnknown,
-          };
+          const unknown = !code || (typeof typedErr.status === "number" && typedErr.status >= 500);
+          const errSummary: ActionErrorSummary = { code, message: typedErr.message, source, unknown };
           setActionError(errSummary);
-          if (originCode === "answer_not_closed" && source !== "words") {
-            const next = optimisticUpdate ? optimisticUpdate(localAnswers) : localAnswers;
-            if (optimisticUpdate) setLocalAnswers(next);
-            const recordedOutcome: SavedOutcome = { outcome: "recorded", unanswered: [] };
-            setLastOutcome(recordedOutcome);
-            saveSnapshot({ answers: next, lastOutcome: recordedOutcome });
-          }
-          if (
-            originCode === "qitem_already_terminal" ||
-            originCode === "decision_revision_changed" ||
-            (originCode === "answer_not_closed" && source !== "words")
-          ) {
-            void refreshQueueRow(typedErr, originCode, errSummary);
+          if (code === "qitem_already_terminal" || code === "decision_revision_changed" || (code === "answer_not_closed" && source !== "words")) {
+            void refreshQueueRow({ code, details, errSummary });
           }
         },
       },
@@ -597,7 +515,7 @@ export function FeedCardQuestionAsk({
           <button
             type="button"
             data-testid={`feed-card-answer-refresh-${cardId}`}
-            onClick={() => void refreshFromUnknown()}
+            onClick={() => void refreshQueueRow({ fromUnknown: true })}
             className="mt-1 min-h-[36px] border border-on-error-container px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-on-error-container hover:opacity-80"
           >
             Refresh request state
@@ -614,9 +532,7 @@ export function FeedCardQuestionAsk({
         <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-on-surface">
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" strokeWidth={1.8} />
           <span>
-            {lastOutcome.notClosed
-              ? `Answered and returned to ${askerLabel}; this ask didn't close.`
-              : `Answered and sent to ${askerLabel}.`}
+            {lastOutcome.notClosed ? `Answered and returned to ${askerLabel}; this ask didn't close.` : `Answered and sent to ${askerLabel}.`}
           </span>
         </div>
         {lastOutcome.message ? (
@@ -643,24 +559,26 @@ export function FeedCardQuestionAsk({
     );
   }
 
-  const isQueueTerminal = Boolean(propStateLower && TERMINAL_STATES.has(propStateLower));
-  if ((settledState && !settledState.refreshing) || isQueueTerminal) {
-    const settledHeadline = settledElsewhereHeadline(
-      settledState?.refreshedItem ?? queueItem,
-      questions,
-      settledState?.fallbackState,
-    );
+  if ((settledState && !settledState.refreshing) || propIsTerminal) {
     return (
       <div data-testid={`feed-card-answer-settled-${cardId}`} className="w-full space-y-2 border border-outline-variant bg-surface-lowest/55 p-3">
         {identityHeader}
         <p data-testid={`feed-card-answer-settled-headline-${cardId}`} className="font-body text-[12px] font-medium leading-relaxed text-on-surface break-words">
-          {settledHeadline}
+          {settledElsewhereHeadline(settledState?.refreshedItem ?? queueItem, questions, settledState?.fallbackState)}
         </p>
         {renderErrorAlert()}
       </div>
     );
   }
 
+  const queryState = queryClient.getQueryState<QueueItemDetail | null>(["queue", "item", qitemId]);
+  const revisionUnavailable =
+    !hasRevision &&
+    !settledState?.refreshing &&
+    (revisionLoadFailed ||
+      (queueItem !== undefined && !queueItem.decisionRevision) ||
+      queryState?.status === "error" ||
+      (queryState?.status === "success" && !queryState.data?.decisionRevision));
   const controlsDisabled = mutation.isPending || Boolean(settledState?.refreshing) || !hasRevision;
   const statusLine = settledState?.refreshing
     ? "Refreshing request state..."
@@ -672,14 +590,16 @@ export function FeedCardQuestionAsk({
           ? `Recorded. ${answeredCount} of ${totalQuestions} answered. Not sent yet.`
           : answeredCount > 0
             ? `${answeredCount} of ${totalQuestions} answered. Not sent yet.`
-            : !hasRevision
-              ? "Loading request state..."
-              : totalQuestions === 1
-                ? `Your answer goes to ${askerLabel} when answered.`
-                : `Your answers go to ${askerLabel} when all ${totalQuestions} are answered.`;
+            : revisionUnavailable
+              ? "Could not load request state. Answer in the TUI (rig tui) or retry."
+              : !hasRevision
+                ? "Loading request state..."
+                : totalQuestions === 1
+                  ? `Your answer goes to ${askerLabel} when answered.`
+                  : `Your answers go to ${askerLabel} when all ${totalQuestions} are answered.`;
   const errorLeadIn = actionError?.unknown
     ? "Outcome unknown — couldn't confirm whether your answer went through."
-    : actionError?.originCode === "answer_not_closed" && actionError?.source !== "words"
+    : actionError?.code === "answer_not_closed" && actionError?.source !== "words"
       ? "Your choices are recorded."
       : actionError?.source === "words"
         ? "Not recorded or sent. Your text is still here."
@@ -723,7 +643,8 @@ export function FeedCardQuestionAsk({
                         )
                       }
                       className={cn(
-                        "w-full sm:w-auto min-h-[44px] px-3 py-2 border font-mono text-[10px] uppercase tracking-wider text-left sm:text-center break-words whitespace-normal transition-colors disabled:opacity-50",
+                        BTN_BASE_CLASS,
+                        "w-full sm:w-auto text-left sm:text-center transition-colors",
                         isSelected
                           ? "bg-primary text-on-primary border-primary"
                           : "bg-surface-lowest border-outline hover:bg-surface-high text-on-surface",
@@ -750,6 +671,16 @@ export function FeedCardQuestionAsk({
         <p role="status" aria-live="polite" data-testid={`feed-card-answer-status-${cardId}`} className="font-mono text-[10px] text-on-surface-variant break-words">
           {statusLine}
         </p>
+        {revisionUnavailable ? (
+          <button
+            type="button"
+            data-testid={`feed-card-ask-retry-load-${cardId}`}
+            onClick={() => void refreshQueueRow({ fromLoadRetry: true })}
+            className={cn(BTN_BASE_CLASS, "w-full sm:w-auto border-outline bg-surface-lowest text-on-surface hover:bg-surface-high")}
+          >
+            Retry loading request state
+          </button>
+        ) : null}
         {lastOutcome?.message ? (
           <p data-testid={`feed-card-answer-outcome-message-${cardId}`} className="font-body text-[11px] leading-relaxed text-on-surface break-words">
             {lastOutcome.message}
@@ -761,7 +692,7 @@ export function FeedCardQuestionAsk({
             data-testid={`feed-card-send-answers-${cardId}`}
             disabled={controlsDisabled}
             onClick={() => submitAnswer("resend", `resend:${effectiveRevision ?? "none"}`, {})}
-            className="w-full sm:w-auto min-h-[44px] px-3 py-2 border border-primary bg-primary text-on-primary font-mono text-[10px] uppercase tracking-wider break-words whitespace-normal hover:opacity-90 disabled:opacity-50"
+            className={cn(BTN_BASE_CLASS, "w-full sm:w-auto border-primary bg-primary text-on-primary hover:opacity-90")}
           >
             Send answers to {askerLabel}
           </button>
@@ -792,7 +723,7 @@ export function FeedCardQuestionAsk({
                 data-testid={`feed-card-own-words-cancel-${cardId}`}
                 disabled={controlsDisabled}
                 onClick={() => setOwnWordsOpen(false)}
-                className="w-full min-[360px]:w-auto min-h-[44px] px-3 py-1 font-mono text-[10px] uppercase border border-outline text-on-surface-variant hover:text-on-surface disabled:opacity-50"
+                className={cn(ACTION_BTN_CLASS, "border border-outline text-on-surface-variant hover:text-on-surface")}
               >
                 Cancel
               </button>
@@ -815,7 +746,7 @@ export function FeedCardQuestionAsk({
                     },
                   );
                 }}
-                className="w-full min-[360px]:w-auto min-h-[44px] px-3 py-1 font-mono text-[10px] uppercase bg-primary text-on-primary hover:opacity-90 disabled:opacity-50"
+                className={cn(ACTION_BTN_CLASS, "bg-primary text-on-primary hover:opacity-90")}
               >
                 {mutation.isPending ? "Sending..." : "Send"}
               </button>
@@ -828,7 +759,7 @@ export function FeedCardQuestionAsk({
               data-testid={`feed-card-own-words-toggle-${cardId}`}
               disabled={controlsDisabled}
               onClick={() => setOwnWordsOpen(true)}
-              className="w-full sm:w-auto min-h-[44px] border border-outline px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-on-surface hover:bg-surface-variant break-words whitespace-normal disabled:opacity-50"
+              className={cn(BTN_BASE_CLASS, "w-full sm:w-auto py-1.5 border-outline text-on-surface hover:bg-surface-variant")}
             >
               ✎ Answer in your own words
             </button>

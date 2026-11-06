@@ -108,8 +108,9 @@ async function postAction(input: MissionControlActionInput): Promise<MissionCont
         code = record.error;
       }
     }
-    const err = new Error(message) as Error & { code?: string; details?: unknown };
+    const err = new Error(message) as Error & { code?: string; status?: number; details?: unknown };
     if (code) err.code = code;
+    err.status = res.status;
     err.details = body;
     throw err;
   }

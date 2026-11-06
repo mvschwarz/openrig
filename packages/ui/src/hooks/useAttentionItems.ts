@@ -130,8 +130,10 @@ function mergeRetained(items: AttentionQueueItem[], limit: number | undefined, a
   const extra = [...retainedAttentionItems.values()].filter(
     (item) => !present.has(item.qitemId) && (aggregated || !item.hostId || item.hostId === "local"),
   );
-  const combined = extra.length ? [...items, ...extra] : items;
-  return limit !== undefined ? combined.slice(0, limit) : combined;
+  if (!extra.length) return limit !== undefined ? items.slice(0, limit) : items;
+  if (limit === undefined) return [...items, ...extra];
+  const keptExtra = extra.slice(-limit);
+  return [...items.slice(0, Math.max(0, limit - keptExtra.length)), ...keptExtra];
 }
 
 export function useAttentionItems(limit: number = 50, aggregated: boolean = false) {

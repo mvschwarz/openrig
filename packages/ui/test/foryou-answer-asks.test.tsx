@@ -15,7 +15,7 @@ import {
   type AttentionQueueItem,
 } from "../src/hooks/useAttentionItems.js";
 import type { FeedCard as FeedCardModel } from "../src/lib/feed-classifier.js";
-import type { QueueItemDetail } from "../src/hooks/useSlices.js";
+import { useQueueItemMap, type QueueItemDetail } from "../src/hooks/useSlices.js";
 import { attentionItemToFeedCard } from "../src/lib/attention-feed.js";
 
 vi.mock("@tanstack/react-router", () => ({
@@ -169,7 +169,10 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     const calls: Array<Record<string, unknown>> = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        if (String(url).includes("/api/queue/q-ask-1")) {
+          return jsonResponse(makeQueueItem({ decisionRevision: "rev-loaded-1" }));
+        }
         calls.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
         return jsonResponse({
           actionId: "a-1",
@@ -186,7 +189,8 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
       }),
     );
 
-    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} />);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const view = renderWithQuery(<FeedCard card={makeQuestionCard()} />, qc);
     const stableBtn = view.getByTestId("feed-card-option-channel-stable");
     const ownWordsToggle = view.getByTestId("feed-card-own-words-toggle-queue-attention-q-ask-1");
 
@@ -199,13 +203,20 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     fireEvent.click(stableBtn);
     expect(calls).toHaveLength(0);
 
+    // When queueItem loads without decisionRevision, offer TUI hint + retry instead of hanging on "Loading..."
     view.rerender(
-      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })}>
-        <FeedCard card={makeQuestionCard()} queueItem={makeQueueItem({ decisionRevision: "rev-loaded-1" })} />
+      <QueryClientProvider client={qc}>
+        <FeedCard card={makeQuestionCard()} queueItem={makeQueueItem({ decisionRevision: null })} />
       </QueryClientProvider>,
     );
+    expect(view.getByTestId("feed-card-answer-status-queue-attention-q-ask-1").textContent).toBe(
+      "Could not load request state. Answer in the TUI (rig tui) or retry.",
+    );
+    fireEvent.click(view.getByTestId("feed-card-ask-retry-load-queue-attention-q-ask-1"));
 
-    expect(view.getByTestId("feed-card-option-channel-stable").hasAttribute("disabled")).toBe(false);
+    await waitFor(() =>
+      expect(view.getByTestId("feed-card-option-channel-stable").hasAttribute("disabled")).toBe(false),
+    );
     fireEvent.click(view.getByTestId("feed-card-option-channel-stable"));
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0]!.expectedRevision).toBe("rev-loaded-1");
@@ -465,15 +476,23 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
     clearQuestionAskSessionSnapshots();
 
     // 3. When a response has no 'answer' and closedQitem is in a non-answered closed state (canceled),
-    //    render closed-without-an-answer ("This request is dropped now."), never "Answered and sent".
+    //    render closed-without-an-answer ("This request is dropped now."), never "Answered and sent",
+    //    and keep the settled panel intact when useQueueItemMap re-renders from the updated ["queue","item"] cache.
     mode = "closedWithoutAnswer";
-    const canceledView = renderWithQuery(<FeedCard card={makeQuestionCard()} queueItem={makeQueueItem()} />);
+    const canceledQc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    canceledQc.setQueryData(["queue", "item", "q-ask-1"], makeQueueItem());
+    function ReactiveQuestionCard() {
+      const map = useQueueItemMap(["q-ask-1"]);
+      return <FeedCard card={makeQuestionCard()} queueItem={map.itemsById.get("q-ask-1")} />;
+    }
+    const canceledView = renderWithQuery(<ReactiveQuestionCard />, canceledQc);
     fireEvent.click(canceledView.getByTestId("feed-card-option-channel-stable"));
     await waitFor(() => {
       const settled = canceledView.getByTestId("feed-card-answer-settled-queue-attention-q-ask-1");
       expect(settled.textContent).toContain("This request is dropped now.");
       expect(settled.textContent).not.toContain("Answered and sent");
     });
+    expect(canceledView.queryByTestId("feed-card-option-channel-stable")).toBeNull();
     cleanup();
     clearQuestionAskSessionSnapshots();
 
@@ -812,8 +831,10 @@ describe("For You — answering an ask's structured questions (#2407 / #2612)", 
 
     await waitFor(() => {
       const ids = result.current.data!.items.map((i) => i.qitemId);
-      // Capped at 50 items total (not 51)
+      // Capped at 50 items total (not 51), while keeping the retained answered ask q-1 visible
       expect(ids).toHaveLength(50);
+      expect(ids).toContain("q-1");
+      expect(ids).not.toContain("q-2");
     });
 
     // When server has fewer than 50 items (e.g. q-3..q-10), q-1 is retained and q-2 (unanswered) is not
