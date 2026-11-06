@@ -169,6 +169,7 @@ export class RigSpecCodec {
         if (m.claudeTokenRef) member["claude_token"] = { label: m.claudeTokenRef.label, file: m.claudeTokenRef.tokenFile };
         if (m.claudeMcp !== undefined) member["claude_mcp"] = m.claudeMcp;
         if (m.codexPermissions !== undefined) member["codex_permissions"] = m.codexPermissions;
+        if (m.launchWrapper !== undefined) member["launch_wrapper"] = [...m.launchWrapper];
         if (m.agentFile) member["agent_file"] = m.agentFile;
         if (m.appendSystemPromptFile) member["append_system_prompt_file"] = m.appendSystemPromptFile;
         if (m.pluginDirs?.length) member["plugin_dirs"] = m.pluginDirs;

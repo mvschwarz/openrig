@@ -5,6 +5,7 @@ import { nodeStartupGuidanceFileSchema } from "./migrations/146_node_startup_gui
 import { managedBlockWritesSchema } from "./migrations/147_managed_block_writes.js";
 import { outboxDispatchedIndexSchema } from "./migrations/148_outbox_dispatched_index.js";
 import { streamIntakeCursorSchema } from "./migrations/149_stream_intake_cursor.js";
+import { nodeLaunchWrapperSchema } from "./migrations/150_node_launch_wrapper.js";
 import { nodeAccountHomeSchema } from "./migrations/141_node_account_home.js";
 import { escalationTargetRefsSchema } from "./migrations/126_escalation_target_refs.js";
 import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_readings.js";
@@ -301,4 +302,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   managedBlockWritesSchema,
   outboxDispatchedIndexSchema,
   streamIntakeCursorSchema,
+  nodeLaunchWrapperSchema,
 ];

@@ -753,3 +753,128 @@ describe("a Claude member's own plugin channels (#2044)", () => {
     expect(result.advisories ?? []).toEqual([]);
   });
 });
+
+describe("member launch_wrapper (#2328)", () => {
+  const withMember = (runtime: string, fields: Record<string, unknown>) => ({
+    version: "0.2",
+    name: "wrapper-rig",
+    pods: [
+      {
+        id: "dev",
+        label: "Dev",
+        members: [
+          {
+            id: "worker",
+            agent_ref: "local:agents/worker",
+            profile: "default",
+            runtime,
+            cwd: ".",
+            ...fields,
+          },
+        ],
+        edges: [],
+      },
+    ],
+    edges: [],
+  });
+
+  it.each(["pi", "codex"])("accepts literal argv with bare or absolute executable, empty non-executable args, spaces and metacharacters on %s", (runtime) => {
+    const argv = ["mtn", "sandbox", "exec", "", "--flag='quoted $VAR ; | &'", "--"];
+    const spec = withMember(runtime, { launch_wrapper: argv });
+    expect(RigSpecSchema.validate(spec)).toEqual({ valid: true, errors: [] });
+    const normalized = RigSpecSchema.normalize(spec);
+    expect(normalized.pods[0]!.members[0]!.launchWrapper).toEqual(argv);
+
+    const absArgv = ["/usr/local/bin/mtn-wrapper", "--seat", "miles"];
+    const absSpec = withMember(runtime, { launch_wrapper: absArgv });
+    expect(RigSpecSchema.validate(absSpec)).toEqual({ valid: true, errors: [] });
+    expect(RigSpecSchema.normalize(absSpec).pods[0]!.members[0]!.launchWrapper).toEqual(absArgv);
+  });
+
+  it.each(["pi", "codex"])("accepts [] as explicit clear on %s and retains [] in normalize", (runtime) => {
+    const spec = withMember(runtime, { launch_wrapper: [] });
+    expect(RigSpecSchema.validate(spec)).toEqual({ valid: true, errors: [] });
+    const member = RigSpecSchema.normalize(spec).pods[0]!.members[0]!;
+    expect(member.launchWrapper).toEqual([]);
+  });
+
+  it("omits launchWrapper when launch_wrapper is absent", () => {
+    const spec = withMember("codex", {});
+    expect(RigSpecSchema.validate(spec)).toEqual({ valid: true, errors: [] });
+    const member = RigSpecSchema.normalize(spec).pods[0]!.members[0]!;
+    expect(member.launchWrapper).toBeUndefined();
+    expect("launchWrapper" in member).toBe(false);
+  });
+
+  it.each(["claude-code", "omp", "terminal", "stub"])("rejects launch_wrapper (including []) on unsupported runtime %s", (runtime) => {
+    for (const value of [["mtn", "--"], []]) {
+      const result = RigSpecSchema.validate(withMember(runtime, { launch_wrapper: value }));
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(" ")).toMatch(/launch_wrapper.*(?:pi|codex)/i);
+    }
+  });
+
+  it("rejects launch_wrapper at rig or pod level", () => {
+    const rigLevel = { ...withMember("codex", {}), launch_wrapper: ["mtn"] };
+    expect(RigSpecSchema.validate(rigLevel).valid).toBe(false);
+    const podLevel = withMember("codex", {});
+    (podLevel.pods[0] as Record<string, unknown>)["launch_wrapper"] = ["mtn"];
+    expect(RigSpecSchema.validate(podLevel).valid).toBe(false);
+  });
+
+  it("rejects invalid launch_wrapper values (bad types, empty/relative executable, NUL/CR/LF, non-string elements)", () => {
+    const invalidValues: unknown[] = [
+      null,
+      "mtn --",
+      42,
+      true,
+      { executable: "mtn" },
+      [""],
+      ["   "],
+      ["", "--"],
+      ["./wrapper"],
+      ["../wrapper"],
+      ["bin/wrapper"],
+      ["~/wrapper"],
+      ["."],
+      [".."],
+      ["/usr/bin/"],
+      ["/usr/../bin/wrapper"],
+      ["wrapper\\cmd"],
+      ["wrap\0per"],
+      ["wrap\nper"],
+      ["wrap\rper"],
+      ["mtn", "bad\0arg"],
+      ["mtn", "bad\narg"],
+      ["mtn", "bad\rarg"],
+      ["mtn", 123],
+      ["mtn", null],
+    ];
+    for (const badValue of invalidValues) {
+      const result = RigSpecSchema.validate(withMember("codex", { launch_wrapper: badValue }));
+      expect(result.valid, JSON.stringify(badValue)).toBe(false);
+      expect(result.errors.join(" "), JSON.stringify(badValue)).toContain("launch_wrapper");
+      expect(result.errors.join(" "), JSON.stringify(badValue)).not.toContain("unknown key");
+    }
+  });
+
+  it("exposes domain helper contracts for validation, stored parsing, and equality", async () => {
+    const { validateLaunchWrapper, parseStoredLaunchWrapper, sameLaunchWrapper } = await import("../src/domain/launch-wrapper.js");
+    expect(validateLaunchWrapper([])).toEqual([]);
+    expect(validateLaunchWrapper(["mtn", "", "--"])).toEqual(["mtn", "", "--"]);
+    expect(parseStoredLaunchWrapper(null)).toBeUndefined();
+    expect(parseStoredLaunchWrapper(undefined)).toBeUndefined();
+    expect(parseStoredLaunchWrapper('["mtn","--"]')).toEqual(["mtn", "--"]);
+    for (const invalidStored of ["", "not-json", "null", "[]", "{}", '"mtn"', '[""]', '["./rel"]', '["a\\nb"]', 123]) {
+      expect(() => parseStoredLaunchWrapper(invalidStored)).toThrow();
+    }
+    expect(sameLaunchWrapper(undefined, null)).toBe(true);
+    expect(sameLaunchWrapper([], null)).toBe(true);
+    expect(sameLaunchWrapper([], undefined)).toBe(true);
+    expect(sameLaunchWrapper([], [])).toBe(true);
+    expect(sameLaunchWrapper(["mtn", "--"], ["mtn", "--"])).toBe(true);
+    expect(sameLaunchWrapper(["mtn", "--"], ["mtn"])).toBe(false);
+    expect(sameLaunchWrapper(["mtn"], [])).toBe(false);
+    expect(sameLaunchWrapper(["mtn"], null)).toBe(false);
+  });
+});

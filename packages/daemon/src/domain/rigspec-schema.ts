@@ -2,6 +2,7 @@ import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { specClaudeTokenRef } from "./claude-seat-token.js";
 import { validateClaudeMcp } from "./claude-mcp.js";
+import { validateLaunchWrapper } from "./launch-wrapper.js";
 import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type {
@@ -67,7 +68,7 @@ const RIG_KEYS = new Set([
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "cwd", "restore_policy",
+  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
   "agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels",
 ]);
@@ -549,6 +550,13 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   if (member["codex_permissions"] !== undefined) {
     if (member["runtime"] !== "codex") errors.push(`${prefix}.codex_permissions: only valid when runtime is "codex"`);
     try { validateCodexMemberPermissions(member["codex_permissions"], `${prefix}.codex_permissions`); }
+    catch (error) { errors.push((error as Error).message); }
+  }
+  if (member["launch_wrapper"] !== undefined) {
+    if (member["runtime"] !== "pi" && member["runtime"] !== "codex") {
+      errors.push(`${prefix}.launch_wrapper: only valid when runtime is "pi" or "codex"`);
+    }
+    try { validateLaunchWrapper(member["launch_wrapper"], `${prefix}.launch_wrapper`); }
     catch (error) { errors.push((error as Error).message); }
   }
   if (member["codex_config_profile"] !== undefined) {
@@ -1313,6 +1321,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     ...(m["claude_token"] === undefined ? {} : { claudeTokenRef: specClaudeTokenRef(m["claude_token"], "claude_token") }),
     ...(m["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(m["claude_mcp"]) }),
     ...(m["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(m["codex_permissions"]) }),
+    ...(m["launch_wrapper"] === undefined ? {} : { launchWrapper: validateLaunchWrapper(m["launch_wrapper"]) }),
     env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,

@@ -1,6 +1,7 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { validateClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
+import { isLaunchWrapperRuntime, parseStoredLaunchWrapper, validateLaunchWrapper } from "./launch-wrapper.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
@@ -28,6 +29,16 @@ import type {
   StartupBlock,
   StartupFile,
 } from "./types.js";
+
+function isValidStoredRecipeLaunchWrapper(value: unknown, runtime: unknown): boolean {
+  if (!isLaunchWrapperRuntime(runtime)) return false;
+  try {
+    validateLaunchWrapper(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function isStringRecord(value: unknown): value is Record<string, string> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -174,6 +185,7 @@ function isStoredRigSpec(value: unknown): value is NodeLaunchRecipe["rigSpec"] {
         && (entry.role === undefined || typeof entry.role === "string")
         && (entry.advisor === undefined || typeof entry.advisor === "string")
         && (entry.claudeMcp === undefined || (entry.runtime === "claude-code" && entry.claudeMcp === "none"))
+        && (entry.launchWrapper === undefined || isValidStoredRecipeLaunchWrapper(entry.launchWrapper, entry.runtime))
         && (entry.agentFile === undefined || typeof entry.agentFile === "string")
         && (entry.appendSystemPromptFile === undefined || typeof entry.appendSystemPromptFile === "string")
         && (entry.pluginDirs === undefined
@@ -321,6 +333,7 @@ interface NodeOptions {
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`). */
   claudeTokenRef?: ClaudeSeatTokenRef;
   claudeMcp?: ClaudeMcp;
+  launchWrapper?: readonly string[] | null;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** The member's declared launch environment (spec `env:`); not merged with the rig's. */
   env?: SeatEnv;
@@ -639,6 +652,11 @@ export class RigRepository {
       validateClaudeMcp(opts.claudeMcp);
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
+    if (opts?.launchWrapper !== undefined && opts.launchWrapper !== null) {
+      if (!isLaunchWrapperRuntime(opts.runtime)) throw new Error("launch_wrapper requires a pi or codex seat");
+      validateLaunchWrapper(opts.launchWrapper);
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
     if (opts?.claudePermissions !== undefined) {
       if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
       validateClaudePermissionRules(opts.claudePermissions);
@@ -781,6 +799,9 @@ export class RigRepository {
     }
     if (opts?.advisor) this.setNodeAdvisor(id, opts.advisor);
     if (opts?.claudeMcp !== undefined) this.setNodeClaudeMcp(id, opts.claudeMcp);
+    if (opts?.launchWrapper !== undefined && opts.launchWrapper !== null && opts.launchWrapper.length > 0) {
+      this.setNodeLaunchWrapper(id, opts.launchWrapper);
+    }
 
     if (opts?.env && this.hasNodeColumn("env_json")) {
       this.db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?")
@@ -884,6 +905,23 @@ export class RigRepository {
       return false;
     }
     return this.db.prepare("UPDATE nodes SET claude_mcp = ? WHERE id = ?").run(value, nodeId).changes > 0;
+  }
+
+  /** Persist or clear (null or []) a seat's launch_wrapper argv prefix. */
+  setNodeLaunchWrapper(nodeId: string, value: readonly string[] | null): boolean {
+    const validated = value === null ? null : validateLaunchWrapper(value);
+    const stored = validated && validated.length > 0 ? JSON.stringify(validated) : null;
+    if (!this.hasNodeColumn("launch_wrapper")) {
+      if (stored !== null) throw new Error("Cannot persist launch_wrapper: database migration is required");
+      return false;
+    }
+    if (value !== null) {
+      const existing = this.db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(nodeId) as { runtime: string | null } | undefined;
+      if (existing && !isLaunchWrapperRuntime(existing.runtime)) {
+        throw new Error("launch_wrapper requires a pi or codex seat");
+      }
+    }
+    return this.db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(stored, nodeId).changes > 0;
   }
 
   setNodeAdvisor(nodeId: string, advisor: string | null): boolean {
@@ -1134,6 +1172,10 @@ export class RigRepository {
   }
 
   private rowToNode(row: NodeRow): Node {
+    const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.id} launch_wrapper`);
+    if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
+      throw new Error(`Seat ${row.id} launch_wrapper: only valid when runtime is "pi" or "codex"`);
+    }
     return {
       id: row.id,
       rigId: row.rig_id,
@@ -1144,6 +1186,7 @@ export class RigRepository {
       effort: row.effort ?? null,
       advisor: row.advisor ?? null,
       claudeMcp: row.claude_mcp ?? null,
+      ...(launchWrapper ? { launchWrapper } : {}),
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       claudeTokenRef: parseClaudeSeatTokenRef(row.claude_token_ref),
@@ -1240,6 +1283,7 @@ interface NodeRow {
   effort?: string | null;
   advisor?: string | null;
   claude_mcp?: ClaudeMcp | null;
+  launch_wrapper?: string | null;
   effort_choice?: string | null;
   codex_config_profile?: string | null;
   claude_token_ref?: string | null;
