@@ -44,7 +44,7 @@ function setup(body = "scenario:reply PONG", env: Record<string, string> = {}) {
     ...process.env, OPENRIG_HOME: home, OPENRIG_SESSION_NAME: SEAT, EXEC_QUEUE_FILE: queueFile,
     PATH: [join(home, "node_modules", ".bin"), dirname(process.execPath), process.env.PATH].join(delimiter), ...env,
   };
-  for (const name of ["FAKE_ACP_LOAD", "FAKE_ACP_MISSING", "FAKE_ACP_COMPANION_PID_FILE", "FAKE_ACP_COST", "FAKE_ACP_PROMPT_USAGE", "FAKE_ACP_IGNORE_EOF", "EXEC_TEST_CONNECTOR", "EXEC_TEST_WINNER", "OPENRIG_EXEC_CONNECTOR"]) if (!(name in env)) delete runEnv[name];
+  for (const name of ["FAKE_ACP_LOAD", "FAKE_ACP_MISSING", "FAKE_ACP_COMPANION_PID_FILE", "FAKE_ACP_COST", "FAKE_ACP_PROMPT_USAGE", "FAKE_ACP_IGNORE_EOF", "EXEC_TEST_CONNECTOR", "EXEC_TEST_WINNER", "EXEC_TEST_HOOK", "OPENRIG_EXEC_CONNECTOR"]) if (!(name in env)) delete runEnv[name];
   return { home, env: runEnv, queueFile };
 }
 type Home = ReturnType<typeof setup>;
@@ -256,6 +256,57 @@ describe("rig exec", () => {
     record(other, "exec-orphan", { state: "requested", pid: process.pid, processStart: processStart(process.pid) });
     const status = await rig(other, ["status", "exec-orphan"]);
     expect(status.out).toContain("interrupted: its connector isn't running and never recorded itself, so no turn was sent");
+  }, 40_000);
+
+  it("settles a run's start and its end exclusively against a concurrent reconciler, in either order", async () => {
+    const connectorLog = (h: Home, runId: string) => readFileSync(runFile(h, runId).connectorLog, "utf8");
+    const binding = (h: Home) => notes(h).filter((note) => /^ACP run \S+: executor/.test(note));
+
+    // The reconciler first: it settles the run after the connector's guard and before its start, so no turn is sent.
+    const first = withEnv(setup(), { EXEC_TEST_HOOK: "after-guard" });
+    const a = await rig(first, ["run", "qitem-task", "--harness", "claude", "--wait"]);
+    const aId = startedId(a.out)!;
+    expect(a.code).toBe(2);
+    expect(runFile(first, aId)).toMatchObject({ state: "interrupted", outcome: "unknown", summary: "interrupted by a test reconciler after-guard" });
+    await until(() => (/no turn is sent/.test(connectorLog(first, aId)) ? true : undefined));
+    expect(connectorLog(first, aId)).toContain("reconciler after-guard: won");
+    expect(binding(first)).toEqual([]);
+    expect(notes(first).filter((note) => note.startsWith("test reconciler"))).toHaveLength(1);
+
+    // The connector first: the reconciler still holding the requested copy loses, and the turn completes.
+    const second = withEnv(setup(), { EXEC_TEST_HOOK: "after-start" });
+    const bId = startedId((await rig(second, ["run", "qitem-task", "--harness", "claude"])).out)!;
+    expect(await ended(second, bId)).toMatchObject({ state: "finished", outcome: "completed" });
+    expect(connectorLog(second, bId)).toContain("reconciler after-start: lost");
+    expect(binding(second)).toHaveLength(1);
+    expect(notes(second).some((note) => note.startsWith("test reconciler"))).toBe(false);
+
+    // The end: a reconciler that settles the started run before the connector records its end wins, and the
+    // connector's own outcome is told to the row without replacing that record.
+    const third = withEnv(setup(), { EXEC_TEST_HOOK: "before-end" });
+    const cId = startedId((await rig(third, ["run", "qitem-task", "--harness", "claude"])).out)!;
+    await until(() => (notes(third).some((note) => note.includes("that record stands")) ? true : undefined));
+    expect(runFile(third, cId)).toMatchObject({ state: "interrupted", summary: "interrupted by a test reconciler before-end" });
+    expect((await rig(third, ["status", cId])).out).toContain("interrupted by a test reconciler before-end");
+    expect(notes(third).join("\n")).toContain(`rig exec run ${cId}: its connector finished with outcome completed (the agent ended its turn (end_turn)) after the run had been recorded interrupted; that record stands`);
+  }, 60_000);
+
+  it("recovers a run from its slots when a crash left the copy behind", async () => {
+    const h = setup();
+    const gone = spawn(process.execPath, ["-e", ""]);
+    await new Promise((resolve) => gone.once("exit", resolve));
+    const runs = join(h.home, "acp", "runs");
+    // The connector claimed its start and died before writing the copy, which still says requested.
+    record(h, "exec-crashed", { state: "requested", pid: process.pid, processStart: processStart(process.pid) });
+    writeFileSync(join(runs, "exec-crashed.start.json"), JSON.stringify({ by: "connector", pid: gone.pid, processStart: "Thu Jan  1 00:00:00 2026", startedAt: "2026-11-06T00:00:01Z" }));
+    const status = await rig(h, ["status", "exec-crashed"]);
+    expect(status.out).toContain("interrupted: its connector ended without recording an outcome, so the outcome is unknown");
+    // The connector recorded its end and died before writing the copy, which still says started.
+    record(h, "exec-ended", { state: "started", pid: gone.pid, processStart: "Thu Jan  1 00:00:00 2026" });
+    writeFileSync(join(runs, "exec-ended.start.json"), JSON.stringify({ by: "connector", pid: gone.pid, startedAt: "2026-11-06T00:00:01Z" }));
+    writeFileSync(join(runs, "exec-ended.end.json"), JSON.stringify({ by: "connector", ended: { state: "finished", outcome: "completed", summary: "the agent ended its turn (end_turn)", endedAt: "2026-11-06T00:00:09Z" } }));
+    expect((await rig(h, ["status", "exec-ended"])).out).toContain("finished, outcome completed");
+    expect(notes(h).filter((note) => note.startsWith("rig exec run exec-ended"))).toEqual([]);
   }, 40_000);
 
   it("the connector entry runs only the requested run it was started for, and leaves any other record untouched", async () => {

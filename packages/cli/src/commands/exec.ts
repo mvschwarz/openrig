@@ -167,9 +167,38 @@ const runPath = (runId: string) => join(runsDir(), `${runId}.json`);
 /** A row's claims: one file per generation, `000001.json` upward, each published whole and never removed. */
 const rowDir = (qitemId: string) => join(runsDir(), "rows", qitemId.replace(/[^A-Za-z0-9._-]/g, "_"));
 
+/** A run's two transitions, each published once: `start` by the connector that runs it, or by whoever settles a run
+ *  that never started; `end` by whichever records how a started run ended. The slots are the run's state; the record
+ *  file is a copy written after each, for readers like `rig acp cancel`, and may lag a crash. */
+const slotPath = (runId: string, slot: "start" | "end") => join(runsDir(), `${runId}.${slot}.json`);
+type StartSlot = { by: "connector"; pid: number; processStart?: string; startedAt: string } | { by: "settled"; ended: Partial<ExecRun> };
+type EndSlot = { by: "connector" | "settled"; ended: Partial<ExecRun> };
+
+let drafts = 0;
+/** Publishes `content` at `target` whole, and only if nothing is there: a hard link fails if the target exists. */
+function publishOnce(target: string, content: unknown): boolean {
+  const draft = `${target}.${process.pid}.${++drafts}.tmp`;
+  writeFileSync(draft, `${JSON.stringify(content)}\n`);
+  try {
+    linkSync(draft, target);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  } finally { rmSync(draft, { force: true }); }
+}
+
 export function readRun(runId: string): ExecRun | undefined {
-  const run = readJson(runPath(runId)) as ExecRun | undefined;
-  return run && typeof run.state === "string" ? run : undefined;
+  const base = readJson(runPath(runId)) as ExecRun | undefined;
+  if (!base || typeof base.state !== "string") return undefined;
+  const start = readJson(slotPath(runId, "start")) as StartSlot | undefined;
+  if (start?.by === "settled") return { ...base, ...start.ended };
+  let run: ExecRun = start?.by === "connector"
+    ? { ...base, state: "started", pid: start.pid, processStart: start.processStart, startedAt: start.startedAt }
+    : base;
+  const end = readJson(slotPath(runId, "end")) as EndSlot | undefined;
+  if (end) run = { ...run, ...end.ended };
+  return run;
 }
 
 function writeRun(run: ExecRun): void {
@@ -199,15 +228,7 @@ export function claimRow(qitemId: string, runId: string, previous?: string, afte
   const top = topClaim(qitemId);
   if (top?.runId !== previous) return false;
   afterRead?.();
-  const draft = join(dir, `.${runId}.${process.pid}.tmp`);
-  writeFileSync(draft, `${JSON.stringify({ runId, qitemId, replaces: previous ?? null })}\n`);
-  try {
-    linkSync(draft, join(dir, `${String((top?.generation ?? 0) + 1).padStart(6, "0")}.json`));
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-    throw error;
-  } finally { rmSync(draft, { force: true }); }
+  return publishOnce(join(dir, `${String((top?.generation ?? 0) + 1).padStart(6, "0")}.json`), { runId, qitemId, replaces: previous ?? null });
 }
 
 type Liveness = "live" | "dead" | "unknown";
@@ -222,6 +243,21 @@ async function liveness(run: ExecRun): Promise<Liveness> {
   return found === undefined ? "unknown" : found.length > 0 ? "live" : "dead";
 }
 
+/** Ends `run` as `ended`, exclusively: a run that hasn't started by claiming its start slot, so its connector can no
+ *  longer start; a started run by claiming its end slot, so its connector can no longer record an outcome over this.
+ *  Only the winner writes the copy and the row note; a loser gets the run as whoever won left it. */
+export async function settleRun(run: ExecRun, ended: Partial<ExecRun>, note?: string, queue?: () => Promise<AcpQueue | undefined>): Promise<{ won: boolean; run: ExecRun }> {
+  const won = run.state === "requested"
+    ? publishOnce(slotPath(run.runId, "start"), { by: "settled", ended } satisfies StartSlot)
+    : publishOnce(slotPath(run.runId, "end"), { by: "settled", ended } satisfies EndSlot);
+  const after = readRun(run.runId) ?? run;
+  if (!won) return { won, run: after };
+  writeRun(after);
+  const q = note ? await queue?.().catch(() => undefined) : undefined;
+  await q?.update(run.qitemId, { note: note! }).catch(() => {});
+  return { won, run: after };
+}
+
 /** A run whose connector is gone without recording an outcome reads interrupted, outcome unknown, with one row note. */
 export async function reconcileRun(run: ExecRun, queue?: () => Promise<AcpQueue | undefined>, connectorExit?: string): Promise<ExecRun> {
   if (run.endedAt || (await liveness(run)) !== "dead") return run;
@@ -234,11 +270,9 @@ export async function reconcileRun(run: ExecRun, queue?: () => Promise<AcpQueue 
   const summary = current.state === "requested"
     ? `interrupted: its connector ${connectorExit ?? "isn't running"} and never recorded itself, so no turn was sent; ${agent}; its log is ${current.connectorLog}`
     : `interrupted: its connector ended without recording an outcome, so the outcome is unknown; ${agent}`;
-  const ended: ExecRun = { ...current, state: "interrupted", outcome: "unknown", summary, endedAt: now() };
-  writeRun(ended);
-  const q = await queue?.().catch(() => undefined);
-  await q?.update(run.qitemId, { note: `rig exec run ${run.runId} ${summary}. Its transcript: ${run.transcript}` }).catch(() => {});
-  return ended;
+  const settled = await settleRun(current, { state: "interrupted", outcome: "unknown", summary, endedAt: now() },
+    `rig exec run ${run.runId} ${summary}. Its transcript: ${run.transcript}`, queue);
+  return settled.run;
 }
 
 export function describeRun(run: ExecRun): string {
@@ -256,8 +290,11 @@ export function describeRun(run: ExecRun): string {
   ].filter((line) => line !== undefined).join("\n");
 }
 
-/** The detached connector: records itself, runs the turn as `rig acp run` does, then records the outcome. */
-export async function runExecConnector(runId: string, queue: AcpQueue | undefined): Promise<number> {
+/** Tests only: points where a test acts as a concurrent reconciler would. */
+export interface ConnectorHooks { afterGuard?: () => Promise<void>; afterStart?: () => Promise<void>; beforeEnd?: () => Promise<void> }
+
+/** The detached connector: claims the run's start, runs the turn as `rig acp run` does, then claims its end. */
+export async function runExecConnector(runId: string, queue: AcpQueue | undefined, hooks: ConnectorHooks = {}): Promise<number> {
   const run = readRun(runId);
   if (!run) { console.error(`No rig exec run ${runId} on this machine`); return 1; }
   // Only the connector `rig exec run` started for this record runs it, once: anything else would send the row's task a
@@ -275,10 +312,26 @@ export async function runExecConnector(runId: string, queue: AcpQueue | undefine
   let interrupts = 0;
   process.on("SIGINT", () => { interrupts += 1; if (interrupts === 1) cancel(); else detach(); });
   process.on("SIGHUP", () => { /* no terminal owns this process; a hangup isn't a cancel */ });
-  const started: ExecRun = { ...run, state: "started", pid: process.pid, processStart: processStart(process.pid), startedAt: now() };
+  await hooks.afterGuard?.();
+  // Claiming the start is what lets this process send the turn. A reconciler that judged the run dead may have claimed
+  // it first; then the run stays settled and nothing is sent.
+  if (!publishOnce(slotPath(runId, "start"), { by: "connector", pid: process.pid, processStart: processStart(process.pid), startedAt: now() } satisfies StartSlot)) {
+    console.error(`${runId} was settled before this connector started (${readRun(runId)?.summary ?? "no summary"}); no turn is sent`);
+    return 1;
+  }
+  const started = readRun(runId)!;
   writeRun(started);
+  await hooks.afterStart?.();
+  /** Records the end only if nothing recorded one first; a reconciler's record stands, and the row hears what happened. */
+  const end = async (ended: Partial<ExecRun>): Promise<void> => {
+    await hooks.beforeEnd?.();
+    if (publishOnce(slotPath(runId, "end"), { by: "connector", ended } satisfies EndSlot)) { writeRun(readRun(runId)!); return; }
+    const recorded = readRun(runId);
+    console.error(`${runId} was recorded ${recorded?.state} before this connector finished; its own outcome was ${ended.outcome}`);
+    await queue?.update(run.qitemId, { note: `rig exec run ${runId}: its connector finished with outcome ${ended.outcome} (${ended.summary}) after the run had been recorded ${recorded?.state}; that record stands` }).catch(() => {});
+  };
   if (!queue) {
-    writeRun({ ...started, state: "finished", outcome: "failed", summary: "the OpenRig daemon couldn't be reached, so no turn was sent", endedAt: now() });
+    await end({ state: "finished", outcome: "failed", summary: "the OpenRig daemon couldn't be reached, so no turn was sent", endedAt: now() });
     return 1;
   }
   let settle: string | undefined;
@@ -289,10 +342,10 @@ export async function runExecConnector(runId: string, queue: AcpQueue | undefine
       progress: (text) => process.stdout.write(text), cancelRequested, detachRequested,
       missingSession: HARNESSES[run.harness]?.missingSession, onSettled: (report) => { settle = report; },
     });
-    writeRun({ ...started, state: "finished", outcome: outcome.kind, summary: outcome.summary, usage: outcome.usage, settle, endedAt: now() });
+    await end({ state: "finished", outcome: outcome.kind, summary: outcome.summary, usage: outcome.usage, settle, endedAt: now() });
     return outcome.kind === "completed" ? 0 : 2;
   } catch (error) {
-    writeRun({ ...started, state: "finished", outcome: "failed", summary: (error as Error).message, settle, endedAt: now() });
+    await end({ state: "finished", outcome: "failed", summary: (error as Error).message, settle, endedAt: now() });
     return 1;
   }
 }
@@ -471,8 +524,7 @@ Guide: rig context get reference/acp-agents.md`)
         if (current.state !== "requested" || spawnError || connectorExit) break;
       }
       if (spawnError && current.state === "requested") {
-        current = { ...current, state: "finished", outcome: "failed", summary: `the connector couldn't be started: ${spawnError.message}`, endedAt: now() };
-        writeRun(current);
+        current = (await settleRun(current, { state: "finished", outcome: "failed", summary: `the connector couldn't be started: ${spawnError.message}`, endedAt: now() })).run;
       } else if (connectorExit && current.state === "requested") {
         current = await reconcileRun(current, async () => queue, connectorExit);
       }
