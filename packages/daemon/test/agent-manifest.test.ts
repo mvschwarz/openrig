@@ -76,24 +76,33 @@ profiles:
 `;
 
 describe("AgentSpec manifest parser + validator", () => {
-  it("rejects malformed profile resource selections instead of silently dropping them", () => {
+  it("advises on malformed selections and normalizes scalar IDs", () => {
     const base = { name: "example", version: "1.0" };
-    expect(validateAgentSpec({ ...base, profiles: { default: { uses: "skills" } } }).errors)
-      .toContain("profiles.default.uses: must be an object");
+    expect(validateAgentSpec({ ...base, profiles: { default: { uses: "skills" } } }).advisories)
+      .toContain("profiles.default.uses: expected an object");
     for (const category of ["skills", "guidance", "subagents", "plugins", "runtime_resources"]) {
       const result = validateAgentSpec({ ...base, profiles: { default: { uses: { [category]: "review" } } } });
-      expect(result.valid).toBe(false);
-      expect(result.errors).toContain(`profiles.default.uses.${category}: must be an array of resource IDs`);
+      expect(result.valid).toBe(true);
+      expect(result.advisories).toContain(`profiles.default.uses.${category}: scalar ID accepted; use a list instead`);
     }
     const invalidEntry = validateAgentSpec({ ...base, profiles: { default: { uses: { skills: [null, ""] } } } });
-    expect(invalidEntry.errors).toEqual([
-      "profiles.default.uses.skills[0]: must be a non-empty resource ID",
-      "profiles.default.uses.skills[1]: must be a non-empty resource ID",
+    expect(invalidEntry.advisories).toEqual([
+      "profiles.default.uses.skills[0]: expected a non-empty resource ID",
+      "profiles.default.uses.skills[1]: expected a non-empty resource ID",
     ]);
+    expect(invalidEntry.valid).toBe(true);
+    for (const malformed of ["", 42, false, { id: "review" }]) {
+      const result = validateAgentSpec({ ...base, profiles: { default: { uses: { skills: malformed } } } });
+      expect(result.valid).toBe(true);
+      expect(result.advisories).toContain("profiles.default.uses.skills: expected an array of resource IDs");
+    }
+    expect(normalizeAgentSpec({ ...base, profiles: { default: { uses: { skills: [null, ""] } } } }).profiles["default"]!.uses.skills).toEqual([null, ""]);
     expect(validateAgentSpec({ ...base, profiles: { default: { uses: { skills: ["review"] } } } }).valid).toBe(true);
     expect(validateAgentSpec({ ...base, profiles: { default: { uses: null }, other: { uses: { skills: null } } } }).valid).toBe(true);
     expect(validateAgentSpec({ ...base, profiles: { default: { uses: [] } } }).valid).toBe(true);
-    expect(validateAgentSpec({ ...base, profiles: { default: { uses: ["review"] } } }).valid).toBe(false);
+    expect(validateAgentSpec({ ...base, profiles: { default: { uses: ["review"] } } }).valid).toBe(true);
+    const raw = { ...base, profiles: { default: { uses: { skills: "review", guidance: "guide", subagents: "agent", plugins: "plugin", runtime_resources: "runtime" } } } };
+    expect(normalizeAgentSpec(raw).profiles["default"]!.uses).toEqual({ skills: ["review"], guidance: ["guide"], subagents: ["agent"], plugins: ["plugin"], runtimeResources: ["runtime"] });
   });
 
   // T1: valid agent.yaml parses and normalizes with correct defaults
@@ -119,6 +128,9 @@ describe("AgentSpec manifest parser + validator", () => {
     expect(spec.profiles["tdd"]).toBeDefined();
     expect(spec.profiles["tdd"]!.uses.skills).toContain("deep-pr-review");
     expect(spec.profiles["tdd"]!.uses.skills).toContain("acme-standards:repo-rules");
+    expect(spec.profiles["tdd"]!.uses.guidance).toEqual(["tdd-rules"]);
+    expect(spec.profiles["tdd"]!.uses.subagents).toEqual(["diff-auditor"]);
+    expect(spec.profiles["tdd"]!.uses.plugins).toEqual(["openrig-core"]);
     expect(spec.defaults?.lifecycle?.executionMode).toBe("interactive_resident");
   });
 

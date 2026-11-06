@@ -304,7 +304,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
       if (profileRaw && typeof profileRaw === "object") {
         const p = profileRaw as Record<string, unknown>;
         if (p["uses"] != null && (typeof p["uses"] !== "object" || (Array.isArray(p["uses"]) && p["uses"].length > 0))) {
-          errors.push(`profiles.${profileName}.uses: must be an object`);
+          advisories.push(`profiles.${profileName}.uses: expected an object`);
         } else if (p["uses"] && typeof p["uses"] === "object") {
           const uses = p["uses"] as Record<string, unknown>;
 
@@ -316,14 +316,18 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
 
           for (const category of ["skills", "guidance", "subagents", "plugins", "runtime_resources"]) {
             const refs = uses[category];
+            if (typeof refs === "string" && refs.trim()) {
+              advisories.push(`profiles.${profileName}.uses.${category}: scalar ID accepted; use a list instead`);
+              continue;
+            }
             if (refs != null && !Array.isArray(refs)) {
-              errors.push(`profiles.${profileName}.uses.${category}: must be an array of resource IDs`);
+              advisories.push(`profiles.${profileName}.uses.${category}: expected an array of resource IDs`);
               continue;
             }
             if (Array.isArray(refs)) {
               for (const [index, ref] of refs.entries()) {
                 if (typeof ref !== "string" || !ref.trim()) {
-                  errors.push(`profiles.${profileName}.uses.${category}[${index}]: must be a non-empty resource ID`);
+                  advisories.push(`profiles.${profileName}.uses.${category}[${index}]: expected a non-empty resource ID`);
                   continue;
                 }
                 // Qualified refs (namespace:id) are accepted for later resolution
@@ -532,6 +536,11 @@ function validatePluginResources(entries: Array<Record<string, unknown>>): strin
   return errors;
 }
 
+function normalizeUses(value: unknown): string[] {
+  if (Array.isArray(value)) return value as string[];
+  return typeof value === "string" && value.trim() ? [value] : [];
+}
+
 function normalizeProfile(raw: Record<string, unknown>): ProfileSpec {
   const uses = raw["uses"] as Record<string, unknown> | undefined;
   return {
@@ -551,11 +560,11 @@ function normalizeProfile(raw: Record<string, unknown>): ProfileSpec {
     startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
     lifecycle: raw["lifecycle"] ? normalizeLifecycle(raw["lifecycle"] as Record<string, unknown>) : undefined,
     uses: {
-      skills: Array.isArray(uses?.["skills"]) ? uses["skills"] as string[] : [],
-      guidance: Array.isArray(uses?.["guidance"]) ? uses["guidance"] as string[] : [],
-      subagents: Array.isArray(uses?.["subagents"]) ? uses["subagents"] as string[] : [],
-      plugins: Array.isArray(uses?.["plugins"]) ? uses["plugins"] as string[] : [],
-      runtimeResources: Array.isArray(uses?.["runtime_resources"]) ? uses["runtime_resources"] as string[] : [],
+      skills: normalizeUses(uses?.["skills"]),
+      guidance: normalizeUses(uses?.["guidance"]),
+      subagents: normalizeUses(uses?.["subagents"]),
+      plugins: normalizeUses(uses?.["plugins"]),
+      runtimeResources: normalizeUses(uses?.["runtime_resources"]),
     },
     activity: normalizeActivityBlock(raw["activity"]),
   };

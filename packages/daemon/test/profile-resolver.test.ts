@@ -61,6 +61,18 @@ function makeCtx(overrides?: Partial<ResolutionContext>): ResolutionContext {
 }
 
 describe("Profile resolver + precedence engine", () => {
+  it("resolves a scalar selection and reports a missing selected scalar", () => {
+    const raw = { name: "test-agent", version: "1.0", resources: { guidance: [{ id: "guide", path: "guide.md" }] }, profiles: { default: { uses: { guidance: "guide" } }, unused: { uses: { guidance: "missing" } } } };
+    const spec = normalizeAgentSpec(raw);
+    const result = resolveNodeConfig(makeCtx({ baseSpec: makeResolved(spec) }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.selectedResources.guidance[0]?.effectiveId).toBe("guide");
+
+    const missing = resolveNodeConfig(makeCtx({ baseSpec: makeResolved(spec), profileName: "unused" }));
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.errors.join(" ")).toContain("missing");
+  });
+
   // T1: profile selects from combined base+import pool
   it("profile selects from combined base+import pool with effectiveId and sourcePath", () => {
     const importSpec = makeSpec({
