@@ -6,13 +6,25 @@
 > - **Released in 0.7.8:** seat activity grants (section 4), and OpenRig's side of the answered permission path
 >   (section 7).
 > - **Runner-author behavior, not yet qualified:** the input, cancellation and permission recipe in sections 5-7, and
->   the runner-side shutdown obligation in section 9. A dsh port implementing this recipe is not qualified.
+>   the runner-side shutdown obligation in section 9. Two runners have shown parts of it natively (below); no
+>   runner is qualified beyond that.
 > - **Existing interfaces with author obligations:** launch-result identity, exact resume, first input and model
 >   handoff. These interfaces do not establish that a particular runner implements them correctly.
 > - **Unchanged:** plain community presets and the built-in runtimes (Claude Code, Codex, Pi, OMP, terminal).
 >
-> No harness has been run end to end under this contract yet, and the native verdict is pending. The first candidate
-> is dsh over ACP.
+> **What has run natively, in 0.7.8's release testing, against a Claude Haiku model:**
+> - **dsh-seat 0.3.0**, an outside runner for dsh 0.2.1-rc.2 over ACP: launch and first input, useful queue work, a
+>   multiline message with a `/abort` line inside it delivered as one prompt, activity that stayed working through a
+>   52-second quiet tool interval and then read idle, cancel by a bare `/abort` typed in the pane, and the same
+>   conversation resumed by `session/resume` after `rig down --snapshot` and `rig up`, with the runner and its child
+>   gone after the managed down.
+> - **The dsh example runner** (`community-harness-examples/dsh/`): dsh's native `session/request_permission` reached
+>   a person, whose allow-once took effect and whose reject-once didn't.
+>
+> **Not shown natively:** a DeepSeek model, the example runner's own resume (its preset declares none), the default
+> permit when nobody can be asked (checked without a model only), a typed or Slack answer, a second person's
+> answer, reboot recovery, and the model OpenRig observes. Any other runner, provider or path is unqualified until
+> it's shown.
 >
 > Release status and pinned references are in the [joined author guide](author-contracts.md). The
 > [community presets reference](community-harness-presets.md) describes the implemented fields, including the runner
