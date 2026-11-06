@@ -81,8 +81,9 @@ rig acp run <row> --cwd <work folder> -- codex-acp
 - `claude-agent-acp` 0.101.0 runs Claude Code through the Claude Agent SDK 0.3.318. With `CLAUDE_CODE_EXECUTABLE` set,
   it runs that `claude`, with that `claude`'s own login; the check ran Claude Code 2.1.310 this way. Without it, an npm
   install runs the Claude binary from the SDK's platform package (Claude Code 2.1.318, by the SDK's package metadata),
-  which wasn't checked; installing with `--omit=optional` leaves that binary out. The adapter also loads your
-  Claude configuration, skills included.
+  which wasn't checked. Installing with `--omit=optional` leaves that binary out, and then, without
+  `CLAUDE_CODE_EXECUTABLE`, the adapter refuses to start; it never falls back to a `claude` on PATH. The adapter also
+  loads your Claude configuration, skills included.
 - `codex-acp` 2.5.0 depends on `@openai/codex` `^0.165.0`, and 0.165.0 was the only release in that range when this
   was checked. A later install can resolve a newer 0.165 release; `npm ls @openai/codex` in `<dir>` shows yours. It uses
   the machine's existing Codex login.
@@ -114,10 +115,11 @@ sweep.
 
 **A completed turn isn't finished work.** In the check, Claude was asked to run a command and wait for it. It moved the
 command into a background task, said it would report when it finished, and ended the turn `completed`. The task died
-with the adapter, and its file never appeared. Check the work itself before you close the row. Long and background
-work weren't checked.
+with the adapter, and its file never appeared. Check the work itself before you close the row. Beyond this one case,
+long and background work weren't checked.
 
-**Cancel.** `rig acp cancel` was acknowledged in 20-30 ms for both. Straight after, Claude's run reported `incomplete`
+**Cancel.** `rig acp cancel` was acknowledged in 20-30 ms for both, sent while the agent waited on a permission
+answer; a cancel mid-generation or mid-tool wasn't timed. Straight after, Claude's run reported `incomplete`
 with one process still running, which was gone a few seconds later; Codex's reported `settled`. An acknowledgement
 isn't a finished shutdown, and it says nothing about further spend.
 
