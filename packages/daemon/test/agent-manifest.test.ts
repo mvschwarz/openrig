@@ -76,6 +76,23 @@ profiles:
 `;
 
 describe("AgentSpec manifest parser + validator", () => {
+  it("rejects malformed profile resource selections instead of silently dropping them", () => {
+    const base = { name: "example", version: "1.0" };
+    expect(validateAgentSpec({ ...base, profiles: { default: { uses: "skills" } } }).errors)
+      .toContain("profiles.default.uses: must be an object");
+    for (const category of ["skills", "guidance", "subagents", "plugins", "runtime_resources"]) {
+      const result = validateAgentSpec({ ...base, profiles: { default: { uses: { [category]: "review" } } } });
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain(`profiles.default.uses.${category}: must be an array of resource IDs`);
+    }
+    const invalidEntry = validateAgentSpec({ ...base, profiles: { default: { uses: { skills: [null, ""] } } } });
+    expect(invalidEntry.errors).toEqual([
+      "profiles.default.uses.skills[0]: must be a non-empty resource ID",
+      "profiles.default.uses.skills[1]: must be a non-empty resource ID",
+    ]);
+    expect(validateAgentSpec({ ...base, profiles: { default: { uses: { skills: ["review"] } } } }).valid).toBe(true);
+  });
+
   // T1: valid agent.yaml parses and normalizes with correct defaults
   it("valid spec parses, validates, and normalizes", () => {
     const raw = parseAgentSpec(VALID_SPEC);
