@@ -77,15 +77,17 @@ describe("custody of asks held for quiet hours", () => {
     return w;
   }
   let n = 0;
-  const ask = () => repo.create({ sourceSession: "asker@r", destinationSession: "person@external", body: `Question ${++n}: pick one`,
-    summary: `Pick ${n}`, evidenceRef: `/proof/${n}.md`, humanIntent: "decision", humanAlert: true, nudge: false } as never) as Promise<QueueItem>;
+  const ask = (humanIntent: "decision" | "update" = "decision") => repo.create({ sourceSession: "asker@r", destinationSession: "person@external",
+    body: humanIntent === "decision" ? `Question ${++n}: pick one` : `Build ${++n} finished; no decision needed`,
+    summary: humanIntent === "decision" ? `Pick ${n}` : `Build ${n} finished`, evidenceRef: `/proof/${n}.md`,
+    humanIntent, humanAlert: humanIntent === "decision", nudge: false } as never) as Promise<QueueItem>;
   const alertFor = async (row: QueueItem) =>
     (await makeQueuePorts(repo, { loadHumanRegistry: registry } as never).listHumanAlerts({ minimumLevel: "RECORD" })).find((a) => a.qitemId === row.qitemId)!;
   const quietOn = () => { const now = new Date(); quiet.setUntil("person", { until: new Date(now.getTime() + 24 * 3_600_000), timezone: "UTC", setBy: "t", now }); };
   const releaseJobs = () => new WatchdogJobsRepository(db).listActive().filter((j) => j.policy === QUIET_RELEASE_POLICY);
-  async function held(): Promise<QueueItem> {
+  async function held(humanIntent: "decision" | "update" = "decision"): Promise<QueueItem> {
     quietOn();
-    const row = await ask();
+    const row = await ask(humanIntent);
     const w = wire();
     const alert = await alertFor(row);
     w.dispatcher.dispatch(OUTBOUND_OP, alert.destinationSession!, toPayload(alert));
@@ -106,12 +108,15 @@ describe("custody of asks held for quiet hours", () => {
     resolveOrchestrator: () => "orch@r", attemptWake: async () => "verified", log: () => {} });
   const ladderTouched = (row: QueueItem) => repo.listTransitions(row.qitemId).some((t) => t.actorSession === "wake-ladder@system");
 
-  it("a healthy hold aged past the thresholds is held: no stuck finding, and the waiting view says held by quiet hours until the boundary", async () => {
-    const row = await held();
+  it.each(["decision", "update"] as const)("a healthy %s hold aged past the thresholds is held: no stuck finding, and the waiting view says held by quiet hours until the boundary", async (humanIntent) => {
+    const row = await held(humanIntent);
+    const stored = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
     expect(findingFor(await sweep(), row)).toEqual([]);
     const view = repo.waitingView(row.qitemId)!;
     expect(view.nextBackstop).toMatchObject({ mechanism: expect.stringMatching(/^quiet-release:/), dueAt: quiet.quietStateFor("person", new Date()).nextBoundary!.at });
     expect(String((view.nextBackstop as { note?: string }).note)).toMatch(/^Held by quiet hours until /);
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", humanIntent, claimedAt: null });
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(stored);
   });
 
   it("a healthy hold isn't counted as picked up, and the wake ladder leaves it to its release job", async () => {

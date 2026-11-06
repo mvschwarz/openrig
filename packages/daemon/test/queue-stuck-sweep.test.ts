@@ -2083,14 +2083,18 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
   let db: Database.Database;
   let repo: QueueRepository;
   let registeredHumans: HumanFragment[];
+  let registryAvailable: boolean;
 
   beforeEach(() => {
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
     registeredHumans = [OWNER, ALPHA, BETA, PLAIN, READER];
+    registryAvailable = true;
     repo = new QueueRepository(db, new EventBus(db), {
       validateRig: () => true,
-      loadHumanRegistry: () => ({ ok: true as const, entities: registeredHumans }),
+      loadHumanRegistry: () => registryAvailable
+        ? { ok: true as const, entities: registeredHumans }
+        : { ok: false as const, error: "fixture registry outage" },
       transport: { send: async () => ({ ok: true, verified: true }) },
     });
   });
@@ -2249,19 +2253,23 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
   const unclaimedFinding = async (qitemId: string) => (await findingsFor(qitemId))
     .filter((f) => (f.tags ?? []).includes(`stuck-sweep:unclaimed-obligation:${qitemId}`));
 
+  function bindHumanPane(destination: string): void {
+    // Isolated topology fixture, as in seedLeadSeat: no native session or pane is contacted.
+    const member = destination.split("@")[0]!;
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-reader', 'kernel')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-reader', 'rig-reader', ?, 'terminal', '/tmp')").run(member);
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('sess-reader', 'node-reader', ?, 'running', '2026-11-05 00:00:00')").run(destination);
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('bind-reader', 'node-reader', 'tmux', ?, '%1')").run(destination);
+    // Distinguish explicit fixture binding from the empty-topology legacy fallback.
+    expect(repo.classifyDestinationOf("unbound-fixture@kernel").class).toBe("unroutable");
+    expect(repo.classifyDestinationOf(destination).class).toBe("pane-bound");
+  }
+
   it.each([
     { destination: "human-reader@external", transport: "gateway-routable" },
     { destination: "human-reader@kernel", transport: "pane-bound" },
   ])("keeps an aged informational update readable at $destination without creating recovery work", async ({ destination, transport }) => {
-    if (transport === "pane-bound") {
-      // Isolated topology fixture, as in seedLeadSeat: no native session or pane is contacted.
-      db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-reader', 'kernel')").run();
-      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-reader', 'rig-reader', 'human-reader', 'terminal', '/tmp')").run();
-      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('sess-reader', 'node-reader', ?, 'running', '2026-11-05 00:00:00')").run(destination);
-      db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('bind-reader', 'node-reader', 'tmux', ?, '%1')").run(destination);
-      // Distinguish explicit fixture binding from the empty-topology legacy fallback.
-      expect(repo.classifyDestinationOf("unbound-fixture@kernel").class).toBe("unroutable");
-    }
+    if (transport === "pane-bound") bindHumanPane(destination);
     expect(repo.classifyDestinationOf(READER.address)).toMatchObject({ class: "gateway-routable", resolvedHuman: READER.address });
     expect(repo.classifyDestinationOf(destination).class).toBe(transport);
     const row = await repo.create({ sourceSession: "asker@r", destinationSession: destination,
@@ -2278,6 +2286,102 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     expect(repo.list({ destinationSession: destination }).find((item) => item.qitemId === row.qitemId))
       .toMatchObject({ body: row.body, state: "pending", humanIntent: "update" });
     expect(await findingsFor(row.qitemId)).toEqual([]);
+  });
+
+  it.each([
+    { destination: "human-reader@external", interruption: "removed" },
+    { destination: "human-reader@kernel", interruption: "removed" },
+    { destination: "human-reader@external", interruption: "outage" },
+    { destination: "human-reader@kernel", interruption: "outage" },
+  ])("PR5-F1 closes only obsolete claim work after $interruption registration recovers at $destination", async ({ destination, interruption }) => {
+    if (destination.endsWith("@kernel")) bindHumanPane(destination);
+    const row = await repo.create({ sourceSession: "asker@r", destinationSession: destination,
+      body: "Build finished; no action needed.", summary: "Build status", evidenceRef: "https://example.test/build",
+      humanIntent: "update", nudge: false });
+    age(row.qitemId);
+    const stored = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    expect(stored).toBeDefined();
+    if (interruption === "removed") registeredHumans = registeredHumans.filter((person) => person.entityId !== READER.entityId);
+    else registryAvailable = false;
+    const initial = await sweep();
+    expect(initial.outcome, initial.error).not.toBe("failed");
+    const [finding] = await unclaimedFinding(row.qitemId);
+    expect(finding).toMatchObject({ state: "pending" });
+    // Reading an unresolved or subsequently registered source cannot close recovery work.
+    repo.waitingView(row.qitemId);
+    expect(repo.getById(finding!.qitemId)?.state).toBe("pending");
+    registeredHumans = [OWNER, ALPHA, BETA, PLAIN, READER];
+    registryAvailable = true;
+    const beforeRead = db.serialize();
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", humanIntent: "update" });
+    expect(repo.list({ destinationSession: destination }).map((item) => item.qitemId)).toContain(row.qitemId);
+    repo.waitingView(row.qitemId);
+    expect(db.serialize()).toEqual(beforeRead);
+    expect(repo.getById(finding!.qitemId)?.state).toBe("pending");
+    const second = await sweep();
+    expect(second.outcome, second.error).not.toBe("failed");
+    expect.soft(second.findings, "F1: sweep closes obsolete unclaimed finding").toContainEqual(
+      expect.objectContaining({ kind: "unclaimed-obligation", findingQitemId: finding!.qitemId, action: "closed" }));
+    expect.soft(repo.getById(finding!.qitemId), "F1: recovery is terminal without claiming correspondence")
+      .toMatchObject({ state: "done", closureReason: "no-follow-on" });
+    const resolution = repo.listTransitions(finding!.qitemId).at(-1)?.transitionNote ?? "";
+    expect.soft(resolution, "F1: resolution names informational correspondence").toMatch(/informational|update/i);
+    expect.soft(resolution).not.toMatch(/source claimed|human (ask|notification) posted|wake verified/i);
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(stored);
+    expect(repo.list({ destinationSession: destination }).find((item) => item.qitemId === row.qitemId))
+      .toMatchObject({ body: row.body, state: "pending", humanIntent: "update", claimedAt: null });
+    expect(repo.deliveryOutcomeFor(row.qitemId)).toBeNull();
+  });
+
+  it.each([
+    { destination: "human-reader@external", delivery: "feed-only" },
+    { destination: "human-reader@kernel", delivery: "feed-only" },
+    { destination: "human-owner@external", delivery: "posted" },
+    { destination: "human-owner@kernel", delivery: "posted" },
+  ])("PR5-F2 shows $delivery informational correspondence at $destination without claim or decision promises", async ({ destination, delivery }) => {
+    if (destination.endsWith("@kernel")) bindHumanPane(destination);
+    const row = await repo.create({ sourceSession: "asker@r", destinationSession: destination,
+      body: "Build finished; no decision requested.", summary: "Build status", evidenceRef: "https://example.test/build",
+      humanIntent: "update", nudge: false });
+    if (delivery === "posted") receipt(row.qitemId, "posted");
+    expect(repo.deliveryOutcomeFor(row.qitemId)?.outcome ?? null).toBe(delivery === "posted" ? "posted" : null);
+    const stored = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    expect(stored).toBeDefined();
+    for (const phase of ["before sweep", "after sweep"]) {
+      if (phase === "after sweep") {
+        const result = await sweep();
+        expect(result.outcome, result.error).not.toBe("failed");
+      }
+      const beforeRead = db.serialize();
+      const shown = repo.getById(row.qitemId)!;
+      const listed = repo.list({ destinationSession: destination }).find((item) => item.qitemId === row.qitemId)!;
+      for (const [surface, view] of [["show", shown.waiting], ["list", listed.waiting], ["waitingView", repo.waitingView(row.qitemId)]] as const) {
+        expect(view, `${phase} ${surface}`).toBeDefined();
+        expect.soft(view!.nextBackstop, `F2: ${phase} ${surface} has no claim deadline`)
+          .toMatchObject({ dueAt: null, intervalSeconds: null });
+        expect.soft(view!.nextBackstop.mechanism, `F2: ${phase} ${surface} is correspondence`)
+          .not.toMatch(/unclaimed|decision/i);
+        expect.soft(view!.laterBackstop?.mechanism ?? "", `F2: ${phase} ${surface} has no later claim promise`).not.toMatch(/unclaimed|decision/i);
+      }
+      expect(db.serialize()).toEqual(beforeRead);
+      expect(shown).toMatchObject({ body: row.body, state: "pending", humanIntent: "update", claimedAt: null });
+      expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(stored);
+      expect(await findingsFor(row.qitemId)).toEqual([]);
+    }
+  });
+
+  it("keeps a registered informational update visibly held by its canonical seat's typing guard", async () => {
+    bindHumanPane("human-reader@kernel");
+    const row = await repo.create({ sourceSession: "asker@r", destinationSession: "human-reader@kernel",
+      body: "Build status", summary: "Build status", evidenceRef: "https://example.test/build", humanIntent: "update", nudge: false });
+    repo.recordNudgeAttempt(row.qitemId, "retained:typing_guard");
+    age(row.qitemId);
+    const stored = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    expect(repo.getById(row.qitemId)!.waiting!.nextBackstop).toMatchObject({ owner: "human-reader@kernel", held: true,
+      mechanism: "held by the seat's typing guard", dueAt: null });
+    await sweep();
+    expect(await findingsFor(row.qitemId)).toEqual([]);
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(stored);
   });
 
   it.each(["decision", undefined] as const)("keeps an unclaimed human request eligible with intent %s", async (humanIntent) => {
@@ -2326,21 +2430,29 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(before);
   });
 
-  it("still reports a failed informational human notice to its asking agent", async () => {
+  it.each(["never-posted", "transport-failed"] as const)("still reports a %s informational human notice to its asking agent", async (outcome) => {
     const row = await repo.create({ sourceSession: "asker@r", destinationSession: OWNER.address, body: "Build status",
       summary: "Build status", evidenceRef: "https://example.test/build", humanIntent: "update", nudge: false });
-    await repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel",
+    if (outcome === "transport-failed") await repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel",
       transitionNote: `slack-owner-notification-transport-failed notification_key=${currentKey(row.qitemId)} level=NOTICE detail=fixture-http-500` });
     // Five minutes exercises delivery recovery without introducing the sixty-minute unclaimed condition.
     age(row.qitemId, 5);
-    expect(repo.deliveryOutcomeFor(row.qitemId)?.outcome).toBe("transport-failed");
+    expect(repo.deliveryOutcomeFor(row.qitemId)?.outcome).toBe(outcome);
     const before = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
     expect(before).toBeDefined();
     const result = await sweep();
     expect(result.outcome, result.error).not.toBe("failed");
     expect(await findingsFor(row.qitemId)).toEqual([expect.objectContaining({ destinationSession: "asker@r",
       tags: expect.arrayContaining([`stuck-sweep:undelivered-human-notice:${row.qitemId}`]),
-      body: expect.stringContaining("human notice transport-failed") })]);
+      body: expect.stringContaining(`human notice ${outcome}`) })]);
+    const [recovery] = await findingsFor(row.qitemId);
+    const view = repo.getById(row.qitemId)!.waiting!;
+    expect(view.nextBackstop).toMatchObject({ owner: "asker@r", mechanism: "queue-recovery:delegated",
+      recovery: { qitemId: recovery!.qitemId, state: "pending" } });
+    expect.soft(view.laterBackstop?.mechanism ?? "", "F2: delivery recovery must not retain a later unclaimed promise").not.toContain("unclaimed");
+    await sweep();
+    expect(repo.getById(recovery!.qitemId)?.state).toBe("pending");
+    expect(repo.deliveryOutcomeFor(row.qitemId)?.outcome).toBe(outcome);
     expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(before);
   });
 
