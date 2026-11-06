@@ -1490,8 +1490,11 @@ export class TmuxAdapter {
       try {
         await this.run(["tmux", "copy-mode", "-q", "-t", pane]);
         return { ok: true };
-      } catch {
-        return this.sendKeysUnchecked(pane, ["-X", "cancel"]);
+      } catch (error) {
+        const fallback = await this.sendKeysUnchecked(pane, ["-X", "cancel"]);
+        if (fallback.ok) return fallback;
+        // Both failed: keep both reasons, so the refusal that reports this can name them.
+        return { ...fallback, message: `copy-mode -q: ${error instanceof Error ? error.message : String(error)}; send-keys -X cancel: ${fallback.message}` };
       }
     }, false, "keys");
   }

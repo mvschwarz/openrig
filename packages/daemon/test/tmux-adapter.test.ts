@@ -933,6 +933,14 @@ describe("TmuxAdapter", () => {
       expect(await adapter.cancelPaneMode("%0")).toEqual({ ok: true });
       expect(exec.mock.calls.map(([command]) => command)).toEqual(["tmux copy-mode -q -t %0", "tmux send-keys -t '%0' '-X' 'cancel'"]);
     });
+
+    it("keeps both reasons when copy-mode -q and the fallback both fail", async () => {
+      const exec = vi.fn(async (command: string) => {
+        throw new Error(command.startsWith("tmux copy-mode") ? "unknown flag -q" : "not in a mode");
+      });
+      const result = await new TmuxAdapter(exec as unknown as ExecFn).cancelPaneMode("%0");
+      expect(result).toMatchObject({ ok: false, message: "copy-mode -q: unknown flag -q; send-keys -X cancel: not in a mode" });
+    });
   });
 
   describe("capturePaneContent", () => {
