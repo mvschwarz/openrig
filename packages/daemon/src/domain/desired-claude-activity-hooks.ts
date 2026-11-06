@@ -18,9 +18,10 @@ type ResolvedAgent = Extract<ReturnType<typeof resolveAgentRef>, { ok: true }>;
  * but every rig, pod and member startup file records that root as its `ownerRoot`. So the ref is resolved against each
  * saved startup file's owner root (re-anchored to the running install for shipped specs, as the runtime switch reads them,
  * #261). Launch also records the folder it read the agent from, as the owner root of the agent's own startup files, so a
- * folder counts only when the ref lands on a recorded root, holds an `agent.yaml` with the seat's resolved spec name, and
- * is the only one that does. Where the records can't prove which folder is the seat's spec (an import or author folder can
- * share its name), the answer is an error, never a guess. */
+ * folder counts only when the ref lands on a distinct recorded root, holds an `agent.yaml` with the seat's resolved spec
+ * name, and is the only one that does (a root resolving the ref back to itself supplies no independent evidence of the
+ * agent's source). Where the records can't prove which folder is the seat's spec (an import or author folder can share its
+ * name), the answer is an error, never a guess. */
 function agentResolvedAgainstRecordedRoots(
   agentRef: string,
   resolvedSpecName: string | null,
@@ -37,7 +38,10 @@ function agentResolvedAgainstRecordedRoots(
     const root = reanchorBuiltinStartupFile({ path, absolutePath, ownerRoot }).ownerRoot;
     if (isAbsolute(root)) roots.add(nodePath.resolve(root));
   }
-  const folders = new Set([...roots].map((root) => nodePath.resolve(root, rel)).filter((folder) => roots.has(folder)));
+  const folders = new Set([...roots].flatMap((root) => {
+    const folder = nodePath.resolve(root, rel);
+    return folder !== root && roots.has(folder) ? [folder] : [];
+  }));
   const agents = [...folders]
     .filter((folder) => fsOps.exists(nodePath.join(folder, "agent.yaml")))
     .map((folder) => resolveAgentRef(`path:${folder}`, folder, fsOps))
