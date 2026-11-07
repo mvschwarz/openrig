@@ -1,7 +1,7 @@
 // A skill whose resource says `on_restore: follow_source` takes today's bytes and today's selection when a restore
 // brings its seat back with its conversation; a seat's edit is still never overwritten.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import fs, { chmodSync, statSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, statSync, symlinkSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -197,6 +197,25 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
     expect(copy("infra-review", "new.txt")).toBe("new");
   });
 
+  it.each([false, true])("reports an ownership-write failure without hiding a refresh error (refresh fails=%s)", failRefresh => {
+    const { paths, sourceOf, launched, put } = seat();
+    launched("infra-review", { "SKILL.md": "v1" });
+    put(join(sourceOf("infra-review"), "SKILL.md"), "v2");
+    const write = fs.writeFileSync;
+    const refreshError = new Error("fixture refresh failed");
+    const spy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, ...args) => {
+      if (String(file).startsWith(`${paths.projectionsPath}.openrig-`)) throw new Error("fixture record failed");
+      if (failRefresh && String(file).startsWith(join(paths.skillsRoot, "infra-review", "SKILL.md.openrig-"))) throw refreshError;
+      return write(file, ...args);
+    });
+    const refresh = () => followSeatSkills(paths, { selected: new Set(["infra-review"]),
+      following: [{ id: "infra-review", source: sourceOf("infra-review") }] });
+    try {
+      if (failRefresh) expect(refresh).toThrow(refreshError);
+      else expect(refresh().warnings.join(" ")).toContain("could not record skill ownership");
+    } finally { spy.mockRestore(); }
+  });
+
   it("names a missing following skill when rehydration cannot recover it", () => {
     const { paths, sourceOf, launched } = seat();
     launched("infra-review", { "SKILL.md": "v1" });
@@ -266,7 +285,7 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
     expect(seatSkillReplay({ paths, entries: [{ category: "skill", effectiveId: "aws-cdk", absolutePath: sourceOf("aws-cdk") }],
       files: [], rehydration: { missing: [], refused: [] } }).skipEntryIds).toContain("aws-cdk");
     // A later fresh restore may still carry the old startup plan; keep suppressing its removed entry.
-    expect(followSeatSkills(paths, { selected: new Set(), following: [] }).removed).toEqual(["aws-cdk"]);
+    expect(followSeatSkills(paths, { selected: new Set(), following: [] }).removed).toEqual([]);
   });
 
   it("leaves skills that keep their saved copy alone, selected or not, and stops following one switched to keep_saved", () => {
@@ -331,6 +350,11 @@ describe("a launch records which of a seat's skills follow their source", () => 
         const dir = join(home, "skills", id);
         mkdirSync(dir, { recursive: true });
         writeFileSync(join(dir, "SKILL.md"), `---\nname: ${id}\ndescription: d\n---\nbody\n`);
+        if (process.platform !== "win32") {
+          const shared = join(home, `${id}-shared-reference.md`);
+          writeFileSync(shared, "shared v1");
+          if (!existsSync(join(dir, "reference.md"))) symlinkSync(shared, join(dir, "reference.md"));
+        }
         chmodSync(join(dir, "SKILL.md"), 0o640);
         return dir;
       };
@@ -349,6 +373,15 @@ describe("a launch records which of a seat's skills follow their source", () => 
       const projected = join(paths.skillsRoot, "infra-review", "SKILL.md");
       if (process.platform !== "win32") expect(JSON.parse(readFileSync(paths.projectionsPath, "utf8")).files[projected].mode).toBe(0o640);
 
+      if (process.platform !== "win32") {
+        const reference = join(paths.skillsRoot, "infra-review", "reference.md");
+        expect(readFileSync(reference, "utf8")).toBe("shared v1");
+        expect(fs.lstatSync(reference).isSymbolicLink()).toBe(false);
+        writeFileSync(join(home, "infra-review-shared-reference.md"), "shared v2");
+        followSeatSkills(paths, { selected: new Set(["infra-review", "tdd"]),
+          following: [{ id: "infra-review", source: join(home, "skills", "infra-review") }] });
+        expect(readFileSync(reference, "utf8")).toBe("shared v2");
+      }
       await launch([{ id: "infra-review" }, { id: "tdd" }]);
       expect(following()).toBeUndefined();
     });

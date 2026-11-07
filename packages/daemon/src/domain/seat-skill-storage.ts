@@ -644,13 +644,15 @@ export function followSeatSkills(paths: SeatSkillPaths, today: SeatSkillSelectio
       const why = notOurs(dir);
       if (why) { kept(dir, `${why}, and it is no longer selected`); continue; }
       // Keep the following policy after removal: an older saved startup plan must not replay this skill later.
+      const hadCopy = recordedBelow(dir).length > 0 || lexists(dir);
       clear(dir);
-      out.removed.push(id);
+      if (hadCopy) out.removed.push(id);
     }
 
   } finally {
     // A partial refresh must remain owned so a later restore can finish it.
-    writeProjections(paths.root, { ...record, files, following });
+    try { writeProjections(paths.root, { ...record, files, following }); }
+    catch (error) { out.warnings.push(`Restore: could not record skill ownership in ${paths.root}: ${(error as Error).message}`); }
   }
   return out;
 }

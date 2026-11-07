@@ -469,6 +469,10 @@ and the restore says why; a source folder without a `SKILL.md` keeps that skill'
 `keep_saved` stops following at the next restore, and its copy stays. Older seat records without file permissions
 retain their byte-only ownership checks until a new projection or refresh records permissions.
 
+Source file symlinks are dereferenced, including links to files outside the skill folder, just as during Claude and
+Codex launch projection. The seat receives an ordinary file containing the target's bytes. A broken link or a link to
+a directory makes the source unreadable and keeps the saved copy; links in the seat's destination remain protected.
+
 Only a restore does this; a running seat isn't changed, and neither is a Codex seat restarted in place. A Claude seat
 loads its seat plugin when its session starts, so it sees the new copies. A Codex seat with following skills receives
 its rebuilt catalog after its resumed session is ready. The catalog lists the skills actually present, replaces its
