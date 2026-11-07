@@ -19,10 +19,11 @@ describe("bin-wrapper", () => {
   });
 
   it.skipIf(!module.getCompileCacheDir || !module.enableCompileCache).each([
-    { args: [], explicitCache: false, expected: false },
-    { args: ["--version"], explicitCache: false, expected: true },
-    { args: [], explicitCache: true, expected: true },
-  ])("compile cache for args=$args, explicitCache=$explicitCache", ({ args, explicitCache, expected }) => {
+    { args: [], interactive: false, explicitCache: false, expected: false },
+    { args: ["--version"], interactive: false, explicitCache: false, expected: true },
+    { args: [], interactive: false, explicitCache: true, expected: true },
+    { args: [], interactive: true, explicitCache: false, expected: true },
+  ])("compile cache for args=$args, interactive=$interactive, explicitCache=$explicitCache", ({ args, interactive, explicitCache, expected }) => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-bin-cache-"));
     const dist = path.join(tempDir, "dist");
     fs.mkdirSync(dist);
@@ -42,7 +43,11 @@ export async function runProgram() { console.log(JSON.stringify({ enabled: !!get
     delete env.NODE_DISABLE_COMPILE_CACHE;
     delete env.NODE_COMPILE_CACHE;
     if (explicitCache) env.NODE_COMPILE_CACHE = path.join(tempDir, "explicit-cache");
-    const result = spawnSync(process.execPath, [wrapper, ...args], { env, encoding: "utf8", timeout: 5000 });
+    // Set stream flags before the wrapper loads; front-door.test.ts covers a real PTY launch.
+    const nodeArgs = interactive
+      ? ["--import", "data:text/javascript,process.stdin.isTTY=true;process.stdout.isTTY=true"]
+      : [];
+    const result = spawnSync(process.execPath, [...nodeArgs, wrapper, ...args], { env, encoding: "utf8", timeout: 5000 });
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({ enabled: expected });
   });
