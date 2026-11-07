@@ -1,8 +1,9 @@
+import { piAccountStateRoot } from "./domain/pi-account-state.js";
 import { EnvironmentStartup } from "./domain/environment-startup.js";
 import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
-import { seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
+import { seatRuntimeHomeBySession, seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
 import { reportRestoreDeliveryFailure } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
@@ -210,6 +211,7 @@ import { managedBlockRecords } from "./domain/managed-block-records.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
+  getOpenRigHome,
   readOpenRigEnv,
 } from "./openrig-compat.js";
 
@@ -723,7 +725,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   const { SeatLaunchEnvironment } = await import("./domain/seat-launch-environment.js");
   const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome,
-    (nodeId, runtime, ignoreAccountHome) => ignoreAccountHome
+    (nodeId, runtime, ignoreAccountHome) => runtime === "pi"
+      ? effectiveRuntimeHome(db, nodeId, "pi", undefined, ignoreAccountHome)
+      : ignoreAccountHome
       ? effectiveRuntimeHome(db, nodeId, runtime as HomeRuntime, runtime === "codex" ? configuredCodexHome : configuredClaudeHome, true)
       : seatAccountHome(db, nodeId, runtime));
   const nodeLauncher = new NodeLauncher({
@@ -768,6 +772,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // dist). Shared by the Pi runtime adapter, the resume adapter, and the
   // resume-token capture sidecar reader.
   const piStateRoot = nodePath.join(OPENRIG_HOME, "state", "pi");
+  const piStateRootForSession = (session: string) => piAccountStateRoot(db, piStateRoot, session);
   const ompStateRoot = nodePath.join(OPENRIG_HOME, "state", "omp");
   const piRunnerEntryPath = nodePath.resolve(import.meta.dirname, "./adapters/pi-runner.js");
   // OPR.0.7.0.2: Pi seats report cost facts from persisted entries only while usage.pi_cost_facts is on;
@@ -784,7 +789,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     tmuxAdapter,
     { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }) },
     { stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath },
-    { seatLaunchEnvironment, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled },
+    { accountHomeForSession: session => seatRuntimeHomeBySession(db, session, "pi"), stateRootForSession: piStateRootForSession, seatLaunchEnvironment, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled },
   );
   const ompResume = new OmpResumeAdapter(
     tmuxAdapter,
@@ -985,7 +990,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   } });
   // OPR.0.4.6.PI1 — the RPC-first Pi adapter (runner-in-a-pane). Same fsOps
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
-  const piAdapter = new PiRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), linkInfo: lstatLinkInfo }, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
+  const piAdapter = new PiRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), linkInfo: lstatLinkInfo }, stateRootForSession: piStateRootForSession, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
   const ompAdapter = new OmpRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath });
   // OPR.0.5.1.1 — the stub runtime adapter (Pi-shaped node-script runner in a pane).
   // Same fsOps shape as Pi; the compiled runner entry lives in the daemon dist.
@@ -2763,18 +2768,28 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // no drivers) — `rig slack status` names what is missing.
   const { GatewaySubsystem } = await import("./domain/gateway/gateway-subsystem.js");
   const { buildSlackGatewayWire, makeHumanReplyResolver } = await import("./domain/gateway/slack/slack-subsystem.js");
+  const { createRelayInboundHandler } = await import("./domain/gateway/relay-inbound.js");
+  const effectiveOpenRigHome = getOpenRigHome();
   const gatewaySubsystem = new GatewaySubsystem({
-    home: OPENRIG_HOME,
+    home: effectiveOpenRigHome,
     wire: () => buildSlackGatewayWire({
-      home: OPENRIG_HOME,
+      home: effectiveOpenRigHome,
       queueRepo: queueRepoInstance,
-      resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract, OPENRIG_HOME),
+      resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract, effectiveOpenRigHome),
       log: (m) => console.log(`[gateway] ${m}`),
     }),
     log: (m) => console.log(`[gateway] ${m}`),
   });
   gatewaySubsystem.start();
   deps.gatewaySubsystem = gatewaySubsystem;
+  if (deps.missionControlWriteContract) {
+    deps.relayInboundHandler = createRelayInboundHandler({
+      home: effectiveOpenRigHome,
+      queueRepo: queueRepoInstance,
+      missionControlWriteContract: deps.missionControlWriteContract,
+      missionControlActionLog: deps.missionControlActionLog,
+    });
+  }
   // OPR.0.5.6.1 — bind the delivery policies' late gateway ref.
   lateGatewayDispatch.fn = (op, ref, payload, opts) => gatewaySubsystem.dispatch(op, ref, payload, opts);
 

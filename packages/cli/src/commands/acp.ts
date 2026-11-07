@@ -4,11 +4,14 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DaemonClient, type DaemonResponse } from "../client.js";
-import { daemonStatusGuard, getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { daemonMayAnswer, daemonStatusGuard, getDaemonStatus, getDaemonUrl, statusGuardMessage } from "../daemon-lifecycle.js";
 import { processIdentity } from "../local-daemon-owner.js";
 import { getOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
 import { answerCommand, runAcpAssignment, type AcpQueue } from "../acp/connector.js";
 import { findRunProcesses } from "../acp/run-processes.js";
+import { serveAcpAgent, TeamRefused, type TeamConnection, type TeamQueue } from "../acp/agent-server.js";
+import { StreamJsonRpcPeer } from "../acp/json-rpc-stdio.js";
+import { CLI_VERSION } from "../version.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -44,6 +47,64 @@ export function daemonAcpQueue(client: DaemonClient): AcpQueue {
   };
 }
 
+/** rig acp serve's queue verbs over the daemon API, acting as the caller the client was built for. */
+export function daemonTeamQueue(client: DaemonClient): TeamQueue {
+  const ok = <T>(response: DaemonResponse<T>, what: string): T => {
+    if (response.status >= 400) throw new Error(`${what} returned HTTP ${response.status}: ${JSON.stringify(response.data)}`);
+    return response.data;
+  };
+  const face = (data: Record<string, unknown>) => {
+    const row = (data.item ?? data) as Record<string, unknown>;
+    const text = (value: unknown) => (typeof value === "string" ? value : null);
+    return {
+      qitemId: String(row.qitemId), state: String(row.state), destinationSession: String(row.destinationSession),
+      handedOffTo: text(row.handedOffTo), closureReason: text(row.closureReason), closureTarget: text(row.closureTarget), resolution: text(row.resolution),
+      closer: text((row.closingTransition as { actorSession?: unknown } | null | undefined)?.actorSession),
+    };
+  };
+  return {
+    async create(row) {
+      const response = await client.post("/api/queue/create", { qitemId: row.qitemId, destinationSession: row.destination, body: row.body, summary: row.summary, tags: row.tags });
+      // A 4xx is the daemon's answered refusal, with nothing written; a 5xx leaves the write unknown, like no answer.
+      if (response.status >= 400 && response.status < 500) throw new TeamRefused(`HTTP ${response.status}: ${JSON.stringify(response.data)}`);
+      ok(response, `queue create for ${row.destination}`);
+    },
+    async show(qitemId) {
+      return face(ok(await client.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`), `queue show ${qitemId}`));
+    },
+    async find(qitemId) {
+      const response = await client.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`);
+      if (response.status === 404) return null;
+      return face(ok(response, `queue show ${qitemId}`));
+    },
+    async transitions(qitemId) {
+      const data = ok(await client.get<Array<Record<string, unknown>>>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`), `queue transitions ${qitemId}`);
+      return data.map((t) => ({
+        transitionId: Number(t.transitionId), ts: String(t.ts), state: String(t.state),
+        transitionNote: typeof t.transitionNote === "string" ? t.transitionNote : null, actorSession: String(t.actorSession),
+      }));
+    },
+    async successor(qitemId) {
+      const data = ok(await client.get<unknown>(`/api/queue/list?handedOffFrom=${encodeURIComponent(qitemId)}&limit=1`), `queue successor of ${qitemId}`);
+      const rows = (Array.isArray(data) ? data : ((data as { items?: unknown[] }).items ?? [])) as Array<{ qitemId?: string }>;
+      return rows[0]?.qitemId;
+    },
+  };
+}
+
+/** The person this machine's OpenRig names as its default (`<id>@external`), or why there isn't one. */
+async function defaultPersonAddress(): Promise<{ address: string } | { reason: string }> {
+  try {
+    const registry = await import("@openrig/daemon/gateway-human-registry");
+    const people = registry.projectHumans();
+    if (!people.ok) return { reason: people.error };
+    const chosen = registry.resolveDefaultPerson(people.entities);
+    return chosen.person ? { address: chosen.person.address } : { reason: chosen.source === "none" ? chosen.reason : "no default person" };
+  } catch (error) {
+    return { reason: (error as Error).message };
+  }
+}
+
 function readRun(runId: string): RunFile | undefined {
   try { return JSON.parse(readFileSync(join(runsDir(), `${runId}.json`), "utf8")) as RunFile; } catch { return undefined; }
 }
@@ -62,7 +123,7 @@ function liveConnector(run: RunFile): boolean {
 }
 
 export function acpCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("acp").description("Hand a queue row's task to an ACP (Agent Client Protocol) agent and keep its outcome on the row");
+  const cmd = new Command("acp").description("ACP (Agent Client Protocol): hand a queue row's task to an ACP agent, or serve OpenRig as an agent to ACP apps");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
   const connect = async (): Promise<DaemonClient | undefined> => {
     const deps = getDeps();
@@ -133,6 +194,55 @@ Guide: rig context get reference/acp-agents.md`)
         process.removeListener("SIGINT", onInterrupt);
         writeRun({ ...runFile, endedAt: new Date().toISOString() });
       }
+    });
+
+  cmd
+    .command("serve")
+    .description("Serve OpenRig as an ACP agent on stdio, for an ACP app (Zed, JetBrains and others) to launch: its prompts go to your team as queue rows")
+    .option("--to <member@rig>", "The seat that receives your tasks: your team's entry point (required to send anything)")
+    .option("--as <address>", "Who the tasks come from (default: OPENRIG_SESSION_NAME, else this machine's default person)")
+    .option("--poll-seconds <n>", "How often to read the work's progress while a turn is open", "2")
+    .addHelpText("after", `
+An ACP app launches this command and talks to it on stdin and stdout. Each prompt becomes a queue row from you to
+--to. The app shows the row's notes and handoffs as progress, and the closing resolution as the reply. A later
+prompt in the same session goes to --to as a follow-up that names the earlier items.
+
+The turn ends when the team closes the item, or when you cancel. Cancelling stops this process waiting; the team's
+work carries on. A turn that ended doesn't mean the work was accepted: the reply says how the item was closed.
+
+It uses the OpenRig daemon on this computer, started with rig daemon start. The app's sign-in step ("OpenRig on this
+machine") checks that the daemon answers and that you resolve to an address: --as, OPENRIG_SESSION_NAME, or the
+default person (rig gateway default <id>).
+
+In Zed's settings.json:
+  "agent_servers": { "OpenRig": { "type": "custom", "command": "rig", "args": ["acp", "serve", "--to", "lead@my-team"] } }
+
+Guide: rig context get reference/acp-agents.md#openrig-as-an-agent-in-acp-apps`)
+    .action(async (opts: { to?: string; as?: string; pollSeconds: string }) => {
+      // Only ACP messages may reach stdout: anything a helper prints goes to stderr instead.
+      console.log = console.error;
+      console.info = console.error;
+      process.stdout.on("error", () => { /* EPIPE once the app has gone; the input closing ends the server */ });
+      const connectTeam = async (): Promise<TeamConnection | { error: string }> => {
+        const status = await getDaemonStatus(getDeps().lifecycleDeps);
+        if (!daemonMayAnswer(status)) {
+          const err = statusGuardMessage(status);
+          return { error: `${err.fact} ${err.action}` };
+        }
+        let caller = opts.as?.trim() || self()?.trim();
+        if (!caller) {
+          const person = await defaultPersonAddress();
+          if ("reason" in person) return { error: `OpenRig doesn't know who you are on this machine (${person.reason}). Choose the default person with rig gateway default <id>, or add --as <address> to the agent's command.` };
+          caller = person.address;
+        }
+        return { queue: daemonTeamQueue(new DaemonClient(getDaemonUrl(status), { sessionName: caller })), caller, receiver: opts.to?.trim() || undefined };
+      };
+      const peer = new StreamJsonRpcPeer(process.stdin, process.stdout);
+      serveAcpAgent(peer, {
+        connect: connectTeam, version: CLI_VERSION, pollMs: Math.max(1, Number(opts.pollSeconds) || 2) * 1000,
+        log: (line) => console.error(`[rig acp serve] ${line}`), closed: peer.closed,
+      });
+      await peer.closed;
     });
 
   cmd

@@ -65,8 +65,9 @@ or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; t
 
 A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
 and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
-The `GET /api/terminal/<name>` routes, the websocket included, answer `{ "error": "unauthorized", "hint" }`. A token
-doesn't get past the browser boundary's 403 refusals, which [Browser access](browser-access.md) describes.
+The `GET /api/terminal/<name>` routes, the websocket included, answer `{ "error": "unauthorized", "hint" }`. A valid configured bearer token in the Authorization header can pass the browser boundary's target-name check
+for a well-formed but unaccepted Host. It cannot pass a malformed Host or a refused Origin; see
+[Browser access](browser-access.md).
 
 ## Event streams
 

@@ -14,7 +14,7 @@ returns `503` with `error: "human_registry_unavailable"`. The result does not in
 ## Participants
 
 A participant is either:
-- **a person**, registered with `rig gateway human add`, with or without a connector binding; or
+- **a person**, registered with `rig gateway human add`, with or without a connector binding (such as Slack or an HTTP loopback [relay](gateway-relay.md)); or
 - **a shared channel**: one vetted Slack channel registered as one participant, `<id>@external`, not a person per
   sender.
 
@@ -22,6 +22,9 @@ People and channels share one address space: a channel can't take a person's id.
 
 A registered person is addressed as `<id>@external`, including without Slack: for example,
 `rig gateway human add alex --display-name "Alex" --delivery-class B` creates `alex@external`, reached in the Feed and Steering.
+A person can also bind to a local bridge adapter using a `relay` binding:
+`rig gateway human add bob --display-name "Bob" --delivery-class B --binding "relay:local-bridge:file:/etc/openrig/relay.env:primary:handle=bob-ops"`
+(see [Gateway Relay Reference](gateway-relay.md) for endpoint, secret provisioning, and custody architecture).
 `human@host` is the unnamed person at the terminal; `human@kernel` is also accepted as a human/gate address.
 These aliases (including `human-<name>@host` and `human-<name>@kernel`) are not agent sessions: reply with
 `rig queue create --destination human@host --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`,

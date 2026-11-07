@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { ClosureReason } from "./hot-potato-enforcer.js";
 import { archiveWhereClause } from "./rig-repository.js";
@@ -5,6 +6,198 @@ import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
 
 export const OWNER_NOTIFICATION_LEVELS = ["RECORD", "NOTICE", "ALERT"] as const;
 export type OwnerNotificationLevel = (typeof OWNER_NOTIFICATION_LEVELS)[number];
+
+export const RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX = "relay-owner-notification-accepted" as const;
+export const RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX = "relay-owner-notification-transport-failed" as const;
+
+export interface RelayOwnerNotificationReceipt {
+  notificationKey: string;
+  deliveryId: string | null;
+  connectorRef: string | null;
+  replyRef: string | null;
+  replyRefHash: string | null;
+  revision: string | null;
+  episodeKey: string | null;
+  level: OwnerNotificationLevel | null;
+  kind: string | null;
+  digest: string | null;
+}
+
+export interface FormatRelayOwnerNotificationAcceptedInput {
+  notificationKey: string;
+  deliveryId?: string | null;
+  connectorRef?: string | null;
+  replyRef?: string | null;
+  replyRefHash?: string | null;
+  revision?: string | null;
+  episodeKey?: string | null;
+  level?: OwnerNotificationLevel | string | null;
+  kind?: string | null;
+  digest?: string | null;
+}
+
+export interface RelayOwnerNotificationTransportFailure {
+  notificationKey: string;
+  connectorRef: string | null;
+  failureClass: string;
+  error: string;
+}
+
+export interface FormatRelayOwnerNotificationTransportFailedInput {
+  notificationKey: string;
+  connectorRef?: string | null;
+  failureClass: string;
+  detail: string;
+}
+
+function encodeReceiptToken(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  return trimmed.replace(/%|[\s=]/g, (ch) => encodeURIComponent(ch));
+}
+
+function encodeConnectorRefToken(value: string | null | undefined): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return encodeURIComponent(value);
+}
+
+function decodeReceiptToken(value: string | null | undefined): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
+export function formatRelayOwnerNotificationAccepted(input: FormatRelayOwnerNotificationAcceptedInput): string {
+  const notificationKey = typeof input.notificationKey === "string" ? input.notificationKey.trim() : "";
+  if (!notificationKey || /\s/.test(notificationKey)) {
+    throw new Error("formatRelayOwnerNotificationAccepted requires a non-empty notificationKey");
+  }
+  const deliveryId = encodeReceiptToken(input.deliveryId);
+  const connectorRef = encodeConnectorRefToken(input.connectorRef ?? null);
+  const rawReplyRef = typeof input.replyRef === "string" && input.replyRef.trim().length > 0 ? input.replyRef.trim() : null;
+  const replyRef = encodeReceiptToken(rawReplyRef);
+  const replyRefHash =
+    encodeReceiptToken(input.replyRefHash) ??
+    (rawReplyRef ? createHash("sha256").update(rawReplyRef).digest("hex") : null);
+  const revision = encodeReceiptToken(input.revision);
+  const episodeKey = encodeReceiptToken(input.episodeKey);
+  const level = encodeReceiptToken(input.level);
+  const kind = encodeReceiptToken(input.kind);
+  const digest = encodeReceiptToken(input.digest);
+
+  const tokens = [`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX}`, `notification_key=${notificationKey}`];
+  if (deliveryId) tokens.push(`delivery_id=${deliveryId}`);
+  if (connectorRef) tokens.push(`connector_ref=${connectorRef}`);
+  if (replyRef) tokens.push(`reply_ref=${replyRef}`);
+  if (replyRefHash) tokens.push(`reply_ref_hash=${replyRefHash}`);
+  if (revision) tokens.push(`revision=${revision}`);
+  if (episodeKey) tokens.push(`episode_key=${episodeKey}`);
+  if (level) tokens.push(`level=${level}`);
+  if (kind) tokens.push(`kind=${kind}`);
+  if (digest) tokens.push(`digest=${digest}`);
+  return tokens.join(" ");
+}
+
+export function parseRelayOwnerNotificationAccepted(
+  note: string | null | undefined,
+): RelayOwnerNotificationReceipt | null {
+  if (!note || !note.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `)) return null;
+  const fields = note.trim().split(/\s+/);
+  const rawValue = (...names: string[]): string | null => {
+    for (const name of names) {
+      const prefix = `${name}=`;
+      const found = fields.find((field) => field.startsWith(prefix));
+      if (found) {
+        const sliced = found.slice(prefix.length);
+        if (sliced.length > 0) return sliced;
+      }
+    }
+    return null;
+  };
+  const decodedValue = (...names: string[]): string | null => decodeReceiptToken(rawValue(...names));
+  const notificationKey = rawValue("notification_key");
+  if (!notificationKey) return null;
+  const replyRef = decodedValue("reply_ref");
+  const replyRefHash =
+    decodedValue("reply_ref_hash") ??
+    (replyRef ? createHash("sha256").update(replyRef).digest("hex") : null);
+  const rawLevel = decodedValue("level");
+  const level =
+    rawLevel && OWNER_NOTIFICATION_LEVELS.includes(rawLevel as OwnerNotificationLevel)
+      ? (rawLevel as OwnerNotificationLevel)
+      : null;
+  return {
+    notificationKey,
+    deliveryId: decodedValue("delivery_id"),
+    connectorRef: decodedValue("connector_ref"),
+    replyRef,
+    replyRefHash,
+    revision: decodedValue("revision"),
+    episodeKey: decodedValue("episode_key"),
+    level,
+    kind: decodedValue("kind"),
+    digest: decodedValue("digest"),
+  };
+}
+
+export function formatRelayOwnerNotificationTransportFailed(
+  input: FormatRelayOwnerNotificationTransportFailedInput,
+): string {
+  const notificationKey = typeof input.notificationKey === "string" ? input.notificationKey.trim() : "";
+  if (!notificationKey || /\s/.test(notificationKey)) {
+    throw new Error("formatRelayOwnerNotificationTransportFailed requires a non-empty notificationKey");
+  }
+  const connectorRef = encodeConnectorRefToken(input.connectorRef ?? null);
+  const failureClass = encodeReceiptToken(input.failureClass);
+  if (!failureClass) {
+    throw new Error("formatRelayOwnerNotificationTransportFailed requires a non-empty failureClass");
+  }
+  const detail = typeof input.detail === "string" ? input.detail.replace(/[\r\n]+/g, " ").trim() : "";
+  const tokens = [
+    `${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX}`,
+    `notification_key=${notificationKey}`,
+  ];
+  if (connectorRef) tokens.push(`connector_ref=${connectorRef}`);
+  tokens.push(`class=${failureClass}`);
+  tokens.push(`error=${detail}`);
+  return tokens.join(" ");
+}
+
+export function parseRelayOwnerNotificationTransportFailed(
+  note: string | null | undefined,
+): RelayOwnerNotificationTransportFailure | null {
+  if (!note || !note.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `)) return null;
+  const trimmed = note.trim();
+  const fields = trimmed.split(/\s+/);
+  const rawValue = (...names: string[]): string | null => {
+    for (const name of names) {
+      const prefix = `${name}=`;
+      const found = fields.find((field) => field.startsWith(prefix));
+      if (found) {
+        const sliced = found.slice(prefix.length);
+        if (sliced.length > 0) return sliced;
+      }
+    }
+    return null;
+  };
+  const notificationKey = rawValue("notification_key");
+  if (!notificationKey) return null;
+  const connectorRef = decodeReceiptToken(rawValue("connector_ref"));
+  const failureClass = decodeReceiptToken(rawValue("class"));
+  if (!failureClass) return null;
+  const errorIdx = trimmed.indexOf(" error=");
+  const error = errorIdx >= 0 ? trimmed.slice(errorIdx + " error=".length) : (rawValue("error") ?? "");
+  return {
+    notificationKey,
+    connectorRef,
+    failureClass,
+    error,
+  };
+}
 
 export function ownerNotificationLevelAtLeast(
   level: OwnerNotificationLevel,
@@ -464,7 +657,14 @@ export class QueueTransitionLog {
   }
 
   hasOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
-    return this.getOwnerNotificationReceipt(qitemId, notificationKey) !== null;
+    return (
+      this.getOwnerNotificationReceipt(qitemId, notificationKey) !== null ||
+      this.getRelayOwnerNotificationReceipt(qitemId, notificationKey) !== null
+    );
+  }
+
+  hasRelayOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
+    return this.getRelayOwnerNotificationReceipt(qitemId, notificationKey) !== null;
   }
 
 /** The latest owner-notification episode per ACTIVE queue row, in queue order. One query
@@ -476,7 +676,7 @@ export class QueueTransitionLog {
  *
  *  The eligible set is restricted to active queue items before any ranking happens, so a
  *  large notification archive never adds scan or ranking work to a sweep with no active item. */
-  activeOwnerNotificationEpisodes(includePosted: boolean): Array<{ qitemId: string; transition: QueueTransition; posted: boolean }> {
+  activeOwnerNotificationEpisodes(includePosted = false): Array<{ qitemId: string; transition: QueueTransition; posted: boolean }> {
     if (!this.hasOwnerNotificationColumns) return [];
     // Exact token match with no wildcard risk: pad both ends so a key at the note's
     // start or end still matches, and instr() compares literally (qitem ids may
@@ -485,7 +685,7 @@ export class QueueTransitionLog {
       `EXISTS (
          SELECT 1 FROM ${this.historySource} r
          WHERE r.qitem_id = ${qitemIdExpr}
-           AND r.transition_note LIKE 'slack-owner-notification-posted %'
+           AND (r.transition_note LIKE 'slack-owner-notification-posted %' OR r.transition_note LIKE 'relay-owner-notification-accepted %')
            AND instr(' ' || r.transition_note || ' ', ' notification_key=' || ${qitemIdExpr} || ':' || ${transitionIdExpr} || ' ') > 0
        )`;
     const postedFilter = includePosted ? "" : `AND NOT ${receipt("latest.qitem_id", "latest.transition_id")}`;
@@ -536,6 +736,64 @@ export class QueueTransitionLog {
       if (!fields.includes(`notification_key=${notificationKey}`)) continue;
       const value = (name: string) => fields.find((field) => field.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
       return { messageTs: value("message_ts"), threadTs: value("thread_ts"), digest: value("digest") };
+    }
+    return null;
+  }
+
+  listRelayOwnerNotificationReceipts(qitemId: string): RelayOwnerNotificationReceipt[] {
+    const rows = this.db
+      .prepare(
+        `SELECT transition_id, transition_note FROM ${this.historySource}
+          WHERE qitem_id = ? AND transition_note LIKE 'relay-owner-notification-accepted %'
+          ORDER BY transition_id DESC`,
+      )
+      .all(qitemId) as Array<{ transition_id: number; transition_note: string }>;
+    const receipts: RelayOwnerNotificationReceipt[] = [];
+    for (const row of rows) {
+      const parsed = parseRelayOwnerNotificationAccepted(row.transition_note);
+      if (parsed) receipts.push(parsed);
+    }
+    return receipts;
+  }
+
+  getRelayOwnerNotificationReceipt(qitemId: string, notificationKey?: string): RelayOwnerNotificationReceipt | null {
+    for (const parsed of this.listRelayOwnerNotificationReceipts(qitemId)) {
+      if (notificationKey === undefined || parsed.notificationKey === notificationKey) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
+  findRelayOwnerNotificationReceiptByReplyRef(
+    replyRef: string,
+  ): (RelayOwnerNotificationReceipt & { qitemId: string }) | null {
+    const trimmed = replyRef.trim();
+    if (!trimmed) return null;
+    const fullHash = createHash("sha256").update(trimmed, "utf8").digest("hex");
+    const rows = this.db
+      .prepare(
+        `SELECT qitem_id, transition_note FROM ${this.historySource}
+          WHERE transition_note LIKE 'relay-owner-notification-accepted %'
+            AND (
+              instr(' ' || transition_note || ' ', ' reply_ref_hash=' || ? || ' ') > 0
+              OR instr(' ' || transition_note || ' ', ' reply_ref=' || ? || ' ') > 0
+            )
+          ORDER BY transition_id DESC`,
+      )
+      .all(fullHash, trimmed) as Array<{ qitem_id: string; transition_note: string }>;
+    for (const row of rows) {
+      const parsed = parseRelayOwnerNotificationAccepted(row.transition_note);
+      if (!parsed) continue;
+      if (parsed.replyRef !== null) {
+        if (parsed.replyRef === trimmed && parsed.replyRefHash === fullHash) {
+          return { qitemId: row.qitem_id, ...parsed };
+        }
+        continue;
+      }
+      if (parsed.replyRefHash === fullHash) {
+        return { qitemId: row.qitem_id, ...parsed };
+      }
     }
     return null;
   }

@@ -9,7 +9,8 @@
 // - orphaned: held or released, but no active release job for its window: nothing will release or redrive it, so the
 //   sweep must find it. The hold note and its job are written together, and the job retires only once every ask it
 //   holds is resolved, so this happens only when a job is stopped or terminated from outside.
-// An ask that has posted, or whose release gave it a disposition, isn't quiet custody any more (null), and neither is
+// An ask that has posted (or been accepted by a relay bridge, which ends local quiet custody without claiming
+// downstream person delivery), or whose release gave it a disposition, isn't quiet custody any more (null), and neither is
 // any row without a quiet-hold note: digest-held and ordinary rows read exactly as before, and so does an attempted
 // ask kept in the dispatch buffer because quiet hours couldn't be read (it has no hold; it is ordinary in-flight work).
 import type Database from "better-sqlite3";
@@ -44,7 +45,9 @@ export function quietHoldCustody(db: Database.Database, qitemId: string, now: Da
     const hold = notes.map(parseQuietHoldNote).find((h) => h?.notificationKey === key);
     if (!hold) return null;
     const windowId = hold.windowId;
-    if (notes.some((n) => hasToken(n, "slack-owner-notification-posted", key) || hasToken(n, "quiet-release-disposition", key))) return null;
+    if (notes.some((n) => hasToken(n, "slack-owner-notification-posted", key)
+      || hasToken(n, "relay-owner-notification-accepted", key)
+      || hasToken(n, "quiet-release-disposition", key))) return null;
     const live = db.prepare("SELECT 1 FROM watchdog_jobs WHERE policy = 'quiet-release' AND state = 'active' AND spec_yaml LIKE ? LIMIT 1")
       .get(`%${releaseJobWindowSpec(windowId)}%`);
     // Without a live job nothing redrives a release or releases a hold, whichever step it reached: orphaned.
@@ -55,11 +58,13 @@ export function quietHoldCustody(db: Database.Database, qitemId: string, now: Da
       if (hasToken(notes[i]!, "quiet-release-dispatched", key) || hasToken(notes[i]!, "quiet-release-returned", key)) { step = i; break; }
     }
     if (step >= 0 && notes[step]!.startsWith("quiet-release-dispatched ")) {
-      // A post failure for this notification with no receipt (a receipt or disposition ended custody above) is still
+      // A post or relay transport failure for this notification with no receipt (a Slack post receipt, relay bridge
+      // acceptance, or disposition ended custody above) is still
       // unresolved, even one recorded before this dispatch: the gateway records a failure once per notification, so a
       // failed re-dispatch adds none. That is the ledger's rule too: failed until a receipt. A release still in flight
       // after an earlier failure therefore reads as failed until its post lands.
-      const failed = notes.find((n) => hasToken(n, "slack-owner-notification-transport-failed", key));
+      const failed = notes.find((n) => hasToken(n, "slack-owner-notification-transport-failed", key)
+        || hasToken(n, "relay-owner-notification-transport-failed", key));
       if (failed) {
         const failure = failed.split(/\s+/).find((t) => t.startsWith("class="))?.slice("class=".length) ?? "unknown";
         return { state: "release-failed", windowId, notificationKey: key, nextBoundary: null, failure };

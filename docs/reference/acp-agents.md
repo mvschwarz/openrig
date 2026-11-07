@@ -181,3 +181,45 @@ rig exec cancel <runId>
 - One run is one turn for one row.
 - The client offers the agent no file-system or terminal methods; the agent works in its own environment.
 - Spend is whatever the agent's provider charges. OpenRig doesn't measure it; it records only what the agent reports.
+
+## OpenRig as an agent in ACP apps
+
+The other direction: `rig acp serve`. An app that speaks ACP and can launch a custom agent command can offer your OpenRig team as its agent. The app starts
+`rig acp serve` and talks to it on stdin and stdout:
+
+```sh
+rig acp serve --to <member@rig>
+```
+
+- **A prompt** becomes a queue row from you to `--to`, the seat that takes your team's new work. The row's body is your
+  prompt, plus a line saying which app sent it and that its closing resolution is your answer.
+- **Progress:** each row the work reaches shows in the app as a step (`Sent to …`, then `Handed to …` at each handoff),
+  with the row's notes as they're written, each with the seat that wrote it.
+- **The reply** is the closing resolution, with who closed the row and how (`done`, `done (canceled)`, `denied`, …). The
+  turn ending says only that the turn ended: read the reply for how the work ended.
+- **A follow-up** in the same session goes to `--to` as a new row whose body names the earlier rows and their states,
+  and the app first shows any earlier row that's still open.
+- **Cancel** stops `rig acp serve` waiting. The team's work carries on, and the reply says so.
+- **Work handed to a seat on another machine** can't be followed from here; the reply says where it went.
+
+**Who you are:** `--as <address>`, else `OPENRIG_SESSION_NAME`, else this machine's default person
+(`rig gateway default <id>`; the address is `<id>@external`). The app's sign-in step, "OpenRig on this machine", checks
+that the daemon answers and that you resolve to an address; until then, signing in and new sessions fail with the
+reason and the fix. The agent talks only to the daemon on this computer, so start it first (`rig daemon start`).
+
+**In Zed**, add the agent to `settings.json`:
+
+```json
+"agent_servers": {
+  "OpenRig": { "type": "custom", "command": "rig", "args": ["acp", "serve", "--to", "lead@my-team"] }
+}
+```
+
+Other apps take the same command and arguments wherever they configure a custom ACP agent.
+
+**Limits:**
+- One receiver per agent command; the app has no team picker.
+- The team's questions to you, and reopening an earlier session, aren't served: a question addressed to you waits in
+  your usual places (the TUI, Slack).
+- Prompts are text. Links and embedded text files are passed on as written; images and audio aren't accepted.
+- Progress is read every 2 seconds while a turn is open (`--poll-seconds`).

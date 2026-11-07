@@ -16,7 +16,7 @@ import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { readSeatEffort } from "./seat-effort.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 
-export type SwitchRuntime = "codex" | "claude-code";
+export type SwitchRuntime = "codex" | "claude-code" | "pi";
 
 /** Where an effective target setting came from. `native_default` means OpenRig passes no flag. */
 export type RuntimeSwitchSettingSource = "explicit" | "agent_spec" | "native_default";
@@ -133,7 +133,7 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
 
   // Saved startup files are runtime-neutral except the seat-skills pointer and a Codex seat's catalog; those are rebuilt
   // for the target. Managed guidance the target projects isn't also delivered as a file (the launch's own rule).
-  const sourceSeat = node.runtime === "codex" || node.runtime === "claude-code"
+  const sourceSeat = node.runtime === "codex" || node.runtime === "claude-code" || node.runtime === "pi"
     ? seatSkillPaths({ rigId: node.rigId, logicalId: node.logicalId, runtime: node.runtime }, input.openrigHome) : undefined;
   const pointer = seatSkillsPointerStartupFile();
   const projectedGuidance = new Set(plan.entries
@@ -186,7 +186,7 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
     async prepare(binding, adapter) {
       const notes: string[] = [];
       if (runtime === "claude-code") notes.push(...ensureSeatSkillPlugin(seatSkills));
-      if (skillLoadout) {
+      if (skillLoadout && runtime !== "pi") {
         const reconcile = (selected: SkillLoadout) => reconcileSkillLoadout({ loadout: selected, runtime, cwd, apply: true,
           topologyOwner: input.canonicalSession, location: seatSkillLocation(seatSkills, runtime) });
         let projection = reconcile(skillLoadout);

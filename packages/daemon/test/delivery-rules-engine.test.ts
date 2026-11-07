@@ -10,7 +10,7 @@
 // Every section below fails at base for exactly those reasons.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
@@ -1192,5 +1192,142 @@ describe("OPR.0.5.6.1 §8 — the production composition is live (R2 B-1/B-2/B-3
     } finally {
       wire.stop();
     }
+  });
+
+  it("recognizes relay owner acceptance on operator escalations as outcome accepted (never posted) without closing underlying work", async () => {
+    const mod = await operatorEngineModule();
+    expect(mod).not.toBeNull();
+
+    const src = await repo.create({ sourceSession: "sender@r", destinationSession: "relay@r", body: "obligation" });
+    const { created } = await repo.handoff({ qitemId: src.qitemId, fromSession: "relay@r", toSession: "worker@r", nudge: false });
+    db.prepare("UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = ? WHERE qitem_id = ?")
+      .run(new Date(Date.now() - 10 * 60_000).toISOString(), "failed:tmux session not found", created.qitemId);
+
+    const relayEnvPath = join(home, "relay-op.env");
+    writeFileSync(
+      relayEnvPath,
+      [
+        "OPENRIG_RELAY_URL=http://127.0.0.1:43117/outbound",
+        "OPENRIG_RELAY_OUTBOUND_TOKEN=out-secret-token",
+        "OPENRIG_RELAY_INBOUND_TOKEN=in-secret-token",
+      ].join("\n") + "\n",
+      { mode: 0o600 },
+    );
+
+    const relayRegistry = {
+      ok: true as const,
+      entities: [
+        {
+          entityId: "human-founder",
+          class: "human" as const,
+          displayName: "Founder",
+          address: "human-founder@external",
+          connectorBindings: [
+            {
+              kind: "relay" as const,
+              connectorRef: "relay-op",
+              secretsRef: `file:${relayEnvPath}`,
+              role: "primary" as const,
+              handle: "founder_relay",
+            },
+          ],
+          prefs: { deliveryClass: "B" as const, availability: "available" as const },
+        },
+      ],
+    };
+
+    const make = (mod as {
+      makeOperatorDeliveryEngine: (deps: unknown) => {
+        dispatchEscalation: (row: QueueItem, reason: string) => Promise<{ decision: string; resolved: boolean; dispatched?: boolean; notificationKey?: string }>;
+        hasAcceptedEscalation: (row: QueueItem) => boolean;
+      };
+    }).makeOperatorDeliveryEngine;
+
+    // Cross-entity provisioning conflict must be caught by default readiness via { entities: reg.entities }
+    const conflictingRegistry = {
+      ok: true as const,
+      entities: [
+        ...relayRegistry.entities,
+        {
+          entityId: "human-second",
+          class: "human" as const,
+          displayName: "Second",
+          address: "human-second@external",
+          connectorBindings: [
+            {
+              kind: "relay" as const,
+              connectorRef: "relay-op",
+              secretsRef: `file:${join(home, "other-relay.env")}`,
+              role: "secondary" as const,
+              handle: "second_relay",
+            },
+          ],
+          prefs: { deliveryClass: "B" as const, availability: "available" as const },
+        },
+      ],
+    };
+    mkdirSync(join(home, "gateway"), { recursive: true });
+    writeFileSync(
+      join(home, "gateway", "participants.yaml"),
+      "version: 1\ndefault: human-founder\norganizations: {}\ngroups: {}\nparticipants: {}\n",
+    );
+
+    const conflictingPort = make({
+      home,
+      gatewayState: () => "active",
+      queueRepo: repo,
+      dispatch: () => ({ ok: true, decisionId: "d-conflict" }),
+      registry: { loadHumanRegistry: () => conflictingRegistry },
+    });
+    const conflictResult = await conflictingPort.dispatchEscalation(created, "wake failed");
+    expect(conflictResult).toMatchObject({
+      dispatched: false,
+      resolved: false,
+      decision: expect.stringMatching(/^unavailable:human-delivery:/),
+    });
+
+    // Default readiness with provisioned relay profile (no custom readiness stub, no Slack config/network probe)
+    const port = make({
+      home,
+      gatewayState: () => "active",
+      queueRepo: repo,
+      dispatch: () => ({ ok: true, decisionId: "d-relay" }),
+      registry: { loadHumanRegistry: () => relayRegistry },
+    });
+
+    const first = await port.dispatchEscalation(created, "wake failed");
+    expect(first).toMatchObject({ decision: "interrupt", dispatched: true, resolved: false });
+    expect(first.notificationKey).toBeTruthy();
+
+    // Hypothetical non-shipped alternative formats must NOT resolve the escalation
+    repo.update({
+      qitemId: created.qitemId,
+      actorSession: "daemon@kernel",
+      transitionNote: `relay_accepted notification_key=${first.notificationKey!} outcome=relay_accepted`,
+    });
+    expect(port.hasAcceptedEscalation(created)).toBe(false);
+
+    // Real relay-owner-notification-accepted evidence resolves as "accepted" (never "posted") without closing work
+    repo.recordRelayOwnerNotificationAccepted({
+      qitemId: created.qitemId,
+      notificationKey: first.notificationKey!,
+      deliveryId: "del-op-1",
+      connectorRef: "relay-op",
+      level: "ALERT",
+      kind: "human-required",
+    });
+
+    expect(port.hasAcceptedEscalation(created)).toBe(true);
+
+    const second = await port.dispatchEscalation(created, "wake failed");
+    expect(second).toMatchObject({
+      decision: "accepted",
+      resolved: true,
+      dispatched: true,
+      notificationKey: first.notificationKey,
+    });
+    expect(second.decision).toBe("accepted");
+    expect(second.decision).not.toBe("posted");
+    expect(repo.getById(created.qitemId)?.state).toBe("pending");
   });
 });

@@ -2,13 +2,17 @@ import type { AttentionRead, AttentionItem } from "@openrig/daemon/attention";
 import type { Action, FleetSnapshot, ViewState } from "../types.js";
 import { listItem, wrapDetailLines, type ContentLine } from "../detail.js";
 
-/** The bounded, confirmed-delivery projection served by S02; no client classification. */
+/** The bounded, confirmed-delivery or bridge-acceptance projection served by S02; no client classification. */
 export interface DeliveredHumanUpdates {
   items: Array<{ qitemId: string; summary: string | null; body: string; humanDetail: string | null;
     destinationSession: string; sourceSession: string; tags: string[] | null; evidenceRef: string | null;
-    deliveredAt: string; deliveryReceipt: string }>;
+    deliveredAt: string; deliveryReceipt: string; deliveryOutcome?: "posted" | "accepted" | null }>;
   limit: number;
   truncated: boolean;
+}
+
+function isBridgeAcceptedUpdate(q: DeliveredHumanUpdates["items"][number]): boolean {
+  return q.deliveryOutcome === "accepted" || q.deliveryReceipt.startsWith("relay-owner-notification-accepted");
 }
 
 export function composeHumanUpdates(attention: AttentionRead | null, updates: DeliveredHumanUpdates | null, wanted?: string | null): AttentionRead | null {
@@ -17,19 +21,30 @@ export function composeHumanUpdates(attention: AttentionRead | null, updates: De
     scope: "instance", readAt: new Date().toISOString(), items: [], detail: null, detailError: null,
     sources: [{ source: "queue", state: "unavailable", detail: "Human requests have not answered." }, { source: "outcomes and health", state: "unavailable", detail: "Feed source unavailable." }],
   };
+  const hasAccepted = Boolean(updates?.items.some(isBridgeAcceptedUpdate));
+  const hasPosted = Boolean(updates?.items.some(q => !isBridgeAcceptedUpdate(q)));
+  const sourceDetail = !updates
+    ? "Delivered updates have not answered."
+    : hasAccepted && !hasPosted
+      ? `Latest ${updates.limit} updates accepted by the bridge; retained receipt window${updates.truncated ? ", more omitted" : ""}.`
+      : hasAccepted
+        ? `Latest ${updates.limit} confirmed delivered or accepted-by-bridge updates; retained receipt window${updates.truncated ? ", more omitted" : ""}.`
+        : `Latest ${updates.limit} confirmed delivered updates; retained receipt window${updates.truncated ? ", more omitted" : ""}.`;
   read.sources.push({ source: "delivered updates", state: !updates ? "unavailable" : updates.truncated ? "partial" : "available",
-    detail: updates ? `Latest ${updates.limit} confirmed delivered updates; retained receipt window${updates.truncated ? ", more omitted" : ""}.` : "Delivered updates have not answered." });
+    detail: sourceDetail });
   for (const q of updates?.items ?? []) {
+    const accepted = isBridgeAcceptedUpdate(q);
     const projects = [...new Set((q.tags ?? []).filter(t => t.startsWith("project:")).map(t => t.slice(8)))];
-    const item: AttentionItem = { id: `human-update:${q.qitemId}`, kind: "update", summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Delivered update",
+    const baseScope = projects.length === 1 ? `project ${projects[0]} (queue tag)` : "instance · project unknown";
+    const item: AttentionItem = { id: `human-update:${q.qitemId}`, kind: "update", summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || (accepted ? "Accepted by bridge" : "Delivered update"),
       recipient: q.destinationSession, urgency: "update", unblocks: null, at: q.deliveredAt,
-      scope: projects.length === 1 ? `project ${projects[0]} (queue tag)` : "instance · project unknown", project: null,
+      scope: accepted ? `${baseScope} · accepted by bridge` : baseScope, project: null,
       source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
     if (!read.items.some(current => current.id === `queue-update:${q.qitemId}`)) read.items.push(item);
     if (wanted === item.id && read.detail?.item.id !== item.id) {
       read.detailError = null;
       read.detail = { item, lines: [q.body, ...(q.humanDetail ? ["Supplemental detail:", q.humanDetail] : []),
-        `From: ${q.sourceSession}`, `Delivered: ${q.deliveredAt}`, `Delivery receipt: ${q.deliveryReceipt}`, `Queue: ${q.qitemId}`, `Evidence: ${q.evidenceRef ?? "none recorded"}`],
+        `From: ${q.sourceSession}`, accepted ? `Accepted by bridge: ${q.deliveredAt}` : `Delivered: ${q.deliveredAt}`, `Delivery receipt: ${q.deliveryReceipt}`, `Queue: ${q.qitemId}`, `Evidence: ${q.evidenceRef ?? "none recorded"}`],
         files: q.evidenceRef?.startsWith("/") ? [{ label: "Update evidence", path: q.evidenceRef }] : [] };
     }
   }

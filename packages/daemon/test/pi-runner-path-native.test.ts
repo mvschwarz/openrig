@@ -54,7 +54,7 @@ else { process.stdin.resume(); console.error('Error: Unknown options: --name, --
         fileURLToPath(new URL("../src/adapters/pi-runner.ts", import.meta.url)),
         "--session-name", "fixture", "--state-root", stateRoot, "--cwd", temp,
         "--launch-id", "path-attempt", "--no-approve"], {
-        env: { PATH: searchPath, HOME: temp, OPENRIG_HOME: path.join(temp, "home") },
+        env: { OPENRIG_PI_ACCOUNT_HOME: "/ignored/ambient", PI_CODING_AGENT_DIR: "/ambient/must-not-be-used", PATH: searchPath, HOME: temp, OPENRIG_HOME: path.join(temp, "home") },
         detached: true, stdio: ["pipe", "pipe", "pipe"],
       });
       let output = "", ready = false, timedOut = false;
@@ -93,6 +93,8 @@ else { process.stdin.resume(); console.error('Error: Unknown options: --name, --
       const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-wrap-child-")));
       const first = path.join(temp, "first"), second = path.join(temp, "second");
       fs.mkdirSync(first); fs.mkdirSync(second);
+      const account = path.join(temp, "account"); fs.mkdirSync(account);
+      fs.writeFileSync(path.join(account, "auth.json"), "synthetic-selected-account");
       const session = path.join(temp, "session.jsonl");
       fs.writeFileSync(session, "fixture\n");
       const piLogPath = path.join(temp, "pi-child-log.json");
@@ -150,6 +152,7 @@ WRAPPER_SH_PID="$$" WRAPPER_PPID="$PPID" ${quote(process.execPath)} -e '
     wrapperPpid: Number(process.env.WRAPPER_PPID),
     wrapperArgs: argv.slice(0, sep),
     execArgv: argv.slice(sep + 1),
+    auth: fs.readFileSync(require("node:path").join(process.env.PI_CODING_AGENT_DIR, "auth.json"), "utf8"),
     cwd: process.cwd(),
     tty: [0, 1, 2].map(fd => Boolean(tty.isatty(fd))),
   }));
@@ -181,8 +184,9 @@ exec "$@"
         "--launch-wrapper-arg", "--",
       ];
 
+      runnerArgv.push("--account-home", account);
       const child = spawn(process.execPath, runnerArgv, {
-        env: { PATH: [first, second, "/usr/bin", "/bin"].join(path.delimiter), HOME: temp, OPENRIG_HOME: path.join(temp, "home"), OPENRIG_NODE_ID: "node-1" },
+        env: { OPENRIG_PI_ACCOUNT_HOME: "/ignored/ambient", PI_CODING_AGENT_DIR: "/ambient/must-not-be-used", PATH: [first, second, "/usr/bin", "/bin"].join(path.delimiter), HOME: temp, OPENRIG_HOME: path.join(temp, "home"), OPENRIG_NODE_ID: "node-1" },
         detached: true, stdio: ["pipe", "pipe", "pipe"],
       });
       let output = "", ready = false, timedOut = false;
@@ -205,6 +209,8 @@ exec "$@"
 
         const wrapperRec = JSON.parse(fs.readFileSync(wrapperLogPath, "utf8"));
         const piRec = JSON.parse(fs.readFileSync(piLogPath, "utf8"));
+        expect(wrapperRec.auth).toBe("synthetic-selected-account");
+        expect(fs.realpathSync(path.join(seat.agentDir, "auth.json"))).toBe(fs.realpathSync(path.join(account, "auth.json")));
         const expectedPiPath = mode === "mise" ? fs.realpathSync(good) : fs.realpathSync(path.join(first, "pi"));
         const expectedChildArgs = buildPiChildArgs({
           sessionsDir: seat.sessionsDir,

@@ -1,7 +1,7 @@
 "use strict";
 
-// Session-only Claude PreToolUse helper. The launcher supplies the kernel or team
-// lists; this file never reads or writes a person's permission settings.
+// Session-only Claude PreToolUse helper. The launcher selects the kernel or team
+// policy; this file never reads or writes a person's permission settings.
 // This is command convenience, not containment (test runners can execute code).
 const { basename, isAbsolute } = require("node:path");
 
@@ -249,7 +249,17 @@ if (require.main === module) {
     try {
       const input = JSON.parse(raw);
       if (input.tool_name !== "Bash" || typeof input.tool_input?.command !== "string") return;
-      const policy = JSON.parse(Buffer.from(process.argv[2], "base64").toString("utf8"));
+      const kind = process.argv[2];
+      let policy;
+      if (kind === "kernel" || kind === "team") {
+        // Each invocation reads the installed lists; native inline allowances remain as launched.
+        const { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } = require("./claude-permission-policies.cjs");
+        policy = kind === "kernel" ? { allow: KERNEL_CLAUDE_ALLOW, ask: [] }
+          : { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK };
+      } else {
+        // Existing running sessions still carry their encoded launch policy.
+        policy = JSON.parse(Buffer.from(kind, "base64").toString("utf8"));
+      }
       const decision = decide(input.tool_input.command, policy);
       if (decision) process.stdout.write(JSON.stringify({ hookSpecificOutput: {
         hookEventName: "PreToolUse", permissionDecision: decision,

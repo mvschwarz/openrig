@@ -129,12 +129,13 @@ describe("SeatStatusService", () => {
       own: rigRepo.addNode(rig.id, "dev.own", { runtime: "codex" }),
       rel: rigRepo.addNode(rig.id, "dev.rel", { runtime: "codex" }),
       plain: rigRepo.addNode(rig.id, "dev.plain", { runtime: "claude-code" }),
+      pi: rigRepo.addNode(rig.id, "dev.pi", { runtime: "pi" }),
       term: rigRepo.addNode(rig.id, "dev.term", { runtime: "terminal" }),
     };
     for (const [name, node] of Object.entries(nodes)) sessionRegistry.registerSession(node.id, `dev-${name}@home-rig`);
     db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "/homes/own" }), nodes.own.id);
     db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "rel/codex" }), nodes.rel.id);
-    const svc = new SeatStatusService({ rigRepo, env: { HOME: "/users/op", CODEX_HOME: "/daemon/codex" } });
+    const svc = new SeatStatusService({ rigRepo, env: { HOME: "/users/op", CODEX_HOME: "/daemon/codex", PI_CODING_AGENT_DIR: "/daemon/pi-ignored" } });
     const status = (ref: string) => {
       const result = svc.getStatus(ref);
       if (!result.ok) throw new Error(result.code);
@@ -144,6 +145,7 @@ describe("SeatStatusService", () => {
     expect(status("dev-rel@home-rig").runtime_home).toEqual({ variable: "CODEX_HOME", home: "/daemon/codex", source: "daemon",
       ignored: { source: "member", value: "rel/codex" } });
     expect(status("dev-plain@home-rig").runtime_home).toEqual({ variable: "CLAUDE_CONFIG_DIR", home: "/users/op/.claude", source: "native_default" });
+    expect(status("dev-pi@home-rig").runtime_home).toEqual({ variable: "PI_CODING_AGENT_DIR", home: null, source: "native_default" });
     expect(status("dev-term@home-rig")).not.toHaveProperty("runtime_home");
   });
 

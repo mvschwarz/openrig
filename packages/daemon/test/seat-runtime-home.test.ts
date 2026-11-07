@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
-import { claudeConfigRootFor, declaredRuntimeHomes, effectiveRuntimeHome, seatAccountHome, seatRuntimeHome, withoutRuntimeHomes } from "../src/domain/seat-runtime-home.js";
+import { claudeConfigRootFor, declaredRuntimeHomes, effectiveRuntimeHome, seatAccountHome, seatRuntimeHome, withoutRuntimeHomes, withoutIgnoredRuntimeHomes } from "../src/domain/seat-runtime-home.js";
 
 // A seat's own runtime home comes from its stored `env:`: the member's value, else the rig's.
 const open: Database.Database[] = [];
@@ -83,6 +83,16 @@ describe("withoutRuntimeHomes and claudeConfigRootFor", () => {
   });
 });
 
+it("resolves Pi member homes and clears a stored selection back to the configured home", () => {
+  const d = db({ rig: { PI_CODING_AGENT_DIR: "/pi/rig" }, members: { a: { PI_CODING_AGENT_DIR: "/pi/member" }, b: undefined } });
+  d.exec("ALTER TABLE nodes ADD COLUMN account_home TEXT; ALTER TABLE nodes ADD COLUMN runtime TEXT");
+  d.prepare("UPDATE nodes SET account_home = ?, runtime = 'pi' WHERE id = 'a'").run("/pi/account");
+  expect(effectiveRuntimeHome(d, "a", "pi", "/pi/daemon")).toBe("/pi/account");
+  expect(effectiveRuntimeHome(d, "a", "pi", "/pi/daemon", true)).toBe("/pi/member");
+  expect(seatRuntimeHome(d, "b", "pi")).toEqual({ home: "/pi/rig", source: "rig" });
+  expect(withoutRuntimeHomes({ PI_CODING_AGENT_DIR: "/pi/account", DEBUG: "1" })).toEqual({ DEBUG: "1" });
+});
+
 describe("declaredRuntimeHomes", () => {
   it("lists each distinct absolute home declared on members and rigs, once", () => {
     const d = db({ rig: { CODEX_HOME: "/homes/shared" },
@@ -90,4 +100,20 @@ describe("declaredRuntimeHomes", () => {
     expect(declaredRuntimeHomes(d, "codex").sort()).toEqual(["/homes/b", "/homes/shared"]);
     expect(declaredRuntimeHomes(d, "claude-code")).toEqual(["/homes/claude"]);
   });
+});
+
+it("never selects an ambient daemon Pi home, including when clearing a stored selection", () => {
+  const d = db({ members: { own: { PI_CODING_AGENT_DIR: "/pi/member" }, plain: undefined } });
+  d.exec("ALTER TABLE nodes ADD COLUMN runtime TEXT; ALTER TABLE nodes ADD COLUMN account_home TEXT; UPDATE nodes SET runtime = 'pi', account_home = '/pi/selected';");
+  expect(effectiveRuntimeHome(d, "own", "pi", "/pi/ambient")).toBe("/pi/selected");
+  expect(effectiveRuntimeHome(d, "own", "pi", "/pi/ambient", true)).toBe("/pi/member");
+  expect(effectiveRuntimeHome(d, "plain", "pi", "/pi/ambient", true)).toBeUndefined();
+  d.exec("UPDATE nodes SET account_home = NULL;");
+  expect(effectiveRuntimeHome(d, "own", "pi", "/pi/ambient")).toBe("/pi/member");
+  expect(effectiveRuntimeHome(d, "plain", "pi", "/pi/ambient")).toBeUndefined();
+});
+
+it("preserves relative Pi homes for community harnesses", () => {
+  expect(withoutIgnoredRuntimeHomes({ PI_CODING_AGENT_DIR: "relative/pi-home", CODEX_HOME: "relative/codex", DEBUG: "1" }))
+    .toEqual({ PI_CODING_AGENT_DIR: "relative/pi-home", DEBUG: "1" });
 });
