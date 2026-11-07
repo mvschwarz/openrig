@@ -37,6 +37,8 @@ const DEFINITE_HC_ERROR_KINDS = new Set(["invalid_params", "not_found", "conflic
 const VIEWER_WRAPPER = 'shift; "$@"; status=$?; printf "\\r\\n%s\\r\\n" "The seat session ended here (exit $status). OpenRig will update this view; nothing else runs in this cell."; exec tail -f /dev/null';
 
 export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand">, nonce: string): string[] {
+  // A remote pane (no attachArgv) runs its ssh paneCommand as composed: the remote command's own readOnly decides,
+  // and OpenRig doesn't rewrite an ssh command.
   const attach = pane.attachArgv
     ? tileAttachArgv(pane.attachArgv[5]!, pane.attachArgv.slice(6), pane.attachArgv[4]!, true)
     : ["/bin/sh", "-c", pane.paneCommand];
@@ -248,7 +250,8 @@ export class HerdrAppProvider implements TerminalProvider {
           const nonce = this.nonce();
           const cell = cellFor(id, pane, nonce, null);
           return { cellId: cell.id, seat: pane.seat, label: pane.label, ...(pane.runtime ? { runtime: pane.runtime } : {}),
-            nonce, argv: viewerArgv(pane, nonce), readOnly: pane.readOnly, terminal: null, state: "planned" as const };
+            nonce, argv: viewerArgv(pane, nonce), readOnly: pane.readOnly, attach: pane.attachArgv ? "local" as const : "remote" as const,
+            terminal: null, state: "planned" as const };
         }),
       };
     });
@@ -359,7 +362,7 @@ export class HerdrAppProvider implements TerminalProvider {
       return notes;
     }
     for (const viewer of pages.flatMap((page) => page.viewers)) {
-      if (viewer.readOnly || viewer.state !== "live" || !viewer.terminal) continue;
+      if (viewer.attach === "remote" || viewer.readOnly || viewer.state !== "live" || !viewer.terminal) continue;
       const writable = await this.makeWritable(viewer);
       if (writable) notes.push(writable);
     }
@@ -369,7 +372,7 @@ export class HerdrAppProvider implements TerminalProvider {
   /** The explicit reveal hands this viewer's tmux client the keyboard (`switch-client -r` toggles read-only). */
   private async makeWritable(viewer: ViewerRecord): Promise<string | null> {
     const tile = viewer.argv.indexOf("openrig-tile");
-    if (tile < 0 || !this.deps.runTmux) return `${viewer.label}: stays read-only (no local tmux attachment to hand the keyboard to).`;
+    if (tile < 0 || !this.deps.runTmux) return `${viewer.label}: stays read-only (this daemon cannot reach its tmux server to hand over the keyboard).`;
     const session = viewer.argv[tile + 1]!;
     const tmux = viewer.argv.slice(tile + 2);
     const got = await this.deps.hc(["get", "--json", viewer.terminal!]);

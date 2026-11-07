@@ -54,13 +54,15 @@ an SSH recipe.
 What an open does, in order:
 
 1. Each viewer is recorded first (`$OPENRIG_HOME/private/herdr-app/clients/`), then started by herdr-core outside
-   every tab (`hc run --bg --no-parent`, labelled `openrig.*`). A viewer attaches to its seat **read-only** and, if
-   the seat's session ends, says so and waits; it never leaves a shell in the cell.
+   every tab (`hc run --bg --no-parent`, labelled `openrig.*`). An interactive local viewer attaches read-only and
+   becomes writable when the view is revealed (read-only panes stay read-only); a seat on another host opens as its own
+   ssh attachment, writable or read-only as that view composes it, and OpenRig doesn't hand over a keyboard for it. If
+   the seat's session ends, the viewer says so and waits; it never leaves a shell in the cell.
 2. One atomic write of `layouts/rig.json`: your current layout, with OpenRig's stack beside your tab block. Your own
    layout file is never written. A `rig.json` OpenRig didn't write is never overwritten.
 3. The Rig layout is shown, the view is selected once herdr-app confirms it shows the new file, and the keyboard
-   goes to the first live cell. Only then do interactive seats' viewers become writable. A view herdr-app hasn't
-   confirmed stays read-only.
+   goes to the first live cell. Only then do local interactive seats' viewers become writable. A local viewer in a view
+   herdr-app hasn't confirmed stays read-only.
 
 Other layouts and other herdr-app windows don't show Rig views. Each window (app home) has its own.
 
@@ -120,4 +122,7 @@ visible straight away.
   folder (`$OPENRIG_HOME/private/herdr-app/viewers`). Planned closes never trigger this.
 - OpenRig doesn't yet check that the window runs on the daemon's herdr-core (`core` in `rig terminal status`); it
   relies on both using the same session on the same machine.
+- `POST /api/terminal/open` (and `POST /api/terminal/close`) carries no bearer middleware, matching the daemon's other
+  open routes; an open writes `mods/rig-*`, `openrig/mods.json` and `layouts/rig.json` into the named `--app-home` once
+  `herdr-app` answers a `status` request on `<app home>/herdr-app.sock`.
 - Runtime-tested on Linux only; macOS and Windows haven't been tried on real machines.

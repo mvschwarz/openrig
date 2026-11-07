@@ -212,6 +212,40 @@ describe("HerdrAppProvider.openView", () => {
     expect(result.notes?.join(" ")).toContain("dev.build · S1: stays read-only");
   });
 
+  it("skips local tmux keyboard handoff for remote ssh viewers (interactive or read-only) with no false read-only note, and migrates journals without attach", async () => {
+    const remoteRw: ComposedPane = {
+      seat: "dev.remote@demo", label: "dev.remote · S1", runtime: "claude-code", readOnly: false,
+      paneCommand: "ssh -t box2 'tmux attach -t =dev.remote@demo'",
+    };
+    const remoteRo: ComposedPane = {
+      seat: "dev.remote-ro@demo", label: "dev.remote-ro · S1", runtime: "claude-code", readOnly: true,
+      paneCommand: "ssh -t box2 'tmux attach -r -t =dev.remote-ro@demo'",
+    };
+    const result = await provider.openView(composed([remoteRw, remoteRo]));
+    expect(result.ok).toBe(true);
+    expect(world.tmuxCalls).toEqual([]);
+    expect((result.notes ?? []).join(" ")).not.toContain("stays read-only");
+    const saved = await files.load();
+    expect(saved.views[0]!.viewers.map((v) => v.attach)).toEqual(["remote", "remote"]);
+    expect(saved.views[0]!.viewers[0]!.argv.slice(4)).toEqual(["n2", "/bin/sh", "-c", remoteRw.paneCommand]);
+
+    // Old journal without `attach` migrates by checking whether argv contains "openrig-tile"
+    const raw = JSON.parse(readFileSync(files.journalPath, "utf8")) as { views: Array<{ viewers: Array<Record<string, unknown>> }> };
+    delete raw.views[0]!.viewers[0]!.attach;
+    raw.views[0]!.viewers.push({
+      cellId: "cell-local", seat: "dev.local@demo", label: "dev.local · S1", nonce: "n99",
+      argv: ["/bin/sh", "-c", "wrapper", "openrig-viewer", "n99", "/bin/sh", "-c", "script", "openrig-tile", "dev.local@demo", "/usr/bin/tmux"],
+      readOnly: false, terminal: "t99", state: "live",
+    });
+    writeFileSync(files.journalPath, JSON.stringify(raw));
+    const migrated = await files.load();
+    expect(migrated.views[0]!.viewers.map((v) => [v.seat, v.attach])).toEqual([
+      ["dev.remote@demo", "remote"],
+      ["dev.remote-ro@demo", "remote"],
+      ["dev.local@demo", "local"],
+    ]);
+  });
+
   it("when the app never shows the write, nothing is selected and every viewer stays read-only", async () => {
     world.applies = false;
     const result = await provider.openView(composed([pane("dev.build@demo")]));

@@ -22,8 +22,10 @@ export interface ViewerRecord {
   nonce: string;
   /** The exact argv the viewer was started with (verified before it is ever ended). */
   argv: string[];
-  /** Interactive panes become writable at an explicit reveal; read-only panes never do. */
+  /** Interactive local panes become writable at an explicit reveal; read-only panes never do. */
   readOnly: boolean;
+  /** Local seats attach via openrig-tile and hand over the keyboard on reveal; remote seats run their own ssh command. */
+  attach: "local" | "remote";
   terminal: string | null;
   /** planned: journalled, not confirmed started; start-unknown: hc run outcome unknown; live: its terminal is known; ended: written as an ended cell. */
   state: "planned" | "start-unknown" | "live" | "ended";
@@ -89,8 +91,15 @@ export class HerdrAppClientFiles {
     if (!text) return empty;
     const parsed = JSON.parse(text) as Partial<ClientState>;
     const now = new Date().toISOString();
+    const views = (parsed.views ?? []).map((v) => ({
+      ...v,
+      viewers: (v.viewers ?? []).map((viewer) => ({
+        ...viewer,
+        attach: viewer.attach ?? (Array.isArray(viewer.argv) && viewer.argv.includes("openrig-tile") ? "local" as const : "remote" as const),
+      })),
+    }));
     const pendingEnds = (parsed.pendingEnds ?? []).map((p) => ({ ...p, since: p.since ?? now }));
-    return { ...empty, ...parsed, views: parsed.views ?? [], pendingEnds };
+    return { ...empty, ...parsed, views, pendingEnds };
   }
 
   async save(state: ClientState): Promise<void> {
