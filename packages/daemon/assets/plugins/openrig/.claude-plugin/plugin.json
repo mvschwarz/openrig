@@ -14,7 +14,7 @@
   "mcpServers": {
     "openrig": {
       "command": "rig",
-      "args": ["mcp", "serve"],
+      "args": ["mcp", "serve", "--front-door"],
       "env": {
         "OPENRIG_SESSION_NAME": "${user_config.seat}"
       }

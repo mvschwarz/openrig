@@ -71,8 +71,9 @@ behave; this skill is the loop around them.
    (`docs/reference/hosted-members.md` in the OpenRig package).
 3. Connect the app to that address, then start a new session so the MCP server starts with it:
    - **Claude Code:** set it as the plugin's OpenRig seat in the plugin's settings.
-   - **Codex:** run `codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve`.
-   - **Another app:** add an MCP server that runs `rig mcp serve` with `OPENRIG_SESSION_NAME` set to the address.
+   - **Codex:** run `codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --front-door`.
+   - **Another app:** add an MCP server that runs `rig mcp serve --front-door` with `OPENRIG_SESSION_NAME` set to the
+     address.
 
 ## What this doesn't do
 
