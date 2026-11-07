@@ -9,7 +9,7 @@ import { processIdentity } from "../local-daemon-owner.js";
 import { getOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
 import { answerCommand, runAcpAssignment, type AcpQueue } from "../acp/connector.js";
 import { findRunProcesses } from "../acp/run-processes.js";
-import { serveAcpAgent, TeamRefused, type TeamConnection, type TeamQueue } from "../acp/agent-server.js";
+import { serveAcpAgent, TeamRefused, type TeamAsk, type TeamConnection, type TeamQueue } from "../acp/agent-server.js";
 import { StreamJsonRpcPeer } from "../acp/json-rpc-stdio.js";
 import { CLI_VERSION } from "../version.js";
 import { realDeps } from "./daemon.js";
@@ -62,6 +62,10 @@ export function daemonTeamQueue(client: DaemonClient): TeamQueue {
       closer: text((row.closingTransition as { actorSession?: unknown } | null | undefined)?.actorSession),
     };
   };
+  const list = async (query: string, what: string): Promise<Array<Record<string, unknown>>> => {
+    const data = ok(await client.get<unknown>(`/api/queue/list?${query}`), what);
+    return (Array.isArray(data) ? data : ((data as { items?: unknown[] }).items ?? [])) as Array<Record<string, unknown>>;
+  };
   return {
     async create(row) {
       const response = await client.post("/api/queue/create", { qitemId: row.qitemId, destinationSession: row.destination, body: row.body, summary: row.summary, tags: row.tags });
@@ -85,9 +89,33 @@ export function daemonTeamQueue(client: DaemonClient): TeamQueue {
       }));
     },
     async successor(qitemId) {
-      const data = ok(await client.get<unknown>(`/api/queue/list?handedOffFrom=${encodeURIComponent(qitemId)}&limit=1`), `queue successor of ${qitemId}`);
-      const rows = (Array.isArray(data) ? data : ((data as { items?: unknown[] }).items ?? [])) as Array<{ qitemId?: string }>;
-      return rows[0]?.qitemId;
+      return (await list(`handedOffFrom=${encodeURIComponent(qitemId)}&limit=1`, `queue successor of ${qitemId}`))[0]?.qitemId as string | undefined;
+    },
+    async openAsks(person) {
+      const rows = await list(`destinationSession=${encodeURIComponent(person)}&state=pending&limit=500`, `open asks to ${person}`);
+      return rows.filter((row) => row.humanIntent !== "update" && (Array.isArray(row.humanQuestions) || row.humanIntent === "decision")).map((row) => ({
+        qitemId: String(row.qitemId), sourceSession: String(row.sourceSession), tsCreated: String(row.tsCreated),
+        summary: typeof row.summary === "string" ? row.summary : null, body: typeof row.body === "string" ? row.body : "",
+        tags: Array.isArray(row.tags) ? (row.tags as string[]) : [],
+        questions: Array.isArray(row.humanQuestions) ? (row.humanQuestions as TeamAsk["questions"]) : [],
+        answered: Object.keys((row.humanAnswers as Record<string, unknown> | null) ?? {}),
+      }));
+    },
+    async answer(qitemId, questionId, optionId) {
+      // The person's answer path, as the TUI records one: the daemon takes the actor from this client's caller.
+      const bearer = process.env.OPENRIG_AUTH_BEARER_TOKEN;
+      const response = await client.post<Record<string, unknown>>("/api/mission-control/action", { verb: "answer", qitemId, questionId, optionId },
+        bearer ? { headers: { Authorization: `Bearer ${bearer}` } } : undefined);
+      if (response.status < 400) return { ok: true };
+      const data = (response.data ?? {}) as { message?: unknown; error?: unknown };
+      return { ok: false, reason: String(data.message ?? data.error ?? `HTTP ${response.status}`) };
+    },
+    async sent(caller) {
+      const rows = await list(`sourceSession=${encodeURIComponent(caller)}&limit=2000`, `rows from ${caller}`);
+      return rows.filter((row) => Array.isArray(row.tags) && (row.tags as string[]).includes("acp-serve")).map((row) => ({
+        qitemId: String(row.qitemId), tsCreated: String(row.tsCreated), tsUpdated: String(row.tsUpdated),
+        summary: typeof row.summary === "string" ? row.summary : null, body: typeof row.body === "string" ? row.body : "", tags: row.tags as string[],
+      }));
     },
   };
 }
@@ -205,7 +233,8 @@ Guide: rig context get reference/acp-agents.md`)
     .addHelpText("after", `
 An ACP app launches this command and talks to it on stdin and stdout. Each prompt becomes a queue row from you to
 --to. The app shows the row's notes and handoffs as progress, and the closing resolution as the reply. A later
-prompt in the same session goes to --to as a follow-up that names the earlier items.
+prompt in the same session goes to --to as a follow-up that names the earlier items. A question the working seats
+ask you meanwhile comes to the app as a choice, recorded as your answer. The app can list and reopen your sessions.
 
 The turn ends when the team closes the item, or when you cancel. Cancelling stops this process waiting; the team's
 work carries on. A turn that ended doesn't mean the work was accepted: the reply says how the item was closed.

@@ -199,6 +199,14 @@ rig acp serve --to <member@rig>
   turn ending says only that the turn ended: read the reply for how the work ended.
 - **A follow-up** in the same session goes to `--to` as a new row whose body names the earlier rows and their states,
   and the app first shows any earlier row that's still open.
+- **A question the team asks you** while a turn is open comes to the app as a permission request, with the ask's own
+  choices, when its row is tagged for that chat (`acp-session:<id>`; the task's row tells the team how). An untagged
+  question from a seat the work reached is named in the chat with where to answer it, because it could be another
+  chat's. Your choice is recorded as your answer, exactly as a click in Slack or the TUI would be, and the seat that
+  asked gets it. Dismissing it, or cancelling the turn, records nothing: the question stays open in the TUI and Slack.
+  A question that wants an answer in words is shown with where to answer it.
+- **Sessions are kept in the queue:** the app can list your earlier sessions (`session/list`) and reopen one
+  (`session/load`). Reopening replays each prompt, its work and the reply as they stand now, and a new prompt continues it.
 - **Cancel** stops `rig acp serve` waiting. The team's work carries on, and the reply says so.
 - **Work handed to a seat on another machine** can't be followed from here; the reply says where it went.
 
@@ -219,7 +227,6 @@ Other apps take the same command and arguments wherever they configure a custom 
 
 **Limits:**
 - One receiver per agent command; the app has no team picker.
-- The team's questions to you, and reopening an earlier session, aren't served: a question addressed to you waits in
-  your usual places (the TUI, Slack).
+- Questions show only while a turn is open; one asked while no turn is open waits in your usual places (the TUI, Slack).
 - Prompts are text. Links and embedded text files are passed on as written; images and audio aren't accepted.
 - Progress is read every 2 seconds while a turn is open (`--poll-seconds`).
