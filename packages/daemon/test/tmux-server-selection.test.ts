@@ -291,6 +291,18 @@ describe("durable tmux server selection", () => {
       .toMatchObject({ home: fs.realpathSync(newHome), pinned: true });
   });
 
+  it.skipIf(process.platform === "win32")("records a new inherited home beneath a symlinked parent by its real path, so isolation can follow", async () => {
+    const parent = path.join(root, "real-parent");
+    const alias = path.join(root, "alias-parent");
+    fs.mkdirSync(parent);
+    fs.symlinkSync(parent, alias);
+    const newHome = path.join(alias, "new-home");
+    await selectTmuxServer({ ...options(), home: newHome });
+    expect(JSON.parse(fs.readFileSync(path.join(newHome, "tmux-server.json"), "utf8")))
+      .toMatchObject({ home: fs.realpathSync(newHome), mode: "inherit", pinned: false });
+    expect(await selectTmuxServer({ ...options(), home: newHome, mode: "isolated" })).toMatchObject({ mode: "isolated" });
+  });
+
   it("keeps an inherited socket path containing commas intact", async () => {
     const socket = path.join(root, "literal, socket");
     expect(await selectTmuxServer({ ...options(), env: { TMUX: `${socket},1,2` } }))
