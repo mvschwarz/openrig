@@ -218,6 +218,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "107_pi_usage_entries.sql": "Pi usage-facts table for the cost view; its tests migrate the canonical full schema.",
   "108_pi_usage_charges.sql": "OpenRouter charges for Pi entries, for the cost view; its tests migrate the canonical full schema.",
   "110_workflow_instance_scope.sql": "adds scope_json to workflow_instances (034 is excluded); workflow suites migrate the canonical workflow schema inline.",
+  "152_workflow_instance_spec.sql": "adds spec_source_path and spec_json to workflow_instances (034 is excluded); workflow suites migrate the canonical workflow schema inline.",
   "065_identity_provenance.sql": "P21 additive era-stamp column on 037_mission_control_actions (itself excluded) — mission-control / review-freeze / scope suites migrate it inline where they assert provenance.",
   "067_i3_identity_provenance.sql": "P21 additive era-stamp columns; it ALTERs inbox_entries + outbox_entries (both excluded from the core edge) alongside queue_transitions/stream_items, so it cannot ride the core-edge list — queue / inbox / outbox / stream suites asserting provenance migrate it inline.",
   "140_identity_principal.sql": "the MCP adapter's principal beside 067's stamp (itself excluded); it ALTERs inbox_entries, outbox_entries and queue_transitions_archive (all excluded from the core edge) alongside queue_transitions/stream_items — suites asserting the principal migrate ALL_MIGRATIONS.",

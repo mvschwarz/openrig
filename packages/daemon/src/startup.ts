@@ -1832,8 +1832,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       workflowExceptionEnsurer = makeEnsureStuckExceptionItem({
         db,
         queueRepo: queueRepoForWorkflow,
-        resolveRoute: (name, version, cls, boundRig) =>
-          workflowRuntime!.resolveExceptionRouteFor(name, version, cls, boundRig),
+        resolveRoute: (name, version, cls, boundRig, instanceId) =>
+          workflowRuntime!.resolveExceptionRouteFor(name, version, cls, boundRig, instanceId),
         humanFallbackSeat: resolveWorkflowHumanDestination,
         log: (line) => console.log(line),
       });
