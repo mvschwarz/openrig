@@ -1451,11 +1451,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           const refusedDest = seatSkillsRoot && entry.category === "skill" ? seatSkillWriteRefusal(seatSkillsRoot, dest) : undefined;
           if (refusedDest) { warnings.push(`${entry.effectiveId}: ${refusedDest}`); notProjected.push(dest); continue; }
           const content = this.fs.readFile(src);
-          record(dest, src, content);
           // Reconcile mode even when the content write is skipped: a byte-identical dest
           // projected earlier may still carry the wrong (default) mode.
           if (this.fs.exists(dest) && hashContent(content) === hashContent(this.fs.readFile(dest))) {
             this.preserveMode(src, dest);
+            record(dest, src, content);
             continue;
           }
           const existed = this.fs.exists(dest);
@@ -1463,6 +1463,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           this.fs.writeFile(dest, content);
           if (!existed) createdFiles.push(dest);
           this.preserveMode(src, dest);
+          record(dest, src, content);
         }
         const pluginLoss = seatSkillsRefused ? seatPluginSkillsLossNote(entry.effectiveId, skippedPluginSkills, seatSkillsRefused) : undefined;
         if (pluginLoss) warnings.push(pluginLoss);
@@ -1471,15 +1472,16 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         const refusedFile = seatSkillsRoot && entry.category === "skill" ? seatSkillWriteRefusal(seatSkillsRoot, destFile) : undefined;
         if (refusedFile) { warnings.push(`${entry.effectiveId}: ${refusedFile}`); return false; }
         const content = this.fs.readFile(entry.absolutePath);
-        record(destFile, entry.absolutePath, content);
         if (this.fs.exists(destFile) && hashContent(content) === hashContent(this.fs.readFile(destFile))) {
           this.preserveMode(entry.absolutePath, destFile);
+          record(destFile, entry.absolutePath, content);
           return true;
         }
         const existed = this.fs.exists(destFile);
         this.fs.writeFile(destFile, content);
         if (!existed) createdFiles.push(destFile);
         this.preserveMode(entry.absolutePath, destFile);
+        record(destFile, entry.absolutePath, content);
       }
     } finally {
       if (entry.category === "plugin") warnings.push(...excludeNewGeneratedFiles(cwd, createdFiles));

@@ -17,8 +17,8 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), "seat-skills-follow-")); });
   afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 
-  function seat() {
-    const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime: "claude-code" }, home);
+  function seat(runtime = "claude-code") {
+    const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime }, home);
     ensureSeatSkillPlugin(paths);
     const sourceOf = (id: string) => join(home, "skills", id);
     const put = (file: string, text: string) => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, text); };
@@ -107,6 +107,56 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
     chmodSync(join(paths.skillsRoot, "infra-review", "scripts/check.sh"), 0o644);
     followSeatSkills(paths, { selected: new Set(["infra-review"]), following: [{ id: "infra-review", source: sourceOf("infra-review") }] });
     expect(statSync(join(paths.skillsRoot, "infra-review", "scripts/check.sh")).mode & 0o777).toBe(0o755);
+  });
+
+  it.each(["claude-code", "codex"])("keeps a seat-local chmod through down, refresh and deselection for %s", (runtime) => {
+    const { paths, sourceOf, put, launched, copy } = seat(runtime);
+    launched("infra-review", { "SKILL.md": "v1", "scripts/check.sh": "exit 0" });
+    const script = join(paths.skillsRoot, "infra-review", "scripts/check.sh");
+    const editedMode = (statSync(script).mode & 0o777) ^ 0o100;
+    chmodSync(script, editedMode);
+    expect(cleanSeatSkills(paths).kept).toContain(script);
+    put(join(sourceOf("infra-review"), "SKILL.md"), "v2");
+    const result = followSeatSkills(paths, { selected: new Set(["infra-review"]),
+      following: [{ id: "infra-review", source: sourceOf("infra-review") }] });
+    expect(result.refreshed).toEqual([]);
+    expect(result.warnings.join("\n")).toContain("was edited");
+    expect(rehydrateSeatSkills(paths).kept).toContain(script);
+    expect(copy("infra-review", "scripts/check.sh")).toBe("exit 0");
+    expect(followSeatSkills(paths, { selected: new Set(), following: [] }).removed).toEqual([]);
+    expect(statSync(script).mode & 0o777).toBe(editedMode);
+  });
+
+  it("takes source mode changes after down and records the refreshed mode", () => {
+    const { paths, sourceOf, launched } = seat();
+    launched("infra-review", { "SKILL.md": "v1", "scripts/check.sh": "exit 0" });
+    const script = join(paths.skillsRoot, "infra-review", "scripts/check.sh");
+    cleanSeatSkills(paths);
+    chmodSync(join(sourceOf("infra-review"), "scripts/check.sh"), 0o755);
+    expect(followSeatSkills(paths, { selected: new Set(["infra-review"]),
+      following: [{ id: "infra-review", source: sourceOf("infra-review") }] }).refreshed).toEqual(["infra-review"]);
+    expect(statSync(script).mode & 0o777).toBe(0o755);
+    expect(cleanSeatSkills(paths).kept).toEqual([]);
+    rehydrateSeatSkills(paths);
+    expect(statSync(script).mode & 0o777).toBe(0o755);
+    chmodSync(script, 0o644);
+    expect(cleanSeatSkills(paths).kept).toContain(script);
+  });
+
+  it.each([false, true])("rehydrates keep_saved with compatible permission records (legacy=%s)", (legacy) => {
+    const { paths, sourceOf, launched } = seat();
+    launched("infra-review", { "SKILL.md": "v1" }, false);
+    const file = join(paths.skillsRoot, "infra-review", "SKILL.md");
+    const savedMode = statSync(file).mode & 0o777;
+    if (legacy) {
+      const record = JSON.parse(readFileSync(paths.projectionsPath, "utf8"));
+      delete record.files[file].mode;
+      writeFileSync(paths.projectionsPath, JSON.stringify(record));
+    }
+    cleanSeatSkills(paths);
+    chmodSync(join(sourceOf("infra-review"), "SKILL.md"), 0o755);
+    expect(rehydrateSeatSkills(paths).restored).toContain(file);
+    expect(statSync(file).mode & 0o777).toBe(legacy ? 0o755 : savedMode);
   });
 
   it("keeps the whole saved skill when a source subdirectory cannot be read", () => {
@@ -225,6 +275,7 @@ describe("a launch records which of a seat's skills follow their source", () => 
     readFile: (p: string) => readFileSync(p, "utf8"), writeFile: (p: string, c: string) => writeFileSync(p, c),
     exists: (p: string) => existsSync(p), mkdirp: (p: string) => { mkdirSync(p, { recursive: true }); },
     copyFile: (a: string, b: string) => writeFileSync(b, readFileSync(a)),
+    statMode: (p: string) => statSync(p).mode, chmod: chmodSync,
     listFiles: (p: string) => {
       const out: string[] = [];
       const walk = (dir: string, rel: string) => {
@@ -247,6 +298,7 @@ describe("a launch records which of a seat's skills follow their source", () => 
         const dir = join(home, "skills", id);
         mkdirSync(dir, { recursive: true });
         writeFileSync(join(dir, "SKILL.md"), `---\nname: ${id}\ndescription: d\n---\nbody\n`);
+        chmodSync(join(dir, "SKILL.md"), 0o640);
         return dir;
       };
       const adapter = runtime === "codex"
@@ -261,6 +313,8 @@ describe("a launch records which of a seat's skills follow their source", () => 
 
       expect((await launch([{ id: "infra-review", onRestore: "follow_source" }, { id: "tdd" }])).failed).toEqual([]);
       expect(following()).toEqual({ "infra-review": { source: join(home, "skills", "infra-review") } });
+      const projected = join(paths.skillsRoot, "infra-review", "SKILL.md");
+      expect(JSON.parse(readFileSync(paths.projectionsPath, "utf8")).files[projected].mode).toBe(0o640);
 
       await launch([{ id: "infra-review" }, { id: "tdd" }]);
       expect(following()).toBeUndefined();

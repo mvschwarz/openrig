@@ -463,10 +463,11 @@ spec as it is now, using the saved launch recipe and rig folder, and:
 - copies in a `follow_source` skill the profile now selects that the seat didn't have;
 - removes a skill that followed its source and that the profile no longer selects.
 
-A copy edited in the seat (a changed or added file), or a folder with the same id that OpenRig didn't write, is kept as
+A copy edited in the seat (changed bytes or recorded file permissions, or an added file), or a folder with the same id that OpenRig didn't write, is kept as
 it is and named in the restore's warnings. If the agent spec can't be read or resolved, the seat keeps its saved skills
 and the restore says why; a source folder without a `SKILL.md` keeps that skill's saved copy. A skill changed to
-`keep_saved` stops following at the next restore, and its copy stays.
+`keep_saved` stops following at the next restore, and its copy stays. Older seat records without file permissions
+retain their byte-only ownership checks until a new projection or refresh records permissions.
 
 Only a restore does this; a running seat isn't changed, and neither is a Codex seat restarted in place. A Claude seat
 loads its seat plugin when its session starts, so it sees the new copies. A Codex seat with following skills receives
