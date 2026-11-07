@@ -1,6 +1,10 @@
 {
   "version": 0,
   "edges": {
+    "bundle": {
+      "path": "packages/daemon/assets/plugins/openrig/skills",
+      "layout": "flat"
+    },
     "canonical": {
       "path": "skills/_canonical",
       "layout": "mirror-of-spec"
@@ -359,6 +363,14 @@
     },
     "watchdog": {
       "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "working-with-an-openrig-team": {
+      "edges": [
+        "bundle",
         "canonical",
         "spec"
       ],

@@ -1,6 +1,9 @@
 {
   "version": 1,
   "edges": {
+    "bundle": {
+      "working-with-an-openrig-team/SKILL.md": "4b3e6e8eecb710abdb95d604c419599566dbc77b019b49175e936e713b65cf6f"
+    },
     "canonical": {
       "core/agent-starters/SKILL.md": "8e8961f44fccb812f39e01174a331dab24f153ceaba91925f1e42371836cdec0",
       "core/agent-startup-and-context-ingestion/SKILL.md": "347f28a9567b4b8d8669aff6946229f53144e0c139aca2cbe77e0eb93a87f1b1",
@@ -10,7 +13,7 @@
       "core/openrig-architect/SKILL.md": "affa65df8087efca711e429e36e8756c711419dccc801d26d9e51a746b56391d",
       "core/openrig-cmux/SKILL.md": "73a86eac45d68b16a38fc0a4438713c634d86061073dac96a4d9e656ea5d34dc",
       "core/openrig-herdr/SKILL.md": "cb39b51f954ca89e8d7ec0f8b3f326476d5c4dd3bc17dbd47e6379aa630e7b22",
-      "core/openrig-skills/SKILL.md": "bdd6594ae1108455103239d39694c865cc40d3f7d9f24cd3566a18397df270da",
+      "core/openrig-skills/SKILL.md": "6d7bf933ac40531f11757a31a93d26dcbda617f1b85f48a21865b3a5c5e2ddaa",
       "core/openrig-software-factory/SKILL.md": "7a57815f3c6865d5cc42c063cccdca998d6ee100a82812362d0c81f314465b77",
       "core/openrig-software-factory/references/worked-example.md": "64dec0e832692b655ffc1ca9f72e96f221f78b8bc97f73775198f188b502f147",
       "core/openrig-upgrade/SKILL.md": "bd1765d94e4d462b9c8b08198238c1239c70ff68228c3d575438a7bc9a326ac6",
@@ -24,6 +27,7 @@
       "core/specification-system/SKILL.md": "5226d6e8b1362df89ba3d5afd82e4b4add355870132ca4b140d7f9f4324ffdc1",
       "core/topology-mutation-and-seat-management/SKILL.md": "527ca074432ce6513fb25cd27e8c709dabe0c91361b8999e09b272f3813abe62",
       "core/watchdog/SKILL.md": "24b2e756e3e9d067fa93a4b5fa5f48a5cce511e8b1a5b360b1c39bc09bc95d82",
+      "core/working-with-an-openrig-team/SKILL.md": "4b3e6e8eecb710abdb95d604c419599566dbc77b019b49175e936e713b65cf6f",
       "pm/backlog-capture/SKILL.md": "345c2b47fc85e48c15c0d42bbb48fb27dd3b0ceec36bf59dc6ed20daaea47a84",
       "pm/context-builder/SKILL.md": "0134c9b0a9f196565109f7f51b6ec78d5c3e4b5982a0d7105a93b29952625b3c",
       "pm/exec-summary/SKILL.md": "ada0f42337920e7acdd94e24cad4f5c269b057e750f4a7fc627ea9efbc02fcb6",
@@ -88,7 +92,7 @@
       "openrig-operating-model/templates/PLAYBOOK.md": "ff6f9dc8caab06dc7b9ae21977310ddefa23e925453bd54629ce0a669403bfb0",
       "openrig-operating-model/templates/SOP.md": "1eaf0daf4f9bbf0715e6a5aaf0f29f030af5fe8b8a10232488ee97c507afa6dc",
       "openrig-operating-model/templates/SPEC.md": "f126536daa59cea3f1cfb0898d83c7cdf99f6392f6f155ea64fe55187dd0f5f1",
-      "openrig-skills/SKILL.md": "bdd6594ae1108455103239d39694c865cc40d3f7d9f24cd3566a18397df270da",
+      "openrig-skills/SKILL.md": "6d7bf933ac40531f11757a31a93d26dcbda617f1b85f48a21865b3a5c5e2ddaa",
       "openrig-user/SKILL.md": "0776fe4e197d347614f72eec817f881debfcae372c4a1f912f2e0fbbf91c67da",
       "orienting-to-an-inherited-seat/CHANGELOG.md": "4d0970e75e5c15b00a48d6a7150376d646257777264fd1b9a191165a8d5a6e84",
       "orienting-to-an-inherited-seat/SKILL.md": "252fed402f19027056bbba241df3305be88de3175b67dc8fe051143bb0d4412b",
@@ -114,7 +118,7 @@
       "core/openrig-architect/SKILL.md": "affa65df8087efca711e429e36e8756c711419dccc801d26d9e51a746b56391d",
       "core/openrig-cmux/SKILL.md": "73a86eac45d68b16a38fc0a4438713c634d86061073dac96a4d9e656ea5d34dc",
       "core/openrig-herdr/SKILL.md": "cb39b51f954ca89e8d7ec0f8b3f326476d5c4dd3bc17dbd47e6379aa630e7b22",
-      "core/openrig-skills/SKILL.md": "bdd6594ae1108455103239d39694c865cc40d3f7d9f24cd3566a18397df270da",
+      "core/openrig-skills/SKILL.md": "6d7bf933ac40531f11757a31a93d26dcbda617f1b85f48a21865b3a5c5e2ddaa",
       "core/openrig-software-factory/SKILL.md": "7a57815f3c6865d5cc42c063cccdca998d6ee100a82812362d0c81f314465b77",
       "core/openrig-software-factory/references/worked-example.md": "64dec0e832692b655ffc1ca9f72e96f221f78b8bc97f73775198f188b502f147",
       "core/openrig-upgrade/SKILL.md": "bd1765d94e4d462b9c8b08198238c1239c70ff68228c3d575438a7bc9a326ac6",
@@ -128,6 +132,7 @@
       "core/specification-system/SKILL.md": "5226d6e8b1362df89ba3d5afd82e4b4add355870132ca4b140d7f9f4324ffdc1",
       "core/topology-mutation-and-seat-management/SKILL.md": "527ca074432ce6513fb25cd27e8c709dabe0c91361b8999e09b272f3813abe62",
       "core/watchdog/SKILL.md": "24b2e756e3e9d067fa93a4b5fa5f48a5cce511e8b1a5b360b1c39bc09bc95d82",
+      "core/working-with-an-openrig-team/SKILL.md": "4b3e6e8eecb710abdb95d604c419599566dbc77b019b49175e936e713b65cf6f",
       "pm/backlog-capture/SKILL.md": "345c2b47fc85e48c15c0d42bbb48fb27dd3b0ceec36bf59dc6ed20daaea47a84",
       "pm/context-builder/SKILL.md": "0134c9b0a9f196565109f7f51b6ec78d5c3e4b5982a0d7105a93b29952625b3c",
       "pm/exec-summary/SKILL.md": "ada0f42337920e7acdd94e24cad4f5c269b057e750f4a7fc627ea9efbc02fcb6",
