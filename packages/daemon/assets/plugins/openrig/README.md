@@ -76,8 +76,8 @@ and start `rig mcp serve --front-door` from the root `mcp.json`.
     questions, for example.
   - **What doesn't:** the missing seat doesn't restrict the server's other tools.
   - `rig_whoami` says the server has no seat.
-- **In VS Code,** the OpenRig VS Code extension can provide the server with your seat. Use the extension's server or the
-  plugin's, not both: both are named `openrig`.
+- **One `openrig` server:** if something else in the app already provides an MCP server named `openrig` with your seat,
+  use that one or the plugin's, not both.
 
 ## What it doesn't do
 
