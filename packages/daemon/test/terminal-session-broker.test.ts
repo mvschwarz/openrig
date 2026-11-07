@@ -415,6 +415,36 @@ describe("TerminalBrokerRegistry", () => {
       expect(reg.size).toBe(0);
     }, { timeout: 1000 });
   });
+
+  it("reattach during broker teardown creates a fresh broker and does not close with 1011 (#2670)", async () => {
+    let releaseTeardown: () => void = () => {};
+    const teardownGate = new Promise<void>((r) => { releaseTeardown = r; });
+    const stopPipePane = vi.fn(async () => {
+      await teardownGate;
+      return { ok: true as const };
+    });
+    const reg = new TerminalBrokerRegistry(makeTmux({ stopPipePane }), { pollMs: 10 });
+    const sub1 = makeSub();
+    const sub2 = makeSub();
+
+    const broker1 = await reg.attach("dev@rig", sub1);
+    expect(reg.size).toBe(1);
+
+    // sub1 detaches, starting broker1 teardown which awaits stopPipePane
+    broker1.detach(sub1);
+
+    // sub2 immediately reattaches to the same session while broker1 is tearing down
+    const broker2Promise = reg.attach("dev@rig", sub2);
+
+    // Unblock broker1 teardown
+    releaseTeardown();
+
+    const broker2 = await broker2Promise;
+    expect(broker2).not.toBe(broker1);
+    expect(sub2.closed).toEqual([]);
+    expect(broker2.subscriberCount).toBe(1);
+    await broker2.dispose();
+  });
 });
 
 // ---- lifecycle hardening (dev1-guard watchpoints) ---------------------------
