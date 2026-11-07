@@ -26,16 +26,21 @@ This plugin is for a person's own agent in an app such as Claude Code or Codex. 
 
 ## Install
 
-**Claude Code**
+The plugin ships inside the OpenRig package, so you install it from there. Its marketplace is named `openrig-app`, because
+OpenRig already uses `openrig` for the marketplace its own Codex seats load `openrig-core` from.
 
-The plugin ships inside the OpenRig package, so you install it from there:
+The commands below use `$(npm root -g)`, npm's global folder. If you installed OpenRig with another prefix, use that
+prefix's `lib/node_modules` instead.
+
+**Claude Code**
 
 ```sh
 claude plugin marketplace add "$(npm root -g)/@openrig/cli/daemon/assets/plugins/openrig"
-claude plugin install openrig@openrig
+claude plugin install openrig@openrig-app
 ```
 
-Set the plugin's **OpenRig seat** to your address, then start a new session.
+Set the plugin's **OpenRig seat** to your address (`/plugin`, then configure): type the address into the row, then save.
+Pressing Enter on the empty row closes it with no change. Then start a new session.
 
 **Codex**
 
@@ -43,9 +48,14 @@ Install the plugin for its skill, then connect the MCP server with your address:
 
 ```sh
 codex plugin marketplace add "$(npm root -g)/@openrig/cli/daemon/assets/plugins/openrig"
-codex plugin add openrig@openrig
+codex plugin add openrig@openrig-app
 codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --front-door
 ```
+
+- **A non-default OpenRig home:** Codex doesn't pass your shell's environment to MCP servers. If your team runs on a
+  non-default OpenRig home, add `--env OPENRIG_HOME=<that home>` to the `codex mcp add` line.
+- **Approvals:** Codex asks you to approve each tool that writes (create, claim, update) the first time it's used. Tools
+  that only read don't ask.
 
 ## What it doesn't do
 

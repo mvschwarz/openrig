@@ -21,6 +21,8 @@ behave; this skill is the loop around them.
   can't list your own work.
 - Call `rig_team` with the rig's name: it shows the team's seats, what each is for, and its lead. Work goes to the lead
   unless the person names a seat.
+- If `lead` is null (its `leadNote` says why), and the team has exactly one seat, send work there. Otherwise, ask the person
+  which seat should take it.
 
 ## Hand the team work
 
@@ -44,16 +46,17 @@ behave; this skill is the loop around them.
 - Show the person the question and the team's draft, in their own words where the item gives them. Then ask for an answer.
 - Record only what the person actually tells you. Claim the item (`rig_queue_claim`), then close it with
   `rig_queue_update`: `state` `done`, `closureReason` `no-follow-on`, and the person's answer in `resolution`, saying it's
-  theirs. If the person isn't there to answer, leave the
-  item open and tell them it's waiting. Never choose an answer for them.
+  theirs. Put only their words there: no notes, paths or summaries of your own. If the person isn't there to answer, leave
+  the item open and tell them it's waiting. Never choose an answer for them.
 - Some questions go to the person directly, outside your seat. Those wait for them where they already answer the team,
   such as the OpenRig TUI or Slack. You can mention that they're waiting; answering them isn't yours.
 
 ## Read the result
 
 - When the item is `done`, its `resolution` is the answer, and its transitions hold the notes the team recorded.
-- If it names an `evidenceRef`, read that file with `rig_artifact_read`, within the shared roots this connection may read.
-  If the connection can't read it, give the person the path.
+- If it names an `evidenceRef`, read it with `rig_artifact_read`, passing the item's `qitemId`, not the path. The tool
+  reads the item's `evidenceRef` within the shared roots this connection may read. For another file in a shared root,
+  pass the root's name and `path`. If the connection can't read it, give the person the path.
 - To ask for changes, create a new item with `revises` set to the earlier `qitemId`, so the revision stays with the
   original work.
 
@@ -71,7 +74,9 @@ behave; this skill is the loop around them.
    (`docs/reference/hosted-members.md` in the OpenRig package).
 3. Connect the app to that address, then start a new session so the MCP server starts with it:
    - **Claude Code:** set it as the plugin's OpenRig seat in the plugin's settings.
-   - **Codex:** run `codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --front-door`.
+   - **Codex:** run `codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --front-door`. Codex
+     doesn't pass the shell's environment to MCP servers, so if the team's OpenRig home isn't the default, add
+     `--env OPENRIG_HOME=<that home>` too.
    - **Another app:** add an MCP server that runs `rig mcp serve --front-door` with `OPENRIG_SESSION_NAME` set to the
      address.
 
