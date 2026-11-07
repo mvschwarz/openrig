@@ -1479,6 +1479,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     void seatAttentionReconciler.onSeatActivity(sessionName, state)
       .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
   };
+  eventBus.subscribe(event => {
+    if (event.type !== "restore.completed") return;
+    void seatAttentionReconciler.onRestoreCompleted(event.rigId)
+      .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
+  });
 
   // Capture compatibility before the spec-library initializer creates the primary directory.
   const userSpecLibraryRoot = getDefaultOpenRigPath("specs");

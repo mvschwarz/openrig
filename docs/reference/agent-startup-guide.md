@@ -73,12 +73,14 @@ alone keeps the seat's lifecycle at `attention_required`, even with startup `rea
 in the rig's `attentionCount` and the TUI's attention totals.
 
 After a full restore of a Claude or Codex seat, answering the prompt is enough. When
-the seat's activity next turns to running or idle, the daemon checks the live seat:
-its tmux session is alive, and the pane runs the agent resuming the conversation the
-seat records. When the check passes, the restore outcome becomes `operator_recovered`,
-so the restore no longer makes the seat need attention. When it fails, nothing is
-recorded and the seat still needs attention, which is true when the pane runs another
-conversation.
+the seat's activity next turns to running or idle, or when the whole restore completes
+after the seat already reads running or idle, the daemon checks the live seat: its tmux
+session is alive, and the pane runs the agent resuming the conversation the seat
+records. When the check passes, the restore outcome becomes `operator_recovered`, so
+the restore no longer makes the seat need attention. When it fails, the restore outcome
+stays and the seat still needs attention, which is true when the pane runs another
+conversation. A check that started before a newer restore of the seat doesn't settle
+the newer outcome.
 
 `rig seat clear-attention <seat>` runs the same check on demand. When it fails, the
 command says which check failed, and `--reason` doesn't bypass it. If

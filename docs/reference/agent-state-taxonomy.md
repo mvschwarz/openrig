@@ -209,9 +209,10 @@ LIFECYCLE); see the
   An `attention_required` outcome, or `failed` with a running session, makes the seat's
   lifecycle `attention_required`, whatever its startup status, so it raises `needsAttention`.
   After a full restore, the daemon reconciles it to `operator_recovered` when the seat's
-  activity next turns to running or idle and the live seat passes its check, and
-  `rig seat clear-attention <seat>` runs that check on demand; `rig seat continue` doesn't
-  change it ([startup guide](agent-startup-guide.md#after-a-restored-seats-prompt)).
+  activity next turns to running or idle (or reads so when the restore completes) and the
+  live seat passes its check, and `rig seat clear-attention <seat>` runs that check on
+  demand; `rig seat continue` doesn't change it
+  ([startup guide](agent-startup-guide.md#after-a-restored-seats-prompt)).
 
 ## Rejected oracles — dated receipts (2026-08-26), so nobody re-derives them expensively
 

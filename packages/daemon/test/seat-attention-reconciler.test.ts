@@ -1011,7 +1011,7 @@ describe("SeatAttentionReconciler", () => {
       expect(attention(rigId, nodeId).lifecycleState).not.toBe("attention_required");
     });
 
-    it("a resumed pane whose lineage doesn't match stays in attention, and the failed check writes and emits nothing", async () => {
+    it("a resumed pane whose lineage doesn't match stays in attention, and the failed check appends no reconciliation and emits no refusal", async () => {
       const { rigId, nodeId } = seedRestoredAtPrompt("r-2622-other", "worker@r-2622-other");
       const strict = vi.fn(async () => ({ ok: false as const, code: "resume_token_mismatch", detail: "The pane runs another conversation." }));
       const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
@@ -1041,6 +1041,46 @@ describe("SeatAttentionReconciler", () => {
       sessionRegistry.updateStatus(session.id, "running");
       expect(await checked.onSeatActivity("worker@r-2622-plain", "running")).toBe(false);
       expect(strict).toHaveBeenCalledTimes(2);
+    });
+
+    it("a seat that settled before the whole restore completed is checked once at completion, and only in that rig", async () => {
+      const seat = (rigId: string, logicalId: string, sessionName: string) => {
+        const node = rigRepo.addNode(rigId, logicalId, { role: "worker", runtime: "claude-code" });
+        const session = sessionRegistry.registerSession(node.id, sessionName);
+        sessionRegistry.updateStartupStatus(session.id, "ready");
+        sessionRegistry.updateStatus(session.id, "running");
+        return node.id;
+      };
+      const complete = (rigId: string, nodes: Array<{ nodeId: string; logicalId: string }>) => eventBus.emit({
+        type: "restore.completed", rigId, snapshotId: "snap-1", result: {
+          snapshotId: "snap-1", preRestoreSnapshotId: "snap-0", rigResult: "partially_restored",
+          nodes: nodes.map((n) => ({ ...n, status: "attention_required" })), warnings: [],
+        } } as any);
+      const rig = rigRepo.createRig("r-2622-early");
+      const early = seat(rig.id, "early", "early@r-2622-early");
+      const waiting = seat(rig.id, "waiting", "waiting@r-2622-early");
+      const other = rigRepo.createRig("r-2622-elsewhere");
+      const elsewhere = seat(other.id, "worker", "worker@r-2622-elsewhere");
+      eventBus.emit({ type: "restore.started", rigId: rig.id, snapshotId: "snap-1" });
+      eventBus.emit({ type: "restore.started", rigId: other.id, snapshotId: "snap-1" });
+      const checked = strictDerivedReconciler();
+
+      // Answered and settled while the rest of the rig was still restoring: nothing to reconcile yet.
+      expect(await checked.onSeatActivity("early@r-2622-early", "idle")).toBe(false);
+      expect(await checked.onSeatActivity("waiting@r-2622-early", "needs_input")).toBe(false);
+      expect(await checked.onSeatActivity("worker@r-2622-elsewhere", "idle")).toBe(false);
+      complete(rig.id, [{ nodeId: early, logicalId: "early" }, { nodeId: waiting, logicalId: "waiting" }]);
+      complete(other.id, [{ nodeId: elsewhere, logicalId: "worker" }]);
+      expect(attention(rig.id, early).needsAttention).toBe(true);
+
+      expect(await checked.onRestoreCompleted(rig.id)).toBe(1);
+      expect(await checked.onRestoreCompleted(rig.id)).toBe(0);
+
+      const reconciled = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
+      expect(reconciled.map((row) => JSON.parse(row.payload).nodeId)).toEqual([early]);
+      expect(attention(rig.id, early).needsAttention).toBe(false);
+      expect(attention(rig.id, waiting).needsAttention).toBe(true);
+      expect(attention(other.id, elsewhere).needsAttention).toBe(true);
     });
   });
 });
