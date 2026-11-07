@@ -103,7 +103,7 @@ export class HerdrFollowView {
       if (!await stillCurrent()) throw new Error("Task membership changed before reconciliation; keeping the previous view.");
       if (!state) {
         state = { version: 1, cwd: path.join(root, "strip"), phase: "creating", policy: { ...DEFAULT_FOLLOW_POLICY, ...(view.task.kind === "slice" || view.task.kind === "mission" ? { maxTiles: 4 } : {}), pins: [], suppressed: {} },
-          tiles: [], events: [`Following ${view.task.name}. Opening a tile can change an agent's terminal size.`] };
+          stripConfirmed: false, tiles: [], events: [`Following ${view.task.name}. Opening a tile can change an agent's terminal size.`] };
         mkdirSync(state.cwd, { recursive: true, mode: 0o700 }); save();
         // Persist first. An uncertain response is enumerated on the next call,
         // never interpreted as permission for another workspace.
@@ -133,12 +133,12 @@ export class HerdrFollowView {
       await currentPane(state.pane);
       if (state.phase === "created") {
         state.phase = "starting"; save();
-        await this.deps.run(["pane", "run", state.pane.pane_id, `/usr/bin/tail -n 30 -F ${quote(log)}`]);
+        await this.deps.run(["pane", "run", state.pane.pane_id, `printf '\\033[2J\\033[3J\\033[H'; exec /usr/bin/tail -n 30 -F ${quote(log)}`]);
       }
       let stripReady = false;
       // A first login shell can take seconds. Observe its single dispatched run
       // for a bounded startup window, never steady membership polling.
-      const stripDeadline = Date.now() + (state.stripConfirmed ? 0 : 10000);
+      const stripDeadline = Date.now() + (state.stripConfirmed === false ? 10000 : 0);
       while (true) {
         const strip = body(await this.deps.run(["pane", "process-info", "--pane", state.pane.pane_id]));
         const processes = (strip.process_info as { foreground_processes?: Array<{ argv?: string[] }> } | undefined)?.foreground_processes;

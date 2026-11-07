@@ -1,0 +1,11 @@
+{
+  "provenance": "Claude Code idle seat with a user statusLine below the composer (OpenRig #2700), captured with tmux capture-pane -e -p on 2026-11-07 before a local mitigation. Transcript omitted: rows 72-80 of 80 kept (the last turn's status line, the framed composer, the statusLine, the mode footer and blank rows); the cursor was not captured with this screen: it is placed on the prompt row (x 2), width and height from the pane. Same-length replacements: the seat label on the top rule, the cwd in the statusLine and the cost figure. sha256 of the uncropped capture: 3f49e292507bae1a333a72d9bdcc165f02c941ca41e25e2c989bbedb3d9239fa.",
+  "screen": "\u001b[38;5;246m✻\u001b[39m \u001b[38;5;246mBrewed for 2m 52s · done 1:48 PM · 1 shell still running\u001b[39m\n\n\u001b[38;5;244m───────────────────────────────────────────────────────────────────── orchestrator-seat@example-rig-abc ─\n\u001b[39m❯ \n\u001b[38;5;244m─────────────────────────────────────────────────────────────────────────────────────────────────────────\n\u001b[39m  \u001b[36mOpus 5.5\u001b[38;5;246m · \u001b[32mctx 262k/1000k (26%)\u001b[38;5;246m · example-orchestrator-seat · ⎇ main · US$ 1234.56\u001b[39m\n  \u001b[38;5;211m⏵⏵ bypass permissions on\u001b[38;5;246m · \u001b[38;5;44m1 shell\u001b[39m\n\n\n",
+  "cursor": {
+    "x": 2,
+    "y": 3,
+    "width": 105,
+    "height": 80
+  },
+  "inMode": false
+}

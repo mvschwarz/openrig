@@ -4,15 +4,17 @@ OpenRig as an agent in apps that speak the [Agent Client Protocol](https://agent
 Zed and JetBrains AI Assistant. Your prompt goes to your OpenRig team as a queue row. The app shows who has the work
 and their notes as it moves, any question the team asks you as a choice, and the team's result as the reply.
 
-This package has one command, `openrig-acp`. It starts `rig acp serve` from the exact `@openrig/cli` version it
-depends on, so ACP apps and the ACP registry can launch it with `npx`.
+This package has one command, `openrig-acp`. It starts `rig acp serve` from the `@openrig/cli` version it depends on,
+and warns on stderr if it finds another, so ACP apps and the ACP registry can launch it with `npx`.
 
 ## What you need
 
 - OpenRig on this computer, with its daemon running (`rig daemon start`) and a team.
 - The seat that receives your team's new work, set once with `rig config set acp.to <member@rig>`, or passed as
   `--to <member@rig>`.
-- You, as a person OpenRig knows: the default person (`rig gateway default <id>`), or `--as <address>`.
+- You, as a person OpenRig knows: the default person (`rig gateway default <id>`), or `--as <address>`. The team's
+  questions reach an `<id>@external` address only once it's registered:
+  `rig gateway human add <id> --display-name "<your name>" --delivery-class <A|B|C|D>`.
 
 The app's sign-in step, "OpenRig on this machine", checks that the daemon answers and that it can tell who you are.
 This agent talks only to the OpenRig daemon on this computer.

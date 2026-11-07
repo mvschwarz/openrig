@@ -11,7 +11,7 @@ vi.mock("../src/daemon-lifecycle.js", async () => ({
 
 const id = "qitem-xh-missing";
 const verbs = [
-  ["show"], ["transitions"], ["claim"], ["unclaim"],
+  ["show"], ["transitions"], ["artifact"], ["claim"], ["unclaim"],
   ["update", "--note", "a note"],
   ["block", "--on", "external:dependency"],
   ["resolve", "--decision", "continue"],
