@@ -415,6 +415,83 @@ describe("TerminalBrokerRegistry", () => {
       expect(reg.size).toBe(0);
     }, { timeout: 1000 });
   });
+
+  it("reattach during broker teardown creates a fresh broker and does not close with 1011 (#2670)", async () => {
+    let releaseTeardown: () => void = () => {};
+    const teardownGate = new Promise<void>((r) => { releaseTeardown = r; });
+    const stopPipePane = vi.fn(async () => {
+      await teardownGate;
+      return { ok: true as const };
+    });
+    const startPipePane = vi.fn(async () => ({ ok: true as const }));
+    const reg = new TerminalBrokerRegistry(makeTmux({ stopPipePane, startPipePane }), { pollMs: 10 });
+    const sub1 = makeSub();
+    const sub2 = makeSub();
+
+    const broker1 = await reg.attach("dev@rig", sub1);
+    expect(reg.size).toBe(1);
+
+    // sub1 detaches, starting broker1 teardown which awaits stopPipePane
+    broker1.detach(sub1);
+
+    // sub2 immediately reattaches to the same session while broker1 is tearing down
+    const broker2Promise = reg.attach("dev@rig", sub2);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const pipeStartsBeforeRelease = startPipePane.mock.calls.length;
+
+    // Unblock broker1 teardown
+    releaseTeardown();
+
+    const broker2 = await broker2Promise;
+    try {
+      expect(pipeStartsBeforeRelease).toBe(1);
+      expect(startPipePane).toHaveBeenCalledTimes(2);
+      expect(broker2).not.toBe(broker1);
+      expect(sub2.closed).toEqual([]);
+      expect(broker2.subscriberCount).toBe(1);
+    } finally {
+      await broker2.dispose();
+    }
+  });
+
+  it("concurrent reattaches during broker teardown all wait for prior teardown and share replacement (#2670)", async () => {
+    let releaseTeardown: () => void = () => {};
+    const teardownGate = new Promise<void>((r) => { releaseTeardown = r; });
+    const stopPipePane = vi.fn(async () => {
+      await teardownGate;
+      return { ok: true as const };
+    });
+    const startPipePane = vi.fn(async () => ({ ok: true as const }));
+    const reg = new TerminalBrokerRegistry(makeTmux({ stopPipePane, startPipePane }), { pollMs: 10 });
+    const sub1 = makeSub();
+    const sub2 = makeSub();
+    const sub3 = makeSub();
+
+    const broker1 = await reg.attach("dev@rig", sub1);
+    broker1.detach(sub1);
+
+    // Multiple subscribers reattach concurrently while broker1 teardown is blocked
+    const broker2Promise = reg.attach("dev@rig", sub2);
+    const broker3Promise = reg.attach("dev@rig", sub3);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(startPipePane).toHaveBeenCalledTimes(1);
+
+    releaseTeardown();
+
+    const [broker2, broker3] = await Promise.all([broker2Promise, broker3Promise]);
+    try {
+      expect(broker2).toBe(broker3);
+      expect(broker2).not.toBe(broker1);
+      expect(startPipePane).toHaveBeenCalledTimes(2);
+      expect(sub2.closed).toEqual([]);
+      expect(sub3.closed).toEqual([]);
+      expect(broker2.subscriberCount).toBe(2);
+    } finally {
+      await broker2.dispose();
+    }
+  });
 });
 
 // ---- lifecycle hardening (dev1-guard watchpoints) ---------------------------
