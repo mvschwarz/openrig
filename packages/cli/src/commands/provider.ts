@@ -605,7 +605,7 @@ and native credential-store requirements are unchanged. No fresh account home or
 Do not combine --api-key-file with --account-home or --clear-account-home; select a home and switch credentials separately.
 Pi seats support --account-home with an existing readable auth.json, or --clear-account-home, through a fresh successor
 with a handover. Their current model and effort are retained unless overridden. Pi account changes work with or without
-a launch_wrapper; changing a seat between Pi and another runtime is not supported.
+a launch_wrapper. To change runtime, use rig seat set-runtime with --runtime pi, codex or claude-code.
 --clear-account-home returns to the configured member/rig/daemon/native home through a fresh successor with a handover.
 Use it without --to-account, --stored-login, --account-home or --token-file. It removes an account-home token reference
 only after confirmation; it does not restore historical login bytes. Anthropic active/default profiles live outside

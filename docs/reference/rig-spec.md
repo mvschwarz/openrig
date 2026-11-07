@@ -588,8 +588,10 @@ rig provider switch --seat pi-worker@my-rig --clear-account-home --reason "Retur
 ```
 
 Pi account changes work with or without `launch_wrapper`. The wrapper receives the successor's managed Pi directory;
-it must preserve the selected credentials if you want OpenRig's account choice to apply. Switching a seat between Pi
-and another runtime is not supported by this account-home feature.
+it must preserve the selected credentials if you want OpenRig's account choice to apply.
+Use `rig seat set-runtime <seat> --runtime <runtime>` with `pi`, `codex` or `claude-code` for cross-runtime switches.
+Those resolve the target's settings afresh rather than keeping the source model or effort;
+see [runtime switching](getting-started.md#move-a-seat-to-the-other-runtime).
 
 This switch starts a fresh conversation with a handover, even when the runtime stays the same. The existing
 subscription-login switch preserves the conversation. Once the successor confirms, OpenRig commits its home, runtime,

@@ -816,6 +816,19 @@ option, the seat's agent spec for the target runtime, or the runtime's own
 default), what is cleared, and the costs below. Nothing changes until you run it
 without `--dry-run`.
 
+Use `--runtime pi` to move a Claude Code or Codex seat to Pi; use `--runtime
+claude-code` or `--runtime codex` to move back. Pi uses a fresh managed state
+directory. Select a prepared Pi account with `--account-home /absolute/path`
+(the directory must contain readable `auth.json`), or use the target's configured
+login. A source account override or Claude token is cleared only at commit;
+credentials are never converted between runtimes. Pi-to-Pi account changes keep
+Pi settings, but cross-runtime switches resolve settings afresh for the target.
+
+A configured `launch_wrapper` carries between Pi and Codex. It must support the
+target executable and preserve its credential environment. Switching a wrapped
+seat to Claude Code is refused before staging; set `launch_wrapper: []` in the
+authored spec and re-apply it first.
+
 The new runtime takes over before the old one stops. Its successor starts beside
 the current occupant, reads a handover (the seat's recap, its open rows and the
 predecessor's screen), and confirms it with `rig seat set-runtime <seat>
@@ -847,7 +860,7 @@ What it costs:
   again afterwards to reach whoever holds the seat.
 - **Leftover files after a failed switch.** The target runtime's prepared seat
   storage and projections can remain.
-- **Codex and Claude Code, single-pane seats.** Startup slash commands aren't
+- **Codex, Claude Code and Pi, single-pane seats.** Startup slash commands aren't
   run by a switch; the dry run lists them.
 
 ## Stop your teams
