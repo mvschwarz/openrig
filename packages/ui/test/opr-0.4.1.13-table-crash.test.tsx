@@ -158,5 +158,5 @@ describe("OPR.0.4.1.13 — table-view crash repro (malformed row + filter)", () 
       }
     }).not.toThrow();
     expect(screen.getByTestId("topology-table-view")).toBeTruthy();
-  });
+  }, 30_000); // Many full-table renders: allow shared-host contention without reducing the stress coverage.
 });

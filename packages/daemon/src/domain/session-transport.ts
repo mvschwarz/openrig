@@ -1048,6 +1048,11 @@ function safeRecord(sink: CaptureObserverSink, input: ObservationInput): void {
   try { sink.record(input); } catch { /* observer failure never reaches the caller */ }
 }
 
+/** What a send under transport.draft_delivery = deliver says when it meets a person's draft. */
+function draftJoinedAdvisory(sessionName: string): string {
+  return `'${sessionName}' had a draft at its prompt and transport.draft_delivery is deliver: this message was pasted at the current cursor into that draft (normally its end), then Enter was sent to submit the combined input. The delivery result says whether that was confirmed.`;
+}
+
 /** transport.draft_delivery as the daemon reads it. deliver is the product default, so only a readable `refuse` opts out:
  *  an unset, unreadable or invalid value follows the default, as other settings fall back to theirs. */
 export function draftDeliveryAllows(read: () => unknown): boolean {
@@ -2085,8 +2090,9 @@ interface SessionTransportDeps {
   runtimeAdapters?: Record<string, TransportReadinessChecker>;
   /** transport.verify_input_box, read per verified Claude Code or Codex send. Absent means off. */
   verifyInputBox?: () => boolean;
-  /** Whether transport.draft_delivery lets this send through a person's draft, read per send that meets one. The daemon
-   *  wires draftDeliveryAllows (deliver by default); a transport built without it keeps refusing. */
+  /** Whether transport.draft_delivery lets this send through a person's draft, read on every ordinary Claude Code or Codex
+   *  send (and on any send that meets a recognised draft). The daemon wires draftDeliveryAllows (deliver by default); a
+   *  transport built without it keeps refusing. */
   deliverOverDraft?: () => boolean;
 }
 
@@ -3280,6 +3286,8 @@ export class SessionTransport {
     // the positive-picker guard (FR-4 — the footgun separation). The advisory is carried on the
     // success result via `warning` so the honest telemetry is surfaced.
     let sendAdvisory: string | undefined;
+    // Set once this send's result says it joined a person's draft, so the input-box read below doesn't say it twice.
+    let draftAdvised = false;
     // Broadcast can carry wait + override: after waiting, it still uses the same deliberate-input boundary.
     const promptOverride = Boolean(opts?.dangerouslyInteract);
     if (waitForIdleMs === undefined || promptOverride) {
@@ -3341,7 +3349,8 @@ export class SessionTransport {
       }
       if (readiness.state === "needs_input") {
         if (!promptOverride && this.deliversOverDraft(readiness, opts)) {
-          sendAdvisory = [sendAdvisory, `'${sessionName}' had a draft at its prompt and transport.draft_delivery is deliver: this message was pasted at the current cursor into that draft (normally its end), then Enter was sent to submit the combined input. The delivery result says whether that was confirmed.`].filter(Boolean).join(" ");
+          sendAdvisory = [sendAdvisory, draftJoinedAdvisory(sessionName)].filter(Boolean).join(" ");
+          draftAdvised = true;
         } else if (!promptOverride) {
           return {
             ok: false,
@@ -3414,6 +3423,27 @@ export class SessionTransport {
     if (targetFailure) return observe(targetFailure);
     const copyModeFailure = await leavePaneMode("No text was sent.");
     if (copyModeFailure) return observe({ ...copyModeFailure, ...(waitMode ? waitEvidence : {}) });
+
+    // transport.draft_delivery for the drafts the pane classifier misses (framed Claude composers read as idle): the
+    // input-box reader sees them. Under an explicit refuse, a typed box refuses as a recognized draft does, before any
+    // input; under deliver, the result only says the message joined it. A transport without the setting's reader, a
+    // send with its own input rule (managed compaction, a deliberate interaction) and an unreadable box are unchanged.
+    const boxRuntime = runtime === "claude-code" || runtime === "codex" ? runtime : null;
+    const draftChoice = boxRuntime && !opts?.preserveInput && !promptOverride && !(draftAdvised) ? this.draftDeliveryChoice() : undefined;
+    if (boxRuntime && draftChoice) {
+      const box = await this.captureInputBox(readTarget, boxRuntime, { remainingMs: INPUT_BOX_READ_DEADLINE_MS });
+      if (box.status === "typed" || box.status === "typed-with-suggestion") {
+        if (draftChoice === "refuse") {
+          const activity: AgentActivity = { state: "needs_input", reason: "prompt_draft", evidenceSource: "pane_heuristic",
+            sampledAt: this.now().toISOString(), evidence: `input box reads ${box.status}`, fallback: true };
+          // Wait evidence keeps its waitedMs and attempts; the activity is this draft's, not the idle the wait ended on.
+          return observe({ ok: false, sessionName, reason: "target_needs_input", sent: false, inputPhase: "not_reached",
+            ...(waitMode ? waitEvidence : {}), activity,
+            error: `Refused: '${sessionName}' is at an interactive prompt (prompt_draft): its input box holds a draft and transport.draft_delivery is refuse. No text was sent.` });
+        }
+        sendAdvisory = [sendAdvisory, draftJoinedAdvisory(sessionName)].filter(Boolean).join(" ");
+      }
+    }
 
     // 3. Deliver ordinary messages as paste, audited prompt answers as key input.
     if (observed) observed.sentHash = hashSentText(text);
@@ -3827,6 +3857,12 @@ export class SessionTransport {
       if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
     }
     return paneCommand.replace(/^-/, "");
+  }
+
+  /** transport.draft_delivery as this transport's reader gives it; undefined without a reader, which keeps today's sends. */
+  private draftDeliveryChoice(): "deliver" | "refuse" | undefined {
+    if (!this.deliverOverDraft) return undefined;
+    try { return this.deliverOverDraft() ? "deliver" : "refuse"; } catch { return undefined; }
   }
 
   /** transport.draft_delivery = deliver (the default): a person's draft at the prompt is the one needs_input an ordinary send or work

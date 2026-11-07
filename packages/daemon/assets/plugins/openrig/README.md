@@ -3,17 +3,21 @@
 Work with your OpenRig team from the coding agent you already use. Your agent can hand the team work, follow that work,
 bring you the team's questions and read what it returns, through OpenRig's MCP server.
 
-This plugin is for a person's own agent in an app such as Claude Code or Codex. The agents on an OpenRig team load
-`openrig-core` instead.
+This plugin is for a person's own agent in an app such as Claude Code, Codex, VS Code, Copilot CLI or Cursor. The agents
+on an OpenRig team load `openrig-core` instead.
 
 ## What it ships
 
-- **The MCP server entry**, in the Claude Code manifest only: `rig mcp serve --front-door`, acting as the seat you set in
-  the plugin's settings. Claude Code substitutes that seat into the server's environment. Codex doesn't, so the plugin
-  ships no shared MCP file, and Codex gets the server from one command (below). An app that passes the seat on unfilled
-  (`${user_config.seat}`) or empty gets a server with no seat: `rig_whoami` says why. It never acts as a seat named after
-  the placeholder. Its messages, new tasks and chat still go through as an unknown sender, each with a note on what is
-  known, and your agent follows a task by its id; claiming, updating, handing off or deciding a task needs the seat.
+- **The MCP server entry, in two forms:**
+  - **In the Claude Code manifest:** `rig mcp serve --front-door`, acting as the seat you set in the plugin's settings.
+    Claude Code substitutes that seat into the server's environment. An app that passes the seat on unfilled
+    (`${user_config.seat}`) or empty gets a server with no seat (see "No seat" below); it never acts as a seat named
+    after the placeholder.
+  - **In the root `plugin.json` and `mcp.json`** (the Agent Plugins 1.0 format, which VS Code, Copilot CLI and Cursor
+    read): the same command with no seat. That format allows no per-person values, so it can't carry one. Claude Code
+    ignores these root files and runs only its own entry. Cursor reads them because `.cursor-plugin/plugin.json`, which
+    carries only the plugin's name, version and description, is there; without it, Cursor runs the Claude Code entry.
+  - Codex gets the server from one command (below).
 - **`--front-door`** tells your agent the team's questions to its seat are yours to answer: it shows them to you and
   records only what you say, instead of working them itself as a team member would.
 - **One skill,** `working-with-an-openrig-team`: the loop around the tools. It covers handing work to the team's lead,
@@ -60,8 +64,34 @@ codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --fr
 - **Approvals:** Codex may ask you to approve tools according to its approval settings. Create, claim and update change
   team state; tools that only read are marked read-only.
 
+**VS Code, Copilot CLI and Cursor**
+
+- **VS Code:** verified on 1.145. Older versions, such as 1.110, don't load Agent Plugins.
+- **Cursor:** verified on 3.27, as a local plugin.
+- **Copilot CLI:** not yet verified; the steps follow its documentation.
+
+Install the plugin from this folder with the app's own install-from-folder step. In VS Code that's **Chat: Install Plugin
+from Source**; in Cursor, copy the folder to `~/.cursor/plugins/local/openrig` and reload. The app starts one `openrig`
+server, `rig mcp serve --front-door`, from the root `mcp.json`, and should load the skill.
+
+- **No seat:** these apps can't set a seat for a plugin's server, so it starts with none. The exception is an app started
+  from a shell where `OPENRIG_SESSION_NAME` (or the older `RIGGED_SESSION_NAME`) is set: its server acts as that seat.
+  - **What goes through without one:** messages (`rig_send`), new tasks (`rig_queue_create`) and chat
+    (`rig_chatroom_send`) reach the team as an unknown sender, `unknown-mcp-` and eight hex digits, one per server. Each
+    opens with a note saying why there's no seat and what the app's MCP client says it is. There's no return address,
+    so your agent follows a task it created by its id (`rig_queue_show`). `rig_whoami` says why there's no seat and
+    names the unknown sender.
+  - **What needs a seat:** OpenRig answers `actor_required` to claim, update, hand off, unclaim and decide, which covers
+    recording an answer to the team's questions. Listing the questions sent to you (`rig_queue_list` with `owned` or
+    `mine`) needs the seat too. Set one to get the team's questions and replies.
+  - Environment export needs an HTTP work grant, which a plugin's local server never has.
+- **One `openrig` server:** if something else in the app already provides an MCP server named `openrig` with your seat,
+  use that one or the plugin's, not both.
+
 ## What it doesn't do
 
 - It adds no panel to the app, and nothing wakes your chat when the team finishes: ask your agent to check.
 - Everyone using the app on this machine acts as the seat it names.
 - It reaches a team on this machine.
+- **Outside Claude Code and Codex,** until a seat is set, it hands the team work only as an unknown sender with no return
+  address, and it can't record answers to the team's questions: see "No seat" above.

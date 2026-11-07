@@ -1583,7 +1583,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         verifyInputBox: () => {
           try { return new ContextPackSettingsStore().resolveOne("transport.verify_input_box").value === true; } catch { return false; }
         },
-        // transport.draft_delivery, read at each send that meets a person's draft: only a readable refuse opts out.
+        // transport.draft_delivery, read on every ordinary Claude Code or Codex send: only a readable refuse opts out.
         deliverOverDraft: () => draftDeliveryAllows(() =>
           readDraftDeliverySetting(() => new ContextPackSettingsStore().resolveOne("transport.draft_delivery").value)),
       });
@@ -2060,6 +2060,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // surface (rig ps, node inventory, parked-query) consumes — never
       // sessions.status, never the parallel AgentActivityStore ingest.
       seatActivity: seatActivityService,
+      // #2661 (c): the pickup's restore grace, read late like every other enforcer consumer
+      compactionOwedSince: (session) => {
+        const since = deps.compactionEnforcer?.postCompactStageOwedSince(physicalSessionName(db, session));
+        return since == null ? null : new Date(since).toISOString();
+      },
     });
     const { SliceIndexer } = await import("./domain/slices/slice-indexer.js");
     const { SliceDetailProjector } = await import("./domain/slices/slice-detail-projector.js");
@@ -2310,6 +2315,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // A confirmed-missing session reads unknown, as in the node inventory: its last Stop
       // or pane sample can't stand for a seat that no longer exists.
       return node && !nodeExecutorConfirmedStopped(db, node.node_id) ? seatActivityService.getSeatState(node.node_id) : null;
+    });
+    // #2661 (c): a seat whose managed restore the daemon still owes is not stalled within its grace (queue-pickup.ts).
+    queueRepoInstance.attachCompactionReader((session) => {
+      const since = deps.compactionEnforcer?.postCompactStageOwedSince(physicalSessionName(db, session));
+      return since == null ? null : new Date(since).toISOString();
     });
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       jobsRepo: watchdogJobsRepoInstance,

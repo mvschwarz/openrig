@@ -367,7 +367,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       return { stopReason: "end_turn" };
     }
     if (!team.receiver) {
-      say(session.id, "This OpenRig agent has no team receiver, so nothing was sent. Add `--to <member@rig>` (the seat that takes your team's new work) to the agent's command in your app's settings.");
+      say(session.id, "This OpenRig agent has no team receiver, so nothing was sent. Choose the seat that takes your team's new work with `rig config set acp.to <member@rig>`, or add `--to <member@rig>` to the agent's command in your app's settings.");
       return { stopReason: "end_turn" };
     }
 
@@ -433,7 +433,9 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
           say(session.id, state.reply);
           return { stopReason: "end_turn" };
         }
-        for (const ask of await team.queue.openAsks(team.caller)) {
+        const asks = await team.queue.openAsks(team.caller);
+        // After a cancel, even one that landed during that read, no new question goes to the person.
+        for (const ask of cancelled ? [] : asks) {
           if (seen.has(ask.qitemId)) continue;
           // An ask tagged for a chat belongs to that chat alone. An untagged one from a seat this work reached might be
           // another chat's, so it isn't asked here; it's named, with where to answer it.

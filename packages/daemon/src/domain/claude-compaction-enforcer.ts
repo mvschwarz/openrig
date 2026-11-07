@@ -706,6 +706,12 @@ export class ClaudeCompactionEnforcer {
     return this.pendingPostCompactRestore.has(sessionName);
   }
 
+  /** #2661 (c): since when (epoch ms) a post-compact stage has been owed to this seat — the /compact this daemon sent,
+   *  or this daemon's recovery of one recorded before a restart (a lower bound then) — or null when none is owed. */
+  postCompactStageOwedSince(sessionName: string): number | null {
+    return this.pendingPostCompactRestore.has(sessionName) ? this.lastAutoCompactAt.get(sessionName) ?? null : null;
+  }
+
   /** The first time this daemon reaches a seat (a poll, a manual request, a state read): pick up its record from before a
    *  restart, with the policy's preparation root (`recoverAfterRestart`). */
   recoverSeat(seat: { sessionName: string; cwd?: string | null; runtime: string | null }): void {
