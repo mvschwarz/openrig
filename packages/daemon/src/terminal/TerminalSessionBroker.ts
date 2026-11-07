@@ -191,6 +191,7 @@ export class TerminalSessionBroker {
   private openPromise: Promise<{ ok: true } | { ok: false; code: number; reason: string }> | null = null;
   private tailStarted = false;
   private torndown = false;
+  private teardownPromise: Promise<void> | null = null;
   // The honest close reason a subscriber should get if it resumes (after an
   // async open/seed) to find the broker already torn down. Set on every
   // teardown path so a late/racing attach never goes silently live.
@@ -223,6 +224,14 @@ export class TerminalSessionBroker {
   /** The session-scoped pipe output file (one per session). Null until open. */
   get pipeOutputPath(): string | null {
     return this.outputPath;
+  }
+
+  get isTorndown(): boolean {
+    return this.torndown;
+  }
+
+  get teardownComplete(): Promise<void> {
+    return this.teardownPromise ?? Promise.resolve();
   }
 
   /**
@@ -258,8 +267,11 @@ export class TerminalSessionBroker {
       this.lastClose = { code: open.code, reason: open.reason };
       this.torndown = true;
       this.teardownResources();
-      await this.restoreWindowSize();
-      this.onEmpty?.(this.sessionName);
+      this.teardownPromise = (async () => {
+        await this.restoreWindowSize();
+        this.onEmpty?.(this.sessionName);
+      })();
+      await this.teardownPromise;
       sub.close(open.code, open.reason);
       return;
     }
@@ -381,21 +393,24 @@ export class TerminalSessionBroker {
 
   /** Force teardown (used by the registry/route on shutdown and by tests). Resolves once the sizing is given back. */
   async dispose(): Promise<void> {
-    if (this.torndown) return;
+    if (this.torndown) return this.teardownPromise ?? Promise.resolve();
     this.lastClose = { code: 1011, reason: "terminal broker unavailable" };
     this.torndown = true;
     this.subscribers.clear();
     this.scrollOffsets.clear();
-    if (this.pipeActive) {
-      this.pipeActive = false;
-      void this.tmux.stopPipePane(this.sessionName).catch(() => {});
-    }
     this.teardownResources();
-    // An open still in flight finishes its pin first, so the release below sees it. Then, before onEmpty as in
-    // teardown, the release: a broker created next reads the given-back value, not this one's pin.
-    await this.openPromise?.catch(() => {});
-    await this.restoreWindowSize();
-    this.onEmpty?.(this.sessionName);
+    this.teardownPromise = (async () => {
+      if (this.pipeActive) {
+        this.pipeActive = false;
+        await this.tmux.stopPipePane(this.sessionName).catch(() => {});
+      }
+      // An open still in flight finishes its pin first, so the release below sees it. Then, before onEmpty as in
+      // teardown, the release: a broker created next reads the given-back value, not this one's pin.
+      await this.openPromise?.catch(() => {});
+      await this.restoreWindowSize();
+      this.onEmpty?.(this.sessionName);
+    })();
+    return this.teardownPromise;
   }
 
   private async openPipe(): Promise<{ ok: true } | { ok: false; code: number; reason: string }> {
@@ -568,15 +583,11 @@ export class TerminalSessionBroker {
 
   /** FR-5: a dead session closes ALL subscribers honestly - never silent stale-live. */
   private async handleSessionDeath(): Promise<void> {
-    if (this.torndown) return;
+    if (this.torndown) return this.teardownPromise ?? Promise.resolve();
     this.lastClose = { code: 1001, reason: "tmux session terminated" };
     this.torndown = true;
     const subs = [...this.subscribers];
     this.subscribers.clear();
-    if (this.pipeActive) {
-      this.pipeActive = false;
-      void this.tmux.stopPipePane(this.sessionName).catch(() => {});
-    }
     this.teardownResources();
     for (const sub of subs) {
       try {
@@ -585,24 +596,34 @@ export class TerminalSessionBroker {
         // already-closed subscriber is fine
       }
     }
-    // A probe that couldn't reach tmux isn't proof the window is gone, so give the sizing back anyway. It acts only on a
-    // window that still lists this broker, so a gone window or one on a restarted tmux server is left alone.
-    await this.restoreWindowSize();
-    this.onEmpty?.(this.sessionName);
+    this.teardownPromise = (async () => {
+      if (this.pipeActive) {
+        this.pipeActive = false;
+        await this.tmux.stopPipePane(this.sessionName).catch(() => {});
+      }
+      // A probe that couldn't reach tmux isn't proof the window is gone, so give the sizing back anyway. It acts only on a
+      // window that still lists this broker, so a gone window or one on a restarted tmux server is left alone.
+      await this.restoreWindowSize();
+      this.onEmpty?.(this.sessionName);
+    })();
+    return this.teardownPromise;
   }
 
   private async teardown(): Promise<void> {
-    if (this.torndown) return;
+    if (this.torndown) return this.teardownPromise ?? Promise.resolve();
     this.lastClose = { code: 1011, reason: "terminal broker unavailable" };
     this.torndown = true;
-    if (this.pipeActive) {
-      this.pipeActive = false;
-      await this.tmux.stopPipePane(this.sessionName).catch(() => {});
-    }
-    // Before onEmpty: a later broker for this window then reads the restored value, not this one's pin.
-    await this.restoreWindowSize();
     this.teardownResources();
-    this.onEmpty?.(this.sessionName);
+    this.teardownPromise = (async () => {
+      if (this.pipeActive) {
+        this.pipeActive = false;
+        await this.tmux.stopPipePane(this.sessionName).catch(() => {});
+      }
+      // Before onEmpty: a later broker for this window then reads the restored value, not this one's pin.
+      await this.restoreWindowSize();
+      this.onEmpty?.(this.sessionName);
+    })();
+    return this.teardownPromise;
   }
 
   /** Let go of the pinned window, once: drop this broker from its holders, and when no live holder is left, give back
@@ -651,6 +672,7 @@ export class TerminalSessionBroker {
  */
 export class TerminalBrokerRegistry {
   private readonly brokers = new Map<string, TerminalSessionBroker>();
+  private readonly pendingTeardown = new Map<string, Promise<void>>();
 
   constructor(private readonly tmux: BrokerTmux, private readonly opts: BrokerOptions = {}) {}
 
@@ -659,21 +681,44 @@ export class TerminalBrokerRegistry {
   }
 
   get(sessionName: string): TerminalSessionBroker | undefined {
-    return this.brokers.get(sessionName);
+    const broker = this.brokers.get(sessionName);
+    return broker && !broker.isTorndown ? broker : undefined;
   }
 
   /** Get-or-create the broker for a session, attach the subscriber, return the broker. */
   async attach(sessionName: string, sub: TerminalSubscriber): Promise<TerminalSessionBroker> {
     let broker = this.brokers.get(sessionName);
-    if (!broker) {
+    if (!broker || broker.isTorndown) {
+      const priorTeardown = broker?.teardownComplete;
       broker = new TerminalSessionBroker(sessionName, this.tmux, {
         ...this.opts,
         onEmpty: (name) => {
-          this.brokers.delete(name);
+          if (this.brokers.get(name) === broker) {
+            this.brokers.delete(name);
+          }
           this.opts.onEmpty?.(name);
         },
       });
       this.brokers.set(sessionName, broker);
+      if (priorTeardown) {
+        const pending = this.pendingTeardown.get(sessionName);
+        const p = Promise.allSettled(
+          pending ? [pending, priorTeardown] : [priorTeardown],
+        ).then((results) => {
+          for (const result of results) {
+            if (result.status === "rejected") throw result.reason;
+          }
+        }).finally(() => {
+          if (this.pendingTeardown.get(sessionName) === p) {
+            this.pendingTeardown.delete(sessionName);
+          }
+        });
+        this.pendingTeardown.set(sessionName, p);
+      }
+    }
+    const pending = this.pendingTeardown.get(sessionName);
+    if (pending) {
+      await pending;
     }
     try {
       await broker.attach(sub);
