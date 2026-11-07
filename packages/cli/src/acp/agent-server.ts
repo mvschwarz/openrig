@@ -350,7 +350,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
     const roots = await sessionRoots(team, sessionId);
     if (roots.length === 0) throw new AcpError(INVALID_PARAMS, `No session ${sessionId} from ${team.caller} on this machine`);
     const session: Session = { id: sessionId, cwd: String(p.cwd ?? ""), sent: [] };
-    const asks = await team.queue.sessionAsks(team.caller, sessionId);
+    const asks = (await team.queue.sessionAsks(team.caller, sessionId)).sort((a, b) => a.tsCreated.localeCompare(b.tsCreated));
     // Replay: each prompt as the caller wrote it, then its work as it stands now, the questions the team asked during
     // it with what's recorded, and the reply. Nothing is asked again here; an open question comes up in the next turn.
     for (const [i, row] of roots.entries()) {

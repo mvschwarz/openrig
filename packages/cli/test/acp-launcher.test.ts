@@ -134,12 +134,13 @@ describe("openrig-acp hands everything to rig acp serve", () => {
     expect(app.err()).toMatch(/^openrig-acp: @openrig\/cli isn't installed beside this package/);
   });
 
-  it("an @openrig/cli of another version is refused on stderr, with nothing on stdout and exit 1", async () => {
-    const app = run(install(true, "0.0.0"), []);
+  it("an @openrig/cli of another version is named on stderr and run anyway, with the arguments and exit code passed", async () => {
+    const root = install(true, "0.0.0");
+    const app = run(root, ["--to", "lead@team"], { FAKE_EXIT: "3" });
     app.child.stdin.end();
-    expect(await app.done).toEqual({ code: 1, signal: null });
-    expect(app.out()).toBe("");
+    expect(await app.done).toEqual({ code: 3, signal: null });
+    expect(JSON.parse(app.out().trim().split("\n")[0]!).argv).toEqual(["acp", "serve", "--to", "lead@team"]);
     expect(app.err()).toMatch(/^openrig-acp: found @openrig\/cli 0\.0\.0 at /);
-    expect(app.err()).toContain(`but this package runs exactly ${cli.version}. Reinstall @openrig/acp.`);
+    expect(app.err()).toContain(`not the ${cli.version} this package pins; running it anyway. Reinstall @openrig/acp to get ${cli.version}.`);
   });
 });

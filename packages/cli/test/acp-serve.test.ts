@@ -541,6 +541,36 @@ describe("rig acp serve", () => {
     expect(asked).toEqual([]);
   });
 
+  it("a reopened session shows, in the order asked, a question closed unanswered as closed and one still open as pending", async () => {
+    const first = connect({}, "asker8@team");
+    const sessionId = await open(first.client);
+    const turn = first.client.request("session/prompt", prompt(sessionId, "Plan the release"));
+    const task = await until(() => rowsTo("asker8@team")[0], "the work row");
+    await move("asker8@team", `/api/queue/${task.qitem_id}/claim`, {});
+    await move("asker8@team", `/api/queue/${task.qitem_id}/update`, { state: "done", closureReason: "no-follow-on", resolution: "Planned." });
+    await turn;
+    // Asked after the turn ended, so no live turn puts them to the app.
+    const choices = [{ id: "y", label: "Yes" }, { id: "n", label: "No" }];
+    await move("asker8@team", "/api/queue/create", { qitemId: "qitem-ask-closed-unanswered", destinationSession: CALLER, body: "Freeze on Friday?", summary: "Freeze?", nudge: false,
+      tags: [`acp-session:${sessionId}`], humanQuestions: [{ id: "q1", question: "Freeze on Friday?", options: choices }] });
+    await move(CALLER, "/api/queue/qitem-ask-closed-unanswered/claim", {});
+    await move(CALLER, "/api/queue/qitem-ask-closed-unanswered/update", { state: "done", closureReason: "no-follow-on", resolution: "Moot now." });
+    await move("asker8@team", "/api/queue/create", { qitemId: "qitem-ask-still-open", destinationSession: CALLER, body: "Tag it 1.0?", summary: "Tag?", nudge: false,
+      tags: [`acp-session:${sessionId}`], humanQuestions: [{ id: "q1", question: "Tag it 1.0?", options: choices }] });
+
+    const second = connect({}, "asker8@team");
+    const asked: unknown[] = [];
+    second.client.onRequest("session/request_permission", async (params) => { asked.push(params); return { outcome: { outcome: "cancelled" } }; });
+    await second.client.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
+    expect(await second.client.request("session/load", { sessionId, cwd: "/tmp", mcpServers: [] })).toEqual({});
+    const questions = second.updates.filter((u) => u.sessionUpdate === "tool_call" && String(u.toolCallId).includes("#"));
+    expect(questions.map((u) => [u.toolCallId, u.status, (u.content as Array<{ content: { text: string } }>).at(-1)!.content.text])).toEqual([
+      ["qitem-ask-closed-unanswered#q1", "completed", "Not answered: qitem-ask-closed-unanswered was closed (done)."],
+      ["qitem-ask-still-open#q1", "pending", "Not answered yet. It's still open in the OpenRig TUI and Slack."],
+    ]);
+    expect(asked).toEqual([]);
+  });
+
   it("a connection's notice is said once in each session, before its first prompt's work", async () => {
     const team: TeamConnection = { queue: daemonTeamQueue(new DaemonClient(url(), { sessionName: CALLER })), caller: CALLER, receiver: "noticed@team", notice: "Your team can't ask you questions here yet." };
     const { client, updates } = connect({ connect: async () => team });

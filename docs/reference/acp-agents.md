@@ -221,7 +221,8 @@ app that starts the agent from the ACP registry passes no arguments, so that's h
 that the daemon answers and that you resolve to an address; until then, signing in and new sessions fail with the
 reason and the fix. The agent talks only to the daemon on this computer, so start it first (`rig daemon start`).
 The team's questions reach you only as a registered person: an `<id>@external` address needs
-`rig gateway human add <id>` first. Until then, the app says so at your first prompt, and your work is still sent.
+`rig gateway human add <id> --display-name "<your name>" --delivery-class <A|B|C|D>` first. Until then, the app says
+so at your first prompt, and your work is still sent.
 
 **In Zed**, add the agent to `settings.json`:
 
