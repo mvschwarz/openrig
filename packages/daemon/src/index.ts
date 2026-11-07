@@ -170,12 +170,24 @@ export function startStuckSweepScheduler(deps: {
   const status = createStuckSweepStatus();
   deps.stuckSweepStatus = status; // healthz reads this snapshot
   const db = deps.rigRepo.db;
+  // A pass yields the event loop, so a tick could start a second pass over the first one (a pass longer than the
+  // interval): one pass at a time, and a tick that finds one still running is skipped.
+  let runningSince: string | null = null;
+  let skipped = 0;
   const runOnce = (): void => {
+    if (runningSince) {
+      // Never silent: a pass that hangs (an awaited send that never settles) shows up here on every tick.
+      skipped++;
+      console.error(`[stuck-sweep] tick skipped: the pass started at ${runningSince} is still running (${skipped} tick(s) skipped)`);
+      return;
+    }
+    runningSince = new Date().toISOString();
+    skipped = 0;
     // runStuckSweep never throws (failure is recorded loudly on the status surface);
     // the catch is the never-crash-the-daemon belt for the promise chain itself.
     void runStuckSweep({ db, queueRepo, status }).catch((err: unknown) => {
       console.error(`[stuck-sweep] scheduler error: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    }).finally(() => { runningSince = null; });
   };
   runOnce(); // boot sweep (fire-and-forget)
   return setInterval(runOnce, resolveStuckSweepIntervalSeconds() * 1000);

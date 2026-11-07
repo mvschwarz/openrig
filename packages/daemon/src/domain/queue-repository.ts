@@ -693,6 +693,7 @@ export function hasLinkedSuccessor(
   sourceQitemId: string,
   target: string,
 ): boolean {
+  if (successorScope?.db === db && successorScope.covers(sourceQitemId)) return successorScope.has(sourceQitemId, target);
   const successor = db
     .prepare(
       `SELECT 1 FROM queue_items s
@@ -707,6 +708,57 @@ export function hasLinkedSuccessor(
     )
     .get(target, target, sourceQitemId, sourceQitemId, sourceQitemId);
   return Boolean(successor);
+}
+
+/** The linked-successor index lent to hasLinkedSuccessor by createLinkedSuccessorLookup's run(), for one synchronous call. */
+let successorScope: { db: Database.Database; covers: (source: string) => boolean; has: (source: string, target: string) => boolean } | null = null;
+
+/** hasLinkedSuccessor for a whole set of sources in one read, for a pass that asks it once per row (the stuck sweep's
+ *  custody loop, and the handoff advisory of each row it reads). The read keeps the per-row query's own predicates: a
+ *  successor is a row whose handed_off_from is the source, or whose chain_of_record is valid JSON with the source among
+ *  its json_each values (compared as `value IN (...)` compares, like `value = ?`: a number or a nested value never
+ *  equals a text id); has() then checks qitem_id or destination_session against the target and that the successor is
+ *  not the source itself. A snapshot from its first has() until invalidate(): the caller invalidates it whenever other
+ *  code could have run. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn
+ *  for a covered source; any other source keeps the per-row query. */
+export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemIds: readonly string[]): {
+  has: (sourceQitemId: string, target: string) => boolean;
+  run: <T>(fn: () => T) => T;
+  invalidate: () => void;
+} {
+  const sources = new Set(sourceQitemIds);
+  let bySource: Map<string, Array<{ qitemId: string; destination: string | null }>> | null = null;
+  const build = () => {
+    const map = new Map<string, Array<{ qitemId: string; destination: string | null }>>();
+    const ids = JSON.stringify([...sources]);
+    const rows = db.prepare(
+      `SELECT s.qitem_id, s.destination_session, s.handed_off_from AS source FROM queue_items s
+        WHERE s.handed_off_from IN (SELECT value FROM json_each(?))
+       UNION
+       SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
+        WHERE s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
+          AND j.value IN (SELECT value FROM json_each(?))`,
+    ).all(ids, ids) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
+    for (const r of rows) {
+      const list = map.get(r.source);
+      const entry = { qitemId: r.qitem_id, destination: r.destination_session };
+      if (list) list.push(entry); else map.set(r.source, [entry]);
+    }
+    return map;
+  };
+  const has = (sourceQitemId: string, target: string): boolean => (bySource ??= build()).get(sourceQitemId)?.some(
+    (s) => s.qitemId !== sourceQitemId && (s.qitemId === target || s.destination === target)) ?? false;
+  const own = { db, covers: (source: string) => sources.has(source), has };
+  return {
+    has,
+    run: (fn) => {
+      if (successorScope?.db === db) return fn();
+      const previous = successorScope;
+      successorScope = own;
+      try { return fn(); } finally { successorScope = previous; }
+    },
+    invalidate: () => { bySource = null; },
+  };
 }
 
 /** PL-007 — defensive column probe. Older test fixtures bypass the
@@ -751,8 +803,9 @@ export type CompactQueueItem = Omit<QueueItem, (typeof COMPACT_ELIDED_FIELDS)[nu
   fieldsElided: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
 };
 
-type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean };
-type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean };
+/** `qitemId` narrows either finder to one row, so a caller can ask again whether that row still qualifies. */
+type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean; qitemId?: string };
+type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string };
 
 function compactRow(item: QueueItem): CompactQueueItem {
   const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
@@ -4479,6 +4532,10 @@ export class QueueRepository {
     const cutoff = opts?.now ?? new Date().toISOString();
     const conditions = ["state = 'in-progress'", "closure_required_at IS NOT NULL", "closure_required_at <= ?"];
     const params: unknown[] = [cutoff];
+    if (opts?.qitemId !== undefined) {
+      conditions.push("qitem_id = ?");
+      params.push(opts.qitemId);
+    }
     if (opts?.rig) {
       const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
       conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
@@ -4581,6 +4638,10 @@ export class QueueRepository {
                           OR receipt.transition_note LIKE 'slack-owner-notification-transport-failed %')))`,
     ];
     const params: unknown[] = [];
+    if (opts?.qitemId !== undefined) {
+      conditions.push("qitem_id = ?");
+      params.push(opts.qitemId);
+    }
     if (opts?.rig) {
       const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
       conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
