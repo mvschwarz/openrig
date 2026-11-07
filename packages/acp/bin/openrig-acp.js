@@ -13,6 +13,12 @@ let rig;
 try {
   const manifestPath = createRequire(import.meta.url).resolve("@openrig/cli/package.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  // Module resolution can reach a different @openrig/cli further up when this package's own copy is missing.
+  const wanted = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).dependencies["@openrig/cli"];
+  if (manifest.version !== wanted) {
+    console.error(`openrig-acp: found @openrig/cli ${manifest.version} at ${dirname(manifestPath)}, but this package runs exactly ${wanted}. Reinstall @openrig/acp.`);
+    process.exit(1);
+  }
   rig = join(dirname(manifestPath), manifest.bin.rig);
 } catch (error) {
   console.error(`openrig-acp: @openrig/cli isn't installed beside this package (${error.message}). Reinstall @openrig/acp.`);

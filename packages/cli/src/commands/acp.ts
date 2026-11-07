@@ -9,7 +9,7 @@ import { processIdentity } from "../local-daemon-owner.js";
 import { getOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
 import { answerCommand, runAcpAssignment, type AcpQueue } from "../acp/connector.js";
 import { findRunProcesses } from "../acp/run-processes.js";
-import { serveAcpAgent, TeamRefused, type TeamAsk, type TeamConnection, type TeamQueue } from "../acp/agent-server.js";
+import { serveAcpAgent, SESSION_TAG, TeamRefused, type TeamAsk, type TeamConnection, type TeamQueue } from "../acp/agent-server.js";
 import { StreamJsonRpcPeer } from "../acp/json-rpc-stdio.js";
 import { CLI_VERSION } from "../version.js";
 import { ConfigStore } from "../config-store.js";
@@ -67,6 +67,17 @@ export function daemonTeamQueue(client: DaemonClient): TeamQueue {
     const data = ok(await client.get<unknown>(`/api/queue/list?${query}`), what);
     return (Array.isArray(data) ? data : ((data as { items?: unknown[] }).items ?? [])) as Array<Record<string, unknown>>;
   };
+  /** The rows that ask the person for a decision (questions with choices, or a decision in words). */
+  const asks = (rows: Array<Record<string, unknown>>): TeamAsk[] =>
+    rows.filter((row) => row.humanIntent !== "update" && (Array.isArray(row.humanQuestions) || row.humanIntent === "decision")).map((row) => ({
+      qitemId: String(row.qitemId), sourceSession: String(row.sourceSession), state: String(row.state), tsCreated: String(row.tsCreated),
+      summary: typeof row.summary === "string" ? row.summary : null, body: typeof row.body === "string" ? row.body : "",
+      tags: Array.isArray(row.tags) ? (row.tags as string[]) : [],
+      questions: Array.isArray(row.humanQuestions) ? (row.humanQuestions as TeamAsk["questions"]) : [],
+      // A click records the option's id; a typed reply records its words.
+      answers: Object.fromEntries(Object.entries((row.humanAnswers as Record<string, unknown> | null) ?? {})
+        .map(([id, value]) => [id, typeof value === "string" ? value : String((value as { text?: unknown } | null)?.text ?? "")])),
+    }));
   return {
     async create(row) {
       const response = await client.post("/api/queue/create", { qitemId: row.qitemId, destinationSession: row.destination, body: row.body, summary: row.summary, tags: row.tags });
@@ -93,14 +104,11 @@ export function daemonTeamQueue(client: DaemonClient): TeamQueue {
       return (await list(`handedOffFrom=${encodeURIComponent(qitemId)}&limit=1`, `queue successor of ${qitemId}`))[0]?.qitemId as string | undefined;
     },
     async openAsks(person) {
-      const rows = await list(`destinationSession=${encodeURIComponent(person)}&state=pending&limit=500`, `open asks to ${person}`);
-      return rows.filter((row) => row.humanIntent !== "update" && (Array.isArray(row.humanQuestions) || row.humanIntent === "decision")).map((row) => ({
-        qitemId: String(row.qitemId), sourceSession: String(row.sourceSession), tsCreated: String(row.tsCreated),
-        summary: typeof row.summary === "string" ? row.summary : null, body: typeof row.body === "string" ? row.body : "",
-        tags: Array.isArray(row.tags) ? (row.tags as string[]) : [],
-        questions: Array.isArray(row.humanQuestions) ? (row.humanQuestions as TeamAsk["questions"]) : [],
-        answered: Object.keys((row.humanAnswers as Record<string, unknown> | null) ?? {}),
-      }));
+      return asks(await list(`destinationSession=${encodeURIComponent(person)}&state=pending&limit=500`, `open asks to ${person}`));
+    },
+    async sessionAsks(person, sessionId) {
+      const rows = await list(`destinationSession=${encodeURIComponent(person)}&limit=2000`, `rows to ${person}`);
+      return asks(rows.filter((row) => Array.isArray(row.tags) && (row.tags as string[]).includes(`${SESSION_TAG}${sessionId}`)));
     },
     async answer(qitemId, questionId, optionId) {
       // The person's answer path, as a click in Slack records one: the daemon takes the actor from this client's caller.
@@ -119,6 +127,33 @@ export function daemonTeamQueue(client: DaemonClient): TeamQueue {
       }));
     },
   };
+}
+
+/** The seat that takes this agent's tasks: --to, else this machine's acp.to setting (an ACP registry launch has no args).
+ *  A setting that can't be read comes back as the reason, for the app's sign-in step to show. */
+export function acpReceiver(to: string | undefined, store: Pick<ConfigStore, "get"> = new ConfigStore()): { receiver?: string } | { error: string } {
+  if (to?.trim()) return { receiver: to.trim() };
+  try {
+    return { receiver: String(store.get("acp.to") ?? "").trim() || undefined };
+  } catch (error) {
+    return { error: `${(error as Error).message} The agent reads acp.to from it; adding --to <member@rig> to the agent's command skips it.` };
+  }
+}
+
+/** Why the team's questions can't reach `address`, when it's a person this machine's OpenRig doesn't know. Says nothing
+ *  for a seat's address, a registered person, or a registry that can't be read (unknown isn't unregistered). */
+export async function unregisteredPersonNotice(address: string, home?: string): Promise<string | undefined> {
+  const suffix = "@external";
+  if (!address.endsWith(suffix)) return undefined;
+  try {
+    const registry = await import("@openrig/daemon/gateway-human-registry");
+    const people = registry.projectHumans(home);
+    if (!people.ok || people.entities.some((person) => person.address === address)) return undefined;
+  } catch {
+    return undefined;
+  }
+  const id = address.slice(0, -suffix.length);
+  return `Your team can't ask you questions here yet: ${address} isn't a registered person on this machine, so OpenRig refuses a question addressed to it. Your work is still sent. To be asked, register yourself with \`rig gateway human add ${id} --display-name "<your name>" --delivery-class <A|B|C|D>\`.`;
 }
 
 /** The person this machine's OpenRig names as its default (`<id>@external`), or why there isn't one. */
@@ -268,9 +303,9 @@ Guide: rig context get reference/acp-agents.md#openrig-as-an-agent-in-acp-apps`)
           if ("reason" in person) return { error: `OpenRig doesn't know who you are on this machine (${person.reason}). Choose the default person with rig gateway default <id>, or add --as <address> to the agent's command.` };
           caller = person.address;
         }
-        // An ACP registry launch has no args, so the receiver can come from this machine's settings instead.
-        const receiver = opts.to?.trim() || String(new ConfigStore().get("acp.to") ?? "").trim() || undefined;
-        return { queue: daemonTeamQueue(new DaemonClient(getDaemonUrl(status), { sessionName: caller })), caller, receiver };
+        const target = acpReceiver(opts.to);
+        if ("error" in target) return target;
+        return { queue: daemonTeamQueue(new DaemonClient(getDaemonUrl(status), { sessionName: caller })), caller, receiver: target.receiver, notice: await unregisteredPersonNotice(caller) };
       };
       const peer = new StreamJsonRpcPeer(process.stdin, process.stdout);
       serveAcpAgent(peer, {

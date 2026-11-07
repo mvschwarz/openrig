@@ -5,14 +5,15 @@ Zed and JetBrains AI Assistant. Your prompt goes to your OpenRig team as a queue
 and their notes as it moves, any question the team asks you as a choice, and the team's result as the reply.
 
 This package has one command, `openrig-acp`. It starts `rig acp serve` from the exact `@openrig/cli` version it
-depends on, so ACP apps and the ACP registry can launch it with `npx`.
+depends on, and stops with a message if it finds another, so ACP apps and the ACP registry can launch it with `npx`.
 
 ## What you need
 
 - OpenRig on this computer, with its daemon running (`rig daemon start`) and a team.
 - The seat that receives your team's new work, set once with `rig config set acp.to <member@rig>`, or passed as
   `--to <member@rig>`.
-- You, as a person OpenRig knows: the default person (`rig gateway default <id>`), or `--as <address>`.
+- You, as a person OpenRig knows: the default person (`rig gateway default <id>`), or `--as <address>`. The team's
+  questions reach an `<id>@external` address only once it's registered (`rig gateway human add <id>`).
 
 The app's sign-in step, "OpenRig on this machine", checks that the daemon answers and that it can tell who you are.
 This agent talks only to the OpenRig daemon on this computer.
