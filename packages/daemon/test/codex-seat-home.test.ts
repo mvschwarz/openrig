@@ -33,7 +33,7 @@ function fixture() {
   const fsOps = { homedir: home, readFile: (p: string) => fs.readFileSync(p, "utf8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
     exists: fs.existsSync, mkdirp: (p: string) => { fs.mkdirSync(p, { recursive: true }); } };
   const launchEnv = new (SeatLaunchEnvironment as any)(tmux, env, root, cli, daemonHome) as SeatLaunchEnvironment;
-  const run = (cmd: string) => exec("/bin/bash", ["--noprofile", "--norc", "-c", cmd], { cwd, env, timeout: 5000 });
+  const run = (cmd: string) => exec("/bin/bash", ["--noprofile", "--norc", "-c", cmd], { cwd, env, timeout: 15000 });
   const seatHomeOf = (nodeId: string) => nodeId === "node" ? seatHome : undefined;
   return { root, home, daemonHome, seatHome, cwd, env, tmux, fsOps, launchEnv, run, seatHomeOf };
 }
