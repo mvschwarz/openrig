@@ -33,7 +33,7 @@ describe.skipIf(!hasTmux || process.platform === "win32")("Pi launch through nat
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-shell-"));
     const socket = path.join(temp, "tmux.sock");
     const session = "pi-fixture";
-    const long = Array.from({ length: 8 }, () => "nested-directory-" + "x".repeat(35)).join(path.sep);
+    const long = Array.from({ length: 14 }, () => "nested-directory-" + "x".repeat(35)).join(path.sep);
     const stateRoot = path.join(temp, longTmp ? "short" : long, "state");
     const cwd = path.join(temp, longTmp ? "short" : long, "project with 'quotes'");
     fs.mkdirSync(cwd, { recursive: true });
@@ -74,7 +74,8 @@ setInterval(() => {}, 1000);
     const parent = path.join(stateRoot, session, "sessions", "parent.jsonl");
     fs.mkdirSync(path.dirname(parent), { recursive: true });
     fs.writeFileSync(parent, "fixture\n");
-    const model = mode === "short-long-tmpdir" ? undefined : "provider/model-" + "m".repeat(longTmp ? 400 : 7000);
+    // Long paths exceed the terminal bound without an unrealistic multi-kilobyte model argument.
+    const model = mode === "short-long-tmpdir" ? undefined : "provider/model-" + "m".repeat(400);
     const expected = buildPiRunnerCommand({ runnerEntryPath: runner, sessionName: session,
       stateRoot, cwd, model, launchId: "attempt", trust: "no-approve",
       sessionFile: launchMode === "resume" ? parent : undefined,
@@ -83,7 +84,7 @@ setInterval(() => {}, 1000);
     else if (longTmp) {
       expect(Buffer.byteLength(expected)).toBeGreaterThan(512);
       expect(Buffer.byteLength(expected)).toBeLessThan(1024);
-    } else expect(Buffer.byteLength(expected)).toBeGreaterThan(7000);
+    } else expect(Buffer.byteLength(expected)).toBeGreaterThan(2000);
     const fsOps = { readFile: (p: string) => fs.readFileSync(p, "utf8"),
       writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
       exists: fs.existsSync, mkdirp: (p: string) => { fs.mkdirSync(p, { recursive: true }); } };
