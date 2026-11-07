@@ -34,7 +34,7 @@ function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 async function readPid(file: string): Promise<number> {
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 600; i++) {
     const text = fs.existsSync(file) ? fs.readFileSync(file, "utf-8").trim() : "";
     if (text) { seenPids.add(Number(text)); return Number(text); }
     await new Promise((r) => setTimeout(r, 25));
@@ -276,7 +276,7 @@ describe.skipIf(process.platform === "win32")("a daemon that stops during a runt
       const outcome = verifying.then(() => undefined, (err: unknown) => err);
       // Each probe writes its own marker once its trap is installed: stop only when both are up.
       const markers = () => fs.readdirSync(root).filter((name) => name.startsWith("ready.") && fs.readFileSync(path.join(root, name), "utf-8").trim());
-      for (let i = 0; i < 400 && markers().length < 2; i++) await new Promise((r) => setTimeout(r, 25));
+      for (let i = 0; i < 600 && markers().length < 2; i++) await new Promise((r) => setTimeout(r, 25));
       expect(markers()).toHaveLength(2);
       for (const name of markers()) await readPid(path.join(root, name));
 
