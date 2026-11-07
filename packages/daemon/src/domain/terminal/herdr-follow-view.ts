@@ -14,6 +14,7 @@ interface Tile extends FollowTile { member: ViewerKey; target: ComposedPane; vie
 interface Canvas {
   version: 1; cwd: string; phase: "creating" | "created" | "starting";
   pane?: ViewerPane; policy: FollowPolicy; tiles: Tile[]; events: string[];
+  stripConfirmed?: boolean;
   closing?: string;
   viewerFailures?: Record<string, { target: string; reason: string }>;
 }
@@ -137,7 +138,7 @@ export class HerdrFollowView {
       let stripReady = false;
       // A first login shell can take seconds. Observe its single dispatched run
       // for a bounded startup window, never steady membership polling.
-      const stripDeadline = Date.now() + 10000;
+      const stripDeadline = Date.now() + (state.stripConfirmed ? 0 : 10000);
       while (true) {
         const strip = body(await this.deps.run(["pane", "process-info", "--pane", state.pane.pane_id]));
         const processes = (strip.process_info as { foreground_processes?: Array<{ argv?: string[] }> } | undefined)?.foreground_processes;
@@ -151,6 +152,7 @@ export class HerdrFollowView {
         throw new Error("The explanation strip process is unconfirmed; pane run was not repeated.");
       }
       await currentPane(state.pane); // Reconfirm generation after a slow shell start.
+      if (!state.stripConfirmed) { state.stripConfirmed = true; save(); }
       const members = view.task.members.map(m => ({ key: keyOf(m.key.hostId, m.key.nodeId), seat: m.seat }));
       for (const key of Object.keys(state.viewerFailures ?? {})) {
         if (!members.some(member => member.key === key) && !state.tiles.some(tile => tile.key === key)) delete state.viewerFailures![key];

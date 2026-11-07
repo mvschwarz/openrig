@@ -127,6 +127,19 @@ describe("stable task-following workspace", () => {
     expect(await opened).toMatchObject({ ok: true, opened: ["a"] });
     expect(f.calls.filter(args => args[1] === "run" && args[3]?.startsWith("/usr/bin/tail"))).toHaveLength(1);
   });
+  it("reads a previously confirmed strip that later ends as unconfirmed without waiting", async () => {
+    vi.useFakeTimers(); const f = fixture();
+    expect(await f.follow(["a"])).toMatchObject({ ok: true });
+    const strip = [...f.panes.values()].find(p => p.argv[0] === "/usr/bin/tail")!;
+    strip.argv = ["/bin/zsh"]; f.calls.length = 0;
+    let settled = false;
+    const refreshed = f.create().follow("qitem:task", task(["a"]), { enabled: true }, async () => true).then(result => { settled = true; return result; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(true);
+    expect(await refreshed).toMatchObject({ ok: false, code: "follow_unconfirmed" });
+    expect(f.calls.filter(args => args[1] === "process-info" && args.at(-1) === strip.pane_id)).toHaveLength(1);
+    expect(f.calls.some(args => args[1] === "run")).toBe(false);
+  });
   it("bounds strip confirmation and reconciles a later start without another run", async () => {
     vi.useFakeTimers(); const f = fixture("darwin"); f.delayStrip(20000);
     const opened = f.follow(["a"]); await vi.advanceTimersByTimeAsync(11000);
