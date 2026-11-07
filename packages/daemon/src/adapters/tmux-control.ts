@@ -380,6 +380,17 @@ export interface TmuxControlOptions {
   maxBuffer?: number;
   /** How a `load-buffer`'s file is read for `set-buffer` (`bufferLoadAsSet`); tests give their own. */
   readBufferFile?: ReadBufferFile;
+  /** Where it says whether its server allows control mode, once per server version read: the daemon's log by default. */
+  log?: (message: string) => void;
+}
+
+/** Whether commands go over the control client: `on` only while one is attached; `allowed` when the server's version
+ *  allows one but none is attached (not started yet, or it couldn't start, attach or stay); `off` when the version
+ *  rules it out; `undecided` until a spawned client has read the version of a running server. */
+export interface TmuxControlStatus {
+  state: "on" | "allowed" | "off" | "undecided";
+  /** The server's own version, as tmux reports it (`#{version}`). */
+  serverVersion?: string;
 }
 
 const RETRY_MS = [1_000, 5_000, 30_000];
@@ -410,7 +421,7 @@ const BUFFER_HOOKS_FORMAT = "#{after-load-buffer}#{after-set-buffer}";
 /** How long the end of a client (its input closed) may take before it is killed. */
 const END_MS = 2_000;
 
-export type TmuxControlExec = ArgvExecFn & { close: () => Promise<void>; owner: string };
+export type TmuxControlExec = ArgvExecFn & { close: () => Promise<void>; owner: string; status: () => TmuxControlStatus };
 
 /**
  * The ArgvExecFn the daemon's TmuxAdapter runs with when control mode is on: routed commands go to the control client,
@@ -424,6 +435,10 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
   const readBufferFile = options.readBufferFile ?? readShortRegularFile;
   const now = options.now ?? (() => Date.now());
   const serverArgs = [...(options.serverArgs ?? [])];
+  const log = options.log ?? ((message: string) => console.warn(message));
+  let control: TmuxControlStatus = { state: "undecided" };
+  /** The server version whose first attached client was logged. */
+  let saidOn: string | undefined;
   let client: ControlClient | null = null;
   let starting: Promise<ControlClient | null> | null = null;
   let failures = 0;
@@ -511,12 +526,31 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
     ";", "set-option", "detach-on-destroy", "on",
   ];
 
+  /** Records what a server's version allows, once for each version read: a server started again may run another one.
+   *  A version that rules control mode out is said at once: a person who set OPENRIG_TMUX_CONTROL=1 on an older server
+   *  otherwise sees no sign that every command is spawned. One that allows it is said once a client attaches. */
+  const heard = (row: string): void => {
+    const serverVersion = row.split("|")[0]!;
+    if (!serverVersion || serverVersion === control.serverVersion) return;
+    if (supportsControlMode(row)) {
+      control = { state: "allowed", serverVersion };
+      return;
+    }
+    control = { state: "off", serverVersion };
+    const why = /^\d+\.\d+[a-z]?$/.test(serverVersion)
+      ? ": control mode needs a server at tmux 3.7c or later" : ", which isn't a tmux release known to be 3.7c or later";
+    log(`[tmux] OPENRIG_TMUX_CONTROL=1 is set, but this daemon's tmux server runs tmux ${serverVersion}${why}, so every`
+      + " tmux command uses a spawned client. The running server's version decides this, not the tmux binary's. To move"
+      + " a team onto a newer server: rig context get reference/tmux-servers.md#moving-an-existing-team-onto-tmux-control-mode");
+  };
+
   /** Whether a server runs that a control client may attach to: one of tmux 3.7c or later (its own version, not the
    *  tmux binary's) with a session that is no control session, read by a spawned client. With none, no client is
    *  started: it never starts a server, nor keeps one up that would exit without it (`checkAlone`). */
   const serverReady = async (): Promise<boolean> => {
     try {
       const rows = (await fallback(["tmux", ...serverArgs, "list-sessions", "-F", `#{version}|#{${CONTROL_OPTION}}`])).split("\n").filter(Boolean);
+      if (rows[0]) heard(rows[0]);
       return supportsControlMode(rows[0] ?? "") && rows.some((row) => row.endsWith("|"));
     } catch {
       return false;
@@ -581,6 +615,10 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
       return null;
     }
     failures = 0;
+    if (control.serverVersion !== saidOn) {
+      saidOn = control.serverVersion;
+      log(`[tmux] Control mode is on: this daemon's tmux server runs tmux ${saidOn}.`);
+    }
     // The server may have lost its last other session while this one was made.
     checkAlone(started);
     return started;
@@ -720,5 +758,7 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
     await Promise.all([...live].map(end));
   };
 
-  return Object.assign(exec, { close, owner });
+  // On only while a client is attached: one that can't start, attach or stay leaves commands to the spawned client.
+  const status = (): TmuxControlStatus => (control.state === "allowed" && client ? { ...control, state: "on" } : { ...control });
+  return Object.assign(exec, { close, owner, status });
 }
