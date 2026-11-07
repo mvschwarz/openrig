@@ -519,28 +519,48 @@ export function recordSeatSkillFollowing(skillsRoot: string, id: string, source:
 /**
  * #2426: before a Claude seat that loads the vendored openrig-core itself starts, retire the copies of that plugin's
  * skills its storage still holds from launches before #2433, so the seat loads each skill once. Only OpenRig's own
- * unchanged copies go, with every record here that could put them back (the loadout's, and any projection record under
- * them). Everything else stays and is named. Never refuses a launch: a failure is named and the seat starts as it is.
+ * unchanged copies go, with their loadout records, and only when no projection record here also names them (a restore
+ * replays those records, so such a copy isn't the loadout's alone). Everything else stays and is named. Never refuses a
+ * launch: a failure is named and the seat starts as it is.
  */
 export function retireSeatCoreSkillCopies(paths: SeatSkillPaths, coreDir: string): string[] {
-  const result = retireDirectPluginCopies({ runtime: "claude-code", location: seatSkillLocation(paths), pluginRoot: coreDir });
+  let result: ReturnType<typeof retireDirectPluginCopies>;
+  try {
+    result = retireDirectPluginCopies({ runtime: "claude-code", location: seatSkillLocation(paths), pluginRoot: coreDir,
+      otherRecord: projectionRecordOf(paths) });
+  } catch (err) {
+    return [`Seat skills: openrig-core's copies were left as they are: ${(err as Error).message}`];
+  }
   const notes: string[] = [];
   if (result.removed.length > 0) {
-    const targets = result.removed.map((id) => nodePath.resolve(paths.skillsRoot, id));
-    const under = (file: string) => targets.some((target) => file === target || file.startsWith(target + nodePath.sep));
-    const record = readProjections(paths.projectionsPath);
-    const files = Object.fromEntries(Object.entries(record.files).filter(([file]) => !under(nodePath.resolve(file))));
-    const following = Object.fromEntries(Object.entries(record.following ?? {}).filter(([id]) => !result.removed.includes(id)));
-    if (Object.keys(files).length !== Object.keys(record.files).length || Object.keys(following).length !== Object.keys(record.following ?? {}).length) {
-      try { writeProjections(paths.root, { ...record, files, following }); } catch (err) {
-        notes.push(`Seat skills: ${paths.projectionsPath} still records the removed copies (${(err as Error).message})`);
-      }
-    }
     notes.push(`Seat skills: removed ${result.removed.length === 1 ? "OpenRig's copy" : `${result.removed.length} OpenRig copies`} of openrig-core's ${result.removed.join(", ")}, which this seat now loads from the plugin itself`);
   }
   for (const copy of result.kept) notes.push(`Seat skills: kept ${copy.target}, though openrig-core also supplies ${copy.id}: ${copy.reason}`);
   for (const error of result.errors) notes.push(`Seat skills: openrig-core's copies were left as they are: ${error.message}`);
   return notes;
+}
+
+/** #2426: whether the seat's projection record also names a skill folder: a file OpenRig recorded writing under it, or the
+ *  skill following its source. Read strictly, unlike readProjections: a record that exists but can't be read names
+ *  every folder, since what it holds is unknown. */
+function projectionRecordOf(paths: SeatSkillPaths): (id: string, target: string) => string | undefined {
+  let record: ProjectionRecord;
+  try {
+    record = JSON.parse(fs.readFileSync(paths.projectionsPath, "utf8")) as ProjectionRecord;
+    if (!record || typeof record.files !== "object" || !record.files) throw new Error("it holds no file record");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return () => undefined;
+    const unknown = `${paths.projectionsPath} can't be read (${(err as Error).message}), so OpenRig can't tell whether it also records this copy`;
+    return () => unknown;
+  }
+  const files = Object.keys(record.files).map((file) => nodePath.resolve(file));
+  const following = record.following && typeof record.following === "object" ? record.following : {};
+  return (id, target) => {
+    const folder = nodePath.resolve(target);
+    if (Object.hasOwn(following, id)) return `it's also recorded as following its source in ${paths.projectionsPath}`;
+    return files.some((file) => file === folder || file.startsWith(folder + nodePath.sep))
+      ? `it's also recorded as a projection in ${paths.projectionsPath}` : undefined;
+  };
 }
 
 /** retireSeatCoreSkillCopies for a node's own storage, when it has one. */

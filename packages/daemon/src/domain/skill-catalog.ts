@@ -1281,6 +1281,15 @@ export interface DirectPluginCopy {
   reason: string;
 }
 
+export interface DirectPluginCopyInput {
+  runtime: SkillRuntime;
+  location: SkillLoadoutLocation;
+  pluginRoot: string;
+  /** Why another record outside this loadout could put a copy back (so it isn't the loadout's alone to remove), or
+   *  undefined when none does. */
+  otherRecord?: (id: string, target: string) => string | undefined;
+}
+
 function sameDirectory(a: string, b: string): boolean {
   const real = (path: string) => { try { return realpathSync(path); } catch { return nodePath.resolve(path); } };
   return real(a) === real(b);
@@ -1292,9 +1301,10 @@ function sameDirectory(a: string, b: string): boolean {
  * expansion wrote it (a `plugin:` revision, which an explicit selection never gets) from this very plugin root, the
  * plugin still supplies that skill, no project selection names it, and its folder is absent or still exactly the recorded
  * tree. Everything else with a supplied skill's name is kept and named: an edited, linked or unreadable folder, a copy
- * recorded from another root, a project selection, and a folder with no record.
+ * recorded from another root, a project selection, a folder with no record, and one that `otherRecord` says another record
+ * could put back.
  */
-export function findDirectPluginCopies(input: { runtime: SkillRuntime; location: SkillLoadoutLocation; pluginRoot: string }): DirectPluginCopy[] {
+export function findDirectPluginCopies(input: DirectPluginCopyInput): DirectPluginCopy[] {
   const { targetRoot, manifestPath } = input.location;
   const supplied = new Set(resolvePluginSkills({ pluginId: "direct", pluginRoot: input.pluginRoot, runtime: input.runtime }).entries.map((skill) => skill.id));
   if (supplied.size === 0) return [];
@@ -1303,19 +1313,20 @@ export function findDirectPluginCopies(input: { runtime: SkillRuntime; location:
   for (const skill of manifest.skills) {
     if (!supplied.has(skill.id) || !pluginIdOf(skill.revision)) continue;
     const keep = (reason: string) => copies.push({ id: skill.id, target: skill.target, disposition: "keep", reason });
+    const retire = (reason: string) => {
+      const other = input.otherRecord?.(skill.id, skill.target);
+      if (other) keep(other); else copies.push({ id: skill.id, target: skill.target, disposition: "retire", reason });
+    };
     if (!sameDirectory(skill.sourceRoot, input.pluginRoot)) { keep(`recorded from ${skill.sourceRoot}, not from ${input.pluginRoot}`); continue; }
     if (manifest.projectSelection.includes(skill.id)) { keep("the project selects it"); continue; }
-    if (!pathEntryExists(skill.target)) {
-      copies.push({ id: skill.id, target: skill.target, disposition: "retire", reason: "its folder is already gone" });
-      continue;
-    }
+    if (!pathEntryExists(skill.target)) { retire("its folder is already gone"); continue; }
     try {
       if (inspectSkillDirectory(skill.target).digest !== skill.digest) { keep("it was changed after OpenRig wrote it"); continue; }
     } catch (err) {
       keep(`it can't be read as the folder OpenRig wrote (${(err as Error).message})`);
       continue;
     }
-    copies.push({ id: skill.id, target: skill.target, disposition: "retire", reason: "unchanged since OpenRig wrote it" });
+    retire("unchanged since OpenRig wrote it");
   }
   const recorded = new Set(manifest.skills.map((skill) => skill.id));
   for (const id of [...supplied].sort(compareBytes)) {
@@ -1331,7 +1342,7 @@ export function findDirectPluginCopies(input: { runtime: SkillRuntime; location:
  * folder beside the skills before the manifest is replaced, and move back if anything fails, as reconcileSkillLoadout
  * stages. Nothing else in the loadout is read, refreshed or removed. Never throws: a failure changes nothing and is named.
  */
-export function retireDirectPluginCopies(input: { runtime: SkillRuntime; location: SkillLoadoutLocation; pluginRoot: string }): {
+export function retireDirectPluginCopies(input: DirectPluginCopyInput): {
   removed: string[];
   kept: DirectPluginCopy[];
   errors: SkillCatalogFailure[];

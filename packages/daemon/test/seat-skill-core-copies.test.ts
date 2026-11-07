@@ -10,8 +10,8 @@ import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { applySeatSkills } from "../src/domain/seat-skill-apply.js";
 import { reconcileSkillLoadout, resolvePluginSkills, type CatalogSkill } from "../src/domain/skill-catalog.js";
 import {
-  ensureSeatSkillPlugin, rehydrateSeatSkills, retireSeatCoreSkillCopies, retireSeatCoreSkillCopiesForNode, SEAT_SKILL_ROUTER_ID,
-  seatSkillLocation, seatSkillPaths, type SeatSkillPaths,
+  ensureSeatSkillPlugin, recordSeatSkillFollowing, recordSeatSkillWrite, rehydrateSeatSkills, retireSeatCoreSkillCopies,
+  retireSeatCoreSkillCopiesForNode, SEAT_SKILL_ROUTER_ID, seatSkillLocation, seatSkillPaths, type SeatSkillPaths,
 } from "../src/domain/seat-skill-storage.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -117,14 +117,70 @@ describe("a Claude seat that loads openrig-core itself, launched with OpenRig's 
     expect(readFileSync(s.paths.manifestPath, "utf8")).toBe(before);
   });
 
-  it("an apply before the next launch removes them too, rather than projecting them again", async () => {
+  it("an apply before the next launch removes them too, rather than projecting them again, and says so", async () => {
     const core = plugin(join(home, "plugins", "openrig-core"), ["alpha"]);
     const s = claudeSeat(core);
     oldLoadout(s.paths, pluginCopies(core));
     const applied = await applySeatSkills({ db: s.db, seat: s.seat, occupant: null, catalogRoot: scratch("core-copies-cat-") });
-    expect(applied.disk).toMatchObject({ ok: true, removed: ["alpha"] });
+    expect(applied.disk).toMatchObject({ ok: true, removed: [],
+      notes: ["Seat skills: removed OpenRig's copy of openrig-core's alpha, which this seat now loads from the plugin itself"] });
     expect(existsSync(join(s.paths.skillsRoot, "alpha"))).toBe(false);
     expect(manifest(s.paths).skills).toEqual([]);
+  });
+
+  it("an apply removes them from every owner's selection, not only the first owner's", async () => {
+    const core = plugin(join(home, "plugins", "openrig-core"), ["alpha"]);
+    const other = plugin(scratch("core-copies-other-"), ["delta"]);
+    const s = claudeSeat(core);
+    oldLoadout(s.paths, [...pluginCopies(core), ...resolvePluginSkills({ pluginId: "other", pluginRoot: other, runtime: "claude-code" }).entries]);
+    // An earlier occupant's selection holds alpha, and the current one's only delta.
+    const record = JSON.parse(readFileSync(s.paths.manifestPath, "utf8")) as { topologySelections: Record<string, string[]> };
+    record.topologySelections = { "dev-seat@core-copies": ["delta"], "earlier@core-copies": ["alpha"] };
+    writeFileSync(s.paths.manifestPath, `${JSON.stringify(record, null, 2)}\n`);
+
+    const applied = await applySeatSkills({ db: s.db, seat: s.seat, occupant: null, catalogRoot: scratch("core-copies-cat-") });
+    expect(applied.disk).toMatchObject({ ok: true,
+      notes: ["Seat skills: removed OpenRig's copy of openrig-core's alpha, which this seat now loads from the plugin itself"] });
+    expect(folders(s.paths)).toEqual(["delta"]);
+    expect(manifest(s.paths).topologySelections).toEqual({ "dev-seat@core-copies": ["delta"] });
+  });
+
+  it("keeps a copy another record could put back, so an apply first and then a restore leave it as it was", async () => {
+    const core = plugin(join(home, "plugins", "openrig-core"), ["alpha", "beta", "delta", "gamma"]);
+    const s = claudeSeat(core);
+    oldLoadout(s.paths, pluginCopies(core));
+    // Beside the loadout's own record: the adapter's record of writing alpha's and delta's files, and beta following its
+    // source. Delta's folder is already gone, which that record could put back.
+    for (const id of ["alpha", "delta"]) {
+      const file = join(s.paths.skillsRoot, id, "SKILL.md");
+      recordSeatSkillWrite(s.paths.skillsRoot, file, join(core, "skills", id, "SKILL.md"), readFileSync(file));
+    }
+    recordSeatSkillFollowing(s.paths.skillsRoot, "beta", join(core, "skills", "beta"));
+    rmSync(join(s.paths.skillsRoot, "delta"), { recursive: true });
+    const kept = (id: string, why: string) => `Seat skills: kept ${join(s.paths.skillsRoot, id)}, though openrig-core also supplies ${id}: it's also recorded as ${why} in ${s.paths.projectionsPath}`;
+    const keptNotes = [kept("alpha", "a projection"), kept("beta", "following its source"), kept("delta", "a projection")];
+
+    const applied = await applySeatSkills({ db: s.db, seat: s.seat, occupant: null, catalogRoot: scratch("core-copies-cat-") });
+    expect(applied.disk.notes).toEqual(["Seat skills: removed OpenRig's copy of openrig-core's gamma, which this seat now loads from the plugin itself", ...keptNotes]);
+    // The kept copies stay selected, so the apply projects delta again as it would any selected copy that went missing.
+    expect(folders(s.paths)).toEqual(["alpha", "beta", "delta"]);
+
+    // A restore has nothing to put back, and the next launch still knows each copy as a recorded one, not an unrecorded folder.
+    expect(rehydrateSeatSkills(s.paths).restored).toEqual([]);
+    expect(s.relaunch()).toEqual(keptNotes);
+    expect(folders(s.paths)).toEqual(["alpha", "beta", "delta"]);
+    expect(manifest(s.paths).skills.map((skill) => skill.id)).toEqual(["alpha", "beta", "delta"]);
+  });
+
+  it("keeps every copy while the seat's projection record can't be read", () => {
+    const core = plugin(join(home, "plugins", "openrig-core"), ["alpha"]);
+    const s = claudeSeat(core);
+    oldLoadout(s.paths, pluginCopies(core));
+    writeFileSync(s.paths.projectionsPath, "{ not json");
+    const notes = s.relaunch();
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/^Seat skills: kept .*alpha, though openrig-core also supplies alpha: .*skill-projections\.json can't be read/);
+    expect(folders(s.paths)).toEqual(["alpha"]);
   });
 
   it("keeps and names every copy it can't show is OpenRig's own unchanged one, and changes no record", async () => {

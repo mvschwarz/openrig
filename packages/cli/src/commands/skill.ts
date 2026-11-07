@@ -60,7 +60,7 @@ interface SeatInspection {
 
 interface SeatApplyResponse {
   inspection: SeatInspection;
-  disk: { ok: boolean; selection?: "reconciled" | "none" | "unreadable"; receipts: Array<{ status: string; id: string; target: string }>; removed: string[]; errors: string[] };
+  disk: { ok: boolean; selection?: "reconciled" | "none" | "unreadable"; receipts: Array<{ status: string; id: string; target: string }>; removed: string[]; errors: string[]; notes?: string[] };
   delivery:
     | { state: "sent"; record: { outcome: string; deliveryId: string }; transportOutcome?: string; detail?: string }
     | { state: "already-delivered"; record: { outcome: string; deliveryId: string } }
@@ -194,6 +194,8 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
     if (!opts.json) {
       for (const receipt of data.disk.receipts) console.log(`${receipt.status.padEnd(11)} ${receipt.id} -> ${receipt.target}`);
       for (const id of data.disk.removed) console.log(`removed     ${id} (deselected, owned, unchanged)`);
+      // #2426: what became of OpenRig's earlier copies of openrig-core's skills (removed, or kept and why).
+      for (const note of data.disk.notes ?? []) console.log(note);
       for (const error of data.disk.errors) console.error(error);
       console.log(`on disk     ${data.disk.ok ? (data.disk.selection === "none" ? "no stored selection" : "reconciled") : data.disk.selection === "unreadable" ? "not reconciled: the stored selection couldn't be read" : "not reconciled"}`);
       console.log(describeDelivery(data.delivery, session));
