@@ -38,6 +38,34 @@ import {
   type PiRunnerState, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
 
+/** Bind the selected account's credentials while retaining the seat's own Pi resources. */
+export function preparePiAccount(agentDir: string, accountHome: string | undefined): void {
+  fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+  const marker = nodePath.join(agentDir, ".openrig-account");
+  const auth = nodePath.join(agentDir, "auth.json");
+  // Validate every explicit home, including the seat's own directory, before changing any link.
+  if (accountHome) {
+    const source = nodePath.join(accountHome, "auth.json");
+    fs.accessSync(source, fs.constants.R_OK);
+    if (!fs.statSync(source).isFile()) throw new Error("Selected Pi auth must be a file");
+  }
+  if (accountHome && fs.realpathSync(accountHome) !== fs.realpathSync(agentDir)) {
+    const source = nodePath.join(accountHome, "auth.json");
+    const current = fs.lstatSync(auth, { throwIfNoEntry: false });
+    if (current && (!current.isSymbolicLink() || !fs.existsSync(marker))) {
+      throw new Error("Existing Pi login is not a managed account link; use a confirmed account switch");
+    }
+    fs.rmSync(auth, { force: true });
+    // Record ownership before linking so a crash between these writes is retryable.
+    fs.writeFileSync(marker, accountHome, { mode: 0o600 });
+    fs.symlinkSync(source, auth);
+  } else if (!accountHome && fs.existsSync(marker)) {
+    // A Pi login may have replaced the link since it was installed.
+    if (fs.lstatSync(auth, { throwIfNoEntry: false })?.isSymbolicLink()) fs.rmSync(auth);
+    fs.rmSync(marker);
+  }
+}
+
 // ── Submitted input boundaries ─────────────────────────────────────────────
 // Canonical TTY buffers can overflow before Node sees even the paste terminator.
 // Use Node's line editor in raw mode, with only paste framing handled here.
@@ -974,6 +1002,7 @@ export class RunnerCore {
 // ── CLI entry ────────────────────────────────────────────────────────────────
 
 interface RunnerArgs {
+  accountHome?: string;
   runtime?: RunnerRuntime;
   sessionName: string;
   stateRoot: string;
@@ -1011,6 +1040,7 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
         args.runtime = runtime;
         break;
       }
+      case "--account-home": args.accountHome = next(); break;
       case "--state-root": args.stateRoot = next(); break;
       case "--cwd": args.cwd = next(); break;
       case "--launch-id": args.launchId = next(); break;
@@ -1048,6 +1078,9 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
     throw new Error("an explicit trust flag is required: --approve or --no-approve");
   }
   if (args.sessionFile && args.forkRef) throw new Error("--session and --fork are mutually exclusive");
+  if (args.accountHome !== undefined && ((args.runtime ?? "pi") !== "pi" || !nodePath.isAbsolute(args.accountHome) || /[\0\r\n]/.test(args.accountHome))) {
+    throw new Error("--account-home requires an absolute Pi account directory");
+  }
   if (args.launchWrapper) {
     if (args.runtime === "omp") {
       throw new Error("--launch-wrapper-arg is only supported for the Pi runtime");
@@ -1229,6 +1262,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const paths = piSeatPaths(args.stateRoot, args.sessionName);
   fs.mkdirSync(paths.agentDir, { recursive: true });
   fs.mkdirSync(paths.sessionsDir, { recursive: true });
+  if (runtime === "pi") {
+    try { preparePiAccount(paths.agentDir, args.accountHome); }
+    catch {
+      console.error(`${PI_RUNNER_ERROR_MARKER} Pi account preparation failed for ${JSON.stringify(nodePath.join(args.accountHome ?? paths.agentDir, "auth.json"))}; provide a readable prepared account file and keep any existing seat login intact, then retry the account operation.`);
+      process.exitCode = 2;
+      return;
+    }
+  }
 
   const { catchUpSince } = prepareRunnerSidecar(
     {
@@ -1253,6 +1294,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     openrigHome: process.env.OPENRIG_HOME,
     openrigUrl: endpoint?.baseUrl ?? process.env.OPENRIG_URL,
   });
+  if (runtime === "pi" && args.accountHome && fs.lstatSync(nodePath.join(paths.agentDir, "auth.json"), { throwIfNoEntry: false })?.isSymbolicLink()) {
+    // Only selected accounts load the Node compatibility shim; unrelated launches are unchanged.
+    childEnv.NODE_OPTIONS = `--require=${JSON.stringify(nodePath.resolve(import.meta.dirname, "../../assets/pi-account-lock.cjs"))}`;
+  }
   const childArgs = buildPiChildArgs({
     sessionsDir: paths.sessionsDir,
     sessionName: args.sessionName,

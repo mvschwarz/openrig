@@ -54,3 +54,35 @@ printf '%s|%s' "$CLAUDE_CONFIG_DIR" "$token"
     db.close(); rmSync(root, { recursive: true, force: true });
   }
 });
+
+it("Pi down and existing-rig up retain the selected account home", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "pi-account-snapshot-"));
+  const db = createFullTestDb();
+  try {
+    const adapter = {
+      runtime: "pi", launchHarness: async () => ({ ok: true }), checkReady: async () => ({ ready: true }),
+      project: async () => ({ projected: [], skipped: [], failed: [] }),
+      deliverStartup: async () => ({ delivered: [], failed: [] }),
+    } as unknown as import("../src/domain/runtime-adapter.js").RuntimeAdapter;
+    const { app, rigRepo, sessionRegistry, snapshotRepo } = createTestApp(db, { adapters: { pi: adapter } });
+    const rig = rigRepo.createRig("pi-account-snapshot");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "pi", cwd: root });
+    db.prepare("UPDATE nodes SET account_home = ? WHERE id = ?").run(root, node.id);
+    const session = sessionRegistry.registerSession(node.id, "worker@pi-account-snapshot");
+    sessionRegistry.updateStatus(session.id, "running");
+    db.prepare("UPDATE sessions SET restore_policy = 'relaunch_fresh' WHERE id = ?").run(session.id);
+    const down = await app.request("/api/down", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rigId: rig.id, snapshot: true, force: true }) });
+    expect(down.status).toBe(200);
+    const stopped = await down.json();
+    expect(stopped.errors).toEqual([]);
+    expect(snapshotRepo.getSnapshot(stopped.snapshotId)!.data.nodes[0]).toMatchObject({ accountHome: root, runtime: "pi" });
+    const up = await app.request("/api/up", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: rig.name, existing: true }) });
+    expect(up.status).toBe(200);
+    expect((await up.json()).status).toBe("restored");
+    expect(rigRepo.getEffectiveSeatEnv(node.id).PI_CODING_AGENT_DIR).toBe(root);
+    const status = await (await app.request("/api/seat/status/worker%40pi-account-snapshot")).json();
+    expect(status.runtime_home).toMatchObject({ home: root, source: "account-switch" });
+  } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
+});
