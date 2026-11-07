@@ -1,6 +1,9 @@
 {
   "version": 1,
   "edges": {
+    "bundle": {
+      "working-with-an-openrig-team/SKILL.md": "28f6e3a3ed141a371a6d168a1e7462ccfe7eb094108db39f6c5c87455997d84a"
+    },
     "canonical": {
       "core/agent-starters/SKILL.md": "8e8961f44fccb812f39e01174a331dab24f153ceaba91925f1e42371836cdec0",
       "core/agent-startup-and-context-ingestion/SKILL.md": "347f28a9567b4b8d8669aff6946229f53144e0c139aca2cbe77e0eb93a87f1b1",
@@ -24,6 +27,7 @@
       "core/specification-system/SKILL.md": "5226d6e8b1362df89ba3d5afd82e4b4add355870132ca4b140d7f9f4324ffdc1",
       "core/topology-mutation-and-seat-management/SKILL.md": "527ca074432ce6513fb25cd27e8c709dabe0c91361b8999e09b272f3813abe62",
       "core/watchdog/SKILL.md": "24b2e756e3e9d067fa93a4b5fa5f48a5cce511e8b1a5b360b1c39bc09bc95d82",
+      "core/working-with-an-openrig-team/SKILL.md": "28f6e3a3ed141a371a6d168a1e7462ccfe7eb094108db39f6c5c87455997d84a",
       "pm/backlog-capture/SKILL.md": "345c2b47fc85e48c15c0d42bbb48fb27dd3b0ceec36bf59dc6ed20daaea47a84",
       "pm/context-builder/SKILL.md": "0134c9b0a9f196565109f7f51b6ec78d5c3e4b5982a0d7105a93b29952625b3c",
       "pm/exec-summary/SKILL.md": "ada0f42337920e7acdd94e24cad4f5c269b057e750f4a7fc627ea9efbc02fcb6",
@@ -128,6 +132,7 @@
       "core/specification-system/SKILL.md": "5226d6e8b1362df89ba3d5afd82e4b4add355870132ca4b140d7f9f4324ffdc1",
       "core/topology-mutation-and-seat-management/SKILL.md": "527ca074432ce6513fb25cd27e8c709dabe0c91361b8999e09b272f3813abe62",
       "core/watchdog/SKILL.md": "24b2e756e3e9d067fa93a4b5fa5f48a5cce511e8b1a5b360b1c39bc09bc95d82",
+      "core/working-with-an-openrig-team/SKILL.md": "28f6e3a3ed141a371a6d168a1e7462ccfe7eb094108db39f6c5c87455997d84a",
       "pm/backlog-capture/SKILL.md": "345c2b47fc85e48c15c0d42bbb48fb27dd3b0ceec36bf59dc6ed20daaea47a84",
       "pm/context-builder/SKILL.md": "0134c9b0a9f196565109f7f51b6ec78d5c3e4b5982a0d7105a93b29952625b3c",
       "pm/exec-summary/SKILL.md": "ada0f42337920e7acdd94e24cad4f5c269b057e750f4a7fc627ea9efbc02fcb6",

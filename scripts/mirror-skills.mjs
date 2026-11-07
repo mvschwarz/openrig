@@ -906,12 +906,13 @@ function validateAuthoringLayout(layout) {
   }
   const edgeNames = Object.keys(layout.edges).sort();
   const requiredEdges = ["canonical", "plugin", "spec"];
+  // A further edge is another shipped plugin's copy of skills authored on spec or plugin (the openrig bundle's).
   if (
-    edgeNames.length !== requiredEdges.length ||
-    edgeNames.some((edge, index) => edge !== requiredEdges[index])
+    requiredEdges.some((edge) => !edgeNames.includes(edge)) ||
+    edgeNames.some((edge) => !requiredEdges.includes(edge) && layout.edges[edge]?.layout !== "flat")
   ) {
     throw new Error(
-      "Layout control must contain exactly canonical, plugin, and spec edges",
+      "Layout control must contain canonical, plugin, and spec edges; any other edge must be a flat plugin copy",
     );
   }
   if (!isRecord(layout.skills) || Object.keys(layout.skills).length === 0) {

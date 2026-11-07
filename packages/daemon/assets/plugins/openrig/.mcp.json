@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "openrig": {
+      "command": "rig",
+      "args": ["mcp", "serve"],
+      "env": {
+        "OPENRIG_SESSION_NAME": "${user_config.seat}"
+      }
+    }
+  }
+}
