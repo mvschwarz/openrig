@@ -10,7 +10,9 @@ This plugin is for a person's own agent in an app such as Claude Code or Codex. 
 
 - **The MCP server entry**, in the Claude Code manifest only: `rig mcp serve --front-door`, acting as the seat you set in
   the plugin's settings. Claude Code substitutes that seat into the server's environment. Codex doesn't, so the plugin
-  ships no shared MCP file, and Codex gets the server from one command (below).
+  ships no shared MCP file, and Codex gets the server from one command (below). An app that passes the seat on unfilled
+  (`${user_config.seat}`) or empty gets a server with no seat: `rig_whoami` says why, and the team refuses its writes
+  until a seat is set. It never acts as a seat named after the placeholder.
 - **`--front-door`** tells your agent the team's questions to its seat are yours to answer: it shows them to you and
   records only what you say, instead of working them itself as a team member would.
 - **One skill,** `working-with-an-openrig-team`: the loop around the tools. It covers handing work to the team's lead,

@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess } from "../src/mcp-server.js";
-import { DaemonClient, DaemonConnectionError, type DaemonResponse } from "../src/client.js";
+import { createMcpServer, dropUnfilledSeat, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
+import { DaemonClient, DaemonConnectionError, senderIdentityHeaders, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
   get?: (path: string) => Promise<DaemonResponse>;
@@ -360,6 +360,47 @@ describe("MCP Server", () => {
       vi.stubEnv("OPENRIG_SESSION_NAME", "claude-app@no-such-rig");
       await setup({ get: getFn }, { frontDoor: true });
       expect((await mcpClient.callTool({ name: "rig_whoami", arguments: {} })).isError).toBe(true);
+      await cleanup();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("an empty or unfilled seat, as an app that doesn't fill in its settings passes it, is no seat: never the placeholder or an inherited seat", async () => {
+    // What an app hands the server when it doesn't substitute its plugin settings, and what stays a seat.
+    const cases: Array<[NodeJS.ProcessEnv, UnfilledSeat | undefined]> = [
+      [{ OPENRIG_SESSION_NAME: "${user_config.seat}" }, { variable: "OPENRIG_SESSION_NAME", value: "${user_config.seat}" }],
+      [{ OPENRIG_SESSION_NAME: "${input:seat}" }, { variable: "OPENRIG_SESSION_NAME", value: "${input:seat}" }],
+      [{ OPENRIG_SESSION_NAME: "$SEAT" }, { variable: "OPENRIG_SESSION_NAME", value: "$SEAT" }],
+      // An empty seat doesn't fall back to one inherited under the legacy name.
+      [{ OPENRIG_SESSION_NAME: "", RIGGED_SESSION_NAME: "dev-impl@my-rig" }, { variable: "OPENRIG_SESSION_NAME", value: "" }],
+      [{ RIGGED_SESSION_NAME: "${user_config.seat}" }, { variable: "RIGGED_SESSION_NAME", value: "${user_config.seat}" }],
+      [{ OPENRIG_SESSION_NAME: "claude-app@my-rig" }, undefined],
+      [{ RIGGED_SESSION_NAME: "claude-app@my-rig" }, undefined],
+      [{}, undefined],
+    ];
+    for (const [given, dropped] of cases) {
+      const env = { ...given };
+      expect(dropUnfilledSeat(env), JSON.stringify(given)).toEqual(dropped);
+      expect(env, JSON.stringify(given)).toEqual(dropped ? {} : given);
+    }
+
+    try {
+      vi.stubEnv("OPENRIG_SESSION_NAME", "${user_config.seat}");
+      vi.stubEnv("RIGGED_SESSION_NAME", "");
+      const unfilledSeat = dropUnfilledSeat()!;
+      // No request carries the placeholder as its sender, and whoami asks no daemon about it.
+      expect(senderIdentityHeaders()).toEqual({});
+      const quietGet = vi.fn(async () => ({ status: 200, data: {} }));
+      await setup({ get: quietGet }, { frontDoor: true, unfilledSeat });
+      const whoami = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
+      expect(whoami.isError).toBeFalsy();
+      expect(whoami.structuredContent).toMatchObject({ ok: true, seat: null, caller: { authenticated: false },
+        unfilledSeat: { variable: "OPENRIG_SESSION_NAME", value: "${user_config.seat}" } });
+      const message = (whoami.structuredContent as { message: string }).message;
+      expect(message).toContain("OPENRIG_SESSION_NAME is \"${user_config.seat}\", a placeholder the app didn't fill in");
+      expect(message).toContain("such as cursor@my-team");
+      expect(quietGet).not.toHaveBeenCalled();
       await cleanup();
     } finally {
       vi.unstubAllEnvs();
