@@ -66,8 +66,9 @@ const PAIR_PRUNE_GRACE_MS = 60 * 60 * 1000;
 /** The longest a pairing request stays open: the 32-bit millisecond limit Node timers have, which the requester's own
  *  wait (`rig host pair --timeout`) is already clamped to. */
 const MAX_PAIR_TTL_MS = 2_147_483_647;
-/** An expired request is kept this long so a waiting client still reads "expired"; with the default life, that's the
- *  hour after creation it always was. */
+/** An expired request becomes eligible for pruning (at the next issuance) this long after it expires, so a waiting
+ *  client can still read "expired"; a terminal poll consumes it sooner. With the default life, that's the hour after
+ *  creation it always was. */
 const PAIR_EXPIRED_KEPT_MS = PAIR_PRUNE_GRACE_MS - PAIR_TTL_MS;
 
 /** How long a pairing request stays open: as long as its requester waits (`timeoutMs`, sent by `rig host pair`),
@@ -76,13 +77,15 @@ function pairTtlMs(requested: unknown): number {
   return typeof requested === "number" && Number.isFinite(requested) && requested > 0 ? Math.min(Math.round(requested), MAX_PAIR_TTL_MS) : PAIR_TTL_MS;
 }
 
-/** A pairing request's life in the words its approval states. */
+/** A pairing request's life as its approval states it: exact, in the largest whole unit (only a life that isn't whole
+ *  seconds, which `rig host pair` never sends below its ceiling, is said as about). */
 function describePairTtl(ms: number): string {
-  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} seconds`;
-  const minutes = Math.round(ms / 60_000);
-  if (minutes < 120) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
-  const hours = Math.round(ms / 3_600_000);
-  return hours < 48 ? `${hours} hours` : `${Math.round(ms / 86_400_000)} days`;
+  const count = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
+  if (ms % 86_400_000 === 0 && ms >= 2 * 86_400_000) return count(ms / 86_400_000, "day");
+  if (ms % 3_600_000 === 0 && ms >= 2 * 3_600_000) return count(ms / 3_600_000, "hour");
+  if (ms % 60_000 === 0) return count(ms / 60_000, "minute");
+  if (ms % 1000 === 0) return count(ms / 1000, "second");
+  return `about ${count(Math.round(ms / 1000), "second")}`;
 }
 const PAIR_HTTP_TIMEOUT_MS = 10_000;
 
@@ -262,7 +265,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
           `APPROVE: rig queue update <this-qitem-id> --state done --closure-reason no-follow-on`,
           `DENY:    rig queue update <this-qitem-id> --state denied`,
           `Approval hands this daemon's bearer token to the requester (full API access).`,
-          `This request expires ${describePairTtl(ttlMs)} after creation, at ${new Date(createdAt + ttlMs).toISOString().slice(0, 16).replace("T", " ")} UTC; expiry persists nothing.`,
+          `This request expires ${describePairTtl(ttlMs)} after creation, at ${new Date(createdAt + ttlMs).toISOString().slice(0, 19).replace("T", " ")} UTC; expiry persists nothing.`,
         ].join("\n"),
       });
       qitemId = item.qitemId;

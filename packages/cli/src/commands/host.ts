@@ -891,17 +891,21 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
       if (!opts.json && timeoutMs === MAX_PAIR_TIMEOUT_MS) {
         console.log(`Waiting up to ~${(MAX_PAIR_TIMEOUT_MS / 86_400_000).toFixed(1)} days for approval on the target (--timeout capped at the maximum).`);
       }
+      // Poll at once, then every 2 s, never sleeping past the deadline: the target keeps the request open only as long
+      // as this side waits, so a short --timeout still sees an approval that's already there.
       const deadline = Date.now() + timeoutMs;
       let outcome: { status?: string; token?: string } = {};
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2000));
+      for (;;) {
         try {
           const res = await deps.httpGet(`${targetBase}/api/hosts/pair-request/${issued.pairId}`);
           outcome = parseJson(res.body) as typeof outcome;
+          if (outcome.status && outcome.status !== "pending") break;
         } catch {
-          continue; // transient poll failure: keep waiting until the deadline
+          // transient poll failure: keep waiting until the deadline
         }
-        if (outcome.status && outcome.status !== "pending") break;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await new Promise((r) => setTimeout(r, Math.min(2000, remaining)));
       }
 
       if (outcome.status !== "approved" || !outcome.token) {
