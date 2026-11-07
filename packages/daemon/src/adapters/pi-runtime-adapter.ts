@@ -234,6 +234,10 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
   ): Promise<HarnessLaunchResult> {
+    const wrapped = binding.launchWrapper?.length ? binding.launchWrapper : undefined;
+    if (wrapped && (this.runtime !== "pi" || !this.seatLaunchEnvironment)) {
+      return { ok: false, error: "launch_wrapper support unavailable; no agent started." };
+    }
     if (!binding.tmuxSession) {
       return { ok: false, error: `No tmux session bound — cannot launch the ${this.runtime === "pi" ? "Pi" : "OMP"} harness` };
     }
@@ -265,6 +269,15 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
         // Session file gone — the honest outcome is the caller's stop-and-ask
         // (awaiting-decision), never a silent fresh start (BR-6).
         return { ok: false, error: `${this.runtime} resume: the persisted session file no longer exists`, recovery: "retry_fresh", missingConversation: true };
+      }
+    }
+
+    let resolvedWrapper: string[] | undefined;
+    if (wrapped) {
+      try {
+        resolvedWrapper = this.seatLaunchEnvironment!.resolveLaunchWrapper(wrapped);
+      } catch {
+        return { ok: false, error: "launch_wrapper unavailable; no agent started." };
       }
     }
 
@@ -308,6 +321,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       launchId,
       usageFacts: this.runtime === "pi" && this.usageFactsEnabled(),
       openRouterCharge: this.runtime === "pi" && this.openRouterChargeEnabled(),
+      ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
     });
 
     const command = this.runtime === "pi" && this.seatLaunchEnvironment

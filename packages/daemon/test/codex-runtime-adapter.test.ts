@@ -2876,3 +2876,130 @@ describe("a fresh Codex seat's managed guidance as launch developer instructions
     expect(sent).not.toContain("developer_instructions");
   });
 });
+
+describe("CodexRuntimeAdapter launch_wrapper", () => {
+  it.each(["fresh", "fork", "resume", "recovery"] as const)("passes launchWrapper through seatCommand for %s and keeps unconfigured byte-identical", async kind => {
+    const tmux = mockTmux();
+    const commandCalls: Array<{ session: string; cmd: string; target: unknown }> = [];
+    const seatLaunchEnvironment = {
+      command: vi.fn(async (session: string, cmd: string, target: { launchWrapper?: readonly string[] }) => {
+        commandCalls.push({ session, cmd, target });
+        const prefix = target.launchWrapper?.length ? target.launchWrapper.map((a) => `'${a}'`).join(" ") + " " : "";
+        return `/usr/bin/env ${prefix}${cmd}`;
+      }),
+    } as never;
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      seatLaunchEnvironment,
+      resolveGitAddDirs: async () => [],
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+    vi.spyOn(adapter as any, "dismissSkippableCodexUpdatePrompt").mockResolvedValue(undefined);
+    vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+    vi.spyOn(adapter as any, "captureFreshThreadId").mockResolvedValue("fresh-thread");
+    vi.spyOn(adapter as any, "captureVerifiedForkId").mockResolvedValue("forked-thread");
+
+    const wrapper = ["codex-wrapper", "--seat", "target-seat", "--"];
+    const binding = { ...makeBinding("/project"), launchGeneration: "gen-2", launchWrapper: wrapper } as NodeBinding;
+
+    if (kind === "recovery") {
+      const built = await adapter.buildResumeCommand(binding, { name: "r01-qa", resumeToken: "thread-recovery" });
+      expect(built).toMatchObject({ ok: true });
+      if (built.ok) {
+        expect(built.command).toContain("'codex-wrapper' '--seat' 'target-seat' '--' codex ");
+      }
+    } else {
+      const res = await adapter.launchHarness(binding, {
+        name: "r01-qa",
+        ...(kind === "resume" ? { resumeToken: "thread-resume" } : {}),
+        ...(kind === "fork" ? { forkSource: { kind: "native_id", value: "parent-thread" } } : {}),
+      });
+      expect(res.ok).toBe(true);
+      const sent = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]![1] as string;
+      expect(sent).toContain("'codex-wrapper' '--seat' 'target-seat' '--' codex ");
+    }
+
+    expect(commandCalls).toHaveLength(1);
+    expect(commandCalls[0]!.target).toEqual({
+      codexCwd: "/project",
+      nodeId: "n1",
+      generation: "gen-2",
+      runtime: "codex",
+      launchWrapper: wrapper,
+    });
+    expect("launchShell" in (commandCalls[0]!.target as Record<string, unknown>)).toBe(false);
+  });
+
+  it("forwards launchShell from buildResumeCommand to seatCommand and returns ok:false when seatCommand throws under launchShell", async () => {
+    const tmux = mockTmux();
+    const commandCalls: Array<{ session: string; cmd: string; target: Record<string, unknown> }> = [];
+    let shouldThrow = false;
+    const seatLaunchEnvironment = {
+      command: vi.fn(async (session: string, cmd: string, target: Record<string, unknown>) => {
+        commandCalls.push({ session, cmd, target });
+        if (shouldThrow) throw new Error("launch_wrapper unavailable; no agent started.");
+        return `/usr/bin/env 'codex-wrapper' '--' ${cmd}`;
+      }),
+    } as never;
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      seatLaunchEnvironment,
+      resolveGitAddDirs: async () => [],
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+    const wrapper = ["codex-wrapper", "--"];
+    const binding = { ...makeBinding("/project"), launchGeneration: "gen-2", launchWrapper: wrapper } as NodeBinding;
+
+    const okRes = await adapter.buildResumeCommand(binding, { name: "r01-qa", resumeToken: "thread-1", launchShell: "/bin/bash" });
+    expect(okRes).toMatchObject({ ok: true });
+    expect(commandCalls[0]!.target).toEqual({
+      codexCwd: "/project",
+      nodeId: "n1",
+      generation: "gen-2",
+      runtime: "codex",
+      launchWrapper: wrapper,
+      launchShell: "/bin/bash",
+    });
+
+    shouldThrow = true;
+    const failRes = await adapter.buildResumeCommand(binding, { name: "r01-qa", resumeToken: "thread-1", launchShell: "fish" });
+    expect(failRes).toEqual({
+      ok: false,
+      error: "launch_wrapper unavailable; no agent started.",
+    });
+  });
+
+  it("refuses fresh, fork, resume and buildResumeCommand when launchWrapper is selected but seatLaunchEnvironment is absent", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      resolveGitAddDirs: async () => [],
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+    const binding = { ...makeBinding("/project"), launchWrapper: ["codex-wrapper", "--"] } as NodeBinding;
+
+    expect(await adapter.launchHarness(binding, { name: "r01-qa" })).toEqual({
+      ok: false,
+      error: "launch_wrapper support unavailable; no agent started.",
+    });
+    expect(await adapter.launchHarness(binding, { name: "r01-qa", resumeToken: "thread-1" })).toEqual({
+      ok: false,
+      error: "launch_wrapper support unavailable; no agent started.",
+    });
+    expect(await adapter.launchHarness(binding, { name: "r01-qa", forkSource: { kind: "native_id", value: "parent-1" } })).toEqual({
+      ok: false,
+      error: "launch_wrapper support unavailable; no agent started.",
+    });
+    expect(await adapter.buildResumeCommand(binding, { name: "r01-qa", resumeToken: "thread-1" })).toEqual({
+      ok: false,
+      error: "launch_wrapper support unavailable; no agent started.",
+    });
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+});

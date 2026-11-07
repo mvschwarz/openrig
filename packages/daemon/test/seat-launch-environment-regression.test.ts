@@ -4,7 +4,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { SeatLaunchEnvironment, publicSeatEnvironment } from "../src/domain/seat-launch-environment.js";
+import { SeatLaunchEnvironment, launchExecutable, publicSeatEnvironment, resolveLaunchWrapperArgv } from "../src/domain/seat-launch-environment.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { codexDaemonSupportProbe } from "../src/domain/codex-daemon-support.js";
@@ -115,6 +115,13 @@ it("B: a reused link remains rig-only; unexpected contents are preserved and fal
   expect(readlinkSync(rig)).toBe(realpathSync(f.cli)); expect(f.warn).toHaveBeenCalledTimes(1);
 });
 
+it("export helper resolves executable from cwd when PATH has empty segments", () => {
+  const f = fixture();
+  const exePath = path.join(f.cwd, "codex");
+  f.exe(exePath, "#!/bin/sh\nexit 0\n");
+  expect(launchExecutable("codex", ":", f.cwd)).toBe(exePath);
+});
+
 
 it.each(["nu", "nu.exe", "fish", "csh", "", "unknown"])("Pi preserves its existing command on an unsupported pane: %s", async shell => {
   const f = fixture(); f.tmux.getPaneCommand.mockResolvedValue(shell);
@@ -122,4 +129,113 @@ it.each(["nu", "nu.exe", "fish", "csh", "", "unknown"])("Pi preserves its existi
   expect(await f.launch.command("seat@rig", command, { runtime: "pi" })).toBe(command);
   expect(f.tmux.getSessionEnv).not.toHaveBeenCalled();
   expect(f.warn).toHaveBeenCalledTimes(1);
+});
+
+const REFUSAL_CMD = "printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false";
+
+it("launch_wrapper prefixes before pinned Node interpreter + Codex entry and after public env envelope", async () => {
+  const f = fixture(), nodeBin = path.join(f.root, "node interpreter");
+  mkdirSync(nodeBin); symlinkSync(process.execPath, path.join(nodeBin, "node"));
+  f.exe(path.join(f.runtime, "codex"), `#!/usr/bin/env node\nconsole.log(JSON.stringify({started:true,node:process.execPath,argv:process.argv.slice(2),path:process.env.PATH}));\n`);
+  f.exe(path.join(f.shared, "my-wrapper"), `#!/bin/sh\nwhile [ "$#" -gt 0 ]; do arg="$1"; shift; [ "$arg" = "--" ] && break; done\nexec "$@"\n`);
+  f.env.PATH = [f.runtime, nodeBin, f.shared, "/usr/bin", "/bin"].join(":");
+  f.identity.OPENRIG_RUNTIME = "codex";
+  const launch = new (SeatLaunchEnvironment as any)(f.tmux, f.env, f.root, f.cli) as SeatLaunchEnvironment;
+  const unwrapped = await launch.command("seat@rig", "codex --no-daemon", { codexCwd: f.cwd, runtime: "codex" });
+  const wrapped = await launch.command("seat@rig", "codex --no-daemon", { codexCwd: f.cwd, runtime: "codex", launchWrapper: ["my-wrapper", "literal $1", "--"] } as any);
+  expect(await launch.command("seat@rig", "codex --no-daemon", { codexCwd: f.cwd, runtime: "codex", launchWrapper: [] } as any)).toBe(unwrapped);
+  const expectedPrefix = `${shellQuote(path.join(f.shared, "my-wrapper"))} 'literal $1' '--' ${shellQuote(path.join(nodeBin, "node"))} ${shellQuote(path.join(f.runtime, "codex"))} --no-daemon`;
+  expect(wrapped.endsWith(expectedPrefix)).toBe(true);
+  const { stdout } = await exec("/bin/bash", ["--noprofile", "--norc", "-c", wrapped], { cwd: f.cwd, env: { ...f.env, PATH: "/usr/bin:/bin" }, timeout: 5000 });
+  expect(JSON.parse(stdout)).toMatchObject({ started: true, node: process.execPath, argv: ["--no-daemon"] });
+});
+
+it.each([
+  "missing-wrapper",
+  "non-executable-wrapper",
+  "directory-wrapper",
+  "relative-dot-wrapper",
+  "relative-sub-wrapper",
+  "empty-executable",
+  "newline-arg",
+  "nul-arg",
+  "empty-daemon-path",
+  "transport-error",
+  "missing-node-id",
+  "missing-session-name",
+  "different-node-id",
+  "missing-paired-cli",
+  "polluted-seat-bin",
+  "nu-shell",
+  "fish-shell",
+  "unknown-shell",
+  "unsupported-runtime-pi",
+  "unsupported-runtime-claude",
+  "unsupported-runtime-omp",
+  "unsupported-runtime-terminal",
+  "missing-runtime",
+] as const)("launch_wrapper fails closed without bare fallback on %s", async failure => {
+  const f = fixture();
+  f.exe(path.join(f.shared, "codex"), "#!/bin/sh\nprintf codex-started\\n\n");
+  f.exe(path.join(f.shared, "valid-wrapper"), "#!/bin/sh\nexec \"$@\"\n");
+  writeFileSync(path.join(f.shared, "non-exec-wrapper"), "#!/bin/sh\nexec \"$@\"\n", { mode: 0o600 });
+  mkdirSync(path.join(f.shared, "dir-wrapper"));
+  f.exe(path.join(f.cwd, "valid-wrapper"), "#!/bin/sh\nexec \"$@\"\n");
+
+  let wrapper: string[] = ["valid-wrapper", "--"];
+  let runtime: string | undefined = "codex";
+  let nodeId = "node";
+  let launch = f.launch;
+
+  if (failure === "missing-wrapper") wrapper = ["does-not-exist", "--"];
+  if (failure === "non-executable-wrapper") wrapper = ["non-exec-wrapper", "--"];
+  if (failure === "directory-wrapper") wrapper = ["dir-wrapper", "--"];
+  if (failure === "relative-dot-wrapper") wrapper = ["./valid-wrapper", "--"];
+  if (failure === "relative-sub-wrapper") wrapper = ["sub/valid-wrapper", "--"];
+  if (failure === "empty-executable") wrapper = ["", "--"];
+  if (failure === "newline-arg") wrapper = ["valid-wrapper", "bad\narg"];
+  if (failure === "nul-arg") wrapper = ["valid-wrapper", "bad\0arg"];
+  if (failure === "empty-daemon-path") f.env.PATH = "";
+  if (failure === "transport-error") f.tmux.getSessionEnv.mockRejectedValue(new Error("transport secret-value"));
+  if (failure === "missing-node-id") delete f.identity.OPENRIG_NODE_ID;
+  if (failure === "missing-session-name") delete f.identity.OPENRIG_SESSION_NAME;
+  if (failure === "different-node-id") nodeId = "other-node";
+  if (failure === "missing-paired-cli") launch = new (SeatLaunchEnvironment as any)(f.tmux, f.env, f.root, path.join(f.root, "no-cli")) as SeatLaunchEnvironment;
+  if (failure === "polluted-seat-bin") {
+    const rig = (await f.run(await f.launch.command("seat@rig", "/bin/sh -c 'command -v rig'"))).stdout.trim();
+    f.exe(path.join(path.dirname(rig), "extra"), "#!/bin/sh\nexit 0\n");
+    f.warn.mockClear();
+  }
+  if (failure === "nu-shell") f.tmux.getPaneCommand.mockResolvedValue("nu");
+  if (failure === "fish-shell") { f.tmux.getPaneCommand.mockResolvedValue("fish"); runtime = "codex"; }
+  if (failure === "unknown-shell") f.tmux.getPaneCommand.mockResolvedValue("unknown");
+  if (failure === "unsupported-runtime-pi") runtime = "pi";
+  if (failure === "unsupported-runtime-claude") runtime = "claude-code";
+  if (failure === "unsupported-runtime-omp") runtime = "omp";
+  if (failure === "unsupported-runtime-terminal") runtime = "terminal";
+  if (failure === "missing-runtime") runtime = undefined;
+
+  const nativeCmd = runtime === "codex" ? "codex --no-daemon" : "node '/runner.js' --session '/s.jsonl'";
+  const result = await launch.command("seat@rig", nativeCmd, {
+    nodeId,
+    ...(runtime ? { runtime } : {}),
+    ...(runtime === "codex" ? { codexCwd: f.cwd } : {}),
+    launchWrapper: wrapper,
+  } as any);
+  expect(result).toBe(REFUSAL_CMD);
+  expect(result).not.toContain("runner.js");
+  expect(result).not.toContain("codex --no-daemon");
+  expect(f.warn).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(f.warn.mock.calls)).not.toContain("secret-value");
+});
+
+it("resolveLaunchWrapperArgv rejects empty PATH or empty array and resolves wrapper[0] on daemonCwd", () => {
+  const f = fixture();
+  f.exe(path.join(f.shared, "valid-wrapper"), "#!/bin/sh\nexec \"$@\"\n");
+  expect(resolveLaunchWrapperArgv(["valid-wrapper", "--"], f.env.PATH, f.root)).toEqual([
+    path.join(f.shared, "valid-wrapper"),
+    "--",
+  ]);
+  expect(() => resolveLaunchWrapperArgv(["valid-wrapper"], "", f.root)).toThrow(/daemon launch PATH/);
+  expect(() => resolveLaunchWrapperArgv([], f.env.PATH, f.root)).toThrow(/empty/);
 });

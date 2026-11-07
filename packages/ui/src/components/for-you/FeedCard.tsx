@@ -4,6 +4,11 @@ import { ArrowRight, Clock, History, PackageCheck, X, CircleAlert } from "lucide
 
 import { AuthorAgentTag } from "./AuthorAgentTag.js";
 import { FeedCardTerminalDrill } from "./FeedCardTerminalDrill.js";
+import {
+  FeedCardQuestionAsk,
+  normalizeHumanAnswers,
+  normalizeHumanQuestions,
+} from "./FeedCardQuestionAsk.js";
 import { QueueItemTrigger } from "../drawer-triggers/QueueItemTrigger.js";
 import type { QueueItemViewerData } from "../drawer-viewers/QueueItemViewer.js";
 import type { QueueItemDetail } from "../../hooks/useSlices.js";
@@ -412,20 +417,29 @@ export function FeedCard({
   };
   const qitemViewerData = qitemViewerDataFromItem(card, queueItem);
   const payload = card.source.payload ?? {};
+  const isRemote = Boolean(card.hostId && card.hostId !== "local");
   // Remote cards must use their origin's payload, not a same-id local queue row.
-  const localItem = !card.hostId || card.hostId === "local" ? queueItem : undefined;
+  const localItem = !isRemote ? queueItem : undefined;
+  const rawQuestions =
+    Array.isArray(localItem?.humanQuestions) && localItem.humanQuestions.length > 0
+      ? localItem.humanQuestions
+      : payload.humanQuestions;
+  const rawAnswers = localItem?.humanAnswers ?? payload.humanAnswers;
+  const parsedQuestions = !isRemote ? normalizeHumanQuestions(rawQuestions) : [];
+  const parsedAnswers = !isRemote ? normalizeHumanAnswers(rawAnswers) : {};
   const hasQuestions = (Array.isArray(payload.humanQuestions) && payload.humanQuestions.length > 0)
     || (Array.isArray(localItem?.humanQuestions) && localItem.humanQuestions.length > 0);
   // Event cards can arrive before the queue read. Do not offer a closing action until it resolves.
   const questionsKnown = localItem !== undefined || Object.hasOwn(payload, "humanQuestions");
   const permissionTags = localItem ? localItem.tags : payload.tags;
   const isRunnerPermission = Array.isArray(permissionTags) && permissionTags.includes("runner-permission");
+  const hasQuestionControls = !isRemote && hasQuestions && parsedQuestions.length > 0 && !isRunnerPermission;
   const body = compactQueueBody(queueItem?.body || card.body);
   const tags = queueItem?.tags ?? qitemViewerData?.tags ?? [];
   const source = qitemViewerData?.source ?? card.authorSession;
   const destination = qitemViewerData?.destination;
   const actorSession = destination?.startsWith("human") ? destination : "human@host";
-  const renderedOutcome = actionOutcome ?? fallbackOutcomeFromQueueItem(card.kind, queueItem);
+  const renderedOutcome = actionOutcome ?? (hasQuestionControls ? null : fallbackOutcomeFromQueueItem(card.kind, queueItem));
   const primaryToken = renderedOutcome ? outcomeToken(renderedOutcome) : KIND_TOKEN[card.kind];
   // C11 Inbox v2: the decision verbs are hidden once a decision lands
   // (outcome receipt) or the queue item is terminal. The row's footer links
@@ -540,7 +554,10 @@ export function FeedCard({
           </div>
         ) : null}
         {renderedOutcome ? <ActionOutcomePanel outcome={renderedOutcome} /> : null}
-        {!hideActions && isActionableCard(card.kind, queueItem, renderedOutcome) && qitemViewerData ? (
+        {!hideActions && qitemViewerData && (
+          isActionableCard(card.kind, queueItem, renderedOutcome)
+          || (hasQuestionControls && (card.kind === "action-required" || card.kind === "approval"))
+        ) ? (
           <div
             data-testid={`feed-card-actions-${card.id}`}
           >
@@ -561,7 +578,18 @@ export function FeedCard({
                     ? (outcome) => onOptimisticOutcome(qitemViewerData.qitemId, outcome)
                     : undefined
                 }
-              /> : hasQuestions ? (
+              /> : hasQuestions && parsedQuestions.length > 0 ? (
+                <FeedCardQuestionAsk
+                  cardId={card.id}
+                  qitemId={qitemViewerData.qitemId}
+                  actorSession={actorSession}
+                  recipientSession={destination}
+                  askerSession={source}
+                  questions={parsedQuestions}
+                  initialAnswers={parsedAnswers}
+                  queueItem={localItem}
+                />
+              ) : hasQuestions ? (
                 <span className="font-mono text-[10px] text-on-surface-variant break-words min-w-0">
                   {card.hostId && card.hostId !== "local"
                     ? `This ask has questions. Answer in the TUI on host ${card.hostId} (rig tui).`

@@ -37,11 +37,12 @@ import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
 export type InPlaceRestartTmux = Pick<TmuxAdapter,
   | "getPanePid" | "getPaneCommand" | "listPanes" | "getSessionEnv" | "signalPid" | "setRemainOnExit"
   | "signalPaneProcess" | "isPaneDead" | "respawnPane" | "getPaneLocalOption" | "restorePaneOption"
-  | "capturePaneHistory" | "capturePaneHistoryParts">;
+  | "capturePaneHistory" | "capturePaneHistoryParts">
+  & Partial<Pick<TmuxAdapter, "getDefaultShell">>;
 
 /** The Codex runtime adapter's resume surface this operation reuses. */
 export interface InPlaceCodexLauncher {
-  buildResumeCommand(binding: NodeBinding, opts: { name: string; resumeToken: string; running?: RunningCodexLaunch }):
+  buildResumeCommand(binding: NodeBinding, opts: { name: string; resumeToken: string; running?: RunningCodexLaunch; launchShell?: string }):
     Promise<{ ok: true; command: string; core: string } | { ok: false; error: string }>;
   /** `nodeId` lets the resume proof read the seat's own CODEX_HOME when it declares one; `home`, the one the running
    *  Codex was read using, wins over both that and the daemon's. */
@@ -488,11 +489,29 @@ export class CodexInPlaceRestart {
       cwd = facts.cwd;
     }
     const relaunchBinding: NodeBinding = { ...binding, cwd };
+    let launchShell: string | undefined;
+    if (binding.launchWrapper?.length) {
+      launchShell = paneShape === "shell_backed"
+        ? executableBase(root!)
+        : ((await this.deps.tmux.getDefaultShell?.()) ?? "");
+      if (!launchShell) {
+        return {
+          ok: false,
+          code: "relaunch_unavailable",
+          message: "The shell that will run the wrapped relaunch could not be determined. Nothing was stopped.",
+        };
+      }
+    }
     // The probed and prepared launch choices come from the running Codex, so the relaunch keeps them and no
     // Codex process is started to decide them again.
     // Keep the launch settings tied to the same OS argv used for the selected process's identity.
     const running = runningLaunch(runningArgv);
-    const relaunch = await this.deps.codex.buildResumeCommand(relaunchBinding, { name: sessionName, resumeToken: token, running });
+    const relaunch = await this.deps.codex.buildResumeCommand(relaunchBinding, {
+      name: sessionName,
+      resumeToken: token,
+      running,
+      ...(launchShell ? { launchShell } : {}),
+    });
     if (!relaunch.ok) return { ok: false, code: "relaunch_unavailable", message: `The resume command could not be built: ${relaunch.error}. Nothing was stopped.` };
     const relaunchHome = envAssignment(relaunch.command, "CODEX_HOME")
       ?? (paneShape === "shell_backed"

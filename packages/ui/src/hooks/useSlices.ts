@@ -387,6 +387,21 @@ export function proofAssetUrl(sliceName: string, relPath: string): string {
 export interface QueueItemDetail {
   /** Structured questions already included in the queue API response. */
   humanQuestions?: unknown[] | null;
+  /** Recorded answers keyed by question id, served by /api/queue/:id and /api/queue/list. */
+  humanAnswers?: Record<string, unknown> | null;
+  /** Revision token for expectedRevision on decision writes, served by /api/queue/:id. */
+  decisionRevision?: string | null;
+  /** Terminal transition metadata served by /api/queue/:id when the row is closed. */
+  closingTransition?: {
+    actorSession?: string | null;
+    closureReason?: string | null;
+    closureTarget?: string | null;
+    state?: string | null;
+    reason?: string | null;
+    toState?: string | null;
+    ts?: string | null;
+    transitionNote?: string | null;
+  } | null;
   qitemId: string;
   tsCreated: string;
   tsUpdated: string;

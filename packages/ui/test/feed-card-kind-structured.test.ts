@@ -68,4 +68,23 @@ describe("hydratedCardKind — FR-3 structured signals only", () => {
   it("terminal states still map to shipped", () => {
     expect(hydratedCardKind(card(), item({ state: "done" }), undefined)).toBe("shipped");
   });
+
+  it("done queue-derived card without questions maps to shipped", () => {
+    const queueDerived: FeedCard = {
+      ...card("action-required"),
+      id: "queue-attention-qitem-x",
+      source: { seq: -1, type: "queue.attention.synthetic", payload: { qitemId: "qitem-x" }, createdAt: new Date(1000).toISOString(), receivedAt: 1000 },
+    };
+    expect(hydratedCardKind(queueDerived, item({ state: "done", destinationSession: "human@host", humanQuestions: null }), undefined)).toBe("shipped");
+  });
+
+  it("done queue-derived card with questions keeps its kind", () => {
+    const queueDerived: FeedCard = {
+      ...card("action-required"),
+      id: "queue-attention-qitem-x",
+      source: { seq: -1, type: "queue.attention.synthetic", payload: { qitemId: "qitem-x" }, createdAt: new Date(1000).toISOString(), receivedAt: 1000 },
+    };
+    const questions = [{ id: "q1", question: "Pick one?", options: [{ id: "a", label: "A" }] }];
+    expect(hydratedCardKind(queueDerived, item({ state: "done", destinationSession: "human@host", humanQuestions: questions }), undefined)).toBe("action-required");
+  });
 });
