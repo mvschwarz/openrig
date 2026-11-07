@@ -977,7 +977,7 @@ describe("PiRuntimeAdapter and PiResumeAdapter launch_wrapper", () => {
     expect(wrappedSend).toHaveBeenCalledTimes(2);
     const expectedFlags = "--launch-wrapper-arg '/abs/bin/wrapper' --launch-wrapper-arg '--flag' --launch-wrapper-arg '--'";
     expect(wrappedSend.mock.calls[0]![1]).toContain(expectedFlags);
-    expect(wrappedSend.mock.calls[1]![1]).toMatch(/^\/usr\/bin\/env OPENRIG_PI_ACCOUNT_HOME= node '/);
+    expect(wrappedSend.mock.calls[1]![1]).toMatch(/^node '/);
     expect(wrappedSend.mock.calls[1]![1]).toContain(expectedFlags);
 
     // Unwrapped (including empty array []): still retries bare cmd on launch_path_too_long without wrapper flags
@@ -1002,7 +1002,7 @@ describe("PiRuntimeAdapter and PiResumeAdapter launch_wrapper", () => {
     );
     expect(unwrappedRes.ok).toBe(true);
     expect(unwrappedSend).toHaveBeenCalledTimes(2);
-    expect(unwrappedSend.mock.calls[1]![1]).toMatch(/^\/usr\/bin\/env OPENRIG_PI_ACCOUNT_HOME= node '/);
+    expect(unwrappedSend.mock.calls[1]![1]).toMatch(/^node '/);
     expect(unwrappedSend.mock.calls[1]![1]).not.toContain("--launch-wrapper-arg");
   });
 
@@ -1094,7 +1094,7 @@ describe("PiRuntimeAdapter and PiResumeAdapter launch_wrapper", () => {
     expect(tooLongRes.ok).toBe(true);
     expect(tooLongSend).toHaveBeenCalledTimes(2);
     expect(tooLongSend.mock.calls[0]![1]).toContain(expectedFlags);
-    expect(tooLongSend.mock.calls[1]![1]).toMatch(/^\/usr\/bin\/env OPENRIG_PI_ACCOUNT_HOME= node '/);
+    expect(tooLongSend.mock.calls[1]![1]).toMatch(/^node '/);
     expect(tooLongSend.mock.calls[1]![1]).toContain(expectedFlags);
   });
 });

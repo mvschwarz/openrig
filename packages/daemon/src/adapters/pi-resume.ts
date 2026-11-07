@@ -29,6 +29,8 @@ export interface PiResumeFsOps {
 }
 
 interface PiResumeOptions {
+  /** Resolve the persisted/configured account without relying on live tmux metadata. */
+  accountHomeForSession?: (session: string) => string | undefined;
   stateRootForSession?: (session: string) => string;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   pollMs?: number;
@@ -115,7 +117,19 @@ export class PiResumeAdapter {
     const appliedLaunch = this.runtime === "omp"
       ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
       : observePiResourceTrust(trust);
+    let nodeId: string | undefined;
+    if (this.runtime === "pi" && this.options.seatLaunchEnvironment) {
+      try { nodeId = await this.tmux.getSessionEnv(tmuxSessionName, "OPENRIG_NODE_ID") ?? undefined; }
+      catch { /* Account-free resume retains best-effort identity correction. */ }
+    }
+    const accountHome = this.runtime === "pi" ? this.options.accountHomeForSession?.(tmuxSessionName)
+      ?? (nodeId ? this.options.seatLaunchEnvironment?.accountHome(nodeId, this.runtime) : undefined) : undefined;
+    if (!nodeId && this.runtime === "pi" && (accountHome || this.fs.exists(`${seat.agentDir}/.openrig-account`))) {
+      return { ok: false, code: "resume_failed", message: "Pi resume needs seat identity to preserve its selected account; restore identity and retry resume." };
+    }
+    if (!nodeId && this.runtime === "pi" && this.options.seatLaunchEnvironment) console.warn("[pi-resume] Seat identity unavailable; account-free resume continues with best-effort routing.");
     const cmd = buildPiRunnerCommand({
+      accountHome,
       runtime: this.runtime,
       runnerEntryPath: this.paths.runnerEntryPath,
       sessionName: tmuxSessionName,
@@ -135,14 +149,7 @@ export class PiResumeAdapter {
       ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
     });
 
-    let nodeId: string | undefined;
-    if (this.runtime === "pi" && this.options.seatLaunchEnvironment) {
-      try { nodeId = await this.tmux.getSessionEnv(tmuxSessionName, "OPENRIG_NODE_ID") ?? undefined; }
-      catch { return { ok: false, code: "resume_failed", message: "Pi resume could not read the seat identity; no account was selected." }; }
-      if (!nodeId) return { ok: false, code: "resume_failed", message: "Pi resume requires the seat's node identity to select its account." };
-    }
-    const accountHome = nodeId ? this.options.seatLaunchEnvironment?.accountHome(nodeId, this.runtime) : undefined;
-    const fallback = this.runtime === "pi" ? `/usr/bin/env OPENRIG_PI_ACCOUNT_HOME= ${cmd}` : cmd;
+    const fallback = cmd;
     const command = this.runtime === "pi" && this.options.seatLaunchEnvironment
       ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime, nodeId, accountHome })
       : fallback;

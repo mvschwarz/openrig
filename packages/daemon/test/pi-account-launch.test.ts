@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -48,7 +48,7 @@ it.each([undefined, ["wrapper", "arg with spaces", "--"]])("preserves the select
     exists: fs.existsSync, mkdirp: file => fs.mkdirSync(file, { recursive: true }),
   }, { stateRoot: root, runnerEntryPath: "/runner.js" }, { stateRootForSession: () => resumedRoot, seatLaunchEnvironment: launch, newLaunchId: () => "attempt" });
   expect(await adapter.resume("build@rig", "pi_session_file", sessionFile, root, "mistral/devstral-latest", undefined, undefined, wrapper)).toMatchObject({ ok: true });
-  expect(launched).toContain(`PI_CODING_AGENT_DIR=${account}`);
+  expect(launched).toContain(`--account-home '${account}'`);
   expect(launched).toContain(`--state-root '${resumedRoot}'`);
   if (wrapper) expect(launched).toContain(`--launch-wrapper-arg '${root}/wrapper' --launch-wrapper-arg 'arg with spaces' --launch-wrapper-arg '--'`);
   let attempts = 0;
@@ -98,7 +98,6 @@ it.each(["selected", "cleared"])("executes a %s Pi account environment without l
     PATH: "/usr/bin:/bin", PI_CODING_AGENT_DIR: "/pi/stale", MISTRAL_API_KEY: "fixture-mistral", GEMINI_API_KEY: "fixture-gemini", OPENROUTER_API_KEY: "fixture-openrouter", ZAI_API_KEY: "fixture-zai", KIMI_API_KEY: "fixture-kimi", MINIMAX_API_KEY: "fixture-minimax",
   } });
   expect(output).toContain(`PI_CODING_AGENT_DIR=/pi/${selection === "cleared" ? "configured" : "selected"}\n`);
-  expect(output).toContain(`OPENRIG_PI_ACCOUNT_HOME=/pi/${selection === "cleared" ? "configured" : "selected"}\n`);
   expect(output).not.toContain("fixture-");
 });
 
@@ -144,14 +143,14 @@ it.each(["pi", "codex", "claude-code"])("scopes extra provider-key scrubbing to 
   expect(output).not.toContain("existing-scrub");
   if (runtime === "pi") {
     expect(output).not.toContain("custom-provider-key");
-    expect(output).toContain("OPENRIG_PI_ACCOUNT_HOME=/selected\n");
+    expect(output).toContain("OPENRIG_PI_ACCOUNT_HOME=/stale\n");
     const unselected = await launch.command("seat@rig", "/usr/bin/env", { nodeId: "node", runtime });
     const ambient = execFileSync("/bin/sh", ["-c", unselected], { encoding: "utf8", env: inherited });
-    expect(ambient).toContain("OPENRIG_PI_ACCOUNT_HOME=\n");
+    expect(ambient).toContain("OPENRIG_PI_ACCOUNT_HOME=/stale\n");
   } else expect(output).toContain("OPENROUTER_API_KEY=custom-provider-key\n");
 });
 
-it.each(["nu", "fish", "bash"])("clears ambient account selection on fallback (%s)", async shell => {
+it.each(["nu", "fish", "bash"])("retains the short account-free fallback (%s)", async shell => {
   const { execFileSync } = await import("node:child_process");
   const { SeatLaunchEnvironment } = await import("../src/domain/seat-launch-environment.js");
   const tmux = {
@@ -160,9 +159,49 @@ it.each(["nu", "fish", "bash"])("clears ambient account selection on fallback (%
   } as unknown as import("../src/adapters/tmux.js").TmuxAdapter;
   const launch = new SeatLaunchEnvironment(tmux, {}, "/tmp");
   const command = await launch.command("seat@rig", "/usr/bin/env", { runtime: "pi" });
-  expect(command).toBe("/usr/bin/env OPENRIG_PI_ACCOUNT_HOME= /usr/bin/env");
+  expect(command).toBe("/usr/bin/env");
   const output = execFileSync("/bin/sh", ["-c", command], { encoding: "utf8", env: { OPENRIG_PI_ACCOUNT_HOME: "/unselected" } });
-  expect(output).toContain("OPENRIG_PI_ACCOUNT_HOME=\n");
-  expect(output).not.toContain("/unselected");
+  expect(output).toContain("OPENRIG_PI_ACCOUNT_HOME=/unselected\n"); // The runner ignores this obsolete variable.
   expect(await launch.command("seat@rig", "/usr/bin/env", { runtime: "pi", accountHome: "/selected" })).toContain("no agent started");
+});
+
+it("retries an interrupted initial account link without treating it as a person's own link", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-account-interrupted-")); roots.push(root);
+  const agent = path.join(root, "agent"), account = path.join(root, "account");
+  fs.mkdirSync(account); fs.writeFileSync(path.join(account, "auth.json"), "synthetic-auth");
+  const symlink = fs.symlinkSync;
+  const interruption = vi.spyOn(fs, "symlinkSync").mockImplementation((...args) => {
+    symlink(...args); throw new Error("simulated interruption immediately after linking");
+  });
+  try { expect(() => preparePiAccount(agent, account)).toThrow("simulated interruption"); }
+  finally { interruption.mockRestore(); }
+  preparePiAccount(agent, account);
+  expect(fs.readFileSync(path.join(agent, "auth.json"), "utf8")).toBe("synthetic-auth");
+  expect(fs.readFileSync(path.join(agent, ".openrig-account"), "utf8")).toBe(account);
+});
+
+it.each([false, true])("resume tolerates unavailable tmux identity only without a chosen account (%s)", async chosen => {
+  const { PiResumeAdapter } = await import("../src/adapters/pi-resume.js");
+  const { SeatLaunchEnvironment } = await import("../src/domain/seat-launch-environment.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-resume-identity-")); roots.push(root);
+  const sessionFile = path.join(root, "session.jsonl"); fs.writeFileSync(sessionFile, "{}");
+  let dispatched = false;
+  const tmux = {
+    getSessionEnv: async () => { throw new Error("metadata unavailable"); },
+    getPaneCommand: async () => "bash",
+    sendShellCommand: async () => {
+      dispatched = true;
+      fs.writeFileSync(path.join(root, "seat@rig/runner-state.json"), JSON.stringify({ ready: true, launchId: "attempt", sessionFile, updatedAt: "now" }));
+      return { ok: true as const };
+    },
+  } as unknown as import("../src/adapters/tmux.js").TmuxAdapter;
+  const launch = new SeatLaunchEnvironment(tmux, {}, root);
+  const adapter = new PiResumeAdapter(tmux, {
+    readFile: file => fs.readFileSync(file, "utf8"), writeFile: fs.writeFileSync,
+    exists: fs.existsSync, mkdirp: file => fs.mkdirSync(file, { recursive: true }),
+  }, { stateRoot: root, runnerEntryPath: "/runner.js" }, {
+    seatLaunchEnvironment: launch, accountHomeForSession: () => chosen ? "/chosen" : undefined, newLaunchId: () => "attempt",
+  });
+  expect(await adapter.resume("seat@rig", "pi_session_file", sessionFile, root)).toMatchObject({ ok: !chosen });
+  expect(dispatched).toBe(!chosen);
 });

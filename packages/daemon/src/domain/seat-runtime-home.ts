@@ -93,7 +93,7 @@ export function declaredRuntimeHomes(db: Database.Database, runtime: HomeRuntime
  *  ignored, so the launch leaves it out too and the runtime resolves as if the seat declared none. */
 export function withoutIgnoredRuntimeHomes(env: SeatEnv): SeatEnv {
   const out = { ...env };
-  for (const name of Object.values(RUNTIME_HOME_VAR)) {
+  for (const name of [RUNTIME_HOME_VAR.codex, RUNTIME_HOME_VAR["claude-code"]]) {
     const value = out[name];
     if (value !== undefined && !path.isAbsolute(value)) delete out[name];
   }

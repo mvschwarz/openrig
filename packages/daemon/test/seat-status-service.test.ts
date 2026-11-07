@@ -135,7 +135,7 @@ describe("SeatStatusService", () => {
     for (const [name, node] of Object.entries(nodes)) sessionRegistry.registerSession(node.id, `dev-${name}@home-rig`);
     db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "/homes/own" }), nodes.own.id);
     db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "rel/codex" }), nodes.rel.id);
-    const svc = new SeatStatusService({ rigRepo, env: { HOME: "/users/op", CODEX_HOME: "/daemon/codex" } });
+    const svc = new SeatStatusService({ rigRepo, env: { HOME: "/users/op", CODEX_HOME: "/daemon/codex", PI_CODING_AGENT_DIR: "/daemon/pi-ignored" } });
     const status = (ref: string) => {
       const result = svc.getStatus(ref);
       if (!result.ok) throw new Error(result.code);

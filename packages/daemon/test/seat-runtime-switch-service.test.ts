@@ -136,7 +136,7 @@ describe("live seat runtime switch", () => {
   afterEach(() => { db.close(); fs.rmSync(home, { recursive: true, force: true }); });
 
   it("switches a Pi account only after confirmation, preserves its seat and selects durable isolated state", async () => {
-    db.prepare("UPDATE nodes SET runtime = 'pi', model = 'mistral/devstral', codex_config_profile = NULL WHERE id = ?").run(nodeId);
+    db.prepare("UPDATE nodes SET runtime = 'pi', model = 'mistral/devstral', effort_choice = 'max', codex_config_profile = NULL WHERE id = ?").run(nodeId);
     const base = path.join(home, "state", "pi");
     const original = piSeatPaths(base, SEAT).agentDir;
     fs.mkdirSync(original, { recursive: true });
@@ -166,7 +166,7 @@ describe("live seat runtime switch", () => {
     const svc = service({ runtimeAdapters: { pi: target } }); successorConfirms(svc);
     expect(await svc.setRuntime({ seatRef: SEAT, runtime: "pi", accountHome, reason: "Change budget" }))
       .toMatchObject({ ok: true, changed: true, from: "pi", to: "pi", claimsMoved: 1, recoveryPending: false });
-    expect(nodeRow()).toMatchObject({ runtime: "pi", model: "mistral/devstral", effort: "high" });
+    expect(nodeRow()).toMatchObject({ runtime: "pi", model: "mistral/devstral", effort: "high", effort_choice: "max" });
     expect(rigRepo.getEffectiveSeatEnv(nodeId).PI_CODING_AGENT_DIR).toBe(accountHome);
     expect(piAccountStateRoot(db, base, SEAT)).toBe(piAccountSwitchStateRoot(base, openSwitch()!.successor_generation));
     expect(sessionRegistry.getBindingForNode(nodeId)).toMatchObject({ tmuxSession: SEAT, tmuxPane: "%5" });

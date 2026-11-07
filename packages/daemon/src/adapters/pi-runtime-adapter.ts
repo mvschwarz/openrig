@@ -323,7 +323,12 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     const appliedLaunch = this.runtime === "omp"
       ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
       : observePiResourceTrust(trust);
+    const accountHome = binding.accountHome !== undefined ? binding.accountHome
+      : binding.nodeId ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime) : undefined;
+    const preparedHome = accountHome === null && binding.nodeId
+      ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime, true) : accountHome;
     const cmd = buildPiRunnerCommand({
+      accountHome: preparedHome ?? undefined,
       runtime: this.runtime,
       runnerEntryPath: this.runnerEntryPath,
       sessionName: location.sessionName,
@@ -343,9 +348,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
     });
 
-    const accountHome = binding.accountHome !== undefined ? binding.accountHome
-      : binding.nodeId ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime) : undefined;
-    const fallback = this.runtime === "pi" ? `/usr/bin/env OPENRIG_PI_ACCOUNT_HOME= ${cmd}` : cmd;
+    const fallback = cmd;
     const command = this.runtime === "pi" && this.seatLaunchEnvironment
       ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, accountHome })
       : fallback;

@@ -101,8 +101,8 @@ export class SeatLaunchEnvironment {
   }
 
   /** The persisted account selection, also used to decide whether a bare launch fallback is safe. */
-  accountHome(nodeId: string, runtime: string): string | undefined {
-    return this.selectedAccountHome?.(nodeId, runtime);
+  accountHome(nodeId: string, runtime: string, ignoreAccountHome = false): string | undefined {
+    return this.selectedAccountHome?.(nodeId, runtime, ignoreAccountHome);
   }
 
   private rigBin(): string {
@@ -186,8 +186,6 @@ export class SeatLaunchEnvironment {
       if (target.codexCwd !== undefined && codexHome) env.CODEX_HOME = codexHome;
       if (accountHome && target.runtime === "claude-code") env.CLAUDE_CONFIG_DIR = accountHome;
       if (target.runtime === "pi") {
-        // Always override ambient values; only the resolved seat selection authorizes linking auth.
-        env.OPENRIG_PI_ACCOUNT_HOME = selectedPiHome ?? "";
         if (selectedPiHome) env.PI_CODING_AGENT_DIR = selectedPiHome;
       }
       // Classic Claude may be an rc alias or function, not a PATH executable.
@@ -226,7 +224,7 @@ export class SeatLaunchEnvironment {
       if (target.launchShell !== undefined) throw new Error("launch_wrapper unavailable; no agent started.");
       return wrapped ? "printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false"
         : accountHome || clearing ? "printf '%s\\n' 'OpenRig: isolated account launch unavailable; no agent started.' >&2; false"
-        : target.runtime === "pi" ? `/usr/bin/env OPENRIG_PI_ACCOUNT_HOME= ${fallback}` : fallback;
+        : fallback;
     }
   }
 }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
-import { claudeConfigRootFor, declaredRuntimeHomes, effectiveRuntimeHome, seatAccountHome, seatRuntimeHome, withoutRuntimeHomes } from "../src/domain/seat-runtime-home.js";
+import { claudeConfigRootFor, declaredRuntimeHomes, effectiveRuntimeHome, seatAccountHome, seatRuntimeHome, withoutRuntimeHomes, withoutIgnoredRuntimeHomes } from "../src/domain/seat-runtime-home.js";
 
 // A seat's own runtime home comes from its stored `env:`: the member's value, else the rig's.
 const open: Database.Database[] = [];
@@ -111,4 +111,9 @@ it("never selects an ambient daemon Pi home, including when clearing a stored se
   d.exec("UPDATE nodes SET account_home = NULL;");
   expect(effectiveRuntimeHome(d, "own", "pi", "/pi/ambient")).toBe("/pi/member");
   expect(effectiveRuntimeHome(d, "plain", "pi", "/pi/ambient")).toBeUndefined();
+});
+
+it("preserves relative Pi homes for community harnesses", () => {
+  expect(withoutIgnoredRuntimeHomes({ PI_CODING_AGENT_DIR: "relative/pi-home", CODEX_HOME: "relative/codex", DEBUG: "1" }))
+    .toEqual({ PI_CODING_AGENT_DIR: "relative/pi-home", DEBUG: "1" });
 });

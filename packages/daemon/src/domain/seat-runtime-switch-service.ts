@@ -250,7 +250,7 @@ export class SeatRuntimeSwitchService {
         const auth = nodePath.join(input.accountHome, "auth.json");
         if (!fs.statSync(auth).isFile()) throw new Error();
         fs.accessSync(auth, fs.constants.R_OK);
-      } catch { return refuse("invalid_runtime_settings", "The Pi account home needs a readable auth.json file; nothing changed."); }
+      } catch { return refuse("invalid_runtime_settings", `Pi account file ${JSON.stringify(nodePath.join(input.accountHome, "auth.json"))} must be readable; sign in to that home first, then retry. Nothing changed.`); }
     }
     const binding = sessionRegistry.getBindingForNode(node.id);
     const sessionName = binding?.tmuxSession ?? null;
@@ -566,10 +566,11 @@ export class SeatRuntimeSwitchService {
       }
       const at = this.now().toISOString();
       const spec = materials.resolvedSpec;
-      db.prepare(`UPDATE nodes SET runtime = ?, model = ?, effort = ?, effort_choice = NULL, advisor = ?, codex_config_profile = ?,
+      db.prepare(`UPDATE nodes SET runtime = ?, model = ?, effort = ?, effort_choice = ?, advisor = ?, codex_config_profile = ?,
         ${spec ? "resolved_spec_name = ?, resolved_spec_version = ?, resolved_spec_hash = ?, restore_policy = ?," : ""}
         occupant_lifecycle = 'active', continuity_outcome = 'fresh', handover_result = 'complete', previous_occupant = ?, handover_at = ? WHERE id = ?`)
-        .run(target, materials.settings.model.value, materials.settings.effort.value, materials.settings.advisor.value, materials.settings.codexConfigProfile.value,
+        .run(target, materials.settings.model.value, target === "pi" && ctx.input.effort === undefined ? node.effort ?? null : materials.settings.effort.value,
+          target === "pi" && ctx.input.effort === undefined ? readSeatEffort(db, node.id)?.choice ?? null : null, materials.settings.advisor.value, materials.settings.codexConfigProfile.value,
           ...(spec ? [spec.name, spec.version, spec.hash, spec.restorePolicy] : []), ctx.sessionName, at, node.id);
       db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = CASE WHEN ? THEN ? ELSE claude_token_ref END WHERE id = ?")
         .run(ctx.input.accountHome ?? null, ctx.input.accountHome !== undefined || node.accountHome ? 1 : 0,

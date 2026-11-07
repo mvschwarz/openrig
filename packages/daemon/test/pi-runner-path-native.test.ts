@@ -54,7 +54,7 @@ else { process.stdin.resume(); console.error('Error: Unknown options: --name, --
         fileURLToPath(new URL("../src/adapters/pi-runner.ts", import.meta.url)),
         "--session-name", "fixture", "--state-root", stateRoot, "--cwd", temp,
         "--launch-id", "path-attempt", "--no-approve"], {
-        env: { PI_CODING_AGENT_DIR: "/ambient/must-not-be-used", PATH: searchPath, HOME: temp, OPENRIG_HOME: path.join(temp, "home") },
+        env: { OPENRIG_PI_ACCOUNT_HOME: "/ignored/ambient", PI_CODING_AGENT_DIR: "/ambient/must-not-be-used", PATH: searchPath, HOME: temp, OPENRIG_HOME: path.join(temp, "home") },
         detached: true, stdio: ["pipe", "pipe", "pipe"],
       });
       let output = "", ready = false, timedOut = false;
@@ -184,8 +184,9 @@ exec "$@"
         "--launch-wrapper-arg", "--",
       ];
 
+      runnerArgv.push("--account-home", account);
       const child = spawn(process.execPath, runnerArgv, {
-        env: { OPENRIG_PI_ACCOUNT_HOME: account, PI_CODING_AGENT_DIR: "/ambient/must-not-be-used", PATH: [first, second, "/usr/bin", "/bin"].join(path.delimiter), HOME: temp, OPENRIG_HOME: path.join(temp, "home"), OPENRIG_NODE_ID: "node-1" },
+        env: { OPENRIG_PI_ACCOUNT_HOME: "/ignored/ambient", PI_CODING_AGENT_DIR: "/ambient/must-not-be-used", PATH: [first, second, "/usr/bin", "/bin"].join(path.delimiter), HOME: temp, OPENRIG_HOME: path.join(temp, "home"), OPENRIG_NODE_ID: "node-1" },
         detached: true, stdio: ["pipe", "pipe", "pipe"],
       });
       let output = "", ready = false, timedOut = false;

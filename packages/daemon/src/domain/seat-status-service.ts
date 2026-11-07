@@ -215,7 +215,7 @@ export class SeatStatusService {
     const ignored = own.ignored ? { ignored: own.ignored } : {};
     if (own.home && own.source) return { runtime_home: { variable, home: own.home, source: own.source } };
     // The daemon's explicit value, as its launches pass it on; else the runtime's native default under HOME.
-    const daemon = this.env[variable];
+    const daemon = runtime === "pi" ? undefined : this.env[variable];
     if (daemon) return { runtime_home: { variable, home: daemon, source: "daemon", ...ignored } };
     const home = this.env.HOME;
     // Unconfigured Pi uses its managed seat directory, not the operator's ~/.pi/agent login.
