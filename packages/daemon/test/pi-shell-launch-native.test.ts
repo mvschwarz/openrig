@@ -679,5 +679,5 @@ setInterval(() => {}, 1000);
       await run("tmux", ["-S", socket, "kill-server"]).catch(() => {});
       fs.rmSync(temp, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, 30_000);
 });
