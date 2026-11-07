@@ -499,7 +499,7 @@ resources:
     const cases = [
       seatWithRecipe(undefined, { recipe: false }),
       seatWithRecipe(undefined),
-      seatWithRecipe(`name: impl\nversion: "1.0"\nresources:\n  skills:\n    - id: x\n      path: skills/x\n      on_restore: sometimes\nprofiles:\n  default: {}\n`),
+      seatWithRecipe(`name: impl\nversion: "1.0"\nresources:\n  skills:\n    - id: x\n      on_restore: follow_source\nprofiles:\n  default: {}\n`),
     ];
     try {
       const reasons = [];
@@ -510,7 +510,7 @@ resources:
       }
       expect(reasons[0]).toContain("no launch recipe");
       expect(reasons[1]).toContain("agent.yaml");
-      expect(reasons[2]).toContain("on_restore");
+      expect(reasons[2]).toContain("path");
     } finally { for (const c of cases) c.db.close(); }
   });
 });

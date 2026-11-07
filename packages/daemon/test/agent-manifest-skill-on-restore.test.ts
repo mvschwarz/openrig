@@ -25,9 +25,11 @@ describe("a skill resource's on_restore says whether a restored seat keeps its s
     }
   });
 
-  it("rejects any other value, naming the entry", () => {
+  it("advises on unknown values, even on an unselected resource, and keeps the saved copy", () => {
     const result = validateAgentSpec(spec("refresh"));
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain(`resources.skills[0].on_restore: must be "keep_saved" | "follow_source" (got "refresh")`);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(normalizeAgentSpec(spec("refresh")).resources.skills[0]!.onRestore).toBe("keep_saved");
+    expect(result.advisories).toContain(`resources.skills[0].on_restore: unknown value "refresh"; expected "keep_saved" | "follow_source"; using "keep_saved"`);
   });
 });

@@ -454,6 +454,8 @@ skills:
 | `path` | string | yes | — | Relative path to the skill's folder, which holds its `SKILL.md`. |
 | `on_restore` | string | no | `keep_saved` | What a restore (`rig up <rig>`) does with a Claude or Codex seat's copy of this skill in the seat's own storage: `keep_saved` or `follow_source`. |
 
+An unknown `on_restore` value produces an advisory and uses `keep_saved`; it does not invalidate the spec.
+
 A restore keeps the skills a seat was launched with. With `keep_saved`, it puts back the saved copy and never takes
 today's bytes from the source. With `follow_source`, before the seat's session starts, the restore reads the seat's agent
 spec as it is now, using the saved launch recipe and rig folder, and:
@@ -541,7 +543,7 @@ restore behavior, and the distinction between readiness and verified proof.
 9. All resource paths must be safe relative paths (a plugin's `source.path` excepted).
 10. Resource IDs must be unique within their category, and each `resources.<category>` must be an array.
 11. `runtime_resources` entries require `runtime` and `type` fields.
-11a. A skill's `on_restore` must be `keep_saved` or `follow_source` when given.
+11a. An unknown skill `on_restore` value produces an advisory naming the known values and falls back to `keep_saved`.
 12a. `resources.hooks` and `profiles.<name>.uses.hooks` are refused: "removed in plugin-primitive (Phase 3a)". Declare
    a plugin instead.
 12b. A plugin needs a unique non-empty `id`, a `source` object with `kind: local` and a non-empty `path`, and a

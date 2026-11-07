@@ -2,7 +2,7 @@ import { parse as parseYaml } from "yaml";
 import type {
   AgentSpec, ImportSpec, StartupBlock, StartupFile, StartupAction,
   LifecycleDefaults, AgentResources, ProfileSpec,
-  SkillResource, SkillOnRestore, GuidanceResource, SubagentResource, RuntimeResource,
+  SkillResource, GuidanceResource, SubagentResource, RuntimeResource,
   PluginResource, PluginSource,
   ValidationResult,
 } from "./types.js";
@@ -283,7 +283,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
             entries.forEach((entry, i) => {
               const onRestore = entry && typeof entry === "object" ? entry["on_restore"] : undefined;
               if (onRestore !== undefined && onRestore !== "keep_saved" && onRestore !== "follow_source") {
-                errors.push(`resources.skills[${i}].on_restore: must be "keep_saved" | "follow_source" (got "${String(onRestore)}")`);
+                advisories.push(`resources.skills[${i}].on_restore: unknown value "${String(onRestore)}"; expected "keep_saved" | "follow_source"; using "keep_saved"`);
               }
             });
           }
@@ -470,7 +470,7 @@ function normalizeResources(raw: unknown): AgentResources {
   return {
     skills: Array.isArray(obj["skills"])
       ? (obj["skills"] as Record<string, unknown>[]).map((s) => ({ id: s["id"] as string, path: s["path"] as string,
-          onRestore: (s["on_restore"] as SkillOnRestore | undefined) ?? "keep_saved" }))
+          onRestore: s["on_restore"] === "follow_source" ? "follow_source" : "keep_saved" }))
       : [],
     guidance: Array.isArray(obj["guidance"])
       ? (obj["guidance"] as Record<string, unknown>[]).map((g) => ({
