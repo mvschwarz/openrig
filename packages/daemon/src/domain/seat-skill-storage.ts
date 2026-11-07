@@ -827,7 +827,7 @@ export function writeSeatSkillCatalog(paths: SeatSkillPaths): SeatSkillCatalog {
     "OpenRig: this seat's skills. This list replaces any earlier OpenRig skill list in this conversation.",
     "",
     lines.length > 0
-      ? "Each skill says when to use it. When that moment comes, read its SKILL.md, then follow it."
+      ? "Each skill says when to use it. When that moment comes, read its current SKILL.md, then follow it; earlier copies read in this conversation may be out of date."
       : "No OpenRig skills are kept for this seat.",
     "",
     ...lines,

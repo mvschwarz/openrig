@@ -7,7 +7,7 @@ import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-i
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -1326,19 +1326,22 @@ export class RestoreOrchestrator {
     // OPR.0.7.0.13: a Claude seat's team skills come back before its session starts, because the session's plugin list
     // is set then. `rig down` removed the unchanged files OpenRig wrote but kept the records, so they are put back from
     // their recorded sources (only where those still match) and the seat's plugin is written again. An edited or
-    // unprovable file is named, never substituted. Nothing is replayed into a resumed conversation; this is the seat's
-    // storage on disk.
+    // unprovable file is named, never substituted. Following skills additionally refresh their current selection;
+    // Codex receives that selection after resume readiness, without replaying other saved startup content.
     // The rehydration's decisions are carried into the fresh relaunch's replay below, so no later writer undoes them.
     let seatRehydration: SeatSkillRehydration | undefined;
+    let restoredSkillCatalog: string | undefined;
     if (node.runtime === "claude-code" || node.runtime === "codex") {
       const seatSkills = seatSkillPaths({ rigId, logicalId: node.logicalId, runtime: node.runtime });
       if (hasSeatSkillRecords(seatSkills)) {
+        let followsSources = hasFollowingSeatSkills(seatSkills);
         if (node.runtime === "claude-code") warnings?.push(...ensureSeatSkillPlugin(seatSkills).map((w) => `Restore: ${w}`));
         // Skills whose resource says `on_restore: follow_source` take today's bytes and today's selection, before the
         // saved ones are put back; an edit is still kept. When today's selection can't be read, the saved one stands.
         if (this.seatSkillSelection) {
           const today = await this.seatSkillSelection(rigId, nodeId).catch((error: unknown) => ({ ok: false as const, reason: (error as Error).message }));
           if (today.ok) {
+            followsSources ||= today.selection.following.length > 0;
             const followed = followSeatSkills(seatSkills, today.selection);
             const changes = [["refreshed", followed.refreshed], ["added", followed.added], ["removed", followed.removed]] as const;
             const summary = changes.filter(([, ids]) => ids.length > 0).map(([what, ids]) => `${what} ${ids.join(", ")}`);
@@ -1365,7 +1368,8 @@ export class RestoreOrchestrator {
         if (node.runtime === "codex") {
           try {
             const catalog = writeSeatSkillCatalog(seatSkills);
-            if (catalog.kept) warnings?.push(`Restore: ${seatCatalogKeptNote(catalog)}`);
+            if (catalog.kept) warnings?.push(`Restore: ${seatCatalogKeptNote(catalog)}; the updated catalog was not sent`);
+            else if (followsSources) restoredSkillCatalog = catalog.path;
           } catch (error) {
             warnings?.push(`Restore: seat_catalog_not_written: ${seatSkills.catalogPath}: ${(error as Error).message}`);
           }
@@ -1405,7 +1409,7 @@ export class RestoreOrchestrator {
     }
 
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
-      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}) }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps);
+      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}) }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
       ...(keptPane ? { launchStarted: true as const } : {}) };
@@ -1665,6 +1669,7 @@ export class RestoreOrchestrator {
     /** Collected out-of-band (this method has many return points): activity-hook
      *  restore gaps the caller attaches to the node result as `restoreGaps`. */
     activityHookGaps?: string[],
+    restoredSkillCatalog?: string,
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
     // OPR.0.7.0.7: what this restore launches with when the seat has a saved effort choice is decided by the one
@@ -2060,6 +2065,13 @@ export class RestoreOrchestrator {
               return false;
             }
             return true;
+          });
+
+          // A following Codex seat gets its current list after native resume is ready, through the ordinary
+          // startup delivery path. The saved startup context stays intact; no other startup material is replayed.
+          if (resumeRequested && restoredSkillCatalog) filteredFiles.push({
+            path: "openrig-seat-skills.md", absolutePath: restoredSkillCatalog,
+            ownerRoot: dirname(restoredSkillCatalog), deliveryHint: "send_text", required: true, appliesOn: ["fresh_start", "restore"],
           });
 
           // Check if any required files were dropped

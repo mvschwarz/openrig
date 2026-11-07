@@ -469,9 +469,17 @@ and the restore says why; a source folder without a `SKILL.md` keeps that skill'
 `keep_saved` stops following at the next restore, and its copy stays.
 
 Only a restore does this; a running seat isn't changed, and neither is a Codex seat restarted in place. A Claude seat
-loads its seat plugin when its session starts, so it sees the new copies. A Codex seat reads each skill's `SKILL.md` at
-the path its skill catalog gives, so it sees a refreshed skill; its catalog is rebuilt on restore but sent to the seat
-only on a fresh start, so a resumed Codex seat isn't told about a skill copied in.
+loads its seat plugin when its session starts, so it sees the new copies. A Codex seat with following skills receives
+its rebuilt catalog after its resumed session is ready. The catalog lists the skills actually present, replaces its
+earlier OpenRig skill list, and asks it to read current skill files before using them. This includes newly selected
+skills and the removal of the last following skill. An edited or linked catalog is kept and not sent, with a warning;
+a delivery failure is reported instead of claiming a complete restore. Neither runtime erases skill instructions
+already read into the retained conversation.
+
+Following covers the whole selected skill folder, including scripts and references. It does not install external
+tools, change MCP configuration, or update bundled plugins. The saved launch recipe supplies the rig directory,
+member and profile; today's agent spec supplies the skill selection. Today's rig YAML and other agent settings are
+not applied by this refresh.
 
 ### Guidance Resources
 
