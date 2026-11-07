@@ -17,6 +17,7 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), "seat-skills-follow-")); });
   afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 
+  /** Create isolated seat storage and helpers that model a recorded skill projection. */
   function seat(runtime = "claude-code") {
     const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime }, home);
     ensureSeatSkillPlugin(paths);
@@ -393,6 +394,7 @@ describe("a restore reads a seat's skill selection from its spec as it is now, t
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), "seat-skills-follow-select-")); });
   afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 
+  /** Create a persisted seat recipe whose source agent spec can change independently. */
   function seatWithRecipe(agentYaml: string | undefined, opts: { recipe?: boolean } = {}) {
     const db = createFullTestDb();
     const rigRoot = mkdtempSync(join(home, "rig-"));

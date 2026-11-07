@@ -460,6 +460,7 @@ function normalizeLifecycle(raw: Record<string, unknown>): LifecycleDefaults {
   };
 }
 
+/** Normalize validated resource declarations, retaining each skill's optional restore policy. */
 function normalizeResources(raw: unknown): AgentResources {
   if (!raw || typeof raw !== "object") {
     return { skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: [] };

@@ -475,6 +475,7 @@ const readProjections = (path: string): ProjectionRecord => {
   } catch { return { files: {} }; }
 };
 
+/** Persist ownership and following-policy metadata within the seat storage boundary. */
 function writeProjections(root: string, record: ProjectionRecord): void {
   writeInsideSeatStorage(root, nodePath.join(root, "skill-projections.json"),
     `${JSON.stringify({ schema: "openrig.seat-skill-projections/v1", files: record.files, ...(record.generated ? { generated: record.generated } : {}),
@@ -537,6 +538,7 @@ export interface SeatSkillFollow {
 /** Every file below `dir` (anything not a folder, links included), relative to it; empty when it isn't there. */
 function filesBelow(dir: string): string[] {
   const out: string[] = [];
+  /** Collect relative file paths without descending through directory symlinks. */
   const walk = (current: string) => {
     const entries = fs.readdirSync(current, { withFileTypes: true });
     for (const entry of entries) {
