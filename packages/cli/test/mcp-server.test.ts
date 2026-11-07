@@ -427,6 +427,14 @@ describe("MCP Server", () => {
       const message = (whoami.structuredContent as { message: string }).message;
       expect(message).toContain("OPENRIG_SESSION_NAME is \"${user_config.seat}\", a placeholder the app didn't fill in");
       expect(message).toContain("such as cursor@my-team");
+      // An app that can't give a plugin's server a value is told what it can do, never only "set it in the env".
+      expect(message).toContain("VS Code, Copilot CLI and Cursor can't give a plugin's server a value, so start the app from a shell");
+      expect(quietGet).not.toHaveBeenCalled();
+      const owned = await mcpClient.callTool({ name: "rig_queue_list", arguments: { owned: true } });
+      expect(owned.isError).toBe(true);
+      const ownedText = (owned.content as Array<{ text: string }>)[0]!.text;
+      expect(ownedText).toContain("rig_whoami says how to give it one");
+      expect(ownedText).not.toContain("in its env");
       expect(quietGet).not.toHaveBeenCalled();
       await cleanup();
     } finally {

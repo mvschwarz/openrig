@@ -1409,7 +1409,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         // An external caller lists its own items only, so the daemon's limit counts those and not the team's.
         const mine = mineAsked || (scope?.ownListsOnly === true && !owned);
         if ((owned || mine) && !sessionName) {
-          const message = "owned and mine need this server's seat: set OPENRIG_SESSION_NAME in its env, or filter by destination or source";
+          const message = "owned and mine need this server's seat (rig_whoami says how to give it one), or filter by destination or source";
           return errorResult(JSON.stringify({ ok: false, error: message }), "seat_required", message);
         }
         if (scope) {
@@ -1590,8 +1590,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
             + "with a note saying so: there's no return address, so follow a task by its qitemId with rig_queue_show. "
             + "Claiming, updating, handing off or deciding a task, answering a question asked of a seat, and listing your own "
             + "items (owned or mine) need this app's seat; reply to the team's questions as a message or a new task naming the "
-            + "question's qitemId. To act as this app's address on the team, such as cursor@my-team, set OPENRIG_SESSION_NAME "
-            + "where the server is configured.";
+            + "question's qitemId. To act as this app's address on the team, such as cursor@my-team, the server needs "
+            + "OPENRIG_SESSION_NAME: in Claude Code, set the plugin's OpenRig seat; in Codex, pass it with --env on codex mcp add. "
+            + "VS Code, Copilot CLI and Cursor can't give a plugin's server a value, so start the app from a shell where "
+            + "OPENRIG_SESSION_NAME is set, or use your own rig mcp serve --front-door server that sets it instead of the plugin's.";
           const none = { ok: true, seat: null, caller, unknownSender, ...(options.unfilledSeat ? { unfilledSeat: options.unfilledSeat } : {}), message };
           return { content: [{ type: "text" as const, text: JSON.stringify(none) }], structuredContent: none };
         }
