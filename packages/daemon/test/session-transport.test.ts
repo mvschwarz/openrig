@@ -694,6 +694,40 @@ describe("SessionTransport", () => {
       expect(callOrder).toEqual(["cancelPaneMode", "sendText", "sendKeys:Enter"]);
     });
 
+    it("leaves the mode through the seat's address when a stale binding elsewhere names the same pane", async () => {
+      const { node } = seedCanonicalRig();
+      sessionRegistry.updateBinding(node.id, { tmuxPane: "%27" });
+      // tmux reuses pane ids after a server restart: another rig's binding can still name %27.
+      const studio = rigRepo.createRig("studio-build");
+      const stale = rigRepo.addNode(studio.id, "sdk.impl", { role: "worker", runtime: "claude-code" });
+      sessionRegistry.registerSession(stale.id, "sdk-impl@studio-build");
+      sessionRegistry.updateBinding(stale.id, { tmuxSession: "sdk-impl@studio-build", tmuxPane: "%27" });
+      // The guard can't resolve the raw pane id to one seat, so a write addressed to it is refused before any key.
+      expect(resolveGuardTarget(db, "%27")).toBeNull();
+      expect(resolveGuardTarget(db, "dev-impl@my-rig")).toMatchObject({ nodeId: node.id, pane: "%27" });
+      const callOrder: string[] = [];
+      const tmux = modalPane({ leaves: true, callOrder });
+      const modeReads: string[] = [];
+      let left = false;
+      tmux.isPaneInMode = vi.fn(async (target: string) => { modeReads.push(target); return !left; });
+      const cancelTargets: string[] = [];
+      // As the adapter's guarded write does: an unresolvable target writes nothing, so the pane stays in its mode.
+      tmux.cancelPaneMode = vi.fn(async (target: string) => {
+        cancelTargets.push(target); callOrder.push("cancelPaneMode");
+        if (!resolveGuardTarget(db, target)) return { ok: false as const, code: "guard_target_unknown", message: `Cannot establish managed input target ${target}; no input written.` };
+        left = true;
+        return { ok: true as const };
+      });
+      const transport = createTransport(tmux);
+
+      const result = await transport.send("dev-impl@my-rig", "hello");
+      // The person's harm first: the message is delivered and submitted, not refused as pane_in_mode.
+      expect(result).toMatchObject({ ok: true });
+      expect(callOrder).toEqual(["cancelPaneMode", "sendText", "sendKeys:Enter"]);
+      expect(cancelTargets).toEqual(["dev-impl@my-rig"]);
+      expect(modeReads.every(target => target === "%27")).toBe(true);
+    });
+
     it("leaves the mode before a submitOnly Enter", async () => {
       seedCanonicalRig();
       const callOrder: string[] = [];
