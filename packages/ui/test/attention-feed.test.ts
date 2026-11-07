@@ -60,6 +60,15 @@ function makeFeedCard(opts: { kind: FeedCard["kind"]; qitemId?: string; id?: str
 }
 
 describe("attentionItemToFeedCard — kind classification", () => {
+  it("preserves question data before card hydration, including on remote hosts", () => {
+    const humanQuestions = [{ id: "channel", question: "Which channel?" }];
+    const card = attentionItemToFeedCard(makeAttention({ humanQuestions, hostId: "remote", tags: ["runner-permission"] }));
+    expect(card.source.payload.humanQuestions).toEqual(humanQuestions);
+    expect(card.hostId).toBe("remote");
+    expect(card.source.payload.tags).toEqual(["runner-permission"]);
+    expect(attentionItemToFeedCard(makeAttention()).source.payload.humanQuestions).toBeNull();
+  });
+
   it("HG-4 approval class: tier='human-gate' → kind:'approval'", () => {
     const card = attentionItemToFeedCard(makeAttention({ tier: "human-gate", destinationSession: "advisor@rig" }));
     expect(card.kind).toBe("approval");

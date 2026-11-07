@@ -54,6 +54,19 @@ describe("GET /library/resolve-address — file-level span serving (Atom 4c)", (
   const resolve = (address: string) =>
     app.request(`/api/context-packs/library/resolve-address?address=${encodeURIComponent(address)}`);
 
+  it("serves complete sections around commented headings and fences", async () => {
+    const welcome = "## Welcome\nhello\n<!--\n## Archived\n```\n-->\nstill welcome";
+    writeFileSync(join(tmp, "lib", "packs", "world", "walk.md"),
+      `${welcome}\n## Reference\nreference instructions\n`);
+    const first = await resolve("packs/world/walk.md#welcome");
+    expect(first.status).toBe(200);
+    expect(((await first.json()) as { text: string }).text).toBe(welcome);
+    const next = await resolve("packs/world/walk.md#reference");
+    expect(next.status).toBe(200);
+    expect(((await next.json()) as { text: string }).text).toBe("## Reference\nreference instructions\n");
+    expect((await resolve("packs/world/walk.md#archived")).status).toBe(422);
+  });
+
   it("serves a requested section after an inline triple-backtick span", async () => {
     writeFileSync(join(tmp, "lib", "packs", "world", "walk.md"),
       "## Welcome\n```literal ` backticks```\n## Reference\nreference instructions\n");

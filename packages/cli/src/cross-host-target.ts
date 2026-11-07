@@ -36,6 +36,8 @@ export interface CrossHostTargetResolution {
   target: string;
   /** The sugar-derived host id (registered suffix), if any. */
   sugarHost: string | undefined;
+  /** The qualifier explicitly names this host, overriding a persisted remote selection. */
+  localHost?: boolean;
   /**
    * Loud-failure hint when the target was 3-part-SHAPED but the suffix
    * matched no registered host. Callers append it to failure surfaces for
@@ -72,7 +74,9 @@ export function resolveCrossHostTarget(
   const suffix = rawTarget.slice(lastAt + 1);
 
   const unregisteredHint = suffix.length > 0
-    ? `no registered host '${suffix}' — if '${suffix}' was meant as a host, check \`rig host ls\``
+    ? `no registered host '${suffix}' — if '${suffix}' is another machine's self-id (the address a cross-host message shows), `
+      + `run \`rig host doctor <alias>\` for that machine's entry if it uses http (it learns the id), or set \`hostId: ${suffix}\` on that entry in hosts.yaml (any transport); `
+      + `\`rig host ls\` lists the registered hosts`
     : undefined;
 
   if (suffix.length === 0 || base.length === 0) {
@@ -100,7 +104,7 @@ export function resolveCrossHostTarget(
       };
     }
     // Routes home: strip the self-suffix, no cross-host sugarHost (local send).
-    return { ok: true, target: base, sugarHost: undefined, hint: undefined };
+    return { ok: true, target: base, sugarHost: undefined, localHost: true, hint: undefined };
   }
 
   const loader = registryLoader ?? loadHostRegistry;

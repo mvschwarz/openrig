@@ -238,7 +238,8 @@ describe("fresh in-place readiness requires current launch evidence", () => {
     const startedAt = "Mon Oct 19 21:30:00 2026";
     f.listProcesses.mockReturnValue([
       { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt },
-      { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "codex", command: "codex resume other-token", startedAt },
+      { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "codex", command: "codex resume other-token",
+        argv: ["codex", "resume", "other-token"], startedAt },
     ]);
     await launch(f.adapter);
     expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "claude_launch_identity_conflict" });

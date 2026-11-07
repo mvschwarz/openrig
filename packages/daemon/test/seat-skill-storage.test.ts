@@ -294,6 +294,30 @@ describe("rig down removes only what OpenRig wrote into a seat's storage, and ke
     expect(hasSeatSkillRecords(paths)).toBe(true);
   });
 
+  it("keeps a recorded copy its source no longer has, so a restore brings back the copy the seat had", () => {
+    const { paths, src, write } = seat();
+    write("review-pr/SKILL.md", "v1");
+    write("queue-handoff/SKILL.md", "handoff");
+    const copy = join(paths.skillsRoot, "review-pr/SKILL.md");
+    const orphan = join(paths.skillsRoot, "queue-handoff/SKILL.md");
+    writeFileSync(join(src, "review-pr/SKILL.md"), "v2"); // the source moved on between down and up
+    rmSync(join(src, "queue-handoff"), { recursive: true }); // and this source is gone
+    const down = cleanSeatSkills(paths);
+    expect(down.removed).toEqual([]);
+    expect(down.kept.sort()).toEqual([copy, orphan].sort());
+    expect(readFileSync(copy, "utf8")).toBe("v1");
+    // The restore finds each copy as it was: present and matching its record, so neither is missing nor substituted.
+    ensureSeatSkillPlugin(paths);
+    expect(rehydrateSeatSkills(paths)).toEqual({ restored: [], kept: [], missing: [], refused: [] });
+    expect(readFileSync(copy, "utf8")).toBe("v1");
+    // A deleted rig still takes them: nothing will restore it.
+    ensureSeatSkillPlugin(paths);
+    const deleted = cleanSeatSkills(paths, { dropRecords: true });
+    expect(deleted.removed.sort()).toEqual([copy, orphan].sort());
+    expect(deleted.kept).toEqual([]);
+    expect(deleted.refused).toEqual([]);
+  });
+
   it("puts the removed files back from the records, then drops everything once the rig itself is deleted", () => {
     const { paths, write } = seat();
     write("queue-handoff/SKILL.md", "skill");

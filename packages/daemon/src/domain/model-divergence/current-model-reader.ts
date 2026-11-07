@@ -40,7 +40,7 @@ interface Deps {
   piRunner: (sessionName: string) => PiOccupantRecordInput["runner"];
   native: CurrentGenerationDeps;
   census: ProcessCensus;
-  readAllPaneProcesses?: () => Promise<Map<string, { pid: number }> | null>;
+  readAllPaneProcesses?: () => Promise<Map<string, { pid: number | null }> | null>;
   now?: () => number;
 }
 type InventoryNode = { nodeId: string; canonicalSessionName: string | null; runtime: string | null; sessionStatus: string | null };
@@ -185,7 +185,7 @@ export class CurrentModelReader {
     } };
     const prepared = await Promise.all(nodes.map(n => this.prepare(n, native)));
     if (!prepared.some(p => "finish" in p)) return prepared as ModelObservation[];
-    let after: Map<string, { pid: number }> | null = null;
+    let after: Map<string, { pid: number | null }> | null = null;
     try { after = await this.deps.readAllPaneProcesses(); } catch { /* UNKNOWN, never a fallback subprocess storm. */ }
     return prepared.map(p => "finish" in p ? p.finish(after?.get(p.pane)?.pid ?? null, after === null ? "native-read-unavailable" : "pane-unavailable") : p);
   }

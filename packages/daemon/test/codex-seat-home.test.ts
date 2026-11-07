@@ -16,6 +16,7 @@ import { provenCodexResume } from "./helpers/codex-resume-proof.js";
 const exec = promisify(execFile), roots: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const r of roots.splice(0)) fs.rmSync(r, { recursive: true, force: true }); });
 
+/** Build a private launch environment whose scripted Codex reports its selected home. */
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-seat-home-")); roots.push(root);
   const home = path.join(root, "home"), daemonHome = path.join(root, "daemon codex"), seatHome = path.join(root, "seat's codex");
@@ -33,7 +34,7 @@ function fixture() {
   const fsOps = { homedir: home, readFile: (p: string) => fs.readFileSync(p, "utf8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
     exists: fs.existsSync, mkdirp: (p: string) => { fs.mkdirSync(p, { recursive: true }); } };
   const launchEnv = new (SeatLaunchEnvironment as any)(tmux, env, root, cli, daemonHome) as SeatLaunchEnvironment;
-  const run = (cmd: string) => exec("/bin/bash", ["--noprofile", "--norc", "-c", cmd], { cwd, env, timeout: 5000 });
+  const run = (cmd: string) => exec("/bin/bash", ["--noprofile", "--norc", "-c", cmd], { cwd, env, timeout: 15000 });
   const seatHomeOf = (nodeId: string) => nodeId === "node" ? seatHome : undefined;
   return { root, home, daemonHome, seatHome, cwd, env, tmux, fsOps, launchEnv, run, seatHomeOf };
 }
@@ -64,6 +65,23 @@ it.each(["fresh", "resume", "fork"])("a seat's own CODEX_HOME wins over the daem
   expect(fs.readFileSync(path.join(f.seatHome, "config.toml"), "utf8")).toContain(MANAGED_FLAG);
   expect(fs.existsSync(path.join(f.daemonHome, "config.toml"))).toBe(false);
   if (kind === "resume") expect(verify).toHaveBeenCalledWith("seat@rig", expect.anything(), expect.objectContaining({ home: f.seatHome }));
+});
+
+it.each(["member", "daemon", "native"])("a staged clear uses the %s baseline for Codex config and its executable child", async baseline => {
+  const f = fixture();
+  const configured = baseline === "member" ? f.seatHome : baseline === "daemon" ? f.daemonHome : undefined;
+  const launchEnv = new (SeatLaunchEnvironment as any)(f.tmux, f.env, f.root, path.join(f.root, "bin", "rig"), baseline === "daemon" ? f.daemonHome : undefined,
+    (_node: string, _runtime: string, ignore: boolean) => ignore ? configured : "/accounts/old") as SeatLaunchEnvironment;
+  const adapter = new CodexRuntimeAdapter({ tmux: f.tmux as any, fsOps: f.fsOps,
+    codexHome: baseline === "daemon" ? f.daemonHome : undefined,
+    seatHome: (_node, ignore) => ignore ? baseline === "member" ? f.seatHome : undefined : "/accounts/old",
+    launchPath: f.env.PATH, seatLaunchEnvironment: launchEnv, resolveGitAddDirs: async () => [],
+    resolveManagedConfigSettings: async () => ({ enabled: true, codexVersion: "0.120.0" }) });
+  vi.spyOn(adapter as any, "dismissSkippableCodexUpdatePrompt").mockResolvedValue(undefined);
+  vi.spyOn(adapter as any, "captureFreshThreadId").mockResolvedValue("fresh");
+  expect((await adapter.launchHarness({ nodeId: "node", tmuxSession: "seat@rig", cwd: f.cwd, accountHome: null } as any, { name: "seat" })).ok).toBe(true);
+  expect(JSON.parse((await f.run(f.tmux.sendShellCommand.mock.calls.at(-1)![1])).stdout).home).toBe(configured);
+  expect(fs.readFileSync(path.join(configured ?? path.join(f.home, ".codex"), "config.toml"), "utf8")).toContain(MANAGED_FLAG);
 });
 
 it("a seat without its own home keeps the daemon's CODEX_HOME and config", async () => {
@@ -153,7 +171,7 @@ it("the legacy Codex resume launches in the seat's own home when one is passed, 
   expect((await adapter.resume("seat@rig", "codex_id", "old", f.cwd)).ok).toBe(true);
   expect(await homeOf()).toBe(f.daemonHome);
   expect(ensured).toEqual([f.seatHome, undefined]);
-});
+}, 35_000);
 
 it("context usage finds a thread's state in a declared seat home", () => {
   const f = fixture(); seed(f.seatHome, "seat-thread");

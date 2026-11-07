@@ -8,13 +8,27 @@ import type { ClaudeResumeRotation } from "./native-process-lineage.js";
 // The startup orchestrator (AS-T07) constructs NodeBinding from Binding + node.cwd.
 
 export interface NodeBinding extends Binding {
+  environmentRestore?: NonNullable<import("./types.js").SnapshotData["environmentBindingsByNode"]>[string];
   cwd: string;
+  /** In-place Claude continuation only: executable observed before the old process exits. */
+  claudeExecutable?: string;
   model?: string;
   effort?: string;
   /** Claude-only, session-scoped Advisor model. */
   advisor?: string;
   codexConfigProfile?: string;
+  /** #875: the file this launch merges its managed guidance blocks into, chosen once at a fresh launch
+   *  (`guidanceFileFor`) or carried from a restore's saved startup context. Null means the rule's file in `cwd`;
+   *  undefined means not chosen yet. */
+  guidanceFile?: string | null;
+  /** #875: this fresh launch carries its managed guidance as launch developer instructions (Codex), not in a file. */
+  guidanceLaunchInstructions?: boolean;
+  /** A staged account-home selection; null explicitly returns to configured defaults before commit. */
+  accountHome?: string | null;
+  accountToken?: import("./claude-seat-token.js").ClaudeSeatTokenRef | null;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
+  launchWrapper?: readonly string[];
   /** A Codex seat's own permission envelope, read live; emitted instead of the posture decision. */
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Rebuild only: a process/conversation-bound native predecessor policy. */
@@ -124,7 +138,10 @@ export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 
 // `launchedProcess` (Claude resume launches): the first process the launch's own readiness check
 // pinned as the one it started, kept even when a later sample saw it replaced (#1077).
-export type HarnessLaunchResult = { firstInput?: import("./community-harness-first-input.js").FirstInputPassed } & (
+export type HarnessLaunchResult = { firstInput?: import("./community-harness-first-input.js").FirstInputPassed;
+  /** A community launcher that opts in was handed the seat's declared model as OPENRIG_MODEL: "confirmed" when the launch
+   *  command's send succeeded, "uncertain" when typing began and the send then failed. Never proof of the model that runs. */
+  modelInput?: { model: string; dispatch: "confirmed" | "uncertain" } } & (
   | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation;
     /** Where resumeToken came from, when not a pane scrape: a community harness's launcher reported it. */
     resumeProvenance?: "launcher" | "passed";
@@ -212,7 +229,15 @@ export interface ForkSource {
  * Startup action execution is NOT part of this contract — that belongs
  * to the startup orchestrator after checkReady().
  */
+/** Where a launch's managed guidance goes (#875): a file (null: the rule's file in the working directory), or, with
+ *  `launchInstructions`, the launch's own developer instructions and no file at all. */
+export interface GuidanceChoice { file: string | null; note?: string; launchInstructions?: true }
+
 export interface RuntimeAdapter {
+  /** Optional environment-driver v1 operations. Absence means unsupported; the host launch path is unchanged. */
+  readonly environment?: Pick<import("./environment-platform.js").EnvironmentPlatform, "protocolVersion" | "create" | "attach" | "project" | "validate" | "forNode">;
+  preflightEnvironmentStartup?(binding: NodeBinding, opts: { resumeToken?: string; resumeType?: string; forkSource?: unknown }): Promise<void>;
+  prepareEnvironmentStartup?(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult>;
   /** Claude's managed capability/launch seam, shared with seat selection. */
   readonly claudeManagedLaunch?: import("./claude-managed-launch.js").ClaudeManagedLaunch;
   readonly runtime: string;
@@ -220,6 +245,9 @@ export interface RuntimeAdapter {
    *  the Claude project tree, for "already in place" detection. Absent = the
    *  instantiator's default target. */
   skillTargetPath?(tmuxSession: string | null, effectiveId: string): string | null;
+  /** #875: where this seat's managed guidance should go, decided at a fresh launch and recorded with its startup context.
+   *  Absent, or a null file, keeps the rule's file in the working directory; a note says why the seat's own file wasn't used. */
+  guidanceFileFor?(binding: NodeBinding, opts?: { resuming?: boolean }): GuidanceChoice | Promise<GuidanceChoice>;
 
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;

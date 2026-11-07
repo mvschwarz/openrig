@@ -7,7 +7,7 @@ export { daemonMayAnswer } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
 import { DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
-import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv } from "./openrig-compat.js";
+import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 // Types only: the module itself (with the daemon's yaml-reading system world) is imported where an
 // instance is initialized, so a command that only talks to the daemon never loads it.
 import type {
@@ -62,6 +62,9 @@ export interface DaemonStatus {
   eventLoop?: DaemonEventLoopEvidence;
   /** #275 — the OS code behind a failed health probe (e.g. EPERM when a sandbox blocked it). */
   probeErrorCode?: string;
+  /** T2 — a refused listener under a live start reservation (daemon-start.lock): a launch is in
+   *  progress and not listening yet. `pid` is the live launcher (else child) PID; `since` its start. */
+  startPending?: { pid: number; since?: string };
 }
 
 /** "unknown": the process may exist but this shell can neither signal nor inspect it. */
@@ -70,6 +73,18 @@ export type ProcessLiveness = "alive" | "dead" | "unknown";
 export interface GetDaemonStatusOptions {
   /** Observers may disable cleanup; only a matching clean shutdown permits removal. */
   cleanupStaleState?: boolean;
+}
+
+/** True for `http://host:port` with an explicit, non-default port and no path, query or
+ *  fragment: the only OPENRIG_URL shape getDaemonUrl's host-and-port rebuild reaches unchanged
+ *  (without a port, or with :80, which URL reports as no port, status falls back to 7433). */
+function isPlainHttpOrigin(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" && u.port !== "" && u.pathname === "/" && !u.search && !u.hash && !url.endsWith("/");
+  } catch {
+    return false;
+  }
 }
 
 /** Build the daemon HTTP URL from status. Uses persisted host or defaults to 127.0.0.1. */
@@ -122,6 +137,16 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
       fact: `Daemon could not be checked: the health probe was blocked (${status.probeErrorCode}).`,
       consequence: `This command needs a responsive daemon. ${blocked.consequence}`,
       action: blocked.action,
+      ...causeCode,
+    };
+  }
+  // A refused probe under a live start reservation: a launch is in progress and nothing is listening yet.
+  if (status.startPending) {
+    const since = status.startPending.since ? ` since ${status.startPending.since}` : "";
+    return {
+      fact: `Daemon is starting (launch reserved by pid ${status.startPending.pid}${since}); it isn't listening yet.`,
+      consequence: "This command needs a responsive daemon.",
+      action: "Wait, then re-check with 'rig daemon status'.",
       ...causeCode,
     };
   }
@@ -830,6 +855,13 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       if (unverified) {
         throw new StartupChildPendingError(`Daemon child ${pid} responds at ${healthzUrl}, but listener verification is incomplete: ${lastProbe} Child left running; startup reservation retained. Inspect 'rig daemon status', daemon-start.lock and daemon.log before recovery.`);
       }
+      // Expiring the readiness budget is not evidence that this owned child failed.
+      // Keep launch exclusion until an operator can inspect a slow pre-bind startup.
+      assertChild();
+      if (deps.isProcessAlive(pid!)) {
+        assertChild();
+        throw new StartupChildPendingError(`Daemon startup is pending after the readiness deadline (child PID ${pid}). Readiness is not confirmed; child left running and startup reservation retained. Last probe: ${lastProbe}. Launch endpoint: ${healthzUrl}. Inspect that URL and ${LOG_FILE}; this check does not publish readiness, adopt the child or release the reservation. To restart manually, stop child PID ${pid} and wait for exit; inspect ${path.join(OPENRIG_DIR, "daemon-start.lock")}, and only after both recorded launcher and child PIDs are absent, archive it and run 'rig daemon start'. 'rig daemon stop' cannot target this unpublished child, and another start remains blocked by the reservation.`);
+      }
       throw new Error(`${summarizeDaemonStartFailure(healthzUrl, deps.readFile(resolveLifecycleFile(deps, "daemon.log")))}. Last probe: ${lastProbe}`);
     }
     assertChild();
@@ -905,7 +937,7 @@ function removeMatchingState(deps: LifecycleDeps, stateFile: string, state: Daem
 export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-target"> {
   const state = readState(deps);
   const configured = resolveConfiguredDaemonTarget();
-  const explicitUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  const explicitUrl = readOpenRigUrl();
   const stateUrl = state ? `http://${formatDaemonHostForUrl(state.host ?? DEFAULT_HOST)}:${state.port}` : undefined;
   const target = stateUrl ?? explicitUrl?.replace(/\/+$/, "") ?? `http://${formatDaemonHostForUrl(configured.host)}:${configured.port}`;
   if (stateUrl && explicitUrl && new URL(explicitUrl).origin !== new URL(stateUrl).origin) {
@@ -1024,12 +1056,52 @@ function findSiblingHome(deps: LifecycleDeps): DaemonStatus["siblingHint"] {
   return undefined;
 }
 
+/** T2 — read-only: the live launcher (else child) PID named by a start reservation, or undefined
+ *  when there is no reservation, it is unreadable, or every PID it names is dead. */
+function liveStartReservation(deps: LifecycleDeps): DaemonStatus["startPending"] {
+  try {
+    const file = path.join(deps.homeDir ?? OPENRIG_DIR, "daemon-start.lock");
+    const raw = deps.exists(file) ? deps.readFile(file) : null;
+    if (!raw) return undefined;
+    let launcherPid: number | undefined;
+    let childPid: number | undefined;
+    let since: string | undefined;
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const rec = JSON.parse(line) as { launcherPid?: unknown; childPid?: unknown; startedAt?: unknown };
+        if (typeof rec.launcherPid === "number") launcherPid = rec.launcherPid;
+        if (typeof rec.childPid === "number") childPid = rec.childPid;
+        if (typeof rec.startedAt === "string") since = rec.startedAt;
+      } catch {
+        // partial line: keep whatever parsed
+      }
+    }
+    for (const pid of [launcherPid, childPid]) {
+      if (pid === undefined) continue;
+      const liveness: ProcessLiveness = deps.processLiveness
+        ? deps.processLiveness(pid)
+        : deps.isProcessAlive(pid) ? "alive" : "dead";
+      if (liveness !== "dead") return { pid, ...(since ? { since } : {}) };
+    }
+  } catch {
+    // best-effort only: a status read must never fail on the reservation
+  }
+  return undefined;
+}
+
 export async function getDaemonStatus(
   deps: LifecycleDeps,
   options: GetDaemonStatusOptions = {},
 ): Promise<DaemonStatus> {
-  // If OPENRIG_URL is set, bypass daemon.json and probe that URL directly
-  const openrigUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  // If OPENRIG_URL is set, bypass daemon.json and probe that URL directly. Commands reach
+  // it through getDaemonUrl's http://host:port rebuild, so only a plain http origin uses
+  // the normalized form; any other URL is probed as written, exactly as before.
+  const rawOpenrigUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  const normalizedOpenrigUrl = readOpenRigUrl();
+  const openrigUrl = normalizedOpenrigUrl !== undefined && isPlainHttpOrigin(normalizedOpenrigUrl)
+    ? normalizedOpenrigUrl
+    : rawOpenrigUrl;
   if (openrigUrl) {
     // An unverified daemon keeps the endpoint it was probed at, so a command can still make its request.
     const endpoint = (() => {
@@ -1070,9 +1142,13 @@ export async function getDaemonStatus(
       // 1ae863d2: the resolved home has NO daemon state — before asserting anything,
       // look for a live sibling home / HOME-MOVED marker (the wrong-home class).
       const siblingHint = findSiblingHome(deps);
-      if (siblingHint) return { state: "unverified", siblingHint, ...probeErrorCodeOf(err) };
-      return isRefusedError(err)
-        ? { state: "stopped" }
+      // T2: a refused listener under a live start reservation is a launch in progress, not down.
+      const refused = isRefusedError(err);
+      const startPending = refused ? liveStartReservation(deps) : undefined;
+      if (siblingHint) return { state: "unverified", siblingHint, ...probeErrorCodeOf(err), ...(startPending ? { startPending } : {}) };
+      if (refused && !startPending) return { state: "stopped" };
+      return refused
+        ? { state: "unverified", port: configured.port, host: configured.host, startPending, ...probeErrorCodeOf(err) }
         : { state: "unverified", port: configured.port, host: configured.host, ...probeErrorCodeOf(err) };
     }
   }
@@ -1100,7 +1176,12 @@ export async function getDaemonStatus(
       return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
+      // T2: unless a live start reservation says a launch is in progress.
+      if (isRefusedError(err)) {
+        const startPending = liveStartReservation(deps);
+        return startPending ? { state: "unverified", pid: state.pid, port: state.port, host, startPending, ...probeErrorCodeOf(err) } : { state: "stopped" };
+      }
+      return { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
     }
   }
 

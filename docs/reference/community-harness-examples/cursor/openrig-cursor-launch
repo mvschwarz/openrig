@@ -34,6 +34,12 @@ chat_store() {
   printf '%s/chats/%s/%s/store.db' "$CURSOR_CONFIG_DIR" "$sum" "$1"
 }
 
+# The seat's declared model (OPENRIG_MODEL, when the preset sets passes_model) goes to a new chat only. A resumed chat isn't
+# passed one: whether Cursor's --resume keeps the chat's earlier model or takes a new one hasn't been checked.
+if [ -n "${OPENRIG_MODEL:-}" ] && [ -z "${OPENRIG_RESUME_REF:-}" ]; then
+  set -- --model "$OPENRIG_MODEL" "$@"
+fi
+
 # Preserve the file's exact bytes, including trailing newlines. A read error stops before the harness starts.
 if [ -n "${OPENRIG_FIRST_INPUT:-}" ]; then
   first_input=$(cat "$OPENRIG_FIRST_INPUT" && printf '.')

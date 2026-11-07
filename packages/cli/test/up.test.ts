@@ -1408,7 +1408,7 @@ describe("Up CLI", () => {
       let body = "";
       for await (const chunk of req) body += chunk;
       const url = decodeURIComponent(req.url ?? "");
-      if (url === "/api/specs/library?kind=rig") {
+      if (url.startsWith("/api/specs/library?kind=rig")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify([{ id: "rig1", kind: "rig", name: "conveyor", sourceType: "builtin", sourcePath: "/specs/rigs/conveyor/rig.yaml" }]));
       } else if (url === "/api/rigs/summary") {

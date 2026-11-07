@@ -45,6 +45,23 @@ describe("workspace HTTP routes (PL-007)", () => {
     expect(body.gaps[0]?.field).toBe("owner");
   });
 
+  it("reports malformed structure without requiring frontmatter or a workspace kind", async () => {
+    fs.writeFileSync(path.join(dir, "unclosed.md"), "---\ndoc: alpha\n");
+    fs.writeFileSync(path.join(dir, "sequence.md"), "---\n- doc: alpha\n---\n");
+    const res = await app.request("/api/workspace/validate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ root: dir }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ totalFiles: 2, filesWithFrontmatter: 2, gapCount: 2 });
+    expect(body.gaps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ relativePath: "unclosed.md", kind: "parse-error", field: null }),
+      expect.objectContaining({ relativePath: "sequence.md", kind: "parse-error", field: null }),
+    ]));
+  });
+
   it("POST /validate rejects missing root with 400", async () => {
     const res = await app.request("/api/workspace/validate", {
       method: "POST",

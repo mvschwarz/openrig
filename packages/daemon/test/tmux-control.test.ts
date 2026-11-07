@@ -129,13 +129,14 @@ function tagOf(line: string, before: string, after: string): string {
 
 /** The spawned tmux the control exec falls back to: its own call (the server's version, read before a client starts)
  *  is answered here; every other argv is recorded and given to `answer`. */
-function fakeSpawned(answer: (argv: string[]) => string | Promise<string> = () => "") {
+function fakeSpawned(answer: (argv: string[]) => string | Promise<string> = () => "", serverArgs: readonly string[] = []) {
   const spawned: string[][] = [];
   const own: string[][] = [];
   const fallback = async (argv: string[]): Promise<string> => {
-    if (argv[1] === "list-sessions" && argv[3]?.startsWith("#{version}")) {
+    const args = argv.slice(1 + serverArgs.length);
+    if (serverArgs.every((arg, i) => arg === argv[i + 1]) && args[0] === "list-sessions" && args[2]?.startsWith("#{version}")) {
       own.push(argv);
-      return "3.6|\n3.6|\n";
+      return "3.8|\n3.8|\n";
     }
     spawned.push(argv);
     return answer(argv);
@@ -144,6 +145,88 @@ function fakeSpawned(answer: (argv: string[]) => string | Promise<string> = () =
 }
 
 describe("tmuxControlExec", () => {
+  it.each([["-S", "/tmp/rig isolated.sock"], ["-L", "rig-isolated"]])("routes commands on its selected %s server and keeps command-local flags", async (flag, server) => {
+    const serverArgs = [flag, server];
+    const client = fakeClient();
+    const { spawned, own, fallback } = fakeSpawned(() => "spawned\n", serverArgs);
+    const start = vi.fn((_args: string[]) => client.child);
+    const exec = tmuxControlExec(fallback, { spawnClient: start, serverArgs, replyTimeoutMs: 1000 });
+    try {
+      const read = exec(["tmux", ...serverArgs, "capture-pane", "-p", "-t", "=seat@rig:", "-S", "-20", ";", "has-session", "-t", "=seat@rig"]);
+      await vi.waitFor(() => expect(client.written).toEqual(["'capture-pane' '-p' '-t' '=seat@rig:' '-S' '-20'"]));
+      client.answer("selected server");
+      await vi.waitFor(() => expect(client.written).toEqual([
+        "'capture-pane' '-p' '-t' '=seat@rig:' '-S' '-20'", "'has-session' '-t' '=seat@rig'",
+      ]));
+      client.answer();
+      expect(await read).toBe("selected server\n");
+      expect(own).toEqual([["tmux", ...serverArgs, "list-sessions", "-F", "#{version}|#{@openrig-control}"]]);
+      expect(start.mock.calls[0]?.[0]?.slice(0, 3)).toEqual([...serverArgs, "-C"]);
+      expect(spawned).toEqual([]);
+    } finally {
+      await exec.close();
+    }
+  });
+
+  it("leaves commands for another server or with other global flags unchanged for the spawned client", async () => {
+    const serverArgs = ["-S", "/tmp/rig-isolated.sock"];
+    const { spawned, own, fallback } = fakeSpawned(() => "spawned\n", serverArgs);
+    const start = vi.fn(() => { throw new Error("No control client expected"); });
+    const exec = tmuxControlExec(fallback, { spawnClient: start, serverArgs });
+    const listing = ["list-sessions", "-F", "#{session_name}"];
+    const commands = [
+      ["tmux", "-S", "/tmp/other.sock", ...listing],
+      ["tmux", "-L", "rig-isolated", ...listing],
+      ["tmux", ...listing],
+      ["tmux", ...serverArgs, "-u", ...listing],
+      ["tmux", ...serverArgs, "-S", "/tmp/other.sock", "has-session", "-t", "=s", ";", ...listing],
+      ["tmux", "-S"],
+    ];
+    for (const argv of commands) expect(await exec(argv)).toBe("spawned\n");
+    expect(spawned).toEqual(commands);
+    expect(own).toEqual([]);
+    expect(start).not.toHaveBeenCalled();
+    await exec.close();
+  });
+
+  it("filters its own listing rows with server flags, including listings that need a spawned client", async () => {
+    const serverArgs = ["-S", "/tmp/rig-isolated.sock"];
+    const client = fakeClient();
+    const { spawned, fallback } = fakeSpawned(() => "", serverArgs);
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, serverArgs, owner: "d4e5", replyTimeoutMs: 1000 });
+    try {
+      const listing = exec(["tmux", ...serverArgs, "list-sessions", "-F", "#{session_name}"]);
+      await vi.waitFor(() => expect(client.written).toHaveLength(1));
+      const tag = tagOf(client.written[0]!, "'list-sessions' '-F' '", "#{session_name}'");
+      client.answer(`${tag}openrig-control-d4e5`, "seat@rig");
+      expect(await listing).toBe("seat@rig\n");
+      expect(await exec(["tmux", ...serverArgs, "list-windows", "-F", "#{window_index}"])).toBe("");
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0]!.slice(0, 5)).toEqual(["tmux", ...serverArgs, "list-windows", "-F"]);
+      tagOf(spawned[0]!.join(" "), `tmux ${serverArgs.join(" ")} list-windows -F `, "#{window_index}");
+      expect(client.written).toHaveLength(1);
+    } finally {
+      await exec.close();
+    }
+  });
+
+  it("keeps read fallback and a lost write's probe on the selected server without replaying the write", async () => {
+    const serverArgs = ["-S", "/tmp/rig-isolated.sock"];
+    const client = fakeClient();
+    const { spawned, fallback } = fakeSpawned(() => "spawned read\n", serverArgs);
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, serverArgs, replyTimeoutMs: 1000 });
+    const readArgv = ["tmux", ...serverArgs, "capture-pane", "-p", "-t", "=seat@rig:"];
+    const read = exec(readArgv);
+    await vi.waitFor(() => expect(client.written).toHaveLength(1));
+    const write = exec(["tmux", ...serverArgs, "send-keys", "-t", "=seat@rig:", "Enter"]).then(() => null, (err: Error) => err.message);
+    await vi.waitFor(() => expect(client.written).toHaveLength(2));
+    client.exit();
+    expect(await read).toBe("spawned read\n");
+    expect(await write).toBe("tmux control client ended: exited (SIGTERM)");
+    expect(spawned).toEqual([readArgv, ["tmux", ...serverArgs, "display-message", "-p", "-t", "=seat@rig:", ""]]);
+    await exec.close();
+  });
+
   it("drops a client once the reply at the head of its line is overdue, and starts a new one for the next command", async () => {
     const clients = [fakeClient(), fakeClient()];
     let started = 0;
@@ -209,9 +292,9 @@ describe("tmuxControlExec", () => {
     await exec.close();
   });
 
-  it("starts no client while no server runs, one before tmux 3.2, or one with control sessions only, and asks again only after a while", async () => {
+  it("starts no client without a known fixed server or with control sessions only, and retries after a while", async () => {
     const servers = [
-      () => { throw new Error("no server running on /tmp/tmux-1000/default"); }, () => "3.1c|\n", () => "", () => "3.6|d4e5\n3.6|ffff0000\n",
+      () => { throw new Error("no server running on /tmp/tmux-1000/default"); }, () => "3.1c|\n", () => "3.4|\n", () => "3.7b|\n", () => "next-3.8|\n", () => "", () => "3.8|d4e5\n3.8|ffff0000\n",
     ];
     for (const server of servers) {
       const spawned: string[][] = [];
@@ -327,7 +410,9 @@ describe("tmuxControlExec", () => {
     await vi.waitFor(() => expect(args).toHaveLength(1));
     expect(args[0]).toEqual(["-C", "new-session", "-s", "openrig-control-d4e5", "-x", "80", "-y", "24", "-f", "no-output,ignore-size",
       "--", "sh", "-c", "while :; do sleep 86400; done",
-      ";", "set-option", "@openrig-control", "d4e5", ";", "set-option", "destroy-unattached", "on", ";", "set-option", "detach-on-destroy", "on"]);
+      ";", "set-option", "@openrig-control", "d4e5", ";", "set-option", "destroy-unattached", "off",
+      ";", "set-hook", "client-detached", "if-shell -F '#{==:#{session_attached},0}' kill-session",
+      ";", "set-option", "detach-on-destroy", "on"]);
     // Its name is taken (a session of someone else's, or one left by a daemon with the same id): tmux makes nothing,
     // and nothing is adopted. The command is spawned, and a client tried again only later.
     clients[0]!.child.stdout.write("%begin 1 1 0\nduplicate session: openrig-control-d4e5\n%error 1 1 0\n");
@@ -463,7 +548,7 @@ describe("tmuxControlExec", () => {
   it("retires a client that finds itself alone as it attaches: the server lost its last other session meanwhile", async () => {
     const client = fakeClient({ checks: [] });
     const spawned: string[][] = [];
-    const probes = ["3.6|\n", "3.6|d4e5\n"];
+    const probes = ["3.8|\n", "3.8|d4e5\n"];
     const exec = tmuxControlExec(async (argv) => {
       if (argv[1] === "list-sessions") return probes.shift()!;
       spawned.push(argv);
@@ -540,13 +625,11 @@ describe("control-mode rules", () => {
     await exec.close();
   });
 
-  it("needs tmux 3.2 or later", () => {
-    expect(supportsControlMode("tmux 3.3a\n")).toBe(true);
-    expect(supportsControlMode("tmux 3.2")).toBe(true);
-    expect(supportsControlMode("tmux next-3.6")).toBe(true);
-    expect(supportsControlMode("tmux 3.1c")).toBe(false);
-    expect(supportsControlMode("tmux 2.9")).toBe(false);
-    expect(supportsControlMode("psmux")).toBe(false);
+  it("#2304 uses control clients only when the server is a known fixed release", () => {
+    for (const version of ["3.3a|", "3.4|", "3.5a|", "3.6|", "3.7|", "3.7a|", "3.7b|", "next-3.8|", "psmux|"]) {
+      expect(supportsControlMode(version), version).toBe(false);
+    }
+    for (const version of ["3.7c|", "3.8|", "4.0|"]) expect(supportsControlMode(version), version).toBe(true);
   });
 
   it("marks its own rows in each listing's format, on its owner's mark, and drops only those rows", () => {

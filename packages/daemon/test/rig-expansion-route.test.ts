@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 
 describe("POST /api/rigs/:rigId/expand", () => {
   let db: Database.Database;
@@ -353,7 +355,7 @@ describe("POST /api/rigs/:rigId/expand", () => {
     materializeSpy.mockRestore();
   });
 
-  it("valid numeric version coerces to string per schema parity", async () => {
+  it("keeps a numeric version raw until canonical schema normalization", async () => {
     const rig = seedRig("image-numeric-rig");
     const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
     await setup.app.request(`/api/rigs/${rig.id}/expand`, {
@@ -370,12 +372,13 @@ describe("POST /api/rigs/:rigId/expand", () => {
         },
       }),
     });
-    // numeric version COERCES to string — schema parity (rigspec-schema.ts
-    // validates string|number and normalizes with String(versionRaw);
-    // orch-lead ruling 2026-08-28 12:06Z: string-only omission would
-    // recreate the silent-default defect for YAML `version: 3`)
+    // Ingress preserves the authored number; the canonical schema owns the
+    // string conversion, so a numeric version can never become an absent pin.
     const spec = materializeSpy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
-    expect(spec.pods[0]!.members[0]!["session_source"]).toEqual({ mode: "agent_image", ref: { kind: "image_name", value: "ok", version: "3" } });
+    expect(spec.pods[0]!.members[0]!["session_source"]).toEqual({ mode: "agent_image", ref: { kind: "image_name", value: "ok", version: 3 } });
+    expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.sessionSource).toEqual({
+      mode: "agent_image", ref: { kind: "image_name", value: "ok", version: "3" },
+    });
     materializeSpy.mockRestore();
   });
 
@@ -460,5 +463,62 @@ describe("POST /api/rigs/:rigId/expand", () => {
         `${podId} must persist nothing`,
       ).toMatchObject({ c: 0 });
     }
+  });
+});
+
+// rig expand keeps a member's explicit effort: the route and the expansion service both carry it into the spec, so it
+// reaches the saved seat and the launch. The agent's profile prefers a different effort.
+describe("POST /api/rigs/:rigId/expand — member effort", () => {
+  const AGENT_YAML = `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    preferences:\n      effort: low\n    uses:\n      skills: []\n`;
+  let db: Database.Database;
+  let setup: ReturnType<typeof createTestApp>;
+  let bindings: NodeBinding[];
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    bindings = [];
+    const adapter = {
+      runtime: "claude-code",
+      listInstalled: async () => [],
+      project: async () => ({ projected: [], skipped: [], failed: [] }),
+      deliverStartup: async () => ({ delivered: 0, failed: [] }),
+      launchHarness: async (binding: NodeBinding) => { bindings.push(binding); return { ok: true }; },
+      checkReady: async () => ({ ready: true }),
+    } as RuntimeAdapter;
+    setup = createTestApp(db, {
+      adapters: { "claude-code": adapter },
+      podInstantiatorFsOps: {
+        exists: (p: string) => p.includes("agents/impl"),
+        readFile: (p: string) => { if (p.includes("agents/impl")) return AGENT_YAML; throw new Error(`Not found: ${p}`); },
+      },
+    });
+  });
+
+  afterEach(() => { db.close(); });
+
+  async function expandWith(effort: Record<string, unknown>) {
+    const rig = setup.rigRepo.createRig("effort-rig");
+    const res = await setup.app.request(`/api/rigs/${rig.id}/expand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rigRoot: "/project/rigs/effort-rig", pod: { id: "qa", label: "QA", members: [
+        { id: "reviewer", runtime: "claude-code", agent_ref: "local:agents/impl", profile: "default", cwd: ".", ...effort },
+      ], edges: [] } }),
+    });
+    const node = db.prepare("SELECT effort FROM nodes WHERE logical_id = 'qa.reviewer'").get() as { effort: string | null } | undefined;
+    return { ok: res.ok, savedEffort: node?.effort ?? null, launchedEffort: bindings.map((b) => b.effort ?? null) };
+  }
+
+  it("keeps an explicit effort in the saved seat and the launch, over the profile's", async () => {
+    expect(await expandWith({ effort: "high" })).toEqual({ ok: true, savedEffort: "high", launchedEffort: ["high"] });
+  });
+
+  it("without an effort, the seat keeps the profile's", async () => {
+    expect(await expandWith({})).toEqual({ ok: true, savedEffort: "low", launchedEffort: ["low"] });
+  });
+
+  // A present but unusable effort stays an advisory, as in a rig spec: it's ignored, never a new refusal.
+  it.each([["blank", "  "], ["a number", 7]])("a %s effort is ignored and the expansion succeeds with the profile's", async (_label, effort) => {
+    expect(await expandWith({ effort })).toEqual({ ok: true, savedEffort: "low", launchedEffort: ["low"] });
   });
 });

@@ -1,38 +1,15 @@
 # Release Notes
 
-This directory is the lightweight release history for OpenRig.
+This directory holds one note per release for OpenRig v0.1.12 through v0.6.3, plus v0.6.12 (for example `v0.1.12.md`).
 
-It is intentionally simpler than a monolithic `CHANGELOG.md`.
-
-Each shipped release gets its own note:
-
-- `v0.1.12.md`
-- `v0.2.0.md`
-- `v0.3.0.md`
-- and so on
-
-## Why This Exists
-
-We want a practical release-management pattern that works with how OpenRig is actually being shipped today:
-
-- npm package release
-- optional Git tag
-- optional GitHub Release
-- short, human-written summary of what is included
-
-This keeps release notes:
-
-- easy to author
-- easy to link in GitHub Releases
-- easy to paste into announcements
-- durable in the repo
+Notes for later releases are in [`CHANGELOG.md`](../../CHANGELOG.md) and on the [GitHub Releases page](https://github.com/mvschwarz/openrig/releases).
 
 ## Minimal Process
 
 For each release:
 
-1. Copy `_template.md` to `vX.Y.Z.md`.
-2. Fill in the release summary, included changes, operator notes, known limitations, and verification performed.
+1. Add the release's section to [`CHANGELOG.md`](../../CHANGELOG.md).
+2. Write the release's GitHub Release notes. No new file is added to this directory.
 3. Run the **substance gate** at the exact release cut. The gate derives every
    file under the shipped pack sources, verifies a hash-bound human judgment
    and an individual disposition for each mechanical candidate, scans the
@@ -79,16 +56,16 @@ For each release:
    git push origin vX.Y.Z
    ```
 
-5. Create a GitHub Release using the same file:
+5. Create the GitHub Release with the notes from step 2:
 
    ```bash
    gh release create vX.Y.Z \
      --repo mvschwarz/openrig \
-     --title "OpenRig vX.Y.Z" \
-     --notes-file docs/releases/vX.Y.Z.md
+     --title "OpenRig X.Y.Z" \
+     --notes-file <release-notes.md>
    ```
 
-6. Publish the npm package if that is part of the release flow.
+6. Publish the npm package.
 
 ## Guidance
 
@@ -101,5 +78,3 @@ For each release:
 ## Scope
 
 This directory is a release-note archive, not a full historical changelog taxonomy.
-
-If OpenRig later wants a curated `CHANGELOG.md`, it can be generated or summarized from the release notes here.

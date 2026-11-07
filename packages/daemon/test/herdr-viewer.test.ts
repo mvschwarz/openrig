@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { HerdrViewer, type HerdrViewerRun } from "../src/domain/terminal/herdr-viewer.js";
 import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
+import { tileAttachArgv078, tileAttachArgv079 } from "../src/domain/terminal/earlier-tile-attach.js";
 import { composeView } from "../src/domain/terminal/view-composer.js";
 import { Hono } from "hono";
 import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
@@ -20,7 +21,7 @@ function fixture() {
   const calls: string[][] = [];
   let ids = { workspace_id: "w1", pane_id: "w1:p1", terminal_id: "term_001", cwd: "" };
   let label = "", running = false, uncertainCreate = false, uncertainRun = false, idless = false;
-  let gone = false, enumerable = true, unreadable = false;
+  let gone = false, enumerable = true, unreadable = false, attachFlags = ["-f", "ignore-size"];
   let workspaceInventory: unknown[] | undefined, paneInventory: Record<string, unknown> | undefined;
   const inspect = async () => ({ sessionId: "$1", nodeId: key.nodeId });
   const run: HerdrViewerRun = async args => {
@@ -45,7 +46,7 @@ function fixture() {
       return "";
     }
     if (command === "pane process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: running
-      ? ["/usr/bin/tmux", "-S", "/tmp/own-tmux.sock", "attach", "-f", "ignore-size", "-t", "$1"] : ["/bin/bash"] }] } } });
+      ? ["/usr/bin/tmux", "-S", "/tmp/own-tmux.sock", "attach", ...attachFlags, "-t", "$1"] : ["/bin/bash"] }] } } });
     throw new Error(`Unexpected provider operation ${args}`);
   };
   const viewer = () => new HerdrViewer(socket, run, "linux", root, inspect);
@@ -53,7 +54,8 @@ function fixture() {
     lose: (listed: boolean, malformed = false) => { gone = true; enumerable = listed; unreadable = malformed; },
     loseChanged: () => { gone = false; enumerable = false; },
     setEnumeration: (workspaces: unknown[], panes: Record<string, unknown>) => { workspaceInventory = workspaces; paneInventory = panes; },
-    setCreateLost: () => { uncertainCreate = true; }, setRunLost: () => { uncertainRun = true; }, setIdless: () => { idless = true; }, exit: () => { running = false; } };
+    setCreateLost: () => { uncertainCreate = true; }, setRunLost: () => { uncertainRun = true; }, setIdless: () => { idless = true; }, exit: () => { running = false; },
+    setAttachFlags: (flags: string[]) => { attachFlags = flags; } };
 }
 
 describe("owned Herdr viewer", () => {
@@ -169,12 +171,20 @@ describe("owned Herdr viewer", () => {
     expect(await new HerdrViewer(socket, async () => { throw new Error("should not run"); }, "darwin", f.root).ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unsupported" });
     expect(await new HerdrViewer(socket, async () => JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket: "/other.sock" }), "linux", f.root).ensure(key, f.target)).toMatchObject({ ok: false });
   });
-  it("keeps ignore-size in writable initial/fallback/replacement and recovery attaches, and preserves read-only", () => {
+  it("sizes writable initial/fallback/replacement attaches and recovery, and preserves read-only", () => {
     const rw = tileAttachArgv("tmux", [], "a@team", false)[2]!;
-    expect(rw.match(/attach -f ignore-size -t/g)).toHaveLength(4);
+    expect(rw.match(/attach -t/g)).toHaveLength(4);
+    expect(rw).not.toContain("ignore-size");
     const ro = tileAttachArgv("tmux", [], "a@team", true)[2]!;
     expect(ro.match(/attach -r -t/g)).toHaveLength(4);
-    const f = fixture(); expect(f.target.recoveryCommand).toContain("attach -f ignore-size -t");
+    expect(ro).not.toContain("pick");
+    const f = fixture(); expect(f.target.recoveryCommand).toContain("attach -t");
+  });
+  it("verifies a writable viewer that sized its session (no ignore-size), but not a read-only spelling", async () => {
+    const f = fixture(); f.setAttachFlags([]);
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true });
+    const g = fixture(); g.setAttachFlags(["-r"]);
+    expect(await g.viewer().ensure(key, g.target)).toMatchObject({ ok: false });
   });
   it("rechecks membership after a queued request and performs no create for a departed member", async () => {
     const f = fixture(), v = f.viewer();
@@ -186,12 +196,12 @@ describe("owned Herdr viewer", () => {
     const provider = { name: "herdr", status: async () => ({ provider: "herdr", available: true, capabilities: {} }), liveness: async () => ({ alive: true }),
       openView: async () => { throw new Error("Whole-plan open must not run"); },
       ensureViewer: async (_key: unknown, pane: typeof f.target, stillCurrent?: () => Promise<boolean>) => {
-        calls++; expect(pane.readOnly).toBe(false); expect(pane.attachArgv![2]).toContain("attach -f ignore-size");
+        calls++; expect(pane.readOnly).toBe(false); expect(pane.attachArgv![2]).toContain("attach -t");
         expect(await stillCurrent!()).toBe(true); return { ok: true as const, viewer: { workspaceId: "w", paneId: "p", terminalId: "t", readOnly: false }, created: true };
       } };
     const svc = new TerminalService({ viewsStore: { get: () => null, list: () => [] }, listRigSeats: () => null, listPodSeats: () => null,
-      listScopeSeats: () => null, listRigNames: () => [], resolveHost: () => null, hasSession: () => true, resolveLocalTmux: () => "/usr/bin/tmux", resolveProvider: () => provider,
-      resolveTaskView: () => ({ task: { qitemId: "qitem-root", name: "Task root", complete: true, issues: [], members: joined ? [{ key, seat: "a@team", availability: "available", viewerStatus: "not-provisioned", obligations: [{ qitemId: "qitem-root", state: "pending" }] }] : [] },
+      listRigNames: () => [], resolveHost: () => null, hasSession: () => true, resolveLocalTmux: () => "/usr/bin/tmux", resolveProvider: () => provider,
+      resolveTaskView: () => ({ task: { kind: "qitem", id: "qitem-root", qitemId: "qitem-root", name: "Task root", complete: true, issues: [], members: joined ? [{ key, seat: "a@team", availability: "available", viewerStatus: "not-provisioned", obligations: [{ qitemId: "qitem-root", state: "pending" }] }] : [] },
         members: joined ? [{ seat: "a@team", label: "a", tmuxSession: "a@team", host: null, alive: true, readOnly: true }] : [] }) });
     const preview = await svc.previewView({ view: "qitem:qitem-root", provider: "herdr" });
     expect("planId" in preview).toBe(true); if (!("planId" in preview)) throw new Error("missing preview");
@@ -219,5 +229,72 @@ describe("owned Herdr viewer", () => {
     const send = (auth?: string) => app.request("/api/terminal/viewer/ensure", { method: "POST", headers: { "Content-Type": "application/json", ...(auth ? { Authorization: auth } : {}) }, body: JSON.stringify(body) });
     expect((await send()).status).toBe(401); expect(calls).toBe(0);
     expect((await send("Bearer fixture-owner-token")).status).toBe(200); expect(calls).toBe(1);
+  });
+});
+
+describe("viewers kept from an earlier release", () => {
+  const quote = (s: string) => "'" + s.replace(/'/g, "'\"'\"'") + "'";
+  const id = JSON.stringify([key.hostId, key.nodeId]);
+  const readOnlyTarget = () => composeView("qitem:qitem-root", [{ seat: "a@team", label: "a", tmuxSession: "a@team", host: null, alive: true, readOnly: true }],
+    { resolveHost: () => null, localTmux: "/usr/bin/tmux", localTmuxServer: ["-S", "/tmp/own-tmux.sock"] }).opened[0]!;
+  /** Rewrite the journal as an earlier release left it: that release's script for a seat, with the same tmux and server. */
+  function keepFrom(f: ReturnType<typeof fixture>, make: typeof tileAttachArgv079, readOnly: boolean, session = "a@team") {
+    const file = path.join(f.root, readdirSync(f.root).find(n => n.endsWith(".json"))!);
+    const journal = JSON.parse(readFileSync(file, "utf8"));
+    const entry = journal.entries[id];
+    entry.argv = make("/usr/bin/tmux", ["-S", "/tmp/own-tmux.sock"], session, readOnly);
+    entry.command = entry.argv.map(quote).join(" "); entry.readOnly = readOnly;
+    writeFileSync(file, JSON.stringify(journal));
+    return () => JSON.parse(readFileSync(file, "utf8")).entries[id] as { command: string; argv: string[] };
+  }
+
+  it.each([["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
+    "keeps a writable viewer recorded by %s and moves it to the current script", async (_, make) => {
+      const f = fixture(); expect((await f.viewer().ensure(key, f.target)).ok).toBe(true);
+      const stored = keepFrom(f, make, false);
+      expect(stored().command).not.toBe(f.target.paneCommand);
+      expect(await f.viewer().lookup(key, f.target)).toMatchObject({ ok: true });
+      expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: false });
+      expect(stored()).toMatchObject({ command: f.target.paneCommand, argv: f.target.attachArgv });
+      expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+    });
+
+  it.each([["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
+    "keeps a read-only viewer recorded by %s", async (_, make) => {
+      const f = fixture(); f.setAttachFlags(["-r"]); const target = readOnlyTarget();
+      expect((await f.viewer().ensure(key, target)).ok).toBe(true);
+      keepFrom(f, make, true);
+      expect(await f.viewer().ensure(key, target)).toMatchObject({ ok: true, created: false });
+      expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+    });
+
+  it("still holds a kept viewer for another seat, for the other mode, or under a command that isn't a tile script", async () => {
+    const f = fixture(); expect((await f.viewer().ensure(key, f.target)).ok).toBe(true);
+    keepFrom(f, tileAttachArgv079, false, "other@team");
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    keepFrom(f, tileAttachArgv079, true);
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    const stored = keepFrom(f, tileAttachArgv079, false);
+    const file = path.join(f.root, readdirSync(f.root).find(n => n.endsWith(".json"))!);
+    const journal = JSON.parse(readFileSync(file, "utf8"));
+    journal.entries[id].argv[2] = "exec /usr/bin/tmux attach"; journal.entries[id].command = journal.entries[id].argv.map(quote).join(" ");
+    writeFileSync(file, JSON.stringify(journal));
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(stored().argv[2]).toBe("exec /usr/bin/tmux attach");
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+  });
+
+  it("holds a kept viewer whose script only shares a tile script's opening, and leaves its saved command", async () => {
+    const f = fixture(); expect((await f.viewer().ensure(key, f.target)).ok).toBe(true);
+    const stored = keepFrom(f, tileAttachArgv079, false);
+    const file = path.join(f.root, readdirSync(f.root).find(n => n.endsWith(".json"))!);
+    const journal = JSON.parse(readFileSync(file, "utf8"));
+    journal.entries[id].argv[2] = 'target=$1; shift; printf "%s\\n" "custom viewer";';
+    journal.entries[id].command = journal.entries[id].argv.map(quote).join(" ");
+    writeFileSync(file, JSON.stringify(journal));
+    const before = stored();
+    expect(await f.viewer().lookup(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(stored()).toEqual(before);
   });
 });

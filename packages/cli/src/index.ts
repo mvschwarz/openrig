@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { environmentCommand, type EnvironmentCommandDeps } from "./commands/environment.js";
 import { Command } from "commander";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -33,6 +34,7 @@ import type { GatewayCommandDeps } from "./commands/gateway.js";
 import { parkedCommand } from "./commands/parked.js";
 import { mcpCommand } from "./commands/mcp.js";
 import { acpCommand } from "./commands/acp.js";
+import { execCommand, type ExecDeps } from "./commands/exec.js";
 import { agentCommand, type AgentDeps } from "./commands/agent.js";
 import { rigCommand, type RigDeps } from "./commands/rig.js";
 import { transcriptCommand } from "./commands/transcript.js";
@@ -119,6 +121,7 @@ export interface ProgramDeps {
   psDeps?: StatusDeps;
   mcpDeps?: StatusDeps;
   acpDeps?: StatusDeps;
+  execDeps?: ExecDeps;
   agentDeps?: AgentDeps;
   rigDeps?: RigDeps;
   transcriptDeps?: StatusDeps;
@@ -143,6 +146,7 @@ export interface ProgramDeps {
   skillDeps?: StatusDeps;
   agentImageDeps?: StatusDeps;
   communityHarnessDeps?: StatusDeps;
+  environmentDeps?: EnvironmentCommandDeps;
   forkDeps?: StatusDeps;
   workspaceDeps?: WorkspaceDeps;
   whoamiDeps?: StatusDeps;
@@ -204,6 +208,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(rosterCommand());
   program.addCommand(mcpCommand(depsOverride?.mcpDeps));
   program.addCommand(acpCommand(depsOverride?.acpDeps));
+  program.addCommand(execCommand(depsOverride?.execDeps));
   program.addCommand(agentCommand(depsOverride?.agentDeps));
   program.addCommand(rigCommand(depsOverride?.rigDeps));
   program.addCommand(transcriptCommand(depsOverride?.transcriptDeps));
@@ -227,6 +232,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(skillCommand(depsOverride?.skillDeps));
   program.addCommand(agentImageCommand(depsOverride?.agentImageDeps));
   program.addCommand(communityHarnessCommand(depsOverride?.communityHarnessDeps));
+  program.addCommand(environmentCommand(depsOverride?.environmentDeps));
   program.addCommand(forkCommand(depsOverride?.forkDeps));
   program.addCommand(workspaceCommand(depsOverride?.workspaceDeps));
   program.addCommand(rigModeCommand(depsOverride?.rigModeDeps));

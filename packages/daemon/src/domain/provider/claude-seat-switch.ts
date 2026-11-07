@@ -7,40 +7,52 @@ import type { ClaudeCredentialPrecedence, ClaudeSeatRelaunch, ProviderPrecheckIn
 export const STORED_LOGIN = "stored-login";
 
 type ClaudeSeat = NonNullable<ReturnType<ClaudeSeatRelaunch["seat"]>>;
+type NextLaunch = ClaudeSeatRelaunch["nextLaunch"];
 type ClaudeCheck =
   | { ok: false; verdict: Extract<PrecheckResult, { safe: false }> }
-  | { ok: true; verdict: Extract<PrecheckResult, { safe: true }>; ref: ClaudeSeatTokenRef | null; instead: string | null };
+  | { ok: true; verdict: Extract<PrecheckResult, { safe: true }>; ref: ClaudeSeatTokenRef | null; instead: string | null;
+    next?: Extract<ReturnType<NextLaunch>, { resumes: true }> };
 
 /** A Claude seat's checks, before anything changes: the reference it would get, that its file would give Claude the token,
- *  that the seat is running, and that nothing Claude Code ranks above the token is set. A move back to the stored login also
+ *  that nothing Claude Code ranks above the token is set, and for a stopped seat that its next launch resumes its
+ *  conversation. A move back to the stored login also
  *  finds a `CLAUDE_CODE_OAUTH_TOKEN` the seat would still receive, and says it's what the seat will use. Managed settings (a
  *  file, MDM or the server) can't be read; the relaunched seat's /status covers them. */
-export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: ClaudeSeat, precedence: ClaudeCredentialPrecedence | undefined): Promise<ClaudeCheck> {
+export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: ClaudeSeat, precedence: ClaudeCredentialPrecedence | undefined,
+  nextLaunch?: NextLaunch): Promise<ClaudeCheck> {
   const refuse = (reason: PrecheckReason, message: string, claude?: ClaudeSwitchView): ClaudeCheck =>
     ({ ok: false, verdict: { safe: false, reasons: [reason], message, ...(claude ? { claude } : {}) } });
   if (!precedence) return refuse("rebind_unsupported_for_runtime", "This daemon can't check what would outrank a Claude seat's own token, so it doesn't move Claude seats.");
-  if (input.tokenFile === undefined) {
+  if (input.apiKeyFile !== undefined && input.tokenFile !== undefined) return refuse("invalid_token_reference", "Choose --api-key-file or a subscription token/stored login, not both.");
+  if (input.tokenFile === undefined && input.apiKeyFile === undefined) {
     return refuse("token_file_required", "A Claude seat moves to its own subscription token with --to-account <label> --token-file <absolute path to a 0600 "
       + "file holding the token>, or back to its config dir's stored login with --stored-login.");
   }
-  const ref = input.tokenFile === null ? null : { label: input.toAccount, tokenFile: input.tokenFile };
+  const ref: ClaudeSeatTokenRef | null = input.apiKeyFile !== undefined
+    ? { label: input.toAccount, tokenFile: input.apiKeyFile, kind: "api-key" }
+    : input.tokenFile === null ? null : { label: input.toAccount, tokenFile: input.tokenFile! };
   if (ref) {
     const problem = claudeSeatTokenRefProblem(ref);
     if (problem) return refuse("invalid_token_reference", `${problem}.`);
     const fileProblem = claudeSeatTokenFileProblem(ref);
     if (fileProblem) return refuse("token_file_unusable", `${fileProblem}, so Claude would start without it. Nothing changed.`);
   }
-  if (!seat.running) {
-    return refuse("seat_not_running", `${input.seat} isn't running, so there's no conversation to resume. Launch it first: rig launch ${seat.rigName} ${seat.logicalId}.`);
-  }
-  const found = await precedence(seat.nodeId, ref ? {} : { storedLogin: true });
+  const found = await precedence(seat.nodeId, ref?.kind === "api-key" ? { apiKey: true } : ref ? {} : { storedLogin: true });
   const instead = found.instead?.length
     ? `the CLAUDE_CODE_OAUTH_TOKEN from ${found.instead.map((c) => `${c.source} (${c.remedy})`).join("; ")}` : null;
-  const claude: ClaudeSwitchView = { label: ref?.label ?? STORED_LOGIN, tokenFile: ref?.tokenFile ?? null, checked: found.checked, notChecked: found.notChecked,
+  const claude: ClaudeSwitchView = { ...(ref?.kind ? { credentialKind: ref.kind } : {}), label: ref?.label ?? STORED_LOGIN, tokenFile: ref?.tokenFile ?? null, checked: found.checked, notChecked: found.notChecked,
     ...(instead ? { instead } : {}) };
   if (found.conflicts.length) {
     return refuse("credential_outranks_token", "Claude Code would use these instead, so nothing changed: "
       + `${found.conflicts.map((c) => `${c.name} (${c.source}; ${c.remedy})`).join("; ")}.`, claude);
+  }
+  if (!seat.running && nextLaunch) {
+    const next = nextLaunch(seat.rigId, seat.nodeId);
+    if (!next.resumes) {
+      return refuse("conversation_not_resumable", `${input.seat} isn't running, and ${next.snapshotId ? `snapshot ${next.snapshotId}, which its next launch uses,` : "its next launch"} `
+        + `${next.why}, so it wouldn't resume its conversation. Nothing changed.`, claude);
+    }
+    return { ok: true, verdict: { safe: true, claude }, ref, instead, next };
   }
   return { ok: true, verdict: { safe: true, claude }, ref, instead };
 }
@@ -49,7 +61,8 @@ export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: Claude
  *  now that resumes the seat, its token reference set, then only that seat relaunched from that snapshot in its pane (its
  *  process ended in place, the pane and its scrollback kept), which reruns `claude --resume <its conversation>` with the
  *  seat's token step. Only a refusal before the seat's process was touched reads as unchanged; anything after it that
- *  doesn't report a resumed conversation reads `unknown`, with the snapshot's recovery, and is never retried. */
+ *  doesn't report a resumed conversation reads `unknown`, with the snapshot's recovery, and is never retried. A stopped seat
+ *  isn't relaunched: its reference is set for its next launch, only when that launch resumes its conversation. */
 export async function switchClaudeSeat(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaunch, seat: ClaudeSeat,
   precedence: ClaudeCredentialPrecedence | undefined): Promise<ProviderSwitchResult> {
   let touched = false;
@@ -71,51 +84,79 @@ export async function switchClaudeSeat(input: ProviderSwitchInput, relaunch: Cla
     }
     // Its reference was set before the error; what the seat runs isn't known.
     return { outcome: "unknown", reasons: ["relaunch_threw"],
-      seat: { seat: input.seat, account: input.tokenFile === null ? STORED_LOGIN : input.toAccount, loginChanged: true, peers: [], undo: null },
+      seat: { seat: input.seat, account: input.tokenFile === null ? STORED_LOGIN : input.toAccount, ...(input.apiKeyFile ? { credentialKind: "api-key", tokenFile: input.apiKeyFile } : {}), loginChanged: true, peers: [], undo: null },
       message: `${input.seat}'s relaunch stopped with an error after its process may have been ended (${message}). Check the pane with rig capture ${input.seat}. Not retried.` };
   }
 }
 
 async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaunch, seat: ClaudeSeat,
   precedence: ClaudeCredentialPrecedence | undefined, touching: () => void): Promise<ProviderSwitchResult> {
-  const checked = await checkClaudeSeat(input, seat, precedence);
+  const checked = await checkClaudeSeat(input, seat, precedence, (rigId, nodeId) => relaunch.nextLaunch(rigId, nodeId));
   if (!checked.ok) {
     const { reasons, message } = checked.verdict;
     return { outcome: "failed_safely", reasons: reasons as [string, ...string[]], ...(message ? { message } : {}) };
   }
   const { nodeId, rigId, rigName, logicalId } = seat;
+  const before = relaunch.tokenRef(nodeId);
+  const account = checked.ref?.label ?? STORED_LOGIN;
+  const reportFor = (conversation: string | null): SeatSwitchReport => ({ seat: input.seat, account, ...(checked.ref?.kind ? { credentialKind: checked.ref.kind } : {}),
+    ...(checked.ref ? { tokenFile: checked.ref.tokenFile } : {}), conversation, loginChanged: false, peers: [],
+    // The label's characters are limited; a path can hold any but a newline, so it's quoted.
+    undo: before
+      ? `rig provider switch --seat ${input.seat} --to-account ${before.label} ${before.kind === "api-key" ? "--api-key-file" : "--token-file"} ${shellQuote(before.tokenFile)}`
+      : `rig provider switch --seat ${input.seat} --stored-login` });
+  if (!seat.running) {
+    // Nothing to relaunch: the reference is saved for the seat's next launch, which the check found resumes its
+    // conversation. No snapshot is taken, so the one checked is the one `rig launch` selects.
+    const next = checked.next;
+    if (!next) return { outcome: "failed_safely", reasons: ["conversation_not_resumable"], message: `${input.seat} isn't running, and its next launch couldn't be checked. Nothing changed.` };
+    relaunch.setTokenRef(nodeId, checked.ref);
+    const report = reportFor(next.conversation);
+    report.loginChanged = true;
+    // A resume through restore's automatic periodic carry needs the plain launch: naming the snapshot turns the carry off.
+    const launch = `rig launch ${rigName} ${logicalId}${next.automatic ? "" : ` --snapshot-id ${next.snapshotId}`}`;
+    const uses = checked.ref ? `its token reference "${account}"`
+      : checked.instead ? `${checked.instead}, which Claude Code ranks above its config dir's stored login` : "its config dir's stored login";
+    report.next = `${launch} resumes conversation ${next.conversation ?? "(not recorded in the snapshot)"} with ${uses}`
+      + `${next.automatic ? ` (it selects the latest usable snapshot, ${next.snapshotId} now, and resumes through its periodic carry)` : ""}. `
+      + (checked.instead ? "After a turn with a tool call, its /status shows the token it uses (CLAUDE_CODE_OAUTH_TOKEN), not the stored login."
+        : "Check its /status after a turn with a tool call.");
+    return { outcome: "succeeded", seat: report,
+      message: `${input.seat} isn't running, so nothing was relaunched. Its next launch uses ${uses}: ${launch}.` };
+  }
   if (!seat.pane) {
     return { outcome: "failed_safely", reasons: ["no_bound_pane"], message: `${input.seat} has no bound tmux pane to relaunch it in. Nothing changed.` };
   }
+  // A switch is how a person recovers a seat from a limit or an outage, so its relaunch keeps a running process's own
+  // --effort (launched by hand, or from an older setting) in place of the seat's saved effort. The seat's explicit
+  // choice (`rig seat set-effort`) is the change a managed relaunch applies, so it goes ahead. A kept effort isn't saved
+  // as the seat's choice.
+  const effort = relaunch.effortChange ? await relaunch.effortChange(nodeId, seat.pane) : undefined;
+  const keepEffort = effort?.running && effort.running !== effort.relaunch && !effort.relaunchIsSeatChoice ? effort.running : undefined;
   const snapshot = relaunch.snapshot(rigId, nodeId);
   if (!snapshot.resumes) {
     return { outcome: "failed_safely", reasons: ["conversation_not_resumable"],
       message: `Snapshot ${snapshot.snapshotId} ${snapshot.why}, so relaunching ${input.seat} wouldn't resume its conversation. Nothing changed.` };
   }
-  const before = relaunch.tokenRef(nodeId);
-  const account = checked.ref?.label ?? STORED_LOGIN;
-  const report: SeatSwitchReport = { seat: input.seat, account, ...(checked.ref ? { tokenFile: checked.ref.tokenFile } : {}),
-    conversation: snapshot.conversation, loginChanged: false, peers: [],
-    // The label's characters are limited; a path can hold any but a newline, so it's quoted.
-    undo: before
-      ? `rig provider switch --seat ${input.seat} --to-account ${before.label} --token-file ${shellQuote(before.tokenFile)}`
-      : `rig provider switch --seat ${input.seat} --stored-login` };
+  const report = reportFor(snapshot.conversation);
   touching();
   relaunch.setTokenRef(nodeId, checked.ref);
   let relaunched: Awaited<ReturnType<ClaudeSeatRelaunch["relaunchInPane"]>>;
-  try { relaunched = await relaunch.relaunchInPane(rigId, logicalId, snapshot.snapshotId); }
+  try { relaunched = await relaunch.relaunchInPane(rigId, logicalId, snapshot.snapshotId, keepEffort ? { effort: keepEffort } : undefined); }
   catch (err) { relaunched = { ok: false, effect: "unknown", code: "relaunch_threw", message: err instanceof Error ? err.message : String(err) }; }
   if (!relaunched.ok && relaunched.effect === "none") {
     relaunch.setTokenRef(nodeId, before);
     return { outcome: "failed_safely", reasons: [`relaunch_${relaunched.code.replace(/-/g, "_")}`], seat: report,
-      message: `${input.seat} wasn't relaunched (${relaunched.code}: ${relaunched.message}) and wasn't touched, so it keeps running as it was, with its token reference as it was.` };
+      message: `${input.seat} wasn't relaunched (${relaunched.code}: ${relaunched.message}) and wasn't touched, so it's as it was before the switch, with its token reference as it was.` };
   }
   report.loginChanged = true;
+  const effortLine = effortNote(input.seat, effort, keepEffort, relaunched);
+  if (effortLine) report.effort = effortLine;
   if (!relaunched.ok) {
     const recoveryCommand = `rig launch ${rigName} ${logicalId} --snapshot-id ${snapshot.snapshotId}`;
     report.restart = { outcome: relaunched.code, message: relaunched.message, recoveryCommand,
-      remainingStep: `If the pane (rig capture ${input.seat}) shows no running Claude, stop the seat first (rig seat stop ${input.seat} --reason "<why>"), `
-        + `then run the recovery command; it resumes the conversation from snapshot ${snapshot.snapshotId} with the new reference. The way back works once the seat runs.` };
+      remainingStep: `Inspect the pane (rig capture ${input.seat}). If a leftover shell/session remains without a running Claude, stop it first (rig seat stop ${input.seat} --reason "<why>"). `
+        + `If the session is already absent, run the recovery command directly; it resumes the conversation from snapshot ${snapshot.snapshotId} with the new reference. The way back works once the seat runs.` };
     return { outcome: "unknown", reasons: [relaunched.code === "relaunch_threw" ? "relaunch_threw" : `relaunch_${relaunched.code.replace(/-/g, "_")}`], seat: report,
       message: `${input.seat}'s relaunch in its pane from snapshot ${snapshot.snapshotId} didn't report a resumed conversation (${relaunched.code}: ${relaunched.message}). `
         + "Its process may have been ended. Not retried." };
@@ -123,6 +164,12 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
   const fallback = relaunched.warnings.filter(isClaudeSeatTokenFallback);
   report.warnings = relaunched.warnings;
   report.restart = { outcome: "resumed", message: `Resumed conversation ${snapshot.conversation ?? "(not recorded in the snapshot)"} in the seat's own pane.` };
+  if (checked.ref?.kind === "api-key") {
+    report.tokenApplied = fallback.length === 0;
+    report.next = "After a real tool turn, check the seat's /status for API-key authentication. The label is operator-supplied; OpenRig does not verify the billing account or enforce a budget.";
+    return { outcome: "rebind_in_progress", seat: report,
+      message: `Relaunched ${input.seat} on its selected API-key file, resuming conversation ${snapshot.conversation ?? "from the snapshot"} in its own pane. Work in flight when it stopped didn't carry over.` };
+  }
   if (checked.ref) {
     report.tokenApplied = fallback.length === 0;
     report.next = report.tokenApplied
@@ -138,4 +185,49 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
   return { outcome: "rebind_in_progress", seat: report, message: checked.instead
     ? `Relaunched ${input.seat} in its own pane without its own token, resuming its conversation. It uses ${checked.instead}, which Claude Code ranks above its config dir's stored login.`
     : `Relaunched ${input.seat} in its own pane on its config dir's stored login, resuming its conversation. Work in flight when it stopped didn't carry over.` };
+}
+
+/** Which effort a switch's relaunch used, and why, from the selection restore's launch reported, when that isn't simply the
+ *  effort already running. Without that report it says so, rather than naming the effort read before the relaunch. When
+ *  the relaunch didn't report resuming, it's worded as asked, not done, with the rule the recovery command (a plain
+ *  restore) follows; the effort read before the relaunch can be stale by then. Nothing when no reader is wired. */
+function effortNote(seat: string, effort: Awaited<ReturnType<NonNullable<ClaudeSeatRelaunch["effortChange"]>>> | undefined,
+  keepEffort: string | undefined, relaunched: Awaited<ReturnType<ClaudeSeatRelaunch["relaunchInPane"]>>): string | undefined {
+  if (effort === undefined) return undefined;
+  const running = effort === null ? null : effort.running;
+  const named = (value: string | null) => value ?? "the runtime default (no --effort)";
+  if (!relaunched.ok) {
+    const recovery = "The recovery command (a plain restore) launches the seat's explicit effort choice at that time, else the snapshot's effort";
+    if (keepEffort) {
+      return `the relaunch was asked to keep the running effort ${keepEffort}, but it didn't report resuming. ${recovery}; `
+        + `to keep ${keepEffort}, run rig seat set-effort ${seat} ${keepEffort} first.`;
+    }
+    if (effort === null) {
+      return `the running effort couldn't be read, and the relaunch didn't report resuming. ${recovery}; rig seat set-effort ${seat} <level> chooses one first.`;
+    }
+    if (effort.running === effort.relaunch && !effort.relaunchIsSeatChoice) return undefined;
+    return `the relaunch didn't report resuming. ${recovery}.`;
+  }
+  const selected = relaunched.effort;
+  if (!selected) {
+    return `the relaunch didn't report which effort it launched; rig seat effort ${seat} shows what launched.`;
+  }
+  if (selected.source === "kept") {
+    return `kept the running effort ${named(selected.effort)}: the seat has no effort choice of its own, so the relaunch kept what it ran with. `
+      + `Its saved effort, ${named(effort === null ? null : effort.relaunch)}, is unchanged; rig seat set-effort ${seat} <level> chooses one.`;
+  }
+  if (effort === null) {
+    return selected.source === "seat_choice"
+      ? `the running effort couldn't be read; the relaunch used the seat's chosen effort ${named(selected.effort)} (rig seat set-effort).`
+      : `the running effort couldn't be read, so the relaunch used the seat's saved effort, ${named(selected.effort)}.`;
+  }
+  if (selected.effort === running) return undefined;
+  if (selected.source === "seat_choice") {
+    return keepEffort
+      ? `the seat's chosen effort ${named(selected.effort)}, saved during the switch, in place of the running ${keepEffort} the relaunch was asked to keep.`
+      : `the seat's chosen effort ${named(selected.effort)} (rig seat set-effort), in place of the running ${running ?? "process's runtime default (no --effort flag)"}.`;
+  }
+  return running === null
+    ? `the running process had no --effort flag, so the relaunch used the seat's saved effort ${named(selected.effort)}.`
+    : `the relaunch used the seat's saved effort ${named(selected.effort)}, in place of the running ${running}.`;
 }

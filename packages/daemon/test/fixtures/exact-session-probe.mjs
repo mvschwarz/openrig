@@ -51,10 +51,14 @@ try {
   // Literal-leading-equals case also reported by lab1207 in PR #460.
   // Each arrangement uses real tmux targets through both adapter APIs.
   const literal = "=worker@demo", plain = "worker@demo";
+  // Keep one server alive: kill-server can return before its socket is released.
+  await native(["new-session", "-d", "-s", "fixture-anchor", "sleep 120"]);
   for (const names of [[literal], [plain], [literal, plain]]) {
-    await native(["kill-server"]);
-    // Keep the private server live when the literal case removes its only pane.
-    await native(["new-session", "-d", "-s", "fixture-anchor", "sleep 120"]);
+    const sessions = (await native(["list-sessions", "-F", "#{session_id} #{session_name}"])).trim().split("\n");
+    for (const session of sessions) {
+      const [id, name] = session.split(" ");
+      if (name !== "fixture-anchor") await native(["kill-session", "-t", id]);
+    }
     for (const name of names) await native(["new-session", "-d", "-s", name, "sleep 120"]);
     for (const adapter of [argv, legacy]) {
       for (const name of names) {

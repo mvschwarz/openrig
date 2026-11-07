@@ -8,7 +8,7 @@
 // post-bootstrap tracker state.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -24,7 +24,11 @@ import {
   type KernelBootDeps,
   type RuntimeAuthStatus,
 } from "../src/domain/kernel-boot.js";
-import type { RigRepository } from "../src/domain/rig-repository.js";
+import { BootstrapRepository } from "../src/domain/bootstrap-repository.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import Database from "better-sqlite3";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { migrate } from "../src/db/migrate.js";
 import type { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator.js";
 import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { EventBus } from "../src/domain/event-bus.js";
@@ -35,6 +39,7 @@ function makeRigRepo(existingRigs: Array<{ id?: string; name: string }>): RigRep
     findRigsByName: (name: string) => existingRigs.filter((r) => r.name === name),
     findUnarchivedRigsByName: (name: string) => existingRigs.filter((r) => r.name === name),
     getRig: () => null,
+    getKernelVariantFromBootstrap: () => null,
   } as unknown as RigRepository;
 }
 
@@ -120,6 +125,120 @@ describe("selectVariant — auth-state → variant mapping", () => {
   });
   it("picks rig-codex-only.yaml when only Codex available", () => {
     expect(selectVariant({ claudeCode: "unavailable", codex: "ok" })).toBe("rig-codex-only.yaml");
+  });
+});
+
+describe("kernel variant from existing bootstrap history", () => {
+  it.each([
+    ["rig.yaml", false], ["rig-claude-only.yaml", false], ["rig-codex-only.yaml", false],
+    ["rig.yaml", true], ["rig-claude-only.yaml", true], ["rig-codex-only.yaml", true],
+  ] as const)("reads an older kernel's %s selection (opt-out: %s)", async (variant, optOut) => {
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      const rigRepo = new RigRepository(db);
+      const rig = rigRepo.createRig("kernel");
+      db.prepare("INSERT INTO bootstrap_runs (id, source_kind, source_ref, rig_id, status) VALUES (?, ?, ?, ?, ?)")
+        .run("older-boot", "rig_spec", join(tmpSpecsDir, "rigs/launch/kernel", variant), rig.id, "partial");
+      if (optOut) process.env.OPENRIG_NO_KERNEL = "1";
+      const probe = vi.fn(async () => ({ claudeCode: "ok", codex: "ok" } as const));
+      const restore = vi.fn(async () => ({ errors: [] }));
+      const bootstrap = makeBootstrapMock();
+      const tracker = await bootKernelIfNeeded(makeBaseDeps({
+        rigRepo, probeRuntimes: probe, restoreLostKernel: restore, bootstrapOrchestrator: bootstrap,
+      }, tmpSpecsDir));
+      try {
+        expect(tracker.getStatus().variant).toBe(variant);
+        expect(probe).not.toHaveBeenCalled();
+        expect(restore).not.toHaveBeenCalled();
+        expect(bootstrap.bootstrap).not.toHaveBeenCalled();
+      } finally { tracker.stop(); }
+    } finally { db.close(); }
+  });
+});
+
+describe("kernel variant persistence", () => {
+  it.each([
+    ["ok", "ok", "rig.yaml"],
+    ["ok", "unavailable", "rig-claude-only.yaml"],
+    ["unavailable", "ok", "rig-codex-only.yaml"],
+  ] as const)("keeps the %s/%s selection after reopening the database", async (claudeCode, codex, variant) => {
+    const dbPath = join(tmpSpecsDir, "kernel.db");
+    let db = new Database(dbPath);
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      let rigRepo = new RigRepository(db);
+      const bootstrap = makeBootstrapMock();
+      let rigId = "";
+      vi.mocked(bootstrap.bootstrap).mockImplementationOnce(async (input) => {
+        rigId = rigRepo.createRig("kernel").id;
+        const history = new BootstrapRepository(db);
+        const run = history.createRun(input.sourceKind, input.sourceRef);
+        history.updateRunStatus(run.id, "completed", { rigId });
+        return { runId: run.id, status: "completed", rigId, stages: [], errors: [], warnings: [] };
+      });
+      const tracker = await bootKernelIfNeeded(makeBaseDeps({
+        rigRepo, bootstrapOrchestrator: bootstrap,
+        probeRuntimes: async () => ({ claudeCode, codex }),
+      }, tmpSpecsDir));
+      await flushPromises();
+      tracker.stop();
+      expect(rigRepo.getKernelVariantFromBootstrap(rigId, tmpSpecsDir)).toBe(variant);
+      db.close();
+      db = new Database(dbPath);
+      rigRepo = new RigRepository(db);
+      const probe = vi.fn(async () => ({ claudeCode: "unavailable", codex: "unavailable" } as const));
+      const restarted = await bootKernelIfNeeded(makeBaseDeps({ rigRepo, probeRuntimes: probe }, tmpSpecsDir));
+      expect(restarted.getStatus().variant).toBe(variant);
+      expect(probe).not.toHaveBeenCalled();
+      expect(rigRepo.getKernelVariantFromBootstrap(rigId, tmpSpecsDir)).toBe(variant);
+      restarted.stop();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("records a partially launched kernel by the bootstrap result's id", async () => {
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      const rigRepo = new RigRepository(db);
+      const bootstrap = makeBootstrapMock();
+      let rigId = "";
+      let otherId = "";
+      vi.mocked(bootstrap.bootstrap).mockImplementationOnce(async (input) => {
+        otherId = rigRepo.createRig("kernel").id;
+        rigRepo.archiveRig(otherId);
+        rigId = rigRepo.createRig("kernel").id;
+        const history = new BootstrapRepository(db);
+        const run = history.createRun(input.sourceKind, input.sourceRef);
+        history.updateRunStatus(run.id, "partial", { rigId });
+        return { runId: run.id, status: "partial", rigId, stages: [], errors: ["seat failed"], warnings: [] };
+      });
+      const tracker = await bootKernelIfNeeded(makeBaseDeps({ rigRepo, bootstrapOrchestrator: bootstrap }, tmpSpecsDir));
+      await flushPromises();
+      expect(tracker.getStatus().kernelState).toBe("bootstrap_failed");
+      expect(rigRepo.getKernelVariantFromBootstrap(rigId, tmpSpecsDir)).toBe("rig.yaml");
+      expect(rigRepo.getKernelVariantFromBootstrap(otherId, tmpSpecsDir)).toBeNull();
+      tracker.stop();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("leaves an existing kernel without a recorded selection unmarked", async () => {
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      const rigRepo = new RigRepository(db);
+      const rig = rigRepo.createRig("kernel");
+      const tracker = await bootKernelIfNeeded(makeBaseDeps({ rigRepo }, tmpSpecsDir));
+      expect(tracker.getStatus().variant).toBeNull();
+      expect(rigRepo.getKernelVariantFromBootstrap(rig.id, tmpSpecsDir)).toBeNull();
+      tracker.stop();
+    } finally {
+      db.close();
+    }
   });
 });
 
@@ -209,9 +328,30 @@ describe("bootKernelIfNeeded — fire-and-forget bootstrap", () => {
     expect(opts.sourceRef).toBe(join(tmpSpecsDir, "rigs/launch/kernel", "rig.yaml"));
     expect(opts.sourceKind).toBe("rig_spec");
     expect(opts.autoApprove).toBe(true);
-    expect(opts.cwdOverride).toBe(tmpSpecsDir);
+    // A new kernel works in the workspace's own `kernel` folder, prepared here, not in the workspace above its projects.
+    expect(opts.cwdOverride).toBe(join(tmpSpecsDir, "kernel"));
+    expect(statSync(join(tmpSpecsDir, "kernel")).isDirectory()).toBe(true);
     release();
     tracker.stop();
+  });
+
+  it("starts a new kernel in the workspace root, as before, when its folder can't be prepared, and refuses nothing", async () => {
+    // A file where the folder would go, and a workspace root that doesn't exist.
+    writeFileSync(join(tmpSpecsDir, "kernel"), "a user's file\n");
+    const missing = join(tmpSpecsDir, "no-workspace");
+    for (const workspaceRoot of [tmpSpecsDir, missing]) {
+      const bootstrap = makeBootstrapMock();
+      const warnings: string[] = [];
+      const tracker = await bootKernelIfNeeded(makeBaseDeps({ bootstrapOrchestrator: bootstrap, cwdOverride: workspaceRoot,
+        log: (level, message) => { if (level === "warn") warnings.push(message); } }, tmpSpecsDir));
+      expect(tracker.getStatus().kernelState).toBe("booting");
+      const opts = (bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap.mock.calls[0]![0];
+      expect(opts.cwdOverride).toBe(workspaceRoot);
+      expect(warnings).toEqual([expect.stringContaining(join(workspaceRoot, "kernel"))]);
+      tracker.stop();
+    }
+    expect(readFileSync(join(tmpSpecsDir, "kernel"), "utf8")).toBe("a user's file\n");
+    expect(existsSync(missing)).toBe(false);
   });
 
   it("transitions to bootstrap_failed when orchestrator returns errors (post-flush)", async () => {

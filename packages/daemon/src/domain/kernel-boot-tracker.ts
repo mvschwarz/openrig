@@ -59,7 +59,8 @@ export interface KernelBootStatus {
    *  terminal/skipped states. */
   firstUnreadySince: string | null;
   /** Filename of the picked variant (rig.yaml / rig-claude-only.yaml /
-   *  rig-codex-only.yaml). null when no variant was selected. */
+   *  rig-codex-only.yaml), retained from automatic boot across daemon restarts.
+   *  null when no selection was recorded. This is origin metadata, not the current runtime mix. */
   variant: string | null;
   /** Human-readable detail for auth_blocked / spec_missing /
    *  bootstrap_failed / degraded states. null otherwise. */
@@ -105,10 +106,11 @@ export class KernelBootTracker {
   /** Mark the tracker as having intentionally not booted (--no-kernel,
    *  already-managed short-circuit, VITEST auto-skip). Terminal state;
    *  no degraded timer. */
-  setSkipped(detail: string): void {
+  setSkipped(detail: string, variant: string | null = null): void {
     this.cancelTimer();
     this.state = "skipped";
     this.detail = detail;
+    this.variant = variant;
     this.firstUnreadySince = null;
   }
 

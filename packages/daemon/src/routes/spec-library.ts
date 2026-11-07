@@ -1,10 +1,11 @@
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { readFileSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { ActiveLensStore } from "../domain/active-lens-store.js";
-import type { SpecLibraryService } from "../domain/spec-library-service.js";
+import type { SpecLibraryEntry, SpecLibraryService } from "../domain/spec-library-service.js";
 import { SpecReviewService, SpecReviewError } from "../domain/spec-review-service.js";
 import {
   getWorkflowReview,
@@ -14,6 +15,17 @@ import {
 } from "../domain/spec-library-workflow-scanner.js";
 import type { WorkflowSpecCache } from "../domain/workflow-spec-cache.js";
 import type { EventBus } from "../domain/event-bus.js";
+import type { SettingsStore } from "../domain/user-settings/settings-store.js";
+
+function visibleEntries(entries: SpecLibraryEntry[], settings: SettingsStore | undefined, includeBuiltins = false): SpecLibraryEntry[] {
+  const showBuiltins = includeBuiltins || settings?.resolveOne("specs.builtins_visible").value !== false;
+  return entries.filter((entry) => {
+    if (entry.id.startsWith("workflow-source:") && entries.some((other) =>
+      !other.id.startsWith("workflow-source:") && other.kind === "workflow" && other.sourcePath === entry.sourcePath)) return false;
+    if (entry.id.startsWith("workflow-source:") && showBuiltins && !includeBuiltins) return false;
+    return showBuiltins || entry.sourceType !== "builtin";
+  });
+}
 
 export function specLibraryRoutes(): Hono {
   const router = new Hono();
@@ -33,9 +45,11 @@ export function specLibraryRoutes(): Hono {
       const cache = c.get("workflowSpecCache" as never) as WorkflowSpecCache | undefined;
       const folder = c.get("workflowsFolderDir" as never) as string | undefined;
       const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+      const aliases: Array<{ name: string; version: string; sourcePath: string; sourceHash: string }> = [];
       if (cache && folder) {
         try {
-          scanWorkflowSpecFolder({ db, cache, folder, builtinDir: builtinDir ?? null, eventBus });
+          scanWorkflowSpecFolder({ db, cache, folder, builtinDir: builtinDir ?? null, eventBus,
+            onBuiltinAlias: (name, version, sourcePath, sourceHash) => aliases.push({ name, version, sourcePath, sourceHash }) });
         } catch { /* best-effort — folder scan failure must not break Library list */ }
       }
       // Re-scan workflow specs on each list request — cheap (single
@@ -43,6 +57,34 @@ export function specLibraryRoutes(): Hono {
       // surfaces always see the freshest cache state without a separate
       // POST /sync.
       const workflowEntries = scanWorkflowSpecs({ db, workflowBuiltinSpecsDir: builtinDir ?? null });
+      for (const alias of aliases) {
+        const original = workflowEntries.find((entry) => entry.sourceType === "builtin" && entry.name === alias.name && entry.version === alias.version);
+        if (!original) continue;
+        try {
+          const hashFile = (file: string) => createHash("sha256").update(readFileSync(file, "utf8")).digest("hex");
+          if (hashFile(alias.sourcePath) !== alias.sourceHash || hashFile(original.sourcePath) !== alias.sourceHash) continue;
+          workflowEntries.push({ ...original, id: `workflow-source:${createHash("sha256").update(alias.sourcePath).digest("hex")}`,
+            sourceType: "user_file", isBuiltIn: false, sourcePath: alias.sourcePath, relativePath: alias.sourcePath });
+        } catch { /* A file changed or disappeared during the scan; try again on the next request. */ }
+      }
+      // Keep a source-specific link valid when an identical copy is edited and
+      // becomes the cache's own user-file row. The normal row is listed once.
+      if (folder && cache) {
+        const sourceHashes = new Map<string, string>();
+        for (const entry of [...workflowEntries]) {
+          if (entry.sourceType !== "user_file" || entry.status === "error" || dirname(entry.sourcePath) !== folder) continue;
+          try {
+            let sourceHash = sourceHashes.get(entry.sourcePath);
+            if (sourceHash === undefined) {
+              sourceHash = createHash("sha256").update(readFileSync(entry.sourcePath, "utf8")).digest("hex");
+              sourceHashes.set(entry.sourcePath, sourceHash);
+            }
+            const cached = cache.getByNameVersion(entry.name, entry.version);
+            if (!cached || cached.sourcePath !== entry.sourcePath || cached.sourceHash !== sourceHash) continue;
+          } catch { continue; /* Missing or changed source: do not project an unverified alias. */ }
+          workflowEntries.push({ ...entry, id: `workflow-source:${createHash("sha256").update(entry.sourcePath).digest("hex")}` });
+        }
+      }
       lib.setWorkflowEntries(workflowEntries);
     }
     return lib;
@@ -81,7 +123,8 @@ export function specLibraryRoutes(): Hono {
   router.get("/", (c) => {
     const lib = refreshWorkflowEntries(c);
     const kind = c.req.query("kind") as "rig" | "agent" | "workflow" | undefined;
-    const entries = lib.list(kind ? { kind } : undefined);
+    const settings = c.get("settingsStore" as never) as SettingsStore | undefined;
+    const entries = visibleEntries(lib.list(kind ? { kind } : undefined), settings, c.req.query("include_builtins") === "true");
     return c.json(entries.map((entry) => {
       // Preserve the authored/catalog path and also identify its actual source.
       // Consumers still read through the existing file-root boundary.
@@ -121,7 +164,9 @@ export function specLibraryRoutes(): Hono {
     // payload shape — topology graph + per-step list + source-path
     // — projected from the workflow_specs SQLite cache.
     if (result.entry.kind === "workflow") {
-      const parsed = parseWorkflowLibraryId(id);
+      const parsed = id.startsWith("workflow-source:")
+        ? { name: result.entry.name, version: result.entry.version }
+        : parseWorkflowLibraryId(id);
       if (!parsed) return c.json({ error: `Workflow library id '${id}' could not be parsed` }, 400);
       const db = (c.get("rigRepo" as never) as { db: Database.Database } | undefined)?.db;
       const builtinDir = c.get("workflowBuiltinSpecsDir" as never) as string | undefined;
@@ -135,7 +180,8 @@ export function specLibraryRoutes(): Hono {
       if (!review) {
         return c.json({ error: `Workflow spec '${parsed.name}' v${parsed.version} not in workflow_specs cache` }, 404);
       }
-      return c.json({ ...review, libraryEntryId: id });
+      return c.json({ ...review, sourcePath: result.entry.sourcePath,
+        isBuiltIn: result.entry.sourceType === "builtin", libraryEntryId: id });
     }
 
     try {
@@ -182,7 +228,9 @@ export function specLibraryRoutes(): Hono {
   router.post("/sync", (c) => {
     const lib = c.get("specLibraryService" as never) as SpecLibraryService;
     lib.scan();
-    return c.json(lib.list());
+    refreshWorkflowEntries(c);
+    const settings = c.get("settingsStore" as never) as SettingsStore | undefined;
+    return c.json(visibleEntries(lib.list(), settings, c.req.query("include_builtins") === "true"));
   });
 
   // DELETE /:id — remove a user-file library entry

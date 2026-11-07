@@ -71,7 +71,16 @@ describe("the documented Cursor launcher and preset", () => {
     expect(exit).not.toBe(0);
   });
 
-  it("declares conversation reporting, resume and first input without an assisted check", () => {
-    expect(loadCommunityHarnessPreset("cursor", EXAMPLE)).toMatchObject({ ok: true, preset: { command: "openrig-cursor-launch", launchResult: true, resume: true, firstInput: true, startupAssisted: false } });
+  it("gives a new chat the seat's model, and a resumed chat none", () => {
+    expect(run(() => ({ OPENRIG_MODEL: "auto" })).args).toEqual(["--resume", "chat-abc", "--trust", "--model", "auto"]);
+    const resumed = run(dir => {
+      addChat(join(dir, "home", "state", "cursor", "node-1"), dir, "chat-777");
+      return { OPENRIG_MODEL: "auto", OPENRIG_RESUME_REF: "chat-777" };
+    });
+    expect(resumed.args).toEqual(["--resume", "chat-777", "--trust"]);
+  });
+
+  it("declares conversation reporting, resume and first input without an assisted check, and doesn't yet take a model", () => {
+    expect(loadCommunityHarnessPreset("cursor", EXAMPLE)).toMatchObject({ ok: true, preset: { command: "openrig-cursor-launch", launchResult: true, resume: true, firstInput: true, startupAssisted: false, passesModel: false } });
   });
 });

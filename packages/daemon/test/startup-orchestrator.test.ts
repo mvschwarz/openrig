@@ -1,10 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
-import { SessionRegistry } from "../src/domain/session-registry.js";
+import { SessionRegistry, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../src/domain/session-registry.js";
+import { COMMUNITY_HARNESS_RUNG_INVENTORY, COMMUNITY_RUNNER_RUNG_INVENTORY, runtimeRungInventory } from "../src/domain/activity-taxonomy.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { StartupOrchestrator, isRecoverableStartupFailure, type StartupInput, type StartupResult } from "../src/domain/startup-orchestrator.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { SessionTransport } from "../src/domain/session-transport.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile, ProjectionResult, StartupDeliveryResult, ReadinessResult } from "../src/domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
@@ -23,6 +28,7 @@ import { CommunityHarnessRuntimeAdapter } from "../src/adapters/community-harnes
 import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE, describeSkillRouterFootprint, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { managedBlockRecords } from "../src/domain/managed-block-records.js";
 import { prepareSeatLaunchAdditions, recordConversationPrompt, systemPromptPendingNote } from "../src/domain/seat-launch-additions.js";
 import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
@@ -213,6 +219,37 @@ describe("StartupOrchestrator", () => {
     } finally { nodeFs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  it("community contract: a continuation that launches nothing keeps the runner declaration its launch recorded", async () => {
+    const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "community-runner-continue-"));
+    try {
+      const preset = (runner: boolean) => nodeFs.writeFileSync(nodePath.join(root, "synth.yaml"),
+        `format: 1\nname: synth\ncommand: synth-launch\nmaintainer: Example\nlimits: []\n${runner ? "launch_result: true\nrunner: true\n" : ""}`);
+      const seed = seedSession();
+      db.prepare("UPDATE nodes SET runtime='synth' WHERE id=?").run(seed.nodeId);
+      sessionRegistry.recordCommunityHarnessSelection(seed.sessionId, "synth", true); // launched as a runner
+      preset(false); // then the person edits the preset to plain and continues the same process (`rig seat continue`)
+      const sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+      const adapter = new CommunityHarnessRuntimeAdapter("synth", { presetsDir: () => root, launchResultRoot: () => root,
+        launchResultWait: { timeoutMs: 20, intervalMs: 10 },
+        tmux: { hasSession: async () => true, getPaneCommand: async () => "node", sendShellCommand } });
+      const recorded = () => db.prepare(`SELECT ${sessionCommunityHarnessSelect(db)} AS harness, ${sessionCommunityRunnerSelect(db)} AS runner
+        FROM sessions s WHERE s.id = ?`).get(seed.sessionId) as { harness: string | null; runner: number | null };
+      const inventory = () => runtimeRungInventory("synth", recorded().harness, recorded().runner === 1);
+
+      await createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd: root },
+        skipHarnessLaunch: true, continueFreshStartup: true }));
+      expect(sendShellCommand).not.toHaveBeenCalled();
+      expect(recorded()).toEqual({ harness: "synth", runner: 1 });
+      expect(inventory()).toBe(COMMUNITY_RUNNER_RUNG_INVENTORY);
+
+      // A real launch samples the preset as it is now.
+      await createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd: root } }));
+      expect(sendShellCommand).toHaveBeenCalledTimes(1);
+      expect(recorded()).toEqual({ harness: "synth", runner: 0 });
+      expect(inventory()).toBe(COMMUNITY_HARNESS_RUNG_INVENTORY);
+    } finally { nodeFs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it.each(["codex-first-login.txt", "codex-first-login-0.162.1.txt"])("persists %s as attention and withholds startup context", async (fixture) => {
     const seed = seedSession();
     db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(seed.nodeId);
@@ -267,6 +304,75 @@ describe("StartupOrchestrator", () => {
       latestError: expect.stringMatching(/sign in/i) });
     expect(compactNodeProjection(served)[0]).toMatchObject({ needsAttention: true,
       latestError: expect.stringMatching(/sign in/i) });
+  });
+
+  // #6: a fresh Claude with no login of its own draws its persistent "Not logged in · Run /login" footer and refuses the
+  // first request. The footer alone must not block (a gateway may authenticate); the refusal must reach the node view.
+  it.each([
+    // Claude 2.1.312 with an empty home draws the refusal as a result row under the prompt.
+    ["refused as a result row", "  ⎿  Not logged in · Please run /login\n\n✻ Cogitated for 0s · done 8:46 AM\n"],
+    ["refused as a reply", "● Not logged in · Please run /login\n\n"],
+    ["gateway", "● Ready to work.\n\n"],
+    ["quoted", "● The setup guide says to expect:\n  ● Not logged in · Please run /login\n\n"],
+  ] as const)("a fresh Claude whose first reply is %s reaches the node view honestly", async (kind, reply) => {
+    const seed = seedSession();
+    const files: ResolvedStartupFile[] = ["role.md", "a.md"].map((path) => ({
+      path, absolutePath: `/fixture/${path}`, ownerRoot: "/fixture", deliveryHint: "send_text" as const, required: true,
+      appliesOn: ["fresh_start" as const],
+    }));
+    const read = (path: string) => `Contents of ${nodePath.basename(path)}`;
+    const submitted: string[] = [];
+    let composer = "";
+    const footer = "                                                    Not logged in · Run /login";
+    const frame = () => `${submitted.length ? `❯ ${submitted[0]}\n${reply}` : ""}────────────────────\n❯ ${composer}\n`
+      + `────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)\n${footer}\n`;
+    const t = mockTmux({
+      getPaneCommand: vi.fn(async () => "claude"),
+      capturePaneContent: vi.fn(async () => frame()),
+      sendText: vi.fn(async (_session: string, text: string) => { composer = text; return { ok: true as const }; }),
+      sendKeys: vi.fn(async () => { submitted.push(composer); composer = ""; return { ok: true as const }; }),
+    });
+    const real = new ClaudeCodeAdapter({ tmux: t, sleep: async () => {}, fsOps: {
+      readFile: read, writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {}, listFiles: () => [],
+    } });
+    const adapter = mockAdapter({ deliverStartup: real.deliverStartup.bind(real), checkReady: vi.fn(binding => real.checkReady(binding)) });
+    const result = await createOrchestrator({ tmux: t, readFile: read }).startNode(makeInput(seed, {
+      adapter, resolvedStartupFiles: files, startupActions: [makeIdentityAction()],
+    }));
+
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("rigRepo" as never, rigRepo);
+      c.set("tmuxAdapter" as never, t);
+      await next();
+    });
+    app.route("/api/rigs/:rigId/nodes", nodesRoutes);
+    const served = await (await app.request(`/api/rigs/${seed.rigId}/nodes`)).json();
+    if (!kind.startsWith("refused")) {
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(submitted).toHaveLength(2);
+      expect(served[0]).toMatchObject({ startupStatus: "ready", needsAttention: false });
+      return;
+    }
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+    expect(submitted).toHaveLength(1);
+    const inventory = getNodeInventory(db, seed.rigId)[0];
+    expect(inventory).toMatchObject({ startupStatus: "attention_required", lifecycleState: "attention_required" });
+    expect(inventory?.latestError).toMatch(/logs in/);
+    expect(inventory?.latestError).not.toContain("Readiness timeout");
+    expect(served[0]).toMatchObject({ startupStatus: "attention_required", needsAttention: true,
+      latestError: expect.stringMatching(/logs in/) });
+    expect(compactNodeProjection(served)[0]).toMatchObject({ needsAttention: true, latestError: expect.stringMatching(/logs in/) });
+  });
+
+  it("a Claude that never draws its TUI still ends in the generic readiness timeout", async () => {
+    const seed = seedSession();
+    const t = mockTmux({ getPaneCommand: vi.fn(async () => "node"), capturePaneContent: vi.fn(async () => "") });
+    const real = new ClaudeCodeAdapter({ tmux: t, sleep: async () => {} });
+    const adapter = mockAdapter({ checkReady: vi.fn(binding => real.checkReady(binding)) });
+    const result = await createOrchestrator({ tmux: t }).startNode(makeInput(seed, { adapter, readinessTimeoutMs: 1_000 }));
+    expect(result).toMatchObject({ ok: false, startupStatus: "failed" });
+    expect(getNodeInventory(db, seed.rigId)[0]?.latestError).toContain("Readiness timeout");
   });
 
   // OPR.0.7.0.13 (router, R1.1): a start replaying a saved context delivers the old seat-skills pointer only with the
@@ -457,6 +563,177 @@ describe("StartupOrchestrator", () => {
     } finally {
       nodeFs.rmSync(cwd, { recursive: true, force: true });
     }
+  });
+
+  // #2456 part 3: a start records what it wrote in each managed block, so a later start refreshes a block it wrote and keeps a
+  // block a person has edited since, naming it, instead of replacing their edit.
+  describe("a start and a managed block it wrote before (#2456)", () => {
+    let cwd: string;
+    let source: string;
+    const fsOps = {
+      readFile: (f: string) => nodeFs.readFileSync(f, "utf8"), writeFile: (f: string, c: string) => nodeFs.writeFileSync(f, c),
+      exists: (f: string) => nodeFs.existsSync(f), mkdirp: (d: string) => { nodeFs.mkdirSync(d, { recursive: true }); },
+      copyFile: (a: string, b: string) => nodeFs.copyFileSync(a, b), listFiles: (d: string) => nodeFs.readdirSync(d), homedir: "",
+    };
+    const tmuxNever = new Proxy({}, { get() { throw new Error("no tmux calls in delivery"); } }) as never;
+    const files = (): ResolvedStartupFile[] => [{ path: "culture.md", absolutePath: source, ownerRoot: nodePath.dirname(source), deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }];
+    const read = (file: string) => nodeFs.readFileSync(file, "utf8");
+    beforeEach(() => {
+      cwd = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "block-refresh-"));
+      fsOps.homedir = cwd;
+      source = nodePath.join(cwd, "spec", "culture.md");
+      nodeFs.mkdirSync(nodePath.dirname(source), { recursive: true });
+      nodeFs.writeFileSync(source, "Culture v1.\n");
+    });
+    afterEach(() => { nodeFs.rmSync(cwd, { recursive: true, force: true }); });
+    // Each adapter gets the records the daemon gives it, so its own guidance writes are checked and recorded.
+    function realAdapter(runtime: "codex" | "claude-code", overrides?: Partial<RuntimeAdapter>, records = managedBlockRecords(db)): RuntimeAdapter {
+      const real = runtime === "codex"
+        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [], managedBlockRecords: records } as never)
+        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, managedBlockRecords: records } as never);
+      // Codex's own projection is what queues launch developer instructions; with an empty plan it does nothing else.
+      return mockAdapter({ runtime, ...(real instanceof CodexRuntimeAdapter ? { project: real.project.bind(real) as RuntimeAdapter["project"] } : {}),
+        deliverStartup: real.deliverStartup.bind(real) as RuntimeAdapter["deliverStartup"], ...overrides });
+    }
+
+    it.each(["codex", "claude-code"] as const)("through the real %s adapter: a start refreshes a block the last start wrote when its source changed", async (runtime) => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, runtime === "codex" ? "AGENTS.md" : "CLAUDE.md");
+      const adapter = realAdapter(runtime);
+      const start = () => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1.");
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      const second = await start();
+      expect(second.ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v2.");
+      expect((second.warnings ?? []).some((w) => w.includes("guidance_block_edited")), JSON.stringify(second.warnings)).toBe(false);
+    });
+
+    it.each(["codex", "claude-code"] as const)("through the real %s adapter: a start keeps a block a person edited since the last start, and names it", async (runtime) => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, runtime === "codex" ? "AGENTS.md" : "CLAUDE.md");
+      const adapter = realAdapter(runtime);
+      const start = () => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      const second = await start();
+      expect(second.ok).toBe(true);
+      // The person's bytes first: on a build without the record, the start replaces the edit.
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+      expect(read(guidance)).not.toContain("Culture v2.");
+      expect(second.warnings?.some((w) => w.includes("guidance_block_edited:") && w.includes("culture.md")), JSON.stringify(second.warnings)).toBe(true);
+    });
+
+    // Q3: a Codex start that carries its guidance as launch developer instructions writes nothing to AGENTS.md, so a block an
+    // earlier start wrote there would stay stale, and the launch text asks Codex to follow AGENTS.md. It's refreshed by the
+    // same rule.
+    it("a Codex start on launch developer instructions refreshes the AGENTS.md block an earlier start wrote", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "AGENTS.md");
+      let launchInstructions = false;
+      const adapter = realAdapter("codex", {
+        guidanceFileFor: vi.fn(() => (launchInstructions ? { file: null, launchInstructions: true as const } : { file: null })),
+      } as Partial<RuntimeAdapter>);
+      const start = () => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1.");
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      launchInstructions = true;
+      expect((await start()).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v2.");
+      expect(read(guidance)).not.toContain("Culture v1.");
+    });
+
+    // Round 1: a block is recorded as it's written, so a later failure in the same start can't lose its record, and a
+    // person's edit before the retry is kept.
+    it("a block a start wrote keeps its record when a later write of that start fails, so an edit before the retry is kept", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const adapter = realAdapter("claude-code");
+      const missing: ResolvedStartupFile = { path: "missing.md", absolutePath: nodePath.join(cwd, "spec", "missing.md"), ownerRoot: nodePath.dirname(source), deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] };
+      const start = (startupFiles: ResolvedStartupFile[]) => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: startupFiles }));
+      expect((await start([...files(), missing])).ok).toBe(false);
+      expect(read(guidance)).toContain("Culture v1.");
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      expect((await start(files())).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+    });
+
+    // Round 1: two links to one guidance file name the same file, so they share its records.
+    it("two links to one guidance file share its records: a start through the second keeps an edit made after the first wrote", async () => {
+      const seed = seedSession();
+      const shared = nodePath.join(cwd, "shared", "CLAUDE.md");
+      nodeFs.mkdirSync(nodePath.dirname(shared), { recursive: true });
+      nodeFs.writeFileSync(shared, "# Shared notes\n");
+      for (const dir of ["a", "b"]) {
+        nodeFs.mkdirSync(nodePath.join(cwd, dir));
+        nodeFs.symlinkSync(shared, nodePath.join(cwd, dir, "CLAUDE.md"));
+      }
+      const adapter = realAdapter("claude-code");
+      const startIn = (dir: string) => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd: nodePath.join(cwd, dir) }, resolvedStartupFiles: files() }));
+      expect((await startIn("a")).ok).toBe(true);
+      expect(read(shared)).toContain("Culture v1.");
+      nodeFs.writeFileSync(shared, read(shared).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      expect((await startIn("b")).ok).toBe(true);
+      expect(read(shared)).toContain("Culture v1. PERSON EDIT");
+    });
+
+    // Round 1: a start that leaves a block as it is tells the seat in one line once it's ready. A resume types nothing: the
+    // resumed conversation gets no new turn, and the result names the block instead.
+    it("a start that keeps an edited block tells the seat in one line; a resume with the same block types nothing", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const adapter = realAdapter("claude-code");
+      const start = (extra?: Partial<StartupInput>) => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files(), ...extra }));
+      const typed = () => vi.mocked(tmux.sendText).mock.calls.filter((call) => String(call[1]).includes("OpenRig guidance note"));
+      expect((await start()).ok).toBe(true);
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      expect((await start()).ok).toBe(true);
+      expect(typed()).toHaveLength(1);
+      expect(String(typed()[0]![1])).toContain("culture.md");
+      vi.mocked(tmux.sendText).mockClear();
+      const resumed = await start({ isRestore: true, resumeToken: "native-original" });
+      expect(resumed.ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+      expect(typed()).toHaveLength(0);
+    });
+
+    // Round 2: the records live in the daemon database, which can fail. Only a schema without the table means "no records";
+    // any other failed read is unknown, so the block is kept and named, and a failed record write is named.
+    const failing = (statement: "SELECT body_sha256" | "INSERT INTO managed_block_writes") => managedBlockRecords({
+      prepare: (sql: string) => {
+        if (sql.trimStart().startsWith(statement)) throw new Error("SQLITE_BUSY: database is locked");
+        return db.prepare(sql);
+      },
+    } as never);
+
+    it("a start keeps a recorded block a person edited when its record can't be read, and names it", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const start = (records?: ReturnType<typeof managedBlockRecords>) => createOrchestrator().startNode(makeInput(seed,
+        { adapter: realAdapter("claude-code", undefined, records), binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      const second = await start(failing("SELECT body_sha256"));
+      expect(second.ok).toBe(true);
+      // Unknown isn't unrecorded: on a build that reads a failed lookup as no record, this start replaces the edit.
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+      expect(read(guidance)).not.toContain("Culture v2.");
+      expect(second.warnings?.some((w) => w.startsWith("guidance_block_record_unreadable:") && w.includes("culture.md")), JSON.stringify(second.warnings)).toBe(true);
+    });
+
+    it("a start names a block whose write record couldn't be saved", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const first = await createOrchestrator().startNode(makeInput(seed,
+        { adapter: realAdapter("claude-code", undefined, failing("INSERT INTO managed_block_writes")), binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect(first.ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1.");
+      expect(first.warnings?.some((w) => w.startsWith("guidance_block_record_not_saved:") && w.includes("culture.md")), JSON.stringify(first.warnings)).toBe(true);
+    });
   });
 
   // A link refusing a seat's first plugin manifest or catalog: its skills are refused there and named, never written into
@@ -696,6 +973,21 @@ describe("StartupOrchestrator", () => {
     expect(result.warnings).toEqual(["AGENTS.md is untracked", "plugin exclude skipped"]);
   });
 
+  it("tells a seat that starts with held messages, once, and names it in the launch's warnings (#2431)", async () => {
+    const seed = seedSession();
+    db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql); // as the guard suites add the held-message store
+    new OutboxHandler(db).retain({ outboxId: "held-1", senderSession: "planner@test-rig", destinationSession: "r01-impl", body: "Real work for you" },
+      { nodeId: seed.nodeId, session: "r01-impl", occupant: null, pane: null });
+    const send = vi.spyOn(SessionTransport.prototype, "send").mockResolvedValue({ ok: true, sent: true } as never);
+    try {
+      const result = await createOrchestrator().startNode(makeInput(seed));
+      const notice = "1 held message was kept for this seat and not delivered: read it with rig seat held-messages r01-impl.";
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(result.warnings).toContain(notice);
+      expect(send.mock.calls.filter(([, text]) => text === notice)).toEqual([["r01-impl", notice, { openrigNotice: true }]]);
+    } finally { send.mockRestore(); }
+  });
+
   it("keeps a challenge-only transport failure best-effort", async () => {
     const seed = seedSession();
     const tmux = mockTmux({ sendText: vi.fn(async () => ({ ok: false as const, message: "fixture transport failure" })) });
@@ -742,6 +1034,45 @@ describe("StartupOrchestrator", () => {
     expect(before.created_at).toBeTruthy();
     await orch.startNode(makeInput(seed, { isRestore: true, resumeToken: "original", preserveStartupContext: true }));
     expect(read()).toEqual(before);
+  });
+
+  // #875 direction 2: a launch decides once where its managed guidance goes and records it; a restore passes the saved
+  // choice (null for an older snapshot), so the adapter isn't asked again and an old seat isn't silently repointed.
+  it("records the adapter's chosen guidance file at launch, and uses a restore's saved choice without asking again", async () => {
+    const seed = seedSession(); const orch = createOrchestrator();
+    const chosen = "/openrig-home/state/pi/r01-impl/agent/AGENTS.md";
+    const guidanceFileFor = vi.fn(() => ({ file: chosen }));
+    const adapter = mockAdapter({ runtime: "pi", guidanceFileFor } as never);
+    const recorded = () => (db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { guidance_file: string | null }).guidance_file;
+    expect((await orch.startNode(makeInput(seed, { adapter }))).ok).toBe(true);
+    expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).toMatchObject({ guidanceFile: chosen });
+    expect(vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1]).toMatchObject({ guidanceFile: chosen });
+    expect(recorded()).toBe(chosen);
+    guidanceFileFor.mockClear();
+    const restored = await orch.startNode(makeInput(seed, { adapter, isRestore: true, binding: { ...makeBinding(), guidanceFile: null } }));
+    expect(restored.ok).toBe(true);
+    expect(guidanceFileFor).not.toHaveBeenCalled();
+    expect(recorded()).toBeNull();
+  });
+
+  // #875 Codex: the adapter may answer asynchronously, a resume is named to it, and a choice of launch instructions rides
+  // the binding to projection, delivery and the launch; nothing is recorded as a guidance file for it.
+  it("passes whether the launch resumes, and carries an adapter's launch-instructions choice on the binding", async () => {
+    const seed = seedSession(); const orch = createOrchestrator();
+    const guidanceFileFor = vi.fn(async (_binding: NodeBinding, opts?: { resuming?: boolean }) =>
+      opts?.resuming ? { file: null } : { file: null, launchInstructions: true });
+    const adapter = mockAdapter({ runtime: "codex", guidanceFileFor } as never);
+    expect((await orch.startNode(makeInput(seed, { adapter }))).ok).toBe(true);
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: false });
+    const chosen = { guidanceFile: null, guidanceLaunchInstructions: true };
+    expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).toMatchObject(chosen);
+    expect(vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1]).toMatchObject(chosen);
+    expect(vi.mocked(adapter.launchHarness).mock.calls[0]?.[0]).toMatchObject(chosen);
+    expect((db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { guidance_file: string | null }).guidance_file).toBeNull();
+    vi.mocked(adapter.project).mockClear();
+    expect((await orch.startNode(makeInput(seed, { adapter, resumeToken: "native-original" }))).ok).toBe(true);
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true });
+    expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).not.toMatchObject({ guidanceLaunchInstructions: true });
   });
 
   it("exact resume retains configured fresh context while sending no replay", async () => {
@@ -841,6 +1172,18 @@ describe("StartupOrchestrator", () => {
     const retry = await createOrchestrator().startNode({ ...input, adapter: mockAdapter() });
     expect(retry).toMatchObject({ ok: true, continuityOutcome: "resumed" });
     expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  it("does not mark pending or project when saved environment execution refuses the prelude", async () => {
+    const seed=seedSession();
+    sessionRegistry.updateStartupStatus(seed.sessionId,"ready");
+    const preflight=vi.fn(async () => { throw new Error("saved execution preserved"); });
+    const adapter=mockAdapter({runtime:"openshell-claude",environment:{} as RuntimeAdapter["environment"],preflightEnvironmentStartup:preflight});
+    const input=makeInput(seed,{adapter});
+    const result=await createOrchestrator().startNode(input);
+    expect(result).toMatchObject({ok:false,startupStatus:"attention_required",errors:["saved execution preserved"]});
+    expect(preflight).toHaveBeenCalledTimes(1); expect(adapter.project).not.toHaveBeenCalled(); expect(adapter.launchHarness).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT startup_status FROM sessions WHERE id=?").get(seed.sessionId)).toEqual({startup_status:"ready"});
   });
 
   // T1: fresh launch enters pending before startup delivery
@@ -1410,6 +1753,55 @@ describe("StartupOrchestrator", () => {
       expect(exec).not.toHaveBeenCalled();
       expect(db.prepare("SELECT payload FROM events WHERE node_id=? AND type='node.startup_first_input_passed'").all(seed.nodeId)).toHaveLength(0);
       expect(JSON.stringify(result)).not.toContain("passed at launch");
+    } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each([[true, "vendor/model", true, 1], [false, "vendor/model", true, 0], [true, undefined, true, 0], [true, "vendor/model", false, 0]])("records a model passed at launch only when the preset opts in (%s), the seat declares one (%s) and the send is confirmed (%s)", async (opted, model, sent, records) => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "model-input-"));
+    try {
+      nodeFs.writeFileSync(nodePath.join(dir, "synth.yaml"), `format: 1\nname: synth\ncommand: synth\nmaintainer: Example\n${opted ? "passes_model: true\n" : ""}`);
+      const seed = seedSession();
+      db.prepare("UPDATE nodes SET runtime='synth' WHERE id=?").run(seed.nodeId);
+      const adapter = new CommunityHarnessRuntimeAdapter("synth", { presetsDir: () => dir,
+        launchResultRoot: () => nodePath.join(dir, "state", "launch-results"),
+        tmux: { hasSession: async () => true, getPaneCommand: async () => "node",
+          sendShellCommand: vi.fn(async (_session: string, _command: string, beforeInput?: () => void) => {
+            beforeInput?.();
+            return sent ? { ok: true as const } : { ok: false as const, message: "typed, then the pane went away" };
+          }) } });
+      const result = await createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), ...(model ? { model } : {}) } }));
+      expect(result.ok).toBe(sent);
+      const rows = db.prepare("SELECT payload FROM events WHERE node_id=? AND type='node.startup_model_passed'").all(seed.nodeId) as { payload: string }[];
+      expect(rows).toHaveLength(records);
+      if (records) expect(JSON.parse(rows[0]!.payload)).toMatchObject({ model, resume: false });
+    } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("delivers contained identity, role and actions without host input when the viewer exits after readiness", async () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "contained-startup-race-"));
+    try {
+      const marker = nodePath.join(dir, "host-executed");
+      const seed = seedSession(); db.prepare("UPDATE nodes SET runtime='openshell-claude' WHERE id=?").run(seed.nodeId);
+      let passed: string | undefined; let viewerExited = false;
+      const contained = { platform: { forNode: () => ({ guestRoot: "/sandbox/openrig" }) }, preflight: async () => {}, project: async () => ({ projected: [], skipped: [], failed: [] }),
+        deliverStartup: async () => ({ delivered: 1, failed: [] }),
+        launch: async (_binding: unknown, opts: { firstInputText?: string }) => { passed = opts.firstInputText;
+          return { ok: true, ...(passed ? { firstInput: { path: "/guest/control/first-input.txt", submission: "unconfirmed" } } : {}) }; },
+        checkReady: async () => { viewerExited = true; return { ready: true }; } };
+      const adapter = new CommunityHarnessRuntimeAdapter("openshell-claude", { environmentStartup: contained as never,
+        tmux: { hasSession: async () => true, getPaneCommand: async () => { viewerExited = true; return "node"; }, sendShellCommand: async () => ({ ok: true }) } });
+      vi.mocked(tmux.sendText).mockImplementation(async (_target, text) => {
+        if (viewerExited) { try { execFileSync("/bin/sh", ["-c", text], { stdio: "ignore" }); } catch {} }
+        return { ok: true };
+      });
+      const role: ResolvedStartupFile = { path: "role.md", absolutePath: "/role.md", ownerRoot: "/", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] };
+      const result = await createOrchestrator({ readFile: () => `Selected role\ntouch '${marker}'` }).startNode(makeInput(seed, { adapter,
+        resolvedStartupFiles: [role], startupActions: [makeIdentityAction(), makeAction({ type: "send_text", value: "selected after-ready instruction" })] }));
+      expect(nodeFs.existsSync(marker)).toBe(false);
+      expect(tmux.sendText).not.toHaveBeenCalled(); expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(passed).toContain("OpenRig-generated identity context");
+      expect(passed).toContain("role.md"); expect(passed).toContain("selected after-ready instruction");
+      expect(result.ok).toBe(true);
     } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -2412,6 +2804,42 @@ describe("StartupOrchestrator", () => {
     expect(callCount).toBeGreaterThanOrEqual(3);
   });
 
+  // #2277: a fresh retry in the same pane can be dispatched while the previous launch's not-found line is still on screen.
+  const notFound = "claude wasn't found when the launch ran (the pane shows: bash: claude: command not found).";
+
+  it("an earlier launch's not-found line doesn't end a new launch that then becomes ready (#2277)", async () => {
+    const seed = seedSession();
+    let calls = 0;
+    const adapter = mockAdapter({
+      checkReady: vi.fn(async () => (++calls >= 2 ? { ready: true } : { ready: false, reason: notFound, code: "returned_to_shell" })),
+    });
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 10_000 }));
+    expect(result.ok).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it("a launch that stays not-found reports it when the readiness wait ends (#2277)", async () => {
+    const seed = seedSession();
+    const adapter = mockAdapter({ checkReady: vi.fn(async () => ({ ready: false, reason: notFound, code: "returned_to_shell" })) });
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 100 }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toEqual([`Readiness timeout after 0.1s — harness did not become interactive: ${notFound}`]);
+  });
+
+  it("a pane back at its shell for another reason still waits for the readiness timeout", async () => {
+    const seed = seedSession();
+    const adapter = mockAdapter({
+      checkReady: vi.fn(async () => ({ ready: false, reason: "The probe pane returned to a shell instead of staying inside the runtime.", code: "returned_to_shell" })),
+    });
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 100 }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toEqual([expect.stringContaining("Readiness timeout after 0.1s")]);
+    expect((adapter.checkReady as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
+  });
+
   it("readiness timeout → startup_failed with timeout message", async () => {
     const seed = seedSession();
     const adapter = mockAdapter({
@@ -2481,5 +2909,94 @@ describe("StartupOrchestrator", () => {
     // Both files were delivered — overlay appended, not replacing role guidance
     expect(deliveredFiles).toContain("guidance/role.md");
     expect(deliveredFiles).toContain("openrig-start.md");
+  });
+
+  describe("launch_wrapper injection in StartupOrchestrator.startNode", () => {
+    function ensureLaunchWrapperColumn(): void {
+      const cols = db.pragma("table_info(nodes)") as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === "launch_wrapper")) {
+        db.exec("ALTER TABLE nodes ADD COLUMN launch_wrapper TEXT;");
+      }
+    }
+
+    it.each(["pi", "codex"] as const)("reads current DB launch_wrapper for %s fresh, resume, fork and rebuild, overriding stale binding", async runtime => {
+      ensureLaunchWrapperColumn();
+      const rig = rigRepo.createRig("wrapper-rig");
+      const parentNode = rigRepo.addNode(rig.id, "parent", { runtime, launchWrapper: ["parent-wrapper", "--"] });
+      const targetNode = rigRepo.addNode(rig.id, "target", { runtime, launchWrapper: ["target-wrapper", "--seat", "target", "--"] });
+      const session = sessionRegistry.registerSession(targetNode.id, `r01-${runtime}`);
+      sessionRegistry.updateStatus(session.id, "running");
+
+      const observedBindings: NodeBinding[] = [];
+      const adapter = mockAdapter({
+        runtime,
+        launchHarness: vi.fn(async (binding, opts) => {
+          observedBindings.push(binding);
+          return {
+            ok: true,
+            resumeToken: opts.resumeToken ?? "new-token",
+            resumeType: runtime === "pi" ? "pi_session_file" : "codex_id",
+          };
+        }),
+      });
+      const orch = createOrchestrator();
+      const baseSeed = { rigId: rig.id, nodeId: targetNode.id, sessionId: session.id };
+      const baseBinding = { ...makeBinding(), nodeId: targetNode.id, tmuxSession: `r01-${runtime}` };
+
+      // 1. Fresh launch injects target node's DB launch_wrapper
+      const freshRes = await orch.startNode(makeInput(baseSeed, { adapter, binding: baseBinding }));
+      expect(freshRes.ok).toBe(true);
+      expect(observedBindings.at(-1)?.launchWrapper).toEqual(["target-wrapper", "--seat", "target", "--"]);
+
+      // 2. Fork launch reads target node's DB launch_wrapper, never parent node's
+      expect(parentNode.id).not.toBe(targetNode.id);
+      const forkRes = await orch.startNode(makeInput(baseSeed, {
+        adapter,
+        binding: baseBinding,
+        forkSource: { kind: "native_id", value: "parent-session-id" },
+      }));
+      expect(forkRes.ok).toBe(true);
+      expect(observedBindings.at(-1)?.launchWrapper).toEqual(["target-wrapper", "--seat", "target", "--"]);
+
+      // 3. Clearing DB row overrides stale launchWrapper on input.binding
+      rigRepo.setNodeLaunchWrapper(targetNode.id, null);
+      const clearedRes = await orch.startNode(makeInput(baseSeed, {
+        adapter,
+        binding: { ...baseBinding, launchWrapper: ["stale-wrapper", "--"] },
+      }));
+      expect(clearedRes.ok).toBe(true);
+      expect(observedBindings.at(-1)?.launchWrapper).toBeUndefined();
+      expect("launchWrapper" in (observedBindings.at(-1) ?? {})).toBe(false);
+    });
+
+    it.each([
+      ["non-canonical empty array", "[]"],
+      ["corrupt JSON", "{not-json"],
+      ["relative executable", '["./relative-wrapper","--"]'],
+      ["newline in arg", '["valid-wrapper","bad\\narg"]'],
+    ])("fails closed at permission_selection before projection or launch when stored launch_wrapper is %s", async (_label, badStored) => {
+      ensureLaunchWrapperColumn();
+      const rig = rigRepo.createRig("bad-wrapper-rig");
+      const node = rigRepo.addNode(rig.id, "impl", { runtime: "codex" });
+      const session = sessionRegistry.registerSession(node.id, "r01-bad");
+      sessionRegistry.updateStatus(session.id, "running");
+
+      db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(badStored, node.id);
+
+      const adapter = mockAdapter({ runtime: "codex" });
+      const orch = createOrchestrator();
+      const result = await orch.startNode(makeInput(
+        { rigId: rig.id, nodeId: node.id, sessionId: session.id },
+        { adapter, binding: { ...makeBinding(), nodeId: node.id, tmuxSession: "r01-bad" } },
+      ));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.startupStatus).toBe("failed");
+        expect(result.errors[0]).toMatch(/^Permission selection: Seat .* launch_wrapper/);
+      }
+      expect(adapter.project).not.toHaveBeenCalled();
+      expect(adapter.deliverStartup).not.toHaveBeenCalled();
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+    });
   });
 });

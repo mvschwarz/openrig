@@ -22,8 +22,11 @@ const binding = {
 // DontRemind immediately; :74-85 persists dismissal or returns RunUpdate.
 // Drive real TmuxAdapter serialization into this model, not a sequence of
 // ready screenshots that would pass even if the wrong input were sent.
-type ProcessRow = { pid: number; ppid: number; command: string; pgid?: number; tpgid?: number; executableName?: string; startedAt?: string };
+type ProcessRow = { pid: number; ppid: number; command: string; argv?: string[]; pgid?: number; tpgid?: number; executableName?: string; startedAt?: string };
 const native = "/opt/codex/vendor/aarch64-apple-darwin/bin/codex";
+const ordinaryNative = "/opt/test-provider/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex";
+const ordinaryArgs = ["-s", "workspace-write", "-C", "/workspace/sample-project", "--add-dir", "/workspace/sample-project/.git",
+  "--add-dir", "/tmp/test-instance/shared-docs/rigs/first-project/state/dev", "-m", "fixture-model"];
 // Synthetic shell -> Node -> native ancestry, including a background helper.
 // Paths, PIDs and start times are invented; only the process relationships matter.
 // The receiver below models the update menu; this is not native execution.
@@ -31,19 +34,20 @@ const ordinaryRows: ProcessRow[] = [
   { pid: 2001, ppid: 2000, pgid: 2001, tpgid: 2002, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000", command: "-zsh" },
   { pid: 2002, ppid: 2001, pgid: 2002, tpgid: 2002, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000", command: "/bin/sh /tmp/test-launch/openrig-tmux-send.txt" },
   { pid: 2003, ppid: 2002, pgid: 2002, tpgid: 2002, executableName: "node", startedAt: "Sat Jan  1 12:00:00 2000", command: "node /opt/test-provider/bin/codex -s workspace-write -C /workspace/sample-project --add-dir /workspace/sample-project/.git --add-dir /tmp/test-instance/shared-docs/rigs/first-project/state/dev -m fixture-model" },
-  { pid: 2004, ppid: 2003, pgid: 2002, tpgid: 2002, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "/opt/test-provider/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex -s workspace-write -C /workspace/sample-project --add-dir /workspace/sample-project/.git --add-dir /tmp/test-instance/shared-docs/rigs/first-project/state/dev -m fixture-model" },
+  { pid: 2004, ppid: 2003, pgid: 2002, tpgid: 2002, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000",
+    command: `${ordinaryNative} ${ordinaryArgs.join(" ")}`, argv: [ordinaryNative, ...ordinaryArgs] },
   { pid: 2005, ppid: 2004, pgid: 2005, tpgid: 2002, executableName: "codex-code-mode-", startedAt: "Sat Jan  1 12:00:00 2000", command: "/opt/test-provider/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex-code-mode-host" },
 ];
 const processRows = (shape: "wrapper" | "exec-wrapper" | "native"): ProcessRow[] => {
-  if (shape === "native") return [{ pid: 101, ppid: 1, command: native, pgid: 101, tpgid: 101, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" }];
+  if (shape === "native") return [{ pid: 101, ppid: 1, command: native, argv: [native], pgid: 101, tpgid: 101, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" }];
   if (shape === "exec-wrapper") return [
     { pid: 101, ppid: 1, command: "node /opt/bin/codex", pgid: 101, tpgid: 101, executableName: "node", startedAt: "Sat Jan  1 12:00:00 2000" },
-    { pid: 102, ppid: 101, command: native, pgid: 101, tpgid: 101, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
+    { pid: 102, ppid: 101, command: native, argv: [native], pgid: 101, tpgid: 101, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
   ];
   return [
     { pid: 101, ppid: 1, command: "-zsh", pgid: 101, tpgid: 102, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
     { pid: 102, ppid: 101, command: "node /opt/bin/codex", pgid: 102, tpgid: 102, executableName: "node", startedAt: "Sat Jan  1 12:00:00 2000" },
-    { pid: 103, ppid: 102, command: native, pgid: 102, tpgid: 102, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
+    { pid: 103, ppid: 102, command: native, argv: [native], pgid: 102, tpgid: 102, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
   ];
 };
 function fixture(options: { menu?: string; delay?: number; beforeMenu?: number; failInput?: boolean; screen?: string; command?: string; panePid?: number; processes?: ProcessRow[]; shape?: "wrapper" | "exec-wrapper" | "native" } = {}) {
@@ -90,8 +94,10 @@ function fixture(options: { menu?: string; delay?: number; beforeMenu?: number; 
   // #1524 (b): a resume's Codex processes carry `resume <token>`, and Codex's records for them name that token once ready.
   const resumeArgs = () => / resume '?([^' ]+)'?/.exec(launched)?.[1];
   const listProcesses = vi.fn(() => (options.processes ?? processRows(options.shape ?? "wrapper")).map(row =>
-    forkArgs() && /codex/.test(row.command) && !/codex-code-mode/.test(row.command) ? { ...row, command: `${row.command} fork ${forkArgs()}` }
-      : resumeArgs() && /codex/.test(row.command) && !/codex-code-mode/.test(row.command) ? { ...row, command: `${row.command} resume ${resumeArgs()}` } : row));
+    forkArgs() && /codex/.test(row.command) && !/codex-code-mode/.test(row.command) ? { ...row, command: `${row.command} fork ${forkArgs()}`,
+      ...(row.argv ? { argv: [...row.argv, "fork", forkArgs()!] } : {}) }
+      : resumeArgs() && /codex/.test(row.command) && !/codex-code-mode/.test(row.command) ? { ...row, command: `${row.command} resume ${resumeArgs()}`,
+        ...(row.argv ? { argv: [...row.argv, "resume", resumeArgs()!] } : {}) } : row));
   const adapter = new CodexRuntimeAdapter({
     tmux, fsOps, sleep: async () => { ticks++; },
     listProcesses,
@@ -227,7 +233,7 @@ describe.each(paths)("Codex update input: $name", ({ opts }) => {
 
   it.each([
     { name: "no process rows", rows: [] },
-    { name: "native name with unrelated executable argument zero", rows: [{pid:101,ppid:1,command:"/bin/echo codex",pgid:101,tpgid:101,executableName:"codex", startedAt: "Sat Jan  1 12:00:00 2000"}] },
+    { name: "native name with unrelated executable argument zero", rows: [{pid:101,ppid:1,command:"/bin/echo codex",argv:["/bin/echo","codex"],pgid:101,tpgid:101,executableName:"codex", startedAt: "Sat Jan  1 12:00:00 2000"}] },
     { name: "argument named codex", rows: [{pid:101,ppid:1,command:"node other.js --label codex",pgid:101,tpgid:101,executableName:"node", startedAt: "Sat Jan  1 12:00:00 2000"}] },
     { name: "native name only in arguments", rows: [{pid:101,ppid:1,command:"/bin/echo codex",pgid:101,tpgid:101,executableName:"echo", startedAt: "Sat Jan  1 12:00:00 2000"}] },
     { name: "background Codex", rows: processRows("wrapper").map(r=>({...r,tpgid:500})) },
@@ -236,7 +242,7 @@ describe.each(paths)("Codex update input: $name", ({ opts }) => {
     { name: "conflicting terminal group", rows: processRows("wrapper").map(r=>r.pid===103?{...r,tpgid:500}:r) },
     { name: "another pane", rows: processRows("wrapper").map(r=>r.pid===103?{...r,ppid:999}:r) },
     { name: "kernel name contradicts argv", rows: processRows("wrapper").map(r=>r.pid===103?{...r,executableName:"node", startedAt: "Sat Jan  1 12:00:00 2000"}:r) },
-    { name: "ambiguous native processes", rows: [...processRows("wrapper"),{pid:104,ppid:102,command:native,pgid:102,tpgid:102,executableName:"codex", startedAt: "Sat Jan  1 12:00:00 2000"}] },
+    { name: "ambiguous native processes", rows: [...processRows("wrapper"),{pid:104,ppid:102,command:native,argv:[native],pgid:102,tpgid:102,executableName:"codex", startedAt: "Sat Jan  1 12:00:00 2000"}] },
   ])("does not choose Skip with $name", async ({rows}) => {
     for (const command of ["node", "codex", "bash"]) {
       const f=fixture({command,processes:rows});

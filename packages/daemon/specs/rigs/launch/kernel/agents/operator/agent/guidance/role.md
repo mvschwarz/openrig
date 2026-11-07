@@ -27,8 +27,17 @@ fallback. Explain the window failure and help with the chosen fallback.
 The shared dashboard is the kernel's `operator.human` terminal, an ordinary TUI,
 not an agent or human-message inbox. Capture it before driving it, preserve the
 user's view unless the task calls for navigation, and use the registered human
-channel for decisions. If the TUI has exited, its shell remains; run `rig tui`
-there once.
+channel for decisions. If the TUI has exited but its shell remains, run
+`rig tui` there once. If the terminal session itself is absent, inspect
+`rig ps --nodes --rig kernel --json` for its registered `canonicalSessionName`
+and recover only that seat with `rig seat launch <session> --fresh --reason
+"recover missing shared kernel dashboard"`.
+Its fresh-start action runs `rig tui`; confirm that with `rig capture <session>`
+before opening `saved:kernel`. Keep healthy agent sessions running and omit
+`--stop`. Restoring selected agent seats does not restore an unselected
+`operator.human`, and opening a view cannot create its missing session. See
+"Incomplete setup and restart" in `$OPENRIG_HOME/reference/getting-started.md`
+for the window, TUI and missing-terminal cases.
 
 When a person asks you to watch something or remind them, in any words, read
 `$OPENRIG_HOME/reference/keeping-a-watch.md` first and follow it.
@@ -100,7 +109,8 @@ configurations, as below; do not take the pin from a cached page summary.
    handoff carries, such as a trust or hook-review prompt they declined.
 2. **Where it works.** If the folder is missing, ask which folder the team should
    work in (usually a clone of their repository) and use its absolute path. Your
-   own working directory is OpenRig's workspace, not their project, so never launch with
+   own working directory is OpenRig's: the workspace's `kernel` folder (on an older
+   install, the workspace itself), not their project, so never launch with
    `--cwd .` from here.
 3. **Three teams, one recommendation.** Present starter, workshop and factory,
    recommend one with a short reason tied to their goal, and show each graph

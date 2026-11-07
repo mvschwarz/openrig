@@ -1,3 +1,4 @@
+import { providerRoutes } from "../src/routes/provider.js";
 // Slice 16: a live seat moves between Codex and Claude Code, successor first. Real repositories on an in-memory
 // database; tmux and the runtime adapters are fakes that keep which pane each session holds, so the exchange, the
 // rollback and the retirement are observable. Nothing native runs here; the native cases are named in the PR.
@@ -20,6 +21,9 @@ import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.j
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { SeatRuntimeSwitchService, runtimeSwitchSummary } from "../src/domain/seat-runtime-switch-service.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
@@ -128,6 +132,201 @@ describe("live seat runtime switch", () => {
   });
   afterEach(() => { db.close(); fs.rmSync(home, { recursive: true, force: true }); });
 
+  it("switches a Codex seat to another account home on the same runtime, committing only after confirmation", async () => {
+    const accountHome = path.join(home, "api-account");
+    fs.mkdirSync(accountHome);
+    const pending = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "review" });
+    const svc = service();
+    successorConfirms(svc);
+
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Use API budget", accountHome, model: "gpt-5.5" });
+
+    expect(result).toMatchObject({ ok: true, changed: true, from: "codex", to: "codex", accountHome, recoveryPending: false });
+    expect(rigRepo.getEffectiveSeatEnv(nodeId).CODEX_HOME).toBe(accountHome);
+    expect(queueRepo.getById(pending.qitemId)).toMatchObject({ destinationSession: SEAT, state: "pending" });
+    expect(sessionRegistry.getBindingForNode(nodeId)).toMatchObject({ tmuxSession: SEAT, tmuxPane: "%5" });
+  });
+
+  it("an unconfirmed account-home successor leaves the source home, settings and token reference unchanged", async () => {
+    const accountHome = path.join(home, "api-account"); fs.mkdirSync(accountHome);
+    const sourceHome = path.join(home, "source-account"); fs.mkdirSync(sourceHome);
+    db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = ? WHERE id = ?")
+      .run(sourceHome, JSON.stringify({ label: "old", tokenFile: path.join(home, "old-token") }), nodeId);
+    const before = nodeRow();
+    const svc = service();
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Use API budget", accountHome, model: "other-model", confirmTimeoutMs: 1000 });
+    expect(result).toMatchObject({ ok: false, committed: false });
+    expect(nodeRow()).toEqual(before);
+    expect(rigRepo.getEffectiveSeatEnv(nodeId).CODEX_HOME).toBe(sourceHome);
+    expect(rigRepo.getRig((db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string }).rig_id)?.nodes.find(n => n.id === nodeId)?.claudeTokenRef?.label).toBe("old");
+  });
+
+  it.each([{ confirms: true, kind: "plan" }, { confirms: false, kind: "plan" }, { confirms: true, kind: "api-key" }, { confirms: false, kind: "api-key" }])("an explicit return to configured login stages without the old $kind override and commits only after confirmation ($confirms)", async ({ confirms, kind }) => {
+    const oldHome = path.join(home, "old-account"); fs.mkdirSync(oldHome);
+    const oldToken = JSON.stringify({ label: "old-account", tokenFile: path.join(home, "old-token"), ...(kind === "api-key" ? { kind } : {}) });
+    db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = ?, env_json = ? WHERE id = ?")
+      .run(oldHome, oldToken, JSON.stringify({ CODEX_HOME: "/accounts/configured" }), nodeId);
+    const target = adapter("codex");
+    vi.mocked(target.launchHarness).mockImplementation(async binding => {
+      expect(binding.accountHome).toBeNull();
+      expect(binding.accountToken).toBeNull();
+      expect(rigRepo.getEffectiveSeatEnv(nodeId).CODEX_HOME).toBe(oldHome);
+      return { ok: true };
+    });
+    const svc = service({ runtimeAdapters: { codex: target } });
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Plan reset", clearAccountHome: true, dryRun: true }))
+      .toMatchObject({ ok: true, dryRun: true, changed: true, accountHome: null });
+    if (confirms) successorConfirms(svc);
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Plan reset", clearAccountHome: true, confirmTimeoutMs: 1000 });
+    expect(result.ok).toBe(confirms);
+    const row = db.prepare("SELECT account_home, claude_token_ref FROM nodes WHERE id = ?").get(nodeId) as Record<string, unknown>;
+    expect(row).toEqual({ account_home: confirms ? null : oldHome, claude_token_ref: confirms ? null : oldToken });
+    expect(rigRepo.getEffectiveSeatEnv(nodeId).CODEX_HOME).toBe(confirms ? "/accounts/configured" : oldHome);
+  });
+
+  it("a default-home no-op acknowledges clear without deleting an unrelated legacy token", async () => {
+    const token = JSON.stringify({ label: "legacy", tokenFile: "/tokens/legacy" });
+    db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?").run(token, nodeId);
+    expect(await service().setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Already default", clearAccountHome: true }))
+      .toMatchObject({ ok: true, changed: false, accountHome: null });
+    expect((db.prepare("SELECT claude_token_ref FROM nodes WHERE id = ?").get(nodeId) as { claude_token_ref: string }).claude_token_ref).toBe(token);
+    expect(fakeTmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("an ordinary runtime switch without an account override retains legacy launch semantics", async () => {
+    const target = adapter("claude-code");
+    vi.mocked(target.launchHarness).mockImplementation(async binding => {
+      expect(binding.accountHome).toBeUndefined();
+      expect(binding.accountToken).toBeUndefined();
+      return { ok: true };
+    });
+    const svc = service({ runtimeAdapters: { "claude-code": target } }); successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Ordinary switch" })).toMatchObject({ ok: true });
+  });
+
+  it.each(["codex", "claude-code"])("a plain switch from %s clears its stale home before the successor starts", async from => {
+    const to = from === "codex" ? "claude-code" : "codex";
+    db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = ? WHERE id = ?").run("/accounts/old-source", JSON.stringify({ label: "old", tokenFile: "/tokens/old" }), nodeId);
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(from, nodeId);
+    const target = adapter(to);
+    vi.mocked(target.launchHarness).mockImplementation(async binding => {
+      expect(binding.accountHome).toBeNull();
+      expect(binding.accountToken).toBeNull();
+      return { ok: true };
+    });
+    const svc = service({ runtimeAdapters: { [to]: target } }); successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: to, reason: "Change runtime" })).toMatchObject({ ok: true });
+    expect(db.prepare("SELECT account_home, claude_token_ref FROM nodes WHERE id = ?").get(nodeId))
+      .toEqual({ account_home: null, claude_token_ref: null });
+    expect(rigRepo.getEffectiveSeatEnv(nodeId)[to === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]).toBeUndefined();
+  });
+
+  it.each(["codex", "claude-code"])("the %s successor gets the target home before any configuration commit", async (runtime) => {
+    const accountHome = path.join(home, "target-account"); fs.mkdirSync(accountHome);
+    const targetAdapter = adapter(runtime);
+    vi.mocked(targetAdapter.launchHarness).mockImplementation(async (binding) => {
+      expect(binding.accountHome).toBe(accountHome);
+      expect(rigRepo.getEffectiveSeatEnv(nodeId).CODEX_HOME).toBeUndefined();
+      expect(nodeRow().runtime).toBe("codex");
+      return { ok: true, resumeToken: "11111111-2222-4333-8444-555555555555", resumeType: runtime === "codex" ? "codex_id" : "claude_id" };
+    });
+    const svc = service({ runtimeAdapters: { [runtime]: targetAdapter } });
+    successorConfirms(svc);
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime, reason: "Use selected account", accountHome });
+    expect(result).toMatchObject({ ok: true, changed: true, accountHome });
+    expect(rigRepo.getEffectiveSeatEnv(nodeId)[runtime === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]).toBe(accountHome);
+  });
+
+  it.each(["relative-home", "/does-not-exist/account-home", "bad\npath"])("refuses unusable target home %j before any staging", async accountHome => {
+    const result = await service().setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Change account", accountHome });
+    expect(result).toMatchObject({ ok: false, code: "invalid_runtime_settings" });
+    expect(fakeTmux.createSession).not.toHaveBeenCalled();
+    expect(nodeRow().runtime).toBe("codex");
+  });
+
+  it("the provider-switch route plans the same-runtime account selection through the native switch", async () => {
+    const accountHome = path.join(home, "target-account"); fs.mkdirSync(accountHome);
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      for (const [key, value] of Object.entries({ db, rigRepo, sessionRegistry, eventBus, queueRepo,
+        discoveryRepo: new DiscoveryRepository(db), tmuxAdapter: fakeTmux, runtimeAdapters: { codex: adapter("codex") } })) c.set(key as never, value as never);
+      await next();
+    });
+    app.route("/api/provider", providerRoutes());
+    const response = await app.request("/api/provider/switch", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat: SEAT, toAccount: "api", accountHome, reason: "Use API budget", dryRun: true }) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, dryRun: true, from: "codex", to: "codex", accountHome });
+    expect(openSwitch()).toBeUndefined();
+    const cleared = await app.request("/api/provider/switch", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat: SEAT, clearAccountHome: true, reason: "Return to configured login", dryRun: true }) });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ ok: true, dryRun: true, accountHome: null });
+    const invalid = await app.request("/api/provider/switch", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat: SEAT, clearAccountHome: true, toAccount: "ambiguous", reason: "Invalid" }) });
+    expect(invalid.status).toBe(400);
+    for (const selection of [{ accountHome, toAccount: "api" }, { clearAccountHome: true }]) {
+      const conflicting = await app.request("/api/provider/switch", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seat: SEAT, ...selection, apiKeyFile: "/synthetic/key", reason: "Invalid combined selector", dryRun: true }) });
+      expect(conflicting.status).toBe(400);
+      expect(openSwitch()).toBeUndefined();
+    }
+  });
+
+  it("a target Claude setup-token reference is staged and committed with its home, replacing any previous token", async () => {
+    const accountHome = path.join(home, "plan-account"); fs.mkdirSync(accountHome);
+    const tokenFile = path.join(home, "plan-token"); fs.writeFileSync(tokenFile, "synthetic-fixture-not-a-token", { mode: 0o600 });
+    const accountToken = { label: "claude-plan", tokenFile };
+    const targetAdapter = adapter("claude-code");
+    vi.mocked(targetAdapter.launchHarness).mockImplementation(async (binding) => {
+      expect(binding).toMatchObject({ accountHome, accountToken });
+      expect(rigRepo.getEffectiveSeatEnv(nodeId).CLAUDE_CONFIG_DIR).toBeUndefined();
+      return { ok: true, resumeToken: "11111111-2222-4333-8444-555555555555", resumeType: "claude_id" };
+    });
+    const svc = service({ runtimeAdapters: { "claude-code": targetAdapter } }); successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Plan reset", accountHome, accountToken }))
+      .toMatchObject({ ok: true, accountHome });
+    const selected = db.prepare("SELECT account_home, claude_token_ref FROM nodes WHERE id = ?").get(nodeId) as { account_home: string; claude_token_ref: string };
+    expect(selected.account_home).toBe(accountHome);
+    expect(JSON.parse(selected.claude_token_ref)).toEqual(accountToken);
+    expect(JSON.stringify(selected)).not.toContain("synthetic-fixture-not-a-token");
+  });
+
+  const accounts = [
+    { name: "codex-plan", runtime: "codex", token: false }, { name: "codex-api", runtime: "codex", token: false },
+    { name: "claude-plan", runtime: "claude-code", token: true }, { name: "claude-api", runtime: "claude-code", token: false },
+  ];
+  it.each(accounts.flatMap(from => accounts.map(to => ({ from, to }))))(
+    "moves $from.name to $to.name while retaining the seat's queue, claims and edges", async ({ from, to }) => {
+      const sourceHome = path.join(home, from.name); fs.mkdirSync(sourceHome);
+      const targetHome = from.name === to.name ? sourceHome : path.join(home, to.name); if (targetHome !== sourceHome) fs.mkdirSync(targetHome);
+      const tokenFile = path.join(home, "claude-plan-token"); fs.writeFileSync(tokenFile, "synthetic-fixture-not-a-token", { mode: 0o600 });
+      const token = { label: "claude-plan", tokenFile };
+      db.prepare("UPDATE nodes SET runtime = ?, account_home = ?, claude_token_ref = ?, codex_config_profile = NULL WHERE id = ?")
+        .run(from.runtime, sourceHome, from.token ? JSON.stringify(token) : null, nodeId);
+      const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string }).rig_id;
+      const peer = rigRepo.addNode(rigId, "orch.lead", { runtime: "codex" });
+      rigRepo.addEdge(rigId, peer.id, nodeId, "delegates_to");
+      const edges = rigRepo.getRig(rigId)!.edges;
+      const item = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "Build" });
+      queueRepo.claim({ qitemId: item.qitemId, destinationSession: SEAT });
+      const target = adapter(to.runtime);
+      vi.mocked(target.launchHarness).mockImplementation(async binding => {
+        expect(binding.accountHome).toBe(targetHome);
+        expect(binding.accountToken).toEqual(to.token ? token : null);
+        expect(rigRepo.getEffectiveSeatEnv(nodeId)[from.runtime === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]).toBe(sourceHome);
+        return { ok: true, resumeToken: "11111111-2222-4333-8444-555555555555", resumeType: to.runtime === "codex" ? "codex_id" : "claude_id" };
+      });
+      const svc = service({ runtimeAdapters: { [to.runtime]: target } }); successorConfirms(svc);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: to.runtime, reason: "Select account", accountHome: targetHome,
+        ...(to.token ? { accountToken: token } : {}) })).toMatchObject({ ok: true, changed: true, claimsMoved: 1 });
+      expect(rigRepo.getRig(rigId)!.edges).toEqual(edges);
+      expect(queueRepo.getById(item.qitemId)).toMatchObject({ destinationSession: SEAT, state: "in-progress" });
+      expect(rigRepo.getEffectiveSeatEnv(nodeId)[to.runtime === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]).toBe(targetHome);
+      const row = db.prepare("SELECT claude_token_ref FROM nodes WHERE id = ?").get(nodeId) as { claude_token_ref: string | null };
+      expect(row.claude_token_ref ? JSON.parse(row.claude_token_ref) : null).toEqual(to.token ? token : null);
+    });
+
   it("the preview shows the target's settings and where each comes from, what is cleared, and the costs; nothing changes", async () => {
     new NativePermissionStore(db).write(nodeId, { runtime: "codex", mode: "full_bypass" }, "operator@test", "earlier choice");
     const result = await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Codex usage limit", dryRun: true });
@@ -182,9 +381,24 @@ describe("live seat runtime switch", () => {
     expect(declareOccupantSwap).toHaveBeenCalledWith(nodeId, row.successor_generation);
   });
 
-  it("carries retained Claude rules into a target successor while replacing a Codex mode selection", async () => {
+  it("tells the successor of messages held for the seat once per activation attempt, and names them in the switch's warnings (#2431)", async () => {
+    db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql); // as the guard suites add the held-message store
+    new OutboxHandler(db).retain({ outboxId: "held-1", senderSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "Real work for you" },
+      { nodeId, session: SEAT, occupant: null, pane: null });
+    const svc = service();
+    successorConfirms(svc);
+
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Codex usage limit" });
+
+    const notice = `1 held message was kept for this seat and not delivered: read it with rig seat held-messages ${SEAT}.`;
+    expect(result).toMatchObject({ ok: true, changed: true, recoveryPending: false, warnings: expect.arrayContaining([notice]) });
+    expect(typed.filter((t) => t.text.includes(notice))).toEqual([{ target: SEAT, text: expect.stringMatching(/You now hold dev-impl@seat-rig on claude-code/) }]);
+  });
+
+  it.each([undefined, "none"] as const)("carries retained Claude rules and MCP selection (%s) into the target successor", async claudeMcp => {
     const rules = { allow: ["Read(./work/**)"], deny: ["Read(./private/**)"] };
     db.prepare("UPDATE nodes SET claude_permissions_json=? WHERE id=?").run(JSON.stringify(rules), nodeId);
+    rigRepo.setNodeClaudeMcp(nodeId, claudeMcp ?? null);
     new NativePermissionStore(db).write(nodeId, { runtime: "codex", mode: "floor" }, "operator", "earlier Codex choice");
     const claude = adapter("claude-code");
     const svc = service({ runtimeAdapters: { codex: adapter("codex"), "claude-code": claude } });
@@ -192,7 +406,7 @@ describe("live seat runtime switch", () => {
     expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", permissionMode: "acceptEdits", reason: "switch with retained rules" }))
       .toMatchObject({ ok: true, to: "claude-code" });
     expect(claude.launchHarness).toHaveBeenCalledWith(expect.objectContaining({
-      claudePermissions: rules, permissionMode: "acceptEdits",
+      claudePermissions: rules, permissionMode: "acceptEdits", claudeMcp,
     }), expect.objectContaining({ name: SEAT }));
   });
 
@@ -239,14 +453,54 @@ describe("live seat runtime switch", () => {
     expect(handover).toMatch(new RegExp(`rig seat set-runtime dev\\.impl@seat-rig --confirm ${openSwitch()!.id} --note`));
   });
 
+  it("resolves the authored recap from the bound session folder when the logical ID is dotted (#2579)", async () => {
+    const { resolveAuthoredRecapPointer } = await import("../src/domain/context-packs/seat-recap-store.js");
+    const topologyRoot = path.join(home, "topology");
+    const seatDir = path.join(topologyRoot, "rigs", "seat-rig", "seats", "dev-impl");
+    fs.mkdirSync(seatDir, { recursive: true });
+    fs.writeFileSync(path.join(seatDir, "RECAP.md"), "# Current position\n");
+    const authoredRecapResolver = vi.fn((seatRef: string) => resolveAuthoredRecapPointer(seatRef, topologyRoot));
+    const svc = service({ authoredRecapResolver });
+    successorConfirms(svc);
+
+    await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "better fit" });
+
+    const handover = typed.find((t) => t.target.startsWith("openrig-switch-"))!.text;
+    expect(authoredRecapResolver).toHaveBeenCalledWith(SEAT);
+    expect(handover).toContain("--- Authored seat recap: seat:RECAP.md ---");
+    expect(handover).not.toContain("no RECAP.md on the seat tree");
+  });
+
+  // #2456: a guidance block the preparation kept is named in the successor's first turn as well as the switch's result, as a
+  // start tells its seat and a handover its packet.
+  it.each([true, false])("the handover names a guidance block the preparation kept (kept: %s), as the result does (#2456)", async (kept) => {
+    const note = "guidance_block_edited: /project/CLAUDE.md: culture.md was edited by hand since OpenRig wrote it, so it wasn't refreshed from /spec/culture.md";
+    const claude = adapter("claude-code");
+    vi.mocked(claude.deliverStartup).mockResolvedValue({ delivered: 0, failed: [], ...(kept ? { warnings: [note] } : {}) } as never);
+    const svc = service({ runtimeAdapters: { codex: adapter("codex"), "claude-code": claude } });
+    successorConfirms(svc);
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "better fit" });
+    const handover = typed.find((t) => t.target.startsWith("openrig-switch-"))!.text;
+    if (kept) {
+      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([note]) });
+      expect(handover).toContain(`OpenRig guidance note: ${note}.`);
+    } else {
+      expect(result).toMatchObject({ ok: true });
+      expect(handover).not.toContain("OpenRig guidance note");
+    }
+  });
+
   it("a Claude Code seat moves to Codex, with an explicit Codex profile", async () => {
     db.prepare("UPDATE nodes SET runtime = 'claude-code', codex_config_profile = NULL, advisor = 'opus' WHERE id = ?").run(nodeId);
-    const svc = service();
+    rigRepo.setNodeClaudeMcp(nodeId, "none");
+    const codex = adapter("codex"), svc = service({ runtimeAdapters: { codex, "claude-code": adapter("claude-code") } });
     successorConfirms(svc);
     const result = await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Claude usage limit", codexConfigProfile: "deep" });
     expect(result).toMatchObject({ ok: true, changed: true, from: "claude-code", to: "codex",
       settings: { codexConfigProfile: { value: "deep", source: "explicit" }, advisor: { value: null } } });
     expect(nodeRow()).toMatchObject({ runtime: "codex", codex_config_profile: "deep", advisor: null });
+    expect(codex.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ claudeMcp: undefined }), expect.anything());
+    expect(db.prepare("SELECT claude_mcp FROM nodes WHERE id=?").get(nodeId)).toEqual({ claude_mcp: "none" });
   });
 
   describe("a retained Codex envelope on the way back to Codex", () => {
@@ -370,6 +624,12 @@ describe("live seat runtime switch", () => {
       expect(result).toMatchObject({ ok: false, code: "runtime_switch_unsupported" });
       expect((result as { message: string }).message).toMatch(/only a single-window, single-pane seat can/);
     });
+    it("a seat with no bound pane says how to get it on the other runtime, and what that route doesn't carry", async () => {
+      db.prepare("UPDATE bindings SET tmux_pane = NULL WHERE node_id = ?").run(nodeId);
+      expect(await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "x", dryRun: true })).toMatchObject({ ok: false, code: "runtime_switch_unsupported",
+        message: expect.stringMatching(/it has no bound tmux pane/),
+        guidance: expect.stringMatching(/start it first.*never started.*declare the other runtime.*rig spec.*doesn't carry this seat's edges, settings or queued work/s) });
+    });
     it("a seat on another runtime", async () => {
       db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(nodeId);
       expect(await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "x", dryRun: true }))
@@ -449,6 +709,7 @@ describe("live seat runtime switch", () => {
       });
       a.route("/api/queue", queueRoutes());
       a.route("/api/seat", seatRoutes);
+      a.route("/api/provider", providerRoutes());
       return a;
     };
     const as = (generation: string, session = SEAT) => ({ "Content-Type": "application/json", "X-OpenRig-Session": session, "X-OpenRig-Occupant-Generation": generation });
@@ -459,13 +720,24 @@ describe("live seat runtime switch", () => {
       return openSwitch();
     };
 
+    it("the provider account-home alias also fences a retired predecessor", async () => {
+      await committedSwitch();
+      const response = await app().request("/api/provider/switch", { method: "POST", headers: as(predecessorGeneration),
+        body: JSON.stringify({ seat: SEAT, toAccount: "api", accountHome: home, reason: "Old process tries again" }) });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ ok: false });
+    });
+
     it("a staged successor that couldn't be retired stays fenced, and recovery at the next start retires it", async () => {
       const a = app();
       const work = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "owned work", nudge: false });
       fakeTmux.signalPaneProcess.mockImplementation(async () => ({ ok: false, code: "tmux_error", message: "controlled retirement failure" }) as never);
       fakeTmux.isPaneDead.mockImplementation(async () => false);
       const svc = service();
-      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit", confirmTimeoutMs: 10_000 })).toMatchObject({ ok: false, committed: false });
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit", confirmTimeoutMs: 10_000 })).toMatchObject({
+        ok: false, committed: false, recoveryPending: true,
+        guidance: "Recovery is pending for dev.impl@seat-rig. Run rig seat set-runtime dev.impl@seat-rig --recover.",
+      });
       const row = openSwitch();
       expect(row).toMatchObject({ phase: "abandoned", attention: expect.stringMatching(/couldn't be retired/) });
       const claim = await a.request(`/api/queue/${work.qitemId}/claim`, { method: "POST", headers: as(row.successor_generation), body: "{}" });
@@ -596,6 +868,81 @@ describe("live seat runtime switch", () => {
       expect(await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "limit" })).toMatchObject({ ok: true, changed: true });
       expect(order).toEqual(["paste", "enter"]);
       expect((fakeTmux as unknown as { capturePaneContent: ReturnType<typeof vi.fn> }).capturePaneContent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("launch_wrapper runtime-switch guard and carry", () => {
+    it("refuses switching a seat with a selected launch_wrapper to an unsupported runtime (claude-code) BEFORE side effects", async () => {
+      rigRepo.setNodeLaunchWrapper(nodeId, ["rtk", "--wrap"]);
+      const svc = service();
+      const result = await svc.setRuntime({
+        seatRef: SEAT,
+        runtime: "claude-code",
+        reason: "try-claude",
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        code: "runtime_switch_failed",
+        committed: false,
+      });
+      expect((result as { message: string }).message).toMatch(/launch_wrapper/i);
+      // Zero side effects: no switch row created, no staging session created, predecessor untouched
+      expect(openSwitch()).toBeUndefined();
+      expect(fakeTmux.createSession).not.toHaveBeenCalled();
+      expect(nodeRow().runtime).toBe("codex");
+      expect(rigRepo.getRig(rigRepo.listRigs()[0]!.id)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--wrap"]);
+    });
+
+    it("carries launch_wrapper onto a Codex successor (same-runtime account switch) and preserves it on the node row", async () => {
+      rigRepo.setNodeLaunchWrapper(nodeId, ["rtk", "--codex-carry"]);
+      const codexAdapter = adapter("codex");
+      const svc = service({
+        runtimeAdapters: { codex: codexAdapter, "claude-code": adapter("claude-code") },
+      });
+      onSleep = () => {
+        const row = openSwitch();
+        if (row?.phase !== "preparing") return;
+        if (!handoverTyped()) return;
+        svc.confirm({ seatRef: SEAT, switchId: row.id, note: "ready", actorSession: SEAT, generation: row.successor_generation });
+      };
+      const altHome = path.join(home, "alt-codex-home");
+      fs.mkdirSync(altHome, { recursive: true });
+      const result = await svc.setRuntime({
+        seatRef: SEAT,
+        runtime: "codex",
+        accountHome: altHome,
+        reason: "switch-account",
+      });
+      expect(result).toMatchObject({ ok: true, changed: true });
+      expect(vi.mocked(codexAdapter.launchHarness).mock.calls[0]?.[0]).toMatchObject({
+        nodeId,
+        launchWrapper: ["rtk", "--codex-carry"],
+      });
+      expect(rigRepo.getRig(rigRepo.listRigs()[0]!.id)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--codex-carry"]);
+    });
+
+    it("fails closed before side effects when stored launch_wrapper is corrupt", async () => {
+      const origListWindows = fakeTmux.listWindows;
+      fakeTmux.listWindows = vi.fn(async (name: string) => {
+        db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("{corrupt", nodeId);
+        return origListWindows(name);
+      });
+      const altHome = path.join(home, "alt-codex-home-2");
+      fs.mkdirSync(altHome, { recursive: true });
+      const result = await service().setRuntime({
+        seatRef: SEAT,
+        runtime: "codex",
+        accountHome: altHome,
+        reason: "switch-account",
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        code: "runtime_switch_failed",
+        committed: false,
+      });
+      expect((result as { message: string }).message).toMatch(/launch_wrapper/);
+      expect(openSwitch()).toBeUndefined();
+      expect(fakeTmux.createSession).not.toHaveBeenCalled();
     });
   });
 });

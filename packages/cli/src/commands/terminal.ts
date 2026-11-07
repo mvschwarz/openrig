@@ -1,10 +1,11 @@
 // OPR.0.4.6.02 C3 — the `rig terminal` command family (the TUI-1 opaque verb +
-// the operator's terminal-provider-ride entry). Three subcommands, all hitting
+// the operator's terminal-provider-ride entry). The subcommands read
 // the ONE canonical daemon composer (`/api/terminal/...`):
 //
 //   rig terminal open <view> [--provider herdr|cmux|rex] [--json]
 //   rig terminal views [--json]
 //   rig terminal status [--provider herdr|cmux|rex] [--json]
+//   rig terminal attach <session> [--read-only]
 //
 // `<view>` resolves daemon-side: a rig name (per-rig derived) | `mission:<id>` |
 // `slice:<id>` (derived) | a saved-view id. The result is the ONE shared
@@ -22,8 +23,12 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
+import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
 
-export interface TerminalDeps extends StatusDeps { windowDeps?: WindowDeps }
+export interface TerminalDeps extends StatusDeps {
+  windowDeps?: WindowDeps;
+  attachTmux?: (target: TmuxAttachment) => Promise<number>;
+}
 export interface FollowControls {
   enabled: boolean; maxTiles?: number; graceMs?: number; focusRetentionMs?: number;
   pin?: string[]; unpin?: string[]; suppress?: string[]; unsuppress?: string[]; suppressionMs?: number;
@@ -126,13 +131,13 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
 
   cmd
     .command("open")
-    .argument("<view>", "a rig name, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
+    .argument("<view>", "a rig name, pod:<rig>/<pod>, seat:<rig>/<logical-id>, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
     .option("--provider <name>", "herdr, cmux or rex: open in the running provider without a desktop window; each open adds a new workspace (inside Herdr, --window reuses a matching one); tmux requires --window. Inside Rex, the default opens in Rex")
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
     .option("--expected-plan <id>", "Open only if the view still matches this preview")
-    .option("--follow", "Keep one qitem:<id> workspace following current obligation owners (Linux Herdr 0.9.5/protocol 22)")
+    .option("--follow", "Keep one qitem:<id>, slice:<id-or-name> or mission:<id> workspace following current obligation owners (Linux Herdr 0.9.5/protocol 22)")
     .option("--no-follow", "Stop following and keep the existing workspace and tiles as a fixed layout")
     .option("--max-tiles <count>", "Following tile limit, 1–256; explicitly raise it to show more members", Number)
     .option("--pin <seats...>", "Retain these following tiles after they leave the task")
@@ -217,6 +222,32 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           printResult(opts.json ?? false, { error: "The daemon did not confirm the requested Herdr session. Update the daemon before inspecting a named session.", code: "terminal_session_unconfirmed" }, 409); return;
         }
         printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
+  cmd.command("attach <session>")
+    .description("Attach this terminal to a session on the selected daemon's tmux server")
+    .option("--read-only", "View the session without sending input")
+    .action(async (session: string, opts: { readOnly?: boolean }) => {
+      const deps = getDeps();
+      await withClient(deps, async client => {
+        try {
+          if (client.baseUrl && !isLocalTmuxHost(client.baseUrl)) {
+            throw new Error("Terminal attachment uses local tmux; run this command on the selected daemon's machine.");
+          }
+          const response = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status");
+          if (response.status >= 400) throw new Error(`Cannot read the tmux server (HTTP ${response.status}).`);
+          if (response.data.tmux?.serverArgs === undefined) {
+            throw new Error("This daemon cannot report its tmux server. Update and restart it before using terminal attach.");
+          }
+          await assertLocalTmux(client, response.data.tmux.mode);
+          process.exitCode = await (deps.attachTmux ?? attachTmux)({
+            session, serverArgs: readTmuxServerArgs(response.data.tmux.serverArgs), readOnly: opts.readOnly ?? false,
+          });
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error));
+          process.exitCode = 1;
+        }
       });
     });
 

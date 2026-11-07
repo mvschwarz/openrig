@@ -23,7 +23,10 @@ Only the activity axis is served today. The session and resumability values are 
 `activity-taxonomy.ts` but no surface reads them: `rig ps --nodes --full` shows the raw session
 STATUS, both node views show a LIFECYCLE of `running`, `detached`, `recoverable` or `attention_required` (`run`, `det`, `rec`,
 `att`), and node inventory serves `occupantLifecycle` (`active`, `retiring`, `retired`,
-`context_walled`, `compacted`, `crashed`, `unknown`).
+`context_walled`, `compacted`, `crashed`, `unknown`). Node inventory's `sessionStatus` is the
+recorded session status, with two observed corrections: a running session whose pane is verified
+to have exited (identity reason `pane_exited`) reads `exited`, with `startupStatus:
+"attention_required"`, and a running session confirmed missing reads `detached`.
 
 The axes never blend. Reachability is strict; revival optimism is a different field
 (omnigent's strict-liveness split). `unknown` is a first-class honest value — the oracle
@@ -58,6 +61,21 @@ A zero prompt count alone is not an observed clear. Absent arbitration evidence 
 the existing live-hook fallback in effect; lifecycle, startup, held and error signals
 can independently raise attention. A false attention flag means no known trigger, not
 proof that an unobserved input box is clear.
+
+A handover whose successor started without a required file also raises attention. That's
+a projected guidance file or a guidance startup file marked `required` still missing from
+the guidance file, or, for a fresh or rebuild successor, a required `send_text` startup
+file that's missing. The seat serves `startedWithoutRequired` with each file's path, the
+table's reason column names each file, and the handover's own output says it's degraded.
+The mark belongs to that successor's session, so the seat's next launch or handover
+clears it. Time alone never does. Repairing the file in place doesn't clear it either,
+because no route delivers guidance into a running conversation.
+
+A fresh or rebuild successor's first turn opens with the seat's `send_text` startup files,
+the ones a fresh start delivers, as absolute paths with the role first. A pointer asks the
+successor to read the file; it isn't the pasted text a start sends. A fork successor
+carries its parent's conversation and gets no list. `send_text` startup actions, such as
+an `after_ready` preload, aren't run for a successor.
 
 The compact human table's ATTN column renders `yes`, `no`, or `?` when the flag is
 unavailable. Compact JSON retains `needsAttention`; use `--full` or
@@ -102,7 +120,7 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
 - **r3 — Claude `sessions/<pid>.json` self-report** (busy/shell/idle/waiting, since
   v2.1.139): standing, above hooks for working/idle. Undocumented internal — unreadable
   means fall down the ladder, never error.
-- **r2 — lifecycle hooks** (Claude SessionStart/UserPromptSubmit/Stop/Notification;
+- **r2 — lifecycle hooks** (Claude SessionStart/UserPromptSubmit/PostToolBatch/Stop/StopFailure/Notification;
   Codex SessionStart/UserPromptSubmit/Stop/PermissionRequest): standing for Claude; Codex's
   hook rung starts at trial and is promoted after 50 agreeing observations over at least an
   hour. Exactly-once turn boundaries; SubagentStop filtered (it
@@ -116,7 +134,10 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   PER-HARNESS when that harness's hook rung earns trust through a measured agreement
   window in production — never by fixture pass alone (symmetric admission: a fixture
   pass admits a rung to TRIAL, where it is measured but not consulted; production agreement
-  promotes it). Undeclared and partial-coverage rungs are identity-only, which is also where
+  promotes it). For Codex, this fallback also accepts a fresh working status adjacent to
+  the composer, or an advancing counter across two fresh captures when output separates
+  them. This positive evidence expires after five seconds; unrecognized, frozen, old or
+  pre-occupant frames add nothing. It uses the existing pane capture. Undeclared and partial-coverage rungs are identity-only, which is also where
   a degraded rung goes, with one declared exception: for a pi or omp seat or a community
   harness, sampling is positive-only: a changing pane reads working, and a quiet one never reads idle on its
   own, since the pane can be quiet mid-turn.
@@ -138,6 +159,26 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   carries an interval holds for two of them, then lapses to unknown, so a runner killed without saying so stops reading
   idle. Silence never clears a pending attention prompt, and a runner that states no interval (omp, an older pi
   runner) keeps the hold-until-the-next-boundary behaviour.
+
+Claude permission notifications raise needs-input immediately. A visible permission can clear
+after it has been observed and then disappears. A notification whose dialog was never observed
+can also clear when Claude reports `PostToolBatch`: every tool in that actor's batch has resolved,
+so its earlier permission requests are no longer pending. The relay carries the native actor
+identity; a subagent or in-process teammate finishing its batch cannot clear the main session's
+request, and overlapping actors remain separate. An individual `PostToolUse` is insufficient
+because another tool in the batch may still be waiting for permission.
+
+Batch completion must come from the current occupant and have a later source timestamp than
+the matching notification. Missing actor attribution from an older relay, equal or older
+timestamps, and another actor's completion retain attention. An unrecognized or missing screen
+does not expire attention by age. `Stop` and `UserPromptSubmit` remain the turn-boundary fallback.
+The oracle remembers each actor's latest completed batch for the current occupant, so a strictly
+earlier notification arriving late cannot restore the mark, even if the completion arrived first.
+A notification with an equal or later timestamp remains eligible; swapping or retiring the
+occupant discards its remembered completions.
+Completing a batch changes the needs-input signal without inferring that the seat is idle or
+overwriting a later elicitation. The hook contract is documented in
+[Claude's hooks reference](https://code.claude.com/docs/en/hooks#posttoolbatch).
 
 Partial-coverage honesty: a source with partial lifecycle coverage gets identity-only
 trust, unless its inventory declares it positive-only. A positive-only source can report

@@ -20,7 +20,7 @@ function fakeExec() {
   const exec = vi.fn(async (cmd: string) => {
     calls.push(cmd);
     if (cmd.startsWith("tmux list-windows -a")) return WINDOWS.map(([s, a, t]) => `${a}|${t}|${s}`).join("\n") + "\n";
-    if (cmd.startsWith("tmux list-panes -a")) return PANES.map(([p, pid, c]) => `${p}|${pid}|${c}`).join("\n") + "\n";
+    if (cmd.startsWith("tmux list-panes -a")) return PANES.map(([p, pid, c]) => `${p}|${pid}|0|${c}`).join("\n") + "\n";
     const m = cmd.match(/^tmux display-message -p -t (\S+) ["']#\{(\w+)\}["']$/);
     if (!m) throw new Error(`unexpected: ${cmd}`);
     const target = unquote(m[1]!), field = m[2]!;
@@ -51,8 +51,17 @@ describe("batched tmux reads", () => {
     for (const [id] of PANES) {
       const pid = await tmux.getPanePid(id), cmd = await tmux.getPaneCommand(id);
       if (pid === null) expect(batch!.has(id), id).toBe(false);
-      else expect(batch!.get(id), id).toEqual({ pid, command: cmd });
+      else expect(batch!.get(id), id).toEqual({ pid, command: cmd, dead: false });
     }
+  });
+
+  it("membership can inspect all windows of the exact session without changing default pane listing", async () => {
+    const calls: string[] = [];
+    const tmux = new TmuxAdapter((async (cmd: string) => { calls.push(cmd); return ""; }) as never);
+    await tmux.listPanes("worker@rig");
+    await tmux.listPanes("worker@rig", true);
+    expect(calls[0]).toContain("list-panes -t '=worker@rig:'");
+    expect(calls[1]).toContain("list-panes -s -t '=worker@rig:'");
   });
 
   it("a tmux failure makes the batch null (callers then read per seat)", async () => {
@@ -77,12 +86,12 @@ describe("batched tmux reads: the separator inside a session name or a command",
   it("keeps a session name and a pane command that contain the field separator intact", async () => {
     const exec = vi.fn(async (cmd: string) => {
       if (cmd.startsWith("tmux list-windows -a")) return "1|1790000100|odd|name@rig\n0|1790000200|odd|name@rig\n";
-      if (cmd.startsWith("tmux list-panes -a")) return "%9|4242|a|b\n";
+      if (cmd.startsWith("tmux list-panes -a")) return "%9|4242|0|a|b\n";
       throw new Error(`unexpected: ${cmd}`);
     });
     const tmux = new TmuxAdapter(exec as never);
     expect(await tmux.readAllSessionWindowActivity()).toEqual(new Map([["odd|name@rig", 1790000100]]));
-    expect(await tmux.readAllPaneProcesses()).toEqual(new Map([["%9", { pid: 4242, command: "a|b" }]]));
+    expect(await tmux.readAllPaneProcesses()).toEqual(new Map([["%9", { pid: 4242, command: "a|b", dead: false }]]));
   });
 });
 

@@ -125,10 +125,10 @@ export function edgeCommand(depsOverride?: StatusDeps): Command {
 
   cmd
     .command("add")
-    .description("Ensure one edge between two existing seats; an existing edge is unchanged")
+    .description("Ensure one typed edge; an existing edge is unchanged")
     .argument("<rig>", "Target rig name or ID")
-    .argument("[from]", "Source seat logical ID, such as orch.lead")
-    .argument("[to]", "Target seat logical ID, such as review.reviewer")
+    .argument("[from]", "Existing source seat logical ID, such as orch.lead")
+    .argument("[to]", "Target logical ID, or a same-daemon address for escalates_to")
     .option("--kind <kind>", "delegates_to, spawned_by, can_observe, collaborates_with or escalates_to")
     .option("--plan", "Validate the request and show the change without writing")
     .option("--json", "JSON output for agents")
@@ -136,8 +136,12 @@ export function edgeCommand(depsOverride?: StatusDeps): Command {
 Examples:
   rig edge add my-rig orch.lead review.reviewer --kind delegates_to
   rig edge add my-rig orch.lead review.reviewer --kind delegates_to --plan --json
+  rig edge add my-rig work.lead review-advisor@coord --kind escalates_to
 
-Endpoints are fully qualified logical IDs for both same-pod and cross-pod edges.
+Use existing, fully qualified logical IDs in <rig> for both same-pod and
+cross-pod edges. For escalates_to only, the target may instead be a canonical
+same-daemon seat address (pod-member@rig), resolved when used; that rig or seat
+need not exist yet. Cross-host and synthetic destinations are unsupported.
 Run it once per edge. A repeat reports the existing edge and its ID, and writes
 nothing. No seats or sessions are changed.`)
     .action(async (rig: string, from: string | undefined, to: string | undefined, opts: { kind?: string; plan?: boolean; json?: boolean }) => {

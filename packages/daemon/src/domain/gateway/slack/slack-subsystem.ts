@@ -26,6 +26,7 @@ import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore, InboundReceiptStore, slackMicros } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
+import { SlackAskSettlement } from "./settled-asks.js";
 import { abortableSleep, subsystemSlackDeliver } from "./slack-delivery.js";
 import { InboundRouter, SLACK_THREAD_ROOT_TAG, handleEnvelope, type SocketEnvelope, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
@@ -41,7 +42,8 @@ import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./soc
 import { HUMAN_ALERT_TAG, loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
 import { sharedChannelAddresses, sharedChannelFor } from "../participants.js";
 import { hasLiveHumanGate, isBlockerLive, type QueueRepository } from "../../queue-repository.js";
-import { formatReplyToChoice, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
+import { humanAnswerText } from "../../human-questions.js";
+import { formatReplyToChoice, formatReplyToThreadMissing, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
 import { ownerNotificationLevelAtLeast } from "../../queue-transition-log.js";
@@ -79,7 +81,8 @@ export interface SlackWireOpts {
   inboundRetryIntervalMs?: number;
   inboundMaxConnects?: number;
   registry?: RegistrySurface;
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
+  /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does. */
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
 }
 
 interface HumanReplyActionPort {
@@ -98,25 +101,29 @@ export function makeHumanReplyResolver(
     const source = queueRepo.getById(input.qitemId);
     if (source?.humanIntent === "update") return "not-applicable";
     if (!contract) return "not-applicable";
-    // A different person's reply to a question parked on someone else already reached the agent as their own message
-    // (the inbound row, linked to the question). It doesn't resume the question, which stays parked on its person.
-    if (source?.state === "blocked" && queueRepo.askedSomeoneElse(input.actorSession, source.blockedOn)) return "not-applicable";
+    // Any registered person's reply resumes a question parked on another: one trusted workspace, recorded as them on that
+    // person's ask (the write contract names both).
     const uncertainDecision = `${input.decision}\n\n---\nOpenRig timing context (Slack reply ${JSON.stringify([input.actorSession, input.messageTs ?? null])}): This reply resumed the question, but its ordering against the posted question could not be confirmed. Resuming is not approval; read the person's words in context.`;
     // An acknowledgement retry must not resolve again. Match this reply's durable
     // context, not an older episode's generic resolved marker.
     if (slackMicros(input.messageTs) !== null && queueRepo.transitionLog.listForQitem(input.qitemId)
-      .some((transition) => transition.ownerNotificationKind === "human-decision-resolved" && transition.transitionNote === uncertainDecision)) {
+      // A different person's resume carries their attribution after the timing context, so match that too.
+      .some((transition) => transition.ownerNotificationKind === "human-decision-resolved"
+        && (transition.transitionNote === uncertainDecision || transition.transitionNote?.startsWith(`${uncertainDecision}; by `) === true))) {
       return "resolved-uncertain";
     }
     let uncertain = false;
+    let parkedOnAsked = false;
+    let episodeKey: string | undefined;
+    let digestReceipt = false;
     // A park on a person by any address (a registered person's own address, as their Slack rows carry it, or a
     // legacy human seat) answers only from a reply written after its current question posted.
     if (source?.state === "blocked" && source.blockedOn && queueRepo.isPersonAddress(source.blockedOn)) {
-      const episode = queueRepo.transitionLog.listForQitem(input.qitemId)
-        .filter((transition) => transition.ownerNotificationKind === "human-required").at(-1);
+      parkedOnAsked = queueRepo.isPersonAddress(source.destinationSession) && queueRepo.answersAsk(source, input.actorSession);
+      const episode = queueRepo.currentHumanRequiredEpisode(input.qitemId);
       if (!episode) return "not-applicable";
-      const key = `${input.qitemId}:${episode.transitionId}`;
-      const receipt = queueRepo.transitionLog.getOwnerNotificationReceipt(input.qitemId, key);
+      const { key, receipt } = episode;
+      episodeKey = key;
       // A final receipt attests delivery even when reconciliation lost its timestamp.
       // Without one, ONLY a unique exact current-episode primary proves anything.
       const primary = !receipt && home ? pendingPrimaryReceipt(home, input.qitemId, key) : null;
@@ -125,10 +132,26 @@ export function makeHumanReplyResolver(
       const replied = slackMicros(input.messageTs);
       if (posted !== null && replied !== null && replied <= posted) return "not-applicable";
       uncertain = Boolean(receipt?.digest) || posted === null || replied === null;
+      digestReceipt = Boolean(receipt?.digest);
     }
 
     try {
-      await contract.act({ verb: "resolve", ...input, decision: uncertain ? uncertainDecision : input.decision });
+      // One answer per question: another person's committed return for this question is the answer. Resume with it, as
+      // theirs; this reply stays the conversation it already became.
+      const winner = episodeKey ? queueRepo.committedAnswerFromAnother(input.qitemId, input.actorSession, episodeKey) : null;
+      if (winner) {
+        // Its typed words are the question's answer, stored as its own resume would: it was taken as the answer only after
+        // the question posted, so only a digest receipt leaves its order uncertain.
+        const words = humanAnswerText(winner.body);
+        const stores = queueRepo.isPersonAddress(source!.destinationSession) && queueRepo.answersAsk(source!, winner.sourceSession) && !digestReceipt;
+        await contract.act({ verb: "resolve", qitemId: input.qitemId, actorSession: winner.sourceSession, decision: words,
+          ...(stores ? { answerText: words } : {}) });
+        return "not-applicable";
+      }
+      // A question parked on the person it asked takes their typed reply as its answer, stored in the resume's own
+      // transaction. A click's return stores nothing here, and a reply whose order is uncertain stays words in context.
+      await contract.act({ verb: "resolve", ...input, decision: uncertain ? uncertainDecision : input.decision,
+        ...(input.typedReply && parkedOnAsked && !uncertain ? { answerText: input.decision } : {}) });
       return uncertain ? "resolved-uncertain" : "resolved";
     } catch (error) {
       if ((error as { code?: string }).code !== "qitem_not_leg1_parked") throw error;
@@ -611,6 +634,20 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
             log(`reply stamp failed for ${p.qitemId}: ${(e as Error).message}`);
           }
         },
+        // #2234: Slack posted a reply to this root as a new top-level message, so the root is gone. Its mapping is closed,
+        // so later posts don't reuse it. A closed root still routes a reply to its seat.
+        onThreadMissing: (p, threadTs, channel) => {
+          threadMap.close(threadTs, channel);
+          log(`thread ${threadTs} in ${channel} is gone: Slack posted the reply as a new message, so its mapping is closed`);
+          // A --reply-to update's receipt says where it actually went; the recorded choice stays, for retries.
+          if (threadReplyTo(p)) {
+            try {
+              opts.queueRepo.update({ qitemId: p.qitemId, actorSession: REPLY_TO_CHOICE_ACTOR, transitionNote: formatReplyToThreadMissing(threadTs) });
+            } catch (e) {
+              log(`reply-to placement for ${p.qitemId} not recorded: ${(e as Error).message}`);
+            }
+          }
+        },
         onTransportFailed: recordTransportFailed,
         onPosted: (p, messageTs, threadTs) => {
           // v3 digest branch: transport truth first — every member receipt is
@@ -970,6 +1007,11 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // hermeticity rule, same as every monitor in the supervision tree.
   const stops: Array<() => void> = [];
   const starts: Array<() => void> = [];
+  const settlement = outboundReady ? new SlackAskSettlement({ queue: opts.queueRepo, token: bot!, fetchImpl: opts.fetchImpl, log }) : null;
+  if (settlement) {
+    starts.push(() => settlement.start());
+    stops.push(() => settlement.stop());
+  }
   let inboundHandle: SocketInboundHandle | undefined;
   let recovery: SlackRecovery | undefined;
   // Recovery covers the channels this machine owns and the threads tracked in them. The configured
@@ -1021,6 +1063,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       seen: inboundSeen,
       deadLetter: dead,
       destination: cfg.inboundDestination,
+      reactions: cfg.reactions === "off" ? "off" : "route",
       resolveSender: makeInboundSenderResolver(registry, opts.home),
       // S10 — deterministic thread routing: mapped thread → exactly the mapped seat; unmapped
       // or human-initiated → the configured orchestrator slot as an unrouted-signal row.
@@ -1163,12 +1206,14 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       platform: "slack", configurationDigest: channelStateDigest(cfg),
       outboundReady,
       inboundReady,
+      ...(settlement ? { settlement: settlement.status() } : {}),
       inboundRouting,
       recovery: recovery?.status() ?? { state: "unavailable", reason: "inbound-not-configured" },
       inbound: inboundHandle?.status() ?? { state: inboundReady ? "not-started" : "not-configured", generation: 0, reconnects: 0 },
       // Durable inbound custody across event, click and relay files, even when inert.
       // Count records, not distinct messages; unreadable storage is null/unknown.
       ...deadLetterBacklogFields(dead, deadActions, deadForwards),
+      relayAttemptsInFlight: router?.getRelayAttemptsInFlight() ?? 0,
       // A machine with no connection of its own can take events a hub relays here; whether a hub does is
       // the hub's configuration, so this says only that it can, and how many have arrived.
       ...(router && !inboundReady ? { relayedInbound: { accepting: true, received: relayedReceived } } : {}),

@@ -137,6 +137,10 @@ export interface ComposerInput {
   state: "empty" | "text" | "unknown";
   rows: string[];
   columns: number;
+  /** How many columns short of `columns` the harness may wrap its text: a row boundary at a width in that range is a wrap. */
+  wrapSlack?: number;
+  /** Conservative visible capacity of the recognized Codex fullscreen composer. */
+  pasteViewport?: { columns: number; rows: number };
   cursor?: ComposerSnapshot["cursor"];
   unknownReason?: string;
   suggestionRows?: string[];
@@ -156,6 +160,7 @@ export const COMPOSER_COLLAPSED_PASTE_PATTERN = /^\[Pasted text #\d+ \+(\d+) lin
 export function composerContainsOwnedText(input: ComposerInput, expected: string): boolean {
   if (input.state !== "text" || !input.cursorAtEnd || input.collapsedPaste || !input.rows.length) return false;
   const text = expected.replace(/\r\n/g, "\n");
+  const narrowest = input.columns - (input.wrapSlack ?? 0);
   let offsets = new Set([0]);
   for (let index = 0; index < input.rows.length; index++) {
     const row = input.rows[index]!;
@@ -165,16 +170,44 @@ export function composerContainsOwnedText(input: ComposerInput, expected: string
       const end = offset + row.length;
       if (index === input.rows.length - 1) { if (end === text.length) return true; continue; }
       if (text[end] === "\n") next.add(end + 1);
-      if (stringWidth(row) >= input.columns) next.add(end);
+      if (stringWidth(row) >= narrowest) next.add(end);
       if (text[end] === " ") {
         const word = /^\S+/.exec(text.slice(end + 1))?.[0] ?? "";
-        if (word && stringWidth(row + " " + word) > input.columns) next.add(end + 1);
+        if (word && stringWidth(row + " " + word) > narrowest) next.add(end + 1);
       }
     }
     offsets = next;
     if (!offsets.size) return false;
   }
   return false;
+}
+
+/** Conservative uncertainty before a protected Codex paste, never Enter authority.
+ * Codex 0.164 collapses >1000 code points to [Pasted Content N chars], which
+ * the current ownership reader cannot own. Only a strictly shorter logical
+ * line has an exact one-row charge. Wrapped lines use a conservative pair bound
+ * over all native semantic breaks, plus an insertion row; this can retain prose
+ * that fits natively, without recreating UAX#14 or weakening Enter ownership.
+ */
+export function composerPasteUncertainty(input: ComposerInput, text: string): "controls" | "long" | "viewport" | null {
+  const viewport = input.pasteViewport;
+  if (!viewport) return null;
+  const normalized = text.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  if (lines.some(line => /[\x00-\x1f\x7f-\x9f]/.test(line))) return "controls";
+  // rust-v0.164.0 chat_composer/paste_input.rs:184-192 (Unicode scalar count).
+  if ([...normalized].length > 1000) return "long";
+  if (viewport.columns < 1 || viewport.rows < 1) return "viewport";
+  let rows = 0;
+  for (const line of lines) {
+    const cells = [...line].reduce((sum, ch) => sum + (ch >= " " && ch <= "~" ? 1 : 2), 0);
+    // A native semantic fragment may move whole, even across an apparent space.
+    // Bound the entire line rather than assuming character or ASCII-space breaks.
+    // Equality is not the one-row fast path: a full line needs an insertion row.
+    rows += cells < viewport.columns ? 1 : Math.ceil(2 * cells / viewport.columns) + 1;
+    if (rows > viewport.rows) return "viewport";
+  }
+  return null;
 }
 
 /** Recognize this lease's paste immediately after pasting or before its Enter

@@ -17,7 +17,7 @@ npx skills add https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/ri
 npx skills add https://github.com/mvschwarz/openrig/tree/<release-tag>/skills/rigs --skill rigs --agent codex
 ```
 
-For a new install, use the latest release's tag, for example `v0.7.3`. If OpenRig is already installed, use the tag
+For a new install, use the latest release's tag, for example `v0.7.5`. If OpenRig is already installed, use the tag
 that matches `rig --version`, or upgrade first. If the command fails with `npx: command not found`, Node.js isn't
 installed or isn't on your PATH yet (see [What you need](#what-you-need)). Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what
 you want built.
@@ -90,7 +90,8 @@ Use `codex` or `both` in place of `claude` to match the coding agents you use. A
 - it adds an OpenRig block to `~/.tmux.conf` (mouse support and longer scrollback).
 
 It doesn't start anything. It ends with a summary of what's done and what still needs you. A missing sign-in shows
-there: run `claude auth login` or `codex login`, then carry on.
+there: run `claude auth login` or `codex login`, then carry on. Setup also tries to record the selected providers
+for a new kernel's first boot; its summary warns if it could not save the choice.
 
 ### 3. Start OpenRig
 
@@ -100,12 +101,16 @@ rig status
 rig ps --nodes --rig kernel
 ```
 
-The daemon starts and boots the kernel with the coding agents you're signed in to, or both if you're signed in to both.
+On the kernel's first boot, the daemon uses the providers selected by `rig setup --providers` that are signed in.
+If no provider choice was recorded, it considers every signed-in provider. An existing kernel keeps its seats;
+changing the setup choice does not replace them. An `OPENRIG_PROVIDER_SELECTED` value in the daemon's environment
+takes precedence over the saved choice.
 
 **What starting OpenRig changes, for the coding agents you use** (paths are the usual defaults):
 - **For Codex:** hooks and trust in `~/.codex/config.toml`, when OpenRig or a Codex agent starts.
 - **For Claude Code:** workspace trust in `~/.claude.json`, and activity hooks in the project's
-  `.claude/settings.local.json`, plus a status line unless you already have your own.
+  `.claude/settings.local.json`, plus a status line unless you already have your own. `rig down` takes the hooks and
+  status line back out once no Claude seat uses that directory.
 - **For both:** small discovery skills in `~/.claude/skills` and `~/.agents/skills`.
 - **Kernel access:** by default the kernel gets broader permissions than a project team gets by default. On Codex
   that's full access with no approval prompts. On Claude Code, its file tools, web fetches and operational commands,

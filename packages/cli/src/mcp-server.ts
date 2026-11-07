@@ -18,6 +18,15 @@ const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
 /** The most text rig_context_get and rig_artifact_read return in one call; a longer file or section is cut, and says so. */
 const CONTEXT_TEXT_LIMIT = 48_000;
 
+/** Where a cut of text at end goes: one unit earlier when end falls inside a surrogate pair (an emoji, say), so the
+ *  cut text and the rest after it both hold whole characters. */
+function wholeCharEnd(text: string, end: number): number {
+  if (end <= 0 || end >= text.length) return end;
+  const before = text.charCodeAt(end - 1);
+  const after = text.charCodeAt(end);
+  return before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff ? end - 1 : end;
+}
+
 type TextResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: true;
@@ -327,10 +336,11 @@ function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
   };
 }
 
-/** The grant service names an external caller's seat cus-<id>-caller@<rig>. v1 marks no seat as a caller, so an item
- *  from a seat of this shape is never the team's question to an external caller, and an external caller can't hand a
- *  task to one. The shape never grants anything. */
-const CALLER_SHAPED = /^cus-.+-caller@[^@]+$/;
+/** The grant service names each connected assistant's seat cus-<id>-<connection>@<rig> (an existing connection's is
+ *  cus-<id>-caller@<rig>). v1 marks no seat as a caller, so for a grant without team/list an item from a seat of this
+ *  shape is never the team's question to it, and it can't hand a task to one. The shape only refuses; it never grants
+ *  anything, and a grant with team/list doesn't read it. */
+const CALLER_SHAPED = /^cus-[^@]+-[^@]+@[^@]+$/;
 
 /** OpenRig's own tags that decide what a person asked about a row sees of its body: what Slack ingestion records about where
  *  the row came from and which parts of its body OpenRig wrote (the sender's channel, the attachments block, the body's
@@ -340,11 +350,15 @@ const CALLER_SHAPED = /^cus-.+-caller@[^@]+$/;
 const OPENRIG_PROVENANCE_TAG = /^(?:founder-slack|inbound|shared-channel|gate)$|^participant:|^slack-/;
 
 /** An external grant (openrig.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
- *  only caller. It may hand tasks to its rigs' team seats (never a caller-shaped seat, a person or another host's
- *  seat), read the items it sent and the team's questions to it (never team-internal or another caller's items), follow
- *  a handed-on item only where it came back to it, and read the artifacts of its own items under its named roots. */
+ *  only caller. It may hand tasks to its rigs' other seats (never a person or another host's seat, and without team/list
+ *  never a caller-shaped seat), read the items it sent and those addressed to it from those seats (never team-internal
+ *  items or other callers' items between themselves), change only the items addressed to its own seat (with the claim and
+ *  update pairs), follow a handed-on item only where it came back to it, and read the artifacts of its own items under
+ *  its named roots. */
 function externalScope(access: McpAccess, seatOf: () => string | undefined): Scope {
   const rigs = new Set(access.rigs);
+  // team/list makes the caller one of its rigs' participants: it may reach another connected assistant's seat.
+  const participant = access.external?.objects.team?.includes("list") === true;
   const caller = (value: unknown): boolean => typeof value === "string" && value !== "" && value === seatOf();
   // A seat of one of its rigs on this instance: member@rig, never a person or another host's seat.
   const member = (value: unknown): boolean => {
@@ -352,17 +366,20 @@ function externalScope(access: McpAccess, seatOf: () => string | undefined): Sco
     const parts = value.split("@");
     return parts.length === 2 && parts[0] !== "" && parts[1] !== "external" && rigs.has(parts[1]!);
   };
-  const team = (value: unknown): boolean => member(value) && !caller(value) && !CALLER_SHAPED.test(value as string);
+  const team = (value: unknown): boolean => member(value) && !caller(value) && (participant || !CALLER_SHAPED.test(value as string));
   const field = (row: unknown, name: "sourceSession" | "destinationSession"): unknown => ((row ?? {}) as Record<string, unknown>)[name];
   const item = (row: unknown): boolean => caller(field(row, "sourceSession"))
     || (caller(field(row, "destinationSession")) && team(field(row, "sourceSession")));
   return {
     session: (value) => caller(value) || team(value),
     item,
-    owner: () => false,
+    // Only an item addressed to its exact seat, and one it may read, is its own to change; the daemon's claim also checks
+    // the claimant.
+    owner: (row) => caller(field(row, "destinationSession")) && item(row),
     rig: (name) => typeof name === "string" && rigs.has(name),
     root: (name) => typeof name === "string" && access.roots.includes(name),
-    // A task goes to the team: never to the caller itself or to another caller-shaped seat, which v1 can't tell apart.
+    // A task goes to another seat of its rigs: never to the caller itself, and without team/list never to another
+    // caller-shaped seat, which v1 can't tell apart.
     destination: team,
     successor: caller,
     artifact: (row) => caller(field(row, "sourceSession")),
@@ -399,7 +416,7 @@ function artifactView(source: string, read: FileRead, offset: number): Record<st
   const base = { available: true, source, root: read.root, path: read.path, size: read.size, mtime: read.mtime };
   if (read.binary) return { ...base, binary: true, note: "A binary file: not shown as text." };
   const text = read.content ?? "";
-  const end = offset + CONTEXT_TEXT_LIMIT;
+  const end = wholeCharEnd(text, offset + CONTEXT_TEXT_LIMIT);
   return {
     ...base, binary: false, offset, text: text.slice(offset, end), totalChars: text.length,
     truncated: text.length > end || read.truncated === true,
@@ -471,7 +488,8 @@ export type McpAccess = {
 
 /** The tool each external object/action pair offers. A pair not listed here offers nothing. */
 const EXTERNAL_TOOLS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
-  queue: { create: "rig_queue_create", show: "rig_queue_show", list: "rig_queue_list" },
+  queue: { create: "rig_queue_create", show: "rig_queue_show", list: "rig_queue_list", claim: "rig_queue_claim", update: "rig_queue_update" },
+  team: { list: "rig_team" },
   artifact: { read: "rig_artifact_read" },
 };
 
@@ -514,6 +532,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_queue_list", routes: ["GET /api/queue/list"], effect: "read", access: "work" },
   { tool: "rig_queue_claim", routes: ["POST /api/queue/:qitemId/claim"], effect: "destructive", access: "work" },
   { tool: "rig_queue_update", routes: ["POST /api/queue/:qitemId/update"], effect: "destructive", access: "work" },
+  { tool: "rig_environment_export", routes: ["GET /api/queue/:qitemId", "POST /api/environments/:bindingId/export"], effect: "additive", access: "work" },
   { tool: "rig_telemetry_events", routes: ["GET /api/telemetry/v1/events"], effect: "read", access: "owner" },
   { tool: "rig_whoami", routes: ["GET /api/whoami"], effect: "read", access: "work" },
   { tool: "rig_team", routes: ["GET /api/rigs/:rigId", "GET /api/rigs/:rigId/nodes", "GET /healthz"], effect: "read", access: "work" },
@@ -553,7 +572,42 @@ const SHARED_INSTRUCTIONS = [
   "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
 ];
 const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
-const EXTERNAL_INSTRUCTIONS = SHARED_INSTRUCTIONS.join("\n");
+const EXTERNAL_INSTRUCTIONS = [
+  "This connection sends requests to an OpenRig team as the caller named by its grant. The daemon attributes requests to that caller. Use only the tools this connection offers.",
+  "To ask the connected team to do work, use rig_queue_create with the task in body. You may omit destination to use the receiver configured by the server operator. If no receiver is available, ask the operator to configure it; don't guess an address. An explicit destination still must be within this connection's grant.",
+  "Keep the returned qitemId and use rig_queue_show to read the result. Acceptance is not completed work. If a create times out, check that same qitemId before retrying and reuse it; never retry with a new id. Use revises for a requested revision of earlier work, preserving its lineage. rig_queue_list shows your own work, including an empty list before your first request.",
+  "Read returned files with rig_artifact_read, within the shared roots and items this connection may reach. A question reserved for a person is theirs to answer; don't answer on their behalf.",
+].join("\n");
+
+/** For an external grant that names claim and update: how it works the items addressed to it, messages included. */
+const EXTERNAL_INBOX_INSTRUCTIONS = [...SHARED_INSTRUCTIONS,
+  "Items addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it, close it done, and reply, when it needs one, with a new item to its sender. Nothing promises to wake you, so check your items again.",
+].join("\n");
+
+function instructionsFor(access: McpAccess | undefined): string {
+  if (!access?.external) return INSTRUCTIONS;
+  const tools = externalTools(access.external.objects);
+  return tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? EXTERNAL_INBOX_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
+}
+
+/** A configured default must identify exactly one existing local node. No topology relationship, name convention
+ *  for a lead, caller identity or task history supplies a missing receiver. Resolve again on each omitted destination. */
+async function taskDestinationExists(client: DaemonClient, destination: string): Promise<boolean> {
+  const rigName = destination.split("@")[1]!;
+  const rig = await resolveRigHandle(client, rigName, { strict: true });
+  if (rig.kind !== "resolved") return false;
+  const nodes = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
+  if (nodes.status !== 200 || !Array.isArray(nodes.data)) return false;
+  let matches = 0;
+  for (const entry of nodes.data as unknown[]) {
+    const { logicalId, rigName: name } = (entry ?? {}) as Record<string, unknown>;
+    if (typeof logicalId !== "string" || name !== rigName) return false;
+    const dot = logicalId.indexOf(".");
+    if (dot <= 0 || dot === logicalId.length - 1) return false;
+    if (`${logicalId.slice(0, dot)}-${logicalId.slice(dot + 1)}@${name}` === destination) matches++;
+  }
+  return matches === 1;
+}
 
 /**
  * Maps a DaemonResponse to MCP tool result.
@@ -602,11 +656,11 @@ function mapResult(
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; rostersFolder?: () => string; presenceFile?: () => string } = {}): McpServer {
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string } = {}): McpServer {
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
-  }, { instructions: options.access?.external ? EXTERNAL_INSTRUCTIONS : INSTRUCTIONS });
+  }, { instructions: instructionsFor(options.access) });
   const { access } = options;
   const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
   const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
@@ -1170,7 +1224,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     {
       description: "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord.",
       inputSchema: z.object({
-        destination: z.string().describe("Destination seat (e.g. dev-impl@my-rig)"),
+        destination: access?.external
+          ? z.string().optional().describe("Destination seat; omit to use the connected team's configured receiver")
+          : z.string().describe("Destination seat (e.g. dev-impl@my-rig)"),
         body: z.string().describe("The task: what to do and what to return"),
         summary: z.string().optional().describe("One-line summary"),
         tags: z.array(z.string()).optional().describe("Tags, e.g. mission:<name>"),
@@ -1183,6 +1239,18 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       annotations: ADDITIVE,
     },
     async ({ destination, body, summary, tags, priority, tier, qitemId, revises, alert }) => {
+      if (destination === undefined && access?.external) {
+        destination = options.taskDestination;
+        const unavailable = () => errorResult("The connected team's task receiver is unavailable. Ask the server operator to configure it.",
+          "task_destination_unavailable", "The connected team's task receiver is unavailable. Ask the server operator to configure it.");
+        if (!destination) return unavailable();
+        // Check scope before looking up the configured receiver: configuration never expands a grant or reveals
+        // another rig's destination. An explicit destination continues through the existing path below.
+        if (!scope?.destination(destination)) return outOfScope("Configured task destination");
+        try {
+          if (!await taskDestinationExists(client, destination)) return unavailable();
+        } catch { return unavailable(); }
+      }
       if (scope && !scope.destination(destination)) return outOfScope(`Destination ${destination}`);
       // A revision carries its original's lineage as a handoff does: the original's chain, then the original.
       let lineage: { chainOfRecord: string[]; body: string } | undefined;
@@ -1335,7 +1403,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const denied = await itemOutOfScope(qitemId);
         if (denied) return denied;
-        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {}), undefined, { structured: true });
+        const res = await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
+        // An external caller's claimed item goes through the same projection as show and list.
+        const view = externalView(scope);
+        return mapResult(view && res.status < 400 ? { ...res, data: projectForExternal(res.data, view) } : res, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
@@ -1366,12 +1437,43 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const denied = await itemOutOfScope(qitemId, "owner");
         if (denied) return denied;
-        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
+        // An external caller waits only on an item it names and can read: parking on a person would ask them, parking on
+        // another item would say whether it exists, and a park that names nothing would restore a blocker the team set.
+        if (access?.external && (blockedOn || state === "blocked")) {
+          const blocker = blockedOn?.startsWith("qitem-") ? await client.get(`/api/queue/${encodeURIComponent(blockedOn)}`) : null;
+          if (!blocker || blocker.status >= 400 || !scope?.item(blocker.data)) return outOfScope(`Blocker ${blockedOn ?? "(none named)"}`);
+        }
+        const res = await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state, closureReason, closureTarget, summary, evidenceRef, blockedOn, wakeAfterSeconds, transitionNote: note, resolution, reopen,
-        }), undefined, { structured: true });
+        });
+        // An external caller's updated item goes through the same projection as show and list.
+        const view = externalView(scope);
+        return mapResult(view && res.status < 400 ? { ...res, data: projectForExternal(res.data, view) } : res, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
+    },
+  );
+
+  // Artifact publication uses this actual authenticated work caller, never a body actor or activity token.
+  if (offered("rig_environment_export")) server.registerTool(
+    "rig_environment_export",
+    {
+      description: "Transfer a bound worker's actual JSON artifact to the host, verify its bytes/schema/context and append a durable receipt to its existing work. Does not close work, stop compute or restore native history. Requires an authenticated HTTP work connection.",
+      inputSchema: z.object({
+        bindingId: z.string(), operationId: z.string(), taskId: z.string(), generation: z.string(), path: z.string(),
+        sha256: z.string(), bytes: z.number().int().positive().max(1048576),
+        schema: z.object({ format: z.literal("json-object/v1"), fields: z.record(z.string(), z.enum(["string", "number", "boolean"])), required: z.array(z.string()) }),
+        context: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
+      }),
+      annotations: ADDITIVE,
+    },
+    async ({ bindingId, ...input }) => {
+      if (!access) return { content: [{ type: "text" as const, text: "This export requires a validated HTTP work grant; a declared stdio/local identity is not authentication." }], isError: true };
+      try {
+        const denied = await itemOutOfScope(input.taskId, "owner"); if (denied) return denied;
+        return mapResult(await client.post(`/api/environments/${encodeURIComponent(bindingId)}/export`, input), undefined, { structured: true });
+      } catch (error) { return caught(error); }
     },
   );
 
@@ -1459,6 +1561,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     },
     async ({ rigId }) => {
       try {
+        // An external caller names one of its grant's rigs, so a lookup never answers about another workspace's rig.
+        if (access?.external && !scope?.rig(rigId)) return outOfScope(`Rig ${rigId}`);
         const rig = await rigIdFor(client, rigId);
         if ("content" in rig) return rig;
         const id = encodeURIComponent(rig.id);
@@ -1479,7 +1583,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           async (seat) => {
             const rows = await client.get(`/api/queue/list?${new URLSearchParams({ destinationSession: seat, compact: "1", limit: String(PRESENCE_ROWS) }).toString()}`)
               .then((res) => (res.status < 400 ? res.data : null), () => null);
-            return { lastCallAt: readPresence(presenceFile())[seat]?.lastCallAt ?? null, lastWake: newestWake(rows, seat),
+            // An external caller sees a ring only on an item it may read, so another pair's item isn't named.
+            const visible = access?.external && Array.isArray(rows) ? rows.filter((row) => scope?.item(row)) : rows;
+            return { lastCallAt: readPresence(presenceFile())[seat]?.lastCallAt ?? null, lastWake: newestWake(visible, seat),
               lastWakeScope: `the latest ring among its ${PRESENCE_ROWS} most recent rows` };
           });
         return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...(hosted.note ? { hostedMembersNote: hosted.note } : {}) } }, undefined, { structured: true });
@@ -1581,7 +1687,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         return mapResult({ status: 200, data: {
           address: found.address ?? address, packRef: found.packRef, filePath: found.filePath,
           ...(found.headerPath !== undefined ? { headerPath: found.headerPath } : {}),
-          text: cut ? text.slice(0, CONTEXT_TEXT_LIMIT) : text,
+          text: cut ? text.slice(0, wholeCharEnd(text, CONTEXT_TEXT_LIMIT)) : text,
           ...(cut ? { truncated: true, totalChars: text.length } : {}),
         } }, undefined, { structured: true });
       } catch (err) {

@@ -25,7 +25,7 @@ const DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX = "compaction/post-compact-extra.md"
 
 function clearEnv(): () => void {
   const keys = [
-    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_DAEMON_DB_CONFLICT",
+    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_DAEMON_DB_CONFLICT",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
@@ -89,6 +89,16 @@ describe("SettingsStore (User Settings v0)", () => {
     restoreEnv();
   });
 
+  it("resolves tmux isolation from the shared config and environment with a strict mode", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("terminal.tmux_server")).toMatchObject({ value: "inherit", source: "default" });
+    store.set("terminal.tmux_server", "isolated");
+    expect(store.resolveOne("terminal.tmux_server")).toMatchObject({ value: "isolated", source: "file" });
+    process.env.OPENRIG_TMUX_SERVER = "inherit";
+    expect(store.resolveOne("terminal.tmux_server")).toMatchObject({ value: "inherit", source: "env" });
+    expect(() => store.set("terminal.tmux_server", "isolate")).toThrow('must be "inherit" or "isolated"');
+  });
+
   it("SETTINGS_VALID_KEYS matches the documented settings key set", () => {
     expect([...SETTINGS_VALID_KEYS]).toEqual([
       "daemon.port", "daemon.host", "daemon.db_conflict",
@@ -108,6 +118,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "topology.root",
       "context.root",
       "context.system_world",
+      "specs.builtins_visible",
       "skills.root",
       "skills.router_line.enabled",
       "onboarding.default_pack.enabled",
@@ -156,6 +167,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "snapshots.periodic.retention_keep",
       // OPR.0.4.6.02 S1 — inner-tmux status-bar launch default (static bool).
       "terminal.status_bar",
+      "terminal.tmux_server",
       "terminal.history_limit",
       "terminal.inherit_tmux_environment",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
@@ -183,6 +195,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "retention.watchdog_keep_per_job",
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",
+      "stream.intake",
       "retention.batch_size",
       "queue.pickup_stall_threshold_minutes",
       // S02 — standing-stuck-sweep cadence + unclaimed-obligation age.

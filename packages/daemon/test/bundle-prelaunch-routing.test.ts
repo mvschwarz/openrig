@@ -25,6 +25,7 @@ import { InstallRepository } from "../src/domain/install-repository.js";
 import { InstallEngine } from "../src/domain/install-engine.js";
 import { InstallVerifier } from "../src/domain/install-verifier.js";
 import { PodBundleSourceResolver, LegacyBundleSourceResolver } from "../src/domain/bundle-source-resolver.js";
+import { existingArchive, MARKER } from "./helpers/bundle-login-fixture.js";
 import { pack } from "../src/domain/bundle-archive.js";
 import { computeIntegrity } from "../src/domain/bundle-integrity.js";
 import { routeBundleContents, routingFailureWarnings, type BundleContentRouting } from "../src/domain/bundle-content-routing.js";
@@ -157,6 +158,7 @@ describe("bundle contents are routed before any seat launches", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     db.close();
     if (savedContextRoot === undefined) delete process.env["OPENRIG_CONTEXT_ROOT"];
@@ -196,6 +198,20 @@ describe("bundle contents are routed before any seat launches", () => {
       ...extra,
     });
   }
+
+  it.each(["resolver", "routing"])("returns %s unpack warnings with existing warnings through bootstrap", async source => {
+    const warning = `Bundle mode repair warning: ${source} fixture`;
+    const resolver = new PodBundleSourceResolver();
+    const resolve = resolver.resolve.bind(resolver);
+    vi.spyOn(resolver, "resolve").mockImplementation(async p => ({ ...await resolve(p), warnings: [warning] }));
+    const result = await orchestrator(async p => ({ ...await routeBundleContents(p), ...(source === "routing" ? { warnings: [warning] } : {}) }), {
+      podBundleSourceResolver: source === "resolver" ? resolver : new PodBundleSourceResolver(),
+    }).bootstrap({ mode: "apply", sourceRef: bundlePath, sourceKind: "rig_bundle", targetRoot: path.join(workDir, "target") });
+    expect(result.status).toBe("completed");
+    expect(result.warnings.filter(w => w === warning)).toEqual([warning]);
+    expect(seenAtLaunch).not.toBeNull();
+    expect(result.stages.find(s => s.stage === "route_bundle_contents")?.status).toBe("ok");
+  });
 
   it("routes the declared context pack and rescans the library before the first seat launches", async () => {
     const result = await orchestrator().bootstrap({
@@ -307,6 +323,33 @@ describe("bundle contents are routed before any seat launches", () => {
 });
 
 describe("routeBundleContents", () => {
+  it.skipIf(process.platform === "win32")("returns unpack warnings without turning them into routing failures and cleans extraction", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "routing-warning-"));
+    const login = "agents/worker/.codex/auth.json";
+    const f = await existingArchive(root, [login], [login]);
+    fs.chmodSync(path.join(f.staging, login), 0o755);
+    await pack(f.staging, f.archive);
+    let extracted: string | undefined;
+    const chmod = fs.chmodSync;
+    const spy = vi.spyOn(fs, "chmodSync").mockImplementation((file, mode) => {
+      if (String(file).endsWith(login) && mode === 0o600) {
+        extracted = String(file).slice(0, -login.length);
+        throw Object.assign(new Error("fixture"), { code: "EPERM" });
+      }
+      return chmod(file, mode);
+    });
+    try {
+      const result = await routeBundleContents(f.archive);
+      expect(result.routingFailures).toBeUndefined();
+      expect(result.warnings).toHaveLength(2);
+      expect(result.warnings?.[0]).toContain("Credential-bearing bundle includes");
+      expect(result.warnings?.[1]).toContain(`chmod failed for '${login}'`);
+      expect(result.warnings?.join("\n")).not.toContain(MARKER);
+      expect(extracted).toBeDefined();
+      expect(fs.existsSync(extracted!)).toBe(false);
+    } finally { spy.mockRestore(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("never throws: an unreadable bundle is reported as a bundle failure", async () => {
     const routing = await routeBundleContents(path.join(os.tmpdir(), "no-such-bundle-20261004.rigbundle"));
 

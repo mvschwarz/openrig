@@ -1,3 +1,7 @@
+import { EnvironmentLifecycle } from "./domain/environment-lifecycle.js";
+import { EnvironmentPlatform, type EnvironmentDriver } from "./domain/environment-platform.js";
+import { OpenShellDriver } from "./adapters/openshell-driver.js";
+import { environmentRoutes } from "./routes/environments.js";
 import { healthDiagnosisRoutes } from "./routes/health-diagnosis.js";
 import type { HealthDiagnosisService } from "./domain/health-diagnosis.js";
 import type { HealthPolicyStore } from "./domain/health-policy.js";
@@ -62,7 +66,7 @@ import { transcriptRoutes } from "./routes/transcripts.js";
 import { transportRoutes } from "./routes/transport.js";
 import { compactionRoutes } from "./routes/compaction.js";
 import type { ClaudeCompactionEnforcer } from "./domain/claude-compaction-enforcer.js";
-import { activityRoutes } from "./routes/activity.js";
+import { activityRoutes, guestActivityRoutes } from "./routes/activity.js";
 import { askRoutes } from "./routes/ask.js";
 import { wakeResolveRoutes } from "./routes/wake-resolve.js";
 import type { AskService } from "./domain/ask-service.js";
@@ -146,6 +150,9 @@ import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/browser-boundary.js";
 
 export interface AppDeps {
+  environmentDriver?: EnvironmentDriver;
+  environmentArtifactRoot?: string;
+  environmentStateRoot?: string;
   /** Boot-time DB context observations, not a live exclusion guarantee. */
   databaseWarnings?: string[];
   proofSourceWatch?: import("./domain/proof/source-watch.js").ProofSourceWatch;
@@ -212,6 +219,7 @@ export interface AppDeps {
   wakeResolveService?: WakeResolveService;
   chatRepo?: ChatRepository;
   streamStore?: StreamStore;
+  streamIntakeCoordinator?: import("./domain/stream-intake.js").StreamIntakeCoordinator;
   slowOpRecorder?: SlowOperationInstrumentation;
   requestPhaseObserver?: import("./domain/request-phase-observer.js").RequestPhaseObserver;
   queueRepo?: QueueRepository;
@@ -446,6 +454,26 @@ function isUiAssetRequestPath(requestPath: string): boolean {
     || relativePath === "manifest.webmanifest";
 }
 
+/** Dedicated activity ingress. Never mount the host API or activity read routes here. */
+export function createGuestActivityApp(deps: AppDeps): Hono {
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("agentActivityStore" as never, deps.agentActivityStore);
+    c.set("sessionRegistry" as never, deps.sessionRegistry);
+    c.set("eventBus" as never, deps.eventBus);
+    c.set("seatActivityService" as never, deps.seatActivityService);
+    c.set("runtimeAdapters" as never, deps.runtimeAdapters ?? {});
+    c.set("tmuxAdapter" as never, deps.tmuxAdapter);
+    // Read only by the runner permission routes, the one other thing a grant can do on this router.
+    c.set("queueRepo" as never, deps.queueRepo);
+    c.set("rigRepo" as never, deps.rigRepo);
+    c.set("streamStore" as never, deps.streamStore);
+    await next();
+  });
+  app.route("/api/activity", guestActivityRoutes);
+  return app;
+}
+
 export function createApp(deps: AppDeps): Hono {
   // Hard runtime invariant: all domain services must share the same db handle.
   if (deps.rigRepo.db !== deps.eventBus.db) {
@@ -500,6 +528,29 @@ export function createApp(deps: AppDeps): Hono {
     throw new Error("createApp: podInstantiator must share the same db handle");
   }
 
+  const environmentPlatform = new EnvironmentPlatform(deps.rigRepo.db, deps.environmentDriver ?? new OpenShellDriver());
+  const environmentLifecycle = new EnvironmentLifecycle(environmentPlatform, deps.queueRepo,
+    deps.environmentStateRoot ?? nodePath.join(process.cwd(), ".openrig-environment-state"), async binding => {
+      const current = deps.sessionRegistry.getBindingForNode(binding.nodeId!);
+      if (!current?.tmuxSession || current.tmuxSession !== binding.seat) return { confirmed: false };
+      const result = await deps.tmuxAdapter.killSession(current.tmuxSession, () => {
+        const now = deps.sessionRegistry.getBindingForNode(binding.nodeId!);
+        if (now?.id !== current.id || now.tmuxSession !== current.tmuxSession) throw new Error("The selected viewer changed");
+      });
+      return { confirmed: result.ok || result.code === "session_not_found" };
+    });
+  let completionPending = false, completionDirty = false;
+  const requestCompletionCheck = () => {
+    completionDirty = true;
+    if (completionPending) return;
+    completionPending = true;
+    void (async () => {
+      while (completionDirty) { completionDirty = false; await environmentLifecycle.checkCompletions(); }
+    })().catch(() => {}).finally(() => { completionPending = false; });
+  };
+  deps.eventBus.subscribe(event => { if (event.type === "queue.updated") requestCompletionCheck(); });
+  // Reconcile durable selected completions after a daemon restart; construction itself invokes no provider.
+  queueMicrotask(requestCompletionCheck);
   const app = new Hono();
   if (deps.requestPhaseObserver) app.use("*", deps.requestPhaseObserver.middleware());
   // A malformed request body is a 400, not the default 500.
@@ -511,6 +562,9 @@ export function createApp(deps: AppDeps): Hono {
   // Inject dependencies into context for all routes
   app.use("*", async (c, next) => {
     c.set("rigRepo" as never, deps.rigRepo);
+    c.set("environmentPlatform" as never, environmentPlatform);
+    c.set("environmentLifecycle" as never, environmentLifecycle);
+    c.set("environmentArtifactRoot" as never, deps.environmentArtifactRoot ?? nodePath.join(process.cwd(), "artifacts", "environments"));
     c.set("sessionRegistry" as never, deps.sessionRegistry);
     c.set("eventBus" as never, deps.eventBus);
     c.set("nodeLauncher" as never, deps.nodeLauncher);
@@ -792,6 +846,7 @@ export function createApp(deps: AppDeps): Hono {
   // Slice-04 OPR.0.5.0.4: registered so the endpoints exist and 503 honestly; the providerService
   // is not set in context until the collection/service seam (C) wires it (until then -> 503).
   app.route("/api/provider", providerRoutes());
+  app.route("/api/environments", environmentRoutes);
   app.route("/api/seat", seatRoutes);
   app.route("/api/rigs/:rigId/chat", chatRoutes());
   app.route("/api/stream", streamRoutes());

@@ -1,5 +1,5 @@
 import { DEFAULT_TIME_ZONE, displayTime } from "../time.js";
-import { sectionRule, wrapDetailLines, type ContentLine } from "../detail.js";
+import { sectionRule, sliceWhole, wrapDetailLines, type ContentLine } from "../detail.js";
 import type { Action, FleetSnapshot, HealthEvidenceReference, HealthRecord } from "../types.js";
 import type { Token } from "../theme.js";
 
@@ -60,7 +60,7 @@ function signalLabel(record: HealthRecord): string {
 
 function clip(text: string, width: number): string {
   if (width <= 0) return "";
-  return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`;
+  return text.length <= width ? text : `${sliceWhole(text, Math.max(0, width - 1))}…`;
 }
 
 function cell(text: string, width: number): string {

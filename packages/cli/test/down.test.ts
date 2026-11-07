@@ -344,6 +344,23 @@ describe("Down CLI", () => {
     expect(logs).toContain("  /work/project/CLAUDE.md: openrig-seat-skills.md");
   });
 
+  it("names each file in a Claude seat's cwd that still holds OpenRig's additions, and keeps the exit code", async () => {
+    const kept = "/work/project/.openrig/context-collector.cjs: not the shipped collector's bytes, so it was kept";
+    responseOverride = {
+      status: 200,
+      body: {
+        rigId: "rig-1", sessionsKilled: 1, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
+        keptFiles: [kept],
+      },
+    };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    expect(logs).toContain("Kept 1 file(s) that still hold OpenRig's additions; check them by hand:");
+    expect(logs).toContain(`  ${kept}`);
+    expect(exitCode).toBeUndefined();
+  });
+
   it.each([
     { rigName: "workshop", isUniqueName: false },
     {},

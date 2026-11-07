@@ -155,7 +155,7 @@ describe("one shared Slack app across two machines", () => {
   });
 
   it("reports the local fallback and still routes an unmapped channel to that destination", async () => {
-    expect(hub.wire!.status()).toMatchObject({ inboundRouting: { fallback: "local", destination: "orch-advisor@v-build" } });
+    expect(hub.wire!.status()).toMatchObject({ inboundRouting: { fallback: "local", destination: "orch-advisor@v-build" }, relayAttemptsInFlight: 0 });
     await say("C0UNMAPPED", "735.1");
     await vi.waitFor(() => expect(inbound(hub)).toHaveLength(1));
     expect(inbound(hub)[0]!.destinationSession).toBe("orch-advisor@v-build");

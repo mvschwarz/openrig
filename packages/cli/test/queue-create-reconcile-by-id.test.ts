@@ -103,6 +103,96 @@ describe("a queue create that got no answer is read back once by its ID", () => 
   const posts = (calls: Call[]) => calls.filter((c) => c.method === "post");
   const readBacks = (calls: Call[]) => calls.filter((c) => c.method === "get" && c.path === `/api/queue/${ID}`);
 
+  it.each([
+    ["an explicit host", "dev@rig-b", ["--host", "vps-b"]],
+    ["a host-qualified destination", "dev@rig-b@vps-b", []],
+  ])("create --verify reads the remote receipt with %s and its bearer, never the local row", async (_case, destination, extra) => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n    bearer_env: XH_AUTH\n`);
+    vi.stubEnv("XH_AUTH", AUTH_VALUE);
+    const { calls, error } = await run(destination, [{ status: 201, data: REMOTE_ROW }], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+      [`${LOCAL}/api/queue/${ID}`]: { status: 404, data: { error: "qitem_not_found" } },
+      [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: { ...REMOTE_ROW, lastNudgeResult: "verified" } },
+    }, ["--verify", ...extra]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toEqual([expect.objectContaining({ base: LOCAL, path: "/api/queue/create" })]);
+    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: REMOTE,
+      options: { timeoutMs: 10_000, headers: { Authorization: `Bearer ${AUTH_VALUE}` } } })]);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ qitemId: ID, persisted: true,
+      delivery: { receiptSource: "terminal", outcome: "verified", wakeResult: "verified" } });
+    expect(stdout.join("\n") + stderr.join("\n")).not.toContain(AUTH_VALUE);
+  });
+
+  it.each([
+    ["missing", { status: 404, data: { error: "qitem_not_found" } }],
+    ["unreachable", new DaemonTimeoutError("remote receipt timed out")],
+    ["wrong id", { status: 200, data: { ...REMOTE_ROW, qitemId: "another-id", lastNudgeResult: "verified" } }],
+    ["wrong destination", { status: 200, data: { ...REMOTE_ROW, destinationSession: "other@rig-b", lastNudgeResult: "verified" } }],
+    ["wrong source", { status: 200, data: { ...REMOTE_ROW, sourceSession: "other@rig-a", lastNudgeResult: "verified" } }],
+    ["wrong body", { status: 200, data: { ...REMOTE_ROW, body: "different", lastNudgeResult: "verified" } }],
+  ] satisfies Array<[string, Reply]>)("create --verify keeps a %s remote receipt indeterminate without resending", async (_case, receipt) => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
+    const { calls, error } = await run("dev@rig-b@vps-b", [{ status: 201, data: REMOTE_ROW }], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...REMOTE_ROW, lastNudgeResult: "verified" } },
+      [`${REMOTE}/api/queue/${ID}`]: receipt,
+    }, ["--verify"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: REMOTE })]);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "indeterminate" } });
+  });
+
+  it("create --verify does not guess a receipt host missing from this CLI's registry", async () => {
+    const { calls, error } = await run("dev@rig-b@vps-b", [{ status: 201, data: REMOTE_ROW }], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...REMOTE_ROW, lastNudgeResult: "verified" } },
+    }, ["--verify"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(0);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "indeterminate" } });
+  });
+
+  it("does not verify an older stored body returned by a successful colliding create", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
+    const oldRow = { ...REMOTE_ROW, body: "older body", lastNudgeResult: "verified" };
+    const { calls, error } = await run("dev@rig-b@vps-b", [{ status: 200, data: { ...oldRow,
+      createWarning: { code: "qitem_body_not_saved", message: "The supplied body was not saved." } } }], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+      [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: oldRow },
+    }, ["--verify"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(1);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "indeterminate" } });
+    expect(stderr.join("\n")).toContain("not saved");
+  });
+
+  it("create --verify reads locally when --host names this daemon, without requiring a registry entry", async () => {
+    const { calls, error } = await run("dev@rig-b", [{ status: 201, data: ROW }], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, lastNudgeResult: "verified" } },
+    }, ["--host", "host-a", "--verify"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "verified" } });
+  });
+
+  it("a reconciled remote create still verifies its remote receipt without another write", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
+    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+      [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: { ...REMOTE_ROW, lastNudgeResult: "verified" } },
+    }, ["--verify"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(2);
+    expect(readBacks(calls).every(c => c.base === REMOTE)).toBe(true);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "verified" } });
+  });
+
   it("a local create that committed after the CLI stopped waiting reads back as created, and isn't sent again", async () => {
     const { calls, error } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)],
       { [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: ROW } });

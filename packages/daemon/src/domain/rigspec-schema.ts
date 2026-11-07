@@ -1,5 +1,9 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
+import { specClaudeTokenRef } from "./claude-seat-token.js";
+import { validateClaudeMcp } from "./claude-mcp.js";
+import { validateLaunchWrapper } from "./launch-wrapper.js";
+import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type {
   LegacyRigSpec,
@@ -64,9 +68,9 @@ const RIG_KEYS = new Set([
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "codex_permissions", "cwd", "restore_policy",
+  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
-  "agent_file", "append_system_prompt_file", "plugin_dirs",
+  "agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
 
@@ -484,6 +488,11 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   const prefix = `${podPrefix}.members[${index}]`;
   if (!isMapping(member)) return [`${prefix}: must be an object`];
   errors.push(...rejectUnknownTopologyKeys(member, MEMBER_KEYS, prefix));
+  for (const field of ["model", "label"]) {
+    if (member[field] !== undefined && typeof member[field] !== "string") {
+      errors.push(`${prefix}.${field}: must be a string`);
+    }
+  }
 
   // OPR.0.5.6.20 A5 — member-level compaction_strategy: all vocabulary decisions go
   // through the manifest's one canonical site; this leg only classifies the answer.
@@ -523,14 +532,31 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   if (!member["runtime"] || typeof member["runtime"] !== "string") {
     errors.push(`${prefix}.runtime: required non-empty string`);
   }
+  if (member["claude_mcp"] !== undefined) {
+    if (member["runtime"] !== "claude-code") errors.push(`${prefix}.claude_mcp: only valid when runtime is "claude-code"`);
+    try { validateClaudeMcp(member["claude_mcp"], `${prefix}.claude_mcp`); }
+    catch (error) { errors.push((error as Error).message); }
+  }
   if (member["claude_permissions"] !== undefined) {
     if (member["runtime"] !== "claude-code") errors.push(`${prefix}.claude_permissions: only valid when runtime is "claude-code"`);
     try { validateClaudePermissionRules(member["claude_permissions"], `${prefix}.claude_permissions`); }
     catch (error) { errors.push((error as Error).message); }
   }
+  if (member["claude_token"] !== undefined) {
+    if (member["runtime"] !== "claude-code") errors.push(`${prefix}.claude_token: only valid when runtime is "claude-code"`);
+    try { specClaudeTokenRef(member["claude_token"], `${prefix}.claude_token`); }
+    catch (error) { errors.push((error as Error).message); }
+  }
   if (member["codex_permissions"] !== undefined) {
     if (member["runtime"] !== "codex") errors.push(`${prefix}.codex_permissions: only valid when runtime is "codex"`);
     try { validateCodexMemberPermissions(member["codex_permissions"], `${prefix}.codex_permissions`); }
+    catch (error) { errors.push((error as Error).message); }
+  }
+  if (member["launch_wrapper"] !== undefined) {
+    if (member["runtime"] !== "pi" && member["runtime"] !== "codex") {
+      errors.push(`${prefix}.launch_wrapper: only valid when runtime is "pi" or "codex"`);
+    }
+    try { validateLaunchWrapper(member["launch_wrapper"], `${prefix}.launch_wrapper`); }
     catch (error) { errors.push((error as Error).message); }
   }
   if (member["codex_config_profile"] !== undefined) {
@@ -588,7 +614,7 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   }
 
   if (member["env"] !== undefined) errors.push(...validateSeatEnv(member["env"], `${prefix}.env`));
-  errors.push(...validateClaudeAdditions(member, prefix));
+  errors.push(...validateClaudeAdditions(member, prefix, advisories));
 
   // Terminal sentinel validation: exact triple required
   const isTerminalRuntime = member["runtime"] === "terminal";
@@ -1215,10 +1241,11 @@ function normalizeSessionSource(raw: unknown): import("./types.js").SessionSourc
   return undefined;
 }
 
-/** OPR.0.7.0.9 — a Claude member's own agent file, appended prompt file and plugin folders: paths beside the spec. */
-function validateClaudeAdditions(member: Record<string, unknown>, prefix: string): string[] {
+/** OPR.0.7.0.9 — a Claude member's own agent file, appended prompt file and plugin folders: paths beside the spec.
+ *  #2044 — and its plugin channels, passed as Claude's `--channels`. */
+function validateClaudeAdditions(member: Record<string, unknown>, prefix: string, advisories: string[]): string[] {
   const errors: string[] = [];
-  for (const key of ["agent_file", "append_system_prompt_file", "plugin_dirs"]) {
+  for (const key of ["agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels"]) {
     if (member[key] !== undefined && member["runtime"] !== "claude-code") {
       errors.push(`${prefix}.${key}: only for Claude members (runtime claude-code)`);
     }
@@ -1252,6 +1279,28 @@ function validateClaudeAdditions(member: Record<string, unknown>, prefix: string
       });
     }
   }
+  const channels = member["plugin_channels"];
+  if (channels !== undefined) {
+    if (!Array.isArray(channels)) {
+      errors.push(`${prefix}.plugin_channels: must be a list of plugin:<name>@<marketplace> entries`);
+    } else {
+      channels.forEach((entry, i) => {
+        const label = `${prefix}.plugin_channels[${i}]`;
+        if (!isClaudePluginChannel(entry)) {
+          errors.push(typeof entry === "string" && entry.startsWith("server:")
+            ? `${label}: "${entry}" is a server entry; only plugin:<name>@<marketplace> entries are supported`
+            : `${label}: must be plugin:<name>@<marketplace>, each name letters, digits, . _ - (got ${JSON.stringify(entry)})`);
+        } else if (channels.indexOf(entry) !== i) {
+          errors.push(`${label}: listed twice ("${entry}")`);
+        }
+      });
+      // `claude_mcp: none` starts Claude with only an empty MCP server set, plugin servers left out too, so no channel
+      // could register.
+      if (channels.length > 0 && member["claude_mcp"] === "none") {
+        advisories.push(`${prefix}.plugin_channels: claude_mcp is "none", which starts Claude without MCP servers (plugin servers included), so no channel could register; remove claude_mcp: none to use the channels, or remove plugin_channels to keep the MCP opt-out`);
+      }
+    }
+  }
   return errors;
 }
 
@@ -1269,7 +1318,10 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     role: m["role"] as string | undefined,
     permissionPolicy: m["permission_policy"] as string | undefined,
     ...(m["claude_permissions"] === undefined ? {} : { claudePermissions: validateClaudePermissionRules(m["claude_permissions"]) }),
+    ...(m["claude_token"] === undefined ? {} : { claudeTokenRef: specClaudeTokenRef(m["claude_token"], "claude_token") }),
+    ...(m["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(m["claude_mcp"]) }),
     ...(m["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(m["codex_permissions"]) }),
+    ...(m["launch_wrapper"] === undefined ? {} : { launchWrapper: validateLaunchWrapper(m["launch_wrapper"]) }),
     env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
@@ -1287,6 +1339,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     ...(typeof m["agent_file"] === "string" ? { agentFile: m["agent_file"] } : {}),
     ...(typeof m["append_system_prompt_file"] === "string" ? { appendSystemPromptFile: m["append_system_prompt_file"] } : {}),
     ...(Array.isArray(m["plugin_dirs"]) ? { pluginDirs: m["plugin_dirs"] as string[] } : {}),
+    ...(Array.isArray(m["plugin_channels"]) ? { pluginChannels: m["plugin_channels"] as string[] } : {}),
   }));
 
   const edges = Array.isArray(raw["edges"])
@@ -1386,14 +1439,31 @@ export class LegacyRigSpecSchema {
           errors.push(`node ${node["id"]}: unknown runtime '${node["runtime"]}'`);
         }
 
+        if (node["claude_mcp"] !== undefined) {
+          if (node["runtime"] !== "claude-code") errors.push(`nodes.${nodeWhere}.claude_mcp: only valid when runtime is "claude-code"`);
+          try { validateClaudeMcp(node["claude_mcp"], `nodes.${nodeWhere}.claude_mcp`); }
+          catch (error) { errors.push((error as Error).message); }
+        }
         if (node["claude_permissions"] !== undefined) {
           if (node["runtime"] !== "claude-code") errors.push(`nodes.${nodeWhere}.claude_permissions: only valid when runtime is "claude-code"`);
           try { validateClaudePermissionRules(node["claude_permissions"], `nodes.${nodeWhere}.claude_permissions`); }
           catch (error) { errors.push((error as Error).message); }
         }
+        if (node["claude_token"] !== undefined) {
+          if (node["runtime"] !== "claude-code") errors.push(`nodes.${nodeWhere}.claude_token: only valid when runtime is "claude-code"`);
+          try { specClaudeTokenRef(node["claude_token"], `nodes.${nodeWhere}.claude_token`); }
+          catch (error) { errors.push((error as Error).message); }
+        }
         if (node["codex_permissions"] !== undefined) {
           if (node["runtime"] !== "codex") errors.push(`nodes.${nodeWhere}.codex_permissions: only valid when runtime is "codex"`);
           try { validateCodexMemberPermissions(node["codex_permissions"], `nodes.${nodeWhere}.codex_permissions`); }
+          catch (error) { errors.push((error as Error).message); }
+        }
+        if (node["launch_wrapper"] !== undefined) {
+          if (node["runtime"] !== "pi" && node["runtime"] !== "codex") {
+            errors.push(`nodes.${nodeWhere}.launch_wrapper: only valid when runtime is "pi" or "codex"`);
+          }
+          try { validateLaunchWrapper(node["launch_wrapper"], `nodes.${nodeWhere}.launch_wrapper`); }
           catch (error) { errors.push((error as Error).message); }
         }
         if (node["effort"] !== undefined) {
@@ -1461,7 +1531,10 @@ export class LegacyRigSpecSchema {
       effort: typeof n["effort"] === "string" && n["effort"].trim() ? n["effort"].trim() : undefined,
       advisor: typeof n["advisor"] === "string" && n["advisor"].trim() ? n["advisor"].trim() : undefined,
       ...(n["claude_permissions"] === undefined ? {} : { claudePermissions: validateClaudePermissionRules(n["claude_permissions"]) }),
+      ...(n["claude_token"] === undefined ? {} : { claudeTokenRef: specClaudeTokenRef(n["claude_token"], "claude_token") }),
+      ...(n["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(n["claude_mcp"]) }),
       ...(n["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(n["codex_permissions"]) }),
+      ...(n["launch_wrapper"] === undefined ? {} : { launchWrapper: validateLaunchWrapper(n["launch_wrapper"]) }),
       cwd: (n["cwd"] as string) ?? undefined,
       surfaceHint: (n["surface_hint"] as string) ?? undefined,
       workspace: (n["workspace"] as string) ?? undefined,

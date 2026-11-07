@@ -7,7 +7,8 @@ export function provenCodexResume(token: string, opts: { panePid?: number; codex
   const panePid = opts.panePid ?? 900;
   const codexPid = opts.codexPid ?? 901;
   const startedAt = opts.startedAt ?? "Tue Oct 20 05:00:01 2026";
-  const codex = { pid: codexPid, ppid: panePid, command: `codex resume ${token}`, pgid: codexPid, tpgid: codexPid, executableName: "codex", startedAt };
+  const codex = { pid: codexPid, ppid: panePid, command: `codex resume ${token}`, argv: ["codex", "resume", token],
+    pgid: codexPid, tpgid: codexPid, executableName: "codex", startedAt };
   return {
     getPanePid: vi.fn(async () => panePid),
     listProcesses: () => panePid === codexPid ? [{ ...codex, ppid: 1 }] : [

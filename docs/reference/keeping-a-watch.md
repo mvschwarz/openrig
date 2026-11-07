@@ -107,6 +107,28 @@ rig queue create --destination <entityId>@external --human-intent update \
 - **`posted` means the connector posted it, not that they read it.** Don't say they saw it.
 - **If delivery fails or is indeterminate,** inspect that task before anything else. Never resend blindly.
 
+## If the timer cannot reach its recipient
+
+A `periodic-reminder` occurrence that definitely fails before input remains owed. The watchdog
+retries through its existing loop, using `queue.wake_retry_interval_seconds` and
+`queue.wake_retry_cap` (by default, three retries five minutes apart). A failed attempt does not
+advance the reminder to its next regular cycle. A confirmed send advances the normal interval;
+recovery does not replay every elapsed cycle.
+
+`rig watchdog show <jobId> --json` includes the failed attempt, its retained outbox IDs, retry
+time and next action. If input may have reached the recipient, that occurrence ends unconfirmed
+and is not automatically sent again. Inspect the recipient and exact outbox record before any
+manual replay. A recurring reminder keeps its next normal cycle under a new occurrence identity. A confirmed receipt survives a daemon restart, so
+finishing its accounting does not type the same occurrence twice.
+
+Exhausted retries end only the failed occurrence, with its cause and next action; a recurring
+reminder keeps its next normal cycle. A permanent transport failure leaves a terminal job:
+correct the destination and register a replacement reminder. A one-shot park timer records its
+failed or unconfirmed wake on the parked row before it ends. A retryable failure is recorded
+there while the timer stays armed. Deliberately held
+input keeps its existing retained-message custody. Condition watches and parked-owner policy
+behavior are unchanged. This does not replay failed occurrences recorded by older versions.
+
 ## "What are you watching for me?"
 
 List **every active state**, not just set-aside ones. A watch being checked can be in progress, and a new one can be

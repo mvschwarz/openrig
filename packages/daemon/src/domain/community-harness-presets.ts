@@ -4,7 +4,8 @@
 // conversation id for each launch (see `community-harness-launch-result.ts`); OpenRig records it as reported, not observed.
 // With `names_conversation: true`, OpenRig names the conversation itself and passes the name to the command; it records it
 // as named by OpenRig, not observed. OpenRig hasn't tested these harnesses: it shows them as community harnesses,
-// never confirms their identity, and reads their activity only from what the screen shows. Built-in runtime names are
+// labels launcher identity separately from observation. A declared managed runner can report activity through hooks;
+// other presets use the screen. Built-in runtime names are
 // reserved, so a preset can't replace one.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -15,7 +16,7 @@ import { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime } from "./built-in-runtime
 export { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime };
 
 export const COMMUNITY_HARNESS_PRESET_FORMAT = 1;
-const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted", "first_input"] as const;
+const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted", "first_input", "runner", "passes_model"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 export interface CommunityHarnessPreset {
@@ -33,6 +34,11 @@ export interface CommunityHarnessPreset {
   startupAssisted: boolean;
   /** The launcher takes OPENRIG_FIRST_INPUT, a private file containing the composed first turn. */
   firstInput: boolean;
+  /** The launcher takes the seat's declared model from OPENRIG_MODEL and maps it into its harness's own setting. */
+  passesModel: boolean;
+  /** The command is an OpenRig-aware runner: it submits each pasted block as one prompt and posts the seat's turn
+   *  boundaries as activity hooks, so its seat's activity reads from those hooks. Requires `launch_result`. */
+  runner: boolean;
   path: string;
 }
 
@@ -72,7 +78,12 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   if (raw.resume !== undefined && typeof raw.resume !== "boolean") return bad("resume must be true or false");
   if (raw.startup_assisted !== undefined && typeof raw.startup_assisted !== "boolean") return bad("startup_assisted must be true or false");
   if (raw.first_input !== undefined && typeof raw.first_input !== "boolean") return bad("first_input must be true or false");
+  if (raw.passes_model !== undefined && typeof raw.passes_model !== "boolean") return bad("passes_model must be true or false");
   if (raw.names_conversation !== undefined && typeof raw.names_conversation !== "boolean") return bad("names_conversation must be true or false");
+  if (raw.runner !== undefined && typeof raw.runner !== "boolean") return bad("runner must be true or false");
+  if (raw.runner === true && raw.launch_result !== true) {
+    return bad("runner needs launch_result: true: a runner reports the conversation it opened in its launch record");
+  }
   if (raw.launch_result === true && raw.names_conversation === true) {
     return bad("launch_result and names_conversation can't both be true: either the launcher reports the conversation, or OpenRig names it");
   }
@@ -81,7 +92,7 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   }
   return { ok: true, preset: { name, command: raw.command as string, maintainer: raw.maintainer as string, limits: limits as string[],
     launchResult: raw.launch_result === true, namesConversation: raw.names_conversation === true, resume: raw.resume === true,
-    startupAssisted: raw.startup_assisted === true, firstInput: raw.first_input === true, path } };
+    startupAssisted: raw.startup_assisted === true, firstInput: raw.first_input === true, runner: raw.runner === true, passesModel: raw.passes_model === true, path } };
 }
 
 /** The first shell construct in a preset command, or null when it's one program with its arguments. The command is
@@ -181,13 +192,13 @@ export interface CommunityHarnessLabel {
   reportedConversation?: string;
   /** The conversation name OpenRig passed to the harness for this launch. */
   namedConversation?: string;
-  needsInput: "from the screen only: no harness prompt pattern";
+  needsInput: "from the screen only: no harness prompt pattern" | "from structured activity and screen observations";
   /** Set when the preset is missing or can't be used. */
   presetError?: string;
 }
 
 export function communityHarnessLabel(runtime: string, dir: string = communityHarnessesDir(),
-  session?: { resumeType: string | null; resumeToken: string | null; resumeProvenance: string | null }): CommunityHarnessLabel {
+  session?: { resumeType: string | null; resumeToken: string | null; resumeProvenance: string | null; runner?: boolean }): CommunityHarnessLabel {
   // A conversation is labelled reported only when the launcher reported it, and named only when OpenRig named it and passed
   // it: a resume that needed attention keeps the conversation it attempted, with neither provenance.
   const own = session?.resumeType === `community:${runtime}` && session.resumeToken ? session.resumeToken : undefined;
@@ -201,7 +212,7 @@ export function communityHarnessLabel(runtime: string, dir: string = communityHa
     identity: reported ? "reported by its launcher, not observed" : named ? "named by OpenRig, not observed" : "not confirmed",
     ...(reported ? { reportedConversation: reported } : {}),
     ...(named ? { namedConversation: named } : {}),
-    needsInput: "from the screen only: no harness prompt pattern",
+    needsInput: session?.runner === true ? "from structured activity and screen observations" : "from the screen only: no harness prompt pattern",
     ...(found.ok ? {} : { presetError: found.message }),
   };
 }

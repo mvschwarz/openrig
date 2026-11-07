@@ -314,18 +314,31 @@ describe("PULSE view increment 3 — Lanes LIVE (NOW / JUST FINISHED / UP NEXT +
   it("JUST FINISHED: recent done/handed-off newest-FINISHED-first (tsUpdated desc) with HH:MM times", () => {
     const snap = liveSnap({
       recentlyFinished: [
-        // served in ts_created order (NOT finish order) — the view re-sorts by tsUpdated
+        // any served order — the view sorts by tsUpdated
         attn({ qitemId: "f1", state: "done", summary: "older close-out", tsUpdated: "2026-08-06T10:58:00.000Z" }),
         attn({ qitemId: "f2", state: "handed-off", summary: "newest fold receipt", tsUpdated: "2026-08-06T11:44:00.000Z" }),
         attn({ qitemId: "f3", state: "done", summary: "mid terminal CLEAR", tsUpdated: "2026-08-06T11:20:00.000Z" }),
       ],
     });
-    const jf = buildPulseModel(snap, NOW).lanes[1];
+    const jf = buildPulseModel(snap, NOW, "UTC").lanes[1];
     expect(jf.label).toBe("JUST FINISHED");
     expect(jf.rows.map((r) => r.label)).toEqual(["newest fold receipt", "mid terminal CLEAR", "older close-out"]);
     expect(jf.rows.map((r) => r.time)).toEqual(["11:44", "11:20", "10:58"]);
     expect(jf.rows.every((r) => r.glyph === "✓")).toBe(true);
     expect(jf.count).toBe(3);
+  });
+
+  it("JUST FINISHED: clocks read in the TUI's time zone, and an unreadable stamp shows none", () => {
+    const snap = liveSnap({
+      recentlyFinished: [
+        attn({ qitemId: "f1", state: "done", summary: "closed", tsUpdated: "2026-08-06T23:44:00.000Z" }),
+        attn({ qitemId: "f2", state: "done", summary: "unreadable", tsUpdated: "not a time" }),
+      ],
+    });
+    const times = (zone: string) => Object.fromEntries(buildPulseModel(snap, NOW, zone).lanes[1].rows.map((r) => [r.label, r.time]));
+    expect(times("Asia/Kolkata")).toEqual({ closed: "05:14", unreadable: "" });
+    expect(times("America/Los_Angeles")).toEqual({ closed: "16:44", unreadable: "" });
+    expect(times("UTC")).toEqual({ closed: "23:44", unreadable: "" });
   });
 
   it("UP NEXT: pending in the SERVED order (verbatim — no client priority synthesis); beyond the cap shows a '…' overflow row with the TRUE total count", () => {

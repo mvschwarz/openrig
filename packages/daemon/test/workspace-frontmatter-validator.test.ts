@@ -96,3 +96,36 @@ describe("validateWorkspaceFrontmatter (PL-007)", () => {
     expect(fs.readFileSync(path.join(dir, "a.md"), "utf-8")).toBe(content);
   });
 });
+
+
+describe("malformed frontmatter structure", () => {
+  it.each(["\n", "\r\n"])("reports an unclosed block with %j line endings even in optional mode", (newline) => {
+    const content = ["---", "doc: alpha", "status: active", "created: 2026-05-04", "owner: someone", ""].join(newline);
+    write("broken.md", content);
+    for (const requireFrontmatter of [false, true]) {
+      const report = validateWorkspaceFrontmatter({ root: dir, requireFrontmatter });
+      expect(report.filesWithFrontmatter).toBe(1);
+      expect(report.gaps).toMatchObject([{ relativePath: "broken.md", kind: "parse-error", field: null }]);
+      expect(report.gapCount).toBe(1);
+    }
+    expect(fs.readFileSync(path.join(dir, "broken.md"), "utf8")).toBe(content);
+  });
+
+  it.each(["[]", "- doc: alpha", "- alpha\n- beta"])("reports a YAML sequence as a parse error: %s", (body) => {
+    write("array.md", `---\n${body}\n---\n`);
+    for (const workspaceKind of [undefined, "knowledge"] as const) {
+      const report = validateWorkspaceFrontmatter({ root: dir, workspaceKind });
+      expect(report.filesWithFrontmatter).toBe(1);
+      expect(report.gaps).toMatchObject([{ kind: "parse-error", field: null }]);
+      expect(report.gapCount).toBe(1);
+    }
+  });
+
+  it("keeps a closing delimiter at EOF valid and skips ordinary Markdown", () => {
+    write("valid.md", "---\ndoc: alpha\n---");
+    write("plain.md", "# Notes\n---\nA horizontal rule.\n");
+    write("prefix.md", "----\nNot a frontmatter opener.\n");
+    const report = validateWorkspaceFrontmatter({ root: dir, workspaceKind: "project" });
+    expect(report).toMatchObject({ totalFiles: 3, filesWithFrontmatter: 1, gapCount: 0 });
+  });
+});

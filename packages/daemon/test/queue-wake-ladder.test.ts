@@ -12,8 +12,9 @@
 // The ladder's state IS the transition log (AM-P3-F6): attempts, rungs, and suspension are
 // derived from markers at every tick, so a daemon restart resumes at the exact position —
 // forgotten-ladder and reset-count are both REDs below.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
+import { renderQueueHandoffNudge } from "../src/domain/queue-nudge-text.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
@@ -308,6 +309,31 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(markersOf(baton.qitemId, "ladder-suspend:")[0]).toMatch(/operator/i); // named as the override
   });
 
+  it("DECLARED WINDOW PARSES EXTERNAL DESTINATIONS: a colon in the session does not disable the override", async () => {
+    const baton = await mkBaton("slack:U123@external");
+    setNudgeResult(baton.qitemId, "failed:tmux session not found", 60);
+    process.env.OPENRIG_WAKE_SUSPEND = `slack:U123@external:${new Date(Date.now() + 3600_000).toISOString()}`;
+    await tick();
+    expect(calls).toHaveLength(0);
+    expect(markersOf(baton.qitemId, "ladder-suspend:")).toHaveLength(1);
+  });
+
+  // Any form Date.parse reads keeps suspending: `date -u '+%Y-%m-%d %H:%M'` prints the space form. (A comma can't
+  // appear: entries are comma-separated, so the textual form drops toUTCString's weekday.)
+  it.each([
+    ["the space form", "worker@r", (d: Date) => d.toISOString().replace("T", " ")],
+    ["the space form", "slack:U123@external", (d: Date) => d.toISOString().replace("T", " ")],
+    ["a textual date", "worker@r", (d: Date) => d.toUTCString().replace(/^\w+, /, "")],
+    ["a textual date", "slack:U123@external", (d: Date) => d.toUTCString().replace(/^\w+, /, "")],
+  ])("DECLARED WINDOW KEEPS EVERY DATE FORM Date.parse reads: %s suspends %s", async (_form, destination, format) => {
+    const baton = await mkBaton(destination);
+    setNudgeResult(baton.qitemId, "failed:tmux session not found", 60);
+    process.env.OPENRIG_WAKE_SUSPEND = `${destination}:${format(new Date(Date.now() + 3600_000))}`;
+    await tick();
+    expect(calls).toHaveLength(0);
+    expect(markersOf(baton.qitemId, "ladder-suspend:")).toHaveLength(1);
+  });
+
   // ── G5: F3 — STORMS AGGREGATE ────────────────────────────────────────────────
 
   it("STORMS AGGREGATE: one dead destination x five stuck batons yields ONE aggregated escalation naming all five, refreshed not duplicated", async () => {
@@ -452,6 +478,26 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     entityId: "human-founder", class: "human" as const, displayName: "Founder", address: "human-founder@external",
     connectorBindings: [], prefs: { deliveryClass: "B" as const, availability: "available" as const },
   }] });
+
+  it.each([false, true])("an inadmissible sender cannot abort a failed baton escalation (consumed hop=%s)", async consumed => {
+    const baton = await exhaustToSelfSkip();
+    const staleSource = "sender@remote@retired-host";
+    db.prepare("UPDATE queue_items SET source_session=?, tags=? WHERE qitem_id=?")
+      .run(staleSource, JSON.stringify(consumed ? ["escalation-route:one-hop"] : []), baton.qitemId);
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: target => target !== staleSource });
+    const posted: string[] = [];
+    const overrides = { resolveOrchestrator: () => null, deliveryEngine: recordingEngine(posted), humanRung: "always" };
+    const result = await tick(overrides);
+    expect(result.outcome).not.toBe("failed");
+    expect(posted).toEqual([baton.qitemId]);
+    expect(calls).toEqual([]);
+    const tag = consumed ? `consumed-hop:${baton.qitemId}` : (await ladderMod()).escalationDedupTag(baton.destinationSession);
+    const carriers = repo.list({ limit: 500 }).filter(row => row.tags?.includes(tag));
+    expect(carriers).toHaveLength(1);
+    expect(carriers[0]).toMatchObject({ sourceSession: "daemon@kernel", destinationSession: baton.destinationSession });
+    await tick(overrides);
+    expect(posted).toEqual([baton.qitemId]);
+  });
 
   it("HUMAN RUNG DEFAULT: with the engine wired and no setting, the operator rung posts the escalation as before", async () => {
     const baton = await exhaustToSelfSkip();
@@ -870,5 +916,42 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(store.resolveOne("queue.wake_retry_cap" as never)).toMatchObject({ value: 3, source: "default" });
     expect(store.resolveOne("queue.wake_unconfirmed_window_minutes" as never)).toMatchObject({ value: 30, source: "default" });
     expect(store.resolveOne("queue.wake_swap_grace_seconds" as never)).toMatchObject({ value: 180, source: "default" });
+  });
+});
+
+describe("wake ladder retry — envelope sender", () => {
+  it("a default ladder retry is sent as OpenRig and keeps the row's source visible in the body", async () => {
+    const db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const src = await repo.create({ sourceSession: "sender@r", destinationSession: "relay@r", body: "obligation" });
+    const { created } = await repo.handoff({ qitemId: src.qitemId, fromSession: "relay@r", toSession: "worker@r", nudge: false });
+    db.prepare("UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = ? WHERE qitem_id = ?").run(
+      new Date(Date.now() - 10 * 60_000).toISOString(),
+      "failed:tmux session not found",
+      created.qitemId,
+    );
+    const maybeNudge = vi.spyOn(repo, "maybeNudge").mockResolvedValue();
+    const mod = await ladderMod();
+    await mod.runWakeLadderTick({
+      db,
+      queueRepo: repo,
+      resolveOrchestrator: () => "orch@r",
+      retryIntervalSeconds: 300,
+      retryCap: 3,
+      unconfirmedWindowMinutes: 30,
+      swapGraceSeconds: 180,
+      log: () => {},
+    });
+    // The body is the default handoff nudge text, plus only the row-source suffix.
+    expect(maybeNudge).toHaveBeenCalledWith(
+      created.qitemId,
+      "worker@r",
+      true,
+      "daemon@kernel",
+      `${renderQueueHandoffNudge(created.qitemId, null)} Row source: relay@r.`,
+      "openrig",
+    );
+    db.close();
   });
 });

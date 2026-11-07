@@ -228,6 +228,18 @@ describe("switches on one Codex home keep each receipt's way back and the login 
     return { home, svc, times, restart, restarted, active, undo };
   }
 
+  it("a native API-key profile switches and returns to subscription bytes through the existing restart", async () => {
+    const f = codexHome();
+    const api = JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "synthetic-api-fixture" });
+    writeFileSync(path.join(f.home, "auth-profiles", "api.json"), api, { mode: 0o600 });
+    const result = await f.svc.switchAccount({ seat: "dev-a@rig", toAccount: "api", forceUnsafe: false }, f.restart());
+    expect(result).toMatchObject({ outcome: "rebind_in_progress", seat: { account: "api" } });
+    expect(f.active()).toBe(api);
+    expect(JSON.stringify(result)).not.toContain("synthetic-api-fixture");
+    expect(f.undo(result.seat!.savedBefore!).ok).toBe(true);
+    expect(f.active()).toBe(login("alpha"));
+  });
+
   it("each switch keeps its own recovery copy, so an earlier receipt's undo still restores its own login", async () => {
     const f = codexHome();
     const first = await f.svc.switchAccount({ seat: "dev-a@rig", toAccount: "beta", forceUnsafe: false }, f.restart());

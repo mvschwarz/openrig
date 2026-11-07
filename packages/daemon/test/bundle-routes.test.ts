@@ -3465,6 +3465,22 @@ describe("POST /api/bundles/install: pre-launch routing report", () => {
     expect(bootstrap).toHaveBeenCalledWith(expect.objectContaining({ mode: "plan", cwdOverride: "/work/openrig" }));
   });
 
+  it.each([false, true])("includes routing warnings in the install response (prelaunch=%s)", async prelaunch => {
+    const routing = { warnings: ["mode repair fixture"], routingFailures: [{ kind: "skills", error: "copy fixture" }] };
+    const warnings = ["bootstrap fixture", ...(prelaunch ? ["mode repair fixture", "Bundle skills routing failed: copy fixture"] : [])];
+    const orchestrator = setup.bootstrapOrchestrator;
+    vi.spyOn(orchestrator, "bootstrap").mockResolvedValue({
+      status: "completed", runId: "run-warnings", rigId: "rig-warnings", stages: [], errors: [], warnings,
+      ...(prelaunch ? { bundleRouting: routing } : {}),
+    } as never);
+    const reroute = vi.spyOn(orchestrator, "routeBundleContents").mockResolvedValue(routing as never);
+    const res = await install({});
+    const body = await res.json();
+    expect(res.status).toBe(201);
+    expect(body.warnings).toEqual(["bootstrap fixture", "mode repair fixture", "Bundle skills routing failed: copy fixture"]);
+    expect(reroute).toHaveBeenCalledTimes(prelaunch ? 0 : 1);
+  });
+
   it("a partial install reports its routing failures in the response and the audit", async () => {
     const failure = { kind: "contextPacks", error: "no space left on device" };
     (setup.bootstrapOrchestrator as unknown as { bootstrap: unknown }).bootstrap = vi.fn().mockResolvedValue({

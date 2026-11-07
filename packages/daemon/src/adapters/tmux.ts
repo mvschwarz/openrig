@@ -11,6 +11,14 @@ import type { TmuxControlExec } from "./tmux-control.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
+/** tmux 3.4 escapes these dollar forms in command output even for show-options -v.
+ * Remove only its added escape; preserve an intentionally preceding backslash. */
+export function decodeTmux34Option(value: string, serverVersion: string): string {
+  return /^3\.4(?:[a-z])?$/.test(serverVersion.trim())
+    ? value.replace(/\\\$(?=[A-Za-z_{])/g, "$")
+    : value;
+}
+
 interface TmuxShellCommandOptions {
   /** Pi can send commands within the terminal byte bound directly. */
   stageIfLong?: boolean;
@@ -241,6 +249,16 @@ function classifyWriteError(err: unknown): TmuxResult {
   return { ok: false, code: "unknown", message: err.message };
 }
 
+/** tmux 3.7+ refuses every send-keys, `-l` included, while the target client is read-only (`tmux attach -r`). */
+function isReadOnlyClientRefusal(result: TmuxResult): boolean {
+  return !result.ok && /client is read-only/i.test(result.message);
+}
+
+/** The key names that submit staged input; both reach the pane as a carriage return. */
+function isSubmitKey(key: string): boolean {
+  return key === "Enter" || key === "C-m";
+}
+
 /** The launch warning when the parent-session identity cleanup could not finish (#771). */
 function parentSessionEnvWarning(target: string, err: unknown): string {
   const reason = err instanceof Error ? err.message : String(err);
@@ -390,7 +408,15 @@ export class TmuxAdapter {
       // as a first start does, so it gets the same scoped environment as every later seat (#2041).
       if (!shell && (await this.startServer()).ok) shell = await this.getDefaultShell();
       if (!shell) throw new Error("Default shell unavailable");
-      if (command === undefined) command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
+      if (command === undefined) {
+        command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
+        // The server, not the connecting client, formats option output. If its version is unavailable,
+        // retain the readback unchanged rather than guessing about a user's command.
+        try {
+          const serverVersion = await this.run(["tmux", "display-message", "-p", "#{version}"]);
+          command = decodeTmux34Option(command, serverVersion);
+        } catch { /* unknown version: keep the original readback */ }
+      }
       // tmux normally copies these client values from the daemon on new-session.
       // Read its configured names, but never reuse values stored on the server.
       const updated = (await this.run(["tmux", "show-options", "-gv", "update-environment"]))
@@ -445,7 +471,7 @@ export class TmuxAdapter {
     // uses. An id alone is unique only for one server's lifetime.
     let created: { id: string; at: string } | null;
     try {
-      const out = await this.exec(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
+      const out = await this.exec(this.onServer(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`));
       const match = /^(\$\d+) (\d+)$/.exec(out.trim());
       created = match ? { id: match[1]!, at: match[2]! } : null;
     } catch (err) {
@@ -478,7 +504,7 @@ export class TmuxAdapter {
   private async removeCreatedSession(name: string, created: { id: string; at: string }): Promise<TmuxResult> {
     const same = `#{&&:#{==:#{session_name},${name}},#{==:#{session_created},${created.at}}}`;
     try {
-      const out = await this.exec(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`);
+      const out = await this.exec(this.onServer(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`));
       if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
       return { ok: true };
     } catch (err) {
@@ -557,7 +583,16 @@ export class TmuxAdapter {
     private exec: ExecFn,
     private fileOps: TmuxFileOps = defaultTmuxFileOps(),
     private argvExec?: ArgvExecFn,
-  ) {}
+    serverArgs: readonly string[] = [],
+  ) { this.serverArgs = [...serverArgs]; }
+
+  private readonly serverArgs: readonly string[];
+
+  /** Prefix one adapter-owned tmux invocation, including its chained commands.
+   * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
+  private onServer(command: string): string {
+    return this.serverArgs.length ? `tmux ${posixJoinArgv([...this.serverArgs])}${command.slice(4)}` : command;
+  }
 
   /**
    * Run a multiplexer command. `argv` is what is EXECUTED on both paths:
@@ -569,8 +604,9 @@ export class TmuxAdapter {
    * preserve an exact legacy string, never to smuggle new semantics.
    */
   private async run(argv: string[], legacy?: string): Promise<string> {
-    if (this.argvExec) return this.argvExec(argv);
-    return this.exec(legacy ?? posixJoinArgv(argv));
+    const targeted = this.serverArgs.length ? [argv[0]!, ...this.serverArgs, ...argv.slice(1)] : argv;
+    if (this.argvExec) return this.argvExec(targeted);
+    return this.exec(legacy ? this.onServer(legacy) : posixJoinArgv(targeted));
   }
 
   /** Environment-bearing commands travel in a private config, never a client's argv.
@@ -600,7 +636,7 @@ export class TmuxAdapter {
       // and server bootstrap is POSIX-specific (psmux auto-starts its own).
       // Native socket ownership arbitrates
       // concurrent starts; the readback below, not shell exit, proves availability.
-      await this.exec("tmux -D </dev/null >/dev/null 2>&1 &");
+      await this.exec(this.onServer("tmux -D </dev/null >/dev/null 2>&1 &"));
       for (let attempt = 0; attempt < 20; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 25));
         if ((await this.probeSession(probeName)).state !== "transport_unavailable") return { ok: true };
@@ -633,7 +669,7 @@ export class TmuxAdapter {
     }
   }
 
-  async listPanes(target: string): Promise<TmuxPane[]> {
+  async listPanes(target: string, allWindows = false): Promise<TmuxPane[]> {
     // Callers name a session (optionally with a window), or an immutable tmux
     // id. Exact session matching prevents observing a prefix neighbor's pane.
     // A bare leading '=' belongs to the literal session name. Only qualified
@@ -642,8 +678,8 @@ export class TmuxAdapter {
     const exactTarget = /^[%$@]\d+$/.test(target) ? target
       : namedTarget.includes(":") ? namedTarget : `${namedTarget}:`;
     try {
-      const output = await this.run(["tmux", "list-panes", "-t", exactTarget, "-F", PANE_FORMAT],
-        `tmux list-panes -t ${shellQuote(exactTarget)} -F "${PANE_FORMAT}"`);
+      const output = await this.run(["tmux", "list-panes", ...(allWindows ? ["-s"] : []), "-t", exactTarget, "-F", PANE_FORMAT],
+        `tmux list-panes ${allWindows ? "-s " : ""}-t ${shellQuote(exactTarget)} -F "${PANE_FORMAT}"`);
       return parseLines(output, parsePaneLine);
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
@@ -899,7 +935,16 @@ export class TmuxAdapter {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
       const checkDraft = guard?.needsInputCheck(identity);
       const policy = checkDraft || options?.beforePaste ? {
-        beforePaste: async () => { if (checkDraft) await guard!.beforeInput(identity); await options?.beforePaste?.(); },
+        // A paste the guard proves it left unsubmitted (#2429) is submitted first, under this lease, once this send's own
+        // checks pass; they then aren't run a second time.
+        beforePaste: async () => {
+          let checked = false;
+          const checks = async () => { await options?.beforePaste?.(); beforeWrite(); beforeInput?.(); checked = true; };
+          // The synchronous checks run again just before the key: the guard's re-read awaits after `checks`.
+          const enter = async () => { beforeWrite(); beforeInput?.(); return (await this.sendKeysUnchecked(pane, ["Enter"])).ok; };
+          if (checkDraft) await guard!.beforeInput(identity, false, text, { checks, enter });
+          if (!checked) await options?.beforePaste?.();
+        },
         afterPaste: async () => { if (checkDraft) await guard!.notePasted(identity, text); },
       } : undefined;
       return this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }, options?.bracketed, policy);
@@ -1021,13 +1066,24 @@ export class TmuxAdapter {
     }
   }
 
-  async sendKeys(target: string, keys: string[], beforeInput?: () => void): Promise<TmuxResult> {
+  async sendKeys(target: string, keys: string[], beforeInput?: () => void, options?: { beforeKeys?: () => Promise<void> }): Promise<TmuxResult> {
     return this.guardedInput(target, async (pane, beforeWrite) => {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
-      const submit = keys.some(key => key === "Enter" || key === "C-m");
-      if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
+      const submit = keys.some(isSubmitKey);
+      const check = async () => {
+        if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
+        if (options?.beforeKeys) await options.beforeKeys();
+      };
+      await check();
       beforeWrite(); beforeInput?.();
-      const result = await this.sendKeysUnchecked(pane, keys);
+      let result = await this.sendKeysUnchecked(pane, keys);
+      // A read-only client stops send-keys but not load-buffer/paste-buffer (#2090). A lone submit key goes as its
+      // carriage return through the unbracketed paste, once the same checks pass again, so input that changed in
+      // the gap is not submitted.
+      if (keys.length === 1 && isSubmitKey(keys[0]!) && isReadOnlyClientRefusal(result)) {
+        result = await this.sendTextUnchecked(pane, "\r", () => { beforeWrite(); beforeInput?.(); }, false,
+          { beforePaste: check, afterPaste: async () => {} });
+      }
       if (result.ok && submit) this.deliveryGuard?.noteSubmitted(identity);
       return result;
     }, false, "keys");
@@ -1194,7 +1250,7 @@ export class TmuxAdapter {
       beforeWrite();
       const result = await this.respawnPaneUnchecked(pane, command, opts);
       const guard = this.deliveryGuard;
-      const target = guard?.maybeTarget(pane);
+      const target = guard?.maybeTarget(paneTarget);
       if (result.ok && target && guard!.ownsLifecycle(target.nodeId)) guard!.noteFreshLifecyclePane(target.nodeId, pane);
       return result;
     }, false, "respawn");
@@ -1425,9 +1481,25 @@ export class TmuxAdapter {
     }
   }
 
-  /** Leave the pane's current mode (copy mode) with `send-keys -X cancel`, through the same input guard as sendKeys. */
+  /** Leave every mode the pane is in, through the same input guard as sendKeys. Modes stack: copy mode can sit under
+   *  run-shell output (view-mode), a chooser, customize or clock mode, and `send-keys -X cancel` leaves only a copy or
+   *  view mode on top. `copy-mode -q` (tmux 3.1a+) leaves them all and types nothing; older tmux falls back to -X cancel. */
   async cancelPaneMode(target: string): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => { beforeWrite(); return this.sendKeysUnchecked(pane, ["-X", "cancel"]); }, false, "keys");
+    return this.guardedInput(target, async (pane, beforeWrite) => {
+      beforeWrite();
+      try {
+        await this.run(["tmux", "copy-mode", "-q", "-t", pane]);
+        return { ok: true };
+      } catch (error) {
+        // The fallback is a second write: check the guard again, as the read-only Enter fallback does, so input that
+        // arrived while copy-mode -q was pending stops it.
+        beforeWrite();
+        const fallback = await this.sendKeysUnchecked(pane, ["-X", "cancel"]);
+        if (fallback.ok) return fallback;
+        // Both failed: keep both reasons, so the refusal that reports this can name them.
+        return { ...fallback, message: `copy-mode -q: ${error instanceof Error ? error.message : String(error)}; send-keys -X cancel: ${fallback.message}` };
+      }
+    }, false, "keys");
   }
 
   /** A launch metadata read. Callers must never put credential values in terminal input. */
@@ -1840,20 +1912,24 @@ export class TmuxAdapter {
     }
   }
 
-  /** Every pane's pid and current command in ONE tmux call, keyed by pane id (%N): the values `getPanePid` /
-   *  `getPaneCommand` read per pane. Panes without a valid pid are left out (read those per pane). Null when tmux can't
-   *  be read at all. The command is the LAST field, so a separator inside it stays intact. */
-  async readAllPaneProcesses(): Promise<Map<string, { pid: number; command: string | null }> | null> {
+  /** Every pane's pid, explicit dead flag and current command in ONE tmux call. A retained dead pane can keep
+   *  its former PID/command: neither proves an executor is alive. A dead pane without a valid PID is retained with
+   *  null PID; other invalid rows fall back to per-pane reads. The command stays LAST to preserve separators. */
+  async readAllPaneProcesses(): Promise<Map<string, { pid: number | null; command: string | null; dead?: boolean }> | null> {
     try {
-      const format = ["#{pane_id}", "#{pane_pid}", "#{pane_current_command}"].join(TMUX_FIELD_SEPARATOR);
+      const format = ["#{pane_id}", "#{pane_pid}", "#{pane_dead}", "#{pane_current_command}"].join(TMUX_FIELD_SEPARATOR);
       const output = await this.run(["tmux", "list-panes", "-a", "-F", format], `tmux list-panes -a -F '${format}'`);
-      const out = new Map<string, { pid: number; command: string | null }>();
+      const out = new Map<string, { pid: number | null; command: string | null; dead?: boolean }>();
       for (const line of output.split("\n")) {
         const first = line.indexOf(TMUX_FIELD_SEPARATOR), second = line.indexOf(TMUX_FIELD_SEPARATOR, first + 1);
-        if (first <= 0 || second < 0) continue;
-        const id = line.slice(0, first), pid = parseInt(line.slice(first + 1, second).trim(), 10);
-        if (!Number.isFinite(pid) || pid <= 0) continue;
-        out.set(id, { pid, command: line.slice(second + 1).trim() || null });
+        const third = line.indexOf(TMUX_FIELD_SEPARATOR, second + 1);
+        if (first <= 0 || second < 0 || third < 0) continue;
+        const id = line.slice(0, first), rawPid = Number(line.slice(first + 1, second).trim());
+        const pid = Number.isInteger(rawPid) && rawPid > 0 ? rawPid : null;
+        const rawDead = line.slice(second + 1, third).trim();
+        const dead = rawDead === "1" ? true : rawDead === "0" ? false : undefined;
+        if (pid === null && dead !== true) continue;
+        out.set(id, { pid, command: line.slice(third + 1).trim() || null, ...(dead === undefined ? {} : { dead }) });
       }
       return out;
     } catch {

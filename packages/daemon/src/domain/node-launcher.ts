@@ -87,6 +87,13 @@ interface NodeLauncherDeps {
   paneExit?: PaneCutoverTiming;
 }
 
+/** For a kept pane: the failures that come before its takeover sent any signal, so this attempt stopped nothing. Every
+ *  later failure comes after TERM, and a death probe that fails reads as "not ended", so those stay unknown. */
+export const NOTHING_STOPPED_LAUNCH_CODES: ReadonlySet<string> = new Set([
+  "node_not_found", "selection_changed", "already_bound", "invalid_session_name", "address_conflict",
+  "pane_not_found",
+]);
+
 export class NodeLauncher {
   readonly db: Database.Database;
   private rigRepo: RigRepository;
@@ -218,7 +225,7 @@ export class NodeLauncher {
       return { ok: false, code: "selection_changed", message: "The selected node or history changed before launch." };
     }
     const tmuxResult = opts?.keepPane
-      ? await this.takeOverPane(sessionName, opts.keepPane, sessionCwd, openRigEnv)
+      ? await this.takeOverPane(sessionName, opts.keepPane, sessionCwd, openRigEnv, node.id)
       : await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
     if (!tmuxResult.ok) {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
@@ -364,17 +371,19 @@ export class NodeLauncher {
   /** A kept pane's takeover, as a handover's cutover does it: its process ends in place (the pane survives it, with its
    *  scrollback), then a shell starts in it with this launch's environment, for the runtime to launch into. Nothing is
    *  touched when the pane isn't in the session. */
-  private async takeOverPane(sessionName: string, pane: string, cwd: string | undefined, env: Record<string, string>):
+  private async takeOverPane(sessionName: string, pane: string, cwd: string | undefined, env: Record<string, string>, nodeId: string):
     Promise<{ ok: true; warnings?: string[] } | { ok: false; code: string; message: string }> {
     let panes: Array<{ id: string }> = [];
     try { panes = await this.tmuxAdapter.listPanes(sessionName); } catch { /* an unreadable session holds no pane to keep */ }
     if (!panes.some((candidate) => candidate.id === pane)) {
       return { ok: false, code: "pane_not_found", message: `Pane ${pane} isn't in tmux session "${sessionName}", so nothing was stopped.` };
     }
-    const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process");
+    // The guard resolves the selected seat before writing to its immutable pane id.
+    const inputTarget = this.tmuxAdapter.deliveryGuard ? nodeId : pane;
+    const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget);
     if (!ended.ok) return { ok: false, code: "pane_process_not_ended", message: ended.message };
     const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
-    const respawned = await this.tmuxAdapter.respawnPane(pane, shell, { ...(cwd ? { cwd } : {}), env });
+    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, shell, { ...(cwd ? { cwd } : {}), env });
     if (!respawned.ok) {
       return { ok: false, code: "pane_not_respawned", message: `The seat's process in pane ${pane} ended, but a shell couldn't start there: ${respawned.message}` };
     }

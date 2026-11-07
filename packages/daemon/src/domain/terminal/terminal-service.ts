@@ -1,3 +1,4 @@
+import type { ScopeViewError } from "./scope-task-terminal-view.js";
 import { tileAttachArgv } from "./tile-attach.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
 import type { ViewerKey, ViewerResult } from "./herdr-viewer.js";
@@ -17,8 +18,8 @@ import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 // RESOLVES + ROUTES.
 //
 // View argument resolution (precedence):
-//   1. `mission:<id>` / `slice:<id>`  → derived, LIVE from the review agents
-//      band; READ-ONLY by construction (a cross-rig observational grouping —
+//   1. `mission:<id>` / `slice:<id>`  → current active obligation owners;
+//      READ-ONLY by construction (a cross-rig observational grouping —
 //      AC-3 "another rig's agents ... read-only"). Never persisted (A3).
 //   2. a rig NAME                      → per-rig derived, LIVE from the node
 //      inventory; INTERACTIVE (you asked for that rig, you drive it — AC-1c).
@@ -42,7 +43,8 @@ import { composeView, type ViewMemberInput } from "./view-composer.js";
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { buildGridRoot } from "./herdr-adapter.js";
-import { daemonTmuxServerArgs } from "../../adapters/tmux-server.js";
+import { daemonTmuxServerArgs, daemonTmuxServerInfo } from "../../adapters/tmux-server.js";
+import type { TmuxServerSelection } from "../tmux-server-selection.js";
 // deriveViewMembers is a VALUE exported by the views store (not the composer).
 import { deriveViewMembers } from "./terminal-views-store.js";
 import type {
@@ -83,6 +85,7 @@ export interface OpenViewRequest {
 export interface TerminalPreview {
   provider: string;
   session?: string;
+  tmux?: TmuxServerSelection;
   view: string;
   planId: string;
   composed: ComposedView;
@@ -90,6 +93,7 @@ export interface TerminalPreview {
   grids: ReturnType<typeof buildGridRoot>[];
   status: ProviderStatus;
   task?: TaskMembership;
+  capabilities: { ensureViewer: boolean };
   viewDescriptor?: ViewDescriptor;
 }
 
@@ -112,6 +116,7 @@ export interface ProviderStatusReport {
 export interface TerminalStatusResult {
   following?: ReturnType<TerminalFollowing["list"]>;
   providers: ProviderStatusReport[];
+  tmux?: TmuxServerSelection;
   session?: string;
   error?: string;
   code?: string;
@@ -132,10 +137,12 @@ export interface TerminalServiceDeps {
   listRigSeatsBatch?(rigNames: string[]): Promise<Map<string, LiveSeatRow[]>> | Map<string, LiveSeatRow[]>;
   /** Live seats of a pod within a rig (by rig name-or-id + pod namespace); null when the rig/pod is unknown. */
   listPodSeats(rigArg: string, podNamespace: string): Promise<LiveSeatRow[] | null> | LiveSeatRow[] | null;
-  /** Live seats for a derived scope (`mission:<id>` | `slice:<id>`); null when the scope is unknown/invalid. */
-  listScopeSeats(scope: string): Promise<LiveSeatRow[] | null> | LiveSeatRow[] | null;
   /** Exact local queue episode; unavailable owners must remain in task.members. */
   resolveTaskView?(qitemId: string): Promise<TaskTerminalView | null> | TaskTerminalView | null;
+  /** Authoritative scoped work in this daemon's configured index context. */
+  resolveScopeView?(view: string): Promise<TaskTerminalView | ScopeViewError> | TaskTerminalView | ScopeViewError;
+  /** Drop generation-cached scope identities on the same source event as following. */
+  invalidateScopeView?(): void;
   /** Known rig names (for the `views` listing). */
   listRigNames(): Promise<string[]> | string[];
   /** Read-only host resolution for the composer (registry unavailable → null for every id). */
@@ -181,24 +188,29 @@ export class TerminalService {
   private localTmux?: Promise<string | undefined>;
   private following?: TerminalFollowing;
 
+  private unsubscribeScope?: () => void;
   constructor(private readonly deps: TerminalServiceDeps) {
+    if (deps.invalidateScopeView) this.unsubscribeScope = deps.eventBus?.subscribe(event => {
+      if (event.type === "scope.sources_changed") deps.invalidateScopeView?.();
+    });
     if (deps.eventBus) this.following = new TerminalFollowing(
       deps.followingStatePath ?? getDefaultOpenRigPath("private/terminal-following/selectors.json"), deps.eventBus,
       (selector, controls) => this.renderFollowing(selector, controls));
   }
 
-  async stop(): Promise<void> { await this.following?.stop(); }
+  async stop(): Promise<void> { this.unsubscribeScope?.(); await this.following?.stop(); }
 
   async followView(req: OpenViewRequest & FollowControls): Promise<OpenViewResult> {
     if (!this.following) return errorResult("herdr", "follow_unavailable", "This daemon has no event-driven terminal following service.");
-    if (!req.view.startsWith("qitem:")) return errorResult("herdr", "follow_view_required", "Follow requires qitem:<id>, whose membership has an authoritative completeness signal.");
+    if (!/^(qitem|slice|mission):.+/.test(req.view)) return errorResult("herdr", "follow_view_required", "Follow requires an authoritative qitem:<id>, slice:<id-or-name> or mission:<id> view.");
+    if (/^(slice|mission):/.test(req.view) && !this.deps.resolveScopeView) return errorResult("herdr", "scope_unsupported", "This daemon has no authoritative scoped membership resolver.");
     const selected = this.selectProvider({ ...req, provider: req.provider ?? "herdr" });
     if ("ok" in selected) return selected;
     if (selected.name !== "herdr" || !selected.provider.followView) return errorResult(selected.name, "follow_unsupported", "Follow is supported by the qualified Herdr provider only.");
-    if (req.expectedPlan !== undefined) {
+    if (/^(slice|mission):/.test(req.view) || req.expectedPlan !== undefined) {
       const composed = await this.resolveComposed(req.view, selected.provider.panesPerPage);
       if ("code" in composed) return errorResult(selected.name, composed.code, composed.error);
-      if (req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return errorResult(selected.name, "preview_changed", "Task membership changed since preview; refresh before enabling following.");
+      if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return errorResult(selected.name, "preview_changed", "Task membership changed since preview; refresh before enabling following.");
     }
     const { enabled, maxTiles, graceMs, focusRetentionMs, pin, unpin, suppress, unsuppress, suppressionMs } = req;
     return this.following.open({ view: req.view, provider: "herdr", ...(selected.session !== undefined ? { session: selected.session } : {}) },
@@ -210,9 +222,11 @@ export class TerminalService {
     if ("ok" in selected) return selected;
     if (!selected.provider.followView) return errorResult(selected.name, "follow_unsupported", "This provider cannot follow a task.");
     let composed: ComposedView | null = null;
+    let membershipError: string | undefined;
     try {
       const current = await this.resolveComposed(selector.view, selected.provider.panesPerPage);
       if (!("code" in current)) composed = { ...current, opened: current.opened.map(p => this.viewerPane(p)) };
+      else membershipError = `${current.code}: ${current.error}${/^(slice|mission):/.test(selector.view) ? ` Refresh or reopen the ${selector.view.split(":")[0]} under its current unambiguous key.` : ""}`;
     } catch { /* Unreadable membership is supplied as unknown, never empty. */ }
     const plan = composed && this.planId(selected.name, composed, selected.session);
     const stillCurrent = async () => {
@@ -221,7 +235,7 @@ export class TerminalService {
       return !("code" in current) && current.task?.complete === true && this.planId(selected.name,
         { ...current, opened: current.opened.map(p => this.viewerPane(p)) }, selected.session) === plan;
     };
-    const result = await selected.provider.followView(selector.view, composed, controls, stillCurrent);
+    const result = await selected.provider.followView(selector.view, composed, controls, stillCurrent, membershipError);
     return { ...result, ...(selected.session !== undefined ? { session: selected.session } : {}),
       ...(composed?.task ? { task: composed.task } : {}), viewDescriptor: { kind: controls.enabled && result.following?.enabled !== false ? "following" : "fixed", name: composed?.task?.name ?? selector.view } };
   }
@@ -313,9 +327,9 @@ export class TerminalService {
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
-    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs() });
+    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode });
     const saved = view.startsWith("saved:") ? this.deps.viewsStore.get(view.slice(6))
-      : !/^(qitem|mission|slice|pod|rig):/.test(view) ? this.deps.viewsStore.get(view) : null;
+      : !/^(qitem|mission|slice|pod|seat|rig):/.test(view) ? this.deps.viewsStore.get(view) : null;
     composed.viewDescriptor = { kind: saved && saved.id === resolved.id ? "fixed" : "following",
       name: resolved.task?.name ?? (saved?.id === resolved.id ? saved.name : resolved.id) };
     if (resolved.task) {
@@ -352,7 +366,9 @@ export class TerminalService {
     const composed = await this.resolveComposed(req.view, provider.panesPerPage, req.viewportColumns);
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
     await this.viewerMappings(provider, composed);
-    return { provider: providerName, ...(session !== undefined ? { session } : {}), view: req.view, composed, viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}),
+    const tmux = daemonTmuxServerInfo();
+    return { provider: providerName, ...(session !== undefined ? { session } : {}), ...(tmux ? { tmux } : {}), view: req.view, composed, viewDescriptor: composed.viewDescriptor, ...(composed.task ? { task: composed.task } : {}),
+      capabilities: { ensureViewer: !!composed.task && !!provider.ensureViewer },
       grids: composed.pages.map(page => buildGridRoot(page, composed.columns)), planId: this.planId(providerName, composed, session), status: await provider.status() };
   }
 
@@ -377,7 +393,7 @@ export class TerminalService {
   /** Explicit owner operation: membership never grants input authority. The
    * HTTP route supplies the existing owner bearer/browser boundary. */
   async ensureViewer(req: OpenViewRequest & { member: ViewerKey; expectedPlan: string }): Promise<ViewerResult> {
-    if (!req.view.startsWith("qitem:")) return { ok: false, code: "view_required", error: "Ensure-viewer requires a qitem view." };
+    if (!/^(qitem|slice|mission):.+/.test(req.view)) return { ok: false, code: "view_required", error: "Ensure-viewer requires an authoritative qitem, slice or mission view." };
     const selected = this.selectProvider({ ...req, provider: req.provider ?? "herdr" });
     if ("ok" in selected) return { ok: false, code: selected.code ?? "unknown_provider", error: selected.error ?? "Provider unavailable." };
     if (!selected.provider.ensureViewer) return { ok: false, code: "viewer_unsupported", error: "This provider has no qualified ensure-viewer operation." };
@@ -418,7 +434,7 @@ export class TerminalService {
       const inventory = await this.deps.listRigSeatsBatch?.(result.rigs);
       for (const entry of entries) {
         const rows = entry.kind === "derived" ? inventory?.get(entry.name) : undefined;
-        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs() })
+        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode })
           : await this.resolveComposed(entry.view, this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage);
         if ("code" in plan) continue;
         result.catalog.push({ ...entry, members: [...plan.opened, ...plan.absent, ...plan.degraded].map((m) => m.seat), ready: plan.opened.length, absent: plan.absent.length, degraded: plan.degraded.length, pages: plan.pages.length });
@@ -429,10 +445,11 @@ export class TerminalService {
 
   /** Provider availability + liveness (doctor). Unknown named provider → empty report for it. */
   async status(providerName?: string, session?: string): Promise<TerminalStatusResult> {
+    const tmux = daemonTmuxServerInfo();
     if (session !== undefined) {
       const selected = this.selectProvider({ provider: providerName, session });
       if ("ok" in selected) return { providers: [], error: selected.error, code: selected.code };
-      return { following: this.following?.list() ?? [], session: selected.session, providers: [{ name: selected.name,
+      return { following: this.following?.list() ?? [], session: selected.session, ...(tmux ? { tmux } : {}), providers: [{ name: selected.name,
         status: await selected.provider.status(), liveness: await selected.provider.liveness() }] };
     }
     const names: string[] = providerName ? [providerName] : ["herdr", "cmux", "rex"];
@@ -448,7 +465,7 @@ export class TerminalService {
       }
       return { name, status: await p.status(), liveness: await p.liveness() };
     }));
-    return { providers, following: this.following?.list() ?? [] };
+    return { providers, following: this.following?.list() ?? [], ...(tmux ? { tmux } : {}) };
   }
 
   /** Resolve a view argument into composer-ready members (precedence in the file header). */
@@ -457,6 +474,11 @@ export class TerminalService {
       const task = await this.deps.resolveTaskView?.(view.slice(6));
       return task ? { id: view, members: task.members, task: task.task }
         : { code: "view_not_found", error: `unknown local queue episode '${view.slice(6)}'` };
+    }
+    if (/^(slice|mission):/.test(view)) {
+      if (!this.deps.resolveScopeView) return { code: "scope_unsupported", error: "This daemon has no authoritative scoped membership resolver." };
+      const scope = await this.deps.resolveScopeView(view);
+      return "code" in scope ? scope : { id: view, members: scope.members, task: scope.task };
     }
     if (view.startsWith("saved:")) {
       const saved = this.deps.viewsStore.get(view.slice(6));
@@ -468,18 +490,6 @@ export class TerminalService {
       }
       return { code: "view_not_found", error: `unknown saved view '${view.slice(6)}'` };
     }
-    // 1. derived scope prefixes → live, read-only, never persisted.
-    if (view.startsWith("mission:") || view.startsWith("slice:")) {
-      const rows = await this.deps.listScopeSeats(view);
-      if (rows == null) {
-        return { code: "view_not_found", error: `unknown or invalid scope '${view}'` };
-      }
-      return {
-        id: view,
-        members: deriveViewMembers(rows, { readOnly: true, labelSuffix: view }),
-      };
-    }
-
     // 2. a pod within a rig — `pod:<rig-id-or-name>/<podNamespace>` (AC-5 launcher
     //    target). Interactive (a subset of your own rig).
     if (view.startsWith("pod:")) {
@@ -491,6 +501,23 @@ export class TerminalService {
       const rows = await this.deps.listPodSeats(rest.slice(0, slash), rest.slice(slash + 1));
       if (rows == null) {
         return { code: "view_not_found", error: `unknown pod '${rest.slice(slash + 1)}' in rig '${rest.slice(0, slash)}'` };
+      }
+      return { id: view, members: deriveViewMembers(rows, { readOnly: false }) };
+    }
+
+    // 2b. one seat within a rig — `seat:<rig-id-or-name>/<logicalId>` (the TUI's agent page opens just that agent).
+    //     Interactive, like its rig. A logical id has no `/`, so the last `/` splits it from the rig.
+    if (view.startsWith("seat:")) {
+      const rest = view.slice("seat:".length);
+      const slash = rest.lastIndexOf("/");
+      if (slash <= 0 || slash === rest.length - 1) {
+        return { code: "view_not_found", error: `malformed seat view '${view}' — expected seat:<rig>/<logical-id>` };
+      }
+      const rigArg = rest.slice(0, slash);
+      const logicalId = rest.slice(slash + 1);
+      const rows = ((await this.deps.listRigSeats(rigArg)) ?? []).filter((row) => row.logicalId === logicalId);
+      if (rows.length === 0) {
+        return { code: "view_not_found", error: `unknown seat '${logicalId}' in rig '${rigArg}'` };
       }
       return { id: view, members: deriveViewMembers(rows, { readOnly: false }) };
     }

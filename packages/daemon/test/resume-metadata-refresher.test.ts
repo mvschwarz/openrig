@@ -688,17 +688,22 @@ describe("a seat's own runtime home in capture and the fallback probe", () => {
   });
 
   it("the fallback resume probe looks in the seat's own Claude config dir, and a seat without one is probed as before", async () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE nodes (id TEXT PRIMARY KEY)");
     const sessionRegistry = {
+      db,
       isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), clearResumeToken: vi.fn(), markResumeProbeResult: vi.fn(),
     } as unknown as SessionRegistry;
     const probeClaudeResume = vi.fn(async () => "resumable" as const);
     const refresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter: mockTmux(), probeClaudeResume, seatHome, sleep: async () => {} });
-    await refresher.refresh([
-      { nodeId: "node-own", sessionId: "s-own", sessionName: "dev-build@r", runtime: "claude-code", resumeType: "claude_id", resumeToken: "tok-own", cwd: "/repo" },
-      { nodeId: "node-plain", sessionId: "s-plain", sessionName: "dev-plain@r", runtime: "claude-code", resumeType: "claude_id", resumeToken: "tok-plain", cwd: "/repo" },
-    ]);
-    expect(probeClaudeResume).toHaveBeenCalledWith("dev-build@r", "tok-own", "/repo", "/homes/build-claude");
-    expect(probeClaudeResume).toHaveBeenCalledWith("dev-plain@r", "tok-plain", "/repo");
+    try {
+      await refresher.refresh([
+        { nodeId: "node-own", sessionId: "s-own", sessionName: "dev-build@r", runtime: "claude-code", resumeType: "claude_id", resumeToken: "tok-own", cwd: "/repo" },
+        { nodeId: "node-plain", sessionId: "s-plain", sessionName: "dev-plain@r", runtime: "claude-code", resumeType: "claude_id", resumeToken: "tok-plain", cwd: "/repo" },
+      ]);
+      expect(probeClaudeResume).toHaveBeenCalledWith("dev-build@r", "tok-own", "/repo", "/homes/build-claude");
+      expect(probeClaudeResume).toHaveBeenCalledWith("dev-plain@r", "tok-plain", "/repo");
+    } finally { db.close(); }
   });
 
   it("the default probe runs claude with the seat's config dir as a leading assignment", async () => {

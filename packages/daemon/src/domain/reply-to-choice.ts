@@ -67,6 +67,21 @@ export function parseReplyToChoice(note: string): ReplyToChoice | null {
   return null;
 }
 
+/** #2234: where Slack actually put a --reply-to update that its choice threaded. The thread's root was gone, so Slack posted
+ *  the update as a new top-level message. Recorded after the post by the same actor, and read only for the receipt: retries and
+ *  reconciliation keep the recorded choice. */
+const REPLY_TO_PLACEMENT_PREFIX = "slack-reply-to-placement";
+
+export function formatReplyToThreadMissing(threadTs: string): string {
+  return `${REPLY_TO_PLACEMENT_PREFIX} reason=thread-missing thread_ts=${threadTs}`;
+}
+
+/** The missing thread a placement note names, or null when the note is not one. Callers check the actor. */
+export function parseReplyToThreadMissing(note: string): string | null {
+  const match = new RegExp(`^${REPLY_TO_PLACEMENT_PREFIX} reason=thread-missing thread_ts=(\\S+)$`).exec(note);
+  return match ? match[1]! : null;
+}
+
 /** The human-readable fallback line the verify result carries. */
 export function describeReplyToFallback(choice: ReplyToFallback): string {
   return "qitemId" in choice ? `${choice.reason} (qitem ${choice.qitemId})` : `${choice.reason} (thread ${choice.threadTs})`;

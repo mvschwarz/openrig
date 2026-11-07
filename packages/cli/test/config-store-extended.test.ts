@@ -44,7 +44,7 @@ function clearEnv(): () => void {
     // its custom home into default-path resolution; UNSETTING it would fall through
     // to the REAL ~/.openrig (foreign on-box state) — so tests set a fresh tmp home.
     "OPENRIG_HOME", "RIGGED_HOME",
-    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_DAEMON_DB_CONFLICT",
+    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_DAEMON_DB_CONFLICT",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
@@ -109,6 +109,16 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     restoreEnv();
   });
 
+  it("resolves tmux isolation from the shared config and environment with a strict mode", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolve().terminal.tmuxServer).toBe("inherit");
+    store.set("terminal.tmux_server", "isolated");
+    expect(store.resolve().terminal.tmuxServer).toBe("isolated");
+    process.env.OPENRIG_TMUX_SERVER = "inherit";
+    expect(store.resolve().terminal.tmuxServer).toBe("inherit");
+    expect(() => store.set("terminal.tmux_server", "isolate")).toThrow('must be "inherit" or "isolated"');
+  });
+
   it("VALID_KEYS includes legacy, user-settings, ui.preview, recovery, agents, feed, and transcript-rotation keys", () => {
     const expected = [
       "daemon.port", "daemon.host", "daemon.db_conflict",
@@ -128,6 +138,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "topology.root",
       "context.root",
       "context.system_world",
+      "specs.builtins_visible",
       "skills.root",
       "skills.router_line.enabled",
       "onboarding.default_pack.enabled",
@@ -174,6 +185,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "snapshots.periodic.retention_keep",
       // OPR.0.4.6.02 S1 — inner-tmux status-bar launch default (static bool).
       "terminal.status_bar",
+      "terminal.tmux_server",
       "terminal.history_limit",
       "terminal.inherit_tmux_environment",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
@@ -200,6 +212,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "retention.watchdog_keep_per_job",
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",
+      "stream.intake",
       "retention.batch_size",
       "queue.pickup_stall_threshold_minutes",
       // S02 — standing-stuck-sweep cadence + unclaimed-obligation age.
@@ -221,6 +234,16 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     store.set("daemon.db_conflict", "stop");
     expect(store.get("daemon.db_conflict")).toBe("stop");
     expect(() => store.set("daemon.db_conflict", "always")).toThrow(/warn or stop/);
+  });
+
+  it("defaults stream.intake to queue.worker and validates destinations", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("stream.intake")).toBe("queue.worker");
+    store.set("stream.intake", "off");
+    expect(store.get("stream.intake")).toBe("off");
+    store.set("stream.intake", "lead@kernel");
+    expect(store.get("stream.intake")).toBe("lead@kernel");
+    expect(() => store.set("stream.intake", "invalid-bare-seat")).toThrow(/Invalid value for stream.intake/);
   });
 
   it("resolves context.root from the canonical default and OPENRIG_CONTEXT_ROOT", () => {
@@ -363,6 +386,37 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     store.reset("health.context_pressure.warning_percent");
     store.reset("health.context_pressure.critical_percent");
     expect(store.resolve().health.contextPressure).toEqual({ warningPercent: 95, criticalPercent: 99 });
+  });
+
+  it("explains that saved context-pressure pair validation excludes environment overrides", () => {
+    const store = new ConfigStore(configPath);
+    process.env.OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT = "50";
+    expect(() => store.set("health.context_pressure.critical_percent", "80"))
+      .toThrow(/config-file pair: warning \(95\).*critical \(80\).*each process resolves configuration/);
+    expect(existsSync(configPath)).toBe(false);
+    store.set("health.context_pressure.critical_percent", "100");
+    store.set("health.context_pressure.warning_percent", "99");
+    const before = readFileSync(configPath, "utf8");
+    expect(() => store.reset("health.context_pressure.critical_percent"))
+      .toThrow(/config-file pair: warning \(99\).*critical \(99\).*each process resolves configuration/);
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
+  it("shows the file-pair explanation through the config command", async () => {
+    process.env.OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT = "50";
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const oldExitCode = process.exitCode;
+    try {
+      process.exitCode = undefined;
+      await configCommand(configPath, { probeDaemonRunning: async () => false })
+        .parseAsync(["node", "rig", "set", "health.context_pressure.critical_percent", "80"]);
+      expect(process.exitCode).toBe(1);
+      expect(error.mock.calls.flat().join(" ")).toContain("config-file pair: warning (95)");
+      expect(existsSync(configPath)).toBe(false);
+    } finally {
+      error.mockRestore();
+      process.exitCode = oldExitCode;
+    }
   });
 
   it("S01 wake ladder exposes retry cadence, cap, unconfirmed window, and swap grace defaults", () => {

@@ -83,3 +83,38 @@ describe("Core-event terminal following", () => {
     expect(resumed.ok).toBe(true); expect(f.render).toHaveBeenCalledTimes(66);
   });
 });
+
+
+describe("scope selector lifetime", () => {
+  it("keeps a known empty slice enabled and repopulates on a queue event", async () => {
+    vi.useFakeTimers(); const f = fixture(), service = f.create();
+    f.render.mockResolvedValueOnce({ ...answer(), opened: [], following: { ...answer().following!, state: "empty" } });
+    const result = await service.open({ ...selector, view: "slice:build" }, { enabled: true });
+    expect(result.following?.enabled).toBe(true);
+    expect(service.list()).toHaveLength(1);
+    f.emit("queue.created"); await vi.advanceTimersByTimeAsync(100);
+    expect(f.render).toHaveBeenCalledTimes(2);
+    expect(service.list()[0]?.status?.state).toBe("following");
+  });
+  it("restores scope selectors and coalesces explicit scope-source changes without polling", async () => {
+    vi.useFakeTimers(); const f = fixture(), first = f.create();
+    await first.open({ ...selector, view: "slice:build" }, { enabled: true }); await first.stop();
+    const second = f.create(); await vi.advanceTimersByTimeAsync(100);
+    expect(second.list()).toHaveLength(1);
+    const before = f.render.mock.calls.length;
+    for (let n = 0; n < 10; n++) f.emit("scope.sources_changed");
+    await vi.advanceTimersByTimeAsync(100); expect(f.render).toHaveBeenCalledTimes(before + 1);
+    await vi.advanceTimersByTimeAsync(600000); expect(f.render).toHaveBeenCalledTimes(before + 1);
+  });
+});
+
+
+it("restores a mission selector and retains complete-empty following through later queue events", async () => {
+  vi.useFakeTimers(); const f = fixture(), first = f.create(), mission = { ...selector, view: "mission:work" };
+  f.render.mockResolvedValue({ ...answer(), opened: [], following: { ...answer().following!, state: "empty", enabled: true } });
+  await first.open(mission, { enabled: true }); await first.stop();
+  const restored = f.create(); await vi.advanceTimersByTimeAsync(100);
+  expect(restored.list()).toHaveLength(1); expect(restored.list()[0]).toMatchObject({ view: "mission:work", enabled: true });
+  const before = f.render.mock.calls.length; f.emit("queue.created"); await vi.advanceTimersByTimeAsync(100);
+  expect(f.render).toHaveBeenCalledTimes(before + 1);
+});

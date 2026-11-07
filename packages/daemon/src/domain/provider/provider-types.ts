@@ -134,7 +134,7 @@ export type PrecheckReason =
   | "invalid_token_reference" // the label or the token file's path can't be a seat's reference
   | "token_file_unusable" // the token file wouldn't give Claude a token: missing, empty, not a file or unreadable
   | "credential_outranks_token" // a cloud provider, API key, auth token or apiKeyHelper would win over the seat's token
-  | "seat_not_running"; // nothing to relaunch: launch the seat first
+  | "conversation_not_resumable"; // a stopped seat's next launch wouldn't resume its conversation
 
 /** A seat on the same Codex home, as the in-place restart reports it (its `PeerReport`). Declared here rather than
  *  imported, so the provider types don't import the restart module and its tmux dependencies. */
@@ -154,6 +154,7 @@ export interface SeatSwitchView {
 
 /** What a Claude seat's precheck saw: the reference it would get, and what the precedence check read and couldn't read. */
 export interface ClaudeSwitchView {
+  credentialKind?: "api-key";
   label: string;
   tokenFile: string | null;
   checked: string[];
@@ -192,7 +193,7 @@ export interface FourBlockReadModel {
  *  record), else the daemon's. */
 export type SeatAccountConfiguration =
   | { source: "registry"; profileRef: string; recordedAt: string; profileSaved: boolean | null }
-  | { source: "default_login"; home: string | null; homeNote: string; homeFrom?: "member" | "rig" }
+  | { source: "default_login"; home: string | null; homeNote: string; homeFrom?: "member" | "rig" | "account-switch" }
   | { source: "unknown"; reason: string };
 
 export interface SeatConfiguredAccount {
@@ -205,7 +206,7 @@ export interface SeatConfiguredAccount {
   registryNotes?: string[];
   /** A home the seat's `env:` declares that isn't an absolute path, so it isn't used: the seat resolves as if
    *  it declared none. Reported, never refused. */
-  ignoredHome?: { from: "member" | "rig"; variable: string; value: string };
+  ignoredHome?: { from: "member" | "rig" | "account-switch"; variable: string; value: string };
   /** Always unlinked: nothing supported links a configured account to an observed allowance. */
   allowance: { linked: false; reason: string };
   /** What this seat itself was observed reporting. Claude: its own status-line samples, and the seats whose

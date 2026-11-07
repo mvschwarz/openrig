@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { SpecLibraryService } from "../src/domain/spec-library-service.js";
 import { SpecReviewService } from "../src/domain/spec-review-service.js";
 import { specLibraryRoutes } from "../src/routes/spec-library.js";
+import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
 const VALID_RIG_YAML = `
 version: "0.2"
@@ -43,16 +44,54 @@ describe("spec library routes", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function createApp(): Hono {
+  function createApp(settingsStore?: SettingsStore): Hono {
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("specLibraryService" as never, lib);
       c.set("specReviewService" as never, new SpecReviewService());
+      c.set("settingsStore" as never, settingsStore);
       await next();
     });
     app.route("/api/specs/library", specLibraryRoutes());
     return app;
   }
+
+  it("hides built-in rigs, agents and workflows from inventory while retaining explicit access", async () => {
+    const builtin = join(tmpDir, "builtins");
+    const user = join(tmpDir, "user");
+    mkdirSync(join(builtin, "rigs", "sample"), { recursive: true });
+    mkdirSync(join(builtin, "agents", "sample"), { recursive: true });
+    mkdirSync(user);
+    writeFileSync(join(builtin, "rigs", "sample", "rig.yaml"), VALID_RIG_YAML);
+    writeFileSync(join(builtin, "agents", "sample", "agent.yaml"), 'name: builtin-agent\nversion: "0.2"\nrole: Test\n');
+    writeFileSync(join(user, "rig.yaml"), VALID_RIG_YAML);
+    lib = new SpecLibraryService({ roots: [{ path: builtin, sourceType: "builtin" }, { path: user, sourceType: "user_file" }], specReviewService: new SpecReviewService() });
+    lib.scan();
+    const workflow = (id: string, sourceType: "builtin" | "user_file") => ({ id, kind: "workflow" as const, name: id, version: "1", sourceType, sourcePath: join(tmpDir, id), relativePath: id, updatedAt: "" });
+    lib.setWorkflowEntries([workflow("builtin-workflow", "builtin"), workflow("user-workflow", "user_file")]);
+    const configPath = join(tmpDir, "config.json");
+    const settings = new SettingsStore(configPath);
+    const app = createApp(settings);
+    const get = async (url: string) => await (await app.request(url)).json() as Array<{ id: string; sourceType: string; kind: string }>;
+    const all = await get("/api/specs/library");
+    expect(all.some((entry) => entry.sourceType === "builtin" && entry.kind === "rig")).toBe(true);
+    expect(all.some((entry) => entry.sourceType === "builtin" && entry.kind === "agent")).toBe(true);
+    expect(all.some((entry) => entry.id === "builtin-workflow")).toBe(true);
+    writeFileSync(configPath, JSON.stringify({ specs: { builtinsVisible: false } }));
+    const visible = await get("/api/specs/library");
+    expect(visible.map((entry) => entry.sourceType)).toEqual(["user_file", "user_file"]);
+    expect(visible.some((entry) => entry.id === "user-workflow")).toBe(true);
+    const workflows = await get("/api/specs/library?kind=workflow");
+    expect(workflows.map((entry) => entry.id)).toEqual(["user-workflow"]);
+    const notOptedIn = await get("/api/specs/library?include_builtins=false");
+    expect(notOptedIn).toHaveLength(visible.length);
+    const sync = await (await app.request("/api/specs/library/sync", { method: "POST" })).json() as Array<{ sourceType: string }>;
+    expect(sync.every((entry) => entry.sourceType === "user_file")).toBe(true);
+    const explicit = await get("/api/specs/library?include_builtins=true");
+    expect(explicit).toHaveLength(all.length);
+    const builtinRig = all.find((entry) => entry.kind === "rig" && entry.sourceType === "builtin")!;
+    expect((await app.request(`/api/specs/library/${builtinRig.id}`)).status).toBe(200);
+  });
 
   it("keeps source provenance and serves canonical source identity for file-root mapping", async () => {
     const res = await createApp().request("/api/specs/library");

@@ -12,7 +12,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
-import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { OutboxHandler, OutboxHandlerError } from "../src/domain/outbox-handler.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -83,7 +83,7 @@ function fixture(saved?: Buffer) {
   const deliveryDeps = { sessionTransport: transport, hasPendingPostCompactStage: (session: string) => hooks.pendingStage?.(session) ?? false };
   const deliver = makeWatchdogDeliver(deliveryDeps);
   cleanup.push(async () => { await transport.guardedDelivery!.stop(); db.close(); });
-  return { db, outbox, deliver, transport, submissions, pastes, hooks, setInput: (text: string) => { body = text; }, enable: () => guard.set("a", { mode: "draft-aware" }, "human@test", "keep draft") };
+  return { db, outbox, deliver, transport, submissions, pastes, hooks, hold: () => guard.set("a", { mode: "hold" }, "human@test", "hold input"), setInput: (text: string) => { body = text; }, enable: () => guard.set("a", { mode: "draft-aware" }, "human@test", "keep draft") };
 }
 
 const seat = "worker@test";
@@ -366,5 +366,117 @@ describe("current parked-owner reminders", () => {
     expect(await f.transport.send(seat, "Peer context")).toMatchObject({ ok: true });
     expect(await f.deliver({ targetSession: seat, message: "Unrelated reminder" }, lone("other", "occ"))).toMatchObject({ status: "ok" });
     expect(f.submissions).toHaveLength(2);
+  });
+});
+
+
+describe("watchdog positive no-input outcomes", () => {
+  it("preserves a real held-quota rejection through transport and engine history", async () => {
+    const f = fixture();
+    await f.hold();
+    const target = resolveGuardTarget(f.db, seat)!;
+    for (let i = 0; i < 100; i++) f.outbox.retain({ outboxId: `held-${i}`, senderSession: seat, destinationSession: seat, body: "held" }, target);
+    const jobs = new WatchdogJobsRepository(f.db);
+    const history = new WatchdogHistoryLog(f.db);
+    const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: history, eventBus: new EventBus(f.db), deliver: f.deliver });
+    const job = jobs.register({ policy: "periodic-reminder", targetSession: seat, intervalSeconds: 60, registeredBySession: seat, specYaml: "message: Still owed\n" });
+    await engine.evaluate(job);
+    expect(history.listForJob(job.jobId, 1)[0]).toMatchObject({ deliveryStatus: "failed", evaluationNotes: { deliveryCode: "retained_quota_full", deliveryInputPhase: "not_reached" } });
+    expect(f.outbox.retentionUsage("a").count).toBe(100);
+    expect(f.pastes).toHaveLength(0);
+    expect(f.submissions).toHaveLength(0);
+  });
+
+  it.each([undefined, "attempted", "written"] as const)("does not promote a quota-shaped result with phase %s", async inputPhase => {
+    const deliver = makeWatchdogDeliver({ sessionTransport: { send: async () => ({ ok: false, sessionName: seat, sent: false, reason: "retained_quota_full", error: "quota-shaped error", ...(inputPhase ? { inputPhase } : {}) }) } });
+    const result = await deliver({ targetSession: seat, message: "Still owed" }, { jobId: "quota-result-control", policy: PARKED_OWNER_POLICY_NAME, occurrenceId: "one" });
+    expect(result).not.toHaveProperty("code");
+    if (inputPhase) expect(result).toHaveProperty("inputPhase", inputPhase);
+    else expect(result).not.toHaveProperty("inputPhase");
+  });
+
+  it("does not infer no input from an untyped error with the same text", async () => {
+    const deliver = makeWatchdogDeliver({ sessionTransport: { send: async () => { throw new Error("Held-message quota is full; no input was written."); } } });
+    const result = await deliver({ targetSession: seat, message: "Still owed" }, { jobId: "quota-control", policy: PARKED_OWNER_POLICY_NAME, occurrenceId: "one" });
+    expect(result).not.toHaveProperty("code");
+    expect(result).not.toHaveProperty("inputPhase");
+  });
+
+  it("excludes bound terminal-only parked reminders while preserving other deliberate deliveries", async () => {
+    const sends = vi.fn().mockResolvedValue({ ok: true });
+    const deliver = makeWatchdogDeliver({ sessionTransport: { send: sends }, isTerminalSeat: () => true } as Parameters<typeof makeWatchdogDeliver>[0]);
+    const refused = await deliver({ targetSession: seat, message: "Parked wake" }, { jobId: "terminal-policy", policy: PARKED_OWNER_POLICY_NAME, occurrenceId: "one" });
+    expect(refused).toMatchObject({ status: "failed", code: "terminal_seat", inputPhase: "not_reached" });
+    expect(sends).not.toHaveBeenCalled();
+    const deliberate = await deliver({ targetSession: seat, message: "Explicitly requested terminal text" }, { jobId: "terminal-explicit", policy: "periodic-reminder", occurrenceId: "two" });
+    expect(deliberate.status).toBe("ok");
+    expect(sends).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("blocked parked-owner no-input recovery on the real repository", () => {
+  it.each(["quota", "terminal"].flatMap(kind => ["before", "after"].map(noteTiming => ({ kind, noteTiming }))))("keeps $kind recovery across another seat note $noteTiming creation", async ({ kind, noteTiming }) => {
+    const f = fixture();
+    if (kind === "quota") {
+      await f.hold();
+      const target = resolveGuardTarget(f.db, seat)!;
+      for (let i = 0; i < 100; i++) f.outbox.retain({ outboxId: `blocked-held-${i}`, senderSession: seat, destinationSession: seat, body: "held" }, target);
+    } else f.db.prepare("UPDATE nodes SET runtime='terminal' WHERE id='a'").run();
+    const { repo, jobs, history } = scheduled(f);
+    const row = await repo.create({ sourceSession: "orch@test", destinationSession: seat, body: "Current obligation", nudge: false });
+    repo.update({ qitemId: row.qitemId, actorSession: seat, state: "blocked", blockedOn: "external:fixture", transitionNote: "waiting without a backstop" });
+    const { isBoundTerminalSeat } = await import("../src/domain/terminal-seat.js");
+    const { runStuckSweep } = await import("../src/domain/queue-stuck-sweep.js");
+    const { findQueueRecovery } = await import("../src/domain/queue-recovery.js");
+    const policy = makeParkedOwnerConsumerPolicy({
+      diagnoseRig: () => ({ seats: [{ sessionName: seat, parked: true, activity: { value: "idle-at-prompt", needsInput: { count: 0, reason: null } }, obligations: { items: [], held: [{ qitemId: row.qitemId, healthy: false }] } }] }),
+      history: { listForJob: (id, limit) => history.listForJob(id, limit), countForJob: id => history.countForJob(id) },
+      rows: {
+        listTransitions: id => repo.listTransitions(id).map(t => ({ ...t, ts: t.ts, transitionNote: t.transitionNote ?? null })),
+        appendNote: (qitemId, transitionNote) => { repo.update({ qitemId, actorSession: "watchdog@system", transitionNote }); return { ok: true }; },
+        recordNudgeResult: (id, result) => repo.recordNudgeAttempt(id, result),
+        listOpenIds: destination => repo.listOpenObligations(destination, 500).map(r => r.qitemId),
+        recoveryOwnsWake: id => queueRecoveryOwnsWake(f.db, repo.getById(id)),
+      },
+      retentionState: () => JSON.stringify(f.outbox.retentionUsage("a")),
+      isTerminalSeat: session => isBoundTerminalSeat(f.db, session), occupantGeneration: () => "g1",
+    });
+    const job = jobs.register({ policy: PARKED_OWNER_POLICY_NAME, targetSession: makeRigAnchor("test"), intervalSeconds: 60, registeredBySession: seat, specYaml: "{}" });
+    const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: history, eventBus: new EventBus(f.db), deliver: f.deliver, additionalPolicies: [policy] });
+    await engine.evaluate(job);
+    await engine.evaluate(jobs.getByIdOrThrow(job.jobId));
+    let writes = repo.listTransitions(row.qitemId).length;
+    const nudge = repo.getById(row.qitemId)!.lastNudgeAttempt;
+    for (let i = 0; i < 10; i++) expect((await engine.evaluate(jobs.getByIdOrThrow(job.jobId))).outcome.action).toBe("skip");
+    expect(repo.listTransitions(row.qitemId)).toHaveLength(writes);
+    expect(repo.getById(row.qitemId)!.lastNudgeAttempt).toBe(nudge);
+    const sweep = () => runStuckSweep({ db: f.db, queueRepo: repo, resolveOrchestrator: () => "orch@test", sessionConfirmedMissing: () => false, log: () => {} });
+    if (noteTiming === "before") {
+      repo.update({ qitemId: row.qitemId, actorSession: "observer@test", transitionNote: "Additional diagnostic context; owner has not responded" });
+      writes++;
+    }
+    await sweep();
+    const recovery = findQueueRecovery(f.db, row.qitemId);
+    expect(recovery).not.toBeNull();
+    const finding = repo.getById(recovery!.qitemId)!;
+    expect(finding.destinationSession).toBe("orch@test");
+    expect(repo.waitingView(finding.qitemId)?.nextBackstop).toMatchObject({ owner: "orch@test", mechanism: "queue-stuck-sweep:unclaimed", dueAt: expect.any(String) });
+    if (noteTiming === "after") {
+      repo.update({ qitemId: row.qitemId, actorSession: "observer@test", transitionNote: "More context; owner still has not responded" });
+      writes++;
+      await sweep();
+      expect(repo.getById(finding.qitemId)?.state).toBe("pending");
+    }
+    const count = f.db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number };
+    for (let i = 0; i < 10; i++) { await sweep(); expect((await engine.evaluate(jobs.getByIdOrThrow(job.jobId))).outcome.action).toBe("skip"); }
+    expect((f.db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number }).n).toBe(count.n);
+    expect(findQueueRecovery(f.db, row.qitemId)?.qitemId).toBe(finding.qitemId);
+    expect(repo.listTransitions(row.qitemId)).toHaveLength(writes);
+    repo.update({ qitemId: row.qitemId, actorSession: seat, transitionNote: "Owner response: I am handling this obligation" });
+    await sweep();
+    expect(repo.getById(finding.qitemId)?.state).toBe("done");
+    expect(f.pastes).toHaveLength(0);
+    expect(f.submissions).toHaveLength(0);
   });
 });

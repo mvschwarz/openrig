@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { classifyPaneActivity, inspectComposerInput } from "../src/domain/session-transport.js";
+import { annotateInputBox, classifyPaneActivity, inspectComposerInput } from "../src/domain/session-transport.js";
 import { composerContainsOwnedText, ownCollapsedPaste, type ComposerSnapshot } from "../src/domain/composer-prompts.js";
+import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
 
 function claude(body: string, cursor?: { x: number; y: number }, width = 80): ComposerSnapshot {
   const rows = body.split("\n");
@@ -10,6 +13,46 @@ function claude(body: string, cursor?: { x: number; y: number }, width = 80): Co
 }
 
 describe("cursor-bound composer input", () => {
+  it.each(["", "\x1b[2mAsk Codex to do anything\x1b[22m"])("reads a supported two-row Codex footer without losing empty-input evidence (%s)", body => {
+    const frame = codexTwoRowComposer(body);
+    expect(inspectComposerInput(frame, "codex")).toMatchObject({ state: "empty", cursor: { x: 2, y: 6, width: 42, height: 10 } });
+    if (!body) expect(annotateInputBox(frame.screen, frame.cursor, "codex")).toMatchObject({ status: "empty", confidence: "high" });
+  });
+
+  it.each(["a real draft", "Ask Codex to do anything", "\n", "draft\n› nested prompt"])("keeps authored input with the same two-row footer (%s)", body => {
+    const frame = codexTwoRowComposer(body);
+    expect(inspectComposerInput(frame, "codex").state).toBe("text");
+  });
+
+  it("does not turn capture's unstyled placeholder heuristic into authority to close a tile", () => {
+    const frame = codexTwoRowComposer("Ask Codex to do anything");
+    expect(annotateInputBox(frame.screen, frame.cursor, "codex")).toMatchObject({ status: "empty", confidence: "high" });
+    expect(inspectComposerInput(frame, "codex").state).toBe("text");
+    const moved = codexTwoRowComposer("\x1b[2mAsk Codex to do anything\x1b[22m"); moved.cursor.x = 4;
+    expect(inspectComposerInput(moved, "codex").state).toBe("text");
+  });
+
+  it("keeps competing cursor-bound prompts ambiguous under the supported footer", () => {
+    const frame = codexTwoRowComposer("\n› "); frame.cursor.y = 7; frame.cursor.x = 4;
+    expect(inspectComposerInput(frame, "codex")).toMatchObject({ state: "unknown", unknownReason: "ambiguous_composer" });
+  });
+
+  it("does not read a numbered choice as an empty composer under the supported footer", () => {
+    expect(inspectComposerInput(codexTwoRowComposer("1. Approve action"), "codex").state).toBe("unknown");
+  });
+
+  it.each([
+    ["missing separator", (frame: ComposerSnapshot) => { frame.screen = frame.screen.replace("\n\n  Model", "\n  Model"); }],
+    ["unknown hint", (frame: ComposerSnapshot) => { frame.screen = frame.screen.replace("? for shortcuts                ⚠ 1 · f2", "unrecognized footer"); }],
+    ["third footer row", (frame: ComposerSnapshot) => { frame.screen += "  unexpected footer\n"; frame.cursor.height++; }],
+    ["copy mode", (frame: ComposerSnapshot) => { frame.inMode = true; }],
+    ["incomplete frame", (frame: ComposerSnapshot) => { frame.cursor.height = 8; }],
+    ["cursor outside composer", (frame: ComposerSnapshot) => { frame.cursor.y = 0; }],
+  ] as const)("keeps %s unknown with a two-row Codex footer", (_label, change) => {
+    const frame = codexTwoRowComposer(); change(frame);
+    expect(inspectComposerInput(frame, "codex").state).toBe("unknown");
+  });
+
   it("keeps nested prompt examples inside the current draft, including when its head is clipped", () => {
     const body = "intro\n────────────────────\n❯ \n────────────────────\n? for shortcuts\n────────────────────\n❯ ";
     const snapshot = claude(body, { x: 4, y: 8 });
@@ -32,6 +75,22 @@ describe("cursor-bound composer input", () => {
     const ghost = "Summarize the recent changes";
     expect(inspectComposerInput(claude(`\x1b[2m${ghost}\x1b[22m`, { x: 2, y: 2 })).state).toBe("empty");
     expect(inspectComposerInput(claude(ghost, { x: 2, y: 2 })).state).toBe("text");
+  });
+
+  it("ignores a suggestion whose words are dim and whose spaces aren't, as capture does, in a native Claude frame (#2428)", () => {
+    const lines = readFileSync(join(import.meta.dirname, "fixtures/input-box/claude-code-2.1.296/openrig-seat-accept-edits-idle.txt"), "utf8")
+      .replace(/\n$/, "").split("\n");
+    const row = lines.findLastIndex(line => line.startsWith("❯"));
+    const prompt = (text: string): ComposerSnapshot => {
+      const screen = [...lines]; screen[row] = `\x1b[0m❯ ${text}`;
+      return { screen: screen.join("\n"), cursor: { x: 2, y: row, width: 80, height: lines.length }, inMode: false };
+    };
+    const dim = (text: string) => `\x1b[2m${text}\x1b[22m`;
+    const suggestion = prompt(["fix", "typecheck", "errors"].map(dim).join(" "));
+    expect(annotateInputBox(suggestion.screen, suggestion.cursor, "claude-code")).toMatchObject({ status: "likely-suggestion", confidence: "high" });
+    expect(inspectComposerInput(suggestion)).toMatchObject({ state: "empty", suggestionRows: ["fix typecheck errors"] });
+    // A word the person typed among dim ones keeps it a draft.
+    expect(inspectComposerInput(prompt(`fix ${dim("typecheck")} ${dim("errors")}`)).state).toBe("text");
   });
 
   it("excludes only a wholly dim suffix after the cursor when identifying staged text", () => {
@@ -104,6 +163,18 @@ describe("cursor-bound composer input", () => {
     expect(composerContainsOwnedText(words, "one two three")).toBe(true);
     expect(composerContainsOwnedText(words, "one  two three")).toBe(false);
     expect(composerContainsOwnedText(inspectComposerInput(claude("one\ntwo")), "one two")).toBe(false);
+  });
+
+  it("finds a delivery's own text in Claude's native wrapped rows, which wrap short of the box (#2429)", () => {
+    const fixtures = join(import.meta.dirname, "fixtures/input-box");
+    const lines = readFileSync(join(fixtures, "claude-code-2.1.296/staged-wrapped.raw.txt"), "utf8").replace(/\n$/, "").split("\n");
+    const text = readFileSync(join(fixtures, "texts/wrapped.txt"), "utf8").replace(/\n$/, "");
+    const last = lines.findLastIndex(line => line.startsWith("❯")) + 2;
+    const input = inspectComposerInput({ screen: lines.join("\n"), cursor: { x: lines[last]!.trimEnd().length, y: last, width: 120, height: lines.length }, inMode: false });
+    expect(input).toMatchObject({ state: "text", cursorAtEnd: true });
+    expect(input.rows).toHaveLength(3);
+    expect(composerContainsOwnedText(input, text)).toBe(true);
+    expect(composerContainsOwnedText(input, text.replace("asked", "ASKED"))).toBe(false);
   });
 
   it("matches Unicode cell widths and treats an opaque paste as separately owned evidence", () => {

@@ -2,9 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { setupCommand, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
 
-// Exercise the real command/result path without probing or changing this host.
+// Exercise the real command/result path without probing or changing this host. A case can set the doctor checks.
+const doctor = vi.hoisted(() => ({ checks: [] as Array<Record<string, unknown>> }));
 vi.mock("../src/commands/doctor.js", () => ({
-  runDoctorChecks: () => ({ checks: [], asyncChecks: [] }),
+  runDoctorChecks: () => ({ checks: doctor.checks, asyncChecks: [] }),
 }));
 vi.mock("../src/config-store.js", () => ({
   ConfigStore: class {
@@ -168,5 +169,45 @@ describe("the installer's setup boundary", () => {
     expect(r.exitCode).toBe(1);
     expect(r.attention).toContain("claude_auth: Claude Code is installed but not ready to launch: Command timed out after 10000ms");
     expect(r.attention).not.toMatch(/not logged in/i);
+  });
+
+  // A failed doctor check leaves setup not ready, so it's listed too. A provider check is a reused step, so it isn't
+  // listed twice.
+  it("a failed doctor check: exit 1, listed with its Fix, and a reused provider step listed once", async () => {
+    doctor.checks = [
+      { name: "port", status: "fail", message: "Port 127.0.0.1:7433 is in use by another process.",
+        fix: "Stop the process using port 7433, or start the daemon on a different port with: rig daemon start --port <port>" },
+      { name: "claude_auth", status: "fail", message: "Claude Code is installed but not ready to launch: Not logged in" },
+    ];
+    try {
+      const r = await run((cmd) => { if (cmd === "claude auth status") throw new Error("Not logged in"); return ok(cmd); });
+      expect(r.exitCode).toBe(1);
+      expect(r.attention).toContain("port: Port 127.0.0.1:7433 is in use by another process.");
+      expect(r.attention).toContain("Fix: Stop the process using port 7433");
+      expect(r.attention.split("claude_auth:").length - 1).toBe(1);
+    } finally {
+      doctor.checks = [];
+    }
+  });
+
+  // A first user on a shared machine whose configured port is served by another OS user's OpenRig daemon, or a share set
+  // up through config alone: setup stays ready and exits 0, and still shows whose daemon it is and the way on.
+  it("another user's daemon on the configured port: exit 0, Setup complete, and the warning listed with its Fix", async () => {
+    doctor.checks = [
+      { name: "port", status: "warn",
+        message: "Port 127.0.0.1:7433 is in use by an OpenRig daemon of another OS user: the endpoint reports euid 1001; your euid is 1002.",
+        fix: "To run your own, give this OpenRig home a free port and start its daemon there." },
+      { name: "cmux", status: "warn", message: "cmux is not installed." },
+    ];
+    try {
+      const r = await run(ok);
+      expect(r.exitCode).toBeUndefined();
+      expect(r.output).toContain("Setup complete.");
+      expect(r.attention).toContain("port: Port 127.0.0.1:7433 is in use by an OpenRig daemon of another OS user: the endpoint reports euid 1001");
+      expect(r.attention).toContain("Fix: To run your own, give this OpenRig home a free port and start its daemon there.");
+      expect(r.attention).not.toContain("cmux:");
+    } finally {
+      doctor.checks = [];
+    }
   });
 });

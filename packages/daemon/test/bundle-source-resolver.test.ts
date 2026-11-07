@@ -1,10 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 // TODO: AS-T12 — migrate to pod-aware bundle assembler
 import { LegacyBundleAssembler as BundleAssembler, type AssemblerFsOps } from "../src/domain/bundle-assembler.js";
 import { computeIntegrity, writeIntegrity, type IntegrityFsOps } from "../src/domain/bundle-integrity.js";
+import { existingArchive, MARKER } from "./helpers/bundle-login-fixture.js";
+import { parse, stringify } from "yaml";
 import { pack } from "../src/domain/bundle-archive.js";
 // TODO: AS-T12 — migrate to pod-aware bundle source resolver
 import { LegacyBundleSourceResolver as BundleSourceResolver } from "../src/domain/bundle-source-resolver.js";
@@ -349,5 +351,40 @@ describe("PodBundleSourceResolver", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+
+describe("bundle resolver unpack warnings", () => {
+  it.skipIf(process.platform === "win32").each([1, 2] as const)("returns credential and failed-cap warnings through schema %s resolution", async schema => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "resolver-warnings-"));
+    const login = "agents/worker/.codex/auth.json";
+    const f = await existingArchive(root, [login], [login], schema);
+    // A real package lets the legacy resolver finish its normal validation too.
+    const pkg = "agents/worker/package.yaml";
+    fs.writeFileSync(path.join(f.staging, pkg), VALID_PKG_MANIFEST);
+    const manifest = parse(fs.readFileSync(path.join(f.staging, "bundle.yaml"), "utf8"));
+    const { createHash } = await import("node:crypto");
+    manifest.integrity.files[pkg] = createHash("sha256").update(VALID_PKG_MANIFEST).digest("hex");
+    fs.writeFileSync(path.join(f.staging, "bundle.yaml"), stringify(manifest));
+    fs.chmodSync(path.join(f.staging, login), 0o755);
+    await pack(f.staging, f.archive);
+    const { PodBundleSourceResolver } = await import("../src/domain/bundle-source-resolver.js");
+    const resolver = schema === 1 ? new BundleSourceResolver({ fsOps: realFsOps() }) : new PodBundleSourceResolver();
+    const chmod = fs.chmodSync;
+    const spy = vi.spyOn(fs, "chmodSync").mockImplementation((file, mode) => {
+      if (String(file).endsWith(login) && mode === 0o600) throw Object.assign(new Error("fixture"), { code: "EPERM" });
+      return chmod(file, mode);
+    });
+    try {
+      const result = await resolver.resolve(f.archive);
+      try {
+        expect(result.warnings).toHaveLength(2);
+        expect(result.warnings?.[0]).toContain("Credential-bearing bundle includes");
+        expect(result.warnings?.[1]).toContain(`chmod failed for '${login}'`);
+        expect(result.warnings?.join("\n")).not.toContain(MARKER);
+        expect(fs.readFileSync(path.join(result.tempDir, login), "utf8")).toBe(MARKER);
+      } finally { resolver.cleanup(result.tempDir); expect(fs.existsSync(result.tempDir)).toBe(false); }
+    } finally { spy.mockRestore(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 });

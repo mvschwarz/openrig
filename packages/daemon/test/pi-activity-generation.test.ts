@@ -75,7 +75,7 @@ describe("Pi occupant-bound activity (#29)", () => {
     }
     f.core.handlePiExit(0);
     const responses = await f.flush();
-    expect(f.payloads).toHaveLength(7);
+    expect(f.payloads).toHaveLength(8); // the run's accepted turn, its five events' hooks, the identity post and the exit
     for (const payload of f.payloads) expect(payload).toMatchObject({
       nodeId: NODE, sessionName: SESSION, runtime: "pi", generation: GENERATION,
     });

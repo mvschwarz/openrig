@@ -87,7 +87,10 @@ export function workspaceCommand(depsOverride?: WorkspaceDeps): Command {
     .description(
       "Walk a workspace root, parse each .md file's YAML frontmatter, and emit a structured gap report. Advisory only — never modifies files. Default root: cwd.",
     )
-    .option("--kind <kind>", "Workspace kind to validate against: user | project | knowledge | lab | delivery")
+    .option(
+      "--kind <kind>",
+      "Workspace kind to validate against: user | project | knowledge | lab | delivery",
+    )
     .option("--no-recursive", "Do not descend into subdirectories")
     .option("--require-frontmatter", "Report a gap for every .md file without a frontmatter delimiter")
     .option("--max-files <n>", "Hard cap on .md files walked", "10000")
@@ -125,7 +128,13 @@ export function workspaceCommand(depsOverride?: WorkspaceDeps): Command {
             maxFiles,
           });
           if (res.status >= 400) {
-            console.error(JSON.stringify(res.data, null, 2));
+            if (opts.json) {
+              console.error(JSON.stringify(res.data, null, 2));
+            } else {
+              const data = res.data as { message?: string; error?: string } | null | undefined;
+              const msg = data?.message ?? data?.error ?? `Validate failed (HTTP ${res.status})`;
+              console.error(msg);
+            }
             process.exitCode = 1;
             return;
           }

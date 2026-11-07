@@ -61,6 +61,28 @@ function makeCtx(overrides?: Partial<ResolutionContext>): ResolutionContext {
 }
 
 describe("Profile resolver + precedence engine", () => {
+  it("reports a non-string skill in the selected profile without rejecting an unused profile", () => {
+    const raw = { name: "test-agent", version: "1.0", profiles: { default: { uses: {} }, malformed: { uses: { skills: [42] } } } };
+    const spec = normalizeAgentSpec(raw);
+    const baseSpec = makeResolved(spec);
+    expect(resolveNodeConfig(makeCtx({ baseSpec })).ok).toBe(true);
+    const result = resolveNodeConfig(makeCtx({ baseSpec, profileName: "malformed" }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toContain('Profile "malformed" has a non-string skill ID');
+  });
+
+  it("resolves a scalar selection and reports a missing selected scalar", () => {
+    const raw = { name: "test-agent", version: "1.0", resources: { guidance: [{ id: "guide", path: "guide.md" }] }, profiles: { default: { uses: { guidance: "guide" } }, unused: { uses: { guidance: "missing" } } } };
+    const spec = normalizeAgentSpec(raw);
+    const result = resolveNodeConfig(makeCtx({ baseSpec: makeResolved(spec) }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.selectedResources.guidance[0]?.effectiveId).toBe("guide");
+
+    const missing = resolveNodeConfig(makeCtx({ baseSpec: makeResolved(spec), profileName: "unused" }));
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.errors.join(" ")).toContain("missing");
+  });
+
   // T1: profile selects from combined base+import pool
   it("profile selects from combined base+import pool with effectiveId and sourcePath", () => {
     const importSpec = makeSpec({
@@ -920,7 +942,7 @@ describe("selected plugin skills", () => {
     return plugin;
   }
 
-  function resolveWithPlugin(root: string, plugin: string, skills: Array<{ id: string; path: string }>) {
+  function resolveWithPlugin(root: string, plugin: string, skills: Array<{ id: string; path: string }>, runtime = "claude-code") {
     const spec = makeSpec({
       resources: { skills, guidance: [], subagents: [], plugins: [{ id: "core", source: { kind: "local", path: plugin } }], runtimeResources: [] },
       profiles: {
@@ -929,11 +951,54 @@ describe("selected plugin skills", () => {
     });
     return resolveNodeConfig(makeCtx({
       baseSpec: makeResolved(spec, root),
-      member: makeMember({ cwd: join(root, "work") }),
+      member: makeMember({ cwd: join(root, "work"), runtime }),
       skillsRoot: join(root, "no-catalog"),
       homedir: join(root, "home"),
     }));
   }
+
+  /** An openrig-core plugin copy at `dir`, with both manifests and one skill. */
+  function writeCore(dir: string): string {
+    for (const manifest of [".claude-plugin", ".codex-plugin"]) {
+      mkdirSync(join(dir, manifest), { recursive: true });
+      writeFileSync(join(dir, manifest, "plugin.json"), JSON.stringify({ name: "openrig-core", version: "0.1.0" }));
+    }
+    mkdirSync(join(dir, "skills", "refocusing"), { recursive: true });
+    writeFileSync(join(dir, "skills", "refocusing", "SKILL.md"), "---\nname: refocusing\ndescription: Use when testing refocusing.\n---\n\n# core\n");
+    return dir;
+  }
+
+  /** Run with OPENRIG_HOME at `root`, so <root>/plugins/openrig-core is the vendored copy a Claude seat loads itself. */
+  function withHome<T>(root: string, run: () => T): T {
+    const previous = process.env.OPENRIG_HOME;
+    process.env.OPENRIG_HOME = root;
+    try { return run(); } finally {
+      if (previous === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = previous;
+    }
+  }
+
+  const loadoutIds = (result: ReturnType<typeof resolveWithPlugin>) =>
+    result.ok ? (result.config.skillLoadout?.entries ?? []).map((entry) => entry.id) : [JSON.stringify(result)];
+
+  it("leaves the vendored openrig-core plugin's skills out of a Claude seat's loadout: the seat loads that plugin itself", () => {
+    const root = mkdtempSync(join(tmpdir(), "openrig-profile-core-plugin-"));
+    try {
+      const vendored = writeCore(join(root, "plugins", "openrig-core"));
+      expect(withHome(root, () => loadoutIds(resolveWithPlugin(root, vendored, [])))).toEqual([]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("keeps openrig-core's skills in the loadout for a Codex seat, and for a Claude seat that selected another copy", () => {
+    const root = mkdtempSync(join(tmpdir(), "openrig-profile-core-plugin-kept-"));
+    try {
+      const vendored = writeCore(join(root, "plugins", "openrig-core"));
+      const other = writeCore(join(root, "elsewhere", "openrig-core"));
+      // Codex loads its own installed copy only when the person's Codex config enables it, so the loadout keeps them.
+      expect(withHome(root, () => loadoutIds(resolveWithPlugin(root, vendored, [], "codex")))).toEqual(["refocusing"]);
+      // A copy other than the vendored one isn't loaded by the seat, so its skills still come through the loadout.
+      expect(withHome(root, () => loadoutIds(resolveWithPlugin(root, other, [])))).toEqual(["refocusing"]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 
   it("adds a selected plugin's skills to the managed loadout, not to the plan's skill entries", () => {
     const root = mkdtempSync(join(tmpdir(), "openrig-profile-plugin-skills-"));

@@ -39,7 +39,7 @@ const MARK_SGR = {
   clawdBodyFg: "38;2;173;103;85", // clawd body ink (downsample forms)
   clawdEyeFg: "38;2;24;24;24", // clawd eyes             #181818
   terminalCellBg: "48;2;12;10;9", // terminal mark dark cell
-  markInkFg: "38;2;250;250;249", // codex `>_` light ink
+  markInkFg: "\x1b[1;39m_", // codex `>_` ink: the terminal's default foreground (#2498)
   codexBlueFg: "38;2;104;103;170", // OFFICIAL sampled       #6867aa
 } as const;
 const MARK_GLYPHS = /[▘▝▖▗▚▞▐▌█▀▄╹]|>_|></; // incl. the picks-v4 eyes pair

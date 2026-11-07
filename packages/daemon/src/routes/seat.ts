@@ -25,6 +25,7 @@ import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import type { SessionTransport } from "../domain/session-transport.js";
 import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
+import { PERMISSIONS_DENY } from "../domain/runner-permissions.js";
 
 export const seatRoutes = new Hono();
 
@@ -50,8 +51,9 @@ seatRoutes.post("/set-typing-guard/:seatRef", async c => {
     || body.holdSeconds !== undefined || body.maxAttempts !== undefined) {
     return c.json({ error: "Supply exactly one enabled boolean or mode, and a reason" }, 400);
   }
-  const actor = transportSenderSession(c);
-  if (!actor) return c.json({ error: "Sender identity required for preference audit" }, 400);
+  // #2350: a seat's transport identity is the recorded actor. An ordinary terminal has none; the change still applies and
+  // the guard records it as unattributed. The body never names the actor.
+  const actor = transportSenderSession(c) ?? null;
   try {
     const target = guard.target(c.req.param("seatRef"));
     const preference = await guard.set(target.nodeId, { mode: body.mode ?? (body.enabled ? "hold" : "off") }, actor, body.reason);
@@ -100,7 +102,8 @@ seatRoutes.post("/retire-held-message/:seatRef/:id", async c => {
 
 seatRoutes.get("/status/:seatRef", (c) => {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
-  const service = new SeatStatusService({ rigRepo, compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined });
+  const service = new SeatStatusService({ rigRepo, activityStore: c.get("agentActivityStore" as never) as import("../domain/agent-activity-store.js").AgentActivityStore | undefined,
+    compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined });
   const result = service.getStatus(c.req.param("seatRef")!);
 
   if (result.ok) {
@@ -125,7 +128,8 @@ seatRoutes.get("/status/:seatRef", (c) => {
 seatRoutes.get("/status/node/:nodeId", (c) => {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   const nodeId = c.req.param("nodeId")!.trim();
-  const result = new SeatStatusService({ rigRepo, compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined }).getStatusByNodeId(nodeId);
+  const result = new SeatStatusService({ rigRepo, activityStore: c.get("agentActivityStore" as never) as import("../domain/agent-activity-store.js").AgentActivityStore | undefined,
+    compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined }).getStatusByNodeId(nodeId);
   if (!result.ok) return c.json(result, result.code === "seat_ref_required" ? 400 : 404);
   const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
   const runtimeSwitch = runtimeSwitchSummary(rigRepo.db, { nodeId });
@@ -229,7 +233,7 @@ function handoverDeps(c: Context): ConstructorParameters<typeof SeatHandoverServ
 }
 
 /** Slice 16: the live runtime switch, sharing the handover's dependencies. */
-function runtimeSwitchService(c: Context): SeatRuntimeSwitchService {
+export function runtimeSwitchService(c: Context): SeatRuntimeSwitchService {
   const instantiator = c.get("podInstantiator" as never) as { runtimeSwitchMaterialContext?: () => { skillsRoot?: string; systemSkills?: string[]; systemWorldError?: string } } | undefined;
   return new SeatRuntimeSwitchService({ ...handoverDeps(c), queueRepo: c.get("queueRepo" as never) as QueueRepository | undefined,
     materialResolution: instantiator?.runtimeSwitchMaterialContext?.(), openrigHome: OPENRIG_HOME });
@@ -247,11 +251,14 @@ seatRoutes.post("/set-runtime/:seatRef", async (c) => {
   const body = parsed as Record<string, unknown>;
   const text = (key: string): string | undefined | null => body[key] === undefined ? undefined : typeof body[key] === "string" ? body[key] as string : null;
   const fields = { runtime: text("runtime"), reason: text("reason"), model: text("model"), effort: text("effort"),
-    codexConfigProfile: text("codexConfigProfile"), permissionMode: text("permissionMode") };
+    codexConfigProfile: text("codexConfigProfile"), permissionMode: text("permissionMode"), accountHome: text("accountHome"), accountLabel: text("accountLabel"), tokenFile: text("tokenFile") };
   const wrong = Object.entries(fields).find(([, value]) => value === null);
   if (wrong) return c.json({ ok: false, code: "invalid_runtime_settings", message: `${wrong[0]} must be a string.` }, 400);
   if (body["dryRun"] !== undefined && typeof body["dryRun"] !== "boolean") {
     return c.json({ ok: false, code: "invalid_runtime_settings", message: "dryRun must be true or false." }, 400);
+  }
+  if (body["clearAccountHome"] !== undefined && typeof body["clearAccountHome"] !== "boolean") {
+    return c.json({ ok: false, code: "invalid_runtime_settings", message: "clearAccountHome must be true or false." }, 400);
   }
   const timeout = body["confirmTimeoutSeconds"];
   if (timeout !== undefined && (typeof timeout !== "number" || !Number.isInteger(timeout) || timeout < 10 || timeout > 3600)) {
@@ -263,6 +270,9 @@ seatRoutes.post("/set-runtime/:seatRef", async (c) => {
     ...(fields.model ? { model: fields.model } : {}), ...(fields.effort ? { effort: fields.effort } : {}),
     ...(fields.codexConfigProfile ? { codexConfigProfile: fields.codexConfigProfile } : {}),
     ...(fields.permissionMode ? { permissionMode: fields.permissionMode } : {}),
+    ...(fields.accountHome !== undefined ? { accountHome: fields.accountHome! } : {}),
+    ...(body["clearAccountHome"] === true ? { clearAccountHome: true } : {}),
+    ...(fields.tokenFile !== undefined ? { accountToken: { label: fields.accountLabel ?? "selected-account", tokenFile: fields.tokenFile! } } : {}),
     ...(typeof timeout === "number" ? { confirmTimeoutMs: timeout * 1000 } : {}),
   });
   if (result.ok) return c.json(result, "recoveryPending" in result && result.recoveryPending ? 202 : 200);
@@ -342,6 +352,7 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
 // One service, one resolution path, one status mapping shared by all three verbs.
 export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifecycleService {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
+  const queueRepo = c.get("queueRepo" as never) as import("../domain/queue-repository.js").QueueRepository | undefined;
   return new SeatLifecycleService({
     db: rigRepo.db,
     rigRepo,
@@ -355,17 +366,20 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
     transcripts: (c.get("contextUsageStore" as never) as ContextUsageStore | undefined) ?? undefined,
     piRecords: (c.get("currentModelReader" as never) as import("../domain/model-divergence/current-model-reader.js").CurrentModelReader | undefined) ?? undefined,
+    humanRegistry: queueRepo ? () => queueRepo.humanRegistry() : undefined,
   });
 }
 
 function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
     || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy"
-    || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition") return 400;
+    || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition"
+    || code === "missing_permissions_to" || code === "permissions_to_not_a_person") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
-    || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed") return 500;
+    || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
+    || code === "permissions_to_unavailable") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;
@@ -464,6 +478,27 @@ const setEffortHandler = async (c: Context) => {
 };
 seatRoutes.post("/set-effort/:seatRef", setEffortHandler);
 seatRoutes.post("/set-effort/node/:nodeId", setEffortHandler);
+
+// Choose (or, with clear: true, remove) the registered person who answers this seat's runner permission requests.
+// Audited; like set-permissions, the actor is required.
+seatRoutes.post("/set-permissions-to/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const actor = transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"].trim() : "");
+  if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
+  const clear = body["clear"] === true;
+  const deny = body["deny"] === true;
+  if ([clear, deny, body["to"] !== undefined].filter(Boolean).length > 1) {
+    return c.json({ ok: false, code: "missing_permissions_to", message: "Pass one of a person, clear or deny." }, 400);
+  }
+  const result = seatLifecycleService(c).setPermissionsTo({
+    seatRef: c.req.param("seatRef"),
+    to: deny ? PERMISSIONS_DENY : clear ? null : typeof body["to"] === "string" ? body["to"] : "",
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: actor,
+  });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+});
 
 // OPR.0.7.0.7 — read one seat's effort four ways: requested, saved, emitted at launch, observed natively.
 seatRoutes.get("/effort/:seatRef", async (c) => {

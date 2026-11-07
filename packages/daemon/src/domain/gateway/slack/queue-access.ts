@@ -73,6 +73,15 @@ export interface InboundQueuePort {
   createQitem(input: CreateQitemInput): Promise<string>;
   getQitem?(qitemId: string): QueueItem | null;
   getHumanAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
+  /** Whether a decision parked on the person it asked takes this person's reply, sent at `ts`, as its answer. */
+  answersPark?(qitemId: string, actorSession: string, ts: string | undefined): boolean;
+  /** This person's returned answer to the current question of a decision parked on them; never an earlier one. */
+  getEpisodeAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
+  /** Every answer this person returned to the ask, oldest first, so a replay after close can find its own. */
+  listHumanAnswers?(qitemId: string, actorSession: string): Array<{ qitemId: string; body: string }>;
+  /** Whether a reply routed to `destination` can answer the row: routed to a person, only when that person is the row's
+   *  asking seat (the sender of an ask to a person). A root recorded with a person as its seat routes to someone else. */
+  routesToAsker?(qitemId: string, destination: string): boolean;
 }
 
 /** What the outbound driver needs: the current human-alert set, full items included. */
@@ -205,39 +214,45 @@ export function makeQueuePorts(
   opts: { loadHumanRegistry?: () => LoadResult; sharedChannels?: () => ReadonlyArray<{ address: string }> } = {},
 ): InboundQueuePort & OutboundQueuePort & { listOpenAsks(filter: AlertFilterOpts): Promise<OpenAskEpisode[]> } {
   /** Each active row's current owner-notification episode, projected to its person or shared channel. Posted episodes
-   *  are skipped unless asked for (the alert sweep never wants them). Null when nobody is registered. */
+   *  are skipped unless asked for (the alert sweep never wants them). Null when nobody is registered.
+   *
+   *  Eligibility lives in the query now: an active row must carry an owner notification, and — for the alert sweep —
+   *  it must still be unposted to Slack. Only eligible rows reach the per-row lookup, so a pathological backlog of
+   *  active rows without any notification costs a single read instead of one latest-transition and one receipt lookup
+   *  per row. There is no row cap: an eligible item older than any window still comes back in both views. */
   const currentEpisodes = (includePosted: boolean): Array<{ item: QueueItem; posted: boolean }> | null => {
     // Nobody registered yet isn't a broken registry: rows to a registered shared channel still post (0.7.3).
     const people = registeredPeople((opts.loadHumanRegistry ?? (() => loadHumanRegistry()))());
     if (!people) return null;
     const channels = (opts.sharedChannels ?? (() => sharedChannelAddresses()))();
-    // Avoid building waiting/recovery views for rows with no unposted owner notification.
-    // Keep list(activeOnly)'s selection, ordering and cap; this remains an O(N) ID scan.
-    const ids = queueRepo.db.prepare(
-      `SELECT qitem_id FROM queue_items
-       WHERE state IN ('pending', 'in-progress', 'blocked')
-       ORDER BY CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END, ts_created DESC
-       LIMIT ?`,
-    ).all(1000000) as Array<{ qitem_id: string }>;
-    return ids.flatMap(({ qitem_id: qitemId }) => {
-      const transition = queueRepo.transitionLog.latestOwnerNotificationForQitem(qitemId);
-      if (!transition) return [];
-      const notificationKey = `${qitemId}:${transition.transitionId}`;
-      const posted = queueRepo.transitionLog.hasOwnerNotificationReceipt(qitemId, notificationKey);
-      if (posted && !includePosted) return [];
+    // A person with no connector binding is reached in the Feed and Steering only, so nothing posts for them.
+    const slackPeople = people.filter((person) => person.connectorBindings.length > 0);
+    const episodes = queueRepo.transitionLog.activeOwnerNotificationEpisodes(includePosted);
+    return episodes.flatMap(({ qitemId, transition, posted }) => {
       const row = queueRepo.getById(qitemId);
       if (!row) return [];
-      const item = project(row, transition, people, channels);
+      const item = project(row, transition, slackPeople, channels);
       return item ? [{ item, posted }] : [];
     });
   };
   return {
     getQitem: (qitemId) => queueRepo.getById(qitemId),
     getHumanAnswer: (qitemId, actorSession) => queueRepo.getHumanAnswer(qitemId, actorSession),
+    answersPark: (qitemId, actorSession, ts) => {
+      const item = queueRepo.getById(qitemId);
+      return item !== null && queueRepo.answersPark(item, actorSession, ts);
+    },
+    getEpisodeAnswer: (qitemId, actorSession) => queueRepo.currentEpisodeAnswer(qitemId, actorSession),
+    listHumanAnswers: (qitemId, actorSession) => queueRepo.listHumanAnswers(qitemId, actorSession),
+    routesToAsker: (qitemId, destination) => {
+      const item = queueRepo.getById(qitemId);
+      return !queueRepo.isPersonAddress(destination) || (item !== null && destination === item.sourceSession);
+    },
     async createQitem(input: CreateQitemInput): Promise<string> {
       const ask = input.inReplyTo ? queueRepo.getById(input.inReplyTo) : null;
-      const directAnswer = input.humanAnswer && ask && ask.destinationSession === input.source && ask.humanIntent !== "update"
-        && queueRepo.isPersonAddress(input.source);
+      // The asked person's answer, or another registered person's: either takes the ask's one shared answer identity.
+      const directAnswer = input.humanAnswer && ask && ask.humanIntent !== "update" && queueRepo.isPersonAddress(ask.destinationSession)
+        && queueRepo.answersAsk(ask, input.source) && queueRepo.isPersonAddress(input.source);
       const createInput = {
         qitemId: input.qitemId,
         sourceSession: input.source,
@@ -249,9 +264,15 @@ export function makeQueuePorts(
         inboundReplyTo: input.inReplyTo ?? null,
         gatewayInbound: true,
       };
-      const created = directAnswer && input.inReplyTo
-        ? await queueRepo.createHumanAnswer({ ...createInput, inboundReplyTo: input.inReplyTo })
+      let created = directAnswer && input.inReplyTo
+        ? await queueRepo.createHumanAnswer({ ...createInput, inboundReplyTo: input.inReplyTo,
+          // A parked decision's answer, typed or clicked, belongs to its current question, so a re-park gets its own.
+          ...(ask?.state === "blocked" ? { episodeKey: queueRepo.currentHumanRequiredEpisode(input.inReplyTo)?.key } : {}) })
         : await queueRepo.create(createInput);
+      // Another registered person's answer already settled the ask: these words still reach the agent, as correspondence.
+      if (directAnswer && created.qitemId !== input.inReplyTo && created.sourceSession !== input.source) {
+        created = await queueRepo.create({ ...createInput, tags: createInput.tags.filter((tag) => tag !== "human-answer") });
+      }
       return (created as unknown as { qitemId: string }).qitemId;
     },
     async listHumanAlerts(filter: AlertFilterOpts): Promise<QueueItem[]> {

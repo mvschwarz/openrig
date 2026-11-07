@@ -30,10 +30,25 @@ With neither a provider nor a session, the daemon's open and preview APIs try
 a live Herdr first, then a live cmux. An explicit session always selects Herdr
 and skips that fallback, including when the daemon's default Herdr endpoint is down.
 
-An explicit session resolves under the daemon user's Herdr session directory;
-it takes precedence over that daemon's default socket override. The selection
-belongs to the request. Saved views still describe membership and layout, so
-pass `--session` again when reopening the view in that session.
+Session paths use the daemon's `XDG_CONFIG_HOME` when set, or `HOME/.config`
+when unset. Relative paths (including an empty value) resolve from the daemon's
+startup directory, matching Herdr's configuration selection. Named sessions live under
+`herdr/sessions/<name>/herdr.sock`; `default` uses `herdr/herdr.sock` directly.
+These settings are captured when the daemon starts.
+
+If the requested name equals the daemon's `HERDR_SESSION`, it keeps that
+session's explicit `HERDR_SOCKET_PATH`. A different requested name uses the
+configuration-tree path, without reusing the override or inferring a session
+from an arbitrary socket path. With an explicit socket but no configured
+session name, omit `--session` to keep that exact endpoint. A missing selected
+socket never falls back to another session. Viewer and follow operations carry
+that exact socket to the CLI through `HERDR_SOCKET_PATH`, without an explicit
+CLI `--session` that would override it. They check that the CLI reports the
+selected socket before changing its panes. Daemon-side CLI calls retain the
+startup environment; desktop follow uses the socket confirmed by the daemon.
+
+The selection belongs to the request. Saved views still describe membership
+and layout, so pass `--session` again when reopening the view in that session.
 
 The existing view rules apply: saved views, rig and pod views, read-only mission
 and slice views, pagination, absent seats and partial results all use the same
@@ -169,7 +184,7 @@ GET /api/terminal/preview?view=qitem:<id>&provider=herdr
 POST /api/terminal/open {"view":"qitem:<id>","provider":"herdr","expectedPlan":"<preview planId>"}
 ```
 
-Preview and open include `task: {qitemId, name, complete, issues, members}`. Each member
+Preview and open include `task: {kind:"qitem", id, qitemId, name, complete, issues, members}`. Each member
 names its structured `{hostId, nodeId}` key (null when unresolved), seat,
 contributing `obligations`, `availability` and `viewerStatus`. Stopped, missing,
 external and unresolved remote owners remain visible. Remote queues are not
@@ -285,9 +300,181 @@ small presentation provenance, separate from queue membership. Herdr display
 labels are not that provenance. Other providers/platforms remain unsupported
 for ensure-viewer until qualified; ordinary open retains its existing behavior.
 
-Writable tile clients use `tmux attach -f ignore-size`; read-only clients keep
-`-r` (which also implies ignore-size). This can avoid contributing to sizing
-when other clients establish the agent window's dimensions. It is **not resize
-isolation**: opening a tile can change the agent's terminal size when it is the
-only sizing client. Observers of a Herdr terminal do not themselves resize it;
+A writable tile attaches with `tmux attach -f ignore-size` when its session
+already has a client that sizes it, so the tile doesn't fight that client over
+the agent window's dimensions. When the session has no sizing client, as with a
+freshly launched seat, the tile attaches without the flag and sizes the window
+itself: tmux applies ignore-size across the whole server, so a session viewed
+only by ignore-size clients would otherwise keep its 80x24 creation size while
+any other session has a sizing client. Read-only clients keep `-r` (which also
+implies ignore-size), and the printed manual attach commands keep
+`-f ignore-size`. This is **not resize isolation**: opening a tile can change
+the agent's terminal size. Observers of a Herdr terminal do not themselves resize it;
 a controlling browser can. No cross-version resize guarantee is implied.
+
+To type into a seat without changing its size, send the text through OpenRig
+(`rig send`, or `POST /api/transport/send`): it is written to the pane with tmux
+buffers and keys, and no client attaches. There is no supported way to attach a
+writable client that is sure never to resize the agent's window.
+
+
+## Following a slice or mission's current work
+
+Use `rig terminal open slice:<name-or-id> --follow --provider herdr` to keep
+one workspace following the current destination owners of that slice's active
+queue rows. `pending`, `in-progress` and `blocked` rows count. A member can own
+several rows; `task.members[].obligations` preserves every row and state.
+
+A slice resolves within the daemon's configured slice index, by exact directory
+name or unique frontmatter `id`. Tags must name it exactly: `rig queue create
+--slice <name-or-id> ...` associates a row. Handoff inherits those tags unless
+replaced; merely linking an untagged child does not associate it. A mission-only
+tag does not put a row in every slice. No project is inferred from a tag or the
+caller's working directory. A bare name or ID claimed by multiple slices is
+`scope_ambiguous`; no first-match scope is selected. Selecting a unique key can
+still follow a slice whose other alias is reused: a row carrying that colliding
+alias must have exactly one `mission:` tag naming exactly one indexed claimant.
+Rows placed in another mission are excluded. Missing, contradictory or otherwise
+unplaceable mission/alias tags make the snapshot incomplete, retaining previous
+viewers. A unique alias on its own retains exact matching. Flat legacy slices
+without an indexed parent mission cannot disambiguate a colliding alias.
+
+Mission views use `mission:<directory-id>`, from the same configured index.
+A mission is known when its directory contains `slices/` (even empty) or a
+readable `mission.yaml` declaration. Its directory ID is its exact identity;
+mission frontmatter is not an alias. Membership is the union of active rows
+with that exact `mission:` tag and rows associated with any physically indexed
+child slice by its exact name or unique ID. Each row counts once even when it
+has both tags. Flat legacy slices without that parent association are not
+inferred into a mission. A child's historical status or composition activation
+flag does not remove its current obligations from the union. Duplicate mission
+IDs are ambiguous. Shared child names/IDs are omitted from bare slice matching;
+rows with one indexed claimant mission are placed through their mission tag.
+A direct mission tag takes precedence, including work tagged to both missions.
+Without that direct tag, a shared-key row with missing, contradictory or
+non-claimant mission tags is named in `issues` and makes the snapshot incomplete;
+known owners remain.
+The launcher reads this same terminal preview and submits its `expectedPlan`
+when opening, rather than using the review-agent roster.
+
+Slice and mission keys are case-sensitive and can include Unicode, plus signs and internal
+spaces. They cannot be empty or contain slash, backslash, control characters,
+or leading/trailing whitespace in the scope reader. The service trims the whole
+selector before composition, so a trailing selector space is accepted by
+preview/ensure with the same plan; ensure rejects a leading selector space.
+Prefer the exact canonical selector in every call. Pass it in JSON or a quoted
+CLI argument; encode it once as a GET query value. Do not double-decode it.
+
+Slice previews and open results use `task: {kind:"slice", id, name, complete,
+issues, members}`. `id` is the unique frontmatter id, or the directory name when
+no id is present. There is no synthetic `qitemId`. Preserve the preview's `view`
+for the ensure request. All successful previews, including qitem previews,
+include `capabilities: {ensureViewer:boolean}`. True means that the resolved
+view/provider implements ensure; the existing member, completeness, owner and
+`expectedPlan` checks still apply. A missing capability/task on an older daemon
+is unsupported scoped membership, not an empty team.
+
+Mission results use the same shape with `task.kind:"mission"`; `task.id` and
+`task.name` are the directory ID, with no synthetic `qitemId`. Ordinary mission
+preview/open uses this current-obligation membership too: past participants
+without active obligations are excluded, while unavailable current owners
+remain named. Follow, preview and ensure share the same authority.
+
+New slice and mission workspaces default to four automatic tiles; `--max-tiles` overrides
+that. Qitem views retain their eight-tile default. The full membership and
+obligation list remains available when tiles exceed capacity. Pins, drafts,
+unknown input and focus retention still protect departed viewers. Closing a
+viewer never stops its agent. Opening a tile can change the agent's dimensions.
+
+A known empty slice or mission remains enabled in the same workspace; later associated
+work can join it. An incomplete queue read (`task.complete:false` plus `issues`)
+retains previous viewers. A missing scope is `scope_not_found`, duplicate scope
+identity is `scope_ambiguous`, unreadable/capped index data is `scope_unavailable`,
+and an unavailable resolver is `scope_unsupported`. None is authoritative empty.
+Ensure of an incomplete snapshot returns `viewer_unconfirmed`; changed plans
+return `preview_changed` before provisioning.
+
+Ordinary ownership changes follow queue/session/node events. Node and directory
+changes under the primary configured index use the existing filesystem watcher,
+with a coalesced scope invalidation event. There is no repeating membership
+poll. Structural edits under additional legacy roots, or a filesystem where
+watching is unavailable, require `rig`'s existing slice refresh endpoint
+`POST /api/slices/refresh` or reopening the view. Missing or unreadable sources
+keep prior viewers; they never certify that the work disappeared.
+
+
+Scope identity reads are bounded to 4,096 directory entries, 16 KiB per selected
+node-header read, and 8 MiB of source bytes per index generation. The byte budget
+counts the bounded read, including text after short frontmatter. An index that
+exceeds these limits is too large for this read; use a smaller configured index
+or a qitem view. This is separate from unreadable or malformed sources.
+Queue membership reads are bounded to 50,000 active rows plus one lookahead,
+16 KiB of encoded tags per row and 8 MiB of aggregate encoded tags. They remain
+fresh on each render. Identities are reused within a scope-source generation
+only while the primary-root watcher is live and existing additional roots are
+covered by that root. A source event or explicit refresh invalidates them;
+errors discard the cache. Unavailable watching or an existing unwatched legacy
+root uses fresh bounded identity reads instead. Missing legacy roots are checked
+on each call so an appearing root cannot reuse an older cached identity set.
+
+Error bodies remain authoritative. `scope_unsupported` is HTTP 400,
+`scope_not_found` is 404, and `scope_ambiguous`/`scope_unavailable` are 409.
+An incomplete queue snapshot is a successful preview with `task.complete:false`;
+ensure returns `viewer_unconfirmed` without a provider effect. Unsupported
+ensure view kinds now return `view_required` (400), where they previously returned
+200 with an error body. Unsupported follow view kinds
+retain `follow_view_required` in a 200 `ok:false` body, as before. A changed
+preview remains `preview_changed` (409). During automatic refresh a missing or
+ambiguous scope retains the existing tiles and names the source problem in the
+explanation strip; refresh or reopen it under the current unambiguous key.
+
+
+## Reading or sending to an expected native conversation
+
+An application that selects an original Claude Code or Codex conversation can opt
+into an expected-identity check. The identity is the exact tuple `nodeId`, canonical
+`sessionName`, `runtime` (`claude-code` or `codex`) and native `nativeId`. A registry
+resume token by itself is not a current-process identity observation.
+
+Read `GET /api/sessions/:sessionName/generation-record-expected` with query fields
+`expectedNodeId`, `expectedRuntime`, `expectedNativeId` and optional `sinceBytes`.
+It resolves the verified current occupant and native process, opens that native
+record, checks its identity, and returns identity and bounded suffix bytes from
+the same opened file. Its existing byte cursor and `generationId` semantics match
+`generation-record`. Success adds `identityContract:1` and `checkedIdentity`, the
+exact expected tuple. Check both before displaying the suffix as that conversation.
+
+Send `POST /api/transport/send-expected` with the ordinary send body and a required
+`expectedIdentity` object containing those four fields. The check runs again after
+buffer preparation immediately before paste, and before Enter after any wait.
+A retained input stores the constraint in its outbox receipt; committed dispatch
+and reuse of its delivery ID cannot select a different original conversation or
+omit the stored constraint. Delivery IDs still do not deduplicate explicit input.
+Success adds `identityContract:1` and `checkedIdentity`. Retained is not sent;
+`checkedIdentity` is an observation at an input boundary, not model consumption.
+If replacement is observed after paste, the result reports `inputPhase:"written"`
+and `sent:true`, with Enter refused. Inspect that input before deciding what to do.
+
+Malformed expectations return 400 (`invalid_expected_identity`). A different
+observed identity returns 409 (`expected_identity_mismatch`); a missing or
+unverified identity returns 409 (`expected_identity_unavailable`). Conflicting
+reuse of a delivery ID returns 409 (`delivery_identity_conflict`). No conditional
+operation falls back to the replacement. Use these dedicated paths when detecting
+support: older daemons return 404 instead of silently ignoring an unknown field.
+Ordinary reads and sends without an expectation or an ID bound by an earlier
+conditional send keep their existing behavior. Reusing a bound ID also carries
+its stored constraint when the caller omits the expectation.
+
+While a runtime switch is preparing or confirmed, a conditional send returns
+409 `expected_identity_unavailable` with `sent:false` and `inputPhase:"not_reached"`.
+It retains neither the input nor the expectation. Retry the conditional endpoint
+with the original `expectedIdentity`; an ordinary send is not an identity-bound
+retry unless its ID already has a stored constraint. Ordinary sends during the
+switch keep their existing retained response.
+
+This is a finite process/record observation followed by a terminal write; tmux has
+no atomic native-conversation compare-and-write operation. A native conversation
+change after the final observation remains a race. The check does not turn a
+terminal attachment into a conversation pin: existing terminal viewers follow
+managed pane/session bindings and may display their replacement. Applications
+must keep that attachment limit separate from checked record reads and sends.

@@ -1,3 +1,5 @@
+import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runtime-switch-custody.js";
+import { SeatStatusService } from "../domain/seat-status-service.js";
 import fs from "node:fs";
 import path from "node:path";
 import { Hono, type Context } from "hono";
@@ -6,16 +8,20 @@ import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
 import type { ClaudeSeatRelaunch, ProviderService, SeatRestart } from "../domain/provider/provider-service.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
+import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import { snapshotLaunchOutcome } from "../domain/restore-orchestrator.js";
+import { periodicCarryIsCurrent, snapshotLaunchOutcome } from "../domain/restore-orchestrator.js";
+import type { SessionRegistry } from "../domain/session-registry.js";
 import { resolveActiveSnapshotSession } from "../domain/active-occupant.js";
 import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
+import { processArgv, verifyClaudePaneRuntime, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { emittedEffortFromArgv, readSeatEffort, type LaunchEffortSelection } from "../domain/seat-effort.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
 import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
-import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
-import { seatLifecycleService } from "./seat.js";
+import { requireSenderIdentity, resolveRecordedProvenance, transportSenderSession } from "./require-sender-identity.js";
+import { seatLifecycleService, runtimeSwitchService } from "./seat.js";
 import {
   readUsageAcrossHosts,
   selectUsageHosts,
@@ -58,7 +64,7 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       if (!rigRepo) return null;
       const row = rigRepo.db.prepare(`SELECT n.id, n.rig_id, n.logical_id, n.runtime, r.name, s.status, b.tmux_pane FROM sessions s
         JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id LEFT JOIN bindings b ON b.node_id = n.id
-        WHERE s.session_name = ? ORDER BY s.created_at DESC, s.id DESC LIMIT 1`)
+        WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`)
         .get(seat) as { id: string; rig_id: string; logical_id: string; runtime: string | null; name: string; status: string; tmux_pane: string | null } | undefined;
       return row?.runtime === "claude-code"
         ? { nodeId: row.id, rigId: row.rig_id, rigName: row.name, logicalId: row.logical_id, running: row.status === "running", pane: row.tmux_pane ?? null } : null;
@@ -74,26 +80,66 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       const occupant = resolveActiveSnapshotSession(snapshot.data, nodeId);
       return { snapshotId: snapshot.id, resumes: true, conversation: occupant.kind === "resolved" ? occupant.session.resumeToken ?? null : null };
     },
+    nextLaunch: (rigId, nodeId) => {
+      const snapshots = c.get("snapshotRepo" as never) as SnapshotRepository | undefined;
+      if (!snapshots) return { snapshotId: null, resumes: false, why: "can't be read: this daemon has no snapshot store" };
+      // The selection and decision a plain `rig launch <rig> <seat>` makes (restore-orchestrator launchSingleNode), with its
+      // automatic periodic carry and the carry's launch-time eligibility.
+      const selected = snapshots.selectRestoreUsable(rigId);
+      if (!selected.ok) return { snapshotId: null, resumes: false, why: `has no usable snapshot (${selected.message})` };
+      const { snapshot, selection } = selected;
+      const carry = snapshot.kind === "auto-periodic" && selection.mode === "automatic";
+      const outcome = snapshotLaunchOutcome(snapshot.data, nodeId, "claude-code", "claude-code", carry);
+      if (outcome.kind !== "resume") return { snapshotId: snapshot.id, resumes: false, why: outcome.why };
+      const occupant = resolveActiveSnapshotSession(snapshot.data, nodeId);
+      if (occupant.kind === "resolved") return { snapshotId: snapshot.id, resumes: true, automatic: false, conversation: occupant.session.resumeToken ?? null };
+      const carried = snapshot.data.periodicResumeSourcesByNode?.[nodeId];
+      const sessions = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+      if (!carried || !sessions || !periodicCarryIsCurrent(rigRepo.db, sessions.getSessionsForRig(rigId), rigId, nodeId, carried,
+        rigRepo.getRig(rigId)?.nodes.find((n) => n.id === nodeId)?.runtime, snapshot.data.nodes.find((n) => n.id === nodeId)?.runtime)) {
+        return { snapshotId: snapshot.id, resumes: false, why: "carries a periodic resume source that is no longer this seat's current resumable session" };
+      }
+      return { snapshotId: snapshot.id, resumes: true, automatic: true, conversation: carried.resumeToken ?? null };
+    },
+    effortChange: async (nodeId, pane) => {
+      const tmux = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
+      const saved = readSeatEffort(rigRepo.db, nodeId);
+      if (!tmux || !saved) return null;
+      const listProcesses = c.get("listProcesses" as never) as NativeProcessLister | undefined;
+      const running = await verifyClaudePaneRuntime({ target: pane, tmux, ...(listProcesses ? { listProcesses } : {}) });
+      if (!running) return null;
+      const emitted = emittedEffortFromArgv("claude-code", processArgv(running.process.command));
+      // A switch's relaunch is restore's resume from a snapshot taken now: its effort is the seat's explicit choice, else
+      // its saved resolution (restore's latest-wins precedence on the same two values).
+      return { running: emitted.flag === "present" ? emitted.value : null, relaunch: saved.effective, relaunchIsSeatChoice: saved.source === "seat_choice" };
+    },
     exclusive: (nodeId, fn) => {
       const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
       return guard ? guard.lifecycle([nodeId], fn) : fn();
     },
-    relaunchInPane: async (rigId, logicalId, snapshotId) => {
+    relaunchInPane: async (rigId, logicalId, snapshotId, relaunchOpts) => {
       const restore = c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined;
       if (!restore) return { ok: false, effect: "none", code: "restore_unavailable", message: "This daemon has no restore orchestrator." };
       const adapters = (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? {};
-      const result = await restore.launchSingleNode(rigId, logicalId, { snapshotId, adapters, fsOps: { exists: (p: string) => fs.existsSync(p) }, keepPane: true });
+      // The effort restore's launch selected, and why, heard on every relaunch.
+      const heard: { effort?: LaunchEffortSelection } = {};
+      const result = await restore.launchSingleNode(rigId, logicalId, { snapshotId, adapters, fsOps: { exists: (p: string) => fs.existsSync(p) }, keepPane: true,
+        onLaunchEffort: (selected: LaunchEffortSelection) => { heard.effort = selected; },
+        ...(relaunchOpts?.effort ? { keepEffort: relaunchOpts.effort } : {}) });
+      const effort = heard.effort ? { effort: heard.effort } : {};
       // A refusal of the whole launch (no usable snapshot, no such seat) comes before anything is touched.
       if (!result.ok) return { ok: false, effect: "none", code: result.code ?? "launch_failed", message: result.message ?? "The seat wasn't launched from the snapshot." };
       const node = result.launched?.find((n) => n.logicalId === logicalId);
-      if (node?.status === "resumed") return { ok: true, status: "resumed", warnings: result.warnings ?? [] };
-      // Restore stops for a decision, or leaves an attached CLI alone, before it touches the seat.
-      const untouched = node?.status === "awaiting-decision" || node?.status === "left_attached";
-      return { ok: false, effect: untouched ? "none" : "unknown", code: node?.status ?? "not_launched", message: node?.error ?? "The seat wasn't launched from the snapshot." };
+      if (node?.status === "resumed") return { ok: true, status: "resumed", warnings: result.warnings ?? [], ...effort };
+      // Restore stops for a decision, or leaves an attached CLI alone, before it touches the seat; a launch that failed
+      // before its takeover stopped anything left it as this attempt found it too.
+      const untouched = node?.nothingStopped === true || (!node?.launchStarted && (node?.status === "awaiting-decision" || node?.status === "left_attached"));
+      return { ok: false, effect: untouched ? "none" : "unknown", code: node?.status ?? "not_launched", message: node?.error ?? "The seat wasn't launched from the snapshot.", ...effort };
     },
   };
 }
 
+/** Expose provider views and switches, delegating isolated account homes to the successor-first runtime switch service. */
 export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
   const router = new Hono();
   // Refresh legs across hosts live as long as these routes: overlapping requests join a running leg, and the last
@@ -314,12 +360,10 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     // A Claude seat's own token file, or `storedLogin=1` for its config dir's stored login.
     const tokenFile = c.req.query("storedLogin") === "1" ? null : c.req.query("tokenFile");
     // An unsafe verdict is a valid 200 response, not an error.
-    return c.json(await svc.precheck({ seat, toAccount, ...(tokenFile !== undefined ? { tokenFile } : {}) }, seatRestartOf(c), claudeSeatOf(c)), 200);
+    return c.json(await svc.precheck({ seat, toAccount, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(c.req.query("apiKeyFile") !== undefined ? { apiKeyFile: c.req.query("apiKeyFile") } : {}) }, seatRestartOf(c), claudeSeatOf(c)), 200);
   });
 
   router.post("/switch", async (c) => {
-    const svc = svcOf(c);
-    if (!svc) return c.json({ error: "provider_service_unavailable" }, unavailable);
     let raw: unknown;
     try {
       raw = await c.req.json();
@@ -331,8 +375,16 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ error: "body must be a JSON object" }, 400);
     }
     const body = raw as Record<string, unknown>;
+    if (body["apiKeyFile"] !== undefined && (body["accountHome"] !== undefined || body["clearAccountHome"] === true)) {
+      return c.json({ error: "apiKeyFile cannot be combined with accountHome or clearAccountHome; switch credentials in place separately" }, 400);
+    }
     const seat = body["seat"];
-    const toAccount = body["toAccount"];
+    const clearAccountHome = body["clearAccountHome"] === true;
+    if (body["clearAccountHome"] !== undefined && typeof body["clearAccountHome"] !== "boolean") return c.json({ error: "clearAccountHome must be true or false" }, 400);
+    if (clearAccountHome && (body["toAccount"] !== undefined || body["accountHome"] !== undefined || body["tokenFile"] !== undefined)) {
+      return c.json({ error: "clearAccountHome cannot select an account or token" }, 400);
+    }
+    const toAccount = body["toAccount"] ?? (clearAccountHome ? "default" : undefined);
     const forceUnsafe = body["forceUnsafe"] ?? false;
     if (typeof seat !== "string" || seat.trim() === "" || typeof toAccount !== "string" || toAccount.trim() === "") {
       return c.json({ error: "seat and toAccount are required" }, 400);
@@ -340,12 +392,40 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     if (typeof forceUnsafe !== "boolean") {
       return c.json({ error: "forceUnsafe must be a boolean" }, 400);
     }
+    if (body["accountHome"] !== undefined || clearAccountHome) {
+      if ((body["tokenFile"] !== undefined && typeof body["tokenFile"] !== "string") || (!clearAccountHome && typeof body["accountHome"] !== "string") || typeof body["reason"] !== "string" ||
+          (body["model"] !== undefined && typeof body["model"] !== "string") ||
+          (body["codexConfigProfile"] !== undefined && typeof body["codexConfigProfile"] !== "string") ||
+          (body["dryRun"] !== undefined && typeof body["dryRun"] !== "boolean")) {
+        return c.json({ ok: false, code: "invalid_runtime_settings", message: "Account-home switching needs a path and reason, with optional model/profile and a Claude token-file reference." }, 400);
+      }
+      const rigRepo = c.get("rigRepo" as never) as RigRepository;
+      const custody = runtimeSwitchCustodyRefusal(rigRepo.db, transportSenderSession(c), c.req.header(OCCUPANT_GENERATION_HEADER));
+      if (custody) return c.json(custody.body, custody.status);
+      const resolved = new SeatStatusService({ rigRepo }).getStatus(seat);
+      if (!resolved.ok) return c.json(resolved, 404);
+      const result = await runtimeSwitchService(c).setRuntime({ seatRef: seat, runtime: resolved.status.runtime ?? "",
+        ...(clearAccountHome ? { clearAccountHome: true } : { accountHome: body["accountHome"] as string }), reason: body["reason"], dryRun: body["dryRun"] === true,
+        ...(typeof body["tokenFile"] === "string" ? { accountToken: { label: toAccount, tokenFile: body["tokenFile"] } } : {}),
+        requestedBy: transportSenderSession(c) ?? null,
+        ...(typeof body["model"] === "string" ? { model: body["model"] } : {}),
+        ...(typeof body["codexConfigProfile"] === "string" ? { codexConfigProfile: body["codexConfigProfile"] } : {}),
+      });
+      return c.json(result, result.ok ? "recoveryPending" in result && result.recoveryPending ? 202 : 200
+        : result.code === "invalid_runtime_settings" ? 400 : 409);
+    }
     const tokenFile = body["tokenFile"];
     if (tokenFile !== undefined && tokenFile !== null && typeof tokenFile !== "string") {
       return c.json({ error: "tokenFile must be a path, or null for the stored login" }, 400);
     }
+    const svc = svcOf(c);
+    if (!svc) return c.json({ error: "provider_service_unavailable" }, unavailable);
+    const apiKeyFile = body["apiKeyFile"];
+    if (apiKeyFile !== undefined && (typeof apiKeyFile !== "string" || tokenFile !== undefined)) {
+      return c.json({ error: "apiKeyFile must be a path and cannot be combined with tokenFile" }, 400);
+    }
     // Business outcome (incl. failed_safely / rebind_in_progress) is an explicit 200 payload.
-    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}) },
+    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(typeof apiKeyFile === "string" ? { apiKeyFile } : {}) },
       seatRestartOf(c), claudeSeatOf(c)), 200);
   });
 

@@ -3,10 +3,16 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ExecFn } from "../adapters/tmux.js";
-import { runtimeProbeFailure, runtimeProbeTimeout } from "../adapters/preflight-exec.js";
+import { RIG_LOGIN_PATH_CHECK, runtimeProbeFailure, runtimeProbeTimeout } from "../adapters/preflight-exec.js";
 import { piVersionNotice } from "../adapters/pi-readiness.js";
 import type { LegacyRigSpec as RigSpec, PreflightResult, RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { deriveCanonicalSessionName, deriveSessionName, tmuxRenamedSessionError, validateSessionName, validateSessionComponents, VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
+
+import { shellQuote } from "../adapters/shell-quote.js";
+import { mergeSeatEnv, type SeatEnv } from "./seat-env.js";
+import { withoutRuntimeHomes } from "./seat-runtime-home.js";
+import { isLaunchWrapperRuntime } from "./launch-wrapper.js";
+import { resolveLaunchWrapperArgv } from "./seat-launch-environment.js";
 
 const RUNTIME_COMMANDS: Record<string, string> = {
   "claude-code": "claude --version",
@@ -116,6 +122,10 @@ export class RigSpecPreflight {
       }
     }
 
+    if (errors.length === 0) {
+      await warnRigLoginPath(spec.nodes.filter(node => node.runtime === "codex").map(node => ({ label: node.id, env: {} })), this.exec, warnings);
+    }
+
     // cmux layout hints: warning if cmux unavailable and spec uses hints
     const hasLayoutHints = spec.nodes.some((n) => n.surfaceHint || n.workspace);
     if (hasLayoutHints) {
@@ -138,7 +148,7 @@ export class RigSpecPreflight {
 
 import { RigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema } from "./rigspec-schema.js";
-import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
+import { resolveAgentRef, type AgentResolverFsOps, agentSpecAdvisoryWarnings } from "./agent-resolver.js";
 import type { ResolutionContext, ResolutionResult } from "./profile-resolver.js";
 import { withNodeConfigResolver } from "./profile-resolution-worker.js";
 import { releaseScanCache } from "./skill-discovery.js";
@@ -165,6 +175,8 @@ const DEFAULT_ACTIVITY_RELAY_PATH = nodePath.resolve(import.meta.dirname, "../..
 const DEFAULT_CLAUDE_HOOKS_MANIFEST_PATH = nodePath.resolve(import.meta.dirname, "../../assets/plugins/openrig-core/hooks/claude.json");
 
 export interface RigPreflightInput {
+  /** One-off launch environment, merged after the rig and member declarations. */
+  envOverride?: SeatEnv;
   rigSpecYaml: string;
   rigRoot: string;
   cwdOverride?: string;
@@ -185,6 +197,7 @@ export interface RigPreflightInput {
  * already-parsed+validated spec. (YAML is only the input adapter at the front.)
  */
 export interface PreflightSpecContext {
+  envOverride?: SeatEnv;
   rigRoot: string;
   cwdOverride?: string;
   fsOps: AgentResolverFsOps;
@@ -275,6 +288,7 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
   return preflightValidatedSpec(rigSpec, {
     rigRoot: input.rigRoot,
     cwdOverride: input.cwdOverride,
+    envOverride: input.envOverride,
     fsOps: input.fsOps,
     skillsRoot: input.skillsRoot,
     rigNameOverride: input.rigNameOverride,
@@ -308,6 +322,7 @@ async function preflightMembers(
   resolveNodeConfigAsync: (context: ResolutionContext) => Promise<ResolutionResult>,
 ): Promise<PreflightResult> {
   const errors: string[] = [];
+  const loginTargets: Array<{ label: string; env: SeatEnv }> = [];
   // §6 reconciliation (PM ruling 2026-08-05): seed EMPTY so main's already-folded activity-hook /
   // collision warnings (pushed below during the checks) come FIRST; the incoming permission-policy
   // discovery warnings are APPENDED at the return. Rationale + semantic fence at the return site.
@@ -367,6 +382,9 @@ async function preflightMembers(
         }
       }
 
+      // Agent spec advisories (non-blocking): the base spec's and each import's, one warning each.
+      warnings.push(...agentSpecAdvisoryWarnings(`${pod.id}.${member.id}`, resolveResult));
+
       // Resolve profile via resolveNodeConfig
       const ctx: ResolutionContext = {
         baseSpec: resolveResult.resolved,
@@ -389,6 +407,9 @@ async function preflightMembers(
         }
         continue;
       }
+
+      if (member.runtime === "codex") loginTargets.push({ label: `${pod.id}.${member.id}`,
+        env: mergeSeatEnv(rigSpec.env, member.env, preflightCtx.envOverride && withoutRuntimeHomes(preflightCtx.envOverride)) });
 
       // Managed Claude activity-hook delivery preflight (NONFATAL): when a claude-code member
       // selects the claude_activity_hooks resource, verify the daemon can actually deliver
@@ -428,6 +449,13 @@ async function preflightMembers(
       if (cwdError) {
         errors.push(`${pod.id}.${member.id}: ${cwdError}`);
       }
+      if (isLaunchWrapperRuntime(member.runtime) && member.launchWrapper && member.launchWrapper.length > 0) {
+        try {
+          resolveLaunchWrapperArgv(member.launchWrapper, process.env.PATH ?? "", process.cwd());
+        } catch (err) {
+          errors.push(`${pod.id}.${member.id}: ${(err as Error).message}`);
+        }
+      }
     }
   }
 
@@ -440,6 +468,7 @@ async function preflightMembers(
     const piErrors = await verifyPiRuntimeAvailable(rigSpec, preflightCtx.exec, warnings);
     errors.push(...piErrors);
     errors.push(...await verifyOmpRuntimeAvailable(rigSpec, preflightCtx.exec));
+    if (errors.length === 0 && !preflightCtx.materializeOnly) await warnRigLoginPath(loginTargets, preflightCtx.exec, warnings);
   }
 
   // §6 RECONCILIATION — WARNING EMISSION ORDER (PM ruling 2026-08-05): ACTIVITY-HOOK-FIRST,
@@ -455,6 +484,25 @@ async function preflightMembers(
   // higher-priority is a FINDING, not an ordering input — the pin freezes presentation, never semantics.
   warnings.push(...permissionPolicyDiscoveryWarnings(rigSpec, preflightCtx));
   return { ready: errors.length === 0, errors, warnings };
+}
+
+/** A Codex login-shell lookup for each distinct declared seat environment, advisory only.
+ * No profile output or environment values are included in the warning. */
+async function warnRigLoginPath(targets: Array<{ label: string; env: SeatEnv }>, exec: ExecFn, warnings: string[]): Promise<void> {
+  const checks = new Map<string, string[]>();
+  for (const { label, env } of targets) {
+    const shell = env.SHELL || process.env.SHELL || "/bin/sh";
+    const assignments = Object.keys(env).sort().map(key => shellQuote(`${key}=${env[key]}`));
+    const command = `/usr/bin/env ${[...assignments, shellQuote(shell)].join(" ")}${RIG_LOGIN_PATH_CHECK}`;
+    const labels = checks.get(command) ?? [];
+    labels.push(label); checks.set(command, labels);
+  }
+  for (const [command, labels] of checks) {
+    try { await exec(command); }
+    catch {
+      warnings.push(`${labels.join(", ")}: login-shell PATH check could not confirm 'rig'; launch continues. For tarball/manual Node, put its bin directory on PATH in ~/.profile (or the login file your shell reads), then check: bash -lc 'command -v node rig'.`);
+    }
+  }
 }
 
 /**

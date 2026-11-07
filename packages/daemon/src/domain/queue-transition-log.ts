@@ -454,8 +454,73 @@ export class QueueTransitionLog {
     return byQitem;
   }
 
+  /** Startup catch-up includes retained terminal rows, unlike active-episode selection. */
+  postedHumanAskIds(): string[] {
+    if (!this.hasOwnerNotificationColumns) return [];
+    return (this.db.prepare(`SELECT DISTINCT qitem_id FROM ${this.historySource}
+      WHERE transition_note LIKE 'slack-owner-notification-posted %'
+        AND qitem_id IN (SELECT qitem_id FROM queue_items)
+        AND instr(' ' || transition_note || ' ', ' kind=human-required ') > 0`).all() as Array<{ qitem_id: string }>).map((r) => r.qitem_id);
+  }
+
   hasOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
     return this.getOwnerNotificationReceipt(qitemId, notificationKey) !== null;
+  }
+
+/** The latest owner-notification episode per ACTIVE queue row, in queue order. One query
+ *  joins every eligibility rule into the selection — the row is active, it carries an owner
+ *  notification, and (when `includePosted` is false, the alert sweep's path) no posted
+ *  receipt exists for that notification's key — so rows that cannot matter never reach a
+ *  per-row lookup. There is no row cap: an eligible item older than any window still comes
+ *  back, and `posted` reports the receipt state for callers that list both.
+ *
+ *  The eligible set is restricted to active queue items before any ranking happens, so a
+ *  large notification archive never adds scan or ranking work to a sweep with no active item. */
+  activeOwnerNotificationEpisodes(includePosted: boolean): Array<{ qitemId: string; transition: QueueTransition; posted: boolean }> {
+    if (!this.hasOwnerNotificationColumns) return [];
+    // Exact token match with no wildcard risk: pad both ends so a key at the note's
+    // start or end still matches, and instr() compares literally (qitem ids may
+    // contain characters LIKE would treat as wildcards).
+    const receipt = (qitemIdExpr: string, transitionIdExpr: string) =>
+      `EXISTS (
+         SELECT 1 FROM ${this.historySource} r
+         WHERE r.qitem_id = ${qitemIdExpr}
+           AND r.transition_note LIKE 'slack-owner-notification-posted %'
+           AND instr(' ' || r.transition_note || ' ', ' notification_key=' || ${qitemIdExpr} || ':' || ${transitionIdExpr} || ' ') > 0
+       )`;
+    const postedFilter = includePosted ? "" : `AND NOT ${receipt("latest.qitem_id", "latest.transition_id")}`;
+    const rows = this.db
+      .prepare(
+        `WITH active_ids AS (
+           SELECT qitem_id FROM queue_items WHERE state IN ('pending', 'in-progress', 'blocked')
+         ),
+         active AS (
+           SELECT qitem_id, ts_created FROM queue_items WHERE state IN ('pending', 'in-progress', 'blocked')
+         ),
+         history_active AS (
+           SELECT h.* FROM ${this.historySource} h
+           WHERE h.qitem_id IN (SELECT qitem_id FROM active_ids)
+             AND h.owner_notification_level IS NOT NULL
+         ),
+         ranked AS (
+           SELECT h.*, ROW_NUMBER() OVER (PARTITION BY h.qitem_id ORDER BY h.transition_id DESC) AS rn
+           FROM history_active h
+         ),
+         latest AS (
+           SELECT * FROM ranked WHERE rn = 1
+         )
+         SELECT latest.*, ${receipt("latest.qitem_id", "latest.transition_id")} AS posted
+           FROM active
+           JOIN latest ON latest.qitem_id = active.qitem_id
+          ${postedFilter}
+           ORDER BY active.ts_created DESC`,
+      )
+      .all() as Array<QueueTransitionRow & { posted: 0 | 1 }>;
+    return rows.map((row) => ({
+      qitemId: row.qitem_id,
+      transition: this.rowToTransition(row),
+      posted: row.posted === 1,
+    }));
   }
 
   getOwnerNotificationReceipt(qitemId: string, notificationKey: string): { messageTs: string | null; threadTs: string | null; digest: string | null } | null {

@@ -1,4 +1,5 @@
-import { Hono } from "hono";
+import { expectedConversation, type ExpectedConversation } from "../domain/expected-conversation.js";
+import { Hono, type Context } from "hono";
 import { CAPTURE_INPUT_BOX_DEADLINE_MS, CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, resolveRecordedIdentity, transportSenderSession } from "./require-sender-identity.js";
@@ -15,6 +16,9 @@ import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 const UNKNOWN_SENDER_NOTICE =
   "Delivered without sender identity: this request carried no X-OpenRig-Session header, so your recipient has no way of knowing who sent it. Follow up and sign it: from a seat shell the header stamps automatically; from anywhere else, send it as a declared sender, `rig queue create --source <you>@external --destination <seat> --summary \"<one line>\" --body-file <file>` (recorded as declared; a registered human gets a reply route), or join this shell to a seat, `eval \"$(rig attach --self --rig <rigId> --node <logicalId> --print-env)\"`, so its sends carry that seat's name (`rig attach --help` covers adding a new member).";
 
+// A fan-out where every recipient holds the text hasn't delivered yet, but the text still arrives unsigned.
+const UNKNOWN_SENDER_HELD_NOTICE = UNKNOWN_SENDER_NOTICE.replace(/^Delivered/, "Held for delivery");
+
 // The unknown-sender From: marker, DERIVED from the canonical envelope wrapper
 // (pane-envelope.ts SENDER_FALLBACK is unexported and its literal is
 // canonicity-guarded to exactly two twin sites) — deriving at module load keeps
@@ -26,13 +30,14 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
   const router = new Hono();
 
   const terminalToken = opts?.bearerToken ?? null;
-  router.use("*", authBearerTokenMiddleware({ expectedToken: terminalToken }));
+  router.use("*", authBearerTokenMiddleware({ expectedToken: terminalToken, diagnosticContext: "terminal" }));
 
-  router.post("/send", async (c) => {
+  const send = async (c: Context) => {
     const transport = c.get("sessionTransport" as never) as SessionTransport;
     const body = await c.req.json<{
       session?: string;
       deliveryId?: string;
+      expectedIdentity?: unknown;
       text: string;
       verify?: boolean;
       force?: boolean;
@@ -48,6 +53,12 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       exactText?: string;
       urgent?: boolean;
     }>();
+
+    let expectedIdentity: ExpectedConversation | undefined;
+    if (c.req.path.endsWith("/send-expected") || body.expectedIdentity !== undefined) {
+      try { expectedIdentity = expectedConversation(body.expectedIdentity); }
+      catch (error) { return c.json({ ok: false, sent: false, reason: "invalid_expected_identity", error: (error as Error).message }, 400); }
+    }
 
     // submitOnly (mechanics-gate fix d9b3989a) sends NO text — the Enter-only retry for staged
     // content; every other send still requires text.
@@ -122,6 +133,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     const target = resolved.sessions.length === 1 ? resolved.sessions[0]!.sessionName : null;
     const switching = target ? runtimeSwitchSummary(db, { session: target }) : null;
     if (target && switching && (switching.phase === "preparing" || switching.phase === "confirmed")) {
+      if (expectedIdentity) return c.json({ ok: false, sessionName: target, sent: false, inputPhase: "not_reached",
+        reason: "expected_identity_unavailable", error: "The seat is switching runtime. No input or expected-identity constraint was retained; retry the conditional endpoint with the original expectedIdentity.",
+        runtimeSwitch: switching }, 409);
       return c.json({ ok: true, sessionName: target, outcome: "retained", sent: false, verified: false, reason: "runtime_switch_in_progress",
         runtimeSwitch: switching,
         warning: `${target} is switching runtime (${switching.from} -> ${switching.to}, switch ${switching.id}) until about ${switching.deadlineAt}. Send it again after the switch; it then reaches whoever holds the seat.` });
@@ -130,6 +144,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
 
     const result = await transport.send(body.session, body.text ?? "", {
       deliveryId: body.deliveryId,
+      expectedIdentity,
       verify: body.verify,
       force: body.force,
       waitForIdleMs: body.waitForIdleMs,
@@ -158,6 +173,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
 
     if (!result.ok) {
       const statusMap: Record<string, number> = {
+        expected_identity_mismatch: 409,
+        expected_identity_unavailable: 409,
+        invalid_expected_identity: 400,
         typing_guard_enabled: 409,
         caller_cancelled: 409,
         guard_target_unknown: 409,
@@ -239,7 +257,10 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
 
     return c.json(result);
-  });
+  };
+  router.post("/send", send);
+  // Separate capability path: an older daemon refuses with 404 instead of ignoring a new field.
+  router.post("/send-expected", send);
 
   router.post("/capture", async (c) => {
     const transport = c.get("sessionTransport" as never) as SessionTransport;
@@ -401,6 +422,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
               identityProvenance: "transport:v1",
             });
             if (r.ok) outbox.markDelivered(entry.outboxId);
+            else if (r.inputPhase === "attempted" || r.inputPhase === "written" || r.sent === true) outbox.markIndeterminate(entry.outboxId);
             else outbox.markFailed(entry.outboxId);
           } catch (err) {
             console.warn(`[transport/broadcast] outbox auto-record failed for ${r.sessionName} (fan-out already dispatched): ${(err as Error).message}`);
@@ -410,9 +432,10 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
 
     // S2 (OPR.0.5.4.3) sender-side honesty: an unattributed fan-out's response carries the
-    // sign-it notice for the CLI renderers to surface. Attributed fan-outs are unchanged.
-    if (!derivedActor) {
-      return c.json({ ...result, warning: UNKNOWN_SENDER_NOTICE });
+    // sign-it notice for the CLI renderers to surface. Attributed fan-outs are unchanged. A fan-out that reached nobody
+    // (an unknown rig, every send refused) doesn't carry it, but a retained send is typed later and is still unsigned.
+    if (!derivedActor && result.sent + (result.retained ?? 0) > 0) {
+      return c.json({ ...result, warning: result.sent > 0 ? UNKNOWN_SENDER_NOTICE : UNKNOWN_SENDER_HELD_NOTICE });
     }
     return c.json(result);
   });

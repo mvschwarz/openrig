@@ -19,6 +19,7 @@ export function budgetLeft(budget: RecoveryBudget, now: number): boolean {
 export class MethodBackoff {
   private readonly until = new Map<string, number>();
   blocked(method: string, now: number): boolean { return (this.until.get(method) ?? 0) > now; }
+  waitMs(method: string, now: number): number { return Math.max(0, (this.until.get(method) ?? 0) - now); }
   hold(method: string, at: number): void { this.until.set(method, Math.max(at, this.until.get(method) ?? 0)); }
 }
 

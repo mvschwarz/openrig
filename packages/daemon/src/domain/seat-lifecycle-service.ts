@@ -1,3 +1,4 @@
+import { communityHarnessOf } from "./built-in-runtimes.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
@@ -28,6 +29,8 @@ import { NativePermissionStore } from "./native-permission-store.js";
 import { validateNativePermissionSelection, unresolvedClaudePermissionModes } from "./native-permission-selection.js";
 import fs from "node:fs";
 import path from "node:path";
+import { PERMISSIONS_DENY, resolvePermissionOwner } from "./runner-permissions.js";
+import type { LoadResult as HumanRegistryLoadResult } from "./gateway/human-registry.js";
 import { resolveConcreteHint, type NodeBinding } from "./runtime-adapter.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { planCwdPreparation } from "./seat-cwd-preparation.js";
@@ -39,7 +42,7 @@ import {
   type EffortResolution, type NativeEffortObservation,
 } from "./seat-effort.js";
 import {
-  claudeCommandSessionToken, codexCommandResumeToken, observeClaudePaneRuntime, observeCodexPaneProcess, processArgv,
+  claudeCommandSessionToken, codexProcessArgv, codexProcessResumeToken, observeClaudePaneRuntime, observeCodexPaneProcess, processArgv,
 } from "./native-process-lineage.js";
 import { defaultInPlaceRestartIo } from "./seat-restart-in-place.js";
 import nodePath from "node:path";
@@ -92,6 +95,8 @@ export interface SeatLifecycleDeps {
   transcripts?: { readSidecar(sessionName: string): { ok: true; data: { transcript_path?: string | null; session_id?: string | null } } | { ok: false }; readCodexTranscriptPath(threadId: string): string | null };
   /** The identity-verified current Pi runner and its own session file; without it a Pi seat's launch and native effort are unknown. */
   piRecords?: Pick<CurrentModelReader, "currentPiRecord">;
+  /** The registered people, read when a seat's permission answer owner is chosen; without it no owner can be chosen. */
+  humanRegistry?: () => HumanRegistryLoadResult;
 }
 
 interface ResolvedSeat {
@@ -147,7 +152,10 @@ export interface SeatRefusal {
     | "guard_unavailable"
     | "guard_target_changed"
     | "selection_changed"
-    | "stop_uncertain";
+    | "stop_uncertain"
+    | "missing_permissions_to"
+    | "permissions_to_not_a_person"
+    | "permissions_to_unavailable";
   message: string;
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
@@ -165,6 +173,10 @@ export interface SeatDescriptor {
 
 export type SetModelResult =
   | { ok: true; seat: SeatDescriptor; from: string | null; to: string; changed: boolean }
+  | SeatRefusal;
+
+export type SetPermissionsToResult =
+  | { ok: true; seat: SeatDescriptor; from: string | null; to: string | null; changed: boolean }
   | SeatRefusal;
 
 export type SetCwdResult =
@@ -226,7 +238,7 @@ export type SetEffortResult =
   | SeatRefusal;
 
 export type StopSeatResult =
-  | { ok: true; seat: SeatDescriptor; sessionName: string; sessionId: string }
+  | { ok: true; seat: SeatDescriptor; sessionName: string; sessionId: string; paneOnly?: boolean }
   | (SeatRefusal & { partialEffect?: boolean; stopPhase?: StopPhase });
 
 /** The narrow identity reviewed before an optional checked stop. */
@@ -308,6 +320,7 @@ export class SeatLifecycleService {
   private readonly inPlaceRestartDaemonStartedAt?: Date;
   private readonly transcripts: SeatLifecycleDeps["transcripts"] | null;
   private readonly piRecords: SeatLifecycleDeps["piRecords"] | null;
+  private readonly humanRegistry: SeatLifecycleDeps["humanRegistry"] | null;
 
   constructor(deps: SeatLifecycleDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatLifecycleService: rigRepo must share the same db handle");
@@ -329,6 +342,7 @@ export class SeatLifecycleService {
     this.inPlaceRestartDaemonStartedAt = deps.inPlaceRestartDaemonStartedAt;
     this.transcripts = deps.transcripts ?? null;
     this.piRecords = deps.piRecords ?? null;
+    this.humanRegistry = deps.humanRegistry ?? null;
   }
 
   private terminalPolicyCheck(nodeId: string, action: TerminalAction, operator?: string | null) {
@@ -412,6 +426,57 @@ export class SeatLifecycleService {
     if (persisted) this.eventBus.notifySubscribers(persisted);
 
     return { ok: true, seat, from, to: model, changed: true };
+  }
+
+  /**
+   * Choose (or clear, with null) the registered person who answers this seat's runner permission requests instead of the
+   * default person, or `deny`, the explicit opt-in to refuse every request. Only a registered person can be chosen; the
+   * canonical address is stored. Audited as node.permissions_to_changed.
+   */
+  setPermissionsTo(input: SeatSettingTarget & { to: string | null; reason: string; operator?: string | null }): SetPermissionsToResult {
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    let to: string | null = null;
+    if (input.to === PERMISSIONS_DENY) {
+      to = PERMISSIONS_DENY; // the explicit opt-in to refuse every request
+    } else if (input.to !== null) {
+      if (!input.to?.trim()) {
+        return { ok: false, code: "missing_permissions_to", message: "A registered person is required (--to <person>), or --clear." };
+      }
+      if (!this.humanRegistry) {
+        return { ok: false, code: "permissions_to_unavailable", message: "This daemon can't read the registered people, so no permission answer owner can be chosen." };
+      }
+      const owner = resolvePermissionOwner(input.to.trim(), this.humanRegistry);
+      if (!owner.ok) return { ok: false, code: owner.code, message: owner.message, guidance: "List the registered people with: rig gateway human list" };
+      to = owner.address;
+    }
+    const resolved = this.resolveSettingTarget(input);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    const from = this.rigRepo.getNodePermissionsTo(resolved.nodeId);
+    if (from === to) return { ok: true, seat, from, to, changed: false };
+
+    let persisted: PersistedEvent | null = null;
+    let written = false;
+    this.db.transaction(() => {
+      if (!this.rigRepo.setNodePermissionsTo(resolved.nodeId, to)) return;
+      written = true;
+      persisted = this.eventBus.persistWithinTransaction({
+        type: "node.permissions_to_changed",
+        rigId: seat.rigId,
+        nodeId: seat.nodeId,
+        logicalId: seat.logicalId,
+        from,
+        to,
+        reason: input.reason.trim(),
+        operator: input.operator ?? null,
+      });
+    })();
+    if (!written) {
+      return { ok: false, code: "permissions_to_unavailable", message: "This daemon's database has no place for a permission answer owner yet; nothing was saved." };
+    }
+    if (persisted) this.eventBus.notifySubscribers(persisted);
+    return { ok: true, seat, from, to, changed: true };
   }
 
   /**
@@ -615,19 +680,26 @@ export class SeatLifecycleService {
       ({ emitted, observed } = await this.piEffort(seat.nodeId, session.session_name, saved));
     } else {
       const observe = runtime === "claude-code" ? observeClaudePaneRuntime : observeCodexPaneProcess;
-      const process = (await observe({ target, tmux: this.tmuxAdapter, ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) }))?.process;
+      const process = (await observe({ target, tmux: this.tmuxAdapter, ...(runtime === "codex" ? { requireArgv: true } : {}),
+        ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) }))?.process;
       if (!process) {
         emitted = { state: "unknown", detail: `No single ${runtime === "claude-code" ? "Claude" : "Codex"} process could be read in the seat's pane.` };
         observed = { state: "not_verified", detail: "The running process could not be read, so no turn can be tied to its launch." };
       } else {
-        const flag = emittedEffortFromArgv(runtime, processArgv(process.command));
-        const value = flag.flag === "present" ? flag.value : null;
-        emitted = { state: "observed", value, pid: process.pid, startedAt: process.startedAt ?? null, matchesSaved: value === saved.effective };
-        // Native effort is attributed only from the transcript of the conversation this process is on.
-        const joined = await this.joinedTranscript(runtime, session, process);
-        const native = "detail" in joined ? { state: "not_verified" as const, detail: joined.detail }
-          : readNativeEffort(runtime, joined.path, process.startedAt ?? null);
-        observed = native.state === "observed" ? { ...native, matchesEmitted: native.value === value } : native;
+        const argv = runtime === "codex" ? codexProcessArgv(process) : processArgv(process.command);
+        if (!argv) {
+          emitted = { state: "unknown", detail: "The running Codex's exact arguments could not be read, so its launch effort is unknown." };
+          observed = { state: "not_verified", detail: "The running Codex's exact arguments could not be read, so no native turn can be tied to its launch." };
+        } else {
+          const flag = emittedEffortFromArgv(runtime, argv);
+          const value = flag.flag === "present" ? flag.value : null;
+          emitted = { state: "observed", value, pid: process.pid, startedAt: process.startedAt ?? null, matchesSaved: value === saved.effective };
+          // Native effort is attributed only from the transcript of the conversation this process is on.
+          const joined = await this.joinedTranscript(runtime, session, process);
+          const native = "detail" in joined ? { state: "not_verified" as const, detail: joined.detail }
+            : readNativeEffort(runtime, joined.path, process.startedAt ?? null);
+          observed = native.state === "observed" ? { ...native, matchesEmitted: native.value === value } : native;
+        }
       }
     }
     return { ok: true, seat, runtime, requested, saved, emitted, observed, precedence, summary: effortSummary(saved, emitted, observed, runtime) };
@@ -696,7 +768,7 @@ export class SeatLifecycleService {
   /** The transcript of the conversation the observed process is on, or why that join can't be made.
    *  The recorded conversation (Codex: the session's resume token; Claude: the status sidecar's session)
    *  must be the one the process itself names, by argv or, for a Codex that names none, by its own logs. */
-  private async joinedTranscript(runtime: "claude-code" | "codex", session: LatestSessionRow, process: { pid: number; command: string; startedAt?: string }):
+  private async joinedTranscript(runtime: "claude-code" | "codex", session: LatestSessionRow, process: { pid: number; command: string; argv?: string[] | null; startedAt?: string }):
     Promise<{ path: string | null } | { detail: string }> {
     if (!this.transcripts) return { detail: "The native transcript for this session isn't known to OpenRig." };
     const mismatch = "The process in the pane isn't on the conversation recorded for this seat (or its conversation couldn't be read), so no native turn can be attributed to it.";
@@ -704,7 +776,7 @@ export class SeatLifecycleService {
       if (runtime === "codex") {
         const recorded = this.sessionResumeToken(session.id);
         if (!recorded) return { detail: "No Codex conversation is recorded for this session yet." };
-        let own = codexCommandResumeToken(process.command) ?? undefined;
+        let own = codexProcessResumeToken(process) ?? undefined;
         if (own === undefined && process.startedAt) {
           const io = { ...defaultInPlaceRestartIo(), ...this.inPlaceRestartIo };
           const facts = await io.readProcess(process.pid);
@@ -1014,7 +1086,7 @@ export class SeatLifecycleService {
       return { ok: false, code: "no_session", message: `Seat "${input.seatRef}" has no session to stop (checked: latest sessions row for node ${seat.logicalId}).` };
     }
     if (session.origin === "claimed") {
-      return {
+      return this.earlierHandoverRefusal(resolved.nodeId, session, "stop refuses to kill it") ?? {
         ok: false,
         code: "claimed_session",
         message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`,
@@ -1064,7 +1136,7 @@ export class SeatLifecycleService {
         if ("code" in resolved) return { ok: false, code: "selection_changed", message: "The selected seat changed." };
         const seat = this.describe(resolved);
         const session = this.latestSession(resolved.nodeId)!;
-        if (session.origin === "claimed") return { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`, guidance: "Release an adopted session with: rig unclaim" };
+        if (session.origin === "claimed") return this.earlierHandoverRefusal(resolved.nodeId, session, "stop refuses to kill it") ?? { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`, guidance: "Release an adopted session with: rig unclaim" };
         const probed = await this.probeLiveness(session.session_name, "stop refuses rather than kill blind");
         if ("code" in probed) return probed;
         const afterProbe = selection();
@@ -1107,7 +1179,7 @@ export class SeatLifecycleService {
     const mutationTargets = nonTerminal;
     for (const row of mutationTargets) {
       if (row.origin === "claimed") {
-        return {
+        return this.earlierHandoverRefusal(resolved.nodeId, row, "clean refuses to touch adopted state") ?? {
           ok: false,
           code: "claimed_session",
           message: `Session "${row.session_name}" was adopted (origin=claimed) — clean refuses to touch adopted state.`,
@@ -1208,7 +1280,9 @@ export class SeatLifecycleService {
       || !this.stillPending(node.id, session.id, pending)) return { ok: false as const, code: "continuation_unavailable", message: "Startup changed during the readiness check. Refresh." };
     const result = await this.startupOrchestrator.startNode({
       rigId: seat.rigId, nodeId: node.id, sessionId: session.id,
-      binding: { ...binding, cwd: node.cwd ?? ".", model: node.model ?? undefined, effort: resolveSeatEffort(node).effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codexConfigProfile ?? undefined },
+      binding: { ...binding, cwd: node.cwd ?? ".", model: node.model ?? undefined, effort: resolveSeatEffort(node).effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codexConfigProfile ?? undefined,
+        // #875: the launch already carried this seat's guidance as developer instructions; keep that, and write no AGENTS.md.
+        ...(pending.mode === "fresh" && pending.guidanceLaunchInstructions ? { guidanceFile: null, guidanceLaunchInstructions: true } : {}) },
       adapter, plan: startup.context.plan, resolvedStartupFiles: startup.context.resolvedStartupFiles,
       startupActions: startup.context.startupActions, isRestore: pending.mode === "fork" && pending.isRestore,
       sessionName: session.session_name, skipHarnessLaunch: true, continueFreshStartup: pending.mode === "fresh", includeDurableObligations: true, allowFreshFallback: false,
@@ -1797,8 +1871,9 @@ export class SeatLifecycleService {
       return { ok: false, code: "no_session", message: `Seat "${seatRef}" has no live managed session to restart (checked: latest sessions row).` };
     }
     if (session.origin === "claimed") {
-      return { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig; in-place restart refuses it.`,
-        guidance: "Release an adopted session with: rig unclaim" };
+      return this.earlierHandoverRefusal(node.id, session, "in-place restart refuses it")
+        ?? { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig; in-place restart refuses it.`,
+          guidance: "Release an adopted session with: rig unclaim" };
     }
     const probed = await this.probeLiveness(session.session_name, "in-place restart refuses rather than act on an unknown session");
     if ("code" in probed) return probed;
@@ -1829,6 +1904,7 @@ export class SeatLifecycleService {
         ...(node.model ? { model: node.model } : {}),
         ...(savedEffort.effective ? { effort: savedEffort.effective } : {}),
         ...(node.codexConfigProfile ? { codexConfigProfile: node.codexConfigProfile } : {}),
+        ...(node.launchWrapper?.length ? { launchWrapper: node.launchWrapper } : {}),
         ...(permissionOverride.codexPermissions ? { codexPermissions: permissionOverride.codexPermissions } : {}),
         launchPosture, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault,
         nonInterruptive: this.rigRepo.getRigNonInterruptive(seat.rigId),
@@ -1910,7 +1986,8 @@ export class SeatLifecycleService {
       if (!checked) throw error;
       return { ok: false, code: "stop_uncertain", message: `Session kill completed, but stop finalization failed: ${(error as Error).message}`, partialEffect: true, stopPhase: "kill_attempted" };
     }
-    return { ok: true, seat, sessionName: session.session_name, sessionId: session.id };
+    return { ok: true, seat, sessionName: session.session_name, sessionId: session.id,
+      ...(communityHarnessOf(session.community_harness, (this.db.prepare("SELECT runtime FROM nodes WHERE id=?").get(resolved.nodeId) as { runtime: string | null } | undefined)?.runtime) ? { paneOnly: true } : {}) };
   }
 
   private nonTerminalSessions(nodeId: string): LatestSessionRow[] {
@@ -2186,6 +2263,24 @@ export class SeatLifecycleService {
       `SELECT id, session_name, status, origin, ${sessionCommunityHarnessSelect(this.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1`,
     ).get(nodeId) as LatestSessionRow | undefined;
     return row ?? null;
+  }
+
+  /** From 0.7.9 a fresh, fork or rebuild handover records its successor as launched (#2440); a successor from before
+   *  keeps origin=claimed. Name that case rather than suggest `rig unclaim`, which would end OpenRig's management. */
+  private earlierHandoverRefusal(nodeId: string, session: { id: string; session_name: string }, refuses: string): SeatRefusal | null {
+    if (this.latestSession(nodeId)?.id !== session.id) return null;
+    const handover = this.db.prepare(
+      "SELECT continuity_outcome, handover_at FROM nodes WHERE id = ? AND handover_result = 'complete' AND continuity_outcome IN ('fresh', 'forked', 'rebuilt')",
+    ).get(nodeId) as { continuity_outcome: string; handover_at: string | null } | undefined;
+    if (!handover) return null;
+    return {
+      ok: false,
+      code: "claimed_session",
+      message: `Session "${session.session_name}" is recorded as adopted (origin=claimed). The seat's last handover `
+        + `(${handover.continuity_outcome}${handover.handover_at ? ` at ${handover.handover_at}` : ""}) is one OpenRig launches, but a `
+        + `successor from before OpenRig 0.7.9 keeps the adopted origin — ${refuses}.`,
+      guidance: "It keeps that origin until its next launched handover or managed launch.",
+    };
   }
 
   private settingTargetLabel(target: SeatSettingTarget): string {

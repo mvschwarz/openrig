@@ -44,10 +44,10 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 36 tools: the original 18, the five queue tools, the telemetry events read, restore status, whoami,
+  // T1: MCP server lists all 37 tools: the original 18, the five queue tools, the telemetry events read, restore status, whoami,
   // the team, slice, mission and two context reads, the artifact read, the decision room and delegated decision, and the
   // worker's handoff and unclaim
-  it("lists all 36 tools", async () => {
+  it("lists all 37 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
@@ -64,6 +64,7 @@ describe("MCP Server", () => {
       "rig_context_pack",
       "rig_discover",
       "rig_down",
+      "rig_environment_export",
       "rig_human_decision_room",
       "rig_mission",
       "rig_ps",
@@ -240,7 +241,7 @@ describe("MCP Server", () => {
     const reads = ["rig_agent_validate", "rig_bundle_inspect", "rig_capture", "rig_chatroom_watch", "rig_ps", "rig_queue_list", "rig_queue_show",
       "rig_restore_status", "rig_rig_nodes", "rig_rig_validate", "rig_snapshot_list", "rig_status", "rig_telemetry_events", "rig_whoami",
       "rig_team", "rig_slices", "rig_mission", "rig_context_pack", "rig_context_get", "rig_artifact_read", "rig_human_decision_room"];
-    const additive = ["rig_add", "rig_chatroom_send", "rig_queue_create", "rig_snapshot_create"];
+    const additive = ["rig_environment_export", "rig_add", "rig_chatroom_send", "rig_queue_create", "rig_snapshot_create"];
     // Discover refreshes and retires discovered facts; claim ends a blocked row's wait. Both change existing state.
     // A delegated decision closes the person's ask; a handoff closes the item passed on; an unclaim ends a claim.
     const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_decide", "rig_queue_handoff", "rig_queue_unclaim",
@@ -519,6 +520,16 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
+  it("cuts long context text before an emoji instead of through it", async () => {
+    const text = `${"x".repeat(47_999)}🚀${"y".repeat(10)}`;
+    await setup({ get: vi.fn(async (path: string) => path.startsWith("/api/context-packs/library/resolve-address")
+      ? { status: 200, data: { address: "world/a.md", packRef: "world", filePath: "a.md", text } }
+      : { status: 404, data: {} }) });
+    const got = (await mcpClient.callTool({ name: "rig_context_get", arguments: { address: "world/a.md" } })).structuredContent as { text: string };
+    expect(got).toMatchObject({ text: "x".repeat(47_999), truncated: true, totalChars: 48_011 });
+    await cleanup();
+  });
+
   it("gives the client short instructions on the seat, durable delegation and reserved questions", async () => {
     await setup();
     const instructions = mcpClient.getInstructions() ?? "";
@@ -557,7 +568,7 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  it("doesn't give an external caller's connection the member workflow or its authority, only the shared lines", async () => {
+  it("gives an external caller its request workflow without member tools or authority", async () => {
     const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
       access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects: { queue: ["create", "show", "list"] } } } });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -568,6 +579,8 @@ describe("MCP Server", () => {
     expect(instructions).toContain("reserved for a person");
     expect(instructions).not.toContain(MEMBER_WORKFLOW_VERSION);
     expect(instructions).not.toContain("basically authorized");
+    expect(instructions).toContain("You may omit destination");
+    expect(instructions).not.toMatch(/rig_whoami|rig_team|rig_queue_handoff|rig_queue_decide/);
     await external.close();
     await server.close();
   });
@@ -679,7 +692,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(36);
+    expect(result.tools.length).toBe(37);
 
     // Clean disconnect
     await cleanup();
@@ -693,7 +706,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(36);
+    expect(result2.tools.length).toBe(37);
 
     await client2.close();
     await server2.close();

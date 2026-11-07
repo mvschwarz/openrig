@@ -2,7 +2,7 @@
 
 Version: 0.2 (pod-aware)
 Last validated against code: 2026-10-07, at the 0.6.6 cut `2620dea8` (whole document at `fcaf1f8e`; changes to its sources since then checked)
-Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/startup-validation.ts`, `packages/daemon/src/domain/permission-policy/policy-ref.ts`, `packages/daemon/src/domain/profile-resolver.ts`, `packages/daemon/src/domain/rigspec-preflight.ts`, `packages/daemon/src/adapters/kernel-authority.ts`, `packages/daemon/src/domain/native-permission-store.ts`, `packages/daemon/src/domain/codex-team-workspace.ts`
+Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/launch-wrapper.ts`, `packages/daemon/src/domain/startup-validation.ts`, `packages/daemon/src/domain/permission-policy/policy-ref.ts`, `packages/daemon/src/domain/profile-resolver.ts`, `packages/daemon/src/domain/rigspec-preflight.ts`, `packages/daemon/src/adapters/kernel-authority.ts`, `packages/daemon/src/domain/native-permission-store.ts`, `packages/daemon/src/domain/codex-team-workspace.ts`
 
 This is the canonical reference for the pod-aware RigSpec YAML format. Every field, validation rule, and default documented here was traced from the actual parser and validator code, not from prior documentation.
 
@@ -180,7 +180,7 @@ edges:
 | `non_interruptive` | boolean | no | — | Pod-aware rig launch-warning default. With full-bypass Claude/Codex seats, true accepts or hides supported harness warnings using launch flags. Explicit CLI choices override this field; this field overrides the machine default. It does not grant permissions, change native settings files, or bypass login. |
 | `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`, `builtin:auto`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute, no empty segments, each segment `[A-Za-z0-9][A-Za-z0-9._-]*`), or `none`, a recorded choice of the floor. Absent uses the default floor with the scoped team launch allowances described below. A bare built-in name such as `yolo` is refused ("use 'builtin:yolo'"), and so is an explicit `null`. A custom file that is missing, unreadable or invalid isn't a validation error: it resolves to the floor, and preflight warns. A member may set its own `permission_policy` (not on a terminal member), which takes precedence over the rig-level one; there is no pod level. See "Attaching a permission policy" below. |
 | `env` | map | no | — | Launch environment for every seat in the rig: `NAME: value` pairs. A member's own `env` overrides it name by name. Names match `^[A-Z_][A-Z0-9_]*$`, names starting `OPENRIG_` are reserved, and values must be non-empty strings (quote numbers and booleans). Values are not secret. See "Launch environment" below. |
-| `managed_blocks` | map | no | `CLAUDE.md` | File that receives OpenRig's managed instruction blocks for Claude Code members. Only the `claude-code` key is accepted, with `CLAUDE.md` or `CLAUDE.local.md`. Codex, Pi and OMP members use `AGENTS.md`. See "Choosing the Claude instruction file" below. |
+| `managed_blocks` | map | no | `CLAUDE.md` | File that receives OpenRig's managed instruction blocks for Claude Code members. Only the `claude-code` key is accepted, with `CLAUDE.md` or `CLAUDE.local.md`. Codex, Pi and OMP members use `AGENTS.md`, except that a fresh Pi seat normally uses its own agent folder's `AGENTS.md` and a fresh Codex 0.164.0+ seat normally gets launch developer instructions; a link, a conflicting or unreadable Codex config layer, or a resume keeps the repository file. See [Codex guidance at launch](agent-startup-guide.md#codex-guidance-at-launch) and [Runtime Differences](agent-startup-guide.md#runtime-differences). See "Choosing the Claude instruction file" below. |
 | `workspace` | object | no | — | The rig's workspace: `workspace_root` (required), `repos[]` of `{name, path, kind}` with `kind` one of `user`, `project`, `knowledge`, `lab` or `delivery` and unique names, an optional `default_repo` naming one of them, and an optional `knowledge_root`. Relative repo paths resolve against `workspace_root`. |
 | `docs` | Doc[] | no | — | Documentation files that should travel with the rig. Included in rig bundles. Each entry has a `path` field (safe relative path). The engine does not consume these — they are for humans and agents setting up the environment before launch. |
 | `startup` | StartupBlock | no | — | Rig-level startup files and actions. Applied to all members via the startup layering model. |
@@ -511,9 +511,9 @@ pods:
 **Where the declared names reach, by runtime.** Declared values are handed to the seat's terminal as tmux environment, so most seats take them as given:
 
 - Plain Claude Code (no permission mode selected), Codex and terminal seats take a spec `HOME`, `PATH` or `CLAUDE_CONFIG_DIR` as given.
-- The cleared environment (`env -i`) belongs only to a managed Claude launch, which is the one used when a permission mode is selected for the seat (for example `permission_policy: builtin:auto`). It forwards the declared names through the cleared environment, except `PATH`, `HOME` and `CLAUDE_CONFIG_DIR`, which OpenRig sets for that launch itself, and `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`, for which it sets its own renderer setting. A spec value for any of those four is not forwarded as such; an absolute `CLAUDE_CONFIG_DIR` becomes the config dir OpenRig sets (see "A seat's own account" below). A seat that selected the shipped `openrig-core` plugin also has `CLAUDE_CODE_PLUGIN_DIRS` (the vendored plugin, added after a list the seat declares itself) among its declared names, so it is forwarded like the others and the plugin's hooks load in a seat with a permission mode as in one without; a seat that didn't select the plugin has no such name added. Beyond the declared names, the launch also forwards, by name and only when the seat's terminal has them set, the terminal and locale variables (`TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LANG` and the `LC_*` names) and the person's editor and display session: `EDITOR`, `VISUAL`, `DISPLAY`, `XAUTHORITY` and `WAYLAND_DISPLAY`. They let Claude's external-editor action open the person's editor and let image paste reach the clipboard, without a value in a spec. `WAYLAND_DISPLAY` is passed as an absolute path: an absolute value is kept, and a relative one is joined to the terminal's `XDG_RUNTIME_DIR`; if the terminal has no `XDG_RUNTIME_DIR` for it, the name is left out. The runtime directory and its `disabled:` bus address (see "The runtime directory, on Linux" above) are forwarded together, and the runtime directory is also forwarded beside a declared `DBUS_SESSION_BUS_ADDRESS`. A terminal's own `XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`, from a shell startup file or tmux's `update-environment`, is not, because D-Bus clients look for the session bus at `$XDG_RUNTIME_DIR/bus` when no address is set; declare it in `env:` to forward it. `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP` and `SSH_AUTH_SOCK` are not forwarded. A running seat picks the names up at its next managed Claude launch, not before: `rig seat launch <seat> --fresh --stop --reason "<why>"` for that seat alone (a new conversation), or a restore of the whole rig (`rig down <rig>`, then `rig up <rig> --existing`, which resumes each conversation but restarts every seat in the rig), or a handover. A seat that is up keeps the environment it started with.
+- The cleared environment (`env -i`) belongs only to a managed Claude launch, which is the one used when a permission mode is selected for the seat (for example `permission_policy: builtin:auto`). It forwards the declared names through the cleared environment, except `PATH`, `HOME` and `CLAUDE_CONFIG_DIR`, which OpenRig sets for that launch itself, and `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`, for which it sets its own renderer setting. A spec value for any of those four is not forwarded as such; an absolute `CLAUDE_CONFIG_DIR` becomes the config dir OpenRig sets (see "A seat's own account" below). A seat that selected the shipped `openrig-core` plugin also has `CLAUDE_CODE_PLUGIN_DIRS` (the vendored plugin, added after a list the seat declares itself) among its declared names, so it is forwarded like the others and the plugin's hooks load in a seat with a permission mode as in one without; a seat that didn't select the plugin has no such name added. Beyond the declared names, the launch also forwards, by name and only when the seat's terminal has them set, the terminal and locale variables (`TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LANG` and the `LC_*` names) and the person's editor and display session: `EDITOR`, `VISUAL`, `DISPLAY`, `XAUTHORITY` and `WAYLAND_DISPLAY`. They let Claude's external-editor action open the person's editor and let image paste reach the clipboard, without a value in a spec. `WAYLAND_DISPLAY` is passed as an absolute path: an absolute value is kept, and a relative one is joined to the terminal's `XDG_RUNTIME_DIR`; if the terminal has no `XDG_RUNTIME_DIR` for it, the name is left out. The runtime directory and its `disabled:` bus address (see "The runtime directory, on Linux" above) are forwarded together, and the runtime directory is also forwarded beside a declared `DBUS_SESSION_BUS_ADDRESS`. A terminal's own `XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`, from a shell startup file or tmux's `update-environment`, is not, because D-Bus clients look for the session bus at `$XDG_RUNTIME_DIR/bus` when no address is set; declare it in `env:` to forward it. `XDG_SESSION_TYPE` and `XDG_CURRENT_DESKTOP` are not forwarded. The SSH agent socket (`SSH_AUTH_SOCK`) is forwarded when OpenRig itself was started with one, so git over SSH works in the seat; a socket only the seat's terminal has stays out. To check, run `ssh-add -l` inside the seat. If it can't reach an SSH agent, start the OpenRig daemon from a terminal where `ssh-add -l` works. A running seat picks the names up at its next managed Claude launch, not before: `rig seat launch <seat> --fresh --stop --reason "<why>"` for that seat alone (a new conversation), or a restore of the whole rig (`rig down <rig>`, then `rig up <rig> --existing`, which resumes each conversation but restarts every seat in the rig), or a handover. A seat that is up keeps the environment it started with.
 - Codex seats run OpenRig's own Codex executable whatever a spec `PATH` says. They use the seat's own `CODEX_HOME` when its `env:` declares an absolute one, else the daemon's when the daemon has one.
-- On Pi and OMP seats the values reach the terminal. The agent process gets only what the runner passes on, so a spec or one-off value reaches it only for the names the runner always passes: `PATH`, `HOME`, `USER`, `LOGNAME`, `TERM`, `LANG`, `LC_ALL`, `SHELL` and `TMPDIR`. Pi's agent process receives the runner's `HOME`, so a spec or one-off `HOME` value that reaches the runner is passed to Pi; OMP's agent process gets its seat state directory (`$OPENRIG_HOME/state/omp/<seat>`, see Oh My Pi below) as `HOME`, so a `HOME` value does not reach it. The selected provider's variables are passed separately, as described under each runtime.
+- On Pi and OMP seats the values reach the terminal. The agent process gets only what the runner passes on, so a spec or one-off value reaches it only for the names the runner always passes: `PATH`, `HOME`, `USER`, `LOGNAME`, `SSH_AUTH_SOCK`, `TERM`, `LANG`, `LC_ALL`, `SHELL` and `TMPDIR`. Pi's agent process receives the runner's `HOME`, so a spec or one-off `HOME` value that reaches the runner is passed to Pi; OMP's agent process gets its seat state directory (`$OPENRIG_HOME/state/omp/<seat>`, see Oh My Pi below) as `HOME`, so a `HOME` value does not reach it. The selected provider's variables are passed separately, as described under each runtime.
 
 **A seat's own account.** Claude Code keeps its login in its config dir and Codex in its home, so a seat whose `env:`
 declares an absolute `CLAUDE_CONFIG_DIR` (Claude Code) or `CODEX_HOME` (Codex) runs on whatever login that directory
@@ -526,6 +526,105 @@ only the stored `env:`. Seats may share a home. Live usage refresh (`rig provide
 daemon's own logins; reading each seat's home would need a native reader per home. OpenRig doesn't copy logins or conversation history between homes, so a conversation saved under a seat's earlier home
 doesn't resume after the seat moves to another one. The `openrig-user` skill has the setup steps.
 
+**A seat's own subscription token.** A Claude member can start on a prepared subscription token from its first launch,
+with no conversation to switch first. Name the token file beside its config dir:
+
+```yaml
+- id: dev
+  runtime: claude-code
+  env:
+    CLAUDE_CONFIG_DIR: /abs/claude-dev
+  claude_token: { label: dev-sub, file: /abs/tokens/dev.token }
+```
+
+The label and the absolute path are stored on the seat when the rig is created, as `rig provider switch --seat <seat>
+--to-account <label> --token-file <path>` stores them. Its launches run the same token step, which reads the file as
+Claude starts; a launch path that can't run it (a pane shell other than a POSIX one, for example) starts without it and
+warns. The file's contents never pass through OpenRig: validation doesn't read it, and they don't reach the spec, the
+seat's record or the launch command. A missing, empty or unreadable file doesn't refuse the spec; the seat starts on its
+config dir's stored login (or a token the daemon gives every seat) and says so. A launch also warns when a setting Claude
+Code ranks above the token would be used instead: an `apiKeyHelper`, or an outranking `env` entry in the user, project
+or local settings. Managed settings aren't inspected. `rig export` writes the seat's current reference, except for a seat
+with an account home or an API-key selection (select those again after import), so a later switch shows there, and `rig provider switch --stored-login` removes it. Only
+`claude-code` members and legacy flat nodes accept it, and there's no rig-level default.
+
+**Switching to an isolated account home.** A running Codex or Claude Code seat can change its native account home
+while staying in its rig:
+
+```sh
+rig provider switch --seat dev-impl@my-rig --to-account api-account \
+  --account-home /home/me/accounts/codex-api --model gpt-5.5 --reason "Use the API budget" --dry-run
+rig seat set-runtime dev-impl@my-rig --runtime claude-code \
+  --account-home /home/me/accounts/claude-api --model claude-sonnet-4-6 --reason "Codex limit"
+```
+
+The directory must already exist and contain the runtime's login or API settings. You choose the account and budget;
+OpenRig does not choose or create credentials. `--account-home` sets `CODEX_HOME` for Codex or `CLAUDE_CONFIG_DIR` for
+Claude Code before the successor starts.
+
+This switch starts a fresh conversation with a handover, even when the runtime stays the same. The existing
+subscription-login switch preserves the conversation. Once the successor confirms, OpenRig commits its home, runtime,
+model, profile and permission selection together. The seat keeps its address, edges, queue rows and claims. If OpenRig
+refuses the switch before cutover, the predecessor's configuration stays unchanged.
+
+For a Claude plan authenticated with `setup-token`, supply the token file with the home:
+
+```sh
+rig provider switch --seat dev-impl@my-rig --to-account claude-plan \
+  --account-home /home/me/accounts/claude-plan --token-file /home/me/credentials/claude-plan-token \
+  --reason "The plan reset"
+# Across runtimes, use set-runtime with --account-home, --token-file and --account-label.
+```
+
+To return to the seat's configured login:
+
+```sh
+rig provider switch --seat dev-impl@my-rig --clear-account-home --reason "The plan reset" --dry-run
+rig provider switch --seat dev-impl@my-rig --clear-account-home --reason "The plan reset"
+# Across runtimes: rig seat set-runtime dev-impl@my-rig --runtime claude-code --clear-account-home --reason "Return to configured login"
+```
+
+Clearing the selection also starts a successor with a fresh conversation and a handover. OpenRig removes the saved
+account-home override and its token reference only after the successor confirms. The successor starts with the member's
+or rig's configured home, falling back to the daemon's selection and then the native default, as an ordinary launch does.
+If there was no account-home override, OpenRig preserves any unrelated legacy per-seat token. Clear uses the current
+configuration; it does not remember a prior login or restore old credentials. Use clear on its own, without
+`--to-account`, `--stored-login`, `--account-home` or a new token reference.
+
+**Anthropic profile limitation.** An active or default profile in Anthropic's configuration directory can override a
+stored Claude login. `CLAUDE_CONFIG_DIR` does not isolate that directory, and OpenRig does not change `ANTHROPIC_CONFIG_DIR`
+or rewrite global profiles. Check or deselect the profile before using a stored-login account home, and verify the
+running account privately.
+
+An isolated Claude launch removes `ANTHROPIC_PROFILE`, `ANTHROPIC_FEDERATION_RULE_ID` and `ANTHROPIC_ORGANIZATION_ID`
+from its inherited environment. It also refuses profile selectors in the selected home's or project's settings `env`
+blocks. An explicit subscription token takes precedence over these selectors, including in the legacy
+subscription-token switch.
+
+OpenRig receives only the token's label and file path. The launch reads the token; if the required file is unusable, no agent
+starts. Selecting an API home without `--token-file` clears an older seat token reference when the selection commits.
+The home's API helper can stay in its user settings. For a selected plan token, OpenRig refuses a home whose API helper
+or credential environment would take precedence over that token. Both modes refuse project credential overrides.
+OpenRig leaves those settings unchanged.
+
+The selected home persists across managed launches and restores. These launches exclude inherited Claude/OpenAI
+credentials and routing variables so credentials from the daemon or shell cannot override the selected home. OpenRig
+refuses to launch if it cannot read the saved selection or the shell cannot enforce isolation. Launches without a home
+selection and existing subscription-login switches keep their behavior. A Claude seat using account-home mode must
+use that mode for later account changes too.
+
+User-managed provider settings can still affect authentication. After a real tool turn, check which account and billing
+identity the runtime used. Do not print tokens or the process environment. The configured home alone cannot verify the
+running account.
+
+Before downgrading to a version without account-home switching, stop the managed seats. Select their accounts using
+that version's supported setup before resuming. Older versions ignore the saved selection and may launch with inherited
+or default credentials. Rolling back the binary alone does not preserve the selected billing account.
+
+OpenRig leaves the imported team file unchanged. Exporting and reimporting a team does not preserve account-home
+isolation, so configure it explicitly for each new rig. If a switch is interrupted, inspect it with `rig seat status`
+and follow the printed recovery command. Wait until the outcome is known before starting another switch.
+
 **Do not put secrets in `env:` or `--env`.** The values are not secret, and nothing here encrypts or hides them (see #306):
 
 - Spec values are stored in OpenRig's database and in rig snapshots, and `rig export` and bundles copy them, so a secret put there by mistake travels with the rig.
@@ -533,6 +632,52 @@ doesn't resume after the seat moves to another one. The `openrig-user` skill has
 - A one-off `--env` value is not stored in the database or in snapshots, but it reaches tmux the same way, so it is visible in the same ways while that launch runs.
 
 Use `env:` for settings only. Credentials belong in the provider's own login or a secret store the seat reads at run time.
+
+### Switching credentials while keeping the conversation
+
+`rig provider switch` resumes a running seat in its existing home and pane. A stopped Claude Code
+seat isn't relaunched: the switch saves the new reference for its next launch, but only when the
+launch it predicts resumes the seat's conversation. That prediction covers the snapshot that
+launch would use and restore's automatic periodic carry. It then prints the launch that resumes:
+`rig launch <rig> <seat> --snapshot-id <id>` for a saved conversation, or a plain
+`rig launch <rig> <seat>` when the resume comes through the periodic carry, which naming a
+snapshot would turn off. Otherwise it refuses and changes nothing. `rig provider precheck` gives
+the same answer.
+For Claude Code, select an API-key file, a subscription-token file, or the home's stored login:
+
+```sh
+rig provider precheck --seat dev-a@my-rig --to-account api-budget --api-key-file /secure/claude-api-key
+rig provider switch --seat dev-a@my-rig --to-account api-budget --api-key-file /secure/claude-api-key
+rig provider switch --seat dev-a@my-rig --to-account plan --token-file /secure/claude-plan-token
+rig provider switch --seat dev-a@my-rig --stored-login
+```
+
+The API-key file must be private (0600 or 0400), nonempty, and at most 8192 bytes, containing
+one key with optional surrounding whitespace. Only the reference is stored. The child reads the
+key at launch; key bytes never enter command arguments, snapshots or switch reports. Classic
+launches require a supported POSIX pane shell. Missing/invalid API-key files prevent launch.
+Settings that could override the key cause a refusal; OpenRig does not edit those settings.
+Native managed settings and a signed-in Claude gateway cannot be ruled out; Claude may require API-key approval before its
+first turn. Check `/status` after a real tool turn to confirm the authentication method.
+
+For Codex, a saved native API-key login is selected with the existing `--to-account <name>`
+path, exactly like a saved subscription login. Prepare it using native `codex login --with-api-key`
+with the key on stdin, then `rig auth save --codex-home <home> <name>`; never put a key in argv.
+Use the seat's existing home. Preparing a login replaces that home's active credentials, so do it
+before running seats there, or prepare/import a native auth profile separately. Switches preserve
+an outgoing credential copy and report peers sharing the home. A native keyring or administrator
+policy can override `auth.json`; the report remains unverified until native account verification.
+
+Select or clear an account home in a separate operation: `--api-key-file` cannot be combined with
+`--account-home` or `--clear-account-home`. A credential switch inside an already selected home
+keeps that home.
+
+Both paths retain the conversation and launch settings, interrupt in-flight work, and report
+uncertain restarts without retrying. They do not move account homes or start a fresh conversation.
+The caller chooses subscription-first order and configures/enforces the API budget; this command
+neither selects accounts automatically nor imposes a spending limit. Downgrade only after switching
+API-key Claude seats back to subscription credentials: older OpenRig versions cannot read the new
+credential kind correctly.
 
 ### Choosing the Claude instruction file
 
@@ -595,19 +740,23 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `id` | string | yes | — | Member identifier. Must not contain dots or `@`. Must be unique within the pod. |
 | `agent_ref` | string | yes | — | Reference to an AgentSpec. Must start with `local:` (relative) or `path:` (absolute). Exception: `builtin:terminal` for infrastructure nodes. |
 | `profile` | string | yes | — | Profile name from the referenced AgentSpec. Use `default` for the default profile. Exception: `none` for terminal nodes. |
-| `codex_config_profile` | string | no | — | Codex-only native profile passed as `-p <name>`; letters, numbers, `_`, `.`, `-`. Separate from the AgentSpec `profile`. With the normal launch mode, this replaces OpenRig's explicit workspace-write sandbox flag. A full-bypass policy instead emits danger-full-access and omits this profile argument. |
+| `codex_config_profile` | string | no | — | Codex-only native profile passed as `-p <name>`; letters, numbers, `_`, `.`, `-`. Separate from the AgentSpec `profile`. With the normal launch mode, this replaces OpenRig's explicit workspace-write sandbox flag. A full-bypass policy instead emits danger-full-access and omits this profile argument. To keep the profile, put full access in the profile itself, or record a workspace-write or read-only `codex_permissions` envelope, which keeps it. |
 | `codex_permissions` | mapping | no | — | Codex-only sandbox and approval envelope, emitted as explicit flags on every managed launch and resume; see [per-member Codex permissions](#per-member-codex-permissions). |
+| `claude_token` | mapping | no | — | Claude-only `{ label, file }`: the seat's own subscription token file, by absolute path, used from its first launch; see "A seat's own subscription token" under [launch environment](#launch-environment). |
 | `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `terminal`, `stub`. `stub` is a deterministic test harness, not an agent: a Node runner in the seat's tmux pane goes through the normal launch, skill projection, startup-file and readiness path, follows `<cwd>/.openrig/stub/script.json` when present, and calls no model. See "What a stub can and cannot prove" in `docs/as-built/test-layers.md`. |
 | `cwd` | string | yes | — | Working directory for the agent. A relative path resolves against the rig root (the directory containing the rig spec). If that path exists as written, it is used. Otherwise a leading `~` or `~/` expands to the home directory (`~user` does not) and `$VAR` / `${VAR}` expand from the daemon host's environment; a relative result still resolves against the rig root. A reference to an unset variable stays as written, so the cwd is that literal path and works only if it exists. Use `"."` for the rig root itself. Can be overridden at launch time with `rig up --cwd`. A cwd inside the OpenRig installation fails preflight unless `--cwd` is given. Editing this declaration does not update an existing seat; use [`rig seat set-cwd`](agent-startup-guide.md#change-an-existing-seats-working-directory) to save its future launch directory. |
 | `label` | string | no | — | Human-readable member name. Shown in UI when present. |
 | `model` | string | no | — | Model override. Runtime-specific (e.g., `claude-opus-4-6` for Claude Code). |
 | `effort` | string | no | — | Reasoning effort override, trimmed. Claude gets `--effort`, Codex `-c model_reasoning_effort=…`, Pi `--thinking` (see "Pi" below). A non-string value is ignored with an advisory. |
 | `advisor` | string | no | — | Claude-only Advisor model for this seat. Overrides the AgentSpec profile/default; blank or non-string values are ignored with an advisory. |
+| `claude_mcp` | `none` | no | normal loading | Claude members only. Disable MCP server loading for this agent on every launch and resume. Omit the field to keep Claude's normal configuration; see [Claude MCP loading](#claude-mcp-loading-runtime-claude-code). |
+| `launch_wrapper` | string[] | no | — | Local built-in `pi` and `codex` members only. Literal argument prefix prepended before the managed launch command on fresh launch, relaunch, rebuild, resume, fork, restore and handover; `[]` explicitly clears a stored wrapper when re-applying an authored spec, while omitting the key leaves an existing seat's stored choice unchanged. See [Launch wrapper](#launch-wrapper-runtime-pi-and-codex). |
 | `permission_policy` | string | no | — | Member-level permission policy; overrides the rig's. Not valid on terminal members. |
 | `env` | map | no | — | Launch environment for this seat, laid over the rig's `env`. Same rules as the rig-level field. Valid on terminal members too. See "Launch environment" below. |
 | `agent_file` | string | no | — | Claude members only. A Claude agent definition (a `.md` file with `name` in its frontmatter) for this seat. It's copied into the seat's own storage and launched as `--agent openrig:<name>`. A path beside the spec: no `..`, not absolute. |
 | `append_system_prompt_file` | string | no | — | Claude members only. A prompt file appended to Claude's system prompt for this seat. It's copied into the seat's own storage and passed as `--append-system-prompt-file`. A path beside the spec. |
 | `plugin_dirs` | list | no | — | Claude members only. Claude plugin folders for this seat, each copied into the seat's own storage and loaded through `CLAUDE_CODE_PLUGIN_DIRS`. Paths beside the spec. Each is copied under its folder name, so two folders with the same name are refused; an empty list is none. A missing file or folder fails that seat's launch by name. `rig bundle create` carries all three; `rig export` names a seat whose additions it doesn't carry. |
+| `plugin_channels` | list | no | — | Claude members only. Plugin channels this agent registers for, as `plugin:<name>@<marketplace>` entries, passed as one `--channels` on every launch; see [Claude plugin channels](#claude-plugin-channels-runtime-claude-code). |
 | `role` | string | no | — | The seat's role, letters, digits, `_`, `.` and `-`. Not valid on terminal members. |
 | `restore_policy` | string | no | the AgentSpec's | Restore behavior. One of: `resume_if_possible`, `relaunch_fresh`, `checkpoint_only`. The default comes from the AgentSpec's `defaults.lifecycle` (else `resume_if_possible`) as narrowed by its profile; a member value may only narrow it further, in that order. |
 | `compaction_strategy` | string | no | — | `default-compaction`, `managed-compaction`, `handover` or `apprentice-handover`; `harness_native` and `pod_continuity` are accepted as deprecated aliases, and `custom_prompt` is refused. `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing). |
@@ -615,6 +764,99 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. |
 | `starter_ref` | object | no | — | `{ name }` of an agent starter (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) whose files lead the seat's startup. Not valid on terminal members or with a fork. |
 | `startup` | StartupBlock | no | — | Member-level startup files and actions. Applied only to this member. |
+
+### Claude MCP loading (`runtime: claude-code`)
+
+Set `claude_mcp: none` on an individual member to launch it without MCP servers:
+
+```yaml
+members:
+  - id: reviewer
+    agent_ref: local:agents/reviewer
+    profile: default
+    runtime: claude-code
+    cwd: .
+    claude_mcp: none
+```
+
+OpenRig passes `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` to
+Claude for this seat. Strict mode selects only the supplied empty server set,
+excluding servers from user, project, team and plugin configuration. It does
+not disable plugin skills or change the seat's permission mode. The choice is
+saved on the seat and carried through fresh starts, forks, resumes (including
+saved startup context) and handover successors. Export and bundle round trips
+preserve it. The same field is supported on legacy `nodes` declarations.
+
+Other agents in the same directory keep their own choices; OpenRig does not
+rewrite shared MCP configuration files. Omit the field for Claude's normal
+loading. A later launch from an authored spec without the field clears the
+seat's saved opt-out once the launch is accepted for startup; a rejected
+launch leaves the choice unchanged. Restarting from saved context keeps it.
+Only `none` is accepted, and the field is invalid on other runtimes. If the
+seat switches to another runtime, the Claude choice stays dormant and applies
+again if it switches back. A currently running Claude process is unaffected.
+Export describes the current runtime and omits a dormant Claude choice. YAML
+exports name each affected agent in a `# Not carried:` comment, which `rig export`
+also prints after writing the file; JSON exports keep their existing shape. If
+you rebuild from that export and switch back to Claude, restore `claude_mcp: none`
+in the Claude declaration. Re-check this setting after downgrading
+OpenRig too: older versions can ignore it.
+
+Shutdown resume probes and the displayed native recovery commands (including
+the conversation picker) also carry the saved MCP choice. If shutdown cannot
+read that choice, it skips the probe and retains the token; shutdown proceeds.
+
+This opt-out is incompatible with an active enterprise `managed-mcp.json`:
+[Claude rejects strict overrides of that managed server set](https://code.claude.com/docs/en/managed-mcp#servers-passed-with---mcp-config-or---strict-mcp-config).
+OpenRig keeps the requested opt-out flags, so startup and resume remain subject
+to that native refusal; it does not fall back to loading servers. Use a host
+without that managed configuration, or omit the opt-out to use the managed set.
+
+### Claude plugin channels (`runtime: claude-code`)
+
+Set `plugin_channels` on a Claude member to register that agent for channel
+notifications (messages a plugin's MCP server pushes into the session):
+
+```yaml
+members:
+  - id: support
+    agent_ref: local:agents/support
+    profile: default
+    runtime: claude-code
+    cwd: .
+    plugin_channels:
+      - plugin:example-channel@example-marketplace
+```
+
+OpenRig passes `--channels plugin:example-channel@example-marketplace` to this
+agent's Claude on every launch, resume, fork, restore and handover. Several
+entries follow one `--channels`, space-separated, and OpenRig's own session
+options come after them. Claude Code 2.1.316 hides `--channels` from
+`claude --help`, so it isn't listed there. An agent without the field gets no
+`--channels`, and nothing is added for other agents or other runtimes; there is
+no rig-wide or environment default.
+
+Each entry is `plugin:<name>@<marketplace>`, both names made of letters, digits,
+`.`, `_` and `-`, starting with a letter or digit. `server:` entries and Claude's
+`--dangerously-load-development-channels` aren't supported. Combining a non-empty
+channel list with `claude_mcp: none` produces a validation warning: that setting
+starts Claude without MCP servers (plugin servers included), so no channel could
+register. OpenRig keeps both settings and launches the member normally. Remove
+`claude_mcp: none` to use the channels, or remove `plugin_channels` to keep the MCP
+opt-out. OpenRig doesn't install plugins or marketplaces, or change the settings
+that admit a channel: whether each channel registers is Claude's decision (the plugin installed, and
+admitted by your organisation's channel settings or Claude's approved list).
+
+Selecting a channel for one agent doesn't isolate what the plugin shares with
+other agents. A token or other credential the plugin keeps in its own
+configuration is the same for every agent that loads that plugin.
+
+The selection is saved with the seat's other launch additions when the seat
+starts from the spec, and starting it from a spec without the field removes it.
+`rig seat launch --plan` and `rig skill loadout --seat` list it, a fork keeps it,
+and `rig bundle create` and `rig export` carry it in the member; a bundle's
+before-install view names each channel as a need. A running Claude process is
+unaffected.
 
 ### Claude Advisor (`runtime: claude-code`)
 
@@ -646,6 +888,26 @@ This requires a Claude Code version that supports `--advisor`. OpenRig never wri
 choose different Advisors. When Advisor is unset, no flag is emitted and Claude's
 own defaults/settings apply. Other runtimes ignore this field.
 
+### Launch wrapper (`runtime: pi` and `codex`)
+
+Set `launch_wrapper` on a local built-in `pi` or `codex` member to prefix its managed launch command with a literal argv vector:
+
+```yaml
+members:
+  - id: impl
+    agent_ref: local:agents/impl
+    profile: default
+    runtime: codex
+    cwd: .
+    launch_wrapper: ["launcher", "exec", "--profile", "seat-a", "--"]
+```
+
+- **Scope and literal argv:** Supported only on local built-in `runtime: pi` and `runtime: codex` members (and legacy flat `pi`/`codex` nodes); other runtimes (`claude-code`, `omp`, `terminal`, `stub` and community harnesses) reject the field, including `[]`. There is no rig-level, pod-level or fork inheritance: a fork uses its target member's own `launch_wrapper`. Every element must be a string without NUL, CR or LF characters and is quoted literally with `shellQuote`, preserving argument order, spaces, quotes, shell metacharacters and empty non-executable arguments without shell or template expansion.
+- **Executable resolution and `exec` contract:** `launch_wrapper[0]` must be a non-empty bare command filename on the daemon's launch `PATH` or an absolute path (no relative paths with slashes such as `./x` or `../x`, no `/` in a bare name, and no shell aliases or functions). Preflight and launch resolve `launch_wrapper[0]` to an executable file using the daemon's launch `PATH` and daemon working directory (before the seat's `rig` bin directory is prepended). For `codex`, the prefix appears immediately before the resolved Codex entry (`'<abs node>' '<abs codex.js>' …` or `'<abs codex>' …`) inside the public seat environment envelope, preserving the session's TTY stdio. For `pi`, OpenRig's host runner stays host-side and unwrapped (`node <pi-runner.js> …`), preserving its RPC lifecycle, sidecars, and status reporting; the wrapper prefixes the resolved Pi child executable (`pi --mode rpc`) inside that runner, and the child's stdio pipes preserve RPC stdin, stdout, and stderr (not a TTY). The wrapper must prepare its environment and `exec` the target command in place so the child process preserves working directory, child stdio pipes (for Pi) or TTY stdio (for Codex), OpenRig session/identity environment, process lineage, exit status and signals; supervising wrappers that keep a parent process are unsupported.
+- **Fail-closed (never unwraps):** When a wrapper is selected, OpenRig applies it across fresh launch, relaunch, rebuild, native resume, fork, restore, handover successor and `pi`↔`codex` runtime switches, and never falls back to bare launch. For `codex`, wrapper resolution and launch environment assembly occur within the shell prefix: if the pane shell is non-POSIX (`nu`, `fish`, etc.), OpenRig session identity is missing or mismatched, `SeatLaunchEnvironment` is unavailable, or `launch_wrapper[0]` is missing or unexecutable, Codex launch fails closed (`OpenRig: launch_wrapper unavailable; no agent started.`). For `pi`, wrapper lookup resolves against the daemon launch `PATH` and daemon working directory before state creation or process dispatch, failing closed before pending launch state if `launch_wrapper[0]` cannot be resolved or executed; runtime child wrapper failures are subsequently reported via the host runner sidecars and markers. If Pi encounters a long launch command (`launch_path_too_long`), it retries execution using the raw host runner command; because that command carries the exact same child wrapper arguments, the Pi child executable never runs unwrapped. In both runtimes, malformed stored wrapper metadata fails closed during reads.
+- **Persistence, `[]` clear vs absent retain, and recreation:** On a new seat, omitting `launch_wrapper` or declaring `launch_wrapper: []` stores no wrapper (`NULL`). When an authored spec is applied to an existing seat, omitting `launch_wrapper` retains the seat's stored wrapper, `launch_wrapper: []` explicitly clears it, and a non-empty array replaces it. A rig that is recreated or imported, including a replacement import, creates new nodes from the incoming spec and uses only what that spec declares, so omitting the field gives the new seat no wrapper. Stored wrapper definitions remain strictly validated; corrupted wrapper rows fail closed during reads without silent unwrap. Restoring an older snapshot that predates `launch_wrapper` preserves the seat's current stored wrapper. First-start retry (`rig launch <rig> <member>`) compares the retained declaration with the node row and refuses to add, change or remove a wrapper on retry. Switching a wrapped seat to an unsupported runtime (`claude-code`, `omp`, etc.) is refused before side effects. There is no live `rig seat` edit verb or management route for `launch_wrapper`; to change or clear a wrapper, edit the `RigSpec` (use `launch_wrapper: []` to clear) and use the supported create/recreate/apply flow. Export (`rig export`) and cached node inventory / `rig ps --nodes --json` (including `--full` and `--fields launchWrapper`) include `launch_wrapper` / `launchWrapper` when configured and omit it when absent.
+- **Boundary and limits:** A `launch_wrapper` is only an argv prefix. Configuring or observing a prefix is **not** proof of sandbox isolation, tooling availability, memory wiring or governance enforcement; verify the wrapper's own guarantees and the runtime independently.
+
 ### Pi (`runtime: pi`)
 
 `runtime: pi` launches the Pi coding agent (`pi --mode rpc`) through OpenRig's RPC runner.
@@ -653,7 +915,7 @@ own defaults/settings apply. Other runtimes ignore this field.
 - **State:** Each seat uses `$OPENRIG_HOME/state/pi/<session>/agent` as its Pi agent directory, with `sessions/` beside it, instead of your default `~/.pi/agent`. The runner sets `PI_CODING_AGENT_DIR` to that directory. `<session>` is the seat's session name, unchanged; for a pod member it is `{podId}-{memberId}@{rigName}`. `$OPENRIG_HOME` defaults to `~/.openrig`. OpenRig creates these directories at launch and does not copy anything from `~/.pi/agent`.
 - **Thinking level:** A Pi seat's effort (the choice saved with `rig seat set-effort`, else the spec's `effort`) is sent to Pi as `--thinking <level>` on every managed launch and resume: fresh launch, successor and restore. Pi accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max`; OpenRig passes the value as written and does not translate it, so Codex's `none` is not mapped to `off`. Only a value of the shape `set-effort` accepts (a letter, then up to 31 letters, digits, `-` or `_`) is sent; any other spec value, such as one with a space or one that starts with `--`, is left out, and `rig seat effort` says so. An unfamiliar level gets an advisory (a warning from `set-effort`), never a refusal, and Pi itself ignores an unknown level with a warning and keeps the level it would use without the flag: a model suffix, the resumed session's level, or its default. With no effort resolved, no flag is sent. The effort wins over a model suffix, and the model string is never changed. `rig seat effort` reports the level sent at launch and, on Pi 0.99.0 or later, the `thinkingLevel` Pi records on this launch's latest successful assistant turn (error and aborted turns are skipped); that is the session's level after Pi's own cap, not proof the provider applied it, and it is shown apart from the level sent when they differ. On older Pi it is NOT VERIFIED. Without an effort, you can still set the level as a model suffix, for example `model: openrouter/x-ai/grok-4:high`. Pi first looks for a model whose id is the whole pin, and uses it when there is one, suffix included. Only when there is none does Pi read the suffix as the level and record the model without it. Any other suffix, such as OpenRouter's `:free`, stays part of the model id. The model-divergence check reads the pin literally when the seat's `models.json` defines a model with that exact id; otherwise it accepts the model with or without the suffix. If the seat's `models.json` can't be read, a pin with a suffix stays unchecked, with the usual warning, when the recorded model matches the whole pin or the pin without its suffix. A record that matches neither is reported.
 - **Custom models:** Pi reads `models.json` from its agent directory, so a seat reads `$OPENRIG_HOME/state/pi/<session>/agent/models.json`, not `~/.pi/agent/models.json`. Custom provider and model definitions for a seat go in that file. A seat that uses only providers Pi already includes does not need one. OpenRig does not create or write `models.json`.
-- **Credentials:** The Pi process receives only `PATH`, `HOME`, `USER`, `LOGNAME`, `TERM`, `LANG`, `LC_ALL`, `SHELL`, `TMPDIR`, a fixed set of OpenRig seat and instance variables, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and at most one provider key. That key is `OPENROUTER_API_KEY`, `ZAI_API_KEY`, `KIMI_API_KEY` or `MINIMAX_API_KEY`, passed only when it is set in the seat's environment and the seat's `model` is written as `openrouter/<id>`, `zai/<id>`, `kimi-coding/<id>` or `minimax/<id>`. Naming that variable in `recovery.provider_auth_env_allowlist` (empty by default) makes the daemon add it, when set in the daemon's environment, to the seat's launch environment. No other variable reaches Pi, including other providers' keys and a custom provider's own key variable.
+- **Credentials:** The Pi process receives only `PATH`, `HOME`, `USER`, `LOGNAME`, `SSH_AUTH_SOCK`, `TERM`, `LANG`, `LC_ALL`, `SHELL`, `TMPDIR`, a fixed set of OpenRig seat and instance variables, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and at most one provider key. That key is `OPENROUTER_API_KEY`, `ZAI_API_KEY`, `KIMI_API_KEY` or `MINIMAX_API_KEY`, passed only when it is set in the seat's environment and the seat's `model` is written as `openrouter/<id>`, `zai/<id>`, `kimi-coding/<id>` or `minimax/<id>`. Naming that variable in `recovery.provider_auth_env_allowlist` (empty by default) makes the daemon add it, when set in the daemon's environment, to the seat's launch environment. No other variable reaches Pi, including other providers' keys and a custom provider's own key variable.
 
 - **Extension dialogs:** The RPC runner shows extension `select`, `confirm`, `input` and `editor` requests in the pane and cancels them because the managed pane cannot answer them. The seat needs attention through the end of the turn, until a new agent run starts. Review the cancelled request and send an instruction the extension can complete without a dialog. Extension `notify` text is shown without raising attention or sending a response.
 
@@ -805,19 +1067,21 @@ the modified topology, run `rig snapshot <rig-id>` and use its returned ID with
 
 Startup blocks can appear at three levels: rig, pod, and member. They are merged additively via the startup layering model (see [the layering model](agent-startup-guide.md#the-layering-model)). The rig's `culture_file` joins as a required file with the `auto` hint in the culture layer, on both fresh start and restore.
 
-`rig export` includes the rig's saved culture file and startup block, and now also
-writes each pod's saved startup files under that pod. The file order, delivery
-hints, required flags, orientation and `applies_on` selections are retained.
-Previously the saved pod file lists were omitted. Pods without a recorded file
-list, including older rigs, keep their existing export behavior; the exporter
-does not reconstruct declarations from a member's combined startup context.
+For member `startup:`, export uses that seat's retained launch recipe (or its pre-launch materialization) rather than guessing from projected files. If that source is unavailable or a member's files came from a different rig root, the YAML names the member's omitted startup; JSON export names omissions in the `X-OpenRig-Export-Warnings` response header. An older seat without a recipe may have had no member startup or an unretained one: inspect its source before re-importing. When member startup files are present in the export, `rig export` checks required paths against the output folder and warns for missing files. The export does not copy member startup files.
+
+`rig export` includes the rig's saved culture file and startup block, and writes
+saved pod startup files and actions under their pod. The file and action order,
+delivery hints, required flags, orientation and `applies_on` selections are retained.
+Pod actions are saved for export when a new rig is created; older rigs and pods
+added from a separate expansion may not have those declarations recorded. Export
+does not reconstruct them from a member's combined startup context; keep the source
+spec when those declarations are needed. This does not change which startup actions
+are inherited when a seat is added later.
 
 File paths remain relative to the exported spec's folder. When exporting to a
 different folder, supply the referenced startup files there or import with the
-original `--rig-root`. The CLI warns once per missing required rig or pod file;
-missing optional files do not trigger that warning. Pod startup actions and
-member startup blocks remain outside this export; keep the source spec when you
-need those declarations.
+original `--rig-root`. The CLI warns once per missing required rig, pod or member
+file; missing optional files do not trigger that warning.
 
 ### Files
 
@@ -834,7 +1098,7 @@ need those declarations.
 | Hint | Behavior |
 |------|----------|
 | `auto` | System chooses based on file type and context. |
-| `guidance_merge` | Merged as a managed block into the runtime's guidance file: for Claude, the `managed_blocks` file (`CLAUDE.md` or `CLAUDE.local.md`); for Codex, Pi and OMP, `AGENTS.md`. Delivered before harness boot. |
+| `guidance_merge` | Merged as a managed block into the runtime's guidance file: for Claude, the `managed_blocks` file (`CLAUDE.md` or `CLAUDE.local.md`); for Codex, Pi and OMP, `AGENTS.md`, except that a fresh Pi seat normally uses its own agent folder's and a fresh Codex 0.164.0+ seat normally gets launch developer instructions (the conditions are in [Codex guidance at launch](agent-startup-guide.md#codex-guidance-at-launch) and [Runtime Differences](agent-startup-guide.md#runtime-differences)). Delivered before harness boot. |
 | `skill_install` | Installed as a skill in the runtime's skill directory. Delivered before harness boot. |
 | `send_text` | Sent as text to the agent's terminal after the harness is ready. Requires the agent TUI to be active. |
 
@@ -1059,6 +1323,7 @@ spec can pass `rig spec validate` and then fail at preflight or import. Run
 24. Startup action `idempotent` is a required boolean.
 25. Non-idempotent actions must not include `restore` in `applies_on`.
 26. `applies_on` values must be from: `fresh_start`, `restore`.
+27. `launch_wrapper` is valid only on `pi` and `codex` members (`[]` included); it must be an array of strings without NUL/CR/LF, and `launch_wrapper[0]` (when non-empty) must be an absolute path or a bare command name on the daemon `PATH`.
 
 ---
 
@@ -1078,3 +1343,15 @@ These are the built-in specs shipped with OpenRig. Read them as worked examples.
 Also shipped, in the same tree: `launch/kernel`, OpenRig's own team, which starts automatically. `first-project` is
 starter's old name and still resolves to it. `workshop`, the four-agent middle team, is a rig bundle rather than a
 built-in. List the built-ins with `rig specs ls --kind rig`.
+
+To omit built-in rigs, agents and workflows from the shared spec inventory, run
+`rig config set specs.builtins_visible false`. This changes the CLI, TUI and other
+consumers of the library listing; user specs remain visible. Use
+`rig specs ls --include-builtins` to list them deliberately, and set the value
+back to `true` to restore the default. Explicit `show`, `preview`, and launch
+lookups can still find hidden built-ins. When built-ins are hidden and a user
+spec has the same name, the user spec wins the name lookup; use the built-in's
+ID from `rig specs ls --include-builtins --json` to select it. With built-ins visible,
+same-name matches remain ambiguous. This is an inventory preference, not an
+access-control boundary; other endpoints and on-disk files can still expose the
+built-ins.

@@ -17,9 +17,9 @@ import { makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsys
 import { SeenStore, DeadLetterStore } from "../src/domain/gateway/slack/state-store.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 
-// With several registered people, a person who wasn't asked can still write in the asked person's Slack thread. Their
-// words reach the agent as their own message, and never become the asked person's answer: not on a pending ask, typed
-// or clicked, and not on a question parked on someone else.
+// With several registered people in one trusted workspace, a person who wasn't asked can write in the asked person's
+// Slack thread, and their reply settles it as their own: typed or clicked on a pending ask, and typed on a question
+// parked on someone else. It settles once: the asked person writing afterwards is words for the agent.
 
 const person = (entityId: string, handle: string): HumanFragment => ({
   entityId, class: "human", displayName: entityId, address: `${entityId}@external`,
@@ -75,44 +75,56 @@ async function fixture(kind: "pending" | "parked") {
       replies: replies.map((item) => ({ source: item.sourceSession, destination: item.destinationSession, humanAnswer: (item.tags ?? []).includes("human-answer") })),
     };
   };
-  return { typed, clicked, state };
+  return { repo, ask, typed, clicked, state };
 }
 
 describe("a reply from a registered person who wasn't asked", () => {
-  it("typed in a pending ask's thread: reaches the agent as their own message; the ask stays open and unanswered", async () => {
+  it("typed in a pending ask's thread: answers it as their own, and the agent gets their words as the answer", async () => {
     const f = await fixture("pending");
     await f.typed("UMIKE", "I'd say yes", "3.3");
-    expect(f.state()).toEqual({ state: "pending", blockedOn: null, answers: null, resolvedBy: [],
-      replies: [{ source: MIKE, destination: ASKER, humanAnswer: false }] });
+    expect(f.state()).toMatchObject({ state: "done", blockedOn: null, answers: { choice: { kind: "typed-reply", text: "I'd say yes" } },
+      resolvedBy: [MIKE], replies: [{ source: MIKE, destination: ASKER, humanAnswer: true }] });
   });
 
-  it("clicked on a pending ask's button: records nothing as the asked person's answer", async () => {
+  it("clicked on a pending ask's button: records the answer as theirs, and the asked person's later click records nothing", async () => {
     const f = await fixture("pending");
     await f.clicked("UMIKE", "2.2");
-    expect(f.state()).toMatchObject({ state: "pending", answers: null, resolvedBy: [] });
-    expect(f.state().replies.filter((reply) => reply.humanAnswer)).toEqual([]);
-    // The same click from the person asked does record their answer, so the refusal above is about who clicked.
+    expect(f.state()).toMatchObject({ state: "done", answers: { choice: "yes" }, resolvedBy: [MIKE] });
+    expect(f.state().replies.filter((reply) => reply.humanAnswer)).toEqual([{ source: MIKE, destination: ASKER, humanAnswer: true }]);
+    // One answer per ask: the same click from the person asked, afterwards, changes nothing.
     await f.clicked("UANA", "2.3");
-    expect(f.state()).toMatchObject({ state: "done", answers: { choice: "yes" }, resolvedBy: [ANA] });
+    expect(f.state()).toMatchObject({ state: "done", answers: { choice: "yes" }, resolvedBy: [MIKE] });
+    expect(f.state().replies.filter((reply) => reply.humanAnswer)).toEqual([{ source: MIKE, destination: ASKER, humanAnswer: true }]);
   });
 
-  it("typed on a question parked on someone else: reaches the agent and doesn't resume the question", async () => {
+  it("clicked after the asked person's typed answer committed but before it closed: records nothing, and settles as theirs", async () => {
+    const f = await fixture("pending");
+    // Ana's typed answer is committed under the ask's answer identity, then execution stops before the close.
+    await f.repo.createHumanAnswer({ sourceSession: ANA, destinationSession: ASKER, body: "Do not ship", summary: "Do not ship",
+      inboundReplyTo: f.ask.qitemId, nudge: false } as never);
+    await f.clicked("UMIKE", "2.2");
+    expect(f.state()).toMatchObject({ state: "done", answers: { choice: { kind: "typed-reply", text: "Do not ship" } }, resolvedBy: [ANA] });
+    expect(f.state().replies.filter((reply) => reply.humanAnswer)).toEqual([{ source: ANA, destination: ASKER, humanAnswer: true }]);
+  });
+
+  it("typed on a question parked on someone else: resumes it as theirs, and reaches the agent", async () => {
     const f = await fixture("parked");
     await f.typed("UMIKE", "go ahead", "3.3");
-    expect(f.state()).toMatchObject({ state: "blocked", blockedOn: "human-ana@host", resolvedBy: [] });
+    expect(f.state()).toMatchObject({ state: "in-progress", blockedOn: null, resolvedBy: [MIKE] });
     expect(f.state().replies).toEqual([{ source: MIKE, destination: ASKER, humanAnswer: false }]);
   });
 
-  it("the asked person still answers, after the other person wrote, and the answer is theirs", async () => {
+  it("the asked person writing after the other person answered: their words reach the agent, and the answer stays the other person's", async () => {
     const pending = await fixture("pending");
     await pending.typed("UMIKE", "I'd say yes", "3.3");
     await pending.typed("UANA", "Yes, go ahead", "4.4");
-    expect(pending.state()).toMatchObject({ state: "done", resolvedBy: [ANA] });
-    expect(pending.state().replies.filter((reply) => reply.humanAnswer)).toEqual([{ source: ANA, destination: ASKER, humanAnswer: true }]);
+    expect(pending.state()).toMatchObject({ state: "done", resolvedBy: [MIKE] });
+    expect(pending.state().replies.filter((reply) => reply.humanAnswer)).toEqual([{ source: MIKE, destination: ASKER, humanAnswer: true }]);
+    expect(pending.state().replies).toContainEqual({ source: ANA, destination: ASKER, humanAnswer: false });
 
     const parked = await fixture("parked");
     await parked.typed("UMIKE", "go ahead", "3.3");
     await parked.typed("UANA", "go ahead", "4.4");
-    expect(parked.state()).toMatchObject({ state: "in-progress", resolvedBy: [ANA] });
+    expect(parked.state()).toMatchObject({ state: "in-progress", resolvedBy: [MIKE] });
   });
 });

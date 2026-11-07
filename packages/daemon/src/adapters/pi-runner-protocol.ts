@@ -174,7 +174,9 @@ export const OMP_PROVIDER_EXTRA_ENV_VARS: Record<string, readonly string[]> = {
 };
 
 // Baseline process needs. No host credential families or shell customization.
-export const PI_ENV_BASELINE_VARS = ["PATH", "HOME", "USER", "LOGNAME", "TERM", "LANG", "LC_ALL", "SHELL", "TMPDIR"] as const;
+// SSH_AUTH_SOCK lets Pi's shell tools run git over SSH (#1159): the path isn't key material, but the socket lets the
+// agent use the keys loaded in ssh-agent.
+export const PI_ENV_BASELINE_VARS = ["PATH", "HOME", "USER", "LOGNAME", "SSH_AUTH_SOCK", "TERM", "LANG", "LC_ALL", "SHELL", "TMPDIR"] as const;
 
 // NodeLauncher supplies identity and instance routing on both fresh and resumed
 // seats. Pi's shell tools inherit this child env: dropping these values makes
@@ -266,6 +268,8 @@ export interface PiRunnerLaunchOpts {
   forkRef?: string;
   /** Launch-attempt scope stamped into every runner sidecar write. */
   launchId: string;
+  /** Pi only: resolved launch_wrapper argv (wrapper[0] resolved to an absolute path by the daemon). */
+  launchWrapper?: readonly string[];
 }
 
 /** The shape `rig seat set-effort` accepts for an effort level. */
@@ -308,6 +312,11 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
   if (opts.usageFacts && opts.runtime !== "omp") {
     parts.push("--usage-facts");
     if (opts.openRouterCharge) parts.push("--openrouter-charge");
+  }
+  if (opts.launchWrapper?.length && opts.runtime !== "omp") {
+    for (const arg of opts.launchWrapper) {
+      parts.push("--launch-wrapper-arg", shellQuote(arg));
+    }
   }
   return parts.join(" ");
 }

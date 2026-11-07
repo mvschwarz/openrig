@@ -35,7 +35,7 @@ import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js"
 import { explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
 import type { ColorMode, Token } from "./theme.js";
 import { terminalLines } from "./terminals/terminal-model.js";
-import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, wrapDetailLines } from "./detail.js";
+import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, sliceWhole, wrapDetailLines } from "./detail.js";
 import { healthAgentLines, healthDetailLines, healthListLines, healthSummaryLine } from "./health/health-model.js";
 import type { Action, FleetSnapshot, LoadState, NeedsItem, RecentTransitionSnap, RowFlash, Screen, SeatEffortRead, ViewState } from "./types.js";
 
@@ -54,13 +54,13 @@ function pad(text: string | number | null | undefined, width: number): string {
   const t = String(text ?? "");
   if (t.length <= width) return t + " ".repeat(width - t.length);
   // never hard-clip mid-word: any truncation reads as an ellipsis (glance honesty)
-  return t.slice(0, Math.max(width - 1, 0)) + "…";
+  return (sliceWhole(t, Math.max(width - 1, 0)) + "…").padEnd(width);
 }
 
 function padLeft(text: string | number | null | undefined, width: number): string {
   const t = String(text ?? "");
   if (t.length <= width) return " ".repeat(width - t.length) + t;
-  return t.slice(0, Math.max(width - 1, 0)) + "…";
+  return (sliceWhole(t, Math.max(width - 1, 0)) + "…").padStart(width);
 }
 
 type Align = "left" | "right";
@@ -404,7 +404,8 @@ function agentDetailLines(
           // appears only for outcome `accepted`; unknowns stay unknown.
           ...wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
-          fieldLine({ label: "terminal", value: `Open terminals ▸ pod ${pod.name}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` } }),
+          // The agent page opens just this agent; the pod and rig pages open theirs.
+          fieldLine({ label: "terminal", value: `Open terminal ▸ ${agent.name}`, link: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${agent.name}` } }),
         ],
       },
       {
@@ -708,6 +709,7 @@ function noRigsText(snap: FleetSnapshot, host: FleetSnapshot["hosts"][number], l
     : `  (no rigs served by ${host.name})`;
 }
 
+/** Rig boundaries take a solid rule and pod boundaries a dotted one; RIG repeats on every row so scrolled rows keep it. */
 function instanceContentLines(
   state: ViewState,
   snap: FleetSnapshot,
@@ -807,10 +809,13 @@ function instanceContentLines(
   let attentionCount = 0;
   let attentionUnknown = 0;
   let openCount = 0;
+  let firstRig = true;
   for (const rig of host.rigs) {
     const agents = rig.pods.flatMap((pod) => pod.agents.map((agent) => ({ pod: pod.name, agent })))
       .filter(({ pod, agent }) => !state.filter || rig.name.includes(state.filter) || pod.includes(state.filter) || agent.name.includes(state.filter));
     if (state.filter && agents.length === 0 && !rig.name.includes(state.filter)) continue;
+    if (!firstRig) lines.push({ text: "─".repeat(columnsWidth(columns)) });
+    firstRig = false;
     const rigAction: Action = { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } };
     if (agents.length === 0) {
       lines.push({
@@ -945,8 +950,10 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       .filter((a) => !state.filter || a.name.includes(state.filter) || a.pod.includes(state.filter));
     const suffix = `rig ${rig.name}${podFilter ? ` · pod ${podFilter}` : ""}${state.filter ? ` · filter "${state.filter}"` : ""}`;
     lines.push(...tabsLine(state, suffix));
-    // Keep the explicit desktop action above the rig's grid.
-    if (!podFilter) lines.push(fieldLine({ label: "terminal", value: `Open terminals ▸ rig ${rig.name}`, link: { type: "act", act: "open-terminal", view: `rig:${rig.name}` } }));
+    // Keep the explicit desktop action above the rig's grid: the whole rig, or on a pod's page that pod.
+    lines.push(podFilter
+      ? fieldLine({ label: "terminal", value: `Open terminals ▸ pod ${podFilter}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${podFilter}` } })
+      : fieldLine({ label: "terminal", value: `Open terminals ▸ rig ${rig.name}`, link: { type: "act", act: "open-terminal", view: `rig:${rig.name}` } }));
     const healthScope = { kind: "rig" as const, rigId: rig.id ?? rig.name, rigName: rig.name, local: host === snap.hosts[0] };
     if (state.viewTab === "health") return [...lines, { text: "" }, ...healthListLines(snap, healthScope, contentWidth)];
     if (state.viewTab === "recent") {
@@ -1050,13 +1057,13 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       // ACTIONS = drive-structure ONLY (BR-9), each mapped to an EXISTING
       // write contract: `run ▸` = the rig-restore write (rendered only where
       // it applies — the seat is not running); `term ▸` = the terminal-open
-      // view contract (pod-scoped, the web's granularity). No false affordance.
+      // view contract for this row's own seat. No false affordance.
       const canRun = a.canRun ?? !a.live;
       const actionsCell = canRun ? "run ▸ · term ▸" : "term ▸";
       const zones: ContentLine["zones"] = [];
       if (actionsColStart >= 0) {
         const termOffset = actionsColStart + actionsCell.indexOf("term ▸");
-        zones.push({ start: termOffset, end: termOffset + "term ▸".length, action: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${a.pod}` } });
+        zones.push({ start: termOffset, end: termOffset + "term ▸".length, action: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${a.name}` } });
       }
       if (canRun && actionsColStart >= 0)
         zones.push({
@@ -1268,7 +1275,8 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
                     }))),
                 {
                   label: "seats now",
-                  value: seats.join(", ") || "(none)",
+                  // Consumers are undefined when this page didn't read the seat inventory: unknown, not none.
+                  value: spec.consumers === undefined ? "not loaded in this view" : seats.join(", ") || "(none)",
                   link: { type: "cross", kind: "running", name: spec.name },
                 },
               ],
@@ -1560,7 +1568,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   lines.push(paneRule(cols, explW, "top", explorerTitle, contentTitle));
 
   const contentWidth = Math.max(cols - explW - 2, 0);
-  const model = buildPulseModel(snap, nowMs);
+  const model = buildPulseModel(snap, nowMs, state.timeZone);
   const chromeRows = 3; // bottom rule + hint bar + status line
   const bodyRows = Math.max(rows - lines.length - chromeRows, 1);
 

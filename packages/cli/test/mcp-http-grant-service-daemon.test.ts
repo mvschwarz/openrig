@@ -10,6 +10,7 @@ import type { AddressInfo } from "node:net";
 import { serve, type ServerType } from "@hono/node-server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client as ModernClient, StreamableHTTPClientTransport as ModernTransport } from "@modelcontextprotocol/client";
 import type Database from "better-sqlite3";
 import { createTestApp } from "../../daemon/test/helpers/test-app.js";
 import { createDb } from "../../daemon/src/db/connection.js";
@@ -107,11 +108,12 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     const rig = setup.rigRepo.listRigs?.().find((r: { name: string }) => r.name === rigName) ?? setup.rigRepo.createRig(rigName);
     const node = setup.rigRepo.addNode(rig.id, `pod.${member}`, { role: "worker" });
     setup.sessionRegistry.registerSession(node.id, `${member}@${rigName}`);
+    return node;
   }
 
-  async function listen(header?: { name: string; value: string }) {
+  async function listen(header?: { name: string; value: string }, taskDestination?: string) {
     const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile: path.join(home, "mcp-http-tokens.json"),
-      grantService: { url: serviceUrl, ...(header ? { header } : {}), timeoutMs: 1_000 } });
+      taskDestination, grantService: { url: serviceUrl, ...(header ? { header } : {}), timeoutMs: 1_000 } });
     closers.push(() => served.close());
     return served;
   }
@@ -124,7 +126,8 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       const result = await client.callTool({ name, arguments: args });
       return { isError: result.isError === true, structured: result.structuredContent as Record<string, any>, text: (result.content as Array<{ text: string }>)[0]?.text ?? "" };
     };
-    return Object.assign(call, { tools: async () => (await client.listTools()).tools.map((tool) => tool.name) });
+    return Object.assign(call, { tools: async () => (await client.listTools()).tools.map((tool) => tool.name),
+      catalog: () => client.listTools(), instructions: () => client.getInstructions() });
   }
 
   const post = (url: string, headers: Record<string, string> = {}) => fetch(url, {
@@ -133,6 +136,115 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
   const rows = () => (db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n;
   const create = (sourceSession: string, destinationSession: string, body: string) =>
     repo.create({ sourceSession, destinationSession, body, nudge: false } as never);
+
+  it("routes an address-free first task to the operator's receiver with caller attribution, retry identity and revision lineage", async () => {
+    seat("team-a", "lead"); // pod.lead exists without any delegates_to edge.
+    const { url } = await listen(undefined, "pod-lead@team-a");
+    const ask = await connect(url);
+    expect(rows()).toBe(0);
+    const catalog = (await ask.catalog()).tools;
+    expect(catalog.map((tool) => tool.name).sort()).toEqual(["rig_artifact_read", "rig_queue_create", "rig_queue_list", "rig_queue_show"]);
+    expect(catalog.find((tool) => tool.name === "rig_queue_create")?.inputSchema.required).not.toContain("destination");
+    expect(ask.instructions()).toContain("You may omit destination");
+    expect(ask.instructions()).not.toMatch(/rig_whoami|rig_team|rig_queue_claim|rig_queue_handoff|rig_queue_decide/);
+    const args = { qitemId: "qitem-first-task", body: "Create a useful file and return it" };
+    const first = await ask("rig_queue_create", args);
+    expect(first.isError).toBe(false);
+    expect(repo.getById(args.qitemId)).toMatchObject({ sourceSession: CALLER, destinationSession: "pod-lead@team-a", body: args.body });
+    const retry = await ask("rig_queue_create", args);
+    expect(retry.isError).toBe(false);
+    expect(retry.structured.qitemId).toBe(args.qitemId);
+    expect(rows()).toBe(1);
+    const revision = await ask("rig_queue_create", { body: "Improve the file", revises: args.qitemId });
+    expect(revision.isError).toBe(false);
+    expect(repo.getById(revision.structured.qitemId)).toMatchObject({ sourceSession: CALLER, destinationSession: "pod-lead@team-a",
+      chainOfRecord: [args.qitemId], body: `Revision of ${args.qitemId}.\n\nImprove the file` });
+    // A supplied destination still takes the original route, even with a different configured receiver.
+    expect((await ask("rig_queue_create", { destination: "other@team-a", body: "Explicit task" })).isError).toBe(false);
+    expect((await ask("rig_queue_show", { qitemId: args.qitemId })).isError).toBe(false);
+    fs.writeFileSync(path.join(shared, "first-result.md"), "Team's returned file");
+    db.prepare("UPDATE queue_items SET evidence_ref = ? WHERE qitem_id = ?").run(path.join(shared, "first-result.md"), args.qitemId);
+    expect((await ask("rig_artifact_read", { qitemId: args.qitemId })).text).toContain("Team's returned file");
+    expect((await ask("rig_artifact_read", { root: "proof", path: "first-result.md" })).structured.code).toBe("out_of_scope");
+  });
+
+  it("also serves an address-free first task to a client pinned to protocol 2026-07-28", async () => {
+    seat("team-a", "lead");
+    const { url } = await listen(undefined, "pod-lead@team-a");
+    const client = new ModernClient({ name: "first-task", version: "1" }, { versionNegotiation: { mode: { pin: "2026-07-28" } } });
+    await client.connect(new ModernTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${KEY}` } } }));
+    closers.push(() => client.close());
+    expect(client.getProtocolEra()).toBe("modern");
+    const tools = (await client.listTools()).tools;
+    expect(tools.find((tool) => tool.name === "rig_queue_create")?.inputSchema.required).not.toContain("destination");
+    const result = await client.callTool({ name: "rig_queue_create", arguments: { qitemId: "qitem-modern-first", body: "Create the file" } });
+    expect(result.isError).not.toBe(true);
+    expect(repo.getById("qitem-modern-first")).toMatchObject({ sourceSession: CALLER, destinationSession: "pod-lead@team-a" });
+  });
+
+  it("does not infer a receiver from grant metadata, caller identity or an empty queue", async () => {
+    const { url } = await listen(); // The fixture's environment.lead is deliberately not a routing contract.
+    const ask = await connect(url);
+    expect((await ask("rig_queue_create", { body: "First task" })).structured.code).toBe("task_destination_unavailable");
+    expect(rows()).toBe(0);
+    expect((await ask("rig_queue_create", { destination: "lead@team-a", body: "Explicit still works" })).isError).toBe(false);
+  });
+
+  it.each([CALLER, "cus-another-caller@team-a", "pod-lead@team-b"])("never uses configured receiver %s outside the caller's team scope", async (target) => {
+    const { url } = await listen(undefined, target);
+    const ask = await connect(url);
+    expect((await ask("rig_queue_create", { body: "First task" })).structured.code).toBe("out_of_scope");
+    expect(rows()).toBe(0);
+  });
+
+  it("requires one existing receiver and rejects ambiguous rig names without writing", async () => {
+    const { url } = await listen(undefined, "pod-lead@team-a");
+    const ask = await connect(url);
+    expect((await ask("rig_queue_create", { body: "Receiver absent" })).structured.code).toBe("task_destination_unavailable");
+    seat("team-a", "lead");
+    setup.rigRepo.createRig("team-a");
+    expect((await ask("rig_queue_create", { body: "Rig ambiguous" })).structured.code).toBe("task_destination_unavailable");
+    expect(rows()).toBe(0);
+  });
+
+  it("rechecks the grant and receiver after connection, with no write after removal or revocation", async () => {
+    const receiver = seat("team-a", "lead");
+    const { url } = await listen(undefined, "pod-lead@team-a");
+    const ask = await connect(url);
+    expect((await ask("rig_queue_create", { body: "Granted" })).isError).toBe(false);
+    setup.rigRepo.deleteNode(receiver.id);
+    expect((await ask("rig_queue_create", { body: "Receiver removed" })).structured.code).toBe("task_destination_unavailable");
+    seat("team-a", "lead");
+    answer = () => [200, active({ objects: { queue: ["show", "list"], artifact: ["read"] } })];
+    await expect(ask("rig_queue_create", { body: "Create permission removed" })).rejects.toThrow();
+    answer = () => [401, { schema: SCHEMA, status: "revoked" }];
+    await expect(ask("rig_queue_create", { body: "Revoked" })).rejects.toThrow();
+    expect(rows()).toBe(1);
+  });
+
+  it("rejects task destination configuration without grant service or with non-local seat syntax", async () => {
+    const base = { daemonUrl, host: "127.0.0.1", port: 0, tokenFile: path.join(home, "unused") };
+    await expect(startMcpHttpServer({ ...base, taskDestination: "pod-lead@team-a" })).rejects.toThrow("needs --grant-service");
+    for (const target of ["", "lead", "a@b@host", "person@external", "lead @team-a"]) {
+      await expect(startMcpHttpServer({ ...base, grantService: { url: serviceUrl }, taskDestination: target })).rejects.toThrow(McpHttpConfigError);
+    }
+  });
+
+  it("requires HTTP and a grant service for the task-destination CLI option", async () => {
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exitCode = process.exitCode;
+    try {
+      for (const args of [[], ["--http"]]) {
+        process.exitCode = undefined;
+        await mcpCommand().parseAsync(["serve", "--port", "1", "--task-destination", "pod-lead@team-a", ...args], { from: "user" });
+        expect(process.exitCode).toBe(1);
+      }
+      expect(quiet).toHaveBeenCalledWith("--task-destination needs --http --grant-service");
+    } finally {
+      process.exitCode = exitCode;
+      quiet.mockRestore();
+    }
+  });
 
   it("asks the grant service on every request with the raw key and this daemon's self id, acts as the grant's seat, and never reads the token file", async () => {
     const fileToken = await addGrant(path.join(home, "mcp-http-tokens.json"), { name: "local", seat: "local@team-a", rigs: ["team-a"], roots: [], workspace: false, owner: true });

@@ -432,3 +432,22 @@ describe("selected proof identity across readers", () => {
     expect(view().map(i => i.verified)).toEqual(["verified", "unverified"]);
   });
 });
+
+
+it("notifies scope followers on a node-header change even when proof readiness is unchanged", async () => {
+  const f = fixture(), file = join(f.alpha, "SPEC.md");
+  const original = fs.readFileSync(file, "utf8"), before = readMissionReadiness(f.mission).revision;
+  let scopeChanges = 0;
+  const watch = watchProofSources(f.missions, () => {}, { emit: () => {} } as unknown as EventBus, () => { scopeChanges++; });
+  try {
+    const updated = original.replace("id: 01-alpha", "id: renamed-alias");
+    fs.writeFileSync(file, updated);
+    const deadline = Date.now() + 5000;
+    while (scopeChanges === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      if (!scopeChanges) fs.writeFileSync(file, updated);
+    }
+    expect(scopeChanges).toBeGreaterThan(0);
+    expect(readMissionReadiness(f.mission).revision).toBe(before);
+  } finally { watch.close(); }
+});

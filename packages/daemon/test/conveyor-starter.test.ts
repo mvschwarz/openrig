@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
@@ -29,6 +29,7 @@ describe("0.3.0 conveyor starter workflow specs", () => {
   let db: Database.Database;
   let eventBus: EventBus;
   let runtime: WorkflowRuntime;
+  let queueRepo: QueueRepository;
 
   beforeEach(() => {
     db = createDb();
@@ -44,7 +45,7 @@ describe("0.3.0 conveyor starter workflow specs", () => {
     ]);
     eventBus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-conveyor', 'conveyor')`).run();
-    const queueRepo = new QueueRepository(db, eventBus, { validateRig: () => true });
+    queueRepo = new QueueRepository(db, eventBus, { validateRig: () => true });
     // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
     // close needs a SAME-DB intent store to make its wake durable.
     queueRepo.attachOutbox(new OutboxHandler(db));
@@ -101,6 +102,18 @@ describe("0.3.0 conveyor starter workflow specs", () => {
       expect(validation.issues.filter((issue) => issue.severity === "error")).toEqual([]);
       expect(validation.summary.entryRole).toBe("intake");
     }
+  });
+
+  it("workflow entry nudge is sent as the instantiating session", async () => {
+    const maybeNudge = vi.spyOn(queueRepo, "maybeNudge").mockResolvedValue();
+    const created = await runtime.instantiate({
+      specPath: CONVEYOR_SPEC,
+      rootObjective: "packet sender",
+      createdBySession: "intake-lead@conveyor",
+    });
+    expect(maybeNudge).toHaveBeenCalledTimes(1);
+    expect(maybeNudge.mock.calls[0]?.[0]).toBe(created.entryQitemId);
+    expect(maybeNudge.mock.calls[0]?.[3]).toBe("intake-lead@conveyor");
   });
 
   it("conveyor can run multiple active instances on the same rig", async () => {

@@ -38,12 +38,12 @@ describe("ACTIONS column = real drive-structure acts (BR-9)", () => {
     expect(hit?.action).toEqual({ type: "act", act: "run", rigId: "openrig-build", agent: "dev50.qa" });
   });
 
-  it("term ▸ zone dispatches open-terminal for the row's pod; clicking elsewhere still drills", () => {
+  it("term ▸ zone dispatches open-terminal for the row's own seat; clicking elsewhere still drills", () => {
     const { screen } = drilledScreen();
     const rowIdx = screen.lines.findIndex((l) => /· guard\s/.test(l));
     const row = screen.lines[rowIdx]!;
     const termHit = hitAt(screen, row.indexOf("term ▸") + 1, rowIdx + 1);
-    expect(termHit?.action).toEqual({ type: "act", act: "open-terminal", view: "pod:openrig-build/dev50" });
+    expect(termHit?.action).toEqual({ type: "act", act: "open-terminal", view: "seat:openrig-build/dev50.guard" });
     const cellHit = hitAt(screen, row.indexOf("gpt-5.6") + 1, rowIdx + 1);
     expect(cellHit?.action).toEqual({
       type: "drill",
@@ -71,9 +71,9 @@ describe("ACTIONS column = real drive-structure acts (BR-9)", () => {
     s.dispatch(parseCommand("agent dev50.driver"));
     const screen = renderScreen(s.get(), snap, { cols: 140, rows: 32 });
     expect(screen.lines.some((l) => l.includes("attach: "))).toBe(true);
-    const termLine = screen.lines.findIndex((l) => l.includes("Open terminals"));
+    const termLine = screen.lines.findIndex((l) => l.includes("Open terminal ▸ dev50.driver"));
     const hit = hitAt(screen, 40, termLine + 1);
-    expect(hit?.action).toEqual({ type: "act", act: "open-terminal", view: "pod:openrig-build/dev50" });
+    expect(hit?.action).toEqual({ type: "act", act: "open-terminal", view: "seat:openrig-build/dev50.driver" });
   });
 
   it("the grammar carries NO act verbs — acts are click-surfaces only; socket stays observe/navigate", () => {

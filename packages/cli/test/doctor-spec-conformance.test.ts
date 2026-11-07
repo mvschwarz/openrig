@@ -7,8 +7,8 @@
 // is not given it must SKIP WITH THE REASON rather than pass — a check that cannot find its input
 // and stays quiet is indistinguishable from one that looked and found nothing wrong.
 
-import { describe, it, expect } from "vitest";
-import { runDoctorChecks, type DoctorDeps } from "../src/commands/doctor.js";
+import { describe, it, expect, vi } from "vitest";
+import { readLiveLogicalIds, runDoctorChecks, type DoctorDeps } from "../src/commands/doctor.js";
 
 const SPEC_3_8 = `version: "0.2"
 name: v-openrig-build
@@ -52,6 +52,23 @@ async function conformanceCheck(deps: DoctorDeps) {
 }
 
 describe("rig doctor — spec vs live conformance", () => {
+  it("does not choose a topology when multiple rigs share the spec name", async () => {
+    const fetch = vi.fn(async (_url: string) => ({ ok: true, json: async () => [
+      { id: "first", name: "v-openrig-build" }, { id: "second", name: "v-openrig-build" },
+    ] }));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const owner = { assertLocalOwner: async () => {} };
+      const check = await conformanceCheck(baseDeps({ specPath: "/spec", readFile: () => SPEC_3_8,
+        fetchLiveLogicalIds: name => readLiveLogicalIds("http://fixture", name, owner as never) }));
+      expect(check!.status).toBe("skipped");
+      expect(check!.message).toContain("first, second");
+      expect(check!.fix).toContain("rig ps --json");
+      const urls = fetch.mock.calls.map(([url]) => url);
+      expect(urls.filter(url => url.endsWith("/api/rigs"))).toHaveLength(1);
+      expect(urls.some(url => url.includes("/nodes"))).toBe(false);
+    } finally { vi.unstubAllGlobals(); }
+  });
   it("SKIPS with the reason when no --spec is given — it must not read as a pass", async () => {
     const check = await conformanceCheck(baseDeps());
     expect(check).toBeDefined();

@@ -326,6 +326,44 @@ describe("listMissions + listSlices + nextSliceNN", () => {
   });
 });
 
+describe("a slice's standing: in flight, delivered in place, or closed (#2427)", () => {
+  let root: string;
+  let missionsRoot: string;
+
+  beforeEach(() => {
+    root = mktemp();
+    missionsRoot = path.join(root, "missions");
+    writeFile(path.join(missionsRoot, "m1", "README.md"), "---\nid: OPR.9.1\n---\n# m1\n");
+    const slice = (dir: string, frontmatter: string) => writeFile(path.join(missionsRoot, "m1", dir, "README.md"), `---\n${frontmatter}\n---\nbody\n`);
+    slice("slices/01-open", "id: OPR.9.1.1\nstatus: active");
+    slice("slices/02-blocked", "id: OPR.9.1.2\nstatus: blocked");
+    slice("slices/03-shipped", "id: OPR.9.1.3\nstatus: shipped");
+    slice("slices/04-done", "id: OPR.9.1.4\nstatus: done");
+    slice("slices/05-replaced", "id: OPR.9.1.5\nstatus: active\nstage: superseded\nsuperseded-by: OPR.9.1.9");
+    slice("slices/06-superseded", "id: OPR.9.1.6\nstatus: superseded");
+    slice("closed/07-stale", "id: OPR.9.1.7\nstatus: closed-stale");
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("slice ls: active is work in flight (blocked included); shipped is delivered in place; closed includes exits in place", () => {
+    const mission = findMission(missionsRoot, "m1");
+    const names = (state: "active" | "shipped" | "closed" | "all") => listSlices(mission, state).map((s) => s.name);
+    expect(names("active")).toEqual(["01-open", "02-blocked"]);
+    expect(names("shipped")).toEqual(["03-shipped", "04-done"]);
+    expect(names("closed")).toEqual(["05-replaced", "06-superseded", "07-stale"]);
+    expect(names("all")).toHaveLength(7);
+  });
+
+  it("mission counts give each slice one standing, the same as slice ls", () => {
+    const counts = { activeSliceCount: 2, shippedSliceCount: 2, closedSliceCount: 3 };
+    expect(listMissions(missionsRoot)[0]).toMatchObject(counts);
+    expect(findMission(missionsRoot, "m1")).toMatchObject(counts);
+  });
+});
+
 describe("findSlice + resolution variants", () => {
   let root: string;
   let missionsRoot: string;
@@ -354,6 +392,43 @@ describe("findSlice + resolution variants", () => {
     const abs = path.join(missionsRoot, "release-0.3.2", "slices", "07-target");
     const slice = findSlice(missionsRoot, abs);
     expect(slice.missionName).toBe("release-0.3.2");
+  });
+
+  it("finds the owning mission when the missions root ends in a separator", () => {
+    const withSlash = missionsRoot + path.sep;
+    expect(findSlice(withSlash, "07-target", "release-0.3.2").missionName).toBe("release-0.3.2");
+    const abs = path.join(missionsRoot, "release-0.3.2", "slices", "07-target");
+    expect(findSlice(withSlash, abs).missionName).toBe("release-0.3.2");
+  });
+
+  it("finds the owning mission for a relative missions root with a bare name and --mission, or a mission path", () => {
+    const prev = process.cwd();
+    process.chdir(root);
+    try {
+      const hinted = findSlice("missions", "07-target", "release-0.3.2");
+      expect(hinted.missionName).toBe("release-0.3.2");
+      expect(hinted.absPath).toBe(path.join(fs.realpathSync(root), "missions", "release-0.3.2", "slices", "07-target"));
+      expect(findSlice("missions/", "07-target", "release-0.3.2").missionName).toBe("release-0.3.2");
+      expect(findSlice("missions", "release-0.3.2/slices/07-target").missionName).toBe("release-0.3.2");
+    } finally {
+      process.chdir(prev);
+    }
+  });
+
+  it.each(["/.", "/sub/.."])("resolves an absolute slice path ending in %s to the slice itself", (suffix) => {
+    const abs = path.join(missionsRoot, "release-0.3.2", "slices", "07-target");
+    fs.mkdirSync(path.join(abs, "sub"));
+    const slice = findSlice(missionsRoot, abs + suffix.replace(/\//g, path.sep));
+    expect(slice.absPath).toBe(abs);
+    expect(slice.name).toBe("07-target");
+    expect(slice.missionName).toBe("release-0.3.2");
+  });
+
+  it("keeps an absolute slice path that leaves the missions root pointing at the requested folder", () => {
+    const outside = path.join(root, "other", "m1", "slices", "x");
+    fs.mkdirSync(outside, { recursive: true });
+    const slice = findSlice(missionsRoot, [missionsRoot, "..", "other", "m1", "slices", "x"].join(path.sep));
+    expect(slice.absPath).toBe(outside);
   });
 
   it.each(["workspace", "missions", "declared mission"])(

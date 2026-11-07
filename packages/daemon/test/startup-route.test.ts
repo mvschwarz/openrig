@@ -3,7 +3,9 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { startupRevision } from "../src/routes/startup.js";
 import { defaultProbeRuntimes } from "../src/domain/kernel-boot.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { verifyCodexPaneProcess, verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
 vi.mock("../src/domain/native-process-lineage.js", async (original) => {
   const actual = await original<typeof import("../src/domain/native-process-lineage.js")>();
@@ -41,6 +43,27 @@ describe("startup consent and effect boundary", () => {
     expect(setup.tmuxAdapter.createSession).not.toHaveBeenCalled();
     const second = await request();
     expect(await second.json()).toMatchObject({ ok: true, rigId: body.rigId, reused: true });
+  });
+  it("prepares a new kernel in the workspace's own kernel folder, outside its projects", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "startup-kernel-ws-"));
+    const saved = process.env["OPENRIG_WORKSPACE_ROOT"];
+    process.env["OPENRIG_WORKSPACE_ROOT"] = workspace;
+    try {
+      setup = createTestApp(db, { podInstantiatorFsOps: { exists: existsSync, readFile: (path) => readFileSync(path, "utf8") } });
+      const response = await setup.app.request("/api/startup/kernel", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runtime: "claude-code" }) });
+      const body = await response.json();
+      expect(body).toMatchObject({ ok: true, rigId: expect.any(String) });
+      // Every seat works in `<workspace.root>/kernel`, beside `<workspace.root>/projects` rather than above it, so the
+      // guidance a seat writes in its directory isn't read by project seats. Nothing else is written in the workspace.
+      const cwds = setup.rigRepo.getRig(body.rigId)!.nodes.map((node) => node.cwd);
+      expect(new Set(cwds)).toEqual(new Set([join(workspace, "kernel")]));
+      expect(statSync(join(workspace, "kernel")).isDirectory()).toBe(true);
+      expect(readdirSync(workspace)).toEqual(["kernel"]);
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_WORKSPACE_ROOT"]; else process.env["OPENRIG_WORKSPACE_ROOT"] = saved;
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
   it("rejects a changed occupant or model before invoking fresh launch", async () => {
     const { rig, node } = seat(); const revision = startupRevision(db, node);
@@ -101,7 +124,8 @@ describe("startup consent and effect boundary", () => {
       appDeps: {
         listProcesses: async () => [
           { pid: 900, ppid: 1, command: "/bin/zsh", pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
-          { pid: 901, ppid: 900, command: "codex --model anthropic/claude-3.5-sonnet", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
+          { pid: 901, ppid: 900, command: "codex --model anthropic/claude-3.5-sonnet",
+            argv: ["codex", "--model", "anthropic/claude-3.5-sonnet"], pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
         ],
       },
     });

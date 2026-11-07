@@ -461,6 +461,13 @@ in the current update window. Current-update coverage is independent of the
 receipt window, so an unavailable current reader cannot retain closed delivery
 history beyond a successful history read. Both reads leave queue state intact.
 
+Clients that need only current FYIs can use `GET /api/queue/open-human-updates`.
+It returns `{items, limit, truncated}` with open human-addressed updates, ordered
+critical then urgent then routine, without requiring a delivery receipt. `limit`
+defaults to 20 and accepts integers from 1 to 100. Optional `view` follows the
+same person perspective as `/api/attention`; a perspective read scans at most
+1000 rows and signals `truncated` when the window may omit matching items.
+
 - `/api/stream` (`server.ts:783`) — `POST /emit` (`routes/stream.ts:56`),
   `GET /list` (`:91`, including `sourceSession`, `hintDestination`, `hintTag`,
   `since`, `until` and `direction` filters), `GET /watch` + `/sse` SSE

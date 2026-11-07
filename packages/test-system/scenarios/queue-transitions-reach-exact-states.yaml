@@ -1,0 +1,75 @@
+# Queue transition family (Help wanted: handoff, block, resolve and unclaim,
+#   each with exact items and destinations).
+# FORM: the four transitions ride the fixture-level `env.queue` seam — SHIPPED
+#   `rig queue ...` writes applied right after `up` (there is NO queue action
+#   verb; the verb set stays locked, so setup lives outside the scenario grammar
+#   and is visibly declared here). The scenario only ASSERTS the observable rows
+#   through `expect queue` (`rig queue list --json --full`).
+# Rows: t-pending untouched; t-blocked parked on a typed gate; t-resolved parked
+#   then unparked by `rig queue resolve --decision` (blocked → in-progress, the
+#   owner nudge suppressed — fixture setup, not this row's check); t-unclaimed
+#   claimed then released (in-progress → pending, destination kept); t-handoff
+#   handed off to dev-impl — the source row reads handed-off (closed) and the
+#   successor is pending at dev-impl, carrying handedOffFrom back to t-handoff;
+#   the queue read includes closed rows via --all so both are visible.
+# Deps: R-10 runner. No emit, no seed — healthy form only.
+scenario: queue-transitions-reach-exact-states
+topology: ./dev-pair-stub.yaml
+env:
+  queue:
+    - id: t-pending
+      source: harness@dev-pair-stub
+      destination: dev-qa@dev-pair-stub
+      summary: "transition — stays pending"
+    - id: t-blocked
+      source: harness@dev-pair-stub
+      destination: dev-qa@dev-pair-stub
+      state: blocked
+      blocked_on: "fold:scenario-transition-wait"
+      summary: "transition — parked blocked"
+    - id: t-resolved
+      source: harness@dev-pair-stub
+      destination: dev-qa@dev-pair-stub
+      state: blocked
+      blocked_on: "fold:scenario-transition-resolve"
+      resolve: "scenario decision recorded while parked"
+      summary: "transition — unparked by resolve"
+    - id: t-unclaimed
+      source: harness@dev-pair-stub
+      destination: dev-qa@dev-pair-stub
+      claim: true
+      unclaim: true
+      summary: "transition — claimed then released"
+    - id: t-handoff
+      source: harness@dev-pair-stub
+      destination: dev-qa@dev-pair-stub
+      handoff: dev-impl@dev-pair-stub
+      handoff_summary: "transition — successor owned by dev-impl"
+      summary: "transition — handed off to dev-impl"
+steps:
+  - up: {}
+  - expect:
+      surface: queue
+      within: 20s
+      match:
+        - qitemId: t-pending
+          state: pending
+          destinationSession: dev-qa@dev-pair-stub
+        - qitemId: t-blocked
+          state: blocked
+          blockedOn: "fold:scenario-transition-wait"
+          destinationSession: dev-qa@dev-pair-stub
+        - qitemId: t-resolved
+          state: in-progress
+          destinationSession: dev-qa@dev-pair-stub
+        - qitemId: t-unclaimed
+          state: pending
+          destinationSession: dev-qa@dev-pair-stub
+        - qitemId: t-handoff
+          state: handed-off
+          handedOffTo: dev-impl@dev-pair-stub
+        - state: pending
+          destinationSession: dev-impl@dev-pair-stub
+          summary: "transition — successor owned by dev-impl"
+          handedOffFrom: t-handoff
+  - down: {}

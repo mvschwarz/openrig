@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -6,6 +6,7 @@ import { createProgram } from "../src/index.js";
 // The registry module is home-state owned by the daemon; the verb (and this test) reach
 // it via the narrow @openrig/daemon/gateway-human-registry subpath (the C3/crash-cart rail).
 import { humansDir, loadHumanRegistry } from "@openrig/daemon/gateway-human-registry";
+import { gatewayRoutes } from "../../daemon/src/routes/gateway.js";
 
 // M1 A3 pt2 / A4b relocate — `rig gateway human add` verb integration. The verb lazy-imports
 // the relocated daemon surface; these tests drive the real command end-to-end.
@@ -19,8 +20,22 @@ describe("rig gateway human add verb (post-relocate)", () => {
     process.exitCode = undefined;
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     if (prevHome === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it("participants --json and the daemon route expose the same filtered view", async () => {
+    const add = createProgram(); add.exitOverride();
+    await add.parseAsync(["node", "rig", "gateway", "human", "add", "mike", "--display-name", "Mike", "--delivery-class", "B"]);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const command = createProgram(); command.exitOverride();
+    await command.parseAsync(["node", "rig", "gateway", "participants", "--organization", "missing", "--json"]);
+    const cli = JSON.parse(String(log.mock.calls.at(-1)?.[0]));
+    const response = await gatewayRoutes({ home }).request("/participants?organization=missing");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(cli);
+    expect(cli).toMatchObject({ ok: true, participants: [], default: { id: "mike", source: "only-person" } });
   });
 
   it("is wired via createProgram (gateway human add)", () => {

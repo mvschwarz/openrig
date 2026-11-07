@@ -1,4 +1,5 @@
 import { selectedCorePluginDir, pluginPathsOf } from "./claude-core-plugin-env.js";
+import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { deriveRelayEvents, parseManagedClaudeNodeCommand } from "./claude-activity-hooks.js";
 import { claudeActivityRelayPath } from "./claude-activity-hooks.js";
 import { existsSync, accessSync, constants } from "node:fs";
@@ -222,9 +223,7 @@ export interface RestoreCheckDeps {
   /** Configured OpenRig instance root, matching the Claude adapter stateDir. */
   stateDir?: string;
   /** Read-only current authored selection, invoked only where hook detail is inspected. */
-  getDesiredClaudeActivityHooks?: (nodeId: string) =>
-    | { status: "known"; selected: boolean }
-    | { status: "unknown"; evidence: string };
+  getDesiredClaudeActivityHooks?: (nodeId: string) => DesiredClaudeActivityHooks;
   /** Relay-backed Claude hook events derived from the shipped hook manifest. */
   getClaudeActivityHookEvents?: () => string[];
 }
@@ -1081,7 +1080,7 @@ export class RestoreCheckService {
       }
       const settingsPath = join(node.cwd, ".claude", "settings.local.json");
       const relayPath = claudeActivityRelayPath(this.deps.stateDir);
-      const events = this.deps.getClaudeActivityHookEvents?.() ?? [];
+      const events = this.requiredClaudeActivityHookEvents();
       if (events.length === 0) {
         return {
           check: `seat.${session}.hooks`, status: "yellow",
@@ -1144,6 +1143,12 @@ export class RestoreCheckService {
     };
   }
 
+  private requiredClaudeActivityHookEvents(): string[] {
+    // PermissionRequest is an optional diagnostic. Older same-version plugin/settings bytes
+    // remain authoritative until normal release/projection; retain all prior readiness duties.
+    return (this.deps.getClaudeActivityHookEvents?.() ?? []).filter(event => event !== "PermissionRequest");
+  }
+
   private inspectCorePlugin(entries: StartupContextProjectionEntry[]): { status: "green" | "yellow"; evidence: string } | null {
     const dir = selectedCorePluginDir(pluginPathsOf(entries.map(entry => ({
       category: entry.category ?? "", absolutePath: entry.absolutePath,
@@ -1155,7 +1160,7 @@ export class RestoreCheckService {
         throw new Error("plugin manifest does not declare the core hook manifest");
       }
       const events = deriveRelayEvents(this.deps, join(dir, manifest["hooks"]));
-      const expected = this.deps.getClaudeActivityHookEvents?.() ?? [];
+      const expected = this.requiredClaudeActivityHookEvents();
       if (!expected.length || expected.some(event => !events.some(actual => actual.event === event))
         || !this.deps.exists(join(dir, "hooks", "scripts", "activity-relay.cjs"))) {
         throw new Error("activity relay or manifest events are missing/uninspectable");

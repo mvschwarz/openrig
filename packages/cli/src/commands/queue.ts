@@ -356,10 +356,29 @@ function printResult(json: boolean, body: unknown, status: number): void {
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
 }
 
+// Priority is matched exactly where it matters (the founder view, attention ranks), so "Critical" would quietly file
+// the row as ordinary work. The daemon stores what it's given, so a documented value is normalized here. Other values
+// are kept as given: `high`, `normal` and `background` are in real use, and the mission view ranks some of them.
+const QUEUE_PRIORITIES = ["routine", "urgent", "critical"];
+function queuePriorityArg(value: string): string {
+  const lower = value.toLowerCase();
+  if (QUEUE_PRIORITIES.includes(lower)) return lower;
+  console.error(`Note: --priority '${value}' is outside the documented choices (${QUEUE_PRIORITIES.join(", ")}); keeping it as given.`);
+  return value;
+}
+
+/** #2276: the daemon's checks of a new row's human-facing fields (missing summary or evidence for a person,
+ *  notification, questions, reply-to). The queue repository raises them before the row's first write, inside the
+ *  create's transaction. A remote host's refusal arrives as remote_queue_write_failed instead, so it isn't one of these. */
+const PRE_WRITE_CREATE_REFUSALS = new Set([
+  "human_route_fields_required", "invalid_human_notification", "invalid_human_questions", "reply_to_requires_update", "reply_to_not_found",
+]);
+
 /** #1642: why a create provably wrote nothing, for the refusals that come before any write: the
  *  selected daemon refused the forward before contacting another host (its registry was unreadable,
- *  the host unknown or SSH-declared), or refused a local create to a rig it doesn't have. Any other
- *  failure, including a timeout or a remote's error, may follow a commit, so it returns null. */
+ *  the host unknown or SSH-declared), refused a local create to a rig it doesn't have, or refused the
+ *  new row's fields while validating it. Any other failure, including a timeout or a remote's error,
+ *  may follow a commit, so it returns null. */
 function provenCreateRefusal(status: number, body: unknown): string | null {
   if (!body || typeof body !== "object") return null;
   const { error, failureClass, hostId } = body as { error?: unknown; failureClass?: unknown; hostId?: unknown };
@@ -369,6 +388,9 @@ function provenCreateRefusal(status: number, body: unknown): string | null {
   }
   if (status === 400 && error === "unknown_destination_rig") {
     return "the daemon refused it because the destination's rig doesn't exist on that daemon.";
+  }
+  if (status === 400 && typeof error === "string" && PRE_WRITE_CREATE_REFUSALS.has(error)) {
+    return `the daemon refused it before writing anything (${error}).`;
   }
   return null;
 }
@@ -515,13 +537,10 @@ function notThisCreate(row: Record<string, unknown>, sent: SentCreate, storedSou
   return null;
 }
 
-/** A create whose answer didn't arrive, or arrived unreadable, may still have committed. Read the row back once by the ID it
- *  was sent with, from the daemon that holds it: this one for a local row, the destination's registered daemon for a
- *  cross-host one. Only a row that is this create counts as committed; anything else leaves the outcome unknown. It never
- *  sends the create again. */
-async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string }> {
-  const remote = remoteHostOf(hostId);
-  const where = remote ? ` on host '${remote}'` : "";
+/** Both reconciliation and --verify read the daemon that holds the row, with its own bearer. */
+async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: string | undefined) {
+  let remote = remoteHostOf(hostId);
+  if (remote && await daemonSelfHostId(client) === remote) remote = undefined;
   let reader = client;
   let options: { timeoutMs: number; headers?: Record<string, string> } = { timeoutMs: CREATE_READ_BACK_TIMEOUT_MS };
   if (remote) {
@@ -529,15 +548,45 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
     const match = registry.ok ? resolveHost(registry.registry, remote, loadHostBindings().bindings) : undefined;
     if (!match?.ok || match.host.transport !== "http") {
       const why = match?.ok ? "its entry in this CLI's host registry is SSH, not a daemon URL" : "it isn't in this CLI's host registry";
-      return { row: null, note: `This CLI couldn't read the row back from host '${remote}' (${why}).` };
+      return { error: `from host '${remote}' (${why})` };
     }
     const bearer = resolveRemoteBearer(match.host);
-    if (!bearer.ok) return { row: null, note: `This CLI couldn't read the row back from host '${remote}' (${bearer.error}).` };
+    if (!bearer.ok) return { error: `from host '${remote}' (${bearer.error})` };
     reader = deps.clientFactory(match.host.url);
     if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
   }
+  return { reader, options };
+}
+
+/** A successful forward isn't a delivery receipt. Never accept a different remote row as this create's receipt. */
+function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Pick<DaemonClient, "get"> {
+  if (!remoteHostOf(hostId)) return client;
+  let target: ReturnType<typeof queueReadTarget> | undefined;
+  let source: ReturnType<typeof storedSourceOf> | undefined;
+  return {
+    get: async <T>(path: string) => {
+      const selected = await (target ??= queueReadTarget(deps, client, hostId));
+      if ("error" in selected) throw new Error(`receipt could not be read ${selected.error}`);
+      const response = await selected.reader.get<T>(path, selected.options);
+      const row = response.data as Record<string, unknown> | undefined;
+      if (response.status === 200 && (!row || row.qitemId !== qitemId
+        || notThisCreate(row, sent, await (source ??= storedSourceOf(client, sent))) !== null)) {
+        throw new Error("receipt row does not match the created qitem");
+      }
+      return response;
+    },
+  };
+}
+
+/** A create whose answer didn't arrive, or arrived unreadable, may still have committed. Read the row back once by the ID it
+ *  was sent with, from the daemon that holds it. Only this create's row counts; it never sends the create again. */
+async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string }> {
+  const remote = remoteHostOf(hostId);
+  const where = remote ? ` on host '${remote}'` : "";
+  const target = await queueReadTarget(deps, client, hostId);
+  if ("error" in target) return { row: null, note: `This CLI couldn't read the row back ${target.error}.` };
   try {
-    const res = await reader.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`, options);
+    const res = await target.reader.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`, target.options);
     if (res.status === 200 && res.data?.qitemId === qitemId) {
       const differs = notThisCreate(res.data, sent, await storedSourceOf(client, sent));
       if (differs === "unread") {
@@ -601,6 +650,18 @@ async function printQueueItemResult(
 // IMPL-SPEC §2.3-2.4.
 const SHOW_BODY_PREVIEW_MAX_CODEPOINTS = 512;
 
+// A misspelled state ("in_progress") would otherwise read as an empty queue, not as a mistake: the list route matches
+// names as given. Each name is checked and trimmed the way the route trims it. This warns rather than refuses, so the
+// CLI's copy of the list doesn't stop it working with a newer daemon that knows more states.
+const QUEUE_STATE_NAMES = ["pending", "in-progress", "done", "blocked", "failed", "denied", "canceled", "handed-off"];
+function warnIfUnknownStates(value?: string): void {
+  const names = (value ?? "").split(",").map((name) => name.trim()).filter(Boolean);
+  const unknown = names.filter((name) => !QUEUE_STATE_NAMES.includes(name));
+  if (unknown.length === 0) return;
+  const effect = unknown.length === names.length ? " Nothing is filed under these names, so an empty result doesn't mean an empty queue." : "";
+  console.error(`Warning: unrecognized --state '${unknown.join("', '")}'. Supported states: ${QUEUE_STATE_NAMES.join(", ")}.${effect}`);
+}
+
 // Commander option parser. InvalidArgumentError (like positiveIntArg/enumArg) is what Commander
 // renders as its usual "option ... argument ... is invalid" error; a plain Error would escape parse.
 const WAKE_DURATION_FORMAT = "must be a positive integer with an optional s, m or h suffix (for example 90s, 15m, 168h)";
@@ -640,6 +701,12 @@ export function previewBody(
     bodyBytes,
     bodyTruncated: true,
   };
+}
+
+// Mark the cut inside the body so readers that discard metadata or stderr can request the complete brief.
+// Counts use code points, like the preview.
+export function previewCutMarker(qitemId: string, shownCodePoints: number, totalCodePoints: number): string {
+  return `…[cut at ${shownCodePoints} of ${totalCodePoints} chars; rig queue show ${shellQuote(qitemId)} --full]`;
 }
 
 function isRecordWithStringBody(v: unknown): v is Record<string, unknown> & { body: string } {
@@ -873,7 +940,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--mission <id>", "First-class mission scope; translated to a mission:<id> tag (composes with --tags)")
     .option("--slice <id>", "First-class slice scope; translated to a slice:<id> tag (composes with --tags)")
     .option("--gate <role>", "OPR.0.4.3.16: mark this as a gate qitem; translated to a gate:<role> tag (role e.g. guard | spec-review | pm-lead | qa | human). The idle-gate watchdog reads this predicate. Composes with --tags.")
-    .option("--priority <priority>", "Priority: routine | urgent | critical", "routine")
+    .option("--priority <priority>", "Priority: routine | urgent | critical", queuePriorityArg, "routine")
     .option("--tier <tier>", "Tier (e.g. fast, routine, deep, critical) — drives SLA")
     .option("--tags <tags>", "Comma-separated tags (composes with --mission and --slice)")
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
@@ -1079,7 +1146,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           if (opts.verify && status < 400) {
             const createdId = typeof created.qitemId === "string" ? created.qitemId : null;
             const delivery = createdId
-              ? await waitForDeliveryOutcome(client, createdId, deps.deliveryVerify, { destinationSession: hostResolved.destination, nudge: opts.nudge })
+              ? await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), createdId, deps.deliveryVerify, { destinationSession: hostResolved.destination, nudge: opts.nudge })
               : unreadableDeliveryResult(null, hostResolved.destination, {}, "create response did not include a qitem id; delivery cannot be correlated");
             await printWriteResult(client, opts.json ?? false, { ...created, qitemId: createdId, persisted: true, delivery }, status, receipt);
             return;
@@ -1173,6 +1240,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--reopen", "Explicitly acknowledge a deliberate terminal-to-active repair; requires --state and --note")
     .option("--closure-reason <reason>", "Required for state=done. --state canceled takes no reason, except 'superseded' (with --closure-target = the successor), which records a supersession, distinct from an abandoned cancel")
     .option("--closure-target <target>", "Required for handed_off_to, escalation, and superseded; blocked_on park records use state=blocked with --blocked-on")
+    .option("--closure-required-at <iso>", "Accept a revised closure deadline on an in-progress item; keeps the claim and records the old/new time and accepting actor")
     .option("--resolution <text>", "The outcome, stored on the row and shown by rig queue show. Needs --state done, canceled, denied, failed or handed-off, and non-blank text. Stored when the update closes an open row, after anything the row already has (a fallback line, an earlier outcome); a row that is already closed keeps what it has")
     .option("--blocked-on <blocker>", "For state=blocked: the blocker — a qitem id (must exist and be live), a human seat (FR-6 park; requires summary + evidence_ref), or a typed non-qitem gate 'fold:<what>' / 'auth:<what>' / 'external:<what>'")
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
@@ -1188,6 +1256,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       reopen?: boolean;
       closureReason?: string;
       closureTarget?: string;
+      closureRequiredAt?: string;
       resolution?: string;
       blockedOn?: string;
       wakeWatchdog?: string;
@@ -1224,6 +1293,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           reopen: opts.reopen,
           closureReason: opts.closureReason,
           closureTarget: opts.closureTarget,
+          ...(opts.closureRequiredAt !== undefined ? { closureRequiredAt: opts.closureRequiredAt } : {}),
           resolution: opts.resolution,
           blockedOn: opts.blockedOn,
           wakeWatchdogId: opts.wakeWatchdog,
@@ -1347,7 +1417,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--note <text>", "Transition note")
-    .option("--priority <priority>", "Override priority for the new qitem")
+    .option("--priority <priority>", "Override priority for the new qitem: routine | urgent | critical", queuePriorityArg)
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
@@ -1451,7 +1521,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--note <text>", "Transition note")
-    .option("--priority <priority>", "Override priority for the new qitem")
+    .option("--priority <priority>", "Override priority for the new qitem: routine | urgent | critical", queuePriorityArg)
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
@@ -1614,7 +1684,10 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           ...(closingTransition === undefined ? [] : [omittedReadField("closingTransition", closingTransition)]),
         ];
         const view = readView(item, fullCommand, omitted);
-        const transformed = { ...record, body: preview, bodyBytes, bodyTruncated, readView: view };
+        const shownBody = bodyTruncated
+          ? `${preview}${previewCutMarker(qitemId, Array.from(preview).length, Array.from(item.body).length)}`
+          : preview;
+        const transformed = { ...record, body: shownBody, bodyBytes, bodyTruncated, readView: view };
         // Slice 15 P2: with output.compact on, the empty fields are left out and counted.
         const compact = compactOutputEnabled() ? compactShow(transformed) : null;
         printResult(json, compact ? compact.item : transformed, res.status);
@@ -1734,6 +1807,7 @@ Examples:
       }
       if (opts.destination) params.set("destinationSession", opts.destination);
       if (opts.source) params.set("sourceSession", opts.source);
+      warnIfUnknownStates(opts.state);
       if (opts.state) params.set("state", opts.state);
       if (opts.targetRepo) params.set("targetRepo", opts.targetRepo);
       if (opts.limit) params.set("limit", String(opts.limit));

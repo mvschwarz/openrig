@@ -36,7 +36,7 @@ console.log(${JSON.stringify(JSON.stringify(result))});process.exitCode=${exit};
 const opened = { provider: "tmux", ok: true, opened: ["advisor", "operator"], absent: [], degraded: [], pages: 1 };
 
 describe("TUI desktop terminal action", () => {
-  it.each(["rig", "pod"])("direct %s action reaches exact attach guidance after definite window refusal, without relaunch", async kind => {
+  it.each(["rig", "seat"])("direct %s action reaches exact attach guidance after definite window refusal, without relaunch", async kind => {
     let snap = demoSnapshot();
     const view = createViewState({ instanceId: "fixture", getSnapshot: () => snap });
     view.dispatch(parseCommand("rig openrig-build"));

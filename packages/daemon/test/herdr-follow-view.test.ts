@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { TerminalService } from "../src/domain/terminal/terminal-service.js";
+import type { EventBus } from "../src/domain/event-bus.js";
 import { HerdrFollowView } from "../src/domain/terminal/herdr-follow-view.js";
 import { composeView } from "../src/domain/terminal/view-composer.js";
 import type { ComposedView } from "../src/domain/terminal/terminal-provider.js";
 import type { ViewerPane } from "../src/domain/terminal/herdr-viewer.js";
+import { inspectComposerInput } from "../src/domain/session-transport.js";
+import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
+import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
+import { tileAttachArgv078, tileAttachArgv079 } from "../src/domain/terminal/earlier-tile-attach.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -13,7 +19,7 @@ const socket = "/tmp/follow-provider.sock";
 export function task(seats: string[], complete = true): ComposedView {
   const composed = composeView("qitem:task", seats.map(seat => ({ seat, label: seat, host: null, alive: true,
     tmuxSession: seat, readOnly: false })), { resolveHost: () => null, localTmux: "/usr/bin/tmux", localTmuxServer: ["-S", "/tmp/follow-seats.sock"] });
-  return { ...composed, task: { qitemId: "task", name: "Example task", complete, issues: complete ? [] : ["read failed"],
+  return { ...composed, task: { kind: "qitem", id: "task", qitemId: "task", name: "Example task", complete, issues: complete ? [] : ["read failed"],
     members: seats.map(seat => ({ key: { hostId: "self", nodeId: seat }, seat, obligations: [{ qitemId: seat, state: "in-progress" }],
       availability: "available", viewerStatus: "not-provisioned" })) } };
 }
@@ -22,9 +28,10 @@ function fixture() {
   const panes = new Map<string, ViewerPane & { argv: string[] }>();
   const calls: string[][] = [], rpc: Array<{ method: string; params: unknown }> = [];
   const inputs = new Map<string, "empty" | "text" | "unknown">();
+  const frames = new Map<string, ComposerSnapshot | null>();
   let transform = (view: ComposedView) => view;
   let lateFocus: { seat: string; reads: number } | undefined;
-  let clock = 100, lostCreate = false, lostClose = false, readsFailed = false;
+  let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false, failedViewerRun = false, failedProcessRead = false;
   const run = async (args: string[]) => {
     calls.push(args);
     const command = args.slice(0, 2).join(" ");
@@ -42,17 +49,19 @@ function fixture() {
       if (args.length !== 2) throw new Error("usage: herdr workspace list");
       return JSON.stringify({ result: { workspaces: [{ workspace_id: "w1" }] } });
     }
-    if (command === "pane list") return JSON.stringify({ result: { panes: [...panes.values()] } });
+    if (command === "pane list") return JSON.stringify({ result: { panes: [...panes.values()].filter(p => !hideViewers || !p.cwd.includes("/viewers/")) } });
     if (command === "pane get") {
       const selected = panes.get(args[2]!); if (!selected) throw new Error("missing pane");
       return JSON.stringify({ result: { pane: selected } });
     }
+    if (command === "pane process-info" && failedProcessRead && panes.get(args[3]!)!.cwd.includes("/viewers/")) { failedProcessRead = false; throw new Error("first viewer inspection failed"); }
     if (command === "pane process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: panes.get(args[3]!)!.argv }] } } });
     if (command === "pane run") {
       const selected = panes.get(args[2]!)!;
       if (args[3]!.startsWith("/usr/bin/tail")) {
         selected.argv = ["/usr/bin/tail", "-n", "30", "-F", path.join(selected.cwd, "..", "events.log")];
       } else {
+        if (failedViewerRun) { failedViewerRun = false; throw new Error("first attach dispatch failed"); }
         // The shared composer produces one wrapper per actual seat.
         const seat = ["a", "b", "c", "d"].find(s => args[3]!.includes(`'${s}'`))!;
         selected.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`];
@@ -72,6 +81,7 @@ function fixture() {
       if (lateFocus?.seat === target.seat && ++lateFocus.reads === 2) {
         for (const selected of panes.values()) selected.focused = selected.argv.at(-1) === `$${target.seat}`;
       }
+      if (frames.has(target.seat)) return inspectComposerInput(frames.get(target.seat) ?? null, "codex").state;
       return inputs.get(target.seat) ?? "empty";
     },
     inspect: async argv => ({ sessionId: `$${argv[4]}`, nodeId: argv[4]! }),
@@ -82,8 +92,17 @@ function fixture() {
       return { type: "pane_focused" };
     } } });
   const provider = create();
-  const follow = (seats = ["a", "b", "c"], controls = {}, complete = true) => provider.follow("qitem:task", transform(task(seats, complete)), { enabled: true, ...controls }, async () => true);
-  return { follow, create, panes, calls, rpc, inputs, advance: (ms: number) => { clock += ms; },
+  const follow = (seats = ["a", "b", "c"], controls = {}, complete = true, current = async () => true) => provider.follow("qitem:task", transform(task(seats, complete)), { enabled: true, ...controls }, current);
+  const journal = () => {
+    const directory = path.join(root, readdirSync(root)[0]!, "viewers");
+    return path.join(directory, readdirSync(directory).find(name => name.endsWith(".json"))!);
+  };
+  const exitViewer = (seat: string) => { [...panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!.argv = ["/bin/bash"]; };
+  return { follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
+    failViewerRun: () => { failedViewerRun = true; },
+    failProcessRead: () => { failedProcessRead = true; },
+    confirmViewer: (seat: string) => { const entry = JSON.parse(readFileSync(journal(), "utf8")).entries[JSON.stringify(["self", seat])]; panes.get(entry.pane.pane_id)!.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`]; },
+    hideViewers: () => { hideViewers = true; }, advance: (ms: number) => { clock += ms; },
     loseCreate: () => { lostCreate = true; }, loseClose: () => { lostClose = true; }, failReads: () => { readsFailed = true; },
     changeTarget: () => { transform = view => ({ ...view, opened: view.opened.map(target => target.seat === "a"
       ? { ...target, paneCommand: `${target.paneCommand} --changed`, attachArgv: [...target.attachArgv!.slice(0, 4), "replacement-a", ...target.attachArgv!.slice(5)] } : target) }); },
@@ -92,6 +111,143 @@ function fixture() {
 }
 
 describe("stable task-following workspace", () => {
+  it("resumes a join paused before attach dispatch through its existing journal without changing drafts or focus", async () => {
+    const f = fixture(); await f.follow(); f.inputs.set("b", "text"); f.focusSeat("b");
+    const before = [...f.panes.values()].map(p => [p.pane_id, p.terminal_id]); const count = f.calls.length; let reads = 0;
+    const paused = await f.follow(["a", "b", "c", "d"], {}, true, async () => ++reads !== 4);
+    expect(paused.opened).toEqual(["a", "b", "c"]);
+    const entry = JSON.parse(readFileSync(f.journal(), "utf8")).entries[JSON.stringify(["self", "d"])];
+    expect(entry.phase).toBe("created"); expect(entry.pane).toBeTruthy();
+    expect(f.calls.slice(count).filter(c => c[1] === "run")).toHaveLength(0);
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true });
+    expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
+    expect(f.calls.slice(count).filter(c => c[1] === "run")).toHaveLength(1);
+    expect([...f.panes.values()].slice(0, 4).map(p => [p.pane_id, p.terminal_id])).toEqual(before);
+    expect([...f.panes.values()].find(p => p.focused)?.argv.at(-1)).toBe("$b");
+    expect(f.inputs.get("b")).toBe("text"); expect(f.rpc).toHaveLength(0);
+  });
+  it("an unconfirmed older viewer holds the whole view before a new join", async () => {
+    const f = fixture(); await f.follow(); f.exitViewer("c"); const count = f.calls.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, opened: ["a", "b", "c"], following: { state: "retained" } });
+    expect(f.calls.slice(count).some(c => ["run", "close", "split", "create"].includes(c[1]!))).toBe(false);
+  });
+  it("keeps an already dispatched attach unconfirmed with its original seat, phase and reason", async () => {
+    const f = fixture(); await f.follow(); f.exitViewer("a"); const count = f.calls.length;
+    const held = await f.follow();
+    expect(held).toMatchObject({ ok: false, opened: ["a", "b", "c"] });
+    expect(held.error).toContain("a:"); expect(held.error).toContain("starting");
+    expect(held.error).toContain("The viewer process is not confirmed");
+    await f.follow(); expect(f.calls.slice(count).some(c => ["run", "close", "split"].includes(c[1]!))).toBe(false);
+  });
+  it("keeps the first dispatch failure in later notices across refresh and recreation", async () => {
+    const f = fixture(); await f.follow(); f.focusSeat("b"); f.inputs.set("b", "text"); f.failViewerRun();
+    const held = await f.follow(["a", "b", "c", "d"]);
+    expect(held.following!.events.at(-1)).toContain("first failure: starting: Viewer effect is unconfirmed: first attach dispatch failed");
+    const count = f.calls.length;
+    const resumed = f.create();
+    for (let i = 0; i < 2; i++) {
+      const later = await resumed.follow("qitem:task", task(["a", "b", "c", "d"]), { enabled: true }, async () => true);
+      expect(later.following!.events.at(-1)).toContain("current confirmation: starting: The viewer process is not confirmed");
+      expect(later.following!.events.at(-1)).toContain("first failure: starting: Viewer effect is unconfirmed: first attach dispatch failed");
+    }
+    expect(f.calls.slice(count).some(c => ["run", "split", "close", "create"].includes(c[1]!))).toBe(false);
+    expect(f.inputs.get("b")).toBe("text");
+    expect([...f.panes.values()].find(p => p.argv.at(-1) === "$b")?.focused).toBe(true);
+  });
+  it("keeps the original failure when membership drops a still-retained uncertain tile", async () => {
+    const f = fixture(); await f.follow(); f.exitViewer("a"); f.failProcessRead();
+    const first = await f.follow();
+    expect(first.error).toContain("first failure: starting: Viewer effect is unconfirmed: first viewer inspection failed");
+    const count = f.calls.length;
+    const later = await f.follow(["b", "c"]);
+    expect(later).toMatchObject({ ok: false, opened: ["a", "b", "c"] });
+    expect(later.error).toContain("current confirmation: starting: The viewer process is not confirmed");
+    expect(later.error).toContain("first failure: starting: Viewer effect is unconfirmed: first viewer inspection failed");
+    expect(f.calls.slice(count).some(c => ["run", "split", "close", "create"].includes(c[1]!))).toBe(false);
+  });
+  it("clears a resolved failure before reporting a later viewer hold", async () => {
+    const f = fixture(); await f.follow(); f.failViewerRun(); await f.follow(["a", "b", "c", "d"]);
+    f.confirmViewer("d");
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ opened: ["a", "b", "c", "d"] });
+    f.exitViewer("d");
+    const held = await f.follow(["a", "b", "c", "d"]);
+    expect(held.error).toContain("first failure: starting: The viewer process is not confirmed");
+    expect(held.error).not.toContain("first attach dispatch failed");
+  });
+  it("a known refusal before split preserves its reason and allows a later join", async () => {
+    const f = fixture(); await f.follow(); const count = f.calls.length; let reads = 0;
+    const held = await f.follow(["a", "b", "c", "d"], {}, true, async () => ++reads !== 3);
+    expect(held.opened).toEqual(["a", "b", "c"]);
+    expect(held.following!.events.join("\n")).toContain("first failure: creating: Membership changed before the split.");
+    expect(f.calls.slice(count).some(c => ["split", "run", "close"].includes(c[1]!))).toBe(false);
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+    expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
+  });
+  it("a known pre-split refusal retires its unused intent even when directory cleanup fails", async () => {
+    const f = fixture(); await f.follow(); const count = f.calls.length; let reads = 0, retainedFile = "";
+    const held = await f.follow(["a", "b", "c", "d"], {}, true, async () => {
+      if (++reads !== 3) return true;
+      const entry = JSON.parse(readFileSync(f.journal(), "utf8")).entries[JSON.stringify(["self", "d"])];
+      retainedFile = path.join(entry.cwd, "retained-note"); writeFileSync(retainedFile, "keep this file");
+      return false;
+    });
+    expect(held.following!.events.join("\n")).toContain("first failure: creating: Membership changed before the split.");
+    expect(JSON.parse(readFileSync(f.journal(), "utf8")).entries[JSON.stringify(["self", "d"])]).toBeUndefined();
+    expect(readFileSync(retainedFile, "utf8")).toBe("keep this file");
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+    expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
+  });
+  it("an uncertain dispatched split keeps its intent even when enumeration is empty", async () => {
+    const f = fixture(); await f.follow(); f.loseCreate(); f.hideViewers(); const count = f.calls.length;
+    const held = await f.follow(["a", "b", "c", "d"]);
+    expect(held.following!.events.join("\n")).toContain("first failure: creating: Viewer effect is unconfirmed: lost create response");
+    const before = readFileSync(f.journal(), "utf8");
+    await f.follow(["a", "b", "c", "d"]);
+    expect(readFileSync(f.journal(), "utf8")).toBe(before);
+    expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
+    expect(f.calls.slice(count).filter(c => c[1] === "run")).toHaveLength(0);
+  });
+  it("a changed terminal identity holds the whole view before joining another member", async () => {
+    const f = fixture(); await f.follow();
+    [...f.panes.values()].find(p => p.cwd.includes("/viewers/"))!.terminal_id = "other-generation";
+    const count = f.calls.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, following: { state: "retained" } });
+    expect(f.calls.slice(count).some(c => ["run", "split", "close"].includes(c[1]!))).toBe(false);
+  });
+  it.each(["", "\x1b[2mAsk Codex to do anything\x1b[22m"])("closes only a departed viewer when the real reader confirms its two-footer Codex composer is empty (%s)", async body => {
+    const f = fixture(); f.frames.set("c", codexTwoRowComposer(body));
+    await f.follow();
+    const before = [...f.panes.values()].map(p => ({ id: p.pane_id, terminal: p.terminal_id, argv: [...p.argv] }));
+    await f.follow(["a", "b"]); f.advance(20000);
+    const result = await f.follow(["a", "b"]);
+    expect(result.opened).toEqual(["a", "b"]);
+    const closes = f.calls.filter(call => call[1] === "close"); expect(closes).toHaveLength(1);
+    const closed = before.find(p => p.id === closes[0]![2])!;
+    expect(closed.argv.at(-1)).toBe("$c");
+    for (const prior of before.filter(p => p.id !== closed.id)) {
+      const current = f.panes.get(prior.id)!;
+      expect({ terminal: current.terminal_id, argv: current.argv }).toEqual({ terminal: prior.terminal, argv: prior.argv });
+    }
+    expect(f.frames.get("c")).toEqual(codexTwoRowComposer(body));
+    expect(f.calls.filter(call => call[1] === "run")).toHaveLength(4); // initial canvas + three viewer clients only
+    expect(f.rpc).toHaveLength(0); // unfocused leaver: no focus transfer
+  });
+
+  it.each(["typed", "literal placeholder", "unavailable", "ambiguous"])("keeps a departed %s composer through the real reader", async kind => {
+    const f = fixture();
+    const frame = kind === "unavailable" ? null : codexTwoRowComposer(kind === "literal placeholder" ? "Ask Codex to do anything"
+      : kind === "ambiguous" ? "\n› " : "a real draft");
+    if (kind === "ambiguous" && frame) { frame.cursor.y = 7; frame.cursor.x = 4; }
+    f.frames.set("c", frame);
+    await f.follow(); await f.follow(["a", "b"]); f.advance(20000);
+    const result = await f.follow(["a", "b"]);
+    expect(result.opened).toContain("c");
+    expect(result.following!.tiles.find(tile => tile.seat === "c")!.reason).toBeTruthy();
+    expect(f.calls.filter(call => call[1] === "close")).toHaveLength(0);
+    expect(f.frames.get("c")).toEqual(frame);
+  });
+
   it("3→4→3 keeps one workspace, unchanged survivor identities, and uses no layout refresh", async () => {
     const f = fixture(); const first = await f.follow();
     expect(first).toMatchObject({ ok: true, opened: ["a", "b", "c"], workspaceId: "w1" });
@@ -194,5 +350,112 @@ describe("stable task-following workspace", () => {
     const count = f.calls.length;
     expect(await next.follow("qitem:task", null, { enabled: false }, async () => false)).toMatchObject({ ok: true, following: { state: "disabled" } });
     expect(f.calls.length).toBe(count);
+  });
+});
+
+
+describe("slice follower policy", () => {
+  it("defaults a new scoped workspace to four tiles, allows an override, and keeps qitem eight", async () => {
+    const f = fixture();
+    const scope = task(["a", "b", "c"]); scope.task = { ...scope.task!, kind: "slice", id: "example" }; delete scope.task.qitemId;
+    const provider = f.create();
+    const first = await provider.follow("slice:example", scope, { enabled: true }, async () => true);
+    expect(first.following?.maxTiles).toBe(4);
+    const ids = [...f.panes.values()].map(pane => [pane.pane_id, pane.terminal_id]);
+    const next = await provider.follow("slice:example", scope, { enabled: true, maxTiles: 6 }, async () => true);
+    expect(next.following?.maxTiles).toBe(6);
+    expect([...f.panes.values()].map(pane => [pane.pane_id, pane.terminal_id])).toEqual(ids);
+    const qitem = await f.follow(); expect(qitem.following?.maxTiles).toBe(8);
+  });
+});
+
+
+function scopeCoreFixture(kind: "qitem" | "slice" | "mission") {
+  const f = fixture(), component = f.create();
+  let failed = false;
+  const callbacks = new Set<Parameters<EventBus["subscribe"]>[0]>();
+  const snapshot = () => ({ task: { kind, id: "empty", ...(kind === "qitem" ? { qitemId: "empty" } : {}),
+    name: "Empty work", complete: true, issues: [], members: [] }, members: [] });
+  const service = new TerminalService({ followingStatePath: path.join(roots.at(-1)!, "core-selectors.json"),
+    eventBus: { subscribe: callback => { callbacks.add(callback); return () => { callbacks.delete(callback); }; } },
+    resolveProvider: () => ({ name: "herdr", status: async () => ({ provider: "herdr", available: true, capabilities: {} }),
+      liveness: async () => ({ alive: true }), openView: async () => { throw new Error("No whole-view relayout"); },
+      followView: component.follow.bind(component) }),
+    viewsStore: { list: () => [], get: () => null }, listRigSeats: () => null, listPodSeats: () => null,
+    listRigNames: () => [], resolveHost: () => null, hasSession: () => true,
+    resolveTaskView: snapshot, resolveScopeView: () => failed ? { code: "scope_not_found", error: "Slice was renamed; reopen the view under its current key." } : snapshot() });
+  return { ...f, service, selector: `${kind}:empty`, fail: () => {
+    failed = true; for (const callback of callbacks) callback({ type: "queue.updated" } as Parameters<typeof callback>[0]);
+  } };
+}
+it.each(["slice", "qitem"] as const)("reports a real empty %s provider result consistently through Core", async kind => {
+  const f = scopeCoreFixture(kind);
+  try {
+    const result = await f.service.followView({ view: f.selector, provider: "herdr", enabled: true });
+    expect(result).toMatchObject({ ok: true, following: { state: "empty", enabled: kind === "slice" },
+      viewDescriptor: { kind: kind === "slice" ? "following" : "fixed" } });
+    expect(result.following?.events.join(" ")).toContain(kind === "slice" ? "waiting for" : "stopped");
+    const current = await f.service.status(); expect(current.following).toHaveLength(kind === "slice" ? 1 : 0);
+  } finally { await f.service.stop(); }
+});
+it("preserves the resolver's renamed-slice explanation in the real provider notice", async () => {
+  const f = scopeCoreFixture("slice");
+  try {
+    await f.service.followView({ view: f.selector, provider: "herdr", enabled: true }); f.fail();
+    await expect.poll(async () => (await f.service.status()).following?.[0]?.status?.events.join(" ")).toContain("reopen the view under its current key");
+    expect((await f.service.status()).following?.[0]?.enabled).toBe(true);
+    expect(f.calls.some(call => call[1] === "close")).toBe(false);
+  } finally { await f.service.stop(); }
+});
+
+
+it("keeps a real empty mission workspace enabled through Core with a mission waiting notice", async () => {
+  const f = scopeCoreFixture("mission");
+  try {
+    const result = await f.service.followView({ view: f.selector, provider: "herdr", enabled: true });
+    expect(result).toMatchObject({ ok: true, following: { state: "empty", enabled: true, maxTiles: 4 }, viewDescriptor: { kind: "following" } });
+    expect(result.following?.events.join(" ")).toContain("following this mission");
+    expect((await f.service.status()).following).toHaveLength(1);
+  } finally { await f.service.stop(); }
+});
+
+describe("follow views kept from an earlier release", () => {
+  const quote = (s: string) => "'" + s.replace(/'/g, "'\"'\"'") + "'";
+  it.each([["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
+    "a writable follow view kept from %s still adds and closes tiles, and moves to the current script", async (_, make) => {
+      const f = fixture(); expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
+      // Rewrite the saved canvas and the viewer journal as that release left them.
+      const earlier = (seat: string) => make("/usr/bin/tmux", ["-S", "/tmp/follow-seats.sock"], seat, false);
+      const canvasFile = path.join(path.dirname(path.dirname(f.journal())), "canvas.json");
+      const canvas = JSON.parse(readFileSync(canvasFile, "utf8"));
+      for (const tile of canvas.tiles) { tile.target.attachArgv = earlier(tile.seat); tile.target.paneCommand = tile.target.attachArgv.map(quote).join(" "); }
+      writeFileSync(canvasFile, JSON.stringify(canvas));
+      const journal = JSON.parse(readFileSync(f.journal(), "utf8"));
+      for (const [id, entry] of Object.entries<{ argv: string[]; command: string }>(journal.entries)) {
+        entry.argv = earlier(JSON.parse(id)[1]); entry.command = entry.argv.map(quote).join(" ");
+      }
+      writeFileSync(f.journal(), JSON.stringify(journal));
+
+      expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+      await f.follow(["a", "b", "d"]); f.advance(4000);
+      expect(await f.follow(["a", "b", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "d"] });
+      expect(f.calls.filter(c => c[1] === "close")).toHaveLength(1);
+      const current = task(["a", "b", "d"]).opened;
+      expect(JSON.parse(readFileSync(canvasFile, "utf8")).tiles.map((t: { target: { paneCommand: string } }) => t.target.paneCommand))
+        .toEqual(current.map(t => t.paneCommand));
+    });
+
+  it("holds a kept follow view whose tile script only shares a tile script's opening, and leaves its saved tiles", async () => {
+    const f = fixture(); expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
+    const canvasFile = path.join(path.dirname(path.dirname(f.journal())), "canvas.json");
+    const canvas = JSON.parse(readFileSync(canvasFile, "utf8"));
+    const tile = canvas.tiles[0];
+    tile.target.attachArgv[2] = 'target=$1; shift; printf "%s\\n" "custom viewer";';
+    tile.target.paneCommand = tile.target.attachArgv.map(quote).join(" ");
+    writeFileSync(canvasFile, JSON.stringify(canvas));
+    const before = f.calls.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, following: { state: "retained" }, error: expect.stringContaining("current attachment differs") });
+    expect(f.calls.slice(before).some(c => ["create", "split", "run", "close"].includes(c[1]!))).toBe(false);
+    expect(JSON.parse(readFileSync(canvasFile, "utf8")).tiles[0].target).toEqual(tile.target);
   });
 });

@@ -23,7 +23,8 @@ const errorFrame = `No saved session found with ID ${token}. Run \`codex resume\
 const started = "Tue Oct 20 05:00:01 2026";
 const rows = (startedAt = started) => [
   { pid: 900, ppid: 1, command: "-zsh", pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Tue Oct 20 04:59:00 2026" },
-  { pid: 901, ppid: 900, command: `codex resume ${token}`, pgid: 901, tpgid: 901, executableName: "codex", startedAt },
+  { pid: 901, ppid: 900, command: `codex resume ${token}`, argv: ["codex", "resume", token],
+    pgid: 901, tpgid: 901, executableName: "codex", startedAt },
 ];
 
 type Evidence = (pid: number, identity: string) => Promise<CodexResumeEvidence> | CodexResumeEvidence;

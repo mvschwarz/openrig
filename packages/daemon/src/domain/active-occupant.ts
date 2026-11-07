@@ -110,10 +110,20 @@ export function absentSeatResumeHistory<T extends { id: string; nodeId: string; 
   return rows.find((session) => !!session.resumeToken?.trim() && !!session.resumeType && session.resumeType !== "none") ?? null;
 }
 
+/** The seat argument of the one-seat commands below, quoted for a shell. */
+function seatArgument(logicalId: string, rigName: string): string {
+  return `'${`${logicalId}@${rigName}`.replace(/'/g, `'"'"'`)}'`;
+}
+
 /** The one-seat command that starts a seat fresh, quoted for a shell. Restore reasons name it rather than a whole-rig
  *  `rig up --existing --fresh`, which is refused while sibling seats run, the state a partial restore leaves. */
 export function freshSeatLaunchCommand(logicalId: string, rigName: string): string {
-  return `rig seat launch '${`${logicalId}@${rigName}`.replace(/'/g, `'"'"'`)}' --fresh --reason "<why>"`;
+  return `rig seat launch ${seatArgument(logicalId, rigName)} --fresh --reason "<why>"`;
+}
+
+/** The one-seat stop a restore reason names before that fresh launch, when the seat's own tmux session is still there. */
+export function seatStopCommand(logicalId: string, rigName: string): string {
+  return `rig seat stop ${seatArgument(logicalId, rigName)} --reason "<why>"`;
 }
 
 /** The stop-for-decision explanation for such a seat, worded once for apply and preview. */

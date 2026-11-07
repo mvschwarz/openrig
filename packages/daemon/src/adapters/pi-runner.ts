@@ -29,6 +29,7 @@ import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { credentialTaint, judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, type PiCredentialEvidence } from "./pi-readiness.js";
 import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary, type PiUsageFact } from "../domain/pi-usage-facts.js";
+import { validateLaunchWrapper } from "../domain/launch-wrapper.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, type ChargeProvenance } from "./pi-openrouter-charge.js";
 import { OMP_MAX_FRAME_BYTES, OmpFrameDecoder, ompProtocolV2Limit } from "./omp-rpc-frame.js";
 import {
@@ -179,11 +180,16 @@ function piCredentialHint(message: string): string {
     : " For managed Pi, configure this provider in the seat's PI_CODING_AGENT_DIR (auth.json or models.json). Its key is not in OpenRig's Pi environment passthrough map; default Pi logins are not automatically shared.";
 }
 
-function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
-  // Empty or control-only fields must not hide a later usable diagnostic.
-  const text = details.map(detail => typeof detail === "string"
+/** The first usable diagnostic, on one line with control characters removed. Empty or control-only fields must not hide
+ *  a later usable one. */
+function diagnosticText(details: unknown[]): string {
+  return details.map(detail => typeof detail === "string"
     ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
     : "").find(Boolean) ?? "";
+}
+
+function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
+  const text = diagnosticText(details);
   const marker = runtime === "omp" ? "[omp-runner] ERROR" : PI_RUNNER_ERROR_MARKER;
   return `${marker} ${text.slice(0, 400) || "request failed"}${runtime === "pi" ? piCredentialHint(text) : ""}`;
 }
@@ -218,8 +224,10 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
       // Pi keeps main's mapping: turn_end carries no notice.
       return runtime === "omp" ? { mirrorLines: [], ...modelErrorNotice(event, runtime) } : { mirrorLines: [] };
     case "turn_start":
-      // Some turn paths omit agent_start; turn_start still opens a turn, so it reports the seat working.
-      return { mirrorLines: [], activity: { hookEvent: "active", subtype: "turn_start" } };
+      // Some turn paths omit agent_start; turn_start still opens a turn, so it reports the seat
+      // working and opens the streaming flag — the beat must cover a turn whose only opening
+      // event was turn_start, or a long quiet turn on that path still loses its working state.
+      return { mirrorLines: [], activity: { hookEvent: "active", subtype: "turn_start" }, streaming: runtime === "omp" ? undefined : true };
     case "message_start":
       return { mirrorLines: [] };
     case "message_update": {
@@ -255,8 +263,13 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
       return { mirrorLines: [] };
     case "compaction_start":
       return { mirrorLines: [`[${runtime}] compacting context…`], activity: { hookEvent: "active", subtype: "compaction" } };
-    case "compaction_end":
-      return { mirrorLines: [`[${runtime}] compaction done`] };
+    case "compaction_end": {
+      // Pi's compaction_end says `aborted` when it was cancelled, and carries `errorMessage` when it failed and wrote no
+      // summary (Pi's docs/rpc.md). An end that names neither is done.
+      const failure = diagnosticText([event.errorMessage]).slice(0, 400);
+      return { mirrorLines: [event.aborted === true ? `[${runtime}] compaction cancelled`
+        : failure ? `[${runtime}] compaction failed: ${failure}` : `[${runtime}] compaction done`] };
+    }
     // OMP names its automatic compaction separately. Pi keeps main's mapping
     // (unmapped), so an idle Pi seat never reads as running after one.
     case "auto_compaction_start":
@@ -382,11 +395,16 @@ export async function readPiSessionEntryIds(
 
 export class RunnerCore {
   private streaming = false;
+  /** Pi runs this runner has opened, each posted as an accepted turn (contract section 4): the working beat names it. */
+  private turn = 0;
   private sessionFile: string | undefined;
   private sessionId: string | undefined;
   private lastEntryId: string | undefined;
   private ready = false;
   private lastHeartbeatMs: number | null = null;
+  /** When this runner last posted any activity payload, so the streaming beat spaces itself
+   *  behind real events (a tool call is evidence enough; the beat covers the silent gaps). */
+  private lastActivityPostMs: number | null = null;
   /** Hook event of the last activity this runner posted; null until it posts one. */
   private lastPostedHook: string | null = null;
   private assistantErrorShown = false;
@@ -531,6 +549,7 @@ export class RunnerCore {
       const message = block.slice("/followup ".length);
       this.io.sendRpc({ type: "follow_up", message });
       this.io.mirrorLine(`you (follow-up) ▸ ${message}`);
+      this.acceptIntoOpenRun();
       return;
     }
     // The runtime decides, not the runner: with streamingBehavior "steer", Pi and OMP run the prompt when idle and,
@@ -539,6 +558,17 @@ export class RunnerCore {
     // when a prompt was consumed locally and started none. It labels the mirror line only.
     this.io.sendRpc({ type: "prompt", message: block, streamingBehavior: "steer" });
     this.io.mirrorLine(this.streaming ? `you (steer) ▸ ${block}` : `you ▸ ${block}`);
+    this.acceptIntoOpenRun();
+  }
+
+  /** A working beat counts only for the latest accepted turn, and each prompt the runner gives the agent is accepted with
+   *  its own number (contract section 4). One sent while a Pi run is open is posted as it's sent, and the run's end
+   *  closes it. One sent while idle is posted when its run opens (handleEvent), so a prompt Pi handles without a run opens
+   *  no turn. */
+  private acceptIntoOpenRun(): void {
+    if (this.runtime !== "pi" || !this.streaming) return;
+    this.turn += 1;
+    this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
   }
 
   /** Child process exit — honest, loud, durable. */
@@ -712,17 +742,38 @@ export class RunnerCore {
     this.io.postActivity(this.activityPayload("Notification", next === "transient_turn_error" ? "runtime_error" : next));
   }
 
-  /** Idle heartbeat. A Pi runner only reports when something happens, and the daemon reads any hook older than
-   *  its freshness window as `unknown` (`stale_runtime_hook`), so an idle seat read `unknown` five minutes after
-   *  its last turn, and a restored seat read `unknown` (`generation_mismatch`) until its first turn. Re-asserting
-   *  idle while ready, not mid-turn and not waiting on the operator keeps the verdict honest: a runner that dies
-   *  stops beating and the seat goes back to `unknown`. Pi only; the OMP identity handshake has its own retry. */
+  /** Idle and streaming heartbeat. A Pi runner only reports at turn and tool boundaries, and the
+   *  daemon reads any hook older than its freshness window as `unknown` (`stale_runtime_hook`): an
+   *  idle seat read `unknown` five minutes after its last turn, and a seat mid-turn read `unknown`
+   *  through a long silent LLM request (the seat-activity oracle stops a bare working hook from
+   *  deciding after 15s, HOOK_AUTHORITY_WINDOW_MS). Beat while ready and not waiting on the
+   *  operator: idle (Stop) when no turn is in flight, and while `streaming` says one is, the
+   *  contract's working beat (`active` / `liveness`, section 4) for the run's accepted turn, each
+   *  at most once per its own interval behind the newest real event. Same honesty
+   *  rule: a runner that dies stops beating and the seat goes back to `unknown` (handlePiExit
+   *  clears `ready`, so no beat outlives the process it vouches for). Pi only; the OMP identity
+   *  handshake has its own retry.
+   *
+   *  Liveness of `streaming` (CodeRabbit 2336): the flag opens on agent_start/turn_start and
+   *  closes only on agent_end — can a turn end without one? Pi's run loop (dist/bundle/chunks,
+   *  runLoop, pi 0.84.4) emits agent_end on every exit: `stopReason === "error" ||
+   *  "aborted"` → finishTurn, turn_end, agent_end, return; decision end → turn_end, agent_end,
+   *  return; loop break → agent_end. That covers /abort (stopReason "aborted"), assistant errors
+   *  and exhausted auto-retries (stopReason "error"), and turns opened by turn_start alone
+   *  (turn_start fires only inside runLoop). A child crash is handlePiExit's honest exit, not a
+   *  silent working state. So a lost agent_end is not a Pi outcome, and no time limit is needed
+   *  on the beat — long silent turns stay covered. */
   heartbeat(): void {
-    if (this.runtime !== "pi" || !this.ready || this.streaming || this.attention) return;
+    if (this.runtime !== "pi" || !this.ready || this.attention) return;
+    const now = Date.parse(this.io.now());
+    if (this.streaming) {
+      if (this.lastActivityPostMs !== null && now - this.lastActivityPostMs < STREAM_HEARTBEAT_MS) return;
+      this.io.postActivity(this.activityPayload("active", "liveness", { turnId: String(this.turn), livenessSeconds: WORK_LIVENESS_SECONDS }));
+      return;
+    }
     // `streaming` follows only agent_start/agent_end; turn_start, compaction and auto-retry also report the agent
     // working. Beat only when the last thing posted was a Stop (or nothing yet), so a beat never lands mid-turn.
     if (this.lastPostedHook !== null && this.lastPostedHook !== "Stop") return;
-    const now = Date.parse(this.io.now());
     if (this.lastHeartbeatMs !== null && now - this.lastHeartbeatMs < IDLE_HEARTBEAT_MS) return;
     this.io.postActivity(this.activityPayload("Stop", "idle_heartbeat"));
   }
@@ -784,7 +835,15 @@ export class RunnerCore {
       if (event.type === "turn_start") this.assistantErrorShown = false;
     }
     const mapped = mapPiEvent(event, this.runtime);
+    // A working beat counts only for the latest accepted turn. Pi's runs start from this runner's prompts, so the run
+    // that opens is posted as one, before its first event; a prompt Pi handles without a run opens none. A prompt sent
+    // into an open run is accepted as it's sent (acceptIntoOpenRun).
+    const opening = this.runtime === "pi" && mapped.streaming === true && !this.streaming;
     if (mapped.streaming !== undefined) this.streaming = mapped.streaming;
+    if (opening) {
+      this.turn += 1;
+      this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
+    }
     // OMP writes its JSONL lazily; re-announce identity after each turn until
     // the daemon confirms the token. Pi's get_state identity is final.
     if (event.type === "agent_end" && this.runtime === "omp") this.postSessionIdentity();
@@ -877,8 +936,9 @@ export class RunnerCore {
   /** Each activity post's place in this runner's event order: posts aren't awaited, so they can arrive out of order. */
   private activitySequence = 0;
 
-  private activityPayload(hookEvent: string, subtype: string | null): Record<string, unknown> {
+  private activityPayload(hookEvent: string, subtype: string | null, extra: Record<string, unknown> = {}): Record<string, unknown> {
     this.lastPostedHook = hookEvent;
+    this.lastActivityPostMs = Date.parse(this.io.now());
     // Any posted Stop is an idle report, so the next beat is due a full interval after it, not just after a beat.
     if (hookEvent === "Stop") this.lastHeartbeatMs = Date.parse(this.io.now());
     return {
@@ -891,6 +951,7 @@ export class RunnerCore {
       subtype,
       // A Pi runner's idle report holds only while it keeps beating; the daemon expires it after two missed beats.
       ...(this.runtime === "pi" && hookEvent === "Stop" && subtype !== "pi_exited" ? { livenessSeconds: IDLE_HEARTBEAT_MS / 1000 } : {}),
+      ...extra,
       occurredAt: this.io.now(),
     };
   }
@@ -926,6 +987,8 @@ interface RunnerArgs {
   /** OPR.0.7.0.2: report usage facts from persisted entries (the daemon passes it when usage.pi_cost_facts is on). */
   usageFacts?: boolean;
   openRouterCharge?: boolean;
+  /** Pi only: resolved launch_wrapper argv (wrapper[0] must be an absolute path). */
+  launchWrapper?: string[];
 }
 
 export function parseRunnerArgs(argv: string[]): RunnerArgs {
@@ -957,6 +1020,11 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       case "--fork": args.forkRef = next(); break;
       case "--usage-facts": args.usageFacts = true; break;
       case "--openrouter-charge": args.openRouterCharge = true; break;
+      case "--launch-wrapper-arg": {
+        const arg = next();
+        (args.launchWrapper ??= []).push(arg);
+        break;
+      }
       case "--approve": args.trust = "approve"; break;
       case "--no-approve": args.trust = "no-approve"; break;
       case "--approval-mode": {
@@ -980,6 +1048,16 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
     throw new Error("an explicit trust flag is required: --approve or --no-approve");
   }
   if (args.sessionFile && args.forkRef) throw new Error("--session and --fork are mutually exclusive");
+  if (args.launchWrapper) {
+    if (args.runtime === "omp") {
+      throw new Error("--launch-wrapper-arg is only supported for the Pi runtime");
+    }
+    const validated = validateLaunchWrapper(args.launchWrapper);
+    if (!validated[0] || !nodePath.isAbsolute(validated[0])) {
+      throw new Error(`launch_wrapper[0]: runner requires an absolute executable path (got ${JSON.stringify(validated[0] ?? "")})`);
+    }
+    args.launchWrapper = validated;
+  }
   return args as RunnerArgs;
 }
 
@@ -1040,7 +1118,26 @@ export function inOrder<A, R>(send: (arg: A) => Promise<R>): (arg: A) => Promise
 const IDENTITY_RETRY_MS = 30_000;
 /** Below the daemon's 5 minute hook freshness window (AGENT_ACTIVITY_FRESHNESS_MS). */
 const IDLE_HEARTBEAT_MS = 3 * 60_000;
-const IDLE_HEARTBEAT_TICK_MS = 15_000;
+/** One 5s scheduler tick drives both beats. CodeRabbit 2336: the first cut ticked every 15s, so a
+ *  streaming beat could land ~15s (+ delivery) behind a real event — the edge of
+ *  HOOK_AUTHORITY_WINDOW_MS, with a worst case near 25s. A 5s tick with a 5s minimum age posts a
+ *  streaming beat 5–10s after the newest event or beat: inside the window with headroom. The idle
+ *  beat's own 3-minute age gate makes the extra ticks free. */
+const PI_HEARTBEAT_TICK_MS = 5_000;
+/** Minimum age of the newest activity post before the streaming beat may re-assert it. */
+const STREAM_HEARTBEAT_MS = 5_000;
+/** How long one working beat counts (contract section 4). Beats land 5–10 s apart, well inside half of it. */
+const WORK_LIVENESS_SECONDS = 30;
+
+/** The Pi heartbeat scheduler — one 5s tick drives both beats (see PI_HEARTBEAT_TICK_MS).
+ *  Exported so tests drive the real interval with fake timers instead of calling heartbeat()
+ *  by hand, which is exactly the gap that hid the 15s-tick latency in the first cut. */
+export function startHeartbeatTimer(core: { heartbeat(): void }, runtime: RunnerRuntime): { stop(): void } {
+  if (runtime !== "pi") return { stop() {} };
+  const timer = setInterval(() => core.heartbeat(), PI_HEARTBEAT_TICK_MS);
+  timer.unref();
+  return { stop: () => clearInterval(timer) };
+}
 
 export interface ExecutableResolverOps {
   isExecutable(path: string): boolean;
@@ -1179,14 +1276,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   console.log(`[${runtime}-runner] starting ${runtime} --mode rpc (seat ${args.sessionName})`);
   console.log(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
 
-  // OMP runs under a per-seat HOME. A HOME-dependent launcher on PATH (a mise
-  // shim) cannot find its target there, so resolve the real binary first,
-  // with the runner's own environment.
+  // OMP runs under a per-seat HOME, and wrapped Pi launches hand the resolved
+  // Pi binary to the wrapper so a HOME-dependent launcher on PATH (a mise
+  // shim) is resolved first with the runner's own environment. Unwrapped Pi
+  // stays bare "pi".
   let command: string = runtime;
-  if (runtime === "omp") {
-    const resolved = resolveRuntimeExecutable("omp", process.env);
+  if (runtime === "omp" || args.launchWrapper?.length) {
+    const resolved = resolveRuntimeExecutable(runtime, process.env);
     if (!resolved.ok) {
-      console.error(`[omp-runner] ERROR launch: ${resolved.error}`);
+      console.error(`[${runtime}-runner] ERROR launch: ${resolved.error}`);
       // Record the exit for this launch so the adapter fails it now instead
       // of waiting out its readiness timeout. The durable cursor survives.
       const at = new Date().toISOString();
@@ -1222,7 +1320,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // (or was added after it, and is then seen by the next one).
   const launchCredentialEvidence = args.openRouterCharge === true && runtime === "pi" ? credentialEvidence() : undefined;
 
-  const child = spawn(command, childArgs, {
+  const spawnFile = args.launchWrapper?.length ? args.launchWrapper[0]! : command;
+  const spawnArgs = args.launchWrapper?.length ? [...args.launchWrapper.slice(1), command, ...childArgs] : childArgs;
+  const child = spawn(spawnFile, spawnArgs, {
     cwd: args.cwd,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
@@ -1346,8 +1446,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // Re-deliver OMP identity until the daemon confirms the resume token.
   const identityRetry = runtime === "omp" ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
   identityRetry?.unref();
-  const idleHeartbeat = runtime === "pi" ? setInterval(() => core.heartbeat(), IDLE_HEARTBEAT_TICK_MS) : undefined;
-  idleHeartbeat?.unref();
+  const heartbeatTimer = startHeartbeatTimer(core, runtime);
   // The last few stderr lines, so an OMP that exits during startup is
   // reported with its own words in the error, not only above it.
   const stderrTail: string[] = [];
@@ -1359,6 +1458,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (stderrTail.length > OMP_STDERR_TAIL_LINES) stderrTail.shift();
     if (runtime === "pi" && !core.isReady() && !reportedPiCapability) {
       const detail = piLaunchCapabilityError(command, args.trust, line, () => {
+        if (args.launchWrapper?.length) return "";
         const version = spawnSync(command, ["--version"], { cwd: args.cwd, env: childEnv, encoding: "utf8",
           timeout: 3000, killSignal: "SIGKILL", maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] });
         if (version.error || version.status !== 0) return "";
@@ -1375,7 +1475,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   if (runtime === "pi") {
     child.on("error", (err) => {
-      console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn pi: ${err.message}`);
+      console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn ${args.launchWrapper?.length ? `launch_wrapper (${spawnFile})` : "pi"}: ${err.message}`);
       const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;
       core.handlePiExit(code);
       input.close();
@@ -1398,7 +1498,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (exited) return;
     exited = true;
     clearInterval(identityRetry);
-    clearInterval(idleHeartbeat);
+    heartbeatTimer.stop();
     if (!core.isReady()) {
       const how = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
       const output = stderrTail.length > 0 ? ` Its last output: ${stderrTail.join(" | ")}` : " It printed nothing on stderr.";

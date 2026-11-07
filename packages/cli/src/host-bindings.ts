@@ -161,7 +161,7 @@ export function recordHostObservation(args: {
 
 function recordUnderLock(alias: string, observedHostId: string, observedUrl: string | undefined, at: string, path: string): HostObservationOutcome {
   const file = loadHostBindings(path);
-  const existing = file.bindings[alias];
+  const existing = Object.hasOwn(file.bindings, alias) ? file.bindings[alias] : undefined;
 
   let result: HostObservationOutcome;
   if (!existing) {

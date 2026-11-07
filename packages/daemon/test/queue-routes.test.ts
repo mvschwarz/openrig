@@ -1573,6 +1573,23 @@ describe("queue routes", () => {
     expect(data[0]!.body).toBe("fyi");
   });
 
+  it("outbox list for a rig returns what its seats sent and what was sent to them, in one read", async () => {
+    for (const [from, to, body] of [["a@r", "b@r", "inside"], ["c@other", "b@r", "into r"], ["c@other", "d@other", "elsewhere"]]) {
+      const record = await app.request("/api/queue/outbox/record", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": from! },
+        body: JSON.stringify({ senderSession: from, destinationSession: to, body }),
+      });
+      expect(record.status).toBe(201);
+    }
+    const list = await app.request("/api/queue/outbox/list?rig=r");
+    expect(list.status).toBe(200);
+    expect(((await list.json()) as Array<{ body: string }>).map((e) => e.body).sort()).toEqual(["inside", "into r"]);
+    // Control: the per-seat read is unchanged, one sender's messages wherever they went.
+    const seat = await app.request("/api/queue/outbox/list?senderSession=c@other");
+    expect(((await seat.json()) as Array<{ body: string }>).map((e) => e.body).sort()).toEqual(["elsewhere", "into r"]);
+    expect((await app.request("/api/queue/outbox/list")).status).toBe(400);
+  });
+
   it("queue, inbox and outbox list refuse only a non-numeric or unbindable limit (#586)", async () => {
     for (const body of ["one", "two", "three"]) {
       const res = await app.request("/api/queue/create", {
@@ -1665,6 +1682,31 @@ describe("queue routes", () => {
     expect((await ids("attention=1")).length).toBe(1);
     expect(await ids(`attention=1&updatedSince=${encodeURIComponent("2999-01-01T00:00:00Z")}`)).toEqual([]);
     expect(await ids(`attention=1&handedOffFrom=${source}`)).toEqual([]);
+  });
+
+  it("GET /api/queue/list?sort=updated picks a bounded window by latest update, so an old item closed last is in it", async () => {
+    const post = (path: string, session: string, body: Record<string, unknown>) => app.request(path, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": session }, body: JSON.stringify(body),
+    });
+    const create = async (body: string) => ((await (await post("/api/queue/create", "a@r", { destinationSession: "b@r", body, nudge: false })).json()) as { qitemId: string }).qitemId;
+    const close = (qitemId: string, ts: string) => {
+      db.prepare("UPDATE queue_items SET state = 'done', ts_updated = ? WHERE qitem_id = ?").run(ts, qitemId);
+    };
+    const oldest = await create("started first, finished last");
+    db.prepare("UPDATE queue_items SET ts_created = '2026-01-01T00:00:00.000Z' WHERE qitem_id = ?").run(oldest);
+    const middle = await create("middle");
+    db.prepare("UPDATE queue_items SET ts_created = '2026-01-02T00:00:00.000Z' WHERE qitem_id = ?").run(middle);
+    const newest = await create("started last");
+    db.prepare("UPDATE queue_items SET ts_created = '2026-01-03T00:00:00.000Z' WHERE qitem_id = ?").run(newest);
+    close(middle, "2026-01-04T00:00:00.000Z");
+    close(newest, "2026-01-05T00:00:00.000Z");
+    close(oldest, "2026-01-06T00:00:00.000Z");
+    const ids = async (query: string) => ((await (await app.request(`/api/queue/list?${query}`)).json()) as Array<{ qitemId: string }>).map((q) => q.qitemId);
+
+    expect(await ids("state=done,handed-off&sort=updated&limit=2")).toEqual([oldest, newest]);
+    // Without it the window stays newest created, and a sort it doesn't know changes nothing.
+    expect(await ids("state=done,handed-off&limit=2")).toEqual([newest, middle]);
+    expect(await ids("state=done,handed-off&sort=other&limit=2")).toEqual([newest, middle]);
   });
 
   it("GET /api/queue/list trims each state name and otherwise keeps today's matching", async () => {

@@ -132,7 +132,10 @@ function readTailChunked(filePath: string, rawLines: number): string | null {
   try {
     const stat = fstatSync(fd);
     if (stat.size === 0) return null;
-    let text = "";
+    // Count each chunk once and join only after the backwards scan. Rescanning
+    // the accumulated tail makes long lines quadratic in the number of chunks.
+    const chunks: string[] = [];
+    let newlineCount = 0;
     let offset = stat.size;
 
     while (offset > 0) {
@@ -159,15 +162,15 @@ function readTailChunked(filePath: string, rawLines: number): string | null {
       }
 
       const chunk = buf.subarray(skipBytes).toString("utf-8");
-      text = chunk + text;
+      chunks.push(chunk);
+      newlineCount += countNewlines(chunk);
 
-      const newlineCount = countNewlines(text);
       // A trailing newline terminates the last line; it does not establish
       // the start of the first requested line when this chunk starts mid-line.
-      if (newlineCount >= rawLines + (text.endsWith("\n") ? 1 : 0)) break;
+      if (newlineCount >= rawLines + (chunks[0]!.endsWith("\n") ? 1 : 0)) break;
     }
 
-    const lines = text.split("\n");
+    const lines = chunks.reverse().join("").split("\n");
     if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
     const tail = lines.slice(-rawLines);
     return tail.join("\n");
@@ -407,15 +410,21 @@ export class TranscriptStore {
     try {
       const stat = fstatSync(fd);
       const CHUNK_SIZE = 64 * 1024;
-      let remainder = "";
+      let remainder: string[] = [];
 
       for (let offset = 0; offset < stat.size; offset += CHUNK_SIZE) {
         const readSize = Math.min(CHUNK_SIZE, stat.size - offset);
         const buf = readTranscriptChunk(fd, readSize, offset);
         // StringDecoder handles incomplete multibyte sequences at chunk boundaries
-        const chunk = remainder + decoder.write(buf);
-        const lines = chunk.split("\n");
-        remainder = lines.pop() ?? "";
+        const lines = decoder.write(buf).split("\n");
+        // Scan only the new chunk. Joining and splitting the growing remainder
+        // on every read makes a long captured line quadratic.
+        if (lines.length === 1) {
+          remainder.push(lines[0]!);
+          continue;
+        }
+        lines[0] = remainder.join("") + lines[0];
+        remainder = [lines.pop() ?? ""];
 
         for (const rawLine of lines) {
           const stripped = this.stripAnsi(rawLine);
@@ -429,7 +438,7 @@ export class TranscriptStore {
       }
 
       // Flush any remaining bytes from the decoder
-      const finalChunk = remainder + decoder.end();
+      const finalChunk = remainder.join("") + decoder.end();
       if (finalChunk) {
         const stripped = this.stripAnsi(finalChunk);
         for (const subLine of stripped.split("\n")) {

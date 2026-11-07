@@ -401,6 +401,8 @@ export interface ScanWorkflowSpecFolderOpts {
    *  its source file disappeared (OQ-4 acceptance: deletion + audit log).
    *  Omitted in unit tests that don't care about emission. */
   eventBus?: EventBus;
+  /** A user file with the same bytes and identity as an existing built-in row. */
+  onBuiltinAlias?: (name: string, version: string, sourcePath: string, sourceHash: string) => void;
 }
 
 export interface ScanWorkflowSpecFolderResult {
@@ -498,7 +500,11 @@ export function scanWorkflowSpecFolder(
     // validation error), record a diagnostic row keyed by source_path
     // so the Library UI can render the error inline.
     try {
-      opts.cache.readThrough(filePath);
+      const cached = opts.cache.readThrough(filePath);
+      if (opts.onBuiltinAlias && opts.builtinDir && cached.sourcePath !== filePath
+          && isUnderDir(cached.sourcePath, opts.builtinDir)) {
+        opts.onBuiltinAlias(cached.name, cached.version, filePath, cached.sourceHash);
+      }
       result.valid += 1;
     } catch (err) {
       // Diagnostic: hash the raw content best-effort so we can detect

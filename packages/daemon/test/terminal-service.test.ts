@@ -8,9 +8,12 @@
 //  - the composed view handed to the provider carries the composer's partition.
 
 import { describe, it, expect } from "vitest";
+import { Hono } from "hono";
+import { terminalRoutes } from "../src/routes/terminal.js";
 import { createHash } from "node:crypto";
 import { planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
+import { daemonTmuxServerArgs, daemonTmuxServerInfo, setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 import { RexAdapter } from "../src/domain/terminal/rex-adapter.js";
 import { createRexCliTransport, type RexRun } from "../src/domain/terminal/rex-transport.js";
 import type {
@@ -62,6 +65,53 @@ const savedView: SavedView = {
   ],
 };
 
+describe("SSH tiles follow the viewing instance's effective server mode", () => {
+  it.each([
+    { requestedMode: "inherit", mode: "inherit" },
+    { requestedMode: "isolated", mode: "isolated" },
+    { requestedMode: "isolated", mode: "inherit" },
+    { requestedMode: "inherit", mode: "isolated" },
+  ] as const)("requested $requestedMode, effective $mode", async ({ requestedMode, mode }) => {
+    const previousArgs = [...daemonTmuxServerArgs()];
+    const previousSelection = daemonTmuxServerInfo();
+    try {
+      // Inheritance can still name a non-default LOCAL socket; its presence does
+      // not opt remote tiles into a new command or disclose that local path.
+      setDaemonTmuxServer(["-S", "/local/only/socket"], {
+        requestedMode, mode, serverArgs: ["-S", "/local/only/socket"], executionArgs: [],
+        migrationPending: requestedMode !== mode, blockingSessions: [],
+      });
+      const remote: SavedView = { id: "remote", name: "remote", members: [{
+        seat: "worker@edge", tmuxSession: "worker@edge", host: "edge", readOnly: true,
+      }] };
+      const { deps, herdr } = makeDeps({
+        viewsStore: { get: id => id === remote.id ? remote : null, list: () => [remote] },
+        resolveHost: id => id === "edge" ? { id, transport: "ssh", target: "fixture" } : null,
+      });
+      const svc = new TerminalService(deps);
+      const preview = await svc.previewView({ view: "remote" }) as { planId: string };
+      const result = await svc.openView({ view: "remote", expectedPlan: preview.planId });
+      expect(result.ok).toBe(true);
+      expect(result.code).toBeUndefined();
+      const command = herdr.lastView!.opened[0]!.paneCommand;
+      if (mode === "isolated") {
+        expect(command).toBe("ssh -t 'fixture' 'env OPENRIG_HOST_SELECTED=local rig terminal attach --read-only -- '\"'\"'worker@edge'\"'\"''");
+      } else {
+        // Main's inherited SSH tiles use remote tmux with identity-pinned replacement handling, not remote rig.
+        expect(command).toMatch(/^ssh -t 'fixture' /);
+        expect(command).toContain("OPENRIG_NODE_ID");
+        expect(command).toContain("attach -r -t");
+        expect(command).toContain("No replacement for $target; reopen the view with rig terminal open.");
+        expect(command).not.toContain("rig terminal attach");
+        expect(herdr.lastView!.opened[0]!.recoveryCommand).toBe("ssh -t 'fixture' 'tmux attach -r -t '\"'\"'worker@edge'\"'\"''");
+      }
+      expect(command).not.toContain("/local/only/socket");
+    } finally {
+      setDaemonTmuxServer(previousArgs, previousSelection);
+    }
+  });
+});
+
 function makeDeps(overrides: Partial<TerminalServiceDeps> = {}): {
   deps: TerminalServiceDeps;
   herdr: RecordingProvider;
@@ -78,10 +128,9 @@ function makeDeps(overrides: Partial<TerminalServiceDeps> = {}): {
     },
     listRigSeats: (rigArg) => (rigArg === "acme-build" || rigArg === "rig-id-1" ? rigRows : null),
     listPodSeats: (rigArg, pod) => (rigArg === "acme-build" && pod === "dev" ? [rigRows[0]!] : null),
-    listScopeSeats: (scope) =>
-      scope === "mission:4.6" || scope === "slice:02"
-        ? [{ canonicalSessionName: "dev-driver@acme-build", attachmentType: "tmux", tmuxSession: "dev-driver@acme-build", rigName: "acme-build", logicalId: "dev.driver" }]
-        : null,
+    resolveScopeView: view => view === "slice:02" || view === "mission:4.6" ? { task: { kind: view.startsWith("slice:") ? "slice" : "mission", id: view.split(":")[1]!, name: view, complete: true, issues: [], members: [] },
+      members: [{ seat: "dev-driver@acme-build", tmuxSession: "dev-driver@acme-build", host: null, readOnly: true, alive: true }] }
+      : { code: "scope_not_found", error: "Unknown fixture slice" },
     listRigNames: () => ["acme-build"],
     resolveHost: () => null,
     hasSession: () => true,
@@ -115,8 +164,8 @@ describe("TerminalService — view resolution + one-shape result", () => {
     expect(notes).toContain("Can you see the team?");
     expect(notes).toContain("does not confirm");
     if (unavailable) {
-      expect(result.notes).toContain("dev.driver: env -u TMUX '/opt/tools/tmux' attach -f ignore-size -t 'dev-driver@acme-build'");
-      expect(result.notes).toContain("rev.r1: env -u TMUX '/opt/tools/tmux' attach -f ignore-size -t 'rev-r1@acme-build'");
+      expect(result.notes).toContain("dev.driver: env -u TMUX '/opt/tools/tmux' attach -t 'dev-driver@acme-build'");
+      expect(result.notes).toContain("rev.r1: env -u TMUX '/opt/tools/tmux' attach -t 'rev-r1@acme-build'");
       expect(notes).toContain("include every command in full, unchanged");
     } else {
       expect(notes).not.toContain("attach -t");
@@ -160,6 +209,27 @@ describe("TerminalService — view resolution + one-shape result", () => {
     const svc = new TerminalService(deps);
     expect((await svc.openView({ view: "pod:acme-build" })).code).toBe("view_not_found"); // no /pod
     expect((await svc.openView({ view: "pod:acme-build/ghost" })).code).toBe("view_not_found"); // unknown pod
+  });
+
+  it("opens a seat:<rig>/<logical-id> as just that seat, interactive (the TUI agent page)", async () => {
+    const { deps, herdr } = makeDeps();
+    const svc = new TerminalService(deps);
+    const res = await svc.openView({ view: "seat:acme-build/rev.r1" });
+    expect(res.ok).toBe(true);
+    expect(res.opened).toEqual(["rev-r1@acme-build"]);
+    expect(herdr.lastView?.opened.every((p) => p.readOnly === false)).toBe(true);
+    expect(herdr.lastView?.id).toBe("seat:acme-build/rev.r1");
+    expect((await svc.openView({ view: "seat:rig-id-1/dev.driver" })).opened).toEqual(["dev-driver@acme-build"]); // rig id form
+  });
+
+  it("a malformed or unknown seat view → view_not_found, naming the expected form", async () => {
+    const { deps } = makeDeps();
+    const svc = new TerminalService(deps);
+    const malformed = await svc.openView({ view: "seat:acme-build" });
+    expect(malformed.code).toBe("view_not_found");
+    expect(malformed.error).toContain("seat:<rig>/<logical-id>");
+    expect((await svc.openView({ view: "seat:acme-build/ghost" })).code).toBe("view_not_found"); // unknown seat
+    expect((await svc.openView({ view: "seat:no-such-rig/dev.driver" })).code).toBe("view_not_found"); // unknown rig
   });
 
   it.each(["mission:4.6", "slice:02"])("opens %s as a watch view without a team-conversation handoff", async view => {
@@ -397,7 +467,7 @@ describe("default saved kernel conversations", () => {
     expect(result.opened).toEqual(unavailable ? [] : ["operator-bound", "tui-bound", "advisor-bound"]);
     expect(result.notes?.join("\n")).toContain("Default kernel view:");
     expect(result.notes?.join("\n")).not.toMatch(/lead pane|Can you see the team/);
-    if (unavailable) expect(result.notes).toContain("operator: env -u TMUX tmux attach -f ignore-size -t 'operator-bound'");
+    if (unavailable) expect(result.notes).toContain("operator: env -u TMUX tmux attach -t 'operator-bound'");
   });
 
   it.each(["herdr", "cmux"])("offers existing conversation attachments when %s is unavailable", async providerName => {
@@ -412,8 +482,8 @@ describe("default saved kernel conversations", () => {
     const result = await new TerminalService(deps).openView({ view: "saved:kernel", provider: providerName });
     expect(result).toMatchObject({ ok: false, opened: [], code: `${providerName}_unavailable` });
     expect(result.absent.map(member => member.seat)).toContain("advisor-bound");
-    expect(result.notes).toContain("operator: env -u TMUX tmux attach -f ignore-size -t 'operator-bound'");
-    expect(result.notes).toContain("dashboard: env -u TMUX tmux attach -f ignore-size -t 'actual-tui'");
+    expect(result.notes).toContain("operator: env -u TMUX tmux attach -t 'operator-bound'");
+    expect(result.notes).toContain("dashboard: env -u TMUX tmux attach -t 'actual-tui'");
     expect(result.notes).toContain("Original provider detail");
     expect(result.notes!.join("\n")).not.toContain("attach -t 'advisor-bound'");
     expect(result.notes!.join("\n")).not.toContain("queue-bound");
@@ -717,4 +787,65 @@ describe("TerminalService — an omitted provider falls back from herdr to cmux 
     expect(herdr.lastView).not.toBeNull();
     expect(cmux.lastView).toBeNull();
   });
+});
+
+
+describe("slice task preview and explicit viewer capability", () => {
+  function sliceService(complete = true) {
+    const { deps, herdr } = makeDeps();
+    const snapshot = () => ({ task: { kind: "slice", id: "build", name: "Build it", complete,
+      issues: complete ? [] : ["Scope read unavailable"], members: [{ key: { hostId: "local", nodeId: "a" }, seat: "a@team",
+        obligations: [{ qitemId: "work", state: "pending" }], availability: "available", viewerStatus: "not-provisioned" }] },
+      members: [{ seat: "a@team", tmuxSession: "a", alive: true, readOnly: true }] });
+    Object.assign(deps, { resolveScopeView: () => snapshot() });
+    let effects = 0;
+    Object.assign(herdr, { ensureViewer: async () => { effects++; return { ok: false, code: "viewer_unconfirmed", error: "Fixture viewer not started" }; } });
+    return { service: new TerminalService(deps), effects: () => effects };
+  }
+  it("uses authoritative scoped membership instead of the live review band", async () => {
+    const { service } = sliceService();
+    const preview = await service.previewView({ view: "slice:build" });
+    expect(preview).toMatchObject({ task: { kind: "slice", id: "build", name: "Build it", complete: true,
+      members: [{ seat: "a@team", obligations: [{ qitemId: "work", state: "pending" }] }] }, capabilities: { ensureViewer: true } });
+    expect("task" in preview && preview.task).not.toHaveProperty("qitemId");
+  });
+  it("rejects changed scope plans before any owner ensure effect", async () => {
+    const { service, effects } = sliceService();
+    expect(await service.ensureViewer({ view: "slice:build", expectedPlan: "stale", member: { hostId: "local", nodeId: "a" } }))
+      .toMatchObject({ ok: false, code: "preview_changed" });
+    expect(effects()).toBe(0);
+  });
+  it("distinguishes an incomplete scope from an empty scope and never ensures it", async () => {
+    const { service, effects } = sliceService(false);
+    const preview = await service.previewView({ view: "slice:build" });
+    if (!("planId" in preview)) throw new Error("Expected scoped preview");
+    expect(preview.task?.complete).toBe(false);
+    expect(await service.ensureViewer({ view: "slice:build", expectedPlan: preview.planId, member: { hostId: "local", nodeId: "a" } }))
+      .toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(effects()).toBe(0);
+  });
+});
+
+
+it("keeps unsupported ensure as a client error and maps unknown/ambiguous scope errors explicitly", async () => {
+  const { deps, herdr } = makeDeps(); Object.assign(herdr, { ensureViewer: async () => { throw new Error("No effect"); } });
+  const service = new TerminalService(deps), app = new Hono();
+  app.use("*", async (c, next) => { c.set("terminalService" as never, service as never); await next(); });
+  app.route("/terminal", terminalRoutes({ bearerToken: "fixture-owner-token" }));
+  const unsupported = await app.request("/terminal/viewer/ensure", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer fixture-owner-token" },
+    body: JSON.stringify({ view: "saved:fixed", member: { hostId: "local", nodeId: "a" }, expectedPlan: "p" }) });
+  expect(unsupported.status).toBe(400); expect(await unsupported.json()).toMatchObject({ code: "view_required" });
+  expect((await app.request("/terminal/preview?view=slice:absent")).status).toBe(404);
+  Object.assign(deps, { resolveScopeView: () => ({ code: "scope_ambiguous", error: "Ambiguous scope" }) });
+  expect((await app.request("/terminal/preview?view=slice:duplicate")).status).toBe(409);
+});
+
+
+it("previews mission owners and ensure capability through the same scoped resolver", async () => {
+  const { deps, herdr } = makeDeps();
+  Object.assign(herdr, { ensureViewer: async () => { throw new Error("Preview is passive"); } });
+  Object.assign(deps, { resolveScopeView: () => ({ task: { kind: "mission", id: "work", name: "work", complete: true, issues: [], members: [] }, members: [] }) });
+  const preview = await new TerminalService(deps).previewView({ view: "mission:work" });
+  expect(preview).toMatchObject({ task: { kind: "mission", id: "work", complete: true, members: [] }, capabilities: { ensureViewer: true } });
+  expect("task" in preview && preview.task).not.toHaveProperty("qitemId");
 });

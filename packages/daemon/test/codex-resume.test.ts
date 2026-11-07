@@ -459,3 +459,87 @@ describe("a seat's own permission envelope on the legacy resume (argv only)", ()
     expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'uuid-123'");
   });
 });
+
+describe("CodexResumeAdapter launch_wrapper", () => {
+  it("accepts trailing launchWrapper after beforeNativeDispatch while preserving all preceding argument positions", async () => {
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const commandCalls: Array<{ session: string; cmd: string; target: unknown }> = [];
+    const seatLaunchEnvironment = {
+      command: vi.fn(async (session: string, cmd: string, target: { launchWrapper?: readonly string[] }) => {
+        commandCalls.push({ session, cmd, target });
+        const prefix = target.launchWrapper?.length ? target.launchWrapper.map((a) => `'${a}'`).join(" ") + " " : "";
+        return `/usr/bin/env ${prefix}${cmd}`;
+      }),
+    } as never;
+    const beforeNativeDispatch = vi.fn(() => true);
+    const wrapper = ["codex-wrapper", "--flag", "--"];
+    const adapter = new CodexResumeAdapter(mockTmux({ sendText }), { seatLaunchEnvironment });
+
+    const res = await adapter.resume(
+      "r99-demo1-impl",
+      "codex_id",
+      "uuid-123",
+      "/repo",
+      null,
+      "floor",
+      "gpt-5.4-cheap",
+      "high",
+      false,
+      false,
+      false,
+      "/seat/codex-home",
+      undefined,
+      beforeNativeDispatch,
+      wrapper,
+    );
+    expect(res.ok).toBe(true);
+    expect(beforeNativeDispatch).toHaveBeenCalled();
+    expect(commandCalls).toEqual([{
+      session: "r99-demo1-impl",
+      cmd: "codex -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' resume 'uuid-123'",
+      target: {
+        codexCwd: "/repo",
+        runtime: "codex",
+        codexHome: "/seat/codex-home",
+        launchWrapper: wrapper,
+      },
+    }]);
+    expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toBe(
+      "/usr/bin/env 'codex-wrapper' '--flag' '--' codex -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' resume 'uuid-123'",
+    );
+  });
+
+  it("refuses selected launchWrapper when seatLaunchEnvironment is absent without falling back to env/bare codex", async () => {
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const ensureManagedConfig = vi.fn(async () => {});
+    const adapter = new CodexResumeAdapter(mockTmux({ sendText }), {
+      launchPath: "/usr/bin",
+      codexHome: "/daemon/codex",
+      ensureManagedConfig,
+    });
+    const res = await adapter.resume(
+      "r99-demo1-impl",
+      "codex_id",
+      "uuid-123",
+      "/repo",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      ["codex-wrapper", "--"],
+    );
+    expect(res).toEqual({
+      ok: false,
+      code: "resume_failed",
+      message: "launch_wrapper support unavailable; no agent started.",
+    });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(ensureManagedConfig).not.toHaveBeenCalled();
+  });
+});

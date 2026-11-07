@@ -103,13 +103,25 @@ interface HeaderScan {
   unterminatedFenceLine: number | null;
 }
 
-/** Scan for real headers, skipping fenced code blocks (``` or ~~~, any info string;
+/** Scan for real headers, skipping HTML comment blocks and fenced code blocks (``` or ~~~, any info string;
  *  a fence closes only on the same marker at the same or greater length). */
 function scanHeaders(lines: string[]): HeaderScan {
   const hits: HeaderHit[] = [];
   let fence: { marker: string; length: number; line: number } | null = null;
+  let comment = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
+    // HTML comment blocks end on the line containing --> (or at EOF). Their
+    // headings and fences are literal content, just as comment markers inside
+    // a fenced code block are literal content. Keep the original span bytes.
+    if (comment) {
+      if (line.includes("-->")) comment = false;
+      continue;
+    }
+    if (!fence && /^ {0,3}<!--/.test(line)) {
+      comment = !line.includes("-->");
+      continue;
+    }
     const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
     if (fenceMatch) {
       const marker = fenceMatch[1]![0]!;

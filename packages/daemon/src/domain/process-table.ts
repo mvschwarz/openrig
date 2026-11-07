@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
+import { parseLinuxProcessArguments } from "./native-process-arguments.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -14,6 +15,8 @@ export interface ProcessTableRow {
   /** lstart, in local time: the identity half of pid + start time. */
   startedAt: string;
   command: string;
+  /** Linux Codex's exact argv from this same /proc cmdline sample; null when unreadable or malformed. */
+  argv?: string[] | null;
 }
 
 let inFlight: Promise<ProcessTableRow[]> | null = null;
@@ -207,6 +210,8 @@ function procRow(pid: string, stat: ProcFile, cmdlineFile: ProcFile | null, boot
     executableName: printable(comm.slice(0, 15)),
     startedAt: lstart(bootTime + Math.floor(Number(fields[19]) / TICKS_PER_SECOND)),
     command,
+    ...(name === "codex" ? { argv: typeof cmdlineFile === "string"
+      ? parseLinuxProcessArguments(Buffer.from(cmdlineFile, "latin1")) : null } : {}),
   };
 }
 

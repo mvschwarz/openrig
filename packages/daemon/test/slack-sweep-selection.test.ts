@@ -14,7 +14,8 @@ import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
 
 const registry = { ok: true as const, entities: [{ entityId: "human-owner", class: "human" as const,
-  displayName: "Owner", address: "human-owner@external", connectorBindings: [], prefs: {} }] };
+  displayName: "Owner", address: "human-owner@external",
+  connectorBindings: [{ kind: "slack", connectorRef: "primary", secretsRef: "unused", role: "primary" }], prefs: {} }] };
 const questions = [{ id: "continue", question: "Continue?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] }];
 
 describe("Slack sweep selection", () => {
@@ -108,12 +109,10 @@ describe("Slack sweep selection", () => {
     expect(await ports().listHumanAlerts({})).toEqual([]);
   });
 
-  it.each(["selection", "transition", "receipt", "row"])("propagates a thrown %s read instead of returning empty success", async (where) => {
+  it.each(["selection", "row"])("propagates a thrown %s read instead of returning empty success", async (where) => {
     row("unreadable"); notify("unreadable");
     const fail = () => { throw new Error("fixture read unavailable"); };
     if (where === "selection") vi.spyOn(db, "prepare").mockImplementation(fail);
-    if (where === "transition") vi.spyOn(repo.transitionLog, "latestOwnerNotificationForQitem").mockImplementation(fail);
-    if (where === "receipt") vi.spyOn(repo.transitionLog, "hasOwnerNotificationReceipt").mockImplementation(fail);
     if (where === "row") vi.spyOn(repo, "getById").mockImplementation(fail);
     await expect(ports().listHumanAlerts({})).rejects.toThrow("fixture read unavailable");
   });

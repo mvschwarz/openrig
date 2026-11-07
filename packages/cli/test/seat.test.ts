@@ -94,6 +94,103 @@ const STATUS = {
 };
 
 describe("seat typing guard commands", () => {
+  it.each(["request_observed", "completed"])("reports a %s harness observation with time and honest pending state", async state => {
+    const permission_stop = { state, command: "Bash: git [arguments hidden]", origin: "harness",
+      source: "PermissionRequest", observed_at: "2026-11-05T01:00:00.000Z", actor: "subagent",
+      pending: state === "completed" ? false : "unknown" };
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permission_stop } }, paths, bodies);
+    const text = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "status", "dev-impl@seat-rig",
+    ]).then(() => undefined));
+    expect(text.logs).toContain("Latest permission observation at 2026-11-05T01:00:00.000Z: Bash: git [arguments hidden]; harness permission request (PermissionRequest, subagent)");
+    expect(text.logs).toContain(state === "completed" ? "  Displayed actor's tool batch completed; this observation is no longer pending."
+      : "  Displayed actor's pending status: unknown (an observation does not establish a waiting prompt).");
+    expect(text.logs).toContain("  Other actors' pending state: unknown (only the latest observation is shown).");
+    expect(text.logs.join("\n")).not.toContain("guard blocked");
+    const json = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "status", "dev-impl@seat-rig", "--json",
+    ]).then(() => undefined));
+    expect(JSON.parse(json.logs.join(""))).toEqual({ ...STATUS, permission_stop });
+    expect(paths).toEqual(["/api/seat/status/dev-impl%40seat-rig", "/api/seat/status/dev-impl%40seat-rig"]);
+    expect(bodies).toEqual([]);
+  });
+
+  it.each([undefined, { state: "unavailable", command: "unavailable", origin: "unknown" }])(
+    "omits an unavailable permission section without requesting a permission change (%j)", async permission_stop => {
+      const paths: string[] = [], bodies: unknown[] = [];
+      const deps = makeDeps({ status: 200, data: { ...STATUS, permission_stop } }, paths, bodies);
+      const result = await captureLogs(() => makeCommand(deps).parseAsync([
+        "node", "rig", "seat", "status", "dev-impl@seat-rig",
+      ]).then(() => undefined));
+      expect(result.exitCode).toBeUndefined();
+      expect(result.logs.join("\n")).not.toMatch(/Permission observation unavailable|Latest permission observation|Claude's suggested rules/);
+      expect(result.logs).toContain("Startup: ready");
+      expect(result.logs.join("\n")).not.toMatch(/approval requested|guard blocked|permission pending|Permission stop/);
+      expect(paths).toEqual(["/api/seat/status/dev-impl%40seat-rig"]);
+      expect(bodies).toEqual([]);
+    },
+  );
+
+  it("keeps the unknown diagnostic in seat status JSON without a permission mutation", async () => {
+    const permission_stop = { state: "unavailable", command: "unavailable", origin: "unknown" };
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permission_stop } }, paths, bodies);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "status", "dev-impl@seat-rig", "--json",
+    ]).then(() => undefined));
+    expect(JSON.parse(result.logs.join(""))).toEqual({ ...STATUS, permission_stop });
+    expect(result.exitCode).toBeUndefined();
+    expect(paths).toEqual(["/api/seat/status/dev-impl%40seat-rig"]);
+    expect(bodies).toEqual([]);
+  });
+
+  it("renders suggested rules as escaped data while JSON decodes to the unchanged evidence", async () => {
+    const ruleContent = "  SYNTHETIC_RULE\u001b[31m\u0000\t\n\r\u0085\u009b\u2028\u2029\u202e\u2066\u034f\u200d\ufeff\u{e0001} ";
+    const entry = { type: "removeRules", rules: [{ toolName: "Bash\u001b[0m\u202e", ruleContent }, { toolName: "Read" },
+      { toolName: "Edit", ruleContent: "" }], behavior: "deny", destination: "userSettings" };
+    const permission_stop = { state: "request_observed", command: "Tool: Read", origin: "harness", source: "PermissionRequest",
+      observed_at: "2026-11-05T01:00:00.000Z", actor: "main", pending: "unknown",
+      suggested_rules: { state: "present", entries: [entry], unsupported: false, size_cut: false } };
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permission_stop } }, paths, bodies);
+    const human = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(human.logs).toContain("  Claude's suggested rules: read-only evidence; not applied or approved, effectiveness unknown.");
+    expect(human.logs).toContain("  These are neither the exact command nor a complete list of dialog options.");
+    const data = human.logs.find(line => line.startsWith("  {"))!;
+    expect(data).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u);
+    expect(JSON.parse(data.trim())).toEqual(entry);
+    const json = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig", "--json"]).then(() => undefined));
+    expect(json.logs.join("")).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u);
+    expect(JSON.parse(json.logs.join(""))).toEqual({ ...STATUS, permission_stop });
+    expect(bodies).toEqual([]);
+  });
+
+  it.each([
+    [undefined, "  Suggested-rule evidence: unavailable."],
+    [{ state: "missing", entries: [], unsupported: false, size_cut: false }, "  Suggested-rule field: missing from the observed hook."],
+    [{ state: "present", entries: [], unsupported: false, size_cut: false }, "  Supported suggested-rule entries: empty."],
+    [{ state: "present", entries: [], unsupported: true, size_cut: false }, "  Unsupported or malformed suggested-rule evidence was withheld."],
+    [{ state: "present", entries: [], unsupported: false, size_cut: true }, "  Suggested-rule evidence is incomplete because of size bounds."],
+  ])("labels missing, empty and incomplete suggestion evidence honestly (case %#)", async (suggested_rules, expected) => {
+    const permission_stop = { state: "request_observed", command: "Tool: Read", origin: "harness", source: "PermissionRequest",
+      observed_at: "2026-11-05T01:00:00.000Z", actor: "main", pending: "unknown", suggested_rules };
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permission_stop } }, paths, bodies);
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(output.logs).toContain(expected);
+    expect(bodies).toEqual([]);
+  });
+
+  it("identifies the account home selected by a switch rather than the native default", async () => {
+    const deps = makeDeps({ status: 200, data: { ...STATUS, runtime_home: {
+      variable: "CODEX_HOME", home: "/accounts/api", source: "account-switch",
+    } } }, []);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(result.logs.join("\n")).toContain("/accounts/api (the seat's selected account home;");
+    expect(result.logs.join("\n")).not.toContain("the native default");
+  });
+
   it("prints the daemon's managed restore delivery failure", async () => {
     const detail = "OpenRig owes its turn boundary. Last delivery: target_activity_unknown; no_activity_signal.";
     const deps = makeDeps({ status: 200, data: { ...STATUS, compaction: { stage: "compacting", detail } } }, []);
@@ -251,8 +348,9 @@ const HANDOVER_RESULT = {
   eventSeq: 42,
   sideEffects: {
     departingSessionKilled: false,
+    departingProcess: "not-touched",
     startupContextDelivered: false,
-    provenanceRecordWritten: false,
+    provenanceRecordWritten: true,
   },
 };
 
@@ -263,8 +361,9 @@ const HANDOVER_RESULT_FRESH = {
   discovery: { id: "disc-fresh", status: "claimed", tmuxSession: "dev-impl@seat-rig-h1SUCCID0", tmuxPane: "%9" },
   sideEffects: {
     departingSessionKilled: false,
+    departingProcess: "ended-graceful",
     startupContextDelivered: true,
-    provenanceRecordWritten: false,
+    provenanceRecordWritten: true,
   },
 };
 
@@ -668,8 +767,9 @@ describe("rig seat status", () => {
       currentStatus: { handoverResult: "complete" },
       sideEffects: {
         departingSessionKilled: false,
+        departingProcess: "not-touched",
         startupContextDelivered: false,
-        provenanceRecordWritten: false,
+        provenanceRecordWritten: true,
       },
     });
   });
@@ -706,10 +806,37 @@ describe("rig seat status", () => {
     expect(output).toContain("Previous occupant: dev-impl@seat-rig");
     expect(output).toContain("Current occupant: successor-session");
     expect(output).toContain("Seat binding and inventory provenance were updated.");
-    // startupContextDelivered:false — the message must include "startup context delivery" in the NOT-performed list.
-    expect(output).toContain("No conversation continuity, startup context delivery, provenance markdown, or session stop was performed.");
+    // The receipt's side effects, as they happened: the lineage record written, the old process left alone.
+    expect(output).toContain("The handover's lineage record (occupant tenure) was written.");
+    expect(output).toContain("The previous occupant's process wasn't touched: the successor was an existing session.");
+    // startupContextDelivered:false — the output says nothing was delivered or carried...
+    expect(output).toContain("OpenRig delivered no startup context and carried no conversation: the discovered successor was already running.");
     // ...and must NOT falsely claim a delivery happened.
     expect(output).not.toContain("restore packet) was delivered");
+  });
+
+  it("handover human output says when the lineage record wasn't written, and that the old process was killed (rebuild)", async () => {
+    const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT, source: { mode: "rebuild", raw: "rebuild" },
+      sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [] },
+      sideEffects: { departingSessionKilled: false, departingProcess: "ended-forced", startupContextDelivered: true, provenanceRecordWritten: false } } }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "rebuild", "--reason", "context wall"]);
+    });
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined(); // the handover itself completed
+    expect(output).toContain("The handover's lineage record (occupant tenure) was NOT written; check the daemon log, which names the first such failure since the daemon started. The seat is already bound to the successor, so don't run the handover again.");
+    expect(output).toContain("The previous occupant's process didn't exit on TERM and was killed; its tmux session was kept, and the successor runs in the same pane.");
+    expect(output).toContain("No conversation continuity was carried: the successor started a fresh conversation.");
+    expect(output).not.toContain("session stop");
+  });
+
+  it("handover human output from an older daemon, whose receipt has no departingProcess, claims neither side effect", async () => {
+    const older = { departingSessionKilled: false, startupContextDelivered: false, provenanceRecordWritten: false };
+    const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT, sideEffects: older } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "discovered:disc-1", "--reason", "mvp-proof"]);
+    });
+    expect(logs.join("\n")).not.toMatch(/lineage record|previous occupant's process/);
   });
 
   it("handover fresh human output HONESTLY reports the delivered startup context (B2)", async () => {
@@ -730,7 +857,7 @@ describe("rig seat status", () => {
     expect(output).toContain("Current occupant: dev-impl@seat-rig-h1SUCCID0");
     // The fresh path DID deliver context — the surface must say so, not deny it.
     expect(output).toContain("The captured startup context (restore packet) was delivered to the successor.");
-    expect(output).not.toContain("No conversation continuity, startup context delivery,");
+    expect(output).not.toContain("OpenRig delivered no startup context");
   });
 
   it("handover fresh human output says an unconfirmed restore packet was sent, not that nothing was delivered", async () => {
@@ -750,8 +877,21 @@ describe("rig seat status", () => {
     expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
     expect(output).toContain(`its submission is unconfirmed: ${reason}.`);
     expect(output).toContain("Check the successor's screen before sending the context again");
-    expect(output).not.toContain("No conversation continuity, startup context delivery,");
+    expect(output).not.toContain("OpenRig delivered no startup context");
     expect(output).not.toContain("restore packet) was delivered");
+  });
+
+  it("handover human output says the successor started without a required file, not a plain complete (#2456)", async () => {
+    const missing = "/project/spec/culture.md";
+    const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT_FRESH, startedWithoutRequired: [missing] } }, []);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "fresh", "--reason", "context-wall"]);
+    });
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined(); // the successor is running, so the handover itself completed
+    expect(logs[0]).toBe("Seat handover complete, degraded: dev-impl@seat-rig");
+    expect(output).toContain(`The successor started without required file ${missing}.`);
+    expect(output).not.toContain("Seat handover complete: dev-impl@seat-rig");
   });
 
   it("handover surfaces a loud step-named failure (successor_create_failed)", async () => {

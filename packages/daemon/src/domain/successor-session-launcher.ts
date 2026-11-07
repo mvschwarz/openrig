@@ -53,6 +53,7 @@ export interface SuccessorNode {
   kernelAuthority?: boolean;
   teamPermissionDefault?: boolean;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   permissionMode?: string;
   /** 0.5.2-07 model fidelity: the seat's SPEC-pinned model (nodes.model). The successor is a continuity
@@ -78,6 +79,7 @@ export interface SuccessorNode {
   /** OPR.0.7.0.9: the seat's own launch additions (copies in its seat storage), populated by the caller. The successor
    *  is the same seat, so its launch passes them as an original launch does; absent = none. */
   launchAdditions?: import("./seat-launch-additions.js").SeatLaunchAdditions;
+  launchWrapper?: readonly string[];
 }
 
 /** Slice 16: what a staged runtime-switch successor's launch adds to an ordinary successor launch. */
@@ -85,7 +87,7 @@ export interface StagedLaunch {
   canonicalSession: string;
   /** Target materials (seat storage, projection, pre-launch files), before the harness starts; returns notes. */
   prepare: (binding: NodeBinding, adapter: RuntimeAdapter) => Promise<string[]>;
-  binding?: Partial<Pick<NodeBinding, "seatSkillsRoot" | "claudeManagedBlockFile" | "runtimeSwitchFrom">>;
+  binding?: Partial<Pick<NodeBinding, "seatSkillsRoot" | "claudeManagedBlockFile" | "runtimeSwitchFrom" | "accountHome" | "accountToken">>;
 }
 
 export type SuccessorLaunchResult =
@@ -97,6 +99,8 @@ export type SuccessorLaunchResult =
       resumeToken?: string;
       resumeType?: string;
       appliedLaunch?: AppliedLaunchObservation;
+      /** How the departing occupant's process ended at the cutover: it exited on TERM, or was killed after the TERM window. */
+      retireeExit: "graceful" | "forced";
       /**
        * OPR.0.4.6.02 S1 — non-fatal tmux option-default warnings from the
        * fresh successor's launch (mouse/status/clipboard). Present only when
@@ -314,6 +318,7 @@ export class SuccessorSessionLauncher {
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
       appliedLaunch: started.appliedLaunch,
+      retireeExit: terminated.path,
       ...(respawned.warnings ? { warnings: respawned.warnings } : {}),
     };
   }
@@ -414,6 +419,7 @@ export class SuccessorSessionLauncher {
       kernelAuthority: node.kernelAuthority,
       teamPermissionDefault: node.teamPermissionDefault,
       claudePermissions: node.claudePermissions,
+      claudeMcp: node.runtime === "claude-code" ? node.claudeMcp : undefined,
       codexPermissions: node.codexPermissions,
       // Seam B: continuity — the successor launches at the departing seat's posture.
       ...(node.launchPosture ? { launchPosture: node.launchPosture } : {}),
@@ -427,6 +433,7 @@ export class SuccessorSessionLauncher {
       codexConfigProfile: node.codexConfigProfile ?? undefined,
       codexRebuildPermissions: node.codexRebuildPermissions,
       ...(node.launchAdditions ? { launchAdditions: node.launchAdditions } : {}),
+      ...(node.launchWrapper?.length ? { launchWrapper: node.launchWrapper } : {}),
       ...(staged?.binding ?? {}),
     };
 

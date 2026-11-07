@@ -377,3 +377,42 @@ describe("first-start retry of a seat that failed before Advisor support", () =>
     expect(f.rigRepo.getRig(rigId)!.nodes.find(n => n.id === nodeId)!.advisor).toBeNull();
   });
 });
+
+describe("agent spec advisories on a first start and its retry", () => {
+  const advisory = (root: string, name: string) =>
+    `dev.${name}: agent spec advisory (${name}, ${path.join(root, "agents", name)}): defaults.effort: non-string value "3" ignored; effort must be a text value`;
+
+  it("an ordinary start reports each advisory once", async () => {
+    const f = setup();
+    f.writeAgent("owner", { effort: 3 });
+    const start = await f.inst.instantiate(RigSpecCodec.serialize(f.spec), f.root);
+    if (!start.ok) throw Error(JSON.stringify(start));
+    expect(start.result.warnings?.filter(w => w === advisory(f.root, "owner"))).toHaveLength(1);
+  });
+
+  it("a successful first-start retry reports the member's advisories once", async () => {
+    const f = setup();
+    f.writeAgent("advised", { effort: 3 });
+    f.spec.pods[0]!.members = [f.spec.pods[0]!.members[1]!];
+    const start = await f.inst.instantiate(RigSpecCodec.serialize(f.spec), f.root);
+    if (!start.ok) throw Error(JSON.stringify(start));
+    const rigId = start.result.rigId;
+    vi.spyOn(f.adapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+      failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] } as never);
+    const member = { id: "advised", agent_ref: "local:agents/advised", profile: "default", runtime: "claude-code", cwd: f.root,
+      model: "claude-sonnet-5-5" };
+    const added = await f.inst.addMemberToPod(rigId, "dev", member, f.root);
+    expect(added, JSON.stringify(added)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+    const node = f.rigRepo.getRig(rigId)!.nodes.find(n => n.logicalId === "dev.advised")!;
+    const session = f.sessionRegistry.getSessionsForRig(rigId).find(s => s.nodeId === node.id)!;
+    f.sessionRegistry.updateStatus(session.id, "exited");
+    f.sessionRegistry.clearBinding(node.id);
+    f.live.delete(session.sessionName);
+    (f.tmux as { probeSession?: unknown }).probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+    const retried = await f.inst.retryFirstStart(rigId, node.id, member, f.root);
+    expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+    if (!retried.ok) return;
+    expect(retried.warnings?.filter(w => w === advisory(f.root, "advised"))).toHaveLength(1);
+  });
+});

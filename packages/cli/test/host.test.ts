@@ -376,6 +376,26 @@ describe("rig host doctor — stepwise distinct errors + three-valued posture", 
     expect(err.join("\n")).toContain("unknown host id 'nope'");
   });
 
+  it("doctor's reply route reads the same hosts.yaml and host-bindings.json rig send does", async () => {
+    const { replyRouteFromDisk } = await import("../src/commands/host.js");
+    const { resolveCrossHostTarget } = await import("../src/cross-host-target.js");
+    fs.writeFileSync(path.join(dir, "hosts.yaml"), [
+      "hosts:",
+      "  - id: old-box-b",
+      "    transport: http",
+      "    url: http://10.0.0.9:7433",
+      "  - id: box-b",
+      "    transport: http",
+      "    url: http://10.0.0.5:7433",
+    ].join("\n") + "\n");
+    // Both aliases learned one identity; hosts.yaml order, not sidecar order, picks the entry.
+    const learned = { hostId: "host-0b0b0b0b", firstObservedAt: "x", lastObservedAt: "x" };
+    fs.writeFileSync(path.join(dir, "host-bindings.json"), JSON.stringify({ version: 1, bindings: { "box-b": learned, "old-box-b": learned } }));
+    expect(replyRouteFromDisk("host-0b0b0b0b")?.id).toBe("old-box-b");
+    expect(resolveCrossHostTarget("pm@some-rig@host-0b0b0b0b", undefined)).toMatchObject({ ok: true, sugarHost: "old-box-b" });
+    expect(replyRouteFromDisk("host-unknown")).toBeNull();
+  });
+
   // seed a registry for the doctor CLI test above
   async function capturePrelude(): Promise<void> {
     const prog = new Command();

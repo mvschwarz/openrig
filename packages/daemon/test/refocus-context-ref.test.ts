@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -429,6 +429,34 @@ exit 1
     expect(result.stdout).not.toContain("Build useful things");
   });
 
+  it("reports an unresolved typed mission and supplies only broad orientation without failing the hook check", () => {
+    const f = fixture();
+    const basis = "typed work did not resolve: row q1 — mission missing resolves to 0 directories";
+    const result = trace(["--trees", "work", "--check", "--unresolved-work-advisory", "--work-basis", basis], unpinned(f.env), f.workStart);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`TRACE GAP — no single current work node: ${basis}`);
+    expect(result.stdout).toContain("a broad orientation, not evidence of a current mission");
+    expect(result.stdout).not.toContain("Deliver refocus");
+    const strict = trace(["--trees", "work", "--check", "--work-basis", basis], unpinned(f.env), f.workStart);
+    expect(strict.status).not.toBe(0);
+  });
+
+  it("reports a timed-out work lookup as an advisory with broad orientation, and keeps other unknowns strict (#2581)", () => {
+    const f = fixture();
+    const reason = "queue whoami failed: spawnSync rig ETIMEDOUT";
+    const advisory = ["--trees", "work", "--check", "--unresolved-work-advisory", "--work-unknown", reason, "--work-unknown-timed-out"];
+    const result = trace(advisory, unpinned(f.env), f.workStart);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`TRACE GAP — current work node UNKNOWN: ${reason}`);
+    expect(result.stdout).toContain("the work lookup timed out, which says nothing about this seat's work");
+    expect(result.stdout).toContain("a broad orientation, not evidence of a current mission");
+    expect(result.stdout).not.toContain("Deliver refocus");
+    const withoutAdvisory = trace(["--trees", "work", "--check", "--work-unknown", reason, "--work-unknown-timed-out"], unpinned(f.env), f.workStart);
+    expect(withoutAdvisory.status).not.toBe(0);
+    const otherUnknown = trace(["--trees", "work", "--check", "--unresolved-work-advisory", "--work-unknown", "queue whoami answer was not JSON"], unpinned(f.env), f.workStart);
+    expect(otherUnknown.status).not.toBe(0);
+  });
+
   it("names an ambiguous basis as the gap even when the working directory is inside the workspace", () => {
     const f = fixture();
     const result = trace(["--trees", "work", "--work-basis", AMBIGUOUS], unpinned(f.env), f.workStart);
@@ -688,6 +716,25 @@ exit 1
         "TRACE GAP — current work node UNKNOWN: queue whoami failed: spawnSync rig ETIMEDOUT",
       );
       expect(result.context).not.toContain("Deliver refocus");
+    }, 20_000);
+
+    // #2581: a whoami that times out says nothing about the seat's work, so it must not count toward "Refocus failed".
+    it("does not count a queue whoami timeout as a refocus failure, while an unreadable answer still counts", () => {
+      const failures = () => {
+        const dir = join(root!, "hook-home", "refocus");
+        return existsSync(dir)
+          ? readdirSync(dir).filter((name) => name.endsWith(".health.json"))
+            .map((name) => Number((JSON.parse(readFileSync(join(dir, name), "utf8")) as { failures?: number }).failures || 0))
+          : [];
+      };
+      const slow = hook(fixture(), { RIG_QUEUE_WHOAMI_SLEEP: "6" });
+      expect(slow.status).toBe(0);
+      expect(slow.context).toContain("TRACE GAP — current work node UNKNOWN: queue whoami failed: spawnSync rig ETIMEDOUT");
+      expect(slow.context).toContain("a broad orientation, not evidence of a current mission");
+      expect(failures().filter((n) => n > 0)).toEqual([]);
+      const unreadable = hook(fixture(), { RIG_QUEUE_WHOAMI_STDOUT: "not json at all" });
+      expect(unreadable.context).toContain("TRACE GAP — current work node UNKNOWN: queue whoami answer was not JSON");
+      expect(failures()).toEqual([1]);
     }, 20_000);
 
     // Vectors from the daemon's session-name parity set (session-name-parity.test.ts).

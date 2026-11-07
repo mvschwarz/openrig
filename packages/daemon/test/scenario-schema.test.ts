@@ -93,6 +93,31 @@ describe("validateScenario — schema fidelity + loud rejection", () => {
     expect(errCodes(validateScenario(doc))).toContain("UNKNOWN_STEP_VERB");
   });
 
+  it("rejects a known-but-unbound step verb at LOAD time with a NAMED error (teaching beats a runtime surprise)", () => {
+    // restore/mutate/policy are in ACTION_VERBS (the format names them) but the
+    // runner has no binding at v1 — they used to pass validation and then throw
+    // UnboundActionError mid-run, AFTER side effects (up/send) already happened.
+    for (const verb of ["restore", "mutate", "policy"]) {
+      const doc = { ...VALID, steps: [{ [verb]: {} }] };
+      const r = validateScenario(doc);
+      expect(r.ok).toBe(false);
+      // distinct from UNKNOWN_STEP_VERB — the verb IS known to the format
+      expect(errCodes(r)).not.toContain("UNKNOWN_STEP_VERB");
+      expect(errCodes(r)).toContain("UNBOUND_STEP_VERB");
+      const e = (r as { ok: false; errors: { code: string; message: string; path: string }[] }).errors.find(
+        (x) => x.code === "UNBOUND_STEP_VERB",
+      )!;
+      expect(e.message).toContain(verb);
+      // the teaching carries the path forward: launch scripts are the shipped seam
+      expect(e.message).toContain("env.stub_scripts");
+      expect(e.path).toContain(verb);
+    }
+    // bound action verbs keep validating — nothing regresses for them
+    expect(validateScenario({ ...VALID, steps: [{ restart: "dev-impl@rig" }] }).ok).toBe(true);
+    expect(validateScenario({ ...VALID, steps: [{ seed_regression: { class: "baton-drop" } }] }).ok).toBe(true);
+    expect(validateScenario({ ...VALID, steps: [{ daemon: { op: "sigterm" } }] }).ok).toBe(true);
+  });
+
   it("requires an expect to name exactly one match mode", () => {
     const none = { ...VALID, steps: [{ expect: { surface: "ps" } }] };
     expect(errCodes(validateScenario(none))).toContain("EXPECT_MATCH_MODE_MISSING");

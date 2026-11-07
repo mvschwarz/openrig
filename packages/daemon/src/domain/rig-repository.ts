@@ -1,16 +1,18 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
+import { validateClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
+import { isLaunchWrapperRuntime, parseStoredLaunchWrapper, validateLaunchWrapper } from "./launch-wrapper.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import { decodeStoredSnapshotData } from "./snapshot-repository.js";
-import { resolve } from "node:path";
+import { posix, resolve } from "node:path";
 import { ulid } from "ulid";
 import { deriveComposeProjectName } from "./compose-project-name.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 import { mergeSeatEnv, parseStoredSeatEnv, type SeatEnv } from "./seat-env.js";
-import { withoutIgnoredRuntimeHomes } from "./seat-runtime-home.js";
-import { parseClaudeSeatTokenRef, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
+import { seatAccountHome, RUNTIME_HOME_VAR, withoutIgnoredRuntimeHomes } from "./seat-runtime-home.js";
+import { claudeSeatTokenRefProblem, parseClaudeSeatTokenRef, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import type {
   Rig,
   Node,
@@ -27,6 +29,16 @@ import type {
   StartupBlock,
   StartupFile,
 } from "./types.js";
+
+function isValidStoredRecipeLaunchWrapper(value: unknown, runtime: unknown): boolean {
+  if (!isLaunchWrapperRuntime(runtime)) return false;
+  try {
+    validateLaunchWrapper(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function isStringRecord(value: unknown): value is Record<string, string> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -172,10 +184,14 @@ function isStoredRigSpec(value: unknown): value is NodeLaunchRecipe["rigSpec"] {
         && (entry.effort === undefined || typeof entry.effort === "string")
         && (entry.role === undefined || typeof entry.role === "string")
         && (entry.advisor === undefined || typeof entry.advisor === "string")
+        && (entry.claudeMcp === undefined || (entry.runtime === "claude-code" && entry.claudeMcp === "none"))
+        && (entry.launchWrapper === undefined || isValidStoredRecipeLaunchWrapper(entry.launchWrapper, entry.runtime))
         && (entry.agentFile === undefined || typeof entry.agentFile === "string")
         && (entry.appendSystemPromptFile === undefined || typeof entry.appendSystemPromptFile === "string")
         && (entry.pluginDirs === undefined
           || (Array.isArray(entry.pluginDirs) && entry.pluginDirs.every((dir) => typeof dir === "string")))
+        && (entry.pluginChannels === undefined
+          || (Array.isArray(entry.pluginChannels) && entry.pluginChannels.every((channel) => typeof channel === "string")))
         && (entry.permissionPolicy === undefined || typeof entry.permissionPolicy === "string")
         && (entry.env === undefined || isStringRecord(entry.env))
         && (entry.restorePolicy === undefined || typeof entry.restorePolicy === "string")
@@ -198,6 +214,8 @@ export interface RigStartupLayers {
   cultureFile?: string;
   startup?: StartupBlock;
   podStartupFiles?: Record<string, StartupFile[]>;
+  /** Export-only authored actions, never inherited by seats added later. */
+  podStartupActions?: Record<string, StartupBlock["actions"]>;
   /** Validated declarations for seats created without a first launch. One source per materialization. */
   materializedSources?: Array<{ root: string; spec: import("./types.js").RigSpec; nodeIds: string[]; cwdOverride?: string }>;
 }
@@ -312,6 +330,10 @@ interface NodeOptions {
   /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF (builtin:<name> or spec-relative path). */
   permissionPolicy?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  /** A Claude seat's own subscription token file, by reference (spec `claude_token`). */
+  claudeTokenRef?: ClaudeSeatTokenRef;
+  claudeMcp?: ClaudeMcp;
+  launchWrapper?: readonly string[] | null;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** The member's declared launch environment (spec `env:`); not merged with the rig's. */
   env?: SeatEnv;
@@ -356,6 +378,23 @@ export class RigRepository {
     );
     this.onRigCreated?.(rig);
     return rig;
+  }
+
+  /** Original built-in kernel template from the rig's latest rig-spec bootstrap, including partial launches.
+   *  Match the verified specs root supplied by daemon startup, not an arbitrary matching path suffix.
+   *  A custom spec or absent history is unknown; do not infer a selection from today's runtime mix. */
+  getKernelVariantFromBootstrap(rigId: string, builtInSpecsDir: string): string | null {
+    const row = this.db.prepare(
+      "SELECT source_ref FROM bootstrap_runs WHERE rig_id = ? AND source_kind = 'rig_spec' ORDER BY created_at DESC, rowid DESC LIMIT 1"
+    ).get(rigId) as { source_ref: string } | undefined;
+    if (!row) return null;
+    const source = posix.normalize(row.source_ref.replace(/\\/g, "/"));
+    const root = posix.normalize(builtInSpecsDir.replace(/\\/g, "/"));
+    if (!posix.isAbsolute(root) && !/^[A-Za-z]:\//.test(root)) return null;
+    const directory = root.replace(/\/+$/, "") + "/rigs/launch/kernel/";
+    if (!source.startsWith(directory)) return null;
+    const variant = source.slice(directory.length);
+    return /^rig(?:-claude-only|-codex-only)?\.yaml$/.test(variant) ? variant : null;
   }
 
   /** Canonical bundle materialization folder, independent of seats' working directories. */
@@ -424,12 +463,17 @@ export class RigRepository {
    *  a restore and a handover successor all read this, so they cannot disagree. A CLAUDE_CONFIG_DIR or
    *  CODEX_HOME that isn't an absolute path is left out: OpenRig reports it as ignored (seat-runtime-home.ts),
    *  so the runtime resolves as if the seat declared none. */
-  getEffectiveSeatEnv(nodeId: string): SeatEnv {
+  getEffectiveSeatEnv(nodeId: string, ignoreAccountHome = false): SeatEnv {
     if (!this.hasNodeColumn("env_json")) return {};
     const row = this.db.prepare("SELECT rig_id, env_json FROM nodes WHERE id = ?")
       .get(nodeId) as { rig_id: string; env_json: string | null } | undefined;
     if (!row) return {};
-    return withoutIgnoredRuntimeHomes(mergeSeatEnv(this.getRigEnv(row.rig_id), parseStoredSeatEnv(row.env_json)));
+    const env = withoutIgnoredRuntimeHomes(mergeSeatEnv(this.getRigEnv(row.rig_id), parseStoredSeatEnv(row.env_json)));
+    for (const runtime of ignoreAccountHome ? [] : ["codex", "claude-code"] as const) {
+      const accountHome = seatAccountHome(this.db, nodeId, runtime);
+      if (accountHome) env[RUNTIME_HOME_VAR[runtime]] = accountHome;
+    }
+    return env;
   }
 
   /** OPR.0.4.8.3 Seam B — persist a rig's attached permission_policy REF (builtin:<name> or a
@@ -603,6 +647,16 @@ export class RigRepository {
   }
 
   addNode(rigId: string, logicalId: string, opts?: NodeOptions): Node {
+    if (opts?.claudeMcp !== undefined) {
+      if (opts.runtime !== "claude-code") throw new Error("claude_mcp requires a claude-code seat");
+      validateClaudeMcp(opts.claudeMcp);
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
+    if (opts?.launchWrapper !== undefined && opts.launchWrapper !== null) {
+      if (!isLaunchWrapperRuntime(opts.runtime)) throw new Error("launch_wrapper requires a pi or codex seat");
+      validateLaunchWrapper(opts.launchWrapper);
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
     if (opts?.claudePermissions !== undefined) {
       if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
       validateClaudePermissionRules(opts.claudePermissions);
@@ -613,6 +667,13 @@ export class RigRepository {
       if (opts.runtime !== "codex") throw new Error("codex_permissions requires a codex seat");
       validateCodexMemberPermissions(opts.codexPermissions);
       // The envelope is written atomically with creation, including direct repository callers.
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
+    if (opts?.claudeTokenRef !== undefined) {
+      if (opts.runtime !== "claude-code") throw new Error("claude_token requires a claude-code seat");
+      const problem = claudeSeatTokenRefProblem(opts.claudeTokenRef);
+      if (problem) throw new Error(`claude_token: ${problem}`);
+      // The reference is written atomically with creation, including direct repository callers.
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
     // Same-rig guard for podId
@@ -711,6 +772,10 @@ export class RigRepository {
         );
     }
 
+    if (opts?.claudeTokenRef !== undefined && !this.setNodeClaudeTokenRef(id, opts.claudeTokenRef)) {
+      throw new Error("claude_token needs the current database schema; the seat wasn't created");
+    }
+
     if (opts?.claudePermissions !== undefined) {
       if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
       this.db.prepare("UPDATE nodes SET claude_permissions_json = ? WHERE id = ?")
@@ -733,6 +798,10 @@ export class RigRepository {
         .run(opts.effort, id);
     }
     if (opts?.advisor) this.setNodeAdvisor(id, opts.advisor);
+    if (opts?.claudeMcp !== undefined) this.setNodeClaudeMcp(id, opts.claudeMcp);
+    if (opts?.launchWrapper !== undefined && opts.launchWrapper !== null && opts.launchWrapper.length > 0) {
+      this.setNodeLaunchWrapper(id, opts.launchWrapper);
+    }
 
     if (opts?.env && this.hasNodeColumn("env_json")) {
       this.db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?")
@@ -798,6 +867,21 @@ export class RigRepository {
       .run(choice, nodeId).changes > 0;
   }
 
+  /** Write or clear (null) the registered person who answers this seat's runner permission requests. Returns false when
+   *  the column isn't available or no row matched, so a caller never reports a change from it. */
+  setNodePermissionsTo(nodeId: string, owner: string | null): boolean {
+    if (!this.hasNodeColumn("permissions_to")) return false;
+    return this.db.prepare("UPDATE nodes SET permissions_to = ? WHERE id = ?")
+      .run(owner, nodeId).changes > 0;
+  }
+
+  /** The seat's selected permission answer owner, or null when none is selected or the column isn't available. */
+  getNodePermissionsTo(nodeId: string): string | null {
+    if (!this.hasNodeColumn("permissions_to")) return null;
+    const row = this.db.prepare("SELECT permissions_to FROM nodes WHERE id = ?").get(nodeId) as { permissions_to: string | null } | undefined;
+    return row?.permissions_to ?? null;
+  }
+
   clearNodeEffort(nodeId: string): boolean {
     if (!this.hasNodeColumn("effort")) return false;
     const result = this.db
@@ -810,10 +894,36 @@ export class RigRepository {
   setNodeClaudeTokenRef(nodeId: string, ref: ClaudeSeatTokenRef | null): boolean {
     if (!this.hasNodeColumn("claude_token_ref")) return false;
     return this.db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?")
-      .run(ref ? JSON.stringify({ label: ref.label, tokenFile: ref.tokenFile }) : null, nodeId).changes > 0;
+      .run(ref ? JSON.stringify({ label: ref.label, tokenFile: ref.tokenFile, ...(ref.kind ? { kind: ref.kind } : {}) }) : null, nodeId).changes > 0;
   }
 
   /** Persist the resolved Advisor; null removes a previous spec's selection. */
+  setNodeClaudeMcp(nodeId: string, value: ClaudeMcp | null): boolean {
+    if (value !== null) validateClaudeMcp(value);
+    if (!this.hasNodeColumn("claude_mcp")) {
+      if (value !== null) throw new Error("Cannot persist claude_mcp: database migration is required");
+      return false;
+    }
+    return this.db.prepare("UPDATE nodes SET claude_mcp = ? WHERE id = ?").run(value, nodeId).changes > 0;
+  }
+
+  /** Persist or clear (null or []) a seat's launch_wrapper argv prefix. */
+  setNodeLaunchWrapper(nodeId: string, value: readonly string[] | null): boolean {
+    const validated = value === null ? null : validateLaunchWrapper(value);
+    const stored = validated && validated.length > 0 ? JSON.stringify(validated) : null;
+    if (!this.hasNodeColumn("launch_wrapper")) {
+      if (stored !== null) throw new Error("Cannot persist launch_wrapper: database migration is required");
+      return false;
+    }
+    if (value !== null) {
+      const existing = this.db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(nodeId) as { runtime: string | null } | undefined;
+      if (existing && !isLaunchWrapperRuntime(existing.runtime)) {
+        throw new Error("launch_wrapper requires a pi or codex seat");
+      }
+    }
+    return this.db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(stored, nodeId).changes > 0;
+  }
+
   setNodeAdvisor(nodeId: string, advisor: string | null): boolean {
     if (!this.hasNodeColumn("advisor")) return false;
     return this.db.prepare("UPDATE nodes SET advisor = ? WHERE id = ?")
@@ -1062,6 +1172,10 @@ export class RigRepository {
   }
 
   private rowToNode(row: NodeRow): Node {
+    const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.id} launch_wrapper`);
+    if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
+      throw new Error(`Seat ${row.id} launch_wrapper: only valid when runtime is "pi" or "codex"`);
+    }
     return {
       id: row.id,
       rigId: row.rig_id,
@@ -1071,9 +1185,12 @@ export class RigRepository {
       model: row.model,
       effort: row.effort ?? null,
       advisor: row.advisor ?? null,
+      claudeMcp: row.claude_mcp ?? null,
+      ...(launchWrapper ? { launchWrapper } : {}),
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       claudeTokenRef: parseClaudeSeatTokenRef(row.claude_token_ref),
+      ...(row.account_home ? { accountHome: row.account_home } : {}),
       permissionPolicy: row.permission_policy ?? null,
       env: parseStoredSeatEnv(row.env_json),
       cwd: row.cwd,
@@ -1165,11 +1282,14 @@ interface NodeRow {
   model: string | null;
   effort?: string | null;
   advisor?: string | null;
+  claude_mcp?: ClaudeMcp | null;
+  launch_wrapper?: string | null;
   effort_choice?: string | null;
   codex_config_profile?: string | null;
   claude_token_ref?: string | null;
   permission_policy?: string | null;
   env_json?: string | null;
+  account_home?: string | null;
   cwd: string | null;
   surface_hint: string | null;
   workspace: string | null;

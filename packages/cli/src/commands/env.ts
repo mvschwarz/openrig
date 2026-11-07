@@ -8,7 +8,7 @@ const LONG_RUNNING_TIMEOUT_MS = 45_000;
 
 export function envCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("env")
-    .description("Inspect and control rig environment services for service-backed rigs and managed apps")
+    .description("Inspect and control rig services; for execution placement use rig environment")
     .addHelpText("after", `
 Examples:
   rig env status secrets-manager
@@ -30,9 +30,14 @@ Examples:
       throw new Error(error ?? `Failed to list rigs (HTTP ${summaries.status})`);
     }
     if (!Array.isArray(summaries.data)) throw new Error("The daemon returned an invalid rig summary.");
-    const match = summaries.data.find((r) => r.name === rigRef || r.id === rigRef);
-    if (!match) throw new Error(`Rig '${rigRef}' not found`);
-    return match.id;
+    const exactId = summaries.data.find((r) => r.id === rigRef);
+    if (exactId) return exactId.id;
+    const matches = summaries.data.filter((r) => r.name === rigRef);
+    if (matches.length > 1) {
+      throw new Error(`'${rigRef}' matches ${matches.length} rigs (${matches.map((r) => r.id).join(", ")}). Nothing was done; pass one of these ids instead.`);
+    }
+    if (matches.length === 0) throw new Error(`Rig '${rigRef}' not found`);
+    return matches[0]!.id;
   }
 
   // rig env status <rig>

@@ -12,6 +12,7 @@ import { readMissionReadiness } from "../domain/proof/judgments.js";
 import { WorkflowInstanceStore } from "../domain/workflow-instance-store.js";
 import { WorkflowStepTrailLog } from "../domain/workflow-step-trail-log.js";
 import { feedPerspective } from "../domain/feed-perspective.js";
+import { resolveRegisteredHumanAddress } from "../domain/gateway/human-registry.js";
 import { UNNAMED_PRIMARY_USER } from "../domain/mission-control/mission-control-write-contract.js";
 
 export function attentionRoutes(): Hono {
@@ -46,11 +47,19 @@ export function attentionRoutes(): Hono {
       const asked = new Set(rows.slice(0, 1000).filter(q => queue.isCurrentHumanAsk(q.qitemId)).map(q => q.qitemId));
       const quiet = new Set(rows.slice(0, 1000).filter(q => asked.has(q.qitemId) && queue.humanAskWithoutAlert(q.qitemId)).map(q => q.qitemId));
       const current = rows.slice(0, 1000).filter(q => isHumanSeatSessionRef(q.destinationSession) || asked.has(q.qitemId) || q.state === "blocked" && isHumanSeatSessionRef(q.blockedOn ?? ""));
+      // A person with no connector binding is asked on Steering and in the Feed only: nothing is posted to them in Slack.
+      const people = queue.humanRegistry();
+      const noConnector = (address: string | null | undefined): boolean => {
+        if (!people.ok) return false;
+        const person = resolveRegisteredHumanAddress(address, people.entities);
+        return people.entities.some((entity) => entity.address === person && entity.connectorBindings.length === 0);
+      };
       // Whether the request went to Slack: its own receipt first, then whether it was ever to be sent.
-      const slackLine = (qitemId: string): string => {
+      const slackLine = (qitemId: string, unbound: boolean): string => {
         const delivery = queue.deliveryOutcomeFor(qitemId);
         if (delivery) return delivery.outcome === "posted" ? "posted (posted isn't read)" : `${delivery.outcome}: ${delivery.detail}`;
-        return quiet.has(qitemId) ? "not sent: created without --alert, and this person's Slack subscription is urgent-only" : "no receipt yet";
+        return unbound ? "not sent: this person has no connector binding, so they're asked on Steering and in the Feed only"
+          : quiet.has(qitemId) ? "not sent: created without --alert, and this person's Slack subscription is urgent-only" : "no receipt yet";
       };
       // Keep an opened request inspectable after its source is resolved, without
       // retaining it in the current Action required feed or inventing an inbox.
@@ -76,13 +85,15 @@ export function attentionRoutes(): Hono {
           ...(toPerson ? { asker: q.sourceSession } : {}),
           ...(questions ? { humanQuestions: questions, humanAnswers: q.humanAnswers ?? {} } : {}),
           summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Request summary unavailable", urgency: q.priority, unblocks, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown", project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
+        const unbound = noConnector(toPerson ? q.destinationSession : q.blockedOn);
+        const notSent = unbound || quiet.has(q.qitemId);
         const route = unanswered
-          ? `Decision route: answer its questions here, choosing an option or typing a reply${quiet.has(q.qitemId) ? "; it wasn't sent to Slack" : ", or in the correlated Slack message"}.`
+          ? `Decision route: answer its questions here, choosing an option or typing a reply${notSent ? "; it wasn't sent to Slack" : ", or in the correlated Slack message"}.`
           : questions && q.state === "pending" ? "Decision route: its questions are all answered, but the answers haven't gone back to the asker yet: send them from here."
-          : quiet.has(q.qitemId) ? "Decision route: answer on Steering; it wasn't sent to Slack." : "Decision route: follow the correlated human request in Slack.";
+          : notSent ? "Decision route: answer on Steering; it wasn't sent to Slack." : "Decision route: follow the correlated human request in Slack.";
         add(item, () => {
           const mode = posture?.resolve({ qitemId: q.qitemId });
-          return ["Request:", q.body, ...(q.humanDetail ? ["Supplemental detail:", q.humanDetail] : []), `State: ${q.state}`, `To: ${q.destinationSession}`, `From: ${q.sourceSession}`, `Blocked on: ${q.blockedOn ?? "none"}`, `Posture: ${mode?.posture ?? "unknown"} · ${mode?.reason ?? "posture source unavailable"}`, `Evidence reference: ${q.evidenceRef ?? "none recorded"}`, `Slack: ${slackLine(q.qitemId)}`, `${route} Inspect: rig queue show ${q.qitemId} --full`, "Queue history (read/delivery is not approval):", ...queue.listTransitions(q.qitemId).map(t => JSON.stringify(t))];
+          return ["Request:", q.body, ...(q.humanDetail ? ["Supplemental detail:", q.humanDetail] : []), `State: ${q.state}`, `To: ${q.destinationSession}`, `From: ${q.sourceSession}`, `Blocked on: ${q.blockedOn ?? "none"}`, `Posture: ${mode?.posture ?? "unknown"} · ${mode?.reason ?? "posture source unavailable"}`, `Evidence reference: ${q.evidenceRef ?? "none recorded"}`, `Slack: ${slackLine(q.qitemId, unbound)}`, `${route} Inspect: rig queue show ${q.qitemId} --full`, "Queue history (read/delivery is not approval):", ...queue.listTransitions(q.qitemId).map(t => JSON.stringify(t))];
         }, () => {
           if (!q.evidenceRef || !path.isAbsolute(q.evidenceRef) && (!p || /^[a-z][a-z\d+.-]*:/i.test(q.evidenceRef))) return [];
           const hash = q.evidenceRef.indexOf("#"), anchor = hash < 0 ? "" : q.evidenceRef.slice(hash);

@@ -6,6 +6,7 @@ import { execSync } from "node:child_process";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { DaemonClient, ForeignLocalDaemonError, formatDaemonHostForUrl } from "../client.js";
 import { ConfigStore } from "../config-store.js";
+import { fetchWithTimeout } from "../fetch-with-timeout.js";
 import { buildWritableHomeCheck } from "../system-preflight.js";
 import {
   CMUX_SETTINGS_DISCLOSURE_PATH,
@@ -18,6 +19,7 @@ import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
 import { classifyNodeVersion } from "../node-support.js";
 import { checkProviderReadiness } from "../provider-auth.js";
+import { getOpenRigHome, readOpenRigUrl } from "../openrig-compat.js";
 
 interface DoctorCheck {
   name: string;
@@ -40,7 +42,12 @@ export interface DoctorDeps {
   env?: NodeJS.ProcessEnv;
   mkdirp?: (path: string) => void;
   checkWritable?: (path: string) => void;
-  fetch?: (url: string) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+  fetch?: (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+  /** The caller's effective user id, compared with the one the port's daemon reports. Absent: this process's own;
+   *  null: this platform has none. */
+  callerUid?: number | null;
+  /** How long each part of /healthz and the cmux status response may take (default 2000 ms). */
+  ownerReportTimeoutMs?: number;
   /**
    * Build B — path to a rig spec to check against the RUNNING rig of the same name (`--spec`).
    *
@@ -55,7 +62,73 @@ export interface DoctorDeps {
 }
 
 const DEFAULT_PORT = 7433;
+const DOCTOR_HTTP_TIMEOUT_MS = 2000;
 const CMUX_SOCKET_CONTROL_FIX = 'In cmux Settings > Automation, select "Automation mode" for Socket Control Mode, or set automation.socketControlMode to "automation" in ~/.config/cmux/cmux.json (older versions use ~/.config/cmux/settings.json; current cmux reads that legacy file only for keys absent from cmux.json). cmux reloads saved settings automatically; rerun `rig doctor` to re-probe without restarting the daemon.';
+
+/** The port's OpenRig daemon, judged by the OS user it reports. /healthz's pid and euid are the daemon's own report,
+ *  not authentication, and every line says so. Another user's daemon warns, since a share set up through config alone
+ *  looks the same and must keep working; it passes when OPENRIG_URL selects this endpoint on purpose. An owner that can't
+ *  be compared, or a body that doesn't arrive in time, warns too. Nothing is stopped or refused here. */
+async function listenerOwnerCheck(where: string, base: string, res: { json?: () => Promise<unknown> }, release: () => void,
+  deps: DoctorDeps): Promise<DoctorCheck> {
+  const env = deps.env ?? process.env;
+  const at = `Port ${where} (${base}, OpenRig home ${getOpenRigHome(env)})`;
+  const callerUid = deps.callerUid === undefined ? process.geteuid?.() : deps.callerUid ?? undefined;
+  const boundMs = deps.ownerReportTimeoutMs ?? 2000;
+  let reported: { pid?: unknown; euid?: unknown } = {};
+  let late = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const read = res.json ? res.json() : Promise.resolve(null);
+    // Releasing the request after the bound rejects the abandoned read; that's expected, not an error.
+    read.catch(() => {});
+    const body: unknown = await Promise.race([
+      read,
+      new Promise<null>(resolve => { timer = setTimeout(() => { late = true; resolve(null); }, boundMs); }),
+    ]);
+    if (body && typeof body === "object") reported = body as { pid?: unknown; euid?: unknown };
+  } catch { /* no readable body: the owner stays unknown */ }
+  finally { clearTimeout(timer); release(); }
+  const pid = Number.isSafeInteger(reported.pid) && (reported.pid as number) > 0 ? `, pid ${reported.pid as number}` : "";
+  const euid = Number.isSafeInteger(reported.euid) && (reported.euid as number) >= 0 ? reported.euid as number : undefined;
+  const ownDaemon = "To run your own, give this OpenRig home a free port and start its daemon there: rig config set daemon.port <free-port>, then rig daemon start.";
+  if (euid === undefined || callerUid === undefined) {
+    return {
+      name: "port", status: "warn",
+      message: `${at} is in use by an OpenRig daemon whose OS user is unknown.`,
+      reason: late
+        ? `Its /healthz report didn't finish within ${boundMs / 1000} s, so doctor can't tell whether it's yours or another user's on this machine.`
+        : euid === undefined
+          ? "It doesn't report an effective user id, so doctor can't tell whether it's yours or another user's on this machine."
+          : "This platform has no effective user id to compare, so doctor can't tell whether it's yours.",
+      fix: `Check that it's yours with rig daemon status. ${ownDaemon}`,
+    };
+  }
+  const reports = `the endpoint reports euid ${euid}${pid}`;
+  if (euid === callerUid) return { name: "port", status: "pass", message: `${at} is in use by your OpenRig daemon: ${reports}, the same as yours.` };
+  const users = `another OS user: ${reports}; your euid is ${callerUid}`;
+  if (sameEndpoint(readOpenRigUrl(env), base)) {
+    return { name: "port", status: "pass", message: `${at} is the endpoint OPENRIG_URL selects, served by an OpenRig daemon of ${users}.` };
+  }
+  return {
+    name: "port", status: "warn",
+    message: `${at} is in use by an OpenRig daemon of ${users}.`,
+    reason: `It isn't this OpenRig home's daemon, unless that user shares it with you: a command that reaches ${base} acts in that user's OpenRig. The pid and euid are the daemon's own report on /healthz, a self-report rather than authentication.`,
+    fix: `${ownDaemon} To use a shared daemon on purpose, set OPENRIG_URL to its address.`,
+  };
+}
+
+/** Whether OPENRIG_URL names this endpoint: the same scheme, host and port, with localhost read as 127.0.0.1. */
+function sameEndpoint(url: string | undefined, base: string): boolean {
+  if (!url) return false;
+  try {
+    const [a, b] = [new URL(url), new URL(base)];
+    const host = (u: URL) => u.hostname === "localhost" ? "127.0.0.1" : u.hostname;
+    return a.protocol === b.protocol && a.port === b.port && host(a) === host(b);
+  } catch {
+    return url === base;
+  }
+}
 
 function defaultCheckPort(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -230,17 +303,32 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
   const daemonPort = config.daemon.port ?? DEFAULT_PORT;
   const daemonBase = `http://${formatDaemonHostForUrl(daemonHost)}:${daemonPort}`;
   const fetchFn = deps.fetch ?? globalThis.fetch;
+  const healthHeaders = async (controller: AbortController) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        fetchFn(`${daemonBase}/healthz`, { signal: controller.signal }),
+        new Promise<null>(resolve => { timer = setTimeout(() => { resolve(null); controller.abort(); }, deps.ownerReportTimeoutMs ?? 2000); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  };
   const portCheck = deps.checkPort(daemonPort, daemonHost).then(async (available): Promise<DoctorCheck> => {
     if (available) {
       return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} available.` };
     }
-    // Port in use — check if it's our daemon via healthz
+    // Port in use — check if it's an OpenRig daemon via healthz, and whose.
+    const owner = new AbortController();
     try {
-      const res = await fetchFn(`${daemonBase}/healthz`);
-      if (res.ok) {
-        return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} in use by OpenRig daemon.` };
-      }
+      const res = await healthHeaders(owner);
+      if (!res) return {
+        name: "port", status: "warn",
+        message: `Port ${daemonHost}:${daemonPort} is in use by an unknown listener.`,
+        reason: "Its /healthz response headers did not arrive in time, so doctor cannot identify it.",
+        fix: `Check the listener on port ${daemonPort} or configure a free port for the daemon.`,
+      };
+      if (res.ok) return await listenerOwnerCheck(`${daemonHost}:${daemonPort}`, daemonBase, res, () => owner.abort(), deps);
     } catch { /* not our daemon */ }
+    finally { owner.abort(); }
     return {
       name: "port",
       status: "fail",
@@ -254,19 +342,27 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
   const asyncChecks: Promise<DoctorCheck>[] = [portCheck];
   if (shellCmuxPassed) {
     const daemonCmuxCheck = (async (): Promise<DoctorCheck> => {
+      const health = new AbortController();
       try {
-        const healthRes = await fetchFn(`${daemonBase}/healthz`);
-        if (!healthRes.ok) {
+        const healthRes = await healthHeaders(health);
+        if (!healthRes?.ok) {
           return { name: "cmux_daemon", status: "skipped", message: "Daemon healthz not ok. Skipping daemon cmux check." };
         }
       } catch {
         return { name: "cmux_daemon", status: "skipped", message: "Daemon not reachable. Skipping daemon cmux check." };
-      }
+      } finally { health.abort(); }
 
       try {
-        const cmuxRes = await fetchFn(`${daemonBase}/api/adapters/cmux/status`);
-        if (cmuxRes.ok && cmuxRes.json) {
-          const data = (await cmuxRes.json()) as { available?: boolean };
+        let data: { available?: boolean } = {};
+        const cmuxRes = await fetchWithTimeout(fetchFn as typeof fetch, `${daemonBase}/api/adapters/cmux/status`, {}, {
+          timeoutMs: deps.ownerReportTimeoutMs ?? DOCTOR_HTTP_TIMEOUT_MS,
+          timeoutMessage: "Doctor's cmux status read timed out.",
+          consumeResponse: async res => {
+            if (res.ok && res.json) data = (await res.json()) as { available?: boolean };
+            else await res.body?.cancel();
+          },
+        });
+        if (cmuxRes.ok) {
           if (data.available) {
             return { name: "cmux_daemon", status: "pass", message: "Daemon cmux control available." };
           }
@@ -327,6 +423,12 @@ async function buildSpecConformanceCheck(deps: DoctorDeps): Promise<DoctorCheck>
   let liveIds: string[] | null;
   try { liveIds = deps.fetchLiveLogicalIds ? await deps.fetchLiveLogicalIds(rigName) : null; }
   catch (error) {
+    if (error instanceof AmbiguousLiveRigError) return {
+      name, status: "skipped",
+      message: `Multiple live rigs match '${rigName}': ${error.ids.join(", ")}; conformance unknown.`,
+      reason: "The spec name does not identify one live rig, so no topology was compared.",
+      fix: "Inspect the matching rig IDs with rig ps --json; use rig ps --nodes -A --json to inspect nodes.",
+    };
     if (error instanceof ForeignLocalDaemonError) return { name, status: "fail", message: error.message };
     throw error;
   }
@@ -411,22 +513,43 @@ function readTmuxMouseMode(deps: DoctorDeps): "on" | "off" | null {
   }
 }
 
+class AmbiguousLiveRigError extends Error {
+  constructor(readonly ids: string[]) { super("Multiple live rigs share the spec name"); }
+}
+
 /** Raw topology reads retain their existing headers; the owner policy is shared with the client. */
 export async function readLiveLogicalIds(base: string, rigName: string, ownerClient = new DaemonClient(base)): Promise<string[] | null> {
   try {
     await ownerClient.assertLocalOwner();
-    const rigsRes = await fetch(`${base}/api/rigs`);
+    let rigs: Array<{ id?: string; name?: string }> = [];
+    const rigsRes = await fetchWithTimeout(fetch, `${base}/api/rigs`, {}, {
+      timeoutMs: DOCTOR_HTTP_TIMEOUT_MS,
+      timeoutMessage: "Doctor's live rig read timed out.",
+      consumeResponse: async res => {
+        if (res.ok) rigs = (await res.json()) as typeof rigs;
+        else await res.body?.cancel();
+      },
+    });
     if (!rigsRes.ok) return null;
-    const rigs = (await rigsRes.json()) as Array<{ id?: string; name?: string }>;
-    const rig = rigs.find((r) => r.name === rigName);
+    const matches = rigs.filter((r) => r.name === rigName);
+    if (matches.length > 1) throw new AmbiguousLiveRigError(matches.map(r => r.id ?? "(missing id)"));
+    if (matches.length === 0) return null;
+    const rig = matches[0];
     if (!rig?.id) return null;
     await ownerClient.assertLocalOwner();
-    const nodesRes = await fetch(`${base}/api/rigs/${rig.id}/nodes`);
+    let nodes: Array<{ logicalId?: string | null }> = [];
+    const nodesRes = await fetchWithTimeout(fetch, `${base}/api/rigs/${rig.id}/nodes`, {}, {
+      timeoutMs: DOCTOR_HTTP_TIMEOUT_MS,
+      timeoutMessage: "Doctor's live node read timed out.",
+      consumeResponse: async res => {
+        if (res.ok) nodes = (await res.json()) as typeof nodes;
+        else await res.body?.cancel();
+      },
+    });
     if (!nodesRes.ok) return null;
-    const nodes = (await nodesRes.json()) as Array<{ logicalId?: string | null }>;
     return nodes.map((n) => n.logicalId ?? "");
   } catch (error) {
-    if (error instanceof ForeignLocalDaemonError) throw error;
+    if (error instanceof ForeignLocalDaemonError || error instanceof AmbiguousLiveRigError) throw error;
     return null;
   }
 }
@@ -458,7 +581,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
             const base = `http://${formatDaemonHostForUrl(cfg.daemon.host ?? "127.0.0.1")}:${cfg.daemon.port ?? DEFAULT_PORT}`;
             return await readLiveLogicalIds(base, rigName);
           } catch (error) {
-            if (error instanceof ForeignLocalDaemonError) throw error;
+            if (error instanceof ForeignLocalDaemonError || error instanceof AmbiguousLiveRigError) throw error;
             return null;
           }
         },

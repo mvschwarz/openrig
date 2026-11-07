@@ -1,4 +1,5 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,7 +14,7 @@ import { codexPluginContentHash, codexLegacyPluginTrustPath, planOwnedCodexConte
 const shipped = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core");
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
-function fixture(config = "", corruptCache = false) {
+function fixture(config = "", corruptCache = false, duringPluginAdd?: () => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "owned-codex-hooks-")); roots.push(root);
   const plugin = path.join(root, "plugins/openrig-core"), home = path.join(root, "codex");
   fs.cpSync(shipped, plugin, { recursive: true }); fs.mkdirSync(home);
@@ -30,6 +31,7 @@ function fixture(config = "", corruptCache = false) {
         fs.cpSync(plugin, cache, {recursive:true});
         if (corruptCache) fs.appendFileSync(path.join(cache,"hooks/scripts/refocus.cjs"),"\nmodified");
         if (!(parse(fs.readFileSync(file, 'utf8')) as any).plugins?.['openrig-core@openrig']) fs.appendFileSync(file, '\n[plugins."openrig-core@openrig"]\nenabled = true\n');
+        duringPluginAdd?.();
       }
       if (args[1] === "marketplace") fs.appendFileSync(file, `\n[marketplaces.openrig]\nsource = ${JSON.stringify(path.dirname(plugin))}\n`);
       return {status:0,stdout:"",stderr:""};
@@ -59,11 +61,70 @@ it.each(['[plugins."openrig-core@openrig"]\nenabled = false\n','[plugins._defaul
   const f = fixture(config); await f.adapter().ensureCodexCorePlugin(); await f.adapter().ensureCodexCorePlugin();
   expect(fs.readFileSync(f.file,"utf8")).toBe(config); expect(f.calls).toEqual([]);
 });
-it("an existing untrusted installation stays untrusted after restart or an upgrade", async () => {
+// #17: an install older than the first-install grant, or a skip Codex didn't record, leaves no choice for any of OpenRig's
+// hooks. OpenRig trusts its own exact shipped hooks there as a first install does; a recorded choice for one keeps them all.
+async function freshInstallStates() { const f = fixture(); await f.adapter().ensureCodexCorePlugin(); return f.read().hooks.state; }
+function registeredWithoutGrants(f: ReturnType<typeof fixture>, extra = "") {
+  const config = `[marketplaces.openrig]\nsource = ${JSON.stringify(path.dirname(f.plugin))}\n\n[plugins."openrig-core@openrig"]\nenabled = true\n${extra}`;
+  fs.writeFileSync(f.file, config); fs.cpSync(f.plugin, f.cache, { recursive: true });
+  return config;
+}
+it("an existing installation with no recorded choice for OpenRig's hooks gains the first install's six exact grants on upgrade", async () => {
   const f = fixture('[plugins."openrig-core@openrig"]\nenabled = true\n');
   fs.mkdirSync(path.join(f.home,"plugins/cache/openrig/openrig-core/older"), {recursive:true});
   await f.adapter().ensureCodexCorePlugin(); await f.adapter().ensureCodexCorePlugin();
-  expect(f.read().hooks?.state ?? {}).toEqual({});
+  expect(f.read().hooks.state).toEqual(await freshInstallStates());
+});
+it("a registered current installation with no recorded choice for OpenRig's hooks gains them on restart, without reinstalling", async () => {
+  const f = fixture(); registeredWithoutGrants(f);
+  await f.adapter().ensureCodexCorePlugin();
+  expect(f.read().hooks.state).toEqual(await freshInstallStates());
+  expect(f.calls).toEqual([]);
+  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(true);
+});
+it("an existing installation with a recorded choice for one of OpenRig's hooks gains no other grant", async () => {
+  const f = fixture();
+  const config = registeredWithoutGrants(f, '\n[hooks.state."openrig-core@openrig:hooks/codex.json:stop:0:0"]\nenabled = false\n');
+  await f.adapter().ensureCodexCorePlugin(); await f.adapter().ensureCodexCorePlugin();
+  expect(fs.readFileSync(f.file, "utf8")).toBe(config);
+});
+it("a recorded choice for one of OpenRig's hooks under a profile, or in the system layer, gains no grant", async () => {
+  const key = "openrig-core@openrig:hooks/codex.json:stop:0:0";
+  const profiled = fixture();
+  const config = registeredWithoutGrants(profiled, `\n[profiles.special.hooks.state.${JSON.stringify(key)}]\nenabled = false\n`);
+  await profiled.adapter().ensureCodexCorePlugin();
+  expect(fs.readFileSync(profiled.file, "utf8")).toBe(config);
+  const system = fixture();
+  const plain = registeredWithoutGrants(system);
+  fs.mkdirSync(path.join(path.dirname(system.home), "etc"));
+  fs.writeFileSync(path.join(path.dirname(system.home), "etc/config.toml"), `[hooks.state.${JSON.stringify(key)}]\nenabled = false\n`);
+  await system.adapter().ensureCodexCorePlugin();
+  expect(fs.readFileSync(system.file, "utf8")).toBe(plain);
+});
+const ownChoice = `\n[hooks.state."openrig-core@openrig:hooks/codex.json:stop:0:0"]\nenabled = false\n`;
+it("a choice recorded while Codex installs the plugin leaves all six of OpenRig's hooks ungranted", async () => {
+  const f: ReturnType<typeof fixture> = fixture('[plugins."openrig-core@openrig"]\nenabled = true\n', false, () => fs.appendFileSync(f.file, ownChoice));
+  fs.mkdirSync(path.join(f.home,"plugins/cache/openrig/openrig-core/older"), {recursive:true});
+  await f.adapter().ensureCodexCorePlugin();
+  expect(Object.keys(f.read().hooks.state)).toEqual(["openrig-core@openrig:hooks/codex.json:stop:0:0"]);
+  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+});
+it("a native choice written while OpenRig prepares its grant keeps its bytes: no grant and no approval", async () => {
+  const f = fixture(); const config = registeredWithoutGrants(f);
+  // computeCodexHookTrust runs between the grant's read of config.toml and its write.
+  const trust = createRequire(import.meta.url)("../assets/plugins/openrig-core/hooks/scripts/codex-hook-trust.cjs");
+  const compute = trust.computeCodexHookTrust;
+  let written = false;
+  const spy = vi.spyOn(trust, "computeCodexHookTrust").mockImplementation((...args: unknown[]) => {
+    if (!written) { written = true; fs.appendFileSync(f.file, ownChoice); }
+    return compute(...args);
+  });
+  try {
+    await f.adapter().ensureCodexCorePlugin();
+    expect(written).toBe(true);
+    expect(fs.readFileSync(f.file, "utf8")).toBe(config + ownChoice);
+    expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+  } finally { spy.mockRestore(); }
 });
 it("a recorded hook decline and outside hook state survive restart and upgrade byte-for-byte", async () => {
   const key = "openrig-core@openrig:hooks/codex.json:stop:0:0";

@@ -820,6 +820,7 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
             executableName: opts.runtime === "codex" ? "codex" : "claude",
             startedAt: "Sat Jan  1 12:00:00 2000",
             command: opts.runtime === "codex" ? "codex resume tok-abc" : "claude --resume tok-abc",
+            ...(opts.runtime === "codex" ? { argv: ["codex", "resume", "tok-abc"] } : {}),
           }]),
         ],
       });
