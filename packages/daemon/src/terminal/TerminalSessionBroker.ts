@@ -267,8 +267,11 @@ export class TerminalSessionBroker {
       this.lastClose = { code: open.code, reason: open.reason };
       this.torndown = true;
       this.teardownResources();
-      await this.restoreWindowSize();
-      this.onEmpty?.(this.sessionName);
+      this.teardownPromise = (async () => {
+        await this.restoreWindowSize();
+        this.onEmpty?.(this.sessionName);
+      })();
+      await this.teardownPromise;
       sub.close(open.code, open.reason);
       return;
     }
@@ -395,12 +398,12 @@ export class TerminalSessionBroker {
     this.torndown = true;
     this.subscribers.clear();
     this.scrollOffsets.clear();
+    this.teardownResources();
     this.teardownPromise = (async () => {
       if (this.pipeActive) {
         this.pipeActive = false;
-        void this.tmux.stopPipePane(this.sessionName).catch(() => {});
+        await this.tmux.stopPipePane(this.sessionName).catch(() => {});
       }
-      this.teardownResources();
       // An open still in flight finishes its pin first, so the release below sees it. Then, before onEmpty as in
       // teardown, the release: a broker created next reads the given-back value, not this one's pin.
       await this.openPromise?.catch(() => {});
@@ -583,20 +586,20 @@ export class TerminalSessionBroker {
     if (this.torndown) return this.teardownPromise ?? Promise.resolve();
     this.lastClose = { code: 1001, reason: "tmux session terminated" };
     this.torndown = true;
+    const subs = [...this.subscribers];
+    this.subscribers.clear();
+    this.teardownResources();
+    for (const sub of subs) {
+      try {
+        sub.close(1001, "tmux session terminated");
+      } catch {
+        // already-closed subscriber is fine
+      }
+    }
     this.teardownPromise = (async () => {
-      const subs = [...this.subscribers];
-      this.subscribers.clear();
       if (this.pipeActive) {
         this.pipeActive = false;
-        void this.tmux.stopPipePane(this.sessionName).catch(() => {});
-      }
-      this.teardownResources();
-      for (const sub of subs) {
-        try {
-          sub.close(1001, "tmux session terminated");
-        } catch {
-          // already-closed subscriber is fine
-        }
+        await this.tmux.stopPipePane(this.sessionName).catch(() => {});
       }
       // A probe that couldn't reach tmux isn't proof the window is gone, so give the sizing back anyway. It acts only on a
       // window that still lists this broker, so a gone window or one on a restarted tmux server is left alone.
@@ -610,6 +613,7 @@ export class TerminalSessionBroker {
     if (this.torndown) return this.teardownPromise ?? Promise.resolve();
     this.lastClose = { code: 1011, reason: "terminal broker unavailable" };
     this.torndown = true;
+    this.teardownResources();
     this.teardownPromise = (async () => {
       if (this.pipeActive) {
         this.pipeActive = false;
@@ -617,7 +621,6 @@ export class TerminalSessionBroker {
       }
       // Before onEmpty: a later broker for this window then reads the restored value, not this one's pin.
       await this.restoreWindowSize();
-      this.teardownResources();
       this.onEmpty?.(this.sessionName);
     })();
     return this.teardownPromise;
@@ -669,6 +672,7 @@ export class TerminalSessionBroker {
  */
 export class TerminalBrokerRegistry {
   private readonly brokers = new Map<string, TerminalSessionBroker>();
+  private readonly pendingTeardown = new Map<string, Promise<void>>();
 
   constructor(private readonly tmux: BrokerTmux, private readonly opts: BrokerOptions = {}) {}
 
@@ -697,8 +701,24 @@ export class TerminalBrokerRegistry {
       });
       this.brokers.set(sessionName, broker);
       if (priorTeardown) {
-        await priorTeardown;
+        const pending = this.pendingTeardown.get(sessionName);
+        const p = Promise.allSettled(
+          pending ? [pending, priorTeardown] : [priorTeardown],
+        ).then((results) => {
+          for (const result of results) {
+            if (result.status === "rejected") throw result.reason;
+          }
+        }).finally(() => {
+          if (this.pendingTeardown.get(sessionName) === p) {
+            this.pendingTeardown.delete(sessionName);
+          }
+        });
+        this.pendingTeardown.set(sessionName, p);
       }
+    }
+    const pending = this.pendingTeardown.get(sessionName);
+    if (pending) {
+      await pending;
     }
     try {
       await broker.attach(sub);
