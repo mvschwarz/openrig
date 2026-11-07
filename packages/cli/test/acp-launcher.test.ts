@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ConfigStore } from "../src/config-store.js";
+import { acpReceiver } from "../src/commands/acp.js";
 
 const repo = fileURLToPath(new URL("../../../", import.meta.url));
 const json = (path: string) => JSON.parse(readFileSync(join(repo, path), "utf8"));
@@ -55,14 +56,28 @@ describe("acp.to: the receiver a registry launch uses", () => {
       expect(store.get("acp.to")).toBe("");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+
+  it("--to wins; a settings file that can't be read is the reason the app's sign-in step shows", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acp-to-"));
+    try {
+      const store = new ConfigStore(join(dir, "config.json"));
+      expect(acpReceiver(undefined, store)).toEqual({ receiver: undefined });
+      store.set("acp.to", "lead@my-team");
+      expect(acpReceiver(undefined, store)).toEqual({ receiver: "lead@my-team" });
+      writeFileSync(join(dir, "config.json"), "{not json");
+      expect(acpReceiver(" other@team ", store)).toEqual({ receiver: "other@team" });
+      const unreadable = acpReceiver(undefined, store);
+      expect("error" in unreadable && unreadable.error).toMatch(/malformed[\s\S]*adding --to <member@rig> to the agent's command skips it\.$/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });
 
 describe("openrig-acp hands everything to rig acp serve", () => {
   const dirs: string[] = [];
   afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-  /** The launcher installed beside a stand-in @openrig/cli whose `rig` reports what it was given. */
-  function install(withCli = true): string {
+  /** The launcher installed beside a stand-in @openrig/cli (the version it pins, unless given) whose `rig` reports what it was given. */
+  function install(withCli = true, cliVersion: string = cli.version): string {
     const root = mkdtempSync(join(tmpdir(), "openrig-acp-"));
     dirs.push(root);
     const acp = join(root, "node_modules/@openrig/acp");
@@ -72,7 +87,7 @@ describe("openrig-acp hands everything to rig acp serve", () => {
     if (withCli) {
       const fake = join(root, "node_modules/@openrig/cli");
       mkdirSync(join(fake, "dist"), { recursive: true });
-      writeFileSync(join(fake, "package.json"), JSON.stringify({ name: "@openrig/cli", version: "0.0.0", type: "module", bin: { rig: "dist/rig.js", "openrig-tui": "dist/tui.js" } }));
+      writeFileSync(join(fake, "package.json"), JSON.stringify({ name: "@openrig/cli", version: cliVersion, type: "module", bin: { rig: "dist/rig.js", "openrig-tui": "dist/tui.js" } }));
       writeFileSync(join(fake, "dist/rig.js"), [
         `process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), mark: process.env.FAKE_MARK }) + "\\n");`,
         `process.stdin.on("data", (d) => process.stdout.write(d));`,
@@ -117,5 +132,15 @@ describe("openrig-acp hands everything to rig acp serve", () => {
     expect(await app.done).toEqual({ code: 1, signal: null });
     expect(app.out()).toBe("");
     expect(app.err()).toMatch(/^openrig-acp: @openrig\/cli isn't installed beside this package/);
+  });
+
+  it("an @openrig/cli of another version is named on stderr and run anyway, with the arguments and exit code passed", async () => {
+    const root = install(true, "0.0.0");
+    const app = run(root, ["--to", "lead@team"], { FAKE_EXIT: "3" });
+    app.child.stdin.end();
+    expect(await app.done).toEqual({ code: 3, signal: null });
+    expect(JSON.parse(app.out().trim().split("\n")[0]!).argv).toEqual(["acp", "serve", "--to", "lead@team"]);
+    expect(app.err()).toMatch(/^openrig-acp: found @openrig\/cli 0\.0\.0 at /);
+    expect(app.err()).toContain(`not the ${cli.version} this package pins; running it anyway. Reinstall @openrig/acp to get ${cli.version}.`);
   });
 });
