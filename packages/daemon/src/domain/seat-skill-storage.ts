@@ -521,15 +521,14 @@ export interface SeatSkillFollow {
 function filesBelow(dir: string): string[] {
   const out: string[] = [];
   const walk = (current: string) => {
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { return; }
+    const entries = fs.readdirSync(current, { withFileTypes: true });
     for (const entry of entries) {
       const full = nodePath.join(current, entry.name);
       if (entry.isDirectory()) walk(full);
       else out.push(nodePath.relative(dir, full));
     }
   };
-  walk(dir);
+  if (lexists(dir)) walk(dir);
   return out.sort();
 }
 
@@ -565,7 +564,9 @@ export function followSeatSkills(paths: SeatSkillPaths, today: SeatSkillSelectio
       if (!insideSeatStorage(paths.root, file)) return `${file} is not inside this seat's storage (a link on the way)`;
       try { if (sha256(fs.readFileSync(file)) !== files[file]!.sha256) return `${file} was edited`; } catch { return `${file} can't be read`; }
     }
-    for (const rel of filesBelow(dir)) if (!files[nodePath.join(dir, rel)]) return `${nodePath.join(dir, rel)} is not a file OpenRig wrote`;
+    try {
+      for (const rel of filesBelow(dir)) if (!files[nodePath.join(dir, rel)]) return `${nodePath.join(dir, rel)} is not a file OpenRig wrote`;
+    } catch { return `${dir} can't be read`; }
     return undefined;
   };
   const kept = (dir: string, why: string) =>
@@ -582,9 +583,9 @@ export function followSeatSkills(paths: SeatSkillPaths, today: SeatSkillSelectio
   for (const { id, source } of today.following) {
     const dir = folderOf(id);
     const sourceDir = nodePath.resolve(source);
-    const sourceFiles = filesBelow(sourceDir);
     let tree: Array<{ rel: string; bytes: Buffer; mode: number }>;
     try {
+      const sourceFiles = filesBelow(sourceDir);
       if (!sourceFiles.includes("SKILL.md")) throw new Error("no SKILL.md");
       tree = sourceFiles.map((rel) => {
         const file = nodePath.join(sourceDir, rel);

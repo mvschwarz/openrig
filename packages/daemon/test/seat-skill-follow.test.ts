@@ -109,6 +109,22 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
     expect(statSync(join(paths.skillsRoot, "infra-review", "scripts/check.sh")).mode & 0o777).toBe(0o755);
   });
 
+  it("keeps the whole saved skill when a source subdirectory cannot be read", () => {
+    const { paths, sourceOf, put, launched, copy } = seat();
+    launched("infra-review", { "SKILL.md": "v1", "references/aws.md": "saved reference" });
+    put(join(sourceOf("infra-review"), "SKILL.md"), "v2");
+    const references = join(sourceOf("infra-review"), "references");
+    chmodSync(references, 0o000);
+    try {
+      const result = followSeatSkills(paths, { selected: new Set(["infra-review"]),
+        following: [{ id: "infra-review", source: sourceOf("infra-review") }] });
+      expect(result.refreshed).toEqual([]);
+      expect(result.warnings.join(" ")).toContain("can't be read");
+      expect(copy("infra-review", "SKILL.md")).toBe("v1");
+      expect(copy("infra-review", "references/aws.md")).toBe("saved reference");
+    } finally { chmodSync(references, 0o755); }
+  });
+
   it("keeps a copy the seat edited, or added a file to, and names it", () => {
     const { paths, sourceOf, put, launched, copy } = seat();
     launched("infra-review", { "SKILL.md": "v1" });
