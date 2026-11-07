@@ -103,7 +103,7 @@ export function daemonTeamQueue(client: DaemonClient): TeamQueue {
       }));
     },
     async answer(qitemId, questionId, optionId) {
-      // The person's answer path, as the TUI records one: the daemon takes the actor from this client's caller.
+      // The person's answer path, as a click in Slack records one: the daemon takes the actor from this client's caller.
       const bearer = process.env.OPENRIG_AUTH_BEARER_TOKEN;
       const response = await client.post<Record<string, unknown>>("/api/mission-control/action", { verb: "answer", qitemId, questionId, optionId },
         bearer ? { headers: { Authorization: `Bearer ${bearer}` } } : undefined);

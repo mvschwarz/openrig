@@ -386,6 +386,28 @@ describe("rig acp serve", () => {
     expect(db.prepare("SELECT human_answers FROM queue_items WHERE qitem_id = 'qitem-ask-theme'").get()).toEqual({ human_answers: null });
   });
 
+  it("after a cancel no new question goes to the app, even one already waiting when the cancel wakes the turn", async () => {
+    // The poll never fires on its own here, so the only pass after the first is the one the cancel's wake runs.
+    let scans = 0;
+    let shown = false;
+    const hiddenUntilCancel = (q: TeamQueue): TeamQueue => ({ ...q, openAsks: async (person) => { scans += 1; return shown ? q.openAsks(person) : []; } });
+    const { client, updates } = connect({ pollMs: 60_000, sleep: (ms) => new Promise<void>((resolve) => { if (ms !== 60_000) setTimeout(resolve, ms); }) },
+      "asker5@team", hiddenUntilCancel);
+    const asked: string[] = [];
+    client.onRequest("session/request_permission", async (params) => { asked.push((params as any).toolCall.toolCallId); return { outcome: { outcome: "cancelled" } }; });
+    const sessionId = await open(client);
+    const turn = client.request("session/prompt", prompt(sessionId, "Pick a font"));
+    await until(() => (scans > 0 ? true : undefined), "the first read of open questions");
+    await move("asker5@team", "/api/queue/create", { qitemId: "qitem-ask-after-cancel", destinationSession: CALLER, body: "Serif or sans", summary: "Font?", nudge: false,
+      tags: [`acp-session:${sessionId}`], humanQuestions: [{ id: "q1", question: "Which font?", options: [{ id: "s", label: "Serif" }, { id: "n", label: "Sans" }] }] });
+    shown = true;
+    client.notify("session/cancel", { sessionId });
+    expect(await turn).toEqual({ stopReason: "cancelled" });
+    expect(asked).toEqual([]);
+    expect(updates.some((u) => String(u.toolCallId ?? "").startsWith("qitem-ask-after-cancel"))).toBe(false);
+    expect(db.prepare("SELECT state, human_answers FROM queue_items WHERE qitem_id = 'qitem-ask-after-cancel'").get()).toEqual({ state: "pending", human_answers: null });
+  });
+
   it("when the work closes with a question still on screen, the app is told before the turn ends, and a later reply answers nothing", async () => {
     const { client, inbound } = connect({}, "asker4@team");
     let answerLate!: () => void;
