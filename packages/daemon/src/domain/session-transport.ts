@@ -1055,9 +1055,10 @@ export function draftDeliveryAllows(read: () => unknown): boolean {
 
 /** The setting's value, taking a valid OPENRIG_TRANSPORT_DRAFT_DELIVERY first: the environment outranks the file, and the
  *  settings store reads the file before its environment override, so an unreadable config.json would otherwise turn an
- *  explicit environment refuse into the default. Anything else comes from the store. */
+ *  explicit environment refuse into the default. Valid means exactly what the store accepts (no trimming); anything else
+ *  comes from the store, which drops an invalid environment value for the file's. */
 export function readDraftDeliverySetting(resolve: () => unknown, env: NodeJS.ProcessEnv = process.env): unknown {
-  const fromEnv = env.OPENRIG_TRANSPORT_DRAFT_DELIVERY?.trim();
+  const fromEnv = env.OPENRIG_TRANSPORT_DRAFT_DELIVERY;
   return fromEnv === "refuse" || fromEnv === "deliver" ? fromEnv : resolve();
 }
 

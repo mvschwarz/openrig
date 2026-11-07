@@ -767,7 +767,8 @@ describe("SessionTransport", () => {
         // The store reads the file before its environment override, so it throws here whatever the environment says.
         expect(fromStore).toThrow(/malformed/);
         expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: "refuse" }))).toBe(false);
-        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: " refuse " }))).toBe(false);
+        // A padded value isn't one the store accepts, so it goes to the store, as the store's own resolver would.
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: " refuse " }))).toBe(true);
         // No valid opt-out: an unreadable file and an invalid environment value both follow the deliver default.
         expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, {}))).toBe(true);
         expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: "maybe" }))).toBe(true);
@@ -779,6 +780,17 @@ describe("SessionTransport", () => {
         const fromFile = () => fileStore.resolveOne("transport.draft_delivery").value;
         expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromFile, {}))).toBe(false);
         expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromFile, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: "deliver" }))).toBe(true);
+        // A padded environment value doesn't defeat the file's refuse: the store's own resolver rejects it (it reads the
+        // real environment) and reads the file, and the early read defers to it.
+        const saved = process.env.OPENRIG_TRANSPORT_DRAFT_DELIVERY;
+        process.env.OPENRIG_TRANSPORT_DRAFT_DELIVERY = " deliver ";
+        try {
+          expect(fileStore.resolveOne("transport.draft_delivery")).toMatchObject({ value: "refuse", source: "file" });
+          expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromFile))).toBe(false);
+        } finally {
+          if (saved === undefined) delete process.env.OPENRIG_TRANSPORT_DRAFT_DELIVERY;
+          else process.env.OPENRIG_TRANSPORT_DRAFT_DELIVERY = saved;
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
