@@ -106,6 +106,14 @@ A verified export, a finished task and an exact restore haven't been shown.
   now runs tmux's `copy-mode -q`, which leaves them all, with a single cancel
   where that fails (tmux before 3.1a), and a refusal names why leaving failed.
   ([#2594](https://github.com/mvschwarz/openrig/pull/2594))
+- **A scrolled pane with a stale record no longer blocks delivery.** tmux
+  reuses pane IDs after a server restart, so a stale binding, from another rig
+  for example, can name the same pane as a live seat. Leaving the mode was
+  addressed by that raw pane ID, which then matched two seats, so it was
+  refused before anything was written and the send failed with nothing sent.
+  Leaving the mode now goes through the seat's address, as the text and Enter
+  writes already did. The stale binding itself is unchanged.
+  ([#2644](https://github.com/mvschwarz/openrig/pull/2644))
 - **A writable rig, pod or seat view sizes the pane it shows,** instead of
   keeping an older attached client's size. Read-only views are unchanged. ([#2614](https://github.com/mvschwarz/openrig/pull/2614))
 - **Herdr views kept across an upgrade keep working,** on Linux Herdr 0.9.5 /

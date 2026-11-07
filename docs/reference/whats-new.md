@@ -87,6 +87,9 @@ Claude Code or Codex.
 - **tmux modes:** a send or wake now leaves every tmux mode in a seat's pane,
   including a chooser, customize or clock mode a person has open. If a send is
   still refused for a tmux mode, the refusal names why leaving failed.
+- **A scrolled pane with a stale record:** leaving the mode now goes through the
+  seat's address, so a stale binding naming the same reused tmux pane, from
+  another rig for example, no longer makes the send fail with nothing sent.
 - **Herdr views kept across an upgrade keep working,** on Linux Herdr 0.9.5 /
   protocol 22. A viewer or follow view kept from 0.7.5 through 0.7.9 now counts
   as the same attachment when only OpenRig's tile script changed, and moves to
