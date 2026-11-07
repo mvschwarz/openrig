@@ -161,6 +161,10 @@ daemon's main API port (normally 7433)."
   `rig seat stop`, `clean` and in-place restart refuse them, and now say why.
   Don't use `rig unclaim` to get around it: that ends OpenRig's management of
   the seat.
+- **Herdr views kept from before 0.7.9,** on Linux Herdr 0.9.5 / protocol 22:
+  after upgrading, a kept viewer can read unconfirmed, and a kept follow view can
+  stop adding tiles for new owners and closing tiles for departed ones. This
+  release doesn't fix it. ([#2467](https://github.com/mvschwarz/openrig/pull/2467))
 - **Permission requests in seat status** show only the latest one, held in
   memory for five minutes and lost on a daemon restart.
 - **Agent spec advisories** don't show for a native resume that continues a

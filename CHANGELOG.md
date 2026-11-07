@@ -285,6 +285,10 @@ A verified export, a finished task and an exact restore haven't been shown.
   launched handover or managed launch records a new session, so until then
   `rig seat stop`, `restart` and `clean` refuse them; the refusal now says so.
   ([#2440](https://github.com/mvschwarz/openrig/pull/2440), [#2572](https://github.com/mvschwarz/openrig/pull/2572))
+- **Herdr views kept from before 0.7.9,** on Linux Herdr 0.9.5 / protocol 22:
+  after upgrading, a kept viewer can read unconfirmed, and a kept follow view can
+  stop adding tiles for new owners and closing tiles for departed ones. This
+  release doesn't fix it. ([#2467](https://github.com/mvschwarz/openrig/pull/2467))
 - **Codex hooks after an upgrade:** Codex sessions kept running across the
   upgrade to 0.7.9 showed "Hook failed — plugin contents changed; hook approval
   required" until relaunched; in that upgrade test, one seat restarted with
