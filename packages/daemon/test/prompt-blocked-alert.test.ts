@@ -1124,19 +1124,28 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   });
 
   it("a prompt that clears and comes back between reminders raises a new alert after two new refusals", async () => {
-    const port = engine([]); const wakes: string[] = [];
-    const { record } = reminder(["refused", "refused"]);
-    await tick(port, toLead(wakes));
-    const [first] = alerts();
-    state = "clear"; await tick(port, toLead(wakes));
-    expect(alerts()).toEqual([]);
-    state = "blocked"; await tick(port, toLead(wakes));
-    record("refused"); await tick(port, toLead(wakes));
-    expect(alerts()).toEqual([]);
-    record("refused"); await tick(port, toLead(wakes));
-    expect(alerts()).toHaveLength(1);
-    expect(alerts()[0]?.qitemId).not.toBe(first!.qitemId);
-    expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+    const clearAt = Date.parse("2030-01-01T00:00:00Z");
+    const at = (offset: number) => new Date(clearAt + offset).toISOString();
+    vi.useFakeTimers({ toFake: ["Date"], now: clearAt - 3 });
+    try {
+      const port = engine([]); const wakes: string[] = [];
+      const { record } = reminder([]);
+      vi.setSystemTime(clearAt);
+      record("refused", "selection_prompt", at(-2));
+      record("refused", "selection_prompt", at(-1));
+      await tick(port, toLead(wakes));
+      const [first] = alerts();
+      state = "clear"; await tick(port, toLead(wakes));
+      expect(alerts()).toEqual([]);
+      state = "blocked"; await tick(port, toLead(wakes));
+      vi.setSystemTime(clearAt + 1);
+      record("refused", "selection_prompt", at(1)); await tick(port, toLead(wakes));
+      expect(alerts()).toEqual([]);
+      record("refused", "selection_prompt", at(1)); await tick(port, toLead(wakes));
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]?.qitemId).not.toBe(first!.qitemId);
+      expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+    } finally { vi.useRealTimers(); }
   });
 
   it("another job's alert retiring while the prompt stays blocked doesn't restart an episode closed by hand", async () => {
