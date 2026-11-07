@@ -52,10 +52,10 @@ codex plugin add openrig@openrig-app
 codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --front-door
 ```
 
-- **A non-default OpenRig home:** Codex doesn't pass your shell's environment to MCP servers. If your team runs on a
-  non-default OpenRig home, add `--env OPENRIG_HOME=<that home>` to the `codex mcp add` line.
-- **Approvals:** Codex asks you to approve each tool that writes (create, claim, update) the first time it's used. Tools
-  that only read don't ask.
+- **A non-default OpenRig home:** Codex does not forward every shell environment variable to MCP servers by default. If
+  your team runs on a non-default OpenRig home, add `--env OPENRIG_HOME=<that home>` to the `codex mcp add` line.
+- **Approvals:** Codex may ask you to approve tools according to its approval settings. Create, claim and update change
+  team state; tools that only read are marked read-only.
 
 ## What it doesn't do
 
