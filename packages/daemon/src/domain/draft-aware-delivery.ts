@@ -64,7 +64,7 @@ export class DraftAwareDelivery {
           this.outbox.retain(entry ? { ...entry, tags: entry.tags ?? undefined, auditPointer: entry.auditPointer ?? undefined }
             : { outboxId: id, senderSession: opts.actorSession ?? "unknown", destinationSession: session, body: text,
               auditPointer: opts.auditPointer, identityProvenance: opts.identityProvenance, identityPrincipal: opts.identityPrincipal, ...(opts.urgent ? { urgency: "urgent" } : {}) },
-            target, !!opts.committedOutboxIds);
+            target, !!opts.committedOutboxIds, { coalesce: false, sameSend: receipt.ids });
           this.db.prepare("UPDATE outbox_entries SET delivery_state='sending',guard_delivery=? WHERE outbox_id=?")
             .run(JSON.stringify(receipt), id);
         }
@@ -122,6 +122,8 @@ export class DraftAwareDelivery {
             this.outbox.finalizeDelivery(id, state);
             this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(JSON.stringify({ ...receipt, result }), id);
           }
+          // Settled as held: only now does it take its sender's place (#2430); a delivered attempt never absorbs held ones.
+          if (state === "retained") for (const id of receipt.ids) this.outbox.coalesceSettled(id, receipt.ids);
         })();
       } catch { recorded = false; }
     }

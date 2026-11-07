@@ -236,6 +236,26 @@ false` and the protection reason, rather than claiming durable custody.
 Reading never sends. Retirement frees that record's active retention quota while
 preserving evidence; it does not deliver a message or close queue work.
 
+A seat holds one message per sender, so one sender can't fill its held quota and
+drop everyone else's messages. A sender's newest held message retires its earlier
+ones at that seat into itself (`retired_by: outbox@system`, reason `coalesced into
+<id>`), in every mode, `draft-aware` included. The newest names them: `rig seat
+held-messages` shows `coalesced: { count, outboxIds }` on it, and each coalesced
+record stays readable with `--id`. Held messages are never replayed, so this changes
+no delivery. A `draft-aware` attempt takes its sender's place only once it settles
+as held; one that is then delivered leaves the held messages as they are. A queue
+wake to a `draft-aware` seat counts its sender's held message there as room, by the
+same rule. At a full quota, a sender with nothing held there is still refused, and
+nothing from another sender is touched. A committed wake is never refused, and the
+sender's next held message coalesces it like any other. A message that settles as
+held late, behind a newer held send, folds into that send's newest part and leaves
+its other parts held. An urgent message coalesced under a routine one passes its
+marking to the newest. Never coalesced: the other parts of the same send, a
+watchdog's reminders (one per job), and an unattributed sender.
+
+A backlog held before this change clears at that sender's next held message to the
+seat, or at once with `rig seat retire-held-message`.
+
 ## Input evidence and outcomes
 
 The cursor-aware reader lives in `session-transport.ts` and shares the composer

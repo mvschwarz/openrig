@@ -1059,3 +1059,53 @@ describe("deliberate override preserves existing input", () => {
     expect(f.observations).toEqual([]);
   });
 });
+
+// #2430 in draft-aware, the mode the issue describes: a seat holds one message per sender, and a draft-aware attempt
+// takes its sender's place only once it settles as held.
+describe("draft-aware at a full held quota (#2430)", () => {
+  const fill = (f: ReturnType<typeof fixture>, sender: string) => {
+    const target = f.guard.target("worker@test");
+    f.outbox.retain({ outboxId: "older", senderSession: sender, destinationSession: "worker@test", body: "older message" }, target);
+    for (let i = 1; i < 100; i++) f.outbox.retain({ outboxId: `filler-${i}`, senderSession: `filler-${i}@test`, destinationSession: "worker@test", body: "held" }, target);
+    expect(f.outbox.retentionUsage("a").count).toBe(100);
+  };
+
+  it("a queue notification is staged when its sender holds a message there, and takes its place when it's held", async () => {
+    // An agent seat: a queue wake is never typed into a terminal seat.
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "unfinished note";
+    fill(f, "sender@test");
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "next work", nudge: false });
+    f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
+    await f.repo.drainPendingWakeIntents();
+
+    const id = `wake-intent-${item.qitemId}`;
+    expect(f.outbox.getById(id)!.deliveryState).toBe("retained");
+    expect(f.outbox.coalescedInto(id)).toEqual(["older"]);
+    expect(f.outbox.getById("older")).toMatchObject({ deliveryState: "retired", body: "older message" });
+    expect(f.outbox.retentionUsage("a").count).toBe(100);
+    expect(f.submissions).toEqual([]);
+  });
+
+  it("a queue notification from a sender that holds nothing there is still refused at a full quota", async () => {
+    const f = fixture(); await f.enable(); f.bodies.a = "unfinished note";
+    fill(f, "sender@test");
+    const item = await f.repo.create({ sourceSession: "newcomer@test", destinationSession: "worker@test", body: "other work", nudge: false });
+    expect(() => f.repo.stageWakeIntent(item.qitemId, "newcomer@test", "worker@test", null, true)).toThrow(/quota/i);
+    expect(f.outbox.getById("older")!.deliveryState).toBe("retained");
+  });
+
+  it("a send that's held takes its sender's place; one that's delivered never absorbs held messages", async () => {
+    const f = fixture(); await f.enable();
+    fill(f, "human@test");
+
+    expect(await f.send("delivered")).toMatchObject({ ok: true, sent: true });
+    expect(f.outbox.getById("older")!.deliveryState).toBe("retained");
+    expect(f.outbox.coalescedInto("delivered")).toEqual([]);
+
+    f.bodies.a = "unfinished note";
+    const held = await f.send("held");
+    expect(held).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(f.outbox.coalescedInto(held.outboxIds![0]!)).toEqual(["older"]);
+    expect(f.outbox.retentionUsage("a").count).toBe(100);
+  });
+});
