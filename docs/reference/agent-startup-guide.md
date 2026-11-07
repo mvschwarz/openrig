@@ -78,7 +78,7 @@ Once the agent is up in its pane, run `rig seat clear-attention <seat>`. After a
 full restore of a Claude or Codex seat, it checks the live seat before clearing
 anything: its tmux session is alive, and the pane runs the agent resuming the
 conversation the seat records. When the check passes, the restore outcome becomes
-`operator_recovered` and the seat stops counting as needing attention. When it
+`operator_recovered`, so the restore no longer makes the seat need attention. When it
 fails, the command says which check failed, and `--reason` doesn't bypass it. If
 the seat records the wrong conversation and you know the right one, set it with
 `rig seat set-resume-token <seat> --token-stdin --reason <text>`, then run
