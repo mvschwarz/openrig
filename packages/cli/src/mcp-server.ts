@@ -662,12 +662,37 @@ function mapResult(
   return opts.structured ? { content: [{ type: "text", text }], structuredContent: structured(res.data) } : { content: [{ type: "text", text }] };
 }
 
+/** A seat value an app passed on without filling it in: empty, or still a placeholder. */
+export interface UnfilledSeat { variable: "OPENRIG_SESSION_NAME" | "RIGGED_SESSION_NAME"; value: string }
+
+// An app that doesn't substitute its settings passes the template through as written: ${user_config.seat}, ${input:seat},
+// $SEAT. No seat address can contain these.
+const SEAT_PLACEHOLDER = /\$\{[^}]*\}|^\s*\$[A-Za-z_]/;
+
+/** Treat an empty or unfilled seat as no seat, for the whole process: drops both names from env, so neither requests
+ *  nor rig_whoami act as the placeholder, or as a seat inherited under the legacy name behind an empty one. A set
+ *  OPENRIG_SESSION_NAME decides; RIGGED_SESSION_NAME counts only when it's absent. Returns what was dropped. */
+export function dropUnfilledSeat(env: NodeJS.ProcessEnv = process.env): UnfilledSeat | undefined {
+  const variable = env.OPENRIG_SESSION_NAME !== undefined ? "OPENRIG_SESSION_NAME" : env.RIGGED_SESSION_NAME !== undefined ? "RIGGED_SESSION_NAME" : undefined;
+  const value = variable ? env[variable]! : undefined;
+  if (!variable || value === undefined || (value.trim() && !SEAT_PLACEHOLDER.test(value))) return undefined;
+  delete env.OPENRIG_SESSION_NAME;
+  delete env.RIGGED_SESSION_NAME;
+  return { variable, value };
+}
+
+export function unfilledSeatText(seat: UnfilledSeat): string {
+  return seat.value.trim()
+    ? `${seat.variable} is ${JSON.stringify(seat.value)}, a placeholder the app didn't fill in`
+    : `${seat.variable} is empty`;
+}
+
 /**
  * Creates an MCP server wrapping the daemon HTTP API.
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean } = {}): McpServer {
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat } = {}): McpServer {
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
@@ -1537,7 +1562,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const seat = seatOf();
         if (!seat) {
-          const none = { ok: true, seat: null, caller, message: "This server has no seat: OPENRIG_SESSION_NAME isn't set where it was configured, so its writes aren't attributed to a seat." };
+          const none = options.unfilledSeat
+            ? { ok: true, seat: null, caller, unfilledSeat: options.unfilledSeat, message: `This server has no seat: ${unfilledSeatText(options.unfilledSeat)}, so it acts as no seat. Reads work; the team refuses writes that need an author (actor_required). Set OPENRIG_SESSION_NAME where the server is configured to this app's address on the team, such as cursor@my-team.` }
+            : { ok: true, seat: null, caller, message: "This server has no seat: OPENRIG_SESSION_NAME isn't set where it was configured, so its writes aren't attributed to a seat." };
           return { content: [{ type: "text" as const, text: JSON.stringify(none) }], structuredContent: none };
         }
         const params = new URLSearchParams({ sessionName: seat, compact: "1" });
