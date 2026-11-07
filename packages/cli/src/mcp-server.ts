@@ -681,6 +681,15 @@ export function dropUnfilledSeat(env: NodeJS.ProcessEnv = process.env): Unfilled
   return { variable, value };
 }
 
+/** How an MCP client named itself in its handshake, cut to one short line; it's the client's claim, never an identity. */
+function clientSaid(client: { name?: unknown; version?: unknown } | undefined): string | null {
+  const part = (value: unknown) => typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 60) : "";
+  const name = part(client?.name);
+  if (!name) return null;
+  const version = part(client?.version);
+  return JSON.stringify(version ? `${name} ${version}` : name);
+}
+
 export function unfilledSeatText(seat: UnfilledSeat): string {
   return seat.value.trim()
     ? `${seat.variable} is ${JSON.stringify(seat.value)}, a placeholder the app didn't fill in`
@@ -702,6 +711,18 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
   // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
   const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+  // With no seat (none configured, or one an app left unfilled), messages, new tasks and chat still go through, as an
+  // unknown sender. Its label is this server's own and no seat's, so two unknown callers never count as one author (a
+  // delegated decision compares authors). Its note says only what is known: why there's no seat, and how the client
+  // describes itself in its handshake, which is the client's claim, not an identity. Every other write keeps its rules.
+  const unknownSender = `unknown-mcp-${randomBytes(4).toString("hex")}`;
+  const unknownSenderNote = (): string | null => {
+    if (seatOf()) return null;
+    const why = options.unfilledSeat ? unfilledSeatText(options.unfilledSeat) : "OPENRIG_SESSION_NAME isn't set where it was configured";
+    const said = clientSaid(server.server.getClientVersion());
+    return `[Unknown sender ${unknownSender}: this app has no OpenRig seat (${why}).${said ? ` Its MCP client says it is ${said}.` : ""}`
+      + " There's no return address: it follows this by its task id.]";
+  };
   const accessClass = new Map(MCP_OPERATIONS.map((op) => [op.tool, op.access]));
   // A local caller (no access) is offered every tool; an authenticated one, its class's; an external caller, its
   // grant's pairs.
@@ -1096,9 +1117,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
         if (scope && !scope.session(session)) return outOfScope(`Session ${session}`);
         const waitForIdleMs = waitForIdleSeconds === undefined ? undefined : Math.ceil(waitForIdleSeconds * 1000);
+        // Unsigned, as before (the transport names it "<unknown sender>"); the note tells the recipient what is known.
+        const note = unknownSenderNote();
         const res = await client.post("/api/transport/send", {
           session,
-          text,
+          text: note ? `${note}\n${text}` : text,
           verify,
           force,
           waitForIdleMs,
@@ -1155,7 +1178,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_chatroom_send")) server.registerTool(
     "rig_chatroom_send",
     {
-      description: "Send a message to a rig's chatroom as this server's seat",
+      description: "Send a message to a rig's chatroom as this server's seat, or, with no seat, as an unknown sender with a note saying so",
       inputSchema: z.object({
         rigName: z.string().describe("Rig name or identifier"),
         body: z.string().describe("Message body"),
@@ -1169,10 +1192,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const rig = await chatRigId(client, rigName);
         if ("content" in rig) return rig;
         // P21: no body sender — the daemon derives it from the transport header (X-OpenRig-Session,
-        // stamped by the MCP server's DaemonClient from its seat env).
-        const res = await client.post(`/api/rigs/${encodeURIComponent(rig.id)}/chat/send`, {
-          body,
-        });
+        // stamped by the MCP server's DaemonClient from its seat env). With no seat, the unknown sender is declared.
+        const note = unknownSenderNote();
+        const res = await client.post(`/api/rigs/${encodeURIComponent(rig.id)}/chat/send`, note
+          ? { body: `${note}\n${body}`, sender: unknownSender } : { body });
         return mapResult(res);
       } catch (err) {
         return caught(err);
@@ -1304,9 +1327,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
       }
       const id = qitemId ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
+      // With no seat, the task goes to its destination as from the unknown sender, with the note at the top of its body.
+      const note = unknownSenderNote();
       try {
         const res = await client.post("/api/queue/create", {
-          qitemId: id, destinationSession: destination, body: lineage?.body ?? body, summary, priority, tier,
+          qitemId: id, destinationSession: destination, body: note ? `${note}\n\n${lineage?.body ?? body}` : lineage?.body ?? body,
+          ...(note ? { sourceSession: unknownSender } : {}), summary, priority, tier,
           tags: access?.external ? tags?.filter((tag) => !OPENRIG_PROVENANCE_TAG.test(tag)) : tags,
           ...(alert ? { humanAlert: true } : {}),
           ...(lineage ? { chainOfRecord: lineage.chainOfRecord } : {}),
@@ -1320,7 +1346,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
         // A create's return, a retry's stored row included, goes through the same external projection as show and list.
         const view = externalView(scope);
-        return mapResult(view && res.status < 400 ? { ...res, data: projectForExternal(res.data, view) } : res, undefined, { structured: true });
+        // An unknown sender has no return address, so it says how to follow the task.
+        const sent = note && res.status < 400 && res.data && typeof res.data === "object" ? { ...res, data: { ...res.data,
+          unknownSender: { label: unknownSender, followUp: `No return address: read this task with rig_queue_show and qitemId ${id}.` } } } : res;
+        return mapResult(view && sent.status < 400 ? { ...sent, data: projectForExternal(sent.data, view) } : sent, undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
         const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id} before retrying, and retry only with that same qitemId.`;
@@ -1562,9 +1591,15 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const seat = seatOf();
         if (!seat) {
-          const none = options.unfilledSeat
-            ? { ok: true, seat: null, caller, unfilledSeat: options.unfilledSeat, message: `This server has no seat: ${unfilledSeatText(options.unfilledSeat)}, so it acts as no seat. Reads work; the team refuses writes that need an author (actor_required). Set OPENRIG_SESSION_NAME where the server is configured to this app's address on the team, such as cursor@my-team.` }
-            : { ok: true, seat: null, caller, message: "This server has no seat: OPENRIG_SESSION_NAME isn't set where it was configured, so its writes aren't attributed to a seat." };
+          const why = options.unfilledSeat ? unfilledSeatText(options.unfilledSeat) : "OPENRIG_SESSION_NAME isn't set where it was configured";
+          const message = `This server has no seat: ${why}, so it acts as no seat and never as another seat. Reads work. `
+            + `Messages (rig_send), new tasks (rig_queue_create) and chat go through as the unknown sender ${unknownSender}, each `
+            + "with a note saying so: there's no return address, so follow a task by its qitemId with rig_queue_show. "
+            + "Claiming, updating, handing off or deciding a task, answering a question asked of a seat, and listing your own "
+            + "items (owned or mine) need this app's seat; reply to the team's questions as a message or a new task naming the "
+            + "question's qitemId. To act as this app's address on the team, such as cursor@my-team, set OPENRIG_SESSION_NAME "
+            + "where the server is configured.";
+          const none = { ok: true, seat: null, caller, unknownSender, ...(options.unfilledSeat ? { unfilledSeat: options.unfilledSeat } : {}), message };
           return { content: [{ type: "text" as const, text: JSON.stringify(none) }], structuredContent: none };
         }
         const params = new URLSearchParams({ sessionName: seat, compact: "1" });

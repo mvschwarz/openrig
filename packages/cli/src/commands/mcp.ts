@@ -34,7 +34,10 @@ Both MCP protocol revisions are served, over stdio and --http alike: clients on 
 server/discover) and clients that open with 2025's initialize handshake.
 
 An empty OPENRIG_SESSION_NAME, or one an app passed on unfilled (such as \${user_config.seat}), means no seat: the
-server acts as none, never as a seat named after the placeholder or one inherited as RIGGED_SESSION_NAME.
+server acts as none, never as a seat named after the placeholder or one inherited as RIGGED_SESSION_NAME. With no
+seat, messages, new tasks and chat still go through as an unknown sender, each with a note on what is known (why there's
+no seat, and how the MCP client describes itself); a task is followed by its qitemId, since there's no return address.
+Claiming, updating, handing off or deciding a task needs a seat.
 
 With --http and no token file, the server stays on loopback and acts as OPENRIG_SESSION_NAME, declared and not
 authenticated, like stdio. Once a grant exists (rig mcp token add), every request needs its bearer credential, loopback
