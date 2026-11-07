@@ -12,6 +12,7 @@ import { CurrentModelReader } from "../src/domain/model-divergence/current-model
 import { parseSqliteUtcMs } from "../src/domain/sqlite-time.js";
 import * as recordReaders from "../src/domain/model-divergence/effective-model-readers.js";
 import { readClaudeModelObservation, readCodexModelObservation } from "../src/domain/model-divergence/effective-model-readers.js";
+import { ModelDivergenceMonitor } from "../src/domain/model-divergence/model-divergence-monitor.js";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { vi.restoreAllMocks(); for (const fn of cleanup.splice(0).reverse()) fn(); });
@@ -109,6 +110,50 @@ it("keeps the monitor's model-only result and metadata readers consistent", asyn
   expect(readClaudeModelObservation(f.path)?.model).toBe("response-model");
   expect(await f.reader.readEffectiveModel({ ...f.input, sessionName: "editor@studio", generation: f.tenure.generationUuid, rigId: f.rig.id, rigName: "studio", pinnedModel: "configured-model" })).toEqual({ ok: true, model: "response-model" });
   expect(readCodexModelObservation(f.path)).toBeNull();
+});
+
+it.each(["claude-code", "codex"])("a resumed %s seat: its predecessor's model is neither observed nor compared until the new occupant's first record", async (runtime) => {
+  const f = fixture(runtime);
+  const seat = { ...f.input, sessionName: "editor@studio", generation: f.tenure.generationUuid, rigId: f.rig.id, rigName: "studio", pinnedModel: "new-model" };
+  const before = new Date(f.boot - 30_000).toISOString(), after = new Date(f.boot + 3_000).toISOString();
+  const record = (timestamp: string, model: string) => runtime === "codex"
+    ? JSON.stringify({ timestamp, type: "turn_context", payload: { model } }) + "\n" : f.claudeRecord(timestamp, model);
+  // The same conversation resumed: the file still ends with the predecessor's last record.
+  writeFileSync(f.path, record(before, "old-model"));
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", model: null, reason: "record-predates-current-occupant" });
+  expect(await f.reader.readEffectiveModel(seat)).toEqual({ ok: false, reason: "no model record from the current occupant yet" });
+  // The new occupant's first record names its own model.
+  appendFileSync(f.path, record(after, "new-model"));
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "observed", model: "new-model", observedAt: after });
+  expect(await f.reader.readEffectiveModel(seat)).toEqual({ ok: true, model: "new-model" });
+});
+
+it("after a resume with a new model, the divergence monitor waits for the new occupant's record: no false divergence, and a real one is still caught", async () => {
+  const f = fixture();
+  const seat = { nodeId: f.node.id, sessionName: "editor@studio", generation: f.tenure.generationUuid, rigId: f.rig.id, rigName: "studio", runtime: "claude-code", pinnedModel: "new-model" };
+  const monitorFor = () => {
+    const proclaimed: Array<{ effectiveModel: string }> = [];
+    const monitor = new ModelDivergenceMonitor({ listPinnedSeats: () => [seat], readEffectiveModel: (s, c) => f.reader.readEffectiveModel(s, c),
+      sendToSession: async () => ({ ok: true }), resolveOrchSeats: () => [], resolveOperatorSeat: () => null, resolveOversightSeat: () => null,
+      recordProclamation: (p) => { proclaimed.push(p); }, warn: () => {} });
+    return { monitor, proclaimed };
+  };
+  // The resumed conversation still ends with the predecessor's record, written on another model before this boot.
+  writeFileSync(f.path, f.claudeRecord(new Date(f.boot - 30_000).toISOString(), "old-model"));
+  const resumed = monitorFor();
+  await resumed.monitor.checkOnce();
+  expect(resumed.proclaimed).toEqual([]);
+  expect(resumed.monitor.pendingSeats()).toEqual([{ key: `${f.node.id}:${f.tenure.generationUuid}`, polls: 1, reason: "no model record from the current occupant yet" }]);
+  appendFileSync(f.path, f.claudeRecord(new Date(f.boot + 3_000).toISOString(), "new-model"));
+  await resumed.monitor.checkOnce();
+  expect(resumed.proclaimed).toEqual([]);
+  expect(resumed.monitor.pendingSeats()).toEqual([]);
+
+  // Control: the new occupant's own record on another model is still a divergence.
+  const real = monitorFor();
+  appendFileSync(f.path, f.claudeRecord(new Date(f.boot + 4_000).toISOString(), "other-model"));
+  await real.monitor.checkOnce();
+  expect(real.proclaimed.map((p) => p.effectiveModel)).toEqual(["other-model"]);
 });
 
 it("serves the same observation through the actual inventory route with configured fields preserved", async () => {

@@ -11,7 +11,6 @@ import {
   type CurrentGenerationDeps, type PiOccupantRecordInput, type PiRecordSelection,
 } from "./current-generation-record.js";
 import {
-  readClaudeEffectiveModel, readCodexEffectiveModel,
   readClaudeModelObservation, readCodexModelObservation, readPiModelObservation,
   type NativeModelObservation, type PiModelObservation,
 } from "./effective-model-readers.js";
@@ -146,8 +145,16 @@ export class CurrentModelReader {
     }
     const selected = await this.select(seat, native);
     if (!selected.ok) return selected;
-    const model = seat.runtime === "claude-code" ? readClaudeEffectiveModel(selected.path) : readCodexEffectiveModel(selected.path);
-    return model ? { ok: true, model } : { ok: false, reason: "no model signal in the bounded current occupant record" };
+    const fact = seat.runtime === "claude-code" ? readClaudeModelObservation(selected.path) : readCodexModelObservation(selected.path);
+    if (!fact) return { ok: false, reason: "no model signal in the bounded current occupant record" };
+    // A resumed conversation keeps its predecessor's records in the same file, so the newest record is this occupant's
+    // model only when it was written after this occupant booted, the rule observe() applies. Until then the read
+    // stays pending: comparing the predecessor's model with the pin would proclaim a divergence that isn't there.
+    const boot = parseSqliteUtcMs(this.deps.sessions.currentOccupantTenure(seat.nodeId)?.bootAt ?? "");
+    const at = fact.observedAt ? Date.parse(fact.observedAt) : NaN;
+    if (!Number.isFinite(boot) || !Number.isFinite(at)) return { ok: false, reason: "the newest model record can't be placed after the current occupant's boot" };
+    if (at <= boot) return { ok: false, reason: "no model record from the current occupant yet" };
+    return { ok: true, model: fact.model };
   }
 
   /** Re-select identity each time; only unchanged file facts are reused, never occupant verdicts. */
