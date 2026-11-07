@@ -534,6 +534,17 @@ it('#2682 P1: a fresh high sample from another conversation, in process or after
    expect(compacts(g)).toHaveLength(1);
   }
  }
+ // A request that never went out was made in no conversation: the attempt takes the sample's conversation, and a request
+ // and map made in the new one are kept, with one request and the /compact.
+ const g=fixture();const d=g.daemon();
+ vi.spyOn(g.transport,'send').mockResolvedValueOnce({ok:false,sent:false,reason:'mid_work'} as any);
+ expect(await d.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'send_failed'});
+ expect(d.getPreparationState(seat)).toMatchObject({status:'sending',delivery:'not_sent'});
+ expect(await d.maybeAutoCompact(other)).toEqual({triggered:true});
+ completeMap(d);
+ expect(await d.maybeAutoCompact(other)).toEqual({triggered:true});
+ expect(prepPrompts(g)).toHaveLength(1);
+ expect(compacts(g)).toHaveLength(1);
 });
 
 it('#2682 P2a: an ended attempt, an idle read, then a stale observation, then a busy seat: no fresh request on the busy poll',async()=>{

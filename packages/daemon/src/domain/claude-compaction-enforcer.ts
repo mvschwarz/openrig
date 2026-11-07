@@ -1207,6 +1207,13 @@ export class ClaudeCompactionEnforcer {
     // the stale-sample drain: the /clear and its low sample may have been missed, and the map is of a context that is gone.
     // A conversation that reads unknown on either side is not a mismatch.
     const armed = this.pendingPreCompactPrep.get(input.sessionName);
+    // A request that never went out was made in no conversation: the attempt takes the sample's, and only a request
+    // delivered (or possibly delivered) in another conversation stops it.
+    if (armed?.mode === "automatic" && armed.status === "sending" && armed.delivery === "not_sent"
+      && !!input.sessionId && armed.sessionId !== input.sessionId) {
+      armed.sessionId = input.sessionId;
+      this.persist(input.sessionName, armed.attemptId, { sessionId: input.sessionId });
+    }
     if (armed?.mode === "automatic" && armed.status === "waiting" && armed.compact === "not_sent" && !armed.compactInFlight
       && !!armed.sessionId && !!input.sessionId && armed.sessionId !== input.sessionId) {
       this.stopPreparation(input.sessionName, "below_threshold_while_prepared", armed);
