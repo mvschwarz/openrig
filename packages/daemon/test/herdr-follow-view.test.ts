@@ -11,6 +11,7 @@ import type { ViewerPane } from "../src/domain/terminal/herdr-viewer.js";
 import { inspectComposerInput } from "../src/domain/session-transport.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
+import { tileAttachArgv078, tileAttachArgv079 } from "../src/domain/terminal/earlier-tile-attach.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -416,4 +417,45 @@ it("keeps a real empty mission workspace enabled through Core with a mission wai
     expect(result.following?.events.join(" ")).toContain("following this mission");
     expect((await f.service.status()).following).toHaveLength(1);
   } finally { await f.service.stop(); }
+});
+
+describe("follow views kept from an earlier release", () => {
+  const quote = (s: string) => "'" + s.replace(/'/g, "'\"'\"'") + "'";
+  it.each([["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
+    "a writable follow view kept from %s still adds and closes tiles, and moves to the current script", async (_, make) => {
+      const f = fixture(); expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
+      // Rewrite the saved canvas and the viewer journal as that release left them.
+      const earlier = (seat: string) => make("/usr/bin/tmux", ["-S", "/tmp/follow-seats.sock"], seat, false);
+      const canvasFile = path.join(path.dirname(path.dirname(f.journal())), "canvas.json");
+      const canvas = JSON.parse(readFileSync(canvasFile, "utf8"));
+      for (const tile of canvas.tiles) { tile.target.attachArgv = earlier(tile.seat); tile.target.paneCommand = tile.target.attachArgv.map(quote).join(" "); }
+      writeFileSync(canvasFile, JSON.stringify(canvas));
+      const journal = JSON.parse(readFileSync(f.journal(), "utf8"));
+      for (const [id, entry] of Object.entries<{ argv: string[]; command: string }>(journal.entries)) {
+        entry.argv = earlier(JSON.parse(id)[1]); entry.command = entry.argv.map(quote).join(" ");
+      }
+      writeFileSync(f.journal(), JSON.stringify(journal));
+
+      expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+      await f.follow(["a", "b", "d"]); f.advance(4000);
+      expect(await f.follow(["a", "b", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "d"] });
+      expect(f.calls.filter(c => c[1] === "close")).toHaveLength(1);
+      const current = task(["a", "b", "d"]).opened;
+      expect(JSON.parse(readFileSync(canvasFile, "utf8")).tiles.map((t: { target: { paneCommand: string } }) => t.target.paneCommand))
+        .toEqual(current.map(t => t.paneCommand));
+    });
+
+  it("holds a kept follow view whose tile script only shares a tile script's opening, and leaves its saved tiles", async () => {
+    const f = fixture(); expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
+    const canvasFile = path.join(path.dirname(path.dirname(f.journal())), "canvas.json");
+    const canvas = JSON.parse(readFileSync(canvasFile, "utf8"));
+    const tile = canvas.tiles[0];
+    tile.target.attachArgv[2] = 'target=$1; shift; printf "%s\\n" "custom viewer";';
+    tile.target.paneCommand = tile.target.attachArgv.map(quote).join(" ");
+    writeFileSync(canvasFile, JSON.stringify(canvas));
+    const before = f.calls.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, following: { state: "retained" }, error: expect.stringContaining("current attachment differs") });
+    expect(f.calls.slice(before).some(c => ["create", "split", "run", "close"].includes(c[1]!))).toBe(false);
+    expect(JSON.parse(readFileSync(canvasFile, "utf8")).tiles[0].target).toEqual(tile.target);
+  });
 });
