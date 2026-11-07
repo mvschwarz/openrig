@@ -1,0 +1,144 @@
+{
+ "origem": "R1 do hillclimb do daemon (T-003453), harness a1719fe6a, golden r1-mainC.json (main c271299f5) e r1-D1.json (D1 a2459bfd3); os passos 48-53 do cenário overlap, sem mudança de valor",
+ "passos": [
+  "48-overlap-setup",
+  "49-overlap-window",
+  "50-overlap-show-after",
+  "52-overlap-findings",
+  "53-overlap-healthz"
+ ],
+ "main": {
+  "meta": {
+   "sha": "c271299f5",
+   "sweep_interval_s": 20,
+   "unclaimed_age_min": 1,
+   "wake_after_s": 20,
+   "overlap_delay_s": 26,
+   "env": [
+    "OPENRIG_STREAM_INTAKE=off",
+    "OPENRIG_TMUX_CONTROL=1",
+    "OPENRIG_QUEUE_STUCK_SWEEP_INTERVAL_SECONDS=20",
+    "OPENRIG_QUEUE_STUCK_SWEEP_UNCLAIMED_AGE_MINUTES=1"
+   ]
+  },
+  "passos": {
+   "48-overlap-setup": {
+    "sweep_before_setup": true,
+    "sweep_completed_during_setup": false
+   },
+   "49-overlap-window": {
+    "delivering_sweep_recorded_after_return": true,
+    "delivery_rc": "0",
+    "delivery_returned": true,
+    "delivery_started": true,
+    "sweep_completed_during_delivery": true
+   },
+   "50-overlap-show-after": {
+    "state": "pending",
+    "lastNudgeResult": "verified",
+    "destinationClass": "pane-bound",
+    "pickup": {
+     "state": "unclaimed"
+    },
+    "nextBackstop": {
+     "mechanism": "queue-recovery:resolved",
+     "recovery_state": "done"
+    }
+   },
+   "52-overlap-findings": {
+    "count": 1,
+    "items": [
+     {
+      "closureReason": "no-follow-on",
+      "destinationSession": "lead-tech@fabrica",
+      "state": "done",
+      "summary_kind": "undelivered-wake"
+     }
+    ],
+    "load_buffer_calls_for_row": 1
+   },
+   "53-overlap-healthz": {
+    "stuckSweep": {
+     "consecutiveFailures": 0,
+     "fields": [
+      "consecutiveFailures",
+      "findingsRouted",
+      "lastError",
+      "lastOutcome",
+      "lastSweepAt"
+     ],
+     "findingsRouted": 468,
+     "lastError": null,
+     "lastOutcome": "findings"
+    }
+   }
+  }
+ },
+ "d1": {
+  "meta": {
+   "sha": "a2459bfd3",
+   "sweep_interval_s": 20,
+   "unclaimed_age_min": 1,
+   "wake_after_s": 20,
+   "overlap_delay_s": 26,
+   "env": [
+    "OPENRIG_STREAM_INTAKE=off",
+    "OPENRIG_TMUX_CONTROL=1",
+    "OPENRIG_QUEUE_STUCK_SWEEP_INTERVAL_SECONDS=20",
+    "OPENRIG_QUEUE_STUCK_SWEEP_UNCLAIMED_AGE_MINUTES=1"
+   ]
+  },
+  "passos": {
+   "48-overlap-setup": {
+    "sweep_before_setup": true,
+    "sweep_completed_during_setup": false
+   },
+   "49-overlap-window": {
+    "delivering_sweep_recorded_after_return": true,
+    "delivery_rc": "0",
+    "delivery_returned": true,
+    "delivery_started": true,
+    "sweep_completed_during_delivery": false
+   },
+   "50-overlap-show-after": {
+    "state": "pending",
+    "lastNudgeResult": "verified",
+    "destinationClass": "pane-bound",
+    "pickup": {
+     "state": "unclaimed"
+    },
+    "nextBackstop": {
+     "mechanism": "queue-recovery:delegated",
+     "recovery_state": "pending"
+    }
+   },
+   "52-overlap-findings": {
+    "count": 1,
+    "items": [
+     {
+      "closureReason": null,
+      "destinationSession": "lead-tech@fabrica",
+      "state": "pending",
+      "summary_kind": "unclaimed-obligation"
+     }
+    ],
+    "load_buffer_calls_for_row": 1
+   },
+   "53-overlap-healthz": {
+    "stuckSweep": {
+     "consecutiveFailures": 0,
+     "fields": [
+      "consecutiveFailures",
+      "findingsRouted",
+      "lastError",
+      "lastOutcome",
+      "lastSweepAt"
+     ],
+     "findingsRouted": 439,
+     "lastError": null,
+     "lastOutcome": "findings"
+    }
+   }
+  }
+ }
+}
