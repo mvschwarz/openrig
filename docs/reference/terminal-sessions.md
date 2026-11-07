@@ -222,11 +222,22 @@ after a grace period; the agent and its conversation keep running. The
 explanation strip names joins, departures, unavailable terminals and limits.
 The first workspace on an empty provider may become focused.
 
-This increment supports the qualified **Linux Herdr 0.9.5/protocol 22**
-endpoint. Other platforms/providers and other selector kinds retain ordinary
-one-shot open. Use `--provider herdr --json` to operate without opening a
-desktop window, and `--session <name>` to select that endpoint. Opening a tile
-can change the agent's terminal size; `ignore-size` does not guarantee isolation.
+Live following supports **Linux and macOS with Herdr protocol 22**. Admission
+checks the live protocol and selected socket, then confirms each pane's IDs,
+focus state and foreground attachment. A shell startup `cd` does not change
+pane identity; filesystem aliases of the same existing path are accepted.
+The detected Herdr version remains visible in provider status. The native
+qualification version is 0.9.5; a matching release label alone is not proof of
+compatibility, and future protocol numbers are not assumed compatible.
+
+If a new view's platform or protocol cannot support following, Core opens a
+labelled **snapshot** instead and disables automatic following. It will not
+track later owner changes. A failed endpoint/identity read or an existing
+canvas stays unconfirmed, preserving it instead of creating a fallback view.
+Other providers and selector kinds retain ordinary one-shot open. Use
+`--provider herdr --json` to operate without opening a desktop window, and
+`--session <name>` to select that endpoint. Opening a tile can change the
+agent's terminal size; `ignore-size` does not guarantee isolation.
 
 ```bash
 rig terminal open qitem:example --follow --provider herdr --json
@@ -284,7 +295,7 @@ operation uses the daemon's existing terminal bearer and browser boundary;
 a bridge must retain its signed-in owner, Origin and expiry controls. It does
 not grant authority based on task membership or accept a caller terminal ID.
 
-On the qualified Linux Herdr 0.9.5/protocol 22 endpoint, it creates one viewer
+On a supported Linux or macOS Herdr protocol-22 endpoint, it creates one viewer
 or reuses an owned, verified `{workspaceId,paneId,terminalId,readOnly}` mapping.
 A repeated/concurrent request does not create another viewer. A lost create
 reply is reconciled before starting anything else; a lost run reply is checked

@@ -56,6 +56,12 @@ export class HerdrFollowView {
       following: { id, enabled: controls.enabled, state: status, maxTiles: state?.policy.maxTiles ?? DEFAULT_FOLLOW_POLICY.maxTiles,
         tiles: state?.tiles.map(({ key, seat, departedAt }) => ({ key, seat, departedAt })) ?? [], events: state?.events ?? [], overflow: [], ...(nextAt ? { nextAt } : {}) },
     });
+    const unsupported = (reason: string): OpenViewResult => {
+      if (state) throw new Error(`${reason} Keeping the existing canvas.`);
+      const answer = result(false, "disabled", reason);
+      answer.code = "follow_unsupported"; answer.following!.enabled = false;
+      return answer;
+    };
     const save = () => {
       mkdirSync(root, { recursive: true, mode: 0o700 });
       const temporary = `${file}.${randomUUID()}.tmp`;
@@ -87,11 +93,12 @@ export class HerdrFollowView {
         if (state) { notice(message); save(); }
         return result(false, "retained", message);
       }
-      if ((this.deps.platform ?? process.platform) !== "linux") throw new Error("Following is qualified on Linux Herdr 0.9.5/protocol 22 only.");
+      if (!["linux", "darwin"].includes(this.deps.platform ?? process.platform)) return unsupported("Live following supports Linux and macOS with Herdr protocol 22.");
       const status = body(await this.deps.run(["status", "server", "--json"]));
-      if (status.version !== "0.9.5" || status.protocol !== 22 || status.running !== true || status.socket !== this.deps.socketPath) {
-        throw new Error("The qualified provider endpoint is unconfirmed; keeping the previous view.");
+      if (status.running !== true || !sameHerdrPath(status.socket, this.deps.socketPath)) {
+        throw new Error("Herdr protocol 22 or the selected endpoint is unconfirmed; keeping the previous view.");
       }
+      if (status.protocol !== 22) return unsupported("Live following requires Herdr protocol 22 and confirmed pane/process replies.");
       if (!await stillCurrent()) throw new Error("Task membership changed before reconciliation; keeping the previous view.");
       if (!state) {
         state = { version: 1, cwd: path.join(root, "strip"), phase: "creating", policy: { ...DEFAULT_FOLLOW_POLICY, ...(view.task.kind === "slice" || view.task.kind === "mission" ? { maxTiles: 4 } : {}), pins: [], suppressed: {} },

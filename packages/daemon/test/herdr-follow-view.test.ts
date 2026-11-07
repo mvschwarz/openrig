@@ -23,19 +23,20 @@ export function task(seats: string[], complete = true): ComposedView {
     members: seats.map(seat => ({ key: { hostId: "self", nodeId: seat }, seat, obligations: [{ qitemId: seat, state: "in-progress" }],
       availability: "available", viewerStatus: "not-provisioned" })) } };
 }
-function fixture() {
+function fixture(platform: NodeJS.Platform = "linux", status = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "following-test-")); roots.push(root);
   const panes = new Map<string, ViewerPane & { argv: string[] }>();
   const calls: string[][] = [], rpc: Array<{ method: string; params: unknown }> = [];
   const inputs = new Map<string, "empty" | "text" | "unknown">();
   const frames = new Map<string, ComposerSnapshot | null>();
   let transform = (view: ComposedView) => view;
+  let reportedCwd: string | null | undefined;
   let lateFocus: { seat: string; reads: number } | undefined;
   let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false, failedViewerRun = false, failedProcessRead = false;
   const run = async (args: string[]) => {
     calls.push(args);
     const command = args.slice(0, 2).join(" ");
-    if (command === "status server") return JSON.stringify({ version: "0.9.5", protocol: 22, running: true, socket });
+    if (command === "status server") return JSON.stringify({ version: "0.9.5", protocol: 22, running: true, socket, ...status });
     if (readsFailed) throw new Error("provider read failed");
     if (command === "workspace create" || command === "pane split") {
       const id = `p${calls.length}`;
@@ -52,7 +53,7 @@ function fixture() {
     if (command === "pane list") return JSON.stringify({ result: { panes: [...panes.values()].filter(p => !hideViewers || !p.cwd.includes("/viewers/")) } });
     if (command === "pane get") {
       const selected = panes.get(args[2]!); if (!selected) throw new Error("missing pane");
-      return JSON.stringify({ result: { pane: selected } });
+      return JSON.stringify({ result: { pane: { ...selected, cwd: reportedCwd === null ? undefined : reportedCwd ?? selected.cwd } } });
     }
     if (command === "pane process-info" && failedProcessRead && panes.get(args[3]!)!.cwd.includes("/viewers/")) { failedProcessRead = false; throw new Error("first viewer inspection failed"); }
     if (command === "pane process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: panes.get(args[3]!)!.argv }] } } });
@@ -76,7 +77,7 @@ function fixture() {
     if (command === "pane report-metadata") return "";
     throw new Error(`Unexpected operation ${args}`);
   };
-  const create = () => new HerdrFollowView({ root, socketPath: socket, platform: "linux", run,
+  const create = () => new HerdrFollowView({ root, socketPath: socket, platform, run,
     now: () => clock, input: async target => {
       if (lateFocus?.seat === target.seat && ++lateFocus.reads === 2) {
         for (const selected of panes.values()) selected.focused = selected.argv.at(-1) === `$${target.seat}`;
@@ -99,6 +100,7 @@ function fixture() {
   };
   const exitViewer = (seat: string) => { [...panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!.argv = ["/bin/bash"]; };
   return { follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
+    reportCwd: (cwd: string | null) => { reportedCwd = cwd; },
     failViewerRun: () => { failedViewerRun = true; },
     failProcessRead: () => { failedProcessRead = true; },
     confirmViewer: (seat: string) => { const entry = JSON.parse(readFileSync(journal(), "utf8")).entries[JSON.stringify(["self", seat])]; panes.get(entry.pane.pane_id)!.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`]; },
@@ -111,6 +113,29 @@ function fixture() {
 }
 
 describe("stable task-following workspace", () => {
+  it("refuses a new incompatible protocol before effects but keeps an existing canvas on a protocol change", async () => {
+    const unsupported = fixture("linux", { protocol: 23 });
+    expect(await unsupported.follow()).toMatchObject({ ok: false, code: "follow_unsupported", following: { enabled: false } });
+    expect(unsupported.calls.some(args => ["create", "split", "run", "close"].includes(args[1]!))).toBe(false);
+    const status = { protocol: 22 }, f = fixture("darwin", status);
+    expect(await f.follow(["a"])).toMatchObject({ ok: true }); status.protocol = 23;
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: false, code: "follow_unconfirmed", opened: ["a"] });
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
+  });
+
+  it.each([null, "/home/person"])("uses created IDs when the first live reply has cwd %s", async cwd => {
+    const f = fixture("darwin"); f.reportCwd(cwd);
+    expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+  });
+
+  it.each(["linux", "darwin"] as const)("follows membership changes on %s with protocol 22 independent of release label", async platform => {
+    const f = fixture(platform, { version: "0.9.6" });
+    expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
+  });
+
   it("keeps a known strip pane through a directory change and owner handoff", async () => {
     const f = fixture();
     expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });
@@ -384,8 +409,9 @@ describe("slice follower policy", () => {
 });
 
 
-function scopeCoreFixture(kind: "qitem" | "slice" | "mission") {
-  const f = fixture(), component = f.create();
+function scopeCoreFixture(kind: "qitem" | "slice" | "mission", protocol = 22, loseSnapshotReply = false) {
+  const f = fixture("darwin", { protocol }), component = f.create();
+  const snapshots: ComposedView[] = [];
   let failed = false;
   const callbacks = new Set<Parameters<EventBus["subscribe"]>[0]>();
   const snapshot = () => ({ task: { kind, id: "empty", ...(kind === "qitem" ? { qitemId: "empty" } : {}),
@@ -393,15 +419,39 @@ function scopeCoreFixture(kind: "qitem" | "slice" | "mission") {
   const service = new TerminalService({ followingStatePath: path.join(roots.at(-1)!, "core-selectors.json"),
     eventBus: { subscribe: callback => { callbacks.add(callback); return () => { callbacks.delete(callback); }; } },
     resolveProvider: () => ({ name: "herdr", status: async () => ({ provider: "herdr", available: true, capabilities: {} }),
-      liveness: async () => ({ alive: true }), openView: async () => { throw new Error("No whole-view relayout"); },
+      liveness: async () => ({ alive: true }), openView: async view => {
+        if (protocol === 22) throw new Error("No whole-view relayout");
+        snapshots.push(view);
+        if (loseSnapshotReply) throw new Error("Lost snapshot reply");
+        return { provider: "herdr", ok: true, opened: [], absent: [], degraded: [], pages: 0 };
+      },
       followView: component.follow.bind(component) }),
     viewsStore: { list: () => [], get: () => null }, listRigSeats: () => null, listPodSeats: () => null,
     listRigNames: () => [], resolveHost: () => null, hasSession: () => true,
     resolveTaskView: snapshot, resolveScopeView: () => failed ? { code: "scope_not_found", error: "Slice was renamed; reopen the view under its current key." } : snapshot() });
-  return { ...f, service, selector: `${kind}:empty`, fail: () => {
+  return { ...f, service, snapshots, selector: `${kind}:empty`, fail: () => {
     failed = true; for (const callback of callbacks) callback({ type: "queue.updated" } as Parameters<typeof callback>[0]);
   } };
 }
+it("retires following before a snapshot with an uncertain reply", async () => {
+  const f = scopeCoreFixture("slice", 23, true);
+  try {
+    await expect(f.service.followView({ view: f.selector, provider: "herdr", enabled: true })).rejects.toThrow("Lost snapshot reply");
+    expect((await f.service.status()).following).toEqual([]);
+    f.fail(); await new Promise(resolve => setTimeout(resolve, 150));
+    expect(f.snapshots).toHaveLength(1);
+  } finally { await f.service.stop(); }
+});
+it("opens an unsupported initial follower as a labelled snapshot and stops following", async () => {
+  const f = scopeCoreFixture("slice", 23);
+  try {
+    const result = await f.service.followView({ view: f.selector, provider: "herdr", enabled: true });
+    expect(result).toMatchObject({ ok: true, viewDescriptor: { kind: "fixed" }, following: { enabled: false, state: "disabled" } });
+    expect(result.notes?.join(" ")).toContain("Snapshot");
+    expect(f.snapshots).toHaveLength(1); expect(f.snapshots[0]?.spaceLabel).toContain("Snapshot");
+    expect((await f.service.status()).following).toEqual([]);
+  } finally { await f.service.stop(); }
+});
 it.each(["slice", "qitem"] as const)("reports a real empty %s provider result consistently through Core", async kind => {
   const f = scopeCoreFixture(kind);
   try {

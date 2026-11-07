@@ -51,7 +51,7 @@ function fixture() {
       ? ["/usr/bin/tmux", "-S", "/tmp/own-tmux.sock", "attach", ...attachFlags, "-t", "$1"] : ["/bin/bash"] }] } } });
     throw new Error(`Unexpected provider operation ${args}`);
   };
-  const viewer = (viewerRoot = root) => new HerdrViewer(socket, run, "linux", viewerRoot, inspect);
+  const viewer = (viewerRoot = root, platform: NodeJS.Platform = "linux", status = {}) => new HerdrViewer(socket, async args => args[0] === "status" ? JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket, ...status }) : run(args), platform, viewerRoot, inspect);
   return { root, target, calls, viewer, ids,
     canonicalizeCreateCwd: () => { canonicalCreateCwd = true; },
     lose: (listed: boolean, malformed = false) => { gone = true; enumerable = listed; unreadable = malformed; },
@@ -62,6 +62,20 @@ function fixture() {
 }
 
 describe("owned Herdr viewer", () => {
+  it.each(["linux", "darwin"] as const)("admits protocol 22 on %s independently of the release label", async platform => {
+    const f = fixture();
+    expect(await f.viewer(f.root, platform, { version: "0.9.6" }).ensure(key, f.target)).toMatchObject({ ok: true });
+    expect(await f.viewer(f.root, platform, { protocol: 23 }).lookup(key, f.target)).toMatchObject({ ok: false });
+  });
+  it("accepts an existing canonical endpoint alias", async () => {
+    const f = fixture(), endpoint = path.join(f.root, "endpoint.sock"), alias = path.join(f.root, "alias.sock");
+    writeFileSync(endpoint, ""); symlinkSync(endpoint, alias);
+    const run: HerdrViewerRun = async args => args[0] === "status"
+      ? JSON.stringify({ running: true, protocol: 22, version: "0.9.5", socket: endpoint })
+      : JSON.stringify({ result: { workspaces: [] } });
+    const v = new HerdrViewer(alias, run, "darwin", f.root, async () => ({ sessionId: "$1", nodeId: key.nodeId }));
+    expect(await v.lookup(key, f.target)).toMatchObject({ code: "viewer_not_provisioned" });
+  });
   it("keeps a known viewer after its cwd changes and still checks its process", async () => {
     const f = fixture(), v = f.viewer();
     expect(await v.ensure(key, f.target)).toMatchObject({ ok: true, created: true });
@@ -188,9 +202,9 @@ describe("owned Herdr viewer", () => {
     expect(await wrong.ensure(key, f.target)).toMatchObject({ ok: false });
     expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
   });
-  it("supports only the qualified endpoint/version/platform", async () => {
+  it("refuses unsupported platforms and different endpoints", async () => {
     const f = fixture();
-    expect(await new HerdrViewer(socket, async () => { throw new Error("should not run"); }, "darwin", f.root).ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unsupported" });
+    expect(await new HerdrViewer(socket, async () => { throw new Error("should not run"); }, "win32", f.root).ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unsupported" });
     expect(await new HerdrViewer(socket, async () => JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket: "/other.sock" }), "linux", f.root).ensure(key, f.target)).toMatchObject({ ok: false });
   });
   it("sizes writable initial/fallback/replacement attaches and recovery, and preserves read-only", () => {

@@ -17,7 +17,7 @@ export type HerdrViewerRun = (argv: string[]) => Promise<string>;
 /** Only the caller which has not dispatched a create may assert this. */
 export class ViewerCreateNotDispatchedError extends Error {}
 export type CreateViewerPane = (cwd: string, label: string) => Promise<string>;
-export interface ViewerPane { workspace_id: string; pane_id: string; terminal_id: string; cwd: string; focused?: boolean }
+export interface ViewerPane { workspace_id: string; pane_id: string; terminal_id: string; cwd?: string | null; focused?: boolean }
 type Pane = ViewerPane;
 interface Entry {
   cwd: string; label: string; command: string; argv: string[]; readOnly: boolean;
@@ -57,10 +57,11 @@ function body(raw: string): Record<string, unknown> {
 function pane(raw: unknown): Pane | null {
   if (!raw || typeof raw !== "object") return null;
   const p = raw as Record<string, unknown>;
-  return ["workspace_id", "pane_id", "terminal_id", "cwd"].every(k => typeof p[k] === "string" && p[k] !== "") ? p as unknown as Pane : null;
+  return ["workspace_id", "pane_id", "terminal_id"].every(k => typeof p[k] === "string" && p[k] !== "") ? p as unknown as Pane : null;
 }
 
-export function sameHerdrPath(left: string, right: string): boolean {
+export function sameHerdrPath(left: unknown, right: string): boolean {
+  if (typeof left !== "string" || !left) return false;
   if (left === right) return true;
   try { return realpathSync(left) === realpathSync(right); } catch { return false; }
 }
@@ -114,10 +115,10 @@ export class HerdrViewer {
     let entry: Entry | undefined;
     const unconfirmed = (error: string): ViewerResult => ({ ok: false, code: "viewer_unconfirmed", error, ...(entry ? { phase: entry.phase } : {}) });
     try {
-      if (this.platform !== "linux") return { ok: false, code: "viewer_unsupported", error: "Ensure-viewer is qualified on Linux Herdr 0.9.5/protocol 22 only." };
+      if (this.platform !== "linux" && this.platform !== "darwin") return { ok: false, code: "viewer_unsupported", error: "Ensure-viewer supports Linux and macOS with Herdr protocol 22." };
       const status = body(await this.run(["status", "server", "--json"]));
-      if (status.version !== "0.9.5" || status.protocol !== 22 || status.running !== true || status.socket !== this.socketPath) {
-        return unconfirmed("The qualified Herdr version/protocol or selected socket was not confirmed.");
+      if (status.protocol !== 22 || status.running !== true || !sameHerdrPath(status.socket, this.socketPath)) {
+        return unconfirmed("Herdr protocol 22 and the selected socket must be confirmed; pane and process replies are checked separately.");
       }
       if (provision && !await stillCurrent()) return unconfirmed("Task membership changed while waiting to provision; refresh its preview.");
       if (!target.attachArgv) return unconfirmed("Only verified local tmux bindings support ensure-viewer.");
@@ -245,8 +246,8 @@ export class HerdrViewer {
     const result = this.pending.then(async () => {
       try {
         const status = body(await this.run(["status", "server", "--json"]));
-        if (this.platform !== "linux" || status.version !== "0.9.5" || status.protocol !== 22
-          || status.running !== true || status.socket !== this.socketPath) return false;
+        if ((this.platform !== "linux" && this.platform !== "darwin") || status.protocol !== 22
+          || status.running !== true || !sameHerdrPath(status.socket, this.socketPath)) return false;
         const endpoint = createHash("sha256").update(this.socketPath).digest("hex");
         const file = path.join(this.root, `${endpoint}.json`);
         const journal = JSON.parse(readFileSync(file, "utf8")) as Journal;
