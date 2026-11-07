@@ -1318,7 +1318,9 @@ export class QueueRepository {
       // Draft-aware wakes remain pending until the transport owns their bounded
       // retry. Manual retention is deliberately never drained.
       const draftTarget = this.transport?.draftAwareTarget?.(input.toSession);
-      if (draftTarget) this.outbox.assertRetentionCapacity(draftTarget.nodeId, frozenEnvelope);
+      // The same rule as a held message (#2430): the sender's own held messages there count as room, since this wake
+      // coalesces them if it settles as held.
+      if (draftTarget) this.outbox.assertRetentionCapacity(draftTarget.nodeId, frozenEnvelope, input.fromSession, [input.outboxId]);
       this.outbox.record(record);
       const binding = this.transport?.deliveryTarget?.(input.toSession);
       if (binding) this.db.prepare("UPDATE outbox_entries SET guard_binding=? WHERE outbox_id=? AND guard_binding IS NULL")

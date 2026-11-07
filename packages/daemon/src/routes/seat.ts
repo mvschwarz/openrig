@@ -113,7 +113,7 @@ seatRoutes.get("/status/:seatRef", (c) => {
     const nodeId = rigRepo.getRig(result.status.rig_id)?.nodes.find((node) => node.logicalId === result.status.logical_id)?.id;
     const runtimeSwitch = nodeId ? runtimeSwitchSummary(rigRepo.db, { nodeId }) : null;
     return c.json({ ...result.status, ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(guard && target ? { typingGuard: {
-      ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldForNode(target.nodeId, 1).total,
+      ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
     } } : {}) });
   }
 
@@ -137,7 +137,7 @@ seatRoutes.get("/status/node/:nodeId", (c) => {
   return c.json({ ...result.status, node_id: nodeId, contract: "seat-node.v1",
     supported_actions: ["set-permissions", "set-policy", "set-model", "set-effort"],
     ...(runtimeSwitch ? { runtimeSwitch } : {}),
-    ...(guard ? { typingGuard: { ...guard.preference(nodeId), heldCount: new OutboxHandler(guard.db).heldForNode(nodeId, 1).total } } : {}) });
+    ...(guard ? { typingGuard: { ...guard.preference(nodeId), heldCount: new OutboxHandler(guard.db).heldCount(nodeId) } } : {}) });
 });
 
 /** The handover's dependencies, which a runtime switch's successor launch shares. */
