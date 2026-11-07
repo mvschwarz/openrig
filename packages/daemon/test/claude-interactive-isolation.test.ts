@@ -8,6 +8,7 @@ import {describe,it,expect} from 'vitest';
 import {TmuxAdapter,type TmuxFileOps} from '../src/adapters/tmux.js';
 const run=promisify(execFile);
 const q=(v:string)=>"'"+v.replaceAll("'","'\"'\"'")+"'";
+/** Poll for readiness for six seconds between attempts; callers must bound any asynchronous probe. */
 async function until(f:()=>boolean|Promise<boolean>){for(const deadline=performance.now()+6000;performance.now()<deadline;){if(await f())return;await new Promise(r=>setTimeout(r,25));}throw Error('private pane did not produce receipt');}
 let hasTmux=false;
 try{execFileSync('tmux',['-V'],{stdio:'ignore'});hasTmux=true;}catch{/* optional dependency */}
