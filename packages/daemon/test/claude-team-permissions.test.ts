@@ -182,7 +182,8 @@ describe("Claude team command permissions", () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-hook 'path "));
     try {
       const copy = join(dir, "hook.cjs"); copyFileSync(asset, copy);
-      const encoded = Buffer.from(JSON.stringify(policy)).toString("base64");
+      // A small policy exercises decoding without triggering host limits on opaque arguments.
+      const encoded = Buffer.from(JSON.stringify({ allow: ["Bash(rig:*)"], ask: ["Bash(rig down:*)"] })).toString("base64");
       const result = spawnSync("/bin/sh", ["-c", [process.execPath, copy, encoded].map(shellQuote).join(" ")], {
         input: JSON.stringify({ tool_name: "Bash", tool_input: { command: "rig down --help" } }), encoding: "utf8",
       });
