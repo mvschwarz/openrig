@@ -44,3 +44,11 @@ export function tileAttachArgv(
   ].join(" ");
   return ["/bin/sh", "-c", script, "openrig-tile", session, tmux, ...server];
 }
+
+/** Whether a kept tile attaches the same seat as the current one. An upgrade can change only OpenRig's own script
+ * (argv[2]), so every other argument must match and the kept script must be a tile script. Callers also compare the
+ * read-only intent they recorded. A kept argv that differs anywhere else is a different attachment. */
+export function sameTileAttachment(kept: readonly string[], current: readonly string[]): boolean {
+  if (kept.length !== current.length || kept.length < 5 || kept[0] !== "/bin/sh" || kept[1] !== "-c" || kept[3] !== "openrig-tile") return false;
+  return kept[2]!.startsWith("target=$1; shift;") && kept.every((word, i) => i === 2 || word === current[i]);
+}
