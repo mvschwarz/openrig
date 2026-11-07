@@ -11,7 +11,8 @@
 // at next read; the cache is never the source of truth.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import { parse as parseYaml } from "yaml";
@@ -54,6 +55,14 @@ function detectSpecColumn(db: Database.Database, columnName: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** #2607: whether two source paths name one file: the same string, or the same real path (a symlinked or relative form
+ *  of it). A path that no longer exists compares by its resolved form. */
+function sameSourceFile(a: string, b: string): boolean {
+  if (a === b) return true;
+  const real = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
+  return real(a) === real(b);
 }
 
 export class WorkflowSpecError extends Error {
@@ -564,6 +573,7 @@ export const RETAINED_STATUS = "retained";
 export class WorkflowSpecCache {
   private readonly hasSpecJsonColumn: boolean;
   private readonly hasDiagnosticColumns: boolean;
+  private readonly hasInstanceSpecColumns: boolean;
 
   constructor(
     private readonly db: Database.Database,
@@ -571,6 +581,33 @@ export class WorkflowSpecCache {
   ) {
     this.hasSpecJsonColumn = detectSpecColumn(db, "spec_json");
     this.hasDiagnosticColumns = detectSpecColumn(db, "status") && detectSpecColumn(db, "error_message");
+    try {
+      this.hasInstanceSpecColumns = db.prepare("PRAGMA table_info(workflow_instances)").all()
+        .some((row) => (row as { name?: string }).name === "spec_source_path");
+    } catch {
+      this.hasInstanceSpecColumns = false;
+    }
+  }
+
+  /**
+   * #2607: before another file takes this id and version's row, keep the unfinished runs started from the row's file on
+   * what that file gave them. A file read at a new path with the same bytes after its old path is gone is taken as moved,
+   * and its runs follow it there. Any other file leaves them the replaced row's spec, the newest their own file gave
+   * them (a file moved and edited in one step is treated that way too).
+   */
+  private keepRunsOnTheirFile(existing: SpecRow, sourcePath: string, sourceHash: string): void {
+    if (!this.hasInstanceSpecColumns || !existing.version || sameSourceFile(existing.source_path, sourcePath)) return;
+    const runs = (this.db
+      .prepare(`SELECT instance_id, spec_source_path FROM workflow_instances WHERE workflow_name = ? AND workflow_version = ? AND spec_source_path IS NOT NULL AND status IN ('active', 'waiting', 'failed')`)
+      .all(existing.name, existing.version) as Array<{ instance_id: string; spec_source_path: string }>)
+      .filter((run) => sameSourceFile(run.spec_source_path, existing.source_path));
+    const moved = !existsSync(existing.source_path) && existing.source_hash === sourceHash;
+    if (runs.length === 0 || (!moved && !existing.spec_json)) return;
+    const update = this.db.prepare(`UPDATE workflow_instances SET ${moved ? "spec_source_path" : "spec_json"} = ? WHERE instance_id = ?`);
+    for (const run of runs) update.run(moved ? sourcePath : existing.spec_json, run.instance_id);
+    console.warn(moved
+      ? `workflow spec ${existing.name}@${existing.version} moved from ${existing.source_path} to ${sourcePath}: ${runs.length} unfinished run(s) follow it there.`
+      : `workflow spec ${existing.name}@${existing.version} from ${existing.source_path} was replaced by ${sourcePath}: ${runs.length} unfinished run(s) started from the first file keep the spec it last gave them.`);
   }
 
   /**
@@ -643,6 +680,7 @@ export class WorkflowSpecCache {
     const stepsJson = JSON.stringify(spec.steps);
     const coordinationTerminalTurnRule = spec.coordination_terminal_turn_rule ?? "hot_potato";
     if (existing) {
+      this.keepRunsOnTheirFile(existing, sourcePath, sourceHash);
       // Update in place (same name+version, content changed).
       const specJsonSet = this.hasSpecJsonColumn ? ", spec_json = ?" : "";
       const diagnosticSet = this.hasDiagnosticColumns ? ", status = 'valid', error_message = NULL" : "";
@@ -805,7 +843,7 @@ export class WorkflowSpecCache {
   getForInstance(instance: { workflowName: string; workflowVersion: string; boundRig: string | null; startedSpec?: StartedWorkflowSpec | null }): WorkflowSpecRow | null {
     const row = this.getByNameVersion(instance.workflowName, instance.workflowVersion);
     const started = instance.startedSpec;
-    if (started && (!row || row.sourcePath !== started.sourcePath)) {
+    if (started && (!row || !sameSourceFile(row.sourcePath, started.sourcePath))) {
       const spec = started.spec;
       return bindRowToRig({
         specId: row?.specId ?? "", name: instance.workflowName, version: instance.workflowVersion,

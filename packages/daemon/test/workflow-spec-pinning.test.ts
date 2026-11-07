@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -11,6 +11,10 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { WorkflowSpecCache } from "../src/domain/workflow-spec-cache.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { runWorkflowBootSweep } from "../src/domain/workflow-boot-sweep.js";
+import { makeEnsureStuckExceptionItem } from "../src/domain/workflow-exception-escalation.js";
+import { WORKFLOW_STEP_STUCK_THRESHOLD_SECONDS } from "../src/domain/workflow-deadline.js";
 
 // #2607: one rig runs several same-shaped feature pods, and each pod's copy of a workflow names its own seats under
 // the same workflow id and version. Starting the second pod's run must not move the first pod's run into it.
@@ -28,6 +32,11 @@ const featureSpec = (pod: string, builder = `${pod}-builder`) => `workflow:
     builder:
       preferred_targets:
         - ${builder}@rig
+    lead:
+      preferred_targets:
+        - ${pod}-lead@rig
+  exception_routing:
+    orchestrator_role: lead
   steps:
     - id: plan
       actor_role: planner
@@ -37,19 +46,22 @@ const featureSpec = (pod: string, builder = `${pod}-builder`) => `workflow:
       actor_role: builder
       allowed_exits:
         - done
+        - failed
 `;
 
 describe("#2607: a running workflow keeps the roles it started with", () => {
   let db: Database.Database;
+  let bus: EventBus;
+  let queueRepo: QueueRepository;
   let runtime: WorkflowRuntime;
   let tmp: string;
 
   beforeEach(() => {
     db = createDb();
     migrate(db, ALL_MIGRATIONS);
-    const bus = new EventBus(db);
+    bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
-    const queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
     queueRepo.attachOutbox(new OutboxHandler(db));
     runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
     tmp = mkdtempSync(join(tmpdir(), "wf-pinning-"));
@@ -65,6 +77,11 @@ describe("#2607: a running workflow keeps the roles it started with", () => {
     writeFileSync(path, yaml);
     return path;
   };
+  const start = (specPath: string) => runtime.instantiate({ specPath, rootObjective: "a feature", createdBySession: "orch@rig" });
+  /** Hand the run's plan step off and say who gets the build step. */
+  const builderOf = async (run: Awaited<ReturnType<typeof start>>, by = runtime) => (await by.project({
+    instanceId: run.instance.instanceId, currentPacketId: run.entryQitemId, exit: "handoff", actorSession: "feature-1-planner@rig", resultNote: "planned",
+  })).nextOwnerSession;
 
   it("a second pod's expansion of the same id and version moves neither pod's run, whichever file was read last", async () => {
     const paths = ["feature-1", "feature-2"].map((pod) => write(pod, featureSpec(pod)));
@@ -93,5 +110,90 @@ describe("#2607: a running workflow keeps the roles it started with", () => {
       instanceId: run.instance.instanceId, currentPacketId: run.entryQitemId, exit: "handoff", actorSession: "feature-1-planner@rig", resultNote: "planned",
     });
     expect(next.nextOwnerSession).toBe("feature-1-builder-b@rig");
+  });
+
+  it("a run started from a copy with the same bytes doesn't follow edits to the other file", async () => {
+    const original = write("feature-1", featureSpec("feature-1"));
+    await start(original);
+    // The copy's bytes match, so the cache keeps the original's row; the run still belongs to the copy.
+    const run = await start(write("feature-1-copy", featureSpec("feature-1")));
+    writeFileSync(original, featureSpec("feature-1", "feature-1-builder-b"));
+    new WorkflowSpecCache(db).readThrough(original);
+    expect(await builderOf(run)).toBe("feature-1-builder@rig");
+  });
+
+  it("an accepted edit to the run's own file outlives another file taking the row, across a restart", async () => {
+    const own = write("feature-1", featureSpec("feature-1"));
+    const run = await start(own);
+    writeFileSync(own, featureSpec("feature-1", "feature-1-builder-b"));
+    new WorkflowSpecCache(db).readThrough(own);
+    await start(write("feature-2", featureSpec("feature-2")));
+    // A restarted daemon reads the same database.
+    expect(await builderOf(run, new WorkflowRuntime({ db, eventBus: bus, queueRepo }))).toBe("feature-1-builder-b@rig");
+  });
+
+  it("a run follows its file when the file moves unchanged, but not to a different file read after its file is gone", async () => {
+    const own = write("feature-1", featureSpec("feature-1"));
+    const moving = await start(own);
+    const renamed = join(tmp, "renamed.yaml");
+    renameSync(own, renamed);
+    new WorkflowSpecCache(db).readThrough(renamed);
+    writeFileSync(renamed, featureSpec("feature-1", "feature-1-builder-b"));
+    new WorkflowSpecCache(db).readThrough(renamed);
+    expect(await builderOf(moving)).toBe("feature-1-builder-b@rig");
+
+    const gone = write("feature-1-again", featureSpec("feature-1", "feature-1-builder-c"));
+    const orphan = await start(gone);
+    rmSync(gone);
+    rmSync(renamed);
+    new WorkflowSpecCache(db).readThrough(write("feature-2", featureSpec("feature-2")));
+    expect(await builderOf(orphan)).toBe("feature-1-builder-c@rig");
+  });
+
+  it("a resume after another file took the row re-resolves to the seat the run's own file last named", async () => {
+    const own = write("feature-1", featureSpec("feature-1"));
+    const run = await start(own);
+    const build = await runtime.project({
+      instanceId: run.instance.instanceId, currentPacketId: run.entryQitemId, exit: "handoff", actorSession: "feature-1-planner@rig", resultNote: "planned",
+    });
+    await runtime.project({
+      instanceId: run.instance.instanceId, currentPacketId: build.nextQitemId!, exit: "failed", actorSession: "feature-1-builder@rig", resultNote: "the builder's seat died",
+    });
+    // The operator names a new builder in the run's own file; then another pod's file takes the row.
+    writeFileSync(own, featureSpec("feature-1", "feature-1-builder-b"));
+    new WorkflowSpecCache(db).readThrough(own);
+    await start(write("feature-2", featureSpec("feature-2")));
+    expect((await runtime.resume({ instanceId: run.instance.instanceId, actorSession: "orch@rig" })).ownerSession).toBe("feature-1-builder-b@rig");
+  });
+
+  it("a stuck run's exception goes to its own pod's lead after another pod's file took the row", async () => {
+    const first = await start(write("feature-1", featureSpec("feature-1")));
+    await start(write("feature-2", featureSpec("feature-2")));
+    expect(runtime.resolveExceptionRouteFor("feature-flow", "1", "stuck_overdue", null, first.instance.instanceId)?.destinationSession).toBe("feature-1-lead@rig");
+    // Named by id and version alone, the cached row decides, as before.
+    expect(runtime.resolveExceptionRouteFor("feature-flow", "1", "stuck_overdue", null)?.destinationSession).toBe("feature-2-lead@rig");
+
+    // The sweep's ensurer, wired as startup wires it, routes the overdue first run the same way.
+    const past = new Date(Date.now() - (WORKFLOW_STEP_STUCK_THRESHOLD_SECONDS + 3600) * 1000).toISOString();
+    db.prepare(`UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?`).run(past, first.entryQitemId);
+    await runWorkflowBootSweep({
+      instanceStore: runtime.instanceStore, queueRepo, watchdogJobsRepo: new WatchdogJobsRepository(db),
+      ensureStuckExceptionItem: makeEnsureStuckExceptionItem({
+        db, queueRepo, humanFallbackSeat: "human@host",
+        resolveRoute: (name, version, cls, boundRig, instanceId) => runtime.resolveExceptionRouteFor(name, version, cls, boundRig, instanceId),
+      }),
+      reconcileStuckExceptions: () => runtime.reconcileStuckExceptions(),
+    });
+    const items = db.prepare(`SELECT destination_session FROM queue_items WHERE tags LIKE '%exception:stuck_overdue%'`).all();
+    expect(items).toEqual([{ destination_session: "feature-1-lead@rig" }]);
+  });
+
+  it("the run's own file is the same file under another path form (a symlinked folder), so its edits still reach it", async () => {
+    const own = write("feature-1", featureSpec("feature-1"));
+    symlinkSync(tmp, join(tmp, "via-link"));
+    const run = await start(join(tmp, "via-link", "feature-1.yaml"));
+    writeFileSync(own, featureSpec("feature-1", "feature-1-builder-b"));
+    new WorkflowSpecCache(db).readThrough(own);
+    expect(await builderOf(run)).toBe("feature-1-builder-b@rig");
   });
 });
