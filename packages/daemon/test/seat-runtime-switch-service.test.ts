@@ -29,6 +29,8 @@ import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js"
 import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import { ensureSeatSkillPlugin, seatSkillLocation, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { reconcileSkillLoadout, resolvePluginSkills } from "../src/domain/skill-catalog.js";
 
 const SEAT = "dev-impl@seat-rig";
 
@@ -502,6 +504,84 @@ describe("live seat runtime switch", () => {
     const notice = `1 held message was kept for this seat and not delivered: read it with rig seat held-messages ${SEAT}.`;
     expect(result).toMatchObject({ ok: true, changed: true, recoveryPending: false, warnings: expect.arrayContaining([notice]) });
     expect(typed.filter((t) => t.text.includes(notice))).toEqual([{ target: SEAT, text: expect.stringMatching(/You now hold dev-impl@seat-rig on claude-code/) }]);
+  });
+
+  /** #2426: the vendored core, which the seat's agent spec selects, and the copies an earlier Claude occupant's launch left
+   *  under `owner`'s selection in the seat's Claude storage. Its successor records whether alpha's copy was there when its
+   *  harness started. Run with OPENRIG_HOME at `home`, where the resolver looks for the vendored core. */
+  const coreCopies = (owner: string, ids: string[], savedRuntime: string) => {
+    const core = path.join(home, "plugins", "openrig-core");
+    fs.mkdirSync(path.join(core, ".claude-plugin"), { recursive: true });
+    fs.writeFileSync(path.join(core, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "openrig-core", version: "0.7.9" }));
+    for (const id of ids) {
+      fs.mkdirSync(path.join(core, "skills", id), { recursive: true });
+      fs.writeFileSync(path.join(core, "skills", id, "SKILL.md"), `---\nname: ${id}\ndescription: The ${id} skill.\n---\n\nUse it.\n`);
+    }
+    const agentDir = path.join(home, "agents", "impl");
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, "agent.yaml"), `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\n  plugins:\n    - id: openrig-core\n      source:\n        kind: local\n        path: ${core}\nprofiles:\n  default:\n    uses:\n      skills: []\n      plugins: [openrig-core]\n`);
+    db.prepare("UPDATE nodes SET agent_ref = ?, profile = 'default', resolved_spec_name = 'impl' WHERE id = ?").run(`path:${agentDir}`, nodeId);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', '[]', ?)").run(nodeId, savedRuntime);
+    const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string }).rig_id;
+    const paths = seatSkillPaths({ rigId, logicalId: "dev.impl", runtime: "claude-code" }, home);
+    ensureSeatSkillPlugin(paths);
+    const old = reconcileSkillLoadout({
+      loadout: { catalogRoot: home, catalogRevision: null, catalogDigest: null, projectSelectionDeclared: false, projectSelection: [],
+        entries: resolvePluginSkills({ pluginId: "openrig-core", pluginRoot: core, runtime: "claude-code" }).entries },
+      runtime: "claude-code", cwd: paths.root, apply: true, topologyOwner: owner, location: seatSkillLocation(paths),
+    });
+    expect(old.errors).toEqual([]);
+    const claude = adapter("claude-code");
+    const presentAtLaunch: boolean[] = [];
+    vi.mocked(claude.launchHarness).mockImplementation(async () => {
+      presentAtLaunch.push(fs.existsSync(path.join(paths.skillsRoot, "alpha")));
+      return { ok: true, resumeToken: "11111111-2222-4333-8444-555555555555", resumeType: "claude_id" };
+    });
+    const svc = service({ runtimeAdapters: { codex: adapter("codex"), "claude-code": claude },
+      materialResolution: { homedir: home, skillsRoot: path.join(home, "no-catalog") } });
+    successorConfirms(svc);
+    return { paths, presentAtLaunch, svc };
+  };
+
+  it("#2426: a Claude successor that loads openrig-core itself starts without OpenRig's earlier copies of its skills, and the switch names them", async () => {
+    const saved = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = home;
+    try {
+      const { paths, presentAtLaunch, svc } = coreCopies(SEAT, ["alpha", "edited"], "codex");
+      fs.writeFileSync(path.join(paths.skillsRoot, "edited", "SKILL.md"), "My own notes.\n");
+
+      const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Codex usage limit" });
+      expect(result).toMatchObject({ ok: true, to: "claude-code", warnings: expect.arrayContaining([
+        "Seat skills: removed OpenRig's copy of openrig-core's alpha, which this seat now loads from the plugin itself",
+        // The edited copy is the switch's own reconciliation's to keep and name, as before.
+        `plugin_skill_kept: edited (${path.join(paths.skillsRoot, "edited")})`,
+      ]) });
+      expect((result as { warnings?: string[] }).warnings?.filter((line) => line.startsWith("Seat skills: kept"))).toEqual([]);
+      expect(presentAtLaunch).toEqual([false]);
+      expect(fs.readFileSync(path.join(paths.skillsRoot, "edited", "SKILL.md"), "utf8")).toBe("My own notes.\n");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+    }
+  });
+
+  it("#2426: a Claude-to-Claude account move leaves the copies to the next ordinary launch, since the live predecessor shares their storage", async () => {
+    const saved = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = home;
+    try {
+      const sourceHome = path.join(home, "claude-api"); fs.mkdirSync(sourceHome);
+      const targetHome = path.join(home, "claude-api-2"); fs.mkdirSync(targetHome);
+      db.prepare("UPDATE nodes SET runtime = 'claude-code', account_home = ?, claude_token_ref = NULL, codex_config_profile = NULL WHERE id = ?").run(sourceHome, nodeId);
+      // An earlier occupant's selection holds the copy, so only a retirement could remove it here.
+      const { paths, presentAtLaunch, svc } = coreCopies("dev-impl@earlier-occupant", ["alpha"], "claude-code");
+
+      const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Select account", accountHome: targetHome });
+      expect(result).toMatchObject({ ok: true, changed: true, to: "claude-code" });
+      expect((result as { warnings?: string[] }).warnings?.filter((line) => line.startsWith("Seat skills:")) ?? []).toEqual([]);
+      expect(presentAtLaunch).toEqual([true]);
+      expect(fs.existsSync(path.join(paths.skillsRoot, "alpha", "SKILL.md"))).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+    }
   });
 
   it.each([undefined, "none"] as const)("carries retained Claude rules and MCP selection (%s) into the target successor", async claudeMcp => {
