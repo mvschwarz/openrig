@@ -410,6 +410,27 @@ export class SeatAttentionReconciler {
     this.deps = deps;
   }
 
+  /** Each session's last activity state seen by `onSeatActivity`. */
+  private readonly lastActivity = new Map<string, string | undefined>();
+
+  /** A seat a full restore stopped at a prompt (a resume-selection picker) keeps that outcome, and needs attention,
+   *  until the strict reconciler proves the resume (#2622). Its activity turning to running or idle is when the person
+   *  may have answered, so the reconciler runs then, once per such change. Its own proof decides; a failed check writes
+   *  and emits nothing, unlike clearAttention's refusal. Returns whether the outcome was reconciled. */
+  async onSeatActivity(sessionName: string, state: string | undefined): Promise<boolean> {
+    const previous = this.lastActivity.get(sessionName);
+    this.lastActivity.set(sessionName, state);
+    if ((state !== "running" && state !== "idle") || state === previous) return false;
+    const reconcile = this.deps.reconcileRestoreOutcome;
+    const session = reconcile ? this.findLatestSessionByName(sessionName) : null;
+    if (!reconcile || !session) return false;
+    const derived = this.getDerivedAttentionOutcome(session);
+    // Subset restores and an assisted startup's own outcome keep their established paths.
+    if (derived?.source !== "restore.completed" || derived.assistedStartupAttemptId !== undefined) return false;
+    const restored = await reconcile(session.rigId, session.nodeId).catch(() => null);
+    return restored?.ok === true;
+  }
+
   async clearAttention(
     sessionName: string,
     opts?: { reason?: string },
