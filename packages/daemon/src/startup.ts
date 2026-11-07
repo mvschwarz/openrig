@@ -1583,7 +1583,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         verifyInputBox: () => {
           try { return new ContextPackSettingsStore().resolveOne("transport.verify_input_box").value === true; } catch { return false; }
         },
-        // transport.draft_delivery, read at each send that meets a person's draft: only a readable refuse opts out.
+        // transport.draft_delivery, read on every ordinary Claude Code or Codex send: only a readable refuse opts out.
         deliverOverDraft: () => draftDeliveryAllows(() =>
           readDraftDeliverySetting(() => new ContextPackSettingsStore().resolveOne("transport.draft_delivery").value)),
       });
