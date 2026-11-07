@@ -888,6 +888,13 @@ export class ClaudeCompactionEnforcer {
       }
       return { triggered: false, reason: "below_threshold" };
     }
+    // The same growth rule as on a fresh sample: a stale sample (a restart, a slow sidecar) that usage has carried
+    // PREPARED_MAP_MAX_GROWTH_PERCENT above the map retires it instead of compacting with it.
+    if (attempt.prepared && !attempt.compactInFlight && lastUsedPercentage != null && attempt.mapUsedPercentage !== undefined
+      && lastUsedPercentage - attempt.mapUsedPercentage >= PREPARED_MAP_MAX_GROWTH_PERCENT) {
+      this.stopPreparation(input.sessionName, "prepared_map_stale", attempt);
+      return { triggered: false, reason: "preparation_stopped" };
+    }
     return this.withDeliveryGuard(unsampled, async () => {
       const result = await this.sendPreparedCompact(unsampled, attempt, false);
       return result.ok ? { triggered: true } : { triggered: false, reason: result.reason === "waiting_for_idle" || result.reason === PREPARED_AWAITING_WINDOW ? result.reason : "send_failed" };

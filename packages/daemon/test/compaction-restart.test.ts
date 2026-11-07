@@ -442,6 +442,21 @@ it('#2682 S1d: a held attempt, a restart, and a stale sample still above with th
  expect(restarted.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,status:'compact-sent'});
 });
 
+it('#2682 S1e: a held attempt, a restart, and a stale sample 15 points above the map: it retires as stale, with no /compact; 14 above still sends',async()=>{
+ for(const [growth,sends] of [[15,false],[14,true]] as const){
+  const f=fixture();const held=await heldBy(f);
+  const mapAt=JSON.parse(readFileSync(join(dirname(held.mapPath),'COMPACTION-STATE.json'),'utf8')).mapUsedPercentage;
+  expect(mapAt).toEqual(expect.any(Number));
+  f.hooks.busy=false;f.advance(11*60_000);
+  const restarted=f.daemon();
+  const out=await staleDrain(restarted,mapAt+growth);
+  if(sends){expect(out).toEqual({triggered:true});expect(compacts(f)).toHaveLength(1);continue;}
+  expect(out).toMatchObject({triggered:false});
+  expect(restarted.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,status:'stopped',reason:'prepared_map_stale'});
+  expect(compacts(f)).toHaveLength(0);
+ }
+});
+
 /** An automatic attempt whose request was delivered and which ended with no map at its deadline, past the retry cooldown. */
 async function endedPastCooldown(f:F,e:ClaudeCompactionEnforcer){
  expect(await e.maybeAutoCompact(hs)).toEqual({triggered:true});
