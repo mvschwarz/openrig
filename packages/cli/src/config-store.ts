@@ -199,7 +199,7 @@ export interface RiggedConfig {
   transport: {
     verifyInputBox: boolean;
     localUserGuard: boolean;
-    // Whether an ordinary send or work notice reaches a seat whose prompt holds a person's draft (default refuse).
+    // Whether an ordinary send or work notice reaches a seat whose prompt holds a person's draft (default deliver; refuse opts out).
     draftDelivery: "refuse" | "deliver";
   };
   // Slice 22 (OPR.0.7.2.22) — typed decisions (OpenRouter + Jev), off until enabled; read by the
@@ -389,7 +389,7 @@ const DEFAULTS = {
   transport: {
     verifyInputBox: false,
     localUserGuard: false,
-    draftDelivery: "refuse",
+    draftDelivery: "deliver",
   },
   // Slice 22 — typed decisions OFF, no consumers, shipped templates only.
   decisions: {

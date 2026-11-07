@@ -15,7 +15,7 @@ import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { classifyPaneActivity, classifyStyledFrame, hasExpectedStagedText, inspectStartupStagedText, probeSessionActivity, promptTextIsFaint, SessionTransport, type TransportReadinessChecker } from "../src/domain/session-transport.js";
+import { classifyPaneActivity, classifyStyledFrame, draftDeliveryAllows, hasExpectedStagedText, inspectStartupStagedText, probeSessionActivity, promptTextIsFaint, SessionTransport, type TransportReadinessChecker } from "../src/domain/session-transport.js";
 import { SeatDeliveryGuard, resolveGuardTarget, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
@@ -684,7 +684,15 @@ describe("SessionTransport", () => {
       return { tmux, callOrder };
     }
 
-    it("refuses as before when the setting is absent", async () => {
+    it("refuses when the setting is refuse, the opt-out", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux, { deliverOverDraft: () => false }).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false, activity: { reason: "prompt_draft" } });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("keeps refusing in a transport built without the daemon's setting reader", async () => {
       seedCanonicalRig();
       const { tmux, callOrder } = draftPane();
       const result = await createTransport(tmux).send("dev-impl@my-rig", "hello");
@@ -737,7 +745,15 @@ describe("SessionTransport", () => {
       expect(callOrder).toEqual([]);
     });
 
-    it("treats an unreadable setting as refuse", async () => {
+    it("reads the setting as the daemon does: only a readable refuse opts out of the deliver default", () => {
+      expect(draftDeliveryAllows(() => "refuse")).toBe(false);
+      expect(draftDeliveryAllows(() => "deliver")).toBe(true);
+      expect(draftDeliveryAllows(() => undefined)).toBe(true);
+      expect(draftDeliveryAllows(() => "something-else")).toBe(true);
+      expect(draftDeliveryAllows(() => { throw new Error("settings unreadable"); })).toBe(true);
+    });
+
+    it("keeps refusing when a transport's own reader throws (the daemon's reader never does)", async () => {
       seedCanonicalRig();
       const { tmux, callOrder } = draftPane();
       const result = await createTransport(tmux, { deliverOverDraft: () => { throw new Error("settings unreadable"); } }).send("dev-impl@my-rig", "hello");

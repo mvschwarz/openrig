@@ -753,8 +753,8 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // Input-box evidence for verified Claude Code and Codex sends; off until the switch is on.
     case "transport.local_user_guard": return false;
     case "transport.verify_input_box": return false;
-    // A draft at the prompt refuses ordinary sends until the setting says deliver.
-    case "transport.draft_delivery": return "refuse";
+    // Ordinary sends reach a seat with a draft at its prompt unless the setting says refuse.
+    case "transport.draft_delivery": return "deliver";
     // Slice 22 — typed decisions off, no consumers, shipped templates only.
     case "decisions.enabled": return false;
     case "decisions.consumers": return "";

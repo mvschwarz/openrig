@@ -1047,6 +1047,12 @@ function safeRecord(sink: CaptureObserverSink, input: ObservationInput): void {
   try { sink.record(input); } catch { /* observer failure never reaches the caller */ }
 }
 
+/** transport.draft_delivery as the daemon reads it. deliver is the product default, so only a readable `refuse` opts out:
+ *  an unset, unreadable or invalid value follows the default, as other settings fall back to theirs. */
+export function draftDeliveryAllows(read: () => unknown): boolean {
+  try { return read() !== "refuse"; } catch { return true; }
+}
+
 export function mapPaneState(state: PaneActivityClassification["state"]): AgentActivity["state"] {
   if (state === "agent_active") return "running";
   if (state === "attention") return "needs_input";
@@ -2069,7 +2075,8 @@ interface SessionTransportDeps {
   runtimeAdapters?: Record<string, TransportReadinessChecker>;
   /** transport.verify_input_box, read per verified Claude Code or Codex send. Absent means off. */
   verifyInputBox?: () => boolean;
-  /** transport.draft_delivery is deliver, read per send that meets a person's draft. Absent means refuse. */
+  /** Whether transport.draft_delivery lets this send through a person's draft, read per send that meets one. The daemon
+   *  wires draftDeliveryAllows (deliver by default); a transport built without it keeps refusing. */
   deliverOverDraft?: () => boolean;
 }
 
@@ -3809,7 +3816,7 @@ export class SessionTransport {
     return paneCommand.replace(/^-/, "");
   }
 
-  /** transport.draft_delivery = deliver: a person's draft at the prompt is the one needs_input an ordinary send or work
+  /** transport.draft_delivery = deliver (the default): a person's draft at the prompt is the one needs_input an ordinary send or work
    *  notice goes through. Menus, permission prompts and hook-reported requests still refuse, and so does a send that must
    *  not join a draft (preserveInput: managed compaction). A send that waits for idle keeps waiting. */
   private deliversOverDraft(readiness: AgentActivity, opts?: SendOpts): boolean {
