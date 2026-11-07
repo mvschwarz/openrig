@@ -16,7 +16,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, rmSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getOpenRigHome } from "../../openrig-compat.js";
 import { DispatchBuffer } from "./dispatch-buffer.js";
@@ -24,7 +24,8 @@ import { parseSessionName } from "../session-name.js";
 
 // ── Schema (closed enums; extend only additively behind the contract) ──
 export const HUMAN_ENTITY_CLASSES = new Set(["human"]);          // M1's only class
-export const HUMAN_CONNECTOR_KINDS = new Set(["slack"]);          // M1's only kind
+export const HUMAN_CONNECTOR_KINDS = new Set(["slack", "relay"]);
+export type HumanConnectorKind = "slack" | "relay";
 export const HUMAN_BINDING_ROLES = new Set(["primary", "secondary"]);
 export const HUMAN_DELIVERY_CLASSES = new Set(["A", "B", "C", "D"]);
 // entityId is the fragment key + filename: a stable slug that survives platform
@@ -109,7 +110,7 @@ function unknownKey(obj: Record<string, unknown>, allowed: Set<string>): string 
 }
 
 export interface HumanConnectorBinding {
-  kind: "slack";
+  kind: HumanConnectorKind;
   connectorRef: string;
   /** POINTER at the connector's vault (secrets-on-connector) — NEVER the secret. */
   secretsRef: string;
@@ -118,9 +119,22 @@ export interface HumanConnectorBinding {
   /** A6 v3: the platform-native id of this human on the connector (e.g. Slack user id).
    *  OPTIONAL — a handle-less binding is OUTBOUND-ONLY (delivery works; it is NOT
    *  inbound-resolvable, so an inbound event on it fails admission LOUDLY). REQUIRED to be
-   *  inbound-resolvable. UNIQUE per kind across ALL bindings of ALL humans (one platform id =
-   *  exactly one human; a duplicate is a registration conflict, REFUSED). */
+   *  inbound-resolvable. UNIQUE per kind (Slack) or per connectorRef (relay) across ALL
+   *  bindings of ALL humans (one platform id = one human; a duplicate is a registration
+   *  conflict, REFUSED). */
   handle?: string;
+}
+
+function handleScopeKey(binding: Pick<HumanConnectorBinding, "kind" | "connectorRef"> & { handle: string }): string {
+  return binding.kind === "relay"
+    ? JSON.stringify(["relay", binding.connectorRef, binding.handle])
+    : `${binding.kind}:${binding.handle}`;
+}
+
+function handleScopeLabel(binding: Pick<HumanConnectorBinding, "kind" | "connectorRef"> & { handle: string }): string {
+  return binding.kind === "relay"
+    ? `relay (${binding.connectorRef}) handle "${binding.handle}"`
+    : `${binding.kind} handle "${binding.handle}"`;
 }
 
 export interface HumanPrefs {
@@ -214,7 +228,7 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
         return { ok: false, error: `connectorBindings[${i}].handle "${String(b.handle)}" must match ${HANDLE_PATTERN} (a platform id — no ':' '@' or whitespace, which could forge a ref)` };
       }
     }
-    const binding: HumanConnectorBinding = { kind: "slack", connectorRef: b.connectorRef, secretsRef: b.secretsRef, role: b.role as "primary" | "secondary" };
+    const binding: HumanConnectorBinding = { kind: b.kind as HumanConnectorKind, connectorRef: b.connectorRef, secretsRef: b.secretsRef, role: b.role as "primary" | "secondary" };
     if (b.handle !== undefined) { handle = b.handle as string; binding.handle = handle; }
     bindings.push(binding);
   }
@@ -222,15 +236,20 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   if (bindings.length > 0 && primaryCount !== 1) {
     return { ok: false, error: `exactly one connectorBinding must have role "primary" (found ${primaryCount}) — it is the default delivery channel` };
   }
-  // A6 v3 pin-1 (within-fragment): a handle is UNIQUE per kind across this human's bindings —
-  // one human must not claim the same platform id twice. (Cross-fragment uniqueness is enforced
-  // in projectHumans, which sees every human at once.)
+  // A6 v3 pin-1 (within-fragment): a handle is UNIQUE per kind (Slack) or per connectorRef
+  // (relay) across this human's bindings — one human must not claim the same platform id twice.
+  // (Cross-fragment uniqueness is enforced in projectHumans, which sees every human at once.)
   const seenHandles = new Set<string>();
   for (const b of bindings) {
     if (b.handle === undefined) continue;
-    const key = `${b.kind}:${b.handle}`;
+    const key = handleScopeKey({ kind: b.kind, connectorRef: b.connectorRef, handle: b.handle });
     if (seenHandles.has(key)) {
-      return { ok: false, error: `duplicate ${b.kind} handle "${b.handle}" across this human's bindings — a handle is unique per kind (one platform id = one human)` };
+      return {
+        ok: false,
+        error: b.kind === "relay"
+          ? `duplicate relay (${b.connectorRef}) handle "${b.handle}" across this human's bindings — a relay handle is unique per connectorRef`
+          : `duplicate ${b.kind} handle "${b.handle}" across this human's bindings — a handle is unique per kind (one platform id = one human)`,
+      };
     }
     seenHandles.add(key);
   }
@@ -321,10 +340,10 @@ function validateEntityCollection(entities: readonly HumanFragment[]): string | 
     entityIds.add(entity.entityId);
     for (const binding of entity.connectorBindings) {
       if (binding.handle === undefined) continue;
-      const key = `${binding.kind}:${binding.handle}`;
+      const key = handleScopeKey({ kind: binding.kind, connectorRef: binding.connectorRef, handle: binding.handle });
       const prior = handleOwner.get(key);
       if (prior !== undefined && prior !== entity.entityId) {
-        return `${binding.kind} handle "${binding.handle}" is claimed by both "${prior}" and "${entity.entityId}" — a handle maps to exactly one human (registration conflict)`;
+        return `${handleScopeLabel({ kind: binding.kind, connectorRef: binding.connectorRef, handle: binding.handle })} is claimed by both "${prior}" and "${entity.entityId}" — a handle maps to exactly one human (registration conflict)`;
       }
       handleOwner.set(key, entity.entityId);
     }
@@ -403,6 +422,41 @@ export function resolveSlackHandle(
   };
 }
 
+export type RelayHandleResolution =
+  | { kind: "registered"; entityId: string; address: string; connectorRef: string; handle: string }
+  | { kind: "unregistered"; connectorRef: string; handle: string; error: string };
+
+/** Resolve an INBOUND relay handle scoped to the authenticated relay `connectorRef`.
+ *  Unlike Slack (where user IDs are globally unique across kind=slack), relay aliases are
+ *  scoped to `(kind="relay", connectorRef, handle)` so an authenticated relay can assert
+ *  only its own bindings while allowing multiple registered people on the same relay to
+ *  answer with their own entity address. Handle-less relay bindings remain outbound-only. */
+export function resolveRelayHandle(
+  connectorRef: string,
+  handle: string,
+  entities: readonly HumanFragment[],
+): RelayHandleResolution {
+  if (connectorRef.length > 0 && handle.length > 0) {
+    for (const e of entities) {
+      for (const b of e.connectorBindings) {
+        if (b.kind === "relay" && b.connectorRef === connectorRef && b.handle !== undefined && b.handle === handle) {
+          return { kind: "registered", entityId: e.entityId, address: e.address, connectorRef, handle };
+        }
+      }
+    }
+  }
+  return {
+    kind: "unregistered",
+    connectorRef,
+    handle,
+    error:
+      `inbound relay (${connectorRef}) sender "${handle}" is not a registered human (no relay binding for "${connectorRef}" with handle "${handle}"). ` +
+      `Register the human + their handle first: rig gateway human add <entityId> --display-name … ` +
+      `--binding relay:${connectorRef}:file:<absolute-env-file>:primary:handle=${handle} --delivery-class …; ` +
+      `until then this message is REFUSED (it was NOT landed as a fabricated human seat).`,
+  };
+}
+
 export function atomicWrite(path: string, body: string): { ok: true } | { ok: false; error: string } {
   try {
     mkdirSync(dirname(path), { recursive: true });
@@ -451,20 +505,8 @@ export function addHumanFragment(
   }
   // A6 v3 pin-1: reject a handle already claimed by a DIFFERENT human BEFORE writing (never leave a
   // conflicting fragment on disk with a failed re-projection). projectHumans is the load-time backstop.
-  const existing = projectHumans(home);
-  if (!existing.ok) return { ok: false, error: `cannot validate handle uniqueness — existing registry is invalid: ${existing.error}` };
-  const claimed = new Map<string, string>();
-  for (const e of existing.entities) {
-    if (e.entityId === v.fragment.entityId) continue; // a replace of the same human is fine
-    for (const b of e.connectorBindings) if (b.handle !== undefined) claimed.set(`${b.kind}:${b.handle}`, e.entityId);
-  }
-  for (const b of v.fragment.connectorBindings) {
-    if (b.handle === undefined) continue;
-    const owner = claimed.get(`${b.kind}:${b.handle}`);
-    if (owner !== undefined) {
-      return { ok: false, error: `${b.kind} handle "${b.handle}" is already registered to human "${owner}" — a handle maps to exactly one human (registration conflict)` };
-    }
-  }
+  const conflict = handleConflict(v.fragment, home);
+  if (conflict) return { ok: false, error: conflict };
   const w = atomicWrite(file, stringifyYaml(v.fragment));
   if (!w.ok) return { ok: false, error: w.error };
   // A new or replaced record may author any availability: it's a change of its own.
@@ -570,6 +612,12 @@ export function parseBindingSpec(spec: string):
   if (!kind || !connectorRef || !secretsRef || !role) {
     return { ok: false, error: `binding spec fields must be non-empty: kind:connectorRef:secretsRef:role[:handle=<id>] (got "${spec}")` };
   }
+  if (kind === "relay" && secretsRef.startsWith("file:")) {
+    const filePath = secretsRef.slice("file:".length);
+    if (!filePath || filePath.startsWith("//") || !isAbsolute(filePath)) {
+      return { ok: false, error: `binding file secretsRef must be file:<absolute-path> (got "${spec}")` };
+    }
+  }
   return { ok: true, binding: handle !== undefined ? { kind, connectorRef, secretsRef, role, handle } : { kind, connectorRef, secretsRef, role } };
 }
 
@@ -667,13 +715,17 @@ function handleConflict(fragment: HumanFragment, home: string): string | undefin
   const claimed = new Map<string, string>();
   for (const e of existing.entities) {
     if (e.entityId === fragment.entityId) continue;
-    for (const b of e.connectorBindings) if (b.handle !== undefined) claimed.set(`${b.kind}:${b.handle}`, e.entityId);
+    for (const b of e.connectorBindings) {
+      if (b.handle !== undefined) {
+        claimed.set(handleScopeKey({ kind: b.kind, connectorRef: b.connectorRef, handle: b.handle }), e.entityId);
+      }
+    }
   }
   for (const b of fragment.connectorBindings) {
     if (b.handle === undefined) continue;
-    const owner = claimed.get(`${b.kind}:${b.handle}`);
+    const owner = claimed.get(handleScopeKey({ kind: b.kind, connectorRef: b.connectorRef, handle: b.handle }));
     if (owner !== undefined) {
-      return `${b.kind} handle "${b.handle}" is already registered to human "${owner}" — a handle maps to exactly one human (registration conflict)`;
+      return `${handleScopeLabel({ kind: b.kind, connectorRef: b.connectorRef, handle: b.handle })} is already registered to human "${owner}" — a handle maps to exactly one human (registration conflict)`;
     }
   }
   return undefined;

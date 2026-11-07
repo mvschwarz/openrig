@@ -352,3 +352,413 @@ describe("P28 — ignore-path telemetry discriminates the rejection branch (unch
     expect(out).not.toContain("secret body text");
   });
 });
+
+describe("Capability 3 — single-wire relay port isolation and attempted-replay bypass", () => {
+  let home: string;
+  beforeEach(() => { home = mkdtempSync(join(tmpdir(), "s10-relay-cut-")); });
+  afterEach(() => { rmSync(home, { recursive: true, force: true }); });
+
+  it("never falls through to Slack when a human's primary binding is relay and the relay profile is unready, and bypasses re-decision on attempted replay", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const { createDb } = await import("../src/db/connection.js");
+    const { migrate } = await import("../src/db/migrate.js");
+    const { ALL_MIGRATIONS } = await import("../src/db/all-migrations.js");
+    const { EventBus } = await import("../src/domain/event-bus.js");
+    const { QueueRepository } = await import("../src/domain/queue-repository.js");
+    const { DEFAULT_CONFIG, saveConfig } = await import("../src/domain/gateway/slack/config.js");
+    const { buildSlackGatewayWire } = await import("../src/domain/gateway/slack/slack-subsystem.js");
+    const { resolveSlackHandle } = await import("../src/domain/gateway/human-registry.js");
+    const { DispatchBuffer } = await import("../src/domain/gateway/dispatch-buffer.js");
+    const { HumanQuietStore } = await import("../src/domain/gateway/human-quiet-windows.js");
+
+    const db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+
+    // Configure Slack as READY so a fallthrough bug would hit Slack chat.postMessage
+    const slackSecrets = join(home, "slack.env");
+    writeFileSync(slackSecrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-FALLTHROUGH", secretsEnvFile: slackSecrets }, home);
+
+    const relaySecrets = join(home, "relay.env");
+    // Start with missing relay file -> unready relay profile
+    const registry = {
+      ok: true as const,
+      entities: [
+        {
+          entityId: "sam",
+          class: "human" as const,
+          displayName: "Sam",
+          address: "sam@external",
+          connectorBindings: [
+            {
+              kind: "relay" as const,
+              connectorRef: "wa-main",
+              secretsRef: `file:${relaySecrets}`,
+              role: "primary" as const,
+              handle: "sam_wa",
+            },
+            {
+              kind: "slack" as const,
+              connectorRef: "slack-secondary",
+              secretsRef: `file:${slackSecrets}`,
+              role: "secondary" as const,
+              handle: "USAM",
+            },
+          ],
+          prefs: { deliveryClass: "A" as const, availability: "available" as const },
+        },
+      ],
+    };
+
+    const repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => registry,
+    });
+    const ask = await repo.create({
+      sourceSession: "lead@rig",
+      destinationSession: "orch@rig",
+      body: "Must never fall through to Slack",
+      nudge: false,
+    });
+    repo.update({
+      qitemId: ask.qitemId,
+      actorSession: "orch@rig",
+      state: "blocked",
+      blockedOn: "sam@kernel",
+      summary: "Relay-bound question",
+      evidenceRef: "/proof/relay-ask.md",
+      transitionNote: "parked",
+    });
+    const askEpisodeKey = `${ask.qitemId}:${repo.transitionLog.latestOwnerNotificationForQitem(ask.qitemId)!.transitionId}`;
+    // Seed an earlier Slack-named transport-failed note for the same episode (as baseline 5d188a43b wrote before the fix);
+    // a subsequent Relay failure for this episode must still record a relay-owner-notification-transport-failed note.
+    repo.update({
+      qitemId: ask.qitemId,
+      actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-transport-failed notification_key=${askEpisodeKey} class=relay-profile-unready error=legacy-slack-named-failure`,
+    });
+
+    const slackCalls: string[] = [];
+    const relayCalls: Array<Record<string, unknown>> = [];
+    let failFirstRelayHttp = true;
+
+    const makeWire = () =>
+      buildSlackGatewayWire({
+        home,
+        queueRepo: repo,
+        registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+        outboundIntervalMs: 15,
+        fetchImpl: async (url, init) => {
+          if (String(url).includes("slack.com")) {
+            slackCalls.push(String(url));
+            return new Response(JSON.stringify({ ok: true, ts: "1724.0001" }), { status: 200 });
+          }
+          relayCalls.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (failFirstRelayHttp) {
+            failFirstRelayHttp = false;
+            throw new Error("simulated connection drop after attempt");
+          }
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        },
+      });
+
+    const w1 = makeWire();
+    try {
+      w1.startServices?.();
+      await new Promise((r) => setTimeout(r, 50));
+      // Unready relay profile is retained in DispatchBuffer and NEVER falls through to Slack
+      expect(slackCalls).toHaveLength(0);
+      expect(relayCalls).toHaveLength(0);
+      expect(new DispatchBuffer(home).pending()).toHaveLength(1);
+      const w1Notes = repo.listTransitions(ask.qitemId).map((t) => t.transitionNote ?? "");
+      const relayFailureNotes = w1Notes.filter((n) => n.startsWith("relay-owner-notification-transport-failed "));
+      expect(relayFailureNotes).toHaveLength(1);
+      expect(relayFailureNotes[0]).toContain("connector_ref=wa-main");
+      expect(relayFailureNotes[0]).toContain("class=relay-profile-unready");
+      expect(repo.getById(ask.qitemId)).toMatchObject({
+        deliveryOutcome: "transport-failed",
+        deliveryFailureDetail: expect.stringContaining("relay-owner-notification-transport-failed"),
+      });
+      expect(repo.findUndelivered().map((q) => q.qitemId)).toContain(ask.qitemId);
+    } finally {
+      w1.stop();
+    }
+
+    // If the relay connectorRef changes while still failing, it must record a new note naming the new connector rather than suppressing
+    registry.entities[0]!.connectorBindings[0]!.connectorRef = "wa-failover";
+    const originalPending = new DispatchBuffer(home).pending()[0]!;
+    const {
+      relayConnectorRef: _oldRef,
+      relayEnvelope: _oldEnv,
+      ...unpreparedPayload
+    } = (originalPending.payload ?? {}) as Record<string, unknown>;
+    const w1b = makeWire();
+    try {
+      w1b.dispatcher.dispatch("post_message", "sam@kernel", unpreparedPayload, {
+        decisionId: "failover-probe",
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      const w1bRelayFailureNotes = repo
+        .listTransitions(ask.qitemId)
+        .map((t) => t.transitionNote ?? "")
+        .filter((n) => n.startsWith("relay-owner-notification-transport-failed "));
+      expect(w1bRelayFailureNotes).toHaveLength(2);
+      expect(w1bRelayFailureNotes[1]).toContain("connector_ref=wa-failover");
+      expect(repo.getById(ask.qitemId)?.deliveryFailureDetail).toContain("connector_ref=wa-failover");
+    } finally {
+      new DispatchBuffer(home).ack("failover-probe");
+      w1b.stop();
+      registry.entities[0]!.connectorBindings[0]!.connectorRef = "wa-main";
+    }
+
+    // Write valid relay secrets and replay: first HTTP attempt drops after recording attempt metadata
+    writeFileSync(
+      relaySecrets,
+      [
+        "OPENRIG_RELAY_URL=http://127.0.0.1:44101/outbound",
+        "OPENRIG_RELAY_OUTBOUND_TOKEN=out-secret-token-123456",
+        "OPENRIG_RELAY_INBOUND_TOKEN=in-secret-token-654321",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+
+    const w2 = makeWire();
+    try {
+      w2.startServices?.();
+      await new Promise((r) => setTimeout(r, 50));
+      expect(slackCalls).toHaveLength(0);
+      expect(relayCalls).toHaveLength(1);
+      expect(new DispatchBuffer(home).pending()).toHaveLength(1);
+    } finally {
+      w2.stop();
+    }
+
+    // Turn ON quiet hours for sam BEFORE the next replay: because the decision was already attempted,
+    // replay must bypass policy re-decision (must NOT hold for quiet hours) and deliver the exact frozen envelope
+    const now = new Date();
+    new HumanQuietStore(db).setUntil("sam", {
+      until: new Date(now.getTime() + 3_600_000),
+      timezone: "UTC",
+      setBy: "test",
+      now,
+    });
+
+    const w3 = makeWire();
+    try {
+      w3.startServices?.();
+      await new Promise((r) => setTimeout(r, 50));
+      expect(slackCalls).toHaveLength(0);
+      expect(relayCalls).toHaveLength(2);
+      expect(relayCalls[1]).toEqual(relayCalls[0]);
+      expect(new DispatchBuffer(home).pending()).toHaveLength(0);
+      const episode = repo.currentHumanRequiredEpisode(ask.qitemId)!;
+      expect(repo.hasRelayOwnerNotificationReceipt(ask.qitemId, episode.key)).toBe(true);
+    } finally {
+      w3.stop();
+      db.close();
+    }
+  });
+
+  it("polls and delivers Relay-primary alerts when Slack is disabled without minting new Slack buffer decisions, then enables Slack without replaying unbuffered Slack backlog while preserving earlier durable Slack buffer entries", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const { createDb } = await import("../src/db/connection.js");
+    const { migrate } = await import("../src/db/migrate.js");
+    const { ALL_MIGRATIONS } = await import("../src/db/all-migrations.js");
+    const { EventBus } = await import("../src/domain/event-bus.js");
+    const { QueueRepository } = await import("../src/domain/queue-repository.js");
+    const { DEFAULT_CONFIG, saveConfig } = await import("../src/domain/gateway/slack/config.js");
+    const { buildSlackGatewayWire } = await import("../src/domain/gateway/slack/slack-subsystem.js");
+    const { resolveSlackHandle } = await import("../src/domain/gateway/human-registry.js");
+    const { DispatchBuffer } = await import("../src/domain/gateway/dispatch-buffer.js");
+    const { makeQueuePorts, seedBacklogAsHistory } = await import("../src/domain/gateway/slack/queue-access.js");
+    const { toPayload } = await import("../src/domain/gateway/slack/outbound-driver.js");
+
+    const db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+
+    const slackSecrets = join(home, "slack.env");
+    writeFileSync(slackSecrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    // Slack starts DISABLED
+    saveConfig({ ...DEFAULT_CONFIG, enabled: false, channel: "C-MIXED", secretsEnvFile: slackSecrets }, home);
+
+    const relaySecrets = join(home, "relay.env");
+    writeFileSync(
+      relaySecrets,
+      [
+        "OPENRIG_RELAY_URL=http://127.0.0.1:44102/outbound",
+        "OPENRIG_RELAY_OUTBOUND_TOKEN=out-secret-token-123456",
+        "OPENRIG_RELAY_INBOUND_TOKEN=in-secret-token-654321",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+
+    const registry = {
+      ok: true as const,
+      entities: [
+        {
+          entityId: "alex",
+          class: "human" as const,
+          displayName: "Alex",
+          address: "alex@external",
+          connectorBindings: [
+            {
+              kind: "slack" as const,
+              connectorRef: "slack-main",
+              secretsRef: `file:${slackSecrets}`,
+              role: "primary" as const,
+              handle: "UALEX",
+            },
+          ],
+          prefs: { deliveryClass: "B" as const, availability: "available" as const },
+        },
+        {
+          entityId: "sam",
+          class: "human" as const,
+          displayName: "Sam",
+          address: "sam@external",
+          connectorBindings: [
+            {
+              kind: "relay" as const,
+              connectorRef: "wa-main",
+              secretsRef: `file:${relaySecrets}`,
+              role: "primary" as const,
+              handle: "sam_wa",
+            },
+          ],
+          prefs: { deliveryClass: "B" as const, availability: "available" as const },
+        },
+      ],
+    };
+
+    const repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => registry,
+    });
+
+    // 1. Earlier durable Slack ask already in DispatchBuffer before Slack was disabled
+    const earlierSlackRow = await repo.create({
+      sourceSession: "lead@rig",
+      destinationSession: "orch@rig",
+      body: "Earlier durable Slack ask body",
+      nudge: false,
+    });
+    repo.update({
+      qitemId: earlierSlackRow.qitemId,
+      actorSession: "orch@rig",
+      state: "blocked",
+      blockedOn: "alex@kernel",
+      summary: "Earlier durable Slack ask",
+      evidenceRef: "/proof/earlier-slack.md",
+      transitionNote: "parked earlier",
+    });
+    const [earlierAlert] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({
+      minimumLevel: "NOTICE",
+    });
+    new DispatchBuffer(home).enqueue({
+      kind: "outbound_decision",
+      decisionId: "earlier-durable-slack-1",
+      op: OUTBOUND_OP,
+      entityBindingRef: "alex@external",
+      payload: toPayload(earlierAlert!),
+    });
+
+    // 2. Fresh Slack-primary ask and fresh Relay-primary ask created while Slack is disabled
+    const freshSlackRow = await repo.create({
+      sourceSession: "lead@rig",
+      destinationSession: "orch@rig",
+      body: "Fresh Slack backlog while disabled",
+      nudge: false,
+    });
+    repo.update({
+      qitemId: freshSlackRow.qitemId,
+      actorSession: "orch@rig",
+      state: "blocked",
+      blockedOn: "alex@kernel",
+      summary: "Slack backlog ask",
+      evidenceRef: "/proof/fresh-slack.md",
+      transitionNote: "parked while slack disabled",
+    });
+
+    const relayRow = await repo.create({
+      sourceSession: "lead@rig",
+      destinationSession: "orch@rig",
+      body: "Fresh Relay ask while Slack disabled",
+      nudge: false,
+    });
+    repo.update({
+      qitemId: relayRow.qitemId,
+      actorSession: "orch@rig",
+      state: "blocked",
+      blockedOn: "sam@kernel",
+      summary: "Relay active ask",
+      evidenceRef: "/proof/relay-active.md",
+      transitionNote: "parked for relay",
+    });
+
+    const slackPosts: Array<Record<string, unknown>> = [];
+    const relayPosts: Array<Record<string, unknown>> = [];
+
+    const makeWire = () =>
+      buildSlackGatewayWire({
+        home,
+        queueRepo: repo,
+        registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+        outboundIntervalMs: 15,
+        fetchImpl: async (url, init) => {
+          if (String(url).includes("slack.com")) {
+            slackPosts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+            return new Response(JSON.stringify({ ok: true, ts: "1724.0002" }), { status: 200 });
+          }
+          relayPosts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        },
+      });
+
+    const w1 = makeWire();
+    try {
+      w1.startServices?.();
+      await new Promise((r) => setTimeout(r, 60));
+      // Relay ask delivered; Slack did not post
+      expect(relayPosts).toHaveLength(1);
+      expect(relayPosts[0]).toMatchObject({
+        recipient: { handle: "sam_wa" },
+        summary: "Relay active ask",
+      });
+      expect(slackPosts).toHaveLength(0);
+      // Fresh Slack ask was NOT dispatched into the buffer while Slack was disabled;
+      // only the pre-existing durable Slack decision remains in the buffer.
+      expect(new DispatchBuffer(home).pending().map((d) => d.decisionId)).toEqual(["earlier-durable-slack-1"]);
+    } finally {
+      w1.stop();
+    }
+
+    // Now enable Slack: seed Slack-primary backlog as history, flip enabled=true, and restart wire
+    const slackOnlyRegistry = {
+      ...registry,
+      entities: registry.entities.filter((e) =>
+        e.connectorBindings.some((b) => b.role === "primary" && b.kind === "slack"),
+      ),
+    };
+    await seedBacklogAsHistory({
+      queue: makeQueuePorts(repo, { loadHumanRegistry: () => slackOnlyRegistry }),
+      seen: new SeenStore(join(home, "state", "slack-outbound-seen.jsonl")),
+      filter: { minimumLevel: "NOTICE" },
+      buffer: new DispatchBuffer(home),
+    });
+    saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-MIXED", secretsEnvFile: slackSecrets }, home);
+
+    const w2 = makeWire();
+    try {
+      w2.startServices?.();
+      await new Promise((r) => setTimeout(r, 60));
+      // Only the pre-existing durable Slack decision replays and posts; the fresh Slack backlog ask was seeded and never buffered
+      expect(slackPosts).toHaveLength(1);
+      expect(JSON.stringify(slackPosts[0])).toContain("Earlier durable Slack ask");
+      expect(JSON.stringify(slackPosts)).not.toContain("Fresh Slack backlog while disabled");
+      expect(new DispatchBuffer(home).pending()).toHaveLength(0);
+    } finally {
+      w2.stop();
+      db.close();
+    }
+  });
+});

@@ -84,4 +84,107 @@ describe("S10 gateway subsystem activation (RED at tip: no boot-time subsystem c
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it("activates relay-only outbound polling post-bind with no Slack credentials while keeping Slack status unconfigured", async () => {
+    const { buildSlackGatewayWire } = await import("../src/domain/gateway/slack/slack-subsystem.js");
+    const { createDb } = await import("../src/db/connection.js");
+    const { migrate } = await import("../src/db/migrate.js");
+    const { ALL_MIGRATIONS } = await import("../src/db/all-migrations.js");
+    const { EventBus } = await import("../src/domain/event-bus.js");
+    const { QueueRepository } = await import("../src/domain/queue-repository.js");
+    const { resolveSlackHandle } = await import("../src/domain/gateway/human-registry.js");
+    const { writeFileSync } = await import("node:fs");
+
+    const home = mkdtempSync(join(tmpdir(), "s10-relay-only-"));
+    const db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    const secretsFile = join(home, "relay.env");
+    writeFileSync(
+      secretsFile,
+      [
+        "OPENRIG_RELAY_URL=http://127.0.0.1:44100/outbound",
+        "OPENRIG_RELAY_OUTBOUND_TOKEN=out-secret-token-123456",
+        "OPENRIG_RELAY_INBOUND_TOKEN=in-secret-token-654321",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    const registry = {
+      ok: true as const,
+      entities: [
+        {
+          entityId: "sam",
+          class: "human" as const,
+          displayName: "Sam",
+          address: "sam@external",
+          connectorBindings: [
+            {
+              kind: "relay" as const,
+              connectorRef: "wa-main",
+              secretsRef: `file:${secretsFile}`,
+              role: "primary" as const,
+              handle: "sam_wa",
+            },
+          ],
+          prefs: { deliveryClass: "A" as const, availability: "available" as const },
+        },
+      ],
+    };
+    const repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => registry,
+    });
+    const row = await repo.create({
+      sourceSession: "lead@rig",
+      destinationSession: "orch@rig",
+      body: "Please confirm.",
+      nudge: false,
+    });
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "orch@rig",
+      state: "blocked",
+      blockedOn: "sam@kernel",
+      summary: "Approve deploy?",
+      evidenceRef: "/proof/deploy.md",
+      transitionNote: "parked",
+    });
+
+    const deliveredEnvelopes: Array<Record<string, unknown>> = [];
+    const wire = buildSlackGatewayWire({
+      home,
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+      outboundIntervalMs: 15,
+      fetchImpl: async (_url, init) => {
+        deliveredEnvelopes.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      },
+    });
+
+    try {
+      // Composition alone must never start network polling or HTTP calls
+      await new Promise((r) => setTimeout(r, 30));
+      expect(deliveredEnvelopes).toHaveLength(0);
+      expect(wire.status()).toMatchObject({
+        outboundReady: false,
+        inboundReady: false,
+      });
+
+      // Post-bind startServices() starts outbound polling and delivers to the relay bridge
+      wire.startServices?.();
+      await new Promise((r) => setTimeout(r, 60));
+      expect(deliveredEnvelopes).toHaveLength(1);
+      expect(deliveredEnvelopes[0]).toMatchObject({
+        v: 1,
+        recipient: { handle: "sam_wa" },
+        intent: "decision",
+      });
+      const episode = repo.currentHumanRequiredEpisode(row.qitemId)!;
+      expect(repo.hasRelayOwnerNotificationReceipt(row.qitemId, episode.key)).toBe(true);
+    } finally {
+      wire.stop();
+      db.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

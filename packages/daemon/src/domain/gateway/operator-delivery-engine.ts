@@ -6,6 +6,7 @@
 // dispatcher and the REAL tick.
 
 import type { QueueItem, QueueRepository } from "../queue-repository.js";
+import { RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX } from "../queue-transition-log.js";
 import { DispatchBuffer } from "./dispatch-buffer.js";
 import { lastMeaningfulTransition } from "../queue-waiting.js";
 import type { DispatchResult } from "./dispatcher.js";
@@ -92,6 +93,7 @@ export function makeOperatorDeliveryEngine(deps: {
       if (note.startsWith("escalation-rung: operator dispatched-to-engine")) resolved = null;
       if (note.split(/\s+/).includes(`notification_key=${key}`)) {
         if (note.startsWith("slack-owner-notification-posted ")) resolved = "posted";
+        if (note.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `)) resolved = "accepted";
         if (note.startsWith("delivery-termination:")) resolved = "terminated";
       }
     }
@@ -134,9 +136,12 @@ export function makeOperatorDeliveryEngine(deps: {
       // Already-accepted decisions returned above retain gateway custody, even if readiness later changes.
       try {
         const readiness = await (deps.readiness?.(human) ?? resolveHumanDeliveryReadiness({
-          human, config: cfg, gatewayState: deps.gatewayState?.() ?? "unavailable",
+          human,
+          config: cfg,
+          gatewayState: deps.gatewayState?.() ?? "unavailable",
           botToken: resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg.secretsEnvFile ?? undefined }),
-        }));
+          home: deps.home,
+        }, { entities: reg.entities }));
         if (!readiness.ready) return { decision: `unavailable:human-delivery:${readiness.reason}`, resolved: false, dispatched: false };
       } catch {
         return { decision: "unavailable:human-delivery:readiness-unavailable", resolved: false, dispatched: false };

@@ -211,6 +211,7 @@ import { managedBlockRecords } from "./domain/managed-block-records.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
+  getOpenRigHome,
   readOpenRigEnv,
 } from "./openrig-compat.js";
 
@@ -2764,18 +2765,28 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // no drivers) — `rig slack status` names what is missing.
   const { GatewaySubsystem } = await import("./domain/gateway/gateway-subsystem.js");
   const { buildSlackGatewayWire, makeHumanReplyResolver } = await import("./domain/gateway/slack/slack-subsystem.js");
+  const { createRelayInboundHandler } = await import("./domain/gateway/relay-inbound.js");
+  const effectiveOpenRigHome = getOpenRigHome();
   const gatewaySubsystem = new GatewaySubsystem({
-    home: OPENRIG_HOME,
+    home: effectiveOpenRigHome,
     wire: () => buildSlackGatewayWire({
-      home: OPENRIG_HOME,
+      home: effectiveOpenRigHome,
       queueRepo: queueRepoInstance,
-      resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract, OPENRIG_HOME),
+      resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract, effectiveOpenRigHome),
       log: (m) => console.log(`[gateway] ${m}`),
     }),
     log: (m) => console.log(`[gateway] ${m}`),
   });
   gatewaySubsystem.start();
   deps.gatewaySubsystem = gatewaySubsystem;
+  if (deps.missionControlWriteContract) {
+    deps.relayInboundHandler = createRelayInboundHandler({
+      home: effectiveOpenRigHome,
+      queueRepo: queueRepoInstance,
+      missionControlWriteContract: deps.missionControlWriteContract,
+      missionControlActionLog: deps.missionControlActionLog,
+    });
+  }
   // OPR.0.5.6.1 — bind the delivery policies' late gateway ref.
   lateGatewayDispatch.fn = (op, ref, payload, opts) => gatewaySubsystem.dispatch(op, ref, payload, opts);
 

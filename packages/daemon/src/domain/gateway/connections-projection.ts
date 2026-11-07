@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { loadConfig, configPathFor, DEFAULT_CONFIG, type SlackConnectorConfig } from "./slack/config.js";
 import { resolveSecret } from "./slack/secrets.js";
 import { loadHumanRegistry } from "./human-registry.js";
+import { loadRelayProfiles } from "./relay-config.js";
 import { channelStateDigest } from "./channel-operations.js";
 import type { SettingsStore } from "../user-settings/settings-store.js";
 
@@ -82,33 +83,58 @@ export function connectionsProjection(home: string, gateway: Record<string, unkn
     : "rig slack verify --json";
   let registry: ReturnType<typeof loadHumanRegistry>;
   try { registry = loadHumanRegistry(home, { readOnly: true }); } catch { registry = { ok: false, error: "registry unavailable" }; }
+  const relayProfilesResult = registry.ok ? loadRelayProfiles(home, { entities: registry.entities }) : null;
+  const relayProfileValues = relayProfilesResult ? [...relayProfilesResult.profiles.values()] : [];
+  const relayTokens = relayProfileValues
+    .flatMap((p) => [p.credentials?.inboundToken, p.credentials?.outboundToken])
+    .filter((t): t is string => Boolean(t));
+  const safeText = (v: unknown): string | null => {
+    const base = text(v);
+    if (base === null) return null;
+    let out = base;
+    for (const tok of relayTokens) out = out.split(tok).join("[redacted]");
+    return out;
+  };
+  const relaySummary = {
+    configured: relayProfileValues.length > 0,
+    ready: relayProfileValues.length > 0 && relayProfileValues.every((p) => p.ready),
+    profiles: relayProfileValues.map((p) => ({
+      connectorRef: safeText(p.connectorRef),
+      state: p.state,
+      configured: p.configured,
+      ready: p.ready,
+      reason: safeText(p.reason),
+      nextAction: safeText(p.nextAction),
+    })),
+  };
   const instance = ["host.name", "workspace.root", "workspace.operator_seat_name"] as const;
   const browserKey = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 16);
   return {
-    observedAt: new Date().toISOString(), home: text(home), pid: process.pid,
-    settingsSource: text(settings?.configPath),
+    observedAt: new Date().toISOString(), home: safeText(home), pid: process.pid,
+    settingsSource: safeText(settings?.configPath),
     settings: instance.map((key) => {
       try {
         const r = settings?.resolveOne(key);
-        return { key, value: text(r?.value), source: r?.source ?? "unavailable" };
+        return { key, value: safeText(r?.value), source: r?.source ?? "unavailable" };
       } catch { return { key, value: null, source: "unavailable" }; }
     }),
-    configSource: { state: configState, path: text(configPath), sourceState }, configuration,
-    running: { state: text(gateway?.state) ?? "unavailable", activatedAt: text(gateway?.activatedAt),
+    configSource: { state: configState, path: safeText(configPath), sourceState }, configuration,
+    running: { state: safeText(gateway?.state) ?? "unavailable", activatedAt: safeText(gateway?.activatedAt),
       outboundReady: typeof connector?.outboundReady === "boolean" ? connector.outboundReady : null,
       inboundReady: typeof connector?.inboundReady === "boolean" ? connector.inboundReady : null,
-      inboundState: text(inbound?.state) ?? "unverified",
+      inboundState: safeText(inbound?.state) ?? "unverified",
       // Delivery health beside the socket state: an open socket is not proof that events arrive.
-      inboundDelivery: text(inbound?.delivery), inboundEventsMissingSince: text(inbound?.eventsMissingSince), applied },
+      inboundDelivery: safeText(inbound?.delivery), inboundEventsMissingSince: safeText(inbound?.eventsMissingSince), applied },
     state, nextAction,
-    registry: { state: registry.ok ? "available" : "unavailable", path: text(join(home, "gateway", "humans")) },
+    relay: relaySummary,
+    registry: { state: registry.ok ? "available" : "unavailable", path: safeText(join(home, "gateway", "humans")) },
     humans: registry.ok ? registry.entities.map((h) => ({
       browserKey: browserKey(h.entityId),
-      entityId: text(h.entityId) ?? "[withheld]", address: text(h.address) ?? "[withheld]", displayName: text(h.displayName), class: h.class, away: h.prefs.away ?? null,
+      entityId: safeText(h.entityId) ?? "[withheld]", address: safeText(h.address) ?? "[withheld]", displayName: safeText(h.displayName), class: h.class, away: h.prefs.away ?? null,
       deliveryClass: h.prefs.deliveryClass, availability: h.prefs.availability ?? (h.prefs.away ? "away" : "available"),
       excluded: cfg ? cfg.outboundDestinations.length > 0 && !cfg.outboundDestinations.includes(h.address) : null,
       bindings: h.connectorBindings.map((b) => ({ browserKey: browserKey(JSON.stringify([b.kind, b.connectorRef, b.role, b.handle ?? null])),
-        kind: b.kind, ref: text(b.connectorRef), role: b.role, handle: text(b.handle), credentialReference: Boolean(b.secretsRef) })),
+        kind: b.kind, ref: safeText(b.connectorRef), role: b.role, handle: safeText(b.handle), credentialReference: Boolean(b.secretsRef) })),
     })) : [],
   };
 }

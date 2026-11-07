@@ -256,7 +256,7 @@ export async function runQuietRelease(input: RunQuietReleaseInput): Promise<{ st
     return { state: "pending", released, dispositions };
   }
   if (open === 0) {
-    input.jobsRepo.markTerminal(input.jobId, "quiet release complete: every held ask posted or given a disposition");
+    input.jobsRepo.markTerminal(input.jobId, "quiet release complete: every held ask posted, accepted by its bridge, or given a disposition");
     return { state: "released", released, dispositions };
   }
   return { state: "pending", released, dispositions };
@@ -274,10 +274,13 @@ function heldKeys(queueRepo: QueueRepository, windowId: string): Array<[string, 
   return out;
 }
 
-/** Posted, or given a disposition: nothing more to release for this key. */
+/** Posted, accepted by a relay bridge (which ends local quiet-release custody without claiming downstream person delivery),
+ *  or given a disposition: nothing more to release for this key. */
 function resolved(queueRepo: QueueRepository, qitemId: string, key: string, notes?: string[]): boolean {
   const all = notes ?? queueRepo.listTransitions(qitemId).map((t) => t.transitionNote ?? "");
-  return all.some((n) => hasToken(n, "slack-owner-notification-posted", key) || hasToken(n, DISPOSITION_PREFIX, key));
+  return all.some((n) => hasToken(n, "slack-owner-notification-posted", key)
+    || hasToken(n, "relay-owner-notification-accepted", key)
+    || hasToken(n, DISPOSITION_PREFIX, key));
 }
 
 /** Watchdog-engine policy wrapper: the scheduler's cadence drives evaluation; the current quiet state owns the timing. */
