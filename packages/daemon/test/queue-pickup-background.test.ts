@@ -13,27 +13,39 @@ const claimed = (over: Partial<PickupFacts> = {}): PickupFacts => ({
 });
 
 describe("(b) a live background shell", () => {
-  it("is working within its grace, and says so", () => {
-    expect(derivePickup(claimed({ backgroundWork: { observedAt: minutesAgo(20) } }))).toEqual({
-      state: "working", evidence: `owner idle at prompt with a live background shell for 20 min (grace ${BACKGROUND_SHELL_GRACE_MINUTES} min)`,
+  it("is working within its grace counted from the claim's last queue change, and says so", () => {
+    expect(derivePickup(claimed({ lastMeaningfulAt: minutesAgo(20), backgroundWork: { observedAt: minutesAgo(15) } }))).toEqual({
+      state: "working", grace: "background-shell",
+      evidence: `owner idle at prompt with a live background shell; no queue change for 20 min (grace ${BACKGROUND_SHELL_GRACE_MINUTES} min)`,
     });
   });
 
   it("past its ceiling is stalled again, and the stall names the shell", () => {
-    const p = derivePickup(claimed({ backgroundWork: { observedAt: minutesAgo(BACKGROUND_SHELL_GRACE_MINUTES + 5) } }));
+    const p = derivePickup(claimed({ backgroundWork: { observedAt: minutesAgo(5) } }));
     expect(p.state).toBe("stalled-after-claim");
+    expect(p.grace).toBeUndefined();
     expect(p.evidence).toContain("no meaningful queue change for 90 min");
-    expect(p.evidence).toContain(`background shell live ${BACKGROUND_SHELL_GRACE_MINUTES + 5} min, past its ${BACKGROUND_SHELL_GRACE_MINUTES} min ceiling`);
+    expect(p.evidence).toContain(`background shell live, past its ${BACKGROUND_SHELL_GRACE_MINUTES} min ceiling (90 min since the claim's last queue change)`);
     expect(stalledPickupFinding({ qitemId: "q1", destinationSession: "worker@r", pickup: p })?.evidence).toBe(p.evidence);
   });
 
+  it("a shell that never ends, with a new turn every hour, still reads stalled after the ceiling (the maintainer's case)", () => {
+    // each hourly turn starts a fresh shell (its first sighting minutes ago) but moves nothing on the queue
+    for (const hours of [2, 3, 5]) {
+      const p = derivePickup(claimed({ claimedAt: minutesAgo(hours * 60 + 10), lastMeaningfulAt: minutesAgo(hours * 60 + 10),
+        backgroundWork: { observedAt: minutesAgo(3) } }));
+      expect(p.state, `after ${hours} h`).toBe("stalled-after-claim");
+    }
+  });
+
   it("the ceiling can be given per call", () => {
-    expect(derivePickup(claimed({ backgroundWork: { observedAt: minutesAgo(20) }, backgroundShellGraceMinutes: 10 })).state)
-      .toBe("stalled-after-claim");
+    expect(derivePickup(claimed({ lastMeaningfulAt: minutesAgo(20), backgroundWork: { observedAt: minutesAgo(20) },
+      backgroundShellGraceMinutes: 10 })).state).toBe("stalled-after-claim");
   });
 
   it("does not override a pending input: needs-input keeps the stall it rides on", () => {
-    const p = derivePickup(claimed({ backgroundWork: { observedAt: minutesAgo(5) }, needsInput: 1, needsInputReason: "dialog owns input" }));
+    const p = derivePickup(claimed({ lastMeaningfulAt: minutesAgo(20), backgroundWork: { observedAt: minutesAgo(5) },
+      needsInput: 1, needsInputReason: "dialog owns input" }));
     expect(p.state).toBe("needs-input");
     expect(p.stall).toContain("no meaningful queue change");
   });
@@ -44,7 +56,7 @@ describe("(b) a live background shell", () => {
   });
 
   it("leaves unclaimed, parked and closed rows alone", () => {
-    const shell = { backgroundWork: { observedAt: minutesAgo(5) } };
+    const shell = { lastMeaningfulAt: minutesAgo(20), backgroundWork: { observedAt: minutesAgo(5) } };
     expect(derivePickup(claimed({ ...shell, claimedAt: null })).state).toBe("unclaimed");
     expect(derivePickup(claimed({ ...shell, state: "blocked" })).state).toBe("parked");
     expect(derivePickup(claimed({ ...shell, state: "done" })).state).toBe("terminal");
@@ -54,7 +66,8 @@ describe("(b) a live background shell", () => {
 describe("(c) a pending managed restore", () => {
   it("is working within its grace, and says so", () => {
     expect(derivePickup(claimed({ compactionOwedSince: minutesAgo(4) }))).toEqual({
-      state: "working", evidence: `managed post-compaction restore owed for 4 min (grace ${COMPACTION_RESTORE_GRACE_MINUTES} min)`,
+      state: "working", grace: "restore-pending",
+      evidence: `managed post-compaction restore owed for 4 min (grace ${COMPACTION_RESTORE_GRACE_MINUTES} min)`,
     });
   });
 
@@ -69,12 +82,12 @@ describe("(c) a pending managed restore", () => {
   });
 
   it("with both signals, either within its grace keeps the row working", () => {
-    expect(derivePickup(claimed({ backgroundWork: { observedAt: minutesAgo(BACKGROUND_SHELL_GRACE_MINUTES + 30) },
-      compactionOwedSince: minutesAgo(2) })).state).toBe("working");
-    const both = derivePickup(claimed({ backgroundWork: { observedAt: minutesAgo(BACKGROUND_SHELL_GRACE_MINUTES + 30) },
+    expect(derivePickup(claimed({ backgroundWork: { observedAt: minutesAgo(5) }, compactionOwedSince: minutesAgo(2) })).state)
+      .toBe("working");
+    const both = derivePickup(claimed({ backgroundWork: { observedAt: minutesAgo(5) },
       compactionOwedSince: minutesAgo(COMPACTION_RESTORE_GRACE_MINUTES + 30) }));
     expect(both.state).toBe("stalled-after-claim");
-    expect(both.evidence).toMatch(/background shell live .*; managed restore owed /);
+    expect(both.evidence).toMatch(/background shell live, past .*; managed restore owed /);
   });
 });
 
@@ -105,10 +118,10 @@ describe("the row face and the stuck sweep", () => {
   });
   afterEach(() => db.close());
 
-  async function quietClaim(): Promise<QueueItem> {
+  async function quietClaim(minutes = 90): Promise<QueueItem> {
     const row = await repo.create({ sourceSession: "sender@r", destinationSession: "worker@r", body: "work" });
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
-    const past = ago(90);
+    const past = ago(minutes);
     db.prepare("UPDATE queue_items SET claimed_at = ?, ts_created = ? WHERE qitem_id = ?").run(past, past, row.qitemId);
     db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(past, row.qitemId);
     return row;
@@ -124,36 +137,70 @@ describe("the row face and the stuck sweep", () => {
   const stalls = (r: Awaited<ReturnType<typeof sweep>>, id: string) =>
     r.findings.filter((f) => f.kind === "stalled-after-claim" && f.qitemId === id);
 
-  it("(b) a recent shell: the row reads working with its reason, and the sweep opens no stall", async () => {
-    const row = await quietClaim();
+  const aging = (id: string, minutes: number) => {
+    const past = ago(minutes);
+    db.prepare("UPDATE queue_items SET claimed_at = ?, ts_created = ? WHERE qitem_id = ?").run(past, past, id);
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(past, id);
+  };
+  const openStall = (id: string) => repo.list({ limit: 50 }).filter((r) => r.tags?.includes(`stuck-sweep:stalled-after-claim:${id}`)
+    && ["pending", "in-progress", "blocked"].includes(r.state));
+
+  it("(b) a shell within its window: the row reads working with its reason, and the sweep opens no stall", async () => {
+    const row = await quietClaim(20);
     shellAt = ago(15);
-    expect(repo.getById(row.qitemId)!.pickup).toMatchObject({ state: "working", evidence: expect.stringContaining("live background shell for 15 min") });
+    expect(repo.getById(row.qitemId)!.pickup).toMatchObject({ state: "working", grace: "background-shell",
+      evidence: expect.stringContaining("live background shell; no queue change for 20 min") });
     expect(stalls(await sweep(), row.qitemId)).toEqual([]);
   });
 
-  it("(b) a stall opened before the shell is seen closes once it is", async () => {
-    const row = await quietClaim();
+  it("(b) past the window: the sweep opens the stall, and its reason names the ceiling", async () => {
+    const row = await quietClaim(BACKGROUND_SHELL_GRACE_MINUTES + 10);
+    shellAt = ago(2); // a fresh shell does not restart the window
     expect(stalls(await sweep(), row.qitemId)).toEqual([expect.objectContaining({ action: "created" })]);
-    shellAt = ago(2);
-    expect(stalls(await sweep(), row.qitemId)).toEqual([expect.objectContaining({ action: "closed" })]);
+    expect(openStall(row.qitemId)).toHaveLength(1);
+    expect(openStall(row.qitemId)[0]!.body).toContain(`past its ${BACKGROUND_SHELL_GRACE_MINUTES} min ceiling`);
   });
 
-  it("(b) a shell past its ceiling: the sweep opens the stall, and its reason names the ceiling", async () => {
-    const row = await quietClaim();
-    shellAt = ago(BACKGROUND_SHELL_GRACE_MINUTES + 10);
+  it("(b) a stall opened before the shell stays open through the grace and is still open when it expires", async () => {
+    const row = await quietClaim(10);
     expect(stalls(await sweep(), row.qitemId)).toEqual([expect.objectContaining({ action: "created" })]);
-    const open = repo.list({ limit: 50 }).filter((r) => r.tags?.includes(`stuck-sweep:stalled-after-claim:${row.qitemId}`));
-    expect(open).toHaveLength(1);
-    expect(open[0]!.body).toContain(`past its ${BACKGROUND_SHELL_GRACE_MINUTES} min ceiling`);
+    const finding = openStall(row.qitemId)[0]!.qitemId;
+    shellAt = ago(1);
+    expect(repo.getById(row.qitemId)!.pickup?.grace).toBe("background-shell");
+    expect((await sweep()).findings.filter((f) => f.qitemId === row.qitemId && f.action === "closed")).toEqual([]);
+    expect(openStall(row.qitemId).map((r) => r.qitemId)).toEqual([finding]);
+    aging(row.qitemId, BACKGROUND_SHELL_GRACE_MINUTES + 5); // the window ends with the shell still live
+    expect(stalls(await sweep(), row.qitemId)).toEqual([expect.objectContaining({ action: "refreshed", findingQitemId: finding })]);
+    expect(openStall(row.qitemId).map((r) => r.qitemId)).toEqual([finding]);
   });
 
   it("(c) a pending restore: working within its grace, stalled past it", async () => {
     const row = await quietClaim();
     owedAt = ago(3);
-    expect(repo.getById(row.qitemId)!.pickup?.state).toBe("working");
+    expect(repo.getById(row.qitemId)!.pickup).toMatchObject({ state: "working", grace: "restore-pending" });
     expect(stalls(await sweep(), row.qitemId)).toEqual([]);
     owedAt = ago(COMPACTION_RESTORE_GRACE_MINUTES + 5);
     expect(repo.getById(row.qitemId)!.pickup?.evidence).toContain("managed restore owed");
     expect(stalls(await sweep(), row.qitemId)).toEqual([expect.objectContaining({ action: "created" })]);
   });
+
+  it("(c) the maintainer's case: stall, a recent restore inside the grace, the grace expiring with the restore still pending: the recovery stays active", async () => {
+    const row = await quietClaim();
+    expect(stalls(await sweep(), row.qitemId)).toEqual([expect.objectContaining({ action: "created" })]);
+    const finding = openStall(row.qitemId)[0]!.qitemId;
+    owedAt = ago(2); // the daemon now owes the seat its restore
+    expect(repo.getById(row.qitemId)!.pickup?.grace).toBe("restore-pending");
+    expect((await sweep()).findings.filter((f) => f.qitemId === row.qitemId && f.action === "closed")).toEqual([]);
+    owedAt = ago(COMPACTION_RESTORE_GRACE_MINUTES + 1); // nothing changed; the grace is over, the restore still owed
+    expect(stalls(await sweep(), row.qitemId)).toEqual([expect.objectContaining({ action: "refreshed", findingQitemId: finding })]);
+    expect(openStall(row.qitemId).map((r) => r.qitemId)).toEqual([finding]);
+  });
+
+  it("a real resolution still closes the stall: the owner moves the row", async () => {
+    const row = await quietClaim();
+    expect(stalls(await sweep(), row.qitemId)).toEqual([expect.objectContaining({ action: "created" })]);
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", transitionNote: "resumed work" });
+    expect(stalls(await sweep(), row.qitemId)).toEqual([expect.objectContaining({ action: "closed" })]);
+  });
+
 });
