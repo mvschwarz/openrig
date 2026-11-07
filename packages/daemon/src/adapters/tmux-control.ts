@@ -72,9 +72,11 @@ function namesItsTarget(args: string[]): boolean {
   return false;
 }
 
-/** Whether a `set-option` names its target among its flags (`-t`, alone or in a cluster such as `-wt`), and none of
- *  them expands a format (`-F`: one may read the client that sends it). Without a target, the client's own session is
- *  the one set. Every flag is read, up to the option's name: `-t`'s value is skipped, whatever it reads. */
+/** Whether a `set-option` names an absolute target among its flags (`-t`, alone or in a cluster such as `-wt`), and
+ *  none of them expands a format (`-F`: one may read the client that sends it). Without a target, the client's own
+ *  session is the one set; so it is with a relative one (`:0`, `1`, `{last}`, a bare name tmux may also match as a
+ *  window of the current session), resolved against the control client's session. Every flag is read, up to the
+ *  option's name: `-t`'s value is skipped, whatever it reads. */
 function optionTargeted(args: string[]): boolean {
   let targeted = false;
   for (let i = 1; i < args.length; i++) {
@@ -83,10 +85,20 @@ function optionTargeted(args: string[]): boolean {
     if (arg.includes("F")) return false;
     const t = arg.indexOf("t");
     if (t < 0) continue;
+    // the target is the next argument; otherwise it is the rest of this one
+    const target = t === arg.length - 1 ? args[++i] : arg.slice(t + 1);
+    if (target === undefined || !absoluteTarget(target)) return false;
     targeted = true;
-    if (t === arg.length - 1) i++; // the target is the next argument; otherwise it is the rest of this one
   }
   return targeted;
+}
+
+/** A target that names the same object from any client: an exact session (`=name`), a pane, window or session id
+ *  (`%N`, `@N`, `$N`), or a session part before the `:` (`name:1`, `=name:`). */
+function absoluteTarget(target: string): boolean {
+  if (/^[=%@$]./.test(target)) return true;
+  const colon = target.indexOf(":");
+  return colon > 0 && !/^[{+-]/.test(target);
 }
 
 /** The most bytes of a file a `load-buffer` is sent as `set-buffer` for. */
@@ -109,15 +121,22 @@ export const readShortRegularFile: ReadBufferFile = async (path, maxBytes) => {
   }
 };
 
+/** Whether the args are a lone `load-buffer -b <name> <path>` that `bufferLoadAsSet` may turn into a set-buffer: the
+ *  shape alone, with no read of the file. */
+export function isLoneBufferLoad(args: string[]): boolean {
+  if (args.length !== 4 || args[0] !== "load-buffer" || args[1] !== "-b") return false;
+  const [, , name, path] = args as [string, string, string, string];
+  return !(name.endsWith(";") || path === "-" || path.endsWith(";"));
+}
+
 /** A lone `load-buffer -b <name> <path>` of a short one-line text file as the `set-buffer` that sets the same buffer
  *  to the same bytes, read here as a spawned client reads them; null keeps the load-buffer spawned. Kept spawned: any
  *  other shape (stdin, other flags, a chain), a file that is not regular or is past the bound, one that cannot be
  *  read, an empty one, bytes that are not UTF-8 or hold a control character (a newline among them), and a text ending
  *  in `;`, which tmux's argument parsing takes for its command's end. */
 export async function bufferLoadAsSet(args: string[], read: ReadBufferFile): Promise<string[] | null> {
-  if (args.length !== 4 || args[0] !== "load-buffer" || args[1] !== "-b") return null;
+  if (!isLoneBufferLoad(args)) return null;
   const [, , name, path] = args as [string, string, string, string];
-  if (name.endsWith(";") || path === "-" || path.endsWith(";")) return null;
   let bytes: Buffer | null;
   try {
     bytes = await read(path, SET_BUFFER_MAX_BYTES);
@@ -614,8 +633,13 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
     const prefix = argsIn.length >= 2 && (argsIn[0] === "-S" || argsIn[0] === "-L") ? argsIn.slice(0, 2) : [];
     const sameServer = prefix.length === serverArgs.length && prefix.every((arg, i) => arg === serverArgs[i]);
     // A short one-line text's load-buffer is sent as set-buffer; a spawned client, if one runs it, gets the load-buffer.
-    const asSet = bin === "tmux" && sameServer && !closed && argsIn[prefix.length] === "load-buffer"
-      ? await bufferLoadAsSet(argsIn.slice(prefix.length), readBufferFile) : null;
+    // The file is read only once a control client is there to take the set-buffer (N1 of the review): without one, the
+    // load-buffer goes spawned, unread here.
+    const loadArgs = argsIn.slice(prefix.length);
+    const loadable = bin === "tmux" && sameServer && !closed && isLoneBufferLoad(loadArgs)
+      && [...prefix, ...loadArgs].every((a) => !/[\n\r\0]/.test(a));
+    if (loadable && !(await connected())) return fallback(argvIn);
+    const asSet = loadable ? await bufferLoadAsSet(loadArgs, readBufferFile) : null;
     const args = asSet ?? argsIn.slice(prefix.length);
     const commandsIn = sameServer && !args[0]?.startsWith("-") ? commandsOf(args) : [];
     const routable = bin === "tmux" && commandsIn.length > 0

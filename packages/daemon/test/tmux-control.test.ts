@@ -467,16 +467,17 @@ describe("tmuxControlExec", () => {
 
   it("spawns the original load-buffer, never a set-buffer, when no client can run", async () => {
     const { spawned, fallback } = fakeSpawned();
-    const exec = tmuxControlExec(fallback, {
-      spawnClient: () => { throw new Error("no tmux"); }, readBufferFile: async () => Buffer.from("short"),
-    });
+    const readBufferFile = vi.fn(async () => Buffer.from("short"));
+    const exec = tmuxControlExec(fallback, { spawnClient: () => { throw new Error("no tmux"); }, readBufferFile });
     const argv = ["tmux", "load-buffer", "-b", "b1", "/tmp/t1"];
     await exec([...argv]);
     expect(spawned).toEqual([argv]);
+    // the file is read only once a client is there to take the set-buffer
+    expect(readBufferFile).not.toHaveBeenCalled();
     await exec.close();
   });
 
-  it("routes a set-option that names its target; one without (-g, -s), or with -F, stays spawned", async () => {
+  it("routes a set-option that names an absolute target; one without (-g, -s), relative, or with -F, stays spawned", async () => {
     const client = fakeClient();
     const { spawned, fallback } = fakeSpawned();
     const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, now: () => 0 });
@@ -484,6 +485,8 @@ describe("tmuxControlExec", () => {
       ["tmux", "set-option", "-w", "-t", "=seat@rig:1", "remain-on-exit", "on"],
       ["tmux", "set-option", "-p", "-u", "-t", "%3", "@openrig-x"],
       ["tmux", "set-option", "-t", "=seat@rig", "@openrig-node", "n1"],
+      ["tmux", "set-option", "-wt@4", "@openrig-y", "1"],
+      ["tmux", "set-option", "-t", "seat:2", "@openrig-z", "1"],
     ];
     for (const argv of routed) {
       const call = exec(argv);
@@ -495,6 +498,8 @@ describe("tmuxControlExec", () => {
       "'set-option' '-w' '-t' '=seat@rig:1' 'remain-on-exit' 'on'",
       "'set-option' '-p' '-u' '-t' '%3' '@openrig-x'",
       "'set-option' '-t' '=seat@rig' '@openrig-node' 'n1'",
+      "'set-option' '-wt@4' '@openrig-y' '1'",
+      "'set-option' '-t' 'seat:2' '@openrig-z' '1'",
     ]);
     const kept = [
       ["tmux", "set-option", "-s", "escape-time", "0"],
@@ -502,10 +507,17 @@ describe("tmuxControlExec", () => {
       ["tmux", "set-option", "-F", "-t", "=seat@rig", "@x", "#{client_name}"],
       ["tmux", "set-option", "--", "-t"],
       ["tmux", "set-option", "-t", "=seat@rig", "-F", "@x", "#{client_name}"],
+      // relative targets resolve against the control client's own session: they stay spawned
+      ["tmux", "set-option", "-w", "-t", ":0", "remain-on-exit", "on"],
+      ["tmux", "set-option", "-w", "-t", "1", "remain-on-exit", "on"],
+      ["tmux", "set-option", "-w", "-t", "{last}", "remain-on-exit", "on"],
+      ["tmux", "set-option", "-t", "seat", "@x", "1"],
+      ["tmux", "set-option", "-wt:1", "@x", "1"],
+      ["tmux", "set-option", "-t", "=seat@rig", "-t", ":0", "@x", "1"],
     ];
     for (const argv of kept) await exec(argv);
     expect(spawned).toEqual(kept);
-    expect(client.written).toHaveLength(3);
+    expect(client.written).toHaveLength(5);
     await exec.close();
   });
 
