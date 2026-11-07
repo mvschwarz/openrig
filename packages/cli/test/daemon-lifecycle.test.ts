@@ -3,7 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { createServer } from "node:net";
-import { realDeps } from "../src/commands/daemon.js";
+import { createProcessLiveness, realDeps } from "../src/commands/daemon.js";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import {
@@ -81,6 +81,57 @@ function writtenState(deps: LifecycleDeps): DaemonState {
 }
 
 describe("Daemon Lifecycle", () => {
+  it.each(["EPERM", "EACCES"])("warns and starts when state is absent and the initial probe is blocked (%s)", async (code) => {
+    let probes = 0;
+    const deps = startableDeps({ fetch: vi.fn(async () => { if (probes++ === 0) throw Object.assign(new Error("probe blocked"), { code }); return startupHealth(); }) });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try { await startDaemon({ port: 7433 }, deps); expect(deps.spawn).toHaveBeenCalledOnce(); expect(warn).toHaveBeenCalled(); } finally { warn.mockRestore(); }
+  });
+
+  it("does not spawn when recorded process liveness is unknown and its probe is blocked", async () => {
+    const state: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
+    const deps = mockDeps({ exists: vi.fn((p: string) => p === STATE_FILE), readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null), isProcessAlive: vi.fn(() => false), processLiveness: vi.fn(() => "unknown"), fetch: vi.fn(async () => { throw Object.assign(new Error("blocked"), { code: "EPERM" }); }) });
+    await expect(startDaemon({ port: 7433 }, deps)).rejects.toThrow(/blocked the connection/i);
+    expect(deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it("continues startup when the recorded process is definitely dead", async () => {
+    const state: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
+    const deps = startableDeps({ exists: vi.fn((p: string) => p === STATE_FILE), readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null), processLiveness: vi.fn(() => "dead") });
+    await startDaemon({ port: 7433 }, deps);
+    expect(deps.spawn).toHaveBeenCalledOnce();
+  });
+
+  it("does not signal or remove state when recorded process liveness is unknown", async () => {
+    const state: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
+    const deps = mockDeps({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null),
+      isProcessAlive: vi.fn(() => false),
+      processLiveness: createProcessLiveness({ signal: () => "not-permitted", readProcessState: () => "S" }),
+      fetch: vi.fn(neverFetch),
+    });
+    await expect(stopDaemon(deps)).rejects.toThrow(/liveness is unknown.*no signal sent.*state preserved/i);
+    expect(deps.fetch).not.toHaveBeenCalled();
+    expect(deps.kill).not.toHaveBeenCalled();
+    expect(deps.removeFile).not.toHaveBeenCalled();
+  });
+
+  it.each(["EPERM", "EACCES"])("preserves a live recorded PID when its identity probe is blocked (%s)", async (code) => {
+    const state: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
+    const deps = mockDeps({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null),
+      isProcessAlive: vi.fn(() => true),
+      fetch: vi.fn(async () => { throw Object.assign(new Error("probe blocked"), { code }); }),
+    });
+    await expect(startDaemon({ port: 7433 }, deps)).rejects.toThrow(/blocked the connection/i);
+    expect(deps.spawn).not.toHaveBeenCalled();
+    await expect(stopDaemon(deps)).rejects.toThrow(/blocked.*no signal sent/i);
+    expect(deps.kill).not.toHaveBeenCalled();
+    expect(deps.removeFile).not.toHaveBeenCalled();
+  });
+
   // A started child whose own endpoint names its PID and reports `hosts`; `probe` scripts each later
   // request: "ok" answers, any other value throws with that error code.
   function listenerStart(hosts: string[], probe: (url: string) => string) {

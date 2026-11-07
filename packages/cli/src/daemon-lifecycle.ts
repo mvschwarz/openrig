@@ -39,6 +39,8 @@ export interface DaemonEventLoopEvidence {
 }
 
 export interface DaemonStatus {
+  /** The selected OPENRIG_URL names a non-loopback endpoint. */
+  explicitRemote?: boolean;
   databaseWarnings?: string[];
   /** RULING 1ae863d2 — C3 3-state semantics (canonical: daemon crash-cart-detect.ts, kept in
    *  lockstep): "stopped" requires POSITIVE evidence (connection refused); a probe TIMEOUT or
@@ -432,9 +434,13 @@ function resolveLifecycleFile(deps: LifecycleDeps, filename: "daemon.json" | "da
  *  - "openrig" — healthz responded (ok or not) → this is our daemon
  *  - "not_openrig" — connection refused → PID is alive but not listening on our port
  *  - "unresponsive" — pid is alive but healthz probe timed out
- *  - "dead" — PID not alive */
-async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openrig" | "not_openrig" | "unresponsive" | "dead"> {
-  if (!deps.isProcessAlive(state.pid)) return "dead";
+ *  - "dead" — PID not alive
+ *  - { blocked } — the OS refused the probe; identity is unknown */
+async function checkPid(state: DaemonState, deps: LifecycleDeps, knownLiveness?: ProcessLiveness): Promise<"openrig" | "not_openrig" | "unresponsive" | "dead" | { blocked: string }> {
+  const liveness = knownLiveness ?? (deps.processLiveness
+    ? deps.processLiveness(state.pid)
+    : deps.isProcessAlive(state.pid) ? "alive" : "dead");
+  if (liveness === "dead") return "dead";
   const host = state.host ?? DEFAULT_HOST;
   try {
     await fetchDaemonProbe(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
@@ -442,6 +448,8 @@ async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openr
     return "openrig";
   } catch (err) {
     if (err instanceof HealthProbeTimeoutError) return "unresponsive";
+    const code = connectionErrorCode(err);
+    if (isBlockedConnectionCode(code)) return { blocked: code };
     // Connection refused → PID alive but not our daemon
     return "not_openrig";
   }
@@ -679,6 +687,10 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
   const existing = readState(deps);
   if (existing) {
     const pidState = await checkPid(existing, deps);
+    if (typeof pidState === "object") {
+      const guidance = blockedConnectionGuidance(pidState.blocked);
+      throw new Error(`${guidance.consequence} ${guidance.action}`);
+    }
     if (pidState === "openrig") {
       // Our daemon is running (possibly unhealthy, but alive on our port)
       throw new Error(`Daemon already running (pid ${existing.pid} on port ${existing.port})`);
@@ -693,6 +705,10 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       await fetchDaemonProbe(deps, `http://${formatDaemonHostForUrl(probeHost)}:${port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
       recoveredRunning = true;
     } catch (error) {
+      const code = connectionErrorCode(error);
+      if (isBlockedConnectionCode(code)) {
+        console.warn(`Warning: daemon health probe was blocked (${code}); the port could not be checked and a daemon may already be running.`);
+      }
       // WSL2 can silently drop probes to an unused port. A slow live daemon can
       // also time out: do not run a second child's initialization against its DB.
       if (error instanceof HealthProbeTimeoutError && await deps.isPortOccupied?.(probeHost, port)) {
@@ -972,7 +988,16 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   }
   const stateFile = resolveLifecycleFile(deps, "daemon.json");
 
-  const pidState = await checkPid(state, deps);
+  const liveness = deps.processLiveness
+    ? deps.processLiveness(state.pid)
+    : deps.isProcessAlive(state.pid) ? "alive" : "dead";
+  if (liveness === "unknown") {
+    throw new Error(`Cannot stop safely: PID ${state.pid} liveness is unknown; no signal sent, state preserved.`);
+  }
+  const pidState = await checkPid(state, deps, liveness);
+  if (typeof pidState === "object") {
+    throw new Error(`Cannot stop safely: the identity probe was blocked (${pidState.blocked}); no signal sent, state preserved.`);
+  }
   if (pidState === "not_openrig") {
     throw new Error(`Cannot stop safely: PID ${state.pid} is present but identity is not confirmed at ${check}; no signal sent, state preserved.`);
   }
@@ -1107,7 +1132,9 @@ export async function getDaemonStatus(
     const endpoint = (() => {
       try {
         const url = new URL(openrigUrl);
-        return { port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST };
+        const host = url.hostname || DEFAULT_HOST;
+        const loopback = host.toLowerCase() === "localhost" || host === "[::1]" || host === "::1" || /^127\.\d+\.\d+\.\d+$/.test(host);
+        return { port: Number(url.port) || DEFAULT_PORT, host, ...(!loopback ? { explicitRemote: true } : {}) };
       } catch {
         return {};
       }

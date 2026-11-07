@@ -1017,6 +1017,10 @@ describe("rig start (OPR.0.3.4.1)", () => {
 // never crosses into the spawned daemon env.
 describe("S20 — start auto-start: routing env never becomes bind intent", () => {
   it("env-sourced OPENRIG_HOST through rig start creates NO bind intent (no OPENRIG_BIND_HOST, routing scrubbed)", async () => {
+    const { default: net } = await import("node:net");
+    const { EventEmitter } = await import("node:events");
+    const socket = Object.assign(new EventEmitter(), { setTimeout: vi.fn(), destroy: vi.fn(), connect() { queueMicrotask(() => socket.emit("error", Object.assign(new Error("refused"), { code: "ECONNREFUSED" }))); } });
+    const socketSpy = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as import("node:net").Socket);
     const savedHost = process.env["OPENRIG_HOST"];
     process.env["OPENRIG_HOST"] = "100.64.55.66"; // the distinct-value discriminator
     let spawnedEnv: Record<string, string> = {};
@@ -1057,6 +1061,7 @@ describe("S20 — start auto-start: routing env never becomes bind intent", () =
       expect(spawnedEnv["OPENRIG_BIND_HOST"]).toBeUndefined(); // no intent minted from routing env
       expect(spawnedEnv["OPENRIG_HOST"]).toBeUndefined();      // and the routing var never crosses
     } finally {
+      socketSpy.mockRestore();
       if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
       else process.env["OPENRIG_HOST"] = savedHost;
     }

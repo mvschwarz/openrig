@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import net from "node:net";
+import { EventEmitter } from "node:events";
 import { Command } from "commander";
 import { SystemPreflight } from "../src/system-preflight.js";
 import { ConfigStore } from "../src/config-store.js";
@@ -159,6 +160,26 @@ describe("SystemPreflight", () => {
     expect(portCheck!.ok).toBe(false);
     expect(portCheck!.error).toContain(String(port));
     expect(portCheck!.fix).toContain("rig config set daemon.port");
+  });
+
+  it.each(["EPERM", "EACCES"])("does not say a blocked port probe is available (%s)", async (code) => {
+    const socket = Object.assign(new EventEmitter(), {
+      setTimeout: vi.fn(), destroy: vi.fn(),
+      connect() { queueMicrotask(() => socket.emit("error", Object.assign(new Error("blocked"), { code }))); },
+    });
+    const constructor = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as net.Socket);
+    try {
+      const result = await createPreflight().run({ port: 7433 });
+      expect(result.ready).toBe(true);
+      expect(result.checks.find((c) => c.name === "port_available")).toMatchObject({ ok: true, warning: expect.stringContaining(code) });
+      expect(result.checks.find((c) => c.name === "port_available")!.warning).toContain("could not be checked");
+    } finally { constructor.mockRestore(); }
+  });
+
+  it("warns when a recorded daemon on the same endpoint has a blocked probe", async () => {
+    const pf = createPreflight({ daemonStatus: { state: "running", port: 7433, host: "127.0.0.1", probeErrorCode: "EPERM" } });
+    const result = await pf.run({ port: 7433, host: "127.0.0.1" });
+    expect(result.checks.find((c) => c.name === "port_available")).toMatchObject({ ok: true, warning: expect.stringContaining("EPERM") });
   });
 
   // Test 6
