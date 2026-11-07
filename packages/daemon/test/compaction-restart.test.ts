@@ -497,3 +497,41 @@ it('#2682 n3: a cancel after a submitted /compact leaves an ended record, and a 
  expect(await restarted.maybeAutoCompact(hs)).toEqual({triggered:true});
  expect(prepPrompts(f)).toHaveLength(2);
 });
+
+it('#2682 P1: a fresh high sample from another conversation, in process or after a restart, or after a dip and a climb back, sends no /compact with the old map',async()=>{
+ const other={...high,sessionId:'conversation-two'};
+ for(const variant of ['armed','held','held-restart','dip-climb','dip-climb-restart'] as const){
+  const f=fixture();let e=f.daemon();
+  await e.maybeAutoCompact(hs);const a=completeMap(e);
+  if(variant.startsWith('dip-climb')){
+   expect(await e.maybeAutoCompact({...hs,usedPercentage:30})).toEqual({triggered:false,reason:'below_threshold'});
+   // Back above before the deadline, on a busy seat: no window for the /compact.
+   f.hooks.busy=true;await e.maybeAutoCompact(hs);
+   if(variant==='dip-climb-restart'){e=f.daemon();await e.maybeAutoCompact(hs);}
+   f.advance(AUTO_PREP_WAIT_MS_DEFAULT+11*60_000);e.reconcilePreparations();
+   // The attempt that dipped is never held, so its pre-dip map stops at the idle grace as before.
+   const state=e.getPreparationState(seat)!;
+   expect(state,variant).toMatchObject({attemptId:a.attemptId,status:'stopped',reason:'map_complete_seat_never_idle'});
+   expect(state.prepared,variant).toBeUndefined();
+   f.hooks.busy=false;await e.maybeAutoCompact(hs);await e.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code',lastUsedPercentage:90,sessionId:'conversation-one'});
+   expect(compacts(f),variant).toHaveLength(0);
+   continue;
+  }
+  if(variant!=='armed'){
+   f.hooks.busy=true;f.advance(AUTO_PREP_WAIT_MS_DEFAULT+11*60_000);e.reconcilePreparations();
+   expect(e.getPreparationState(seat),variant).toMatchObject({status:'waiting',prepared:true});
+   f.hooks.busy=false;f.advance(11*60_000);
+   if(variant==='held-restart')e=f.daemon();
+  }
+  // The /clear and its low sample were missed; the seat is idle with an empty box.
+  expect(await e.maybeAutoCompact(other),variant).toMatchObject({triggered:false});
+  expect(compacts(f),variant).toHaveLength(0);
+  expect(e.getPreparationState(seat),variant).toMatchObject({attemptId:a.attemptId,status:'stopped'});
+  // An unknown conversation is not a mismatch: on a fresh copy of the armed case, it compacts with the map as before.
+  if(variant==='armed'){
+   const g=fixture();const d=g.daemon();await d.maybeAutoCompact(hs);completeMap(d);
+   expect(await d.maybeAutoCompact({...high,sessionId:null})).toEqual({triggered:true});
+   expect(compacts(g)).toHaveLength(1);
+  }
+ }
+});

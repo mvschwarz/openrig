@@ -507,8 +507,8 @@ interface PreparationAttempt extends PreparationState {
   stoppedAt?: number;
   /** An explicit cancel, even one after a stop: a decision about this seat, never retried automatically. */
   cancelled?: boolean;
-  /** The armed automatic attempt's newest fresh sample was below the threshold (this.now() of that sample), until a fresh
-   *  sample is back above. Once the attempt is held, its window stays closed meanwhile, for a stale-sample drain too. */
+  /** When a fresh sample first read below the threshold while the automatic attempt was armed (this.now() of that sample).
+   *  A climb back above does not clear it: an attempt that dipped is never held, in this daemon or after a restart. */
   belowSince?: number;
   /** The /compact write has begun and its result isn't back: the attempt is never held then, only stopped as before. */
   compactInFlight?: boolean;
@@ -559,7 +559,7 @@ interface CompactionRecord {
   prepared?: true;
   preparedAt?: number;
   preparedReason?: string;
-  /** The attempt's newest fresh sample was below the threshold: it is never held then. */
+  /** A fresh sample read below the threshold while the attempt was armed, even if usage climbed back: it is never held. */
   belowSince?: number;
   mapReadyAt?: number;
   mapUsedPercentage?: number;
@@ -1192,10 +1192,15 @@ export class ClaudeCompactionEnforcer {
       }
       return { triggered: false, reason: "below_threshold" };
     }
-    const held = this.pendingPreCompactPrep.get(input.sessionName);
-    if (held?.belowSince !== undefined) {
-      delete held.belowSince;
-      this.persist(input.sessionName, held.attemptId, { belowSince: undefined });
+    // A climb back above the threshold keeps the dip's mark (belowSince): the attempt that dipped is never held (#2682).
+    // Another conversation, proved by both sample and attempt naming theirs, ends an armed or held automatic attempt, as in
+    // the stale-sample drain: the /clear and its low sample may have been missed, and the map is of a context that is gone.
+    // A conversation that reads unknown on either side is not a mismatch.
+    const armed = this.pendingPreCompactPrep.get(input.sessionName);
+    if (armed?.mode === "automatic" && armed.status === "waiting" && armed.compact === "not_sent" && !armed.compactInFlight
+      && !!armed.sessionId && !!input.sessionId && armed.sessionId !== input.sessionId) {
+      this.stopPreparation(input.sessionName, "below_threshold_while_prepared", armed);
+      return { triggered: false, reason: "preparation_stopped" };
     }
 
     // No new automatic compaction while disabled. An already-owed stage above uses
