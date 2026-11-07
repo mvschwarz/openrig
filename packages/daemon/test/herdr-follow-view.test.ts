@@ -31,6 +31,7 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
   const frames = new Map<string, ComposerSnapshot | null>();
   let transform = (view: ComposedView) => view;
   let reportedCwd: string | null | undefined;
+  let changedCreateCwd = false;
   let lateFocus: { seat: string; reads: number } | undefined;
   let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false, failedViewerRun = false, failedProcessRead = false;
   const run = async (args: string[]) => {
@@ -42,6 +43,7 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
       const id = `p${calls.length}`;
       const made = { pane_id: id, workspace_id: "w1", terminal_id: `term-${id}`, cwd: args[args.indexOf("--cwd") + 1]!,
         focused: panes.size === 0, argv: ["/bin/bash"] };
+      if (changedCreateCwd) made.cwd = tmpdir();
       panes.set(id, made);
       if (lostCreate) { lostCreate = false; throw new Error("lost create response"); }
       return JSON.stringify({ result: { [command === "workspace create" ? "root_pane" : "pane"]: made } });
@@ -60,11 +62,12 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
     if (command === "pane run") {
       const selected = panes.get(args[2]!)!;
       if (args[3]!.startsWith("/usr/bin/tail")) {
-        selected.argv = ["/usr/bin/tail", "-n", "30", "-F", path.join(selected.cwd, "..", "events.log")];
+        selected.argv = ["/usr/bin/tail", "-n", "30", "-F", args[3]!.match(/-F '([^']+)'$/)![1]!];
       } else {
         if (failedViewerRun) { failedViewerRun = false; throw new Error("first attach dispatch failed"); }
         // The shared composer produces one wrapper per actual seat.
-        const seat = ["a", "b", "c", "d"].find(s => args[3]!.includes(`'${s}'`))!;
+        const command = args[3]!.startsWith("/bin/sh ") ? readFileSync(args[3]!.slice(9, -1), "utf8") : args[3]!;
+        const seat = ["a", "b", "c", "d"].find(s => command.includes(`'${s}'`))!;
         selected.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`];
       }
       return "";
@@ -101,6 +104,7 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
   const exitViewer = (seat: string) => { [...panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!.argv = ["/bin/bash"]; };
   return { follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
     reportCwd: (cwd: string | null) => { reportedCwd = cwd; },
+    changeCreateCwd: () => { changedCreateCwd = true; },
     failViewerRun: () => { failedViewerRun = true; },
     failProcessRead: () => { failedProcessRead = true; },
     confirmViewer: (seat: string) => { const entry = JSON.parse(readFileSync(journal(), "utf8")).entries[JSON.stringify(["self", seat])]; panes.get(entry.pane.pane_id)!.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`]; },
@@ -113,6 +117,12 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
 }
 
 describe("stable task-following workspace", () => {
+  it("keeps the received strip creation IDs even if its rc already changed cwd", async () => {
+    const f = fixture(); f.changeCreateCwd();
+    expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
+  });
+
   it("refuses a new incompatible protocol before effects but keeps an existing canvas on a protocol change", async () => {
     const unsupported = fixture("linux", { protocol: 23 });
     expect(await unsupported.follow()).toMatchObject({ ok: false, code: "follow_unsupported", following: { enabled: false } });

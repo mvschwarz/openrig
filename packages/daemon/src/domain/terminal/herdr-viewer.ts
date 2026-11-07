@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync, realpathSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync, realpathSync, lstatSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
@@ -21,7 +21,7 @@ export interface ViewerPane { workspace_id: string; pane_id: string; terminal_id
 type Pane = ViewerPane;
 interface Entry {
   cwd: string; label: string; command: string; argv: string[]; readOnly: boolean;
-  phase: "creating" | "created" | "starting"; pane?: Pane;
+  phase: "creating" | "created" | "starting"; pane?: Pane; scriptHash?: string;
 }
 interface Journal { version: 1; entries: Record<string, Entry> }
 const runFile = promisify(execFile);
@@ -86,11 +86,46 @@ export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string
   return found;
 }
 
+function ownedViewerDirectory(entry: Entry, root: string, endpoint: string): string {
+  if (!/^openrig-viewer-[0-9a-f-]{36}$/.test(entry.label)
+    || entry.cwd !== path.join(root, endpoint, entry.label.slice("openrig-viewer-".length))) {
+    throw new Error("Viewer provenance has no owned attribution directory.");
+  }
+  return entry.cwd;
+}
+function prepareViewerCommand(entry: Entry, root: string, endpoint: string): string {
+  const file = path.join(ownedViewerDirectory(entry, root, endpoint), "attach.sh");
+  const source = `exec ${entry.command}\n`;
+  const hash = createHash("sha256").update(source).digest("hex");
+  try { writeFileSync(file, source, { mode: 0o600, flag: "wx" }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !lstatSync(file).isFile()
+      || lstatSync(file).isSymbolicLink() || createHash("sha256").update(readFileSync(file)).digest("hex") !== hash) throw error;
+  }
+  entry.scriptHash = hash;
+  // Keep terminal input short even while the login shell uses canonical mode.
+  return `/bin/sh '${file.replace(/'/g, `'"'"'`)}'`;
+}
+function retireViewerDirectory(entry: Entry, root: string, endpoint: string): void {
+  const cwd = ownedViewerDirectory(entry, root, endpoint), file = path.join(cwd, "attach.sh");
+  if (entry.scriptHash) {
+    try {
+      if (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()
+        || createHash("sha256").update(readFileSync(file)).digest("hex") !== entry.scriptHash) {
+        throw new Error("The owned viewer script changed; it was preserved.");
+      }
+      unlinkSync(file);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  try { rmdirSync(cwd); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+}
+
 /** One owned viewer per seat/endpoint. The journal is presentation provenance,
  * not task membership. It is written BEFORE each possible effect so neither a
  * lost reply nor a daemon restart authorizes a second create/run. Labels alone
- * never establish ownership; creation attribution also needs our private cwd,
- * exact returned pane/terminal pair, and the actual foreground attach argv.
+ * never establish ownership: a received create reply binds the returned IDs;
+ * lost replies require unique private-cwd recovery. The foreground attach
+ * argv and current seat binding are always confirmed before reuse.
  */
 export class HerdrViewer {
   private pending = Promise.resolve();
@@ -174,7 +209,8 @@ export class HerdrViewer {
         }
         const reply = body(raw);
         const made = pane(reply.root_pane);
-        if (!made || !sameHerdrPath(made.cwd, cwd)) return unconfirmed("Create returned no attributable pane/terminal pair; its effect remains uncertain.");
+        if (!made) return unconfirmed("Create returned no pane/terminal identity; its effect remains uncertain.");
+        // These IDs came from this creation call. Its cwd may already reflect an rc cd.
         entry.pane = made; entry.phase = "created"; save(); created = true;
       }
       if (!entry.pane) {
@@ -193,14 +229,9 @@ export class HerdrViewer {
         if (!provision || (await this.ownedPanes(entry)).length !== 0) {
           return unconfirmed("Viewer identity changed or disappeared; an enumerable viewer cannot be replaced.");
         }
-        // Only a complete empty readback retires provenance. Remove our empty
-        // attribution directory, never provider panes or arbitrary journal paths.
-        if (!/^openrig-viewer-[0-9a-f-]{36}$/.test(entry.label)
-          || entry.cwd !== path.join(this.root, endpoint, entry.label.slice("openrig-viewer-".length))) {
-          return unconfirmed("Absent viewer provenance has no owned attribution directory.");
-        }
-        try { rmdirSync(entry.cwd); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        // Only complete empty readback retires provenance. Remove the exact owned
+        // script and directory; never provider panes or arbitrary journal paths.
+        retireViewerDirectory(entry, this.root, endpoint);
         delete journal.entries[id]; save();
         return { ok: false, code: "viewer_not_provisioned", error: "The old viewer is confirmed absent; ensure again to create a verified replacement." };
       }
@@ -209,9 +240,10 @@ export class HerdrViewer {
         if (!await stillCurrent()) return unconfirmed("Task membership changed before the viewer process started.");
         const beforeRun = await this.inspect(target.attachArgv);
         if (beforeRun.nodeId !== key.nodeId || beforeRun.sessionId !== binding.sessionId) return unconfirmed("The seat binding changed before the viewer process started.");
+        const command = prepareViewerCommand(entry, this.root, endpoint);
         entry.phase = "starting"; save();
         // pane run rc0/empty stdout is not proof. It is sent ONCE then checked.
-        await this.run(["pane", "run", current.pane_id, entry.command]);
+        await this.run(["pane", "run", current.pane_id, command]);
       }
       const process = body(await this.run(["pane", "process-info", "--pane", current.pane_id]));
       const info = process.process_info as { foreground_processes?: Array<{ argv?: unknown }> } | undefined;
@@ -258,7 +290,7 @@ export class HerdrViewer {
           || entry.pane.workspace_id !== expected.workspaceId || !/^openrig-viewer-[0-9a-f-]{36}$/.test(entry.label)
           || entry.cwd !== path.join(this.root, endpoint, entry.label.slice("openrig-viewer-".length))) return false;
         if ((await this.ownedPanes(entry)).length !== 0) return false;
-        try { rmdirSync(entry.cwd); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false; }
+        retireViewerDirectory(entry, this.root, endpoint);
         delete journal.entries[id];
         const temporary = `${file}.${randomUUID()}.tmp`;
         writeFileSync(temporary, JSON.stringify(journal) + "\n", { mode: 0o600 }); renameSync(temporary, file);

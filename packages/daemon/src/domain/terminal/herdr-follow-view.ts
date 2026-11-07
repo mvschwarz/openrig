@@ -109,7 +109,8 @@ export class HerdrFollowView {
         const reply = body(await this.deps.run(["workspace", "create", "--cwd", state.cwd,
           "--label", view.task.name, "--no-focus"]));
         const made = pane(reply.root_pane);
-        if (!made || !sameHerdrPath(made.cwd, state.cwd)) throw new Error("Workspace creation returned no attributable pane/terminal pair.");
+        if (!made) throw new Error("Workspace creation returned no pane/terminal identity.");
+        // A successful creation reply binds these IDs even if the rc already ran cd.
         state.pane = made; state.phase = "created"; save();
       }
       if (!state.pane) {

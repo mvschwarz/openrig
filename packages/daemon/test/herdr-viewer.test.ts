@@ -23,7 +23,7 @@ function fixture() {
   let label = "", running = false, uncertainCreate = false, uncertainRun = false, idless = false;
   let gone = false, enumerable = true, unreadable = false, attachFlags = ["-f", "ignore-size"];
   let workspaceInventory: unknown[] | undefined, paneInventory: Record<string, unknown> | undefined;
-  let canonicalCreateCwd = false;
+  let canonicalCreateCwd = false, changedCreateCwd = false, canonicalLimit = 0;
   const inspect = async () => ({ sessionId: "$1", nodeId: key.nodeId });
   const run: HerdrViewerRun = async args => {
     calls.push(args);
@@ -33,6 +33,7 @@ function fixture() {
       gone = false; enumerable = true;
       ids.cwd = args[args.indexOf("--cwd") + 1]!; label = args[args.indexOf("--label") + 1]!;
       if (canonicalCreateCwd) ids.cwd = realpathSync(ids.cwd);
+      if (changedCreateCwd) ids.cwd = tmpdir();
       if (uncertainCreate) { uncertainCreate = false; throw new Error("lost response"); }
       return JSON.stringify({ result: { root_pane: idless ? {} : ids } });
     }
@@ -43,6 +44,7 @@ function fixture() {
     if (command === "pane list") return JSON.stringify({ result: paneInventory ? paneInventory[args[args.indexOf("--workspace") + 1]!] : { panes: [ids] } });
     if (command === "pane get") { if (gone) throw new Error("pane not found"); return JSON.stringify({ result: { pane: ids } }); }
     if (command === "pane run") {
+      if (canonicalLimit && Buffer.byteLength(args[3]!) >= canonicalLimit) throw new Error("pane_send_failed: canonical mode line limit");
       running = true;
       if (uncertainRun) { uncertainRun = false; throw new Error("lost run response"); }
       return "";
@@ -54,6 +56,8 @@ function fixture() {
   const viewer = (viewerRoot = root, platform: NodeJS.Platform = "linux", status = {}) => new HerdrViewer(socket, async args => args[0] === "status" ? JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket, ...status }) : run(args), platform, viewerRoot, inspect);
   return { root, target, calls, viewer, ids,
     canonicalizeCreateCwd: () => { canonicalCreateCwd = true; },
+    changeCreateCwd: () => { changedCreateCwd = true; },
+    limitCanonicalInput: (bytes: number) => { canonicalLimit = bytes; },
     lose: (listed: boolean, malformed = false) => { gone = true; enumerable = listed; unreadable = malformed; },
     loseChanged: () => { gone = false; enumerable = false; },
     setEnumeration: (workspaces: unknown[], panes: Record<string, unknown>) => { workspaceInventory = workspaces; paneInventory = panes; },
@@ -62,6 +66,28 @@ function fixture() {
 }
 
 describe("owned Herdr viewer", () => {
+  it("uses received creation IDs when the shell changed cwd before the reply", async () => {
+    const f = fixture(); f.changeCreateCwd();
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: true });
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: false });
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
+  });
+  it("keeps a lost creation reply plus changed cwd uncertain without repeating create or run", async () => {
+    const f = fixture(); f.changeCreateCwd(); f.setCreateLost();
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false });
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false });
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
+    expect(f.calls.filter(args => args[1] === "run")).toHaveLength(0);
+  });
+  it("starts the exact attach through a short owned script under a canonical-mode line limit", async () => {
+    const f = fixture(); f.limitCanonicalInput(1024);
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true });
+    const command = f.calls.find(args => args[1] === "run")![3]!;
+    expect(Buffer.byteLength(command)).toBeLessThan(1024);
+    expect(command).toContain("/bin/sh ");
+    expect(readFileSync(path.join(f.ids.cwd, "attach.sh"), "utf8")).toBe(`exec ${f.target.paneCommand}\n`);
+  });
+
   it.each(["linux", "darwin"] as const)("admits protocol 22 on %s independently of the release label", async platform => {
     const f = fixture();
     expect(await f.viewer(f.root, platform, { version: "0.9.6" }).ensure(key, f.target)).toMatchObject({ ok: true });
@@ -75,6 +101,13 @@ describe("owned Herdr viewer", () => {
       : JSON.stringify({ result: { workspaces: [] } });
     const v = new HerdrViewer(alias, run, "darwin", f.root, async () => ({ sessionId: "$1", nodeId: key.nodeId }));
     expect(await v.lookup(key, f.target)).toMatchObject({ code: "viewer_not_provisioned" });
+  });
+  it("preserves a changed script when its viewer is confirmed absent", async () => {
+    const f = fixture(); expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true });
+    const file = path.join(f.ids.cwd, "attach.sh"); writeFileSync(file, "user change\n"); f.lose(false);
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(readFileSync(file, "utf8")).toBe("user change\n");
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
   });
   it("keeps a known viewer after its cwd changes and still checks its process", async () => {
     const f = fixture(), v = f.viewer();
