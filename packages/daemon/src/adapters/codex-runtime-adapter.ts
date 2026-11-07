@@ -70,7 +70,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 };
 
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
-import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "../domain/seat-skill-storage.js";
+import { recordUnchangedSeatSkillFollowing, recordSeatSkillFollowing, recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "../domain/seat-skill-storage.js";
 import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
 import { findTomlTable, opensTomlTable, parseTomlRoot, tomlArrayTableHeaderPath, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
 
@@ -808,12 +808,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const failed: Array<{ effectiveId: string; error: string }> = [];
 
     for (const entry of plan.entries) {
-      if (entry.classification === "no_op") {
-        skipped.push(entry.effectiveId);
-        continue;
-      }
-
       try {
+        if (entry.classification === "no_op") {
+          if (entry.category === "skill" && binding.seatSkillsRoot && !binding.seatSkillsRefused) {
+            recordUnchangedSeatSkillFollowing(binding.seatSkillsRoot, entry.effectiveId,
+              entry.onRestore === "follow_source" ? entry.absolutePath : undefined);
+          }
+          skipped.push(entry.effectiveId);
+          continue;
+        }
         const didProject = this.projectEntry(entry, binding.cwd, warnings, binding.seatSkillsRoot, binding.seatSkillsRefused, this.homeFor(binding), binding);
         if (didProject) {
           projected.push(entry.effectiveId);
@@ -1391,6 +1394,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.provisionWorkspaceTrust(binding.cwd ?? null, this.homeFor(binding));
   }
 
+  /** Copy one selected resource, preserving source modes and recording owned seat-skill files after writing. */
   private projectEntry(entry: ProjectionEntry, cwd: string, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string,
     home?: string, binding?: NodeBinding): boolean {
     if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, home)) {
@@ -1451,11 +1455,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           const refusedDest = seatSkillsRoot && entry.category === "skill" ? seatSkillWriteRefusal(seatSkillsRoot, dest) : undefined;
           if (refusedDest) { warnings.push(`${entry.effectiveId}: ${refusedDest}`); notProjected.push(dest); continue; }
           const content = this.fs.readFile(src);
-          record(dest, src, content);
           // Reconcile mode even when the content write is skipped: a byte-identical dest
           // projected earlier may still carry the wrong (default) mode.
           if (this.fs.exists(dest) && hashContent(content) === hashContent(this.fs.readFile(dest))) {
             this.preserveMode(src, dest);
+            record(dest, src, content);
             continue;
           }
           const existed = this.fs.exists(dest);
@@ -1463,6 +1467,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           this.fs.writeFile(dest, content);
           if (!existed) createdFiles.push(dest);
           this.preserveMode(src, dest);
+          record(dest, src, content);
         }
         const pluginLoss = seatSkillsRefused ? seatPluginSkillsLossNote(entry.effectiveId, skippedPluginSkills, seatSkillsRefused) : undefined;
         if (pluginLoss) warnings.push(pluginLoss);
@@ -1471,20 +1476,27 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         const refusedFile = seatSkillsRoot && entry.category === "skill" ? seatSkillWriteRefusal(seatSkillsRoot, destFile) : undefined;
         if (refusedFile) { warnings.push(`${entry.effectiveId}: ${refusedFile}`); return false; }
         const content = this.fs.readFile(entry.absolutePath);
-        record(destFile, entry.absolutePath, content);
         if (this.fs.exists(destFile) && hashContent(content) === hashContent(this.fs.readFile(destFile))) {
           this.preserveMode(entry.absolutePath, destFile);
+          record(destFile, entry.absolutePath, content);
           return true;
         }
         const existed = this.fs.exists(destFile);
         this.fs.writeFile(destFile, content);
         if (!existed) createdFiles.push(destFile);
         this.preserveMode(entry.absolutePath, destFile);
+        record(destFile, entry.absolutePath, content);
       }
     } finally {
       if (entry.category === "plugin") warnings.push(...excludeNewGeneratedFiles(cwd, createdFiles));
     }
-    return seatProjectionComplete(entry.effectiveId, notProjected, warnings);
+    const complete = seatProjectionComplete(entry.effectiveId, notProjected, warnings);
+    // A skill whose resource says `on_restore: follow_source` is recorded as following its source, so a restore that
+    // keeps the conversation brings it up to date (and removes it once no longer selected); any other is unmarked.
+    if (complete && seatSkillsRoot && entry.category === "skill") {
+      recordSeatSkillFollowing(seatSkillsRoot, entry.effectiveId, entry.onRestore === "follow_source" ? entry.absolutePath : undefined);
+    }
+    return complete;
   }
 
   /**

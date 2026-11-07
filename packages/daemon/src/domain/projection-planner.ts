@@ -1,7 +1,7 @@
 import nodePath from "node:path";
 import * as os from "node:os";
 import { OPENRIG_HOME } from "../openrig-compat.js";
-import type { StartupBlock } from "./types.js";
+import type { SkillOnRestore, SkillResource, StartupBlock } from "./types.js";
 import { classifyResourceProjection } from "./conflict-detector.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "./profile-resolver.js";
 import type { ResourceCollision } from "./agent-resolver.js";
@@ -37,6 +37,9 @@ export interface ProjectionEntry {
    *    and projects only when its runtime-specific manifest is present
    */
   pluginType?: "claude" | "codex" | "auto";
+  /** Skills only, set when the resource says `on_restore: follow_source`: a restore that keeps the seat's
+   *  conversation takes this skill's source as it is then, instead of the saved copy. */
+  onRestore?: SkillOnRestore;
 }
 
 export interface ProjectionPlan {
@@ -151,6 +154,10 @@ export function planProjection(input: ProjectionInput): PlanResult {
         absolutePath,
         classification: "safe_projection",
       };
+
+      if (catKey === "skills" && (qr.resource as SkillResource).onRestore === "follow_source") {
+        entry.onRestore = "follow_source";
+      }
 
       if (catKey === "runtimeResources") {
         entry.resourceType = (qr.resource as { type?: string }).type;

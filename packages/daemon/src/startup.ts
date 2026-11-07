@@ -52,7 +52,7 @@ import { createCmuxCliTransport } from "./adapters/cmux-transport.js";
 import { SnapshotRepository } from "./domain/snapshot-repository.js";
 import { CheckpointStore } from "./domain/checkpoint-store.js";
 import { SnapshotCapture } from "./domain/snapshot-capture.js";
-import { RestoreOrchestrator } from "./domain/restore-orchestrator.js";
+import { RestoreOrchestrator, type RestoreOrchestratorDeps } from "./domain/restore-orchestrator.js";
 import { createDesiredClaudeActivityHooksReader } from "./domain/desired-claude-activity-hooks.js";
 import { ClaudeManagedLaunch } from "./domain/claude-managed-launch.js";
 import { ClaudeResumeAdapter } from "./adapters/claude-resume.js";
@@ -804,6 +804,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     warnings?: string[];
   }>) | undefined;
   let persistedFreshPodLaunchAvailable: ((rigId: string, nodeId: string) => boolean) | undefined;
+  let persistedSeatSkillSelection: RestoreOrchestratorDeps["seatSkillSelection"];
 
   const restoreOrchestrator = new RestoreOrchestrator({
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
@@ -816,6 +817,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       ? persistedFreshPodLaunch(rigId, nodeId)
       : { status: "failed", error: "Pod instantiator is not ready for a fresh launch." },
     freshLaunchAvailable: (rigId, nodeId) => persistedFreshPodLaunchAvailable?.(rigId, nodeId) ?? false,
+    seatSkillSelection: async (rigId, nodeId) => persistedSeatSkillSelection
+      ? persistedSeatSkillSelection(rigId, nodeId)
+      : { ok: false, reason: "the pod instantiator is not ready" },
   });
 
   // Connect to cmux at startup — degrades gracefully if absent
@@ -1219,6 +1223,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   persistedFreshPodLaunch = (rigId, nodeId) => podInstantiator.launchPersistedFresh(rigId, nodeId);
   persistedFreshPodLaunchAvailable = (rigId, nodeId) => podInstantiator.canLaunchPersistedFresh(rigId, nodeId);
+  persistedSeatSkillSelection = (rigId, nodeId) => podInstantiator.seatSkillSelection(rigId, nodeId);
 
   const podBundleSourceResolver = new PodBundleSourceResolver();
 
