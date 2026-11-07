@@ -24,6 +24,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository, deriveCrossHostSuccessorId, type QueueItem } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
+import { ESCALATION_HOP_TAG, hasConsumedEscalationHop, resolveEscalationOwner } from "../src/domain/escalation-owner.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
@@ -2676,5 +2677,70 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
       transitionNote: `${mod.LADDER_ATTEMPT_PREFIX} 1 failed:tmux session not found` });
     await sweep();
     expect(await unclaimedFinding(id)).toHaveLength(1);
+  });
+
+  // PR #2649, "One deliberate change in behaviour": the static two-kind case, nothing changing during a yield.
+  it("the static two-kind case: an undelivered human notice that wins the row over an escalation-routed kind carries no unused route note or hop tag, and its hop stays available", async () => {
+    // Topology: the claimant's seat escalates to a seat in another rig, so its stalled-after-claim route is "routed".
+    const rigs = new RigRepository(db);
+    let seq = 0;
+    const seat = (rigName: string, logicalId: string, session: string) => {
+      const rig = rigs.listRigs().find((r) => r.name === rigName) ?? rigs.createRig(rigName);
+      const node = rigs.addNode(rig.id, logicalId, { runtime: "claude-code" });
+      db.prepare("INSERT INTO sessions (id,node_id,session_name,status) VALUES (?,?,?,?)")
+        .run(`session-two-kind-${++seq}`, node.id, session, "running");
+      return { rig, node, session };
+    };
+    const worker = seat("a", "work.lead", "worker@a");
+    const other = seat("b", "top.lead", "lead@b");
+    rigs.addEdge(worker.rig.id, worker.node.id, other.session, "escalates_to");
+    expect(resolveEscalationOwner(db, worker.session, (t) => repo.acceptsDestination(t)))
+      .toMatchObject({ outcome: "routed", owner: other.session });
+
+    // An agent's row, claimed, parked on a registered human, resolved by that human back to in-progress; the
+    // resolved notice's post failed. The notice owner is the row's destination (the claimant).
+    const row = await repo.create({ sourceSession: "asker@r", destinationSession: worker.session, body: "work" });
+    const id = row.qitemId;
+    repo.claim({ qitemId: id, destinationSession: worker.session });
+    await repo.update({ qitemId: id, actorSession: worker.session, state: "blocked", blockedOn: "human-owner@external",
+      transitionNote: "needs a human decision" } as never);
+    await repo.update({ qitemId: id, actorSession: "human-owner@external", state: "in-progress",
+      ownerNotificationKind: "human-decision-resolved", transitionNote: "decision supplied" } as never);
+    receipt(id, "transport-failed");
+    // The claim and every transition move back past the pickup stall threshold: no claimant motion since.
+    const past = new Date(Date.now() - 61 * 60_000).toISOString();
+    age(id);
+    db.prepare("UPDATE queue_items SET claimed_at = ?, ts_updated = ? WHERE qitem_id = ?").run(past, past, id);
+
+    // Both rules hold on this row before the pass: stalled-after-claim (routed through resolveOrch) and
+    // undelivered-human-notice (routed to the notice owner, never through resolveOrch).
+    const before = repo.getById(id)!;
+    expect(before).toMatchObject({ state: "in-progress", destinationSession: worker.session });
+    expect(before.claimedAt).toBeTruthy();
+    expect(before.pickup?.state).toBe("stalled-after-claim");
+    expect(repo.deliveryOutcomeFor(id)?.outcome).toBe("transport-failed");
+    expect(repo.findUndelivered({ qitemId: id })[0]?.deliveryOutcome).toBe("transport-failed");
+    expect(hasConsumedEscalationHop(db, id)).toBe(false);
+
+    const mod = await sweepMod();
+    const result = await mod.runStuckSweep({ db, queueRepo: repo, status: mod.createStuckSweepStatus(),
+      unclaimedAgeMinutes: 60, log: () => {}, isRegisteredHost: () => false });
+    // The per-row dedup keeps the later kind: the human notice wins the row.
+    expect(result.findings.filter((f) => f.qitemId === id)).toEqual([
+      expect.objectContaining({ kind: "undelivered-human-notice", action: "created" }),
+    ]);
+    const findings = await findingsFor(id);
+    expect(findings).toHaveLength(1);
+    const [finding] = findings;
+    expect(finding!.tags).toContain(`stuck-sweep:undelivered-human-notice:${id}`);
+    expect(finding!.tags).not.toContain(`stuck-sweep:stalled-after-claim:${id}`);
+    expect(finding!.destinationSession).toBe(worker.session);
+    // The losing kind's route took no hop for this finding: no route note, no hop tag.
+    expect(finding!.tags).not.toContain(ESCALATION_HOP_TAG);
+    expect(finding!.body).not.toContain("escalation route:");
+    expect(finding!.body).not.toContain("escalates_to routed");
+    expect(finding!.body).toContain("human notice transport-failed");
+    // Its own escalation hop is still available.
+    expect(hasConsumedEscalationHop(db, finding!.qitemId)).toBe(false);
   });
 });

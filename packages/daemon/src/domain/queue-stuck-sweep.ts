@@ -112,10 +112,17 @@ export interface StuckSweepStatusSnapshot {
   lastError: string | null;
   consecutiveFailures: number;
   findingsRouted: number;
+  /** Start of the pass in flight, or null between passes: a pass that never ends shows here, not only as a stale
+   *  lastSweepAt. */
+  runningSince: string | null;
+  /** Scheduler ticks skipped because a pass was still running; reset when the next pass starts. */
+  skippedTicks: number;
 }
 
 export interface StuckSweepStatus {
   record(outcome: "clean" | "findings" | "failed", detail?: { error?: string; findings?: number }): void;
+  /** The scheduler's one-pass-at-a-time state, mirrored for /healthz. */
+  pass(state: { runningSince: string | null; skippedTicks: number }): void;
   snapshot(): StuckSweepStatusSnapshot;
 }
 
@@ -128,6 +135,8 @@ export function createStuckSweepStatus(): StuckSweepStatus {
     lastError: null,
     consecutiveFailures: 0,
     findingsRouted: 0,
+    runningSince: null,
+    skippedTicks: 0,
   };
   return {
     record(outcome, detail) {
@@ -136,6 +145,10 @@ export function createStuckSweepStatus(): StuckSweepStatus {
       state.lastError = outcome === "failed" ? (detail?.error ?? "unknown error") : null;
       state.consecutiveFailures = outcome === "failed" ? state.consecutiveFailures + 1 : 0;
       if (detail?.findings) state.findingsRouted += detail.findings;
+    },
+    pass(pass) {
+      state.runningSince = pass.runningSince;
+      state.skippedTicks = pass.skippedTicks;
     },
     snapshot() {
       return { ...state };

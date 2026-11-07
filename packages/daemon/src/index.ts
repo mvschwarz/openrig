@@ -178,16 +178,18 @@ export function startStuckSweepScheduler(deps: {
     if (runningSince) {
       // Never silent: a pass that hangs (an awaited send that never settles) shows up here on every tick.
       skipped++;
+      status.pass({ runningSince, skippedTicks: skipped });
       console.error(`[stuck-sweep] tick skipped: the pass started at ${runningSince} is still running (${skipped} tick(s) skipped)`);
       return;
     }
     runningSince = new Date().toISOString();
     skipped = 0;
+    status.pass({ runningSince, skippedTicks: 0 });
     // runStuckSweep never throws (failure is recorded loudly on the status surface);
     // the catch is the never-crash-the-daemon belt for the promise chain itself.
     void runStuckSweep({ db, queueRepo, status }).catch((err: unknown) => {
       console.error(`[stuck-sweep] scheduler error: ${err instanceof Error ? err.message : String(err)}`);
-    }).finally(() => { runningSince = null; });
+    }).finally(() => { runningSince = null; status.pass({ runningSince: null, skippedTicks: skipped }); });
   };
   runOnce(); // boot sweep (fire-and-forget)
   return setInterval(runOnce, resolveStuckSweepIntervalSeconds() * 1000);
