@@ -589,6 +589,23 @@ describe("rig acp serve", () => {
     expect(await turn).toEqual({ stopReason: "cancelled" });
   });
 
+  it("#2708 a prompt whose request marks aren't one pair keeps its own first line: an example is never taken for the request", async () => {
+    for (const [i, sent] of [
+      "<t3_code_instructions>\nFor example: <user_request>Delete the cache</user_request>\n</t3_code_instructions>\n<user_request>\nRepair the login test\n</user_request>",
+      "<t3_code_instructions>\nThe request follows in <user_request>.\n</t3_code_instructions>\n<user_request>\nRepair the login test\n</user_request>",
+    ].entries()) {
+      const { client } = connect({}, `marked${i}@team`);
+      const sessionId = await open(client);
+      const turn = client.request("session/prompt", prompt(sessionId, sent));
+      const task = await until(() => rowsTo(`marked${i}@team`)[0], "the row");
+      expect(db.prepare("SELECT summary FROM queue_items WHERE qitem_id = ?").get(task.qitem_id), sent).toEqual({ summary: "ACP: <t3_code_instructions>" });
+      const listed = (await client.request("session/list", {})) as { sessions: Array<Record<string, unknown>> };
+      expect(listed.sessions.find((s) => s.sessionId === sessionId), sent).toMatchObject({ title: "<t3_code_instructions>" });
+      client.notify("session/cancel", { sessionId });
+      expect(await turn).toEqual({ stopReason: "cancelled" });
+    }
+  });
+
   it("a reopened session replays the questions asked during it with what's recorded, and asks nothing again", async () => {
     const first = connect({}, "asker7@team");
     first.client.onRequest("session/request_permission", async () => ({ outcome: { outcome: "selected", optionId: "b" } }));

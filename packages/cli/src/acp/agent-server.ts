@@ -159,8 +159,10 @@ function oneLine(text: string, max: number): string {
 
 /** The person's own words in a prompt, for the row's summary and the session's title. An app that wraps them in its
  *  own instructions marks them (T3 Code sends several blocks of harness text, then `<user_request>…</user_request>`);
- *  the row's body keeps everything the app sent. */
+ *  the row's body keeps everything the app sent. Only a prompt with one opening and one closing mark is read this
+ *  way: with more, an example could be taken for the request, so the prompt stands as sent. */
 function personsWords(text: string): string {
+  if (text.split("<user_request>").length !== 2 || text.split("</user_request>").length !== 2) return text;
   const marked = /<user_request>([\s\S]*?)<\/user_request>/.exec(text)?.[1];
   return marked?.trim() ? marked : text;
 }
