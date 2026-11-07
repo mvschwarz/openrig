@@ -903,7 +903,7 @@ describe("rig seat status", () => {
       "node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "rebuild", "--reason", "context-wall",
     ]).then(() => undefined));
     const output = human.logs.join("\n");
-    console.info("PR8_REBUILD_CLI", JSON.stringify({ output, json: JSON.parse(json.logs.join("")), paths }));
+    console.info("ISSUE1544_REBUILD_CLI", JSON.stringify({ output, json: JSON.parse(json.logs.join("")), paths }));
     expect(human.exitCode).toBeUndefined();
     expect(human.errors).toEqual([]);
     expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
