@@ -606,3 +606,18 @@ it('#2682 P2b: an ended attempt, an idle read, then a peer\'s turn before the se
  expect(await restarted.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'waiting_for_idle'});
  expect(prepPrompts(g)).toHaveLength(1);
 });
+
+it('#2682: an ended attempt whose conversation reads unknown keeps its gate when the unsent replacement moves to another conversation: a busy seat gets no second request',async()=>{
+ const f=fixture();const e=f.daemon();
+ expect(await e.maybeAutoCompact(high)).toEqual({triggered:true});
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);e.reconcilePreparations();
+ expect(e.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'delivered'});
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);
+ vi.spyOn(f.transport,'send').mockResolvedValueOnce({ok:false,sent:false,reason:'mid_work'} as any);
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'send_failed'});
+ expect(e.getPreparationState(seat)).toMatchObject({status:'sending',delivery:'not_sent'});
+ await e.maybeAutoCompact({...high,usedPercentage:40,sessionId:'conversation-two'});
+ f.hooks.busy=true;
+ expect(await e.maybeAutoCompact({...high,sessionId:'conversation-two'})).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(f)).toHaveLength(1);
+});
