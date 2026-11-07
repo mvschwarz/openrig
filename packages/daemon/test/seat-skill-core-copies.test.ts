@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -175,6 +175,45 @@ describe("a Claude seat that loads openrig-core itself, launched with OpenRig's 
     expect(applied.disk).toMatchObject({ ok: true, removed: [], errors: [] });
     expect(folders(s.paths)).toEqual(["alpha", "beta", "delta"]);
     expect(manifest(s.paths).skills.map((skill) => skill.id)).toEqual(["alpha", "beta", "delta"]);
+  });
+
+  // A provider switch relaunches a running Claude seat in its own pane: the launch itself ends the running process there.
+  it.each([true, false])("on a kept pane, the copies go only once its running process has ended (it ends: %s)", async (ends) => {
+    const core = plugin(join(home, "plugins", "openrig-core"), ["alpha"]);
+    const s = claudeSeat(core);
+    oldLoadout(s.paths, pluginCopies(core));
+    const sessions = new SessionRegistry(s.db);
+    const running = sessions.registerSession(s.seat.nodeId, s.seat.sessionName);
+    sessions.updateStatus(running.id, "running");
+    sessions.updateBinding(s.seat.nodeId, { tmuxSession: s.seat.sessionName, tmuxPane: "%7" });
+    const alpha = join(s.paths.skillsRoot, "alpha");
+    const presentWhenSignalled: boolean[] = [];
+    const tmux = { ...fakeTmux([]),
+      listPanes: async () => [{ id: "%7", index: 0, cwd: ".", width: 80, height: 24, active: true }],
+      setRemainOnExit: async () => ({ ok: true as const }),
+      signalPaneProcess: async () => { presentWhenSignalled.push(existsSync(alpha)); return { ok: true as const }; },
+      isPaneDead: async () => ends,
+      getDefaultShell: async () => "/bin/sh",
+      respawnPane: async () => ({ ok: true as const }),
+    } as unknown as TmuxAdapter;
+    const launcher = new NodeLauncher({ db: s.db, rigRepo: new RigRepository(s.db), sessionRegistry: sessions, eventBus: new EventBus(s.db),
+      tmuxAdapter: tmux, pluginsDir: join(home, "plugins"), paneExit: { pollMs: 1, timeoutMs: 5, sleep: async () => {} } });
+
+    // As restore's relaunch for a provider switch asks: the seat's own session and its bound pane.
+    const result = await launcher.launchNode(s.seat.rigId, s.seat.logicalId, { pluginPaths: [core], keepPane: "%7", sessionName: s.seat.sessionName });
+    expect(result).toMatchObject({ ok: ends });
+    // Nothing was removed while the process the pane held was still being asked to end.
+    expect(presentWhenSignalled.length).toBeGreaterThan(0);
+    expect(presentWhenSignalled.every(Boolean)).toBe(true);
+    if (ends) {
+      expect(result).toMatchObject({ ok: true,
+        warnings: expect.arrayContaining(["Seat skills: removed OpenRig's copy of openrig-core's alpha, which this seat now loads from the plugin itself"]) });
+      expect(folders(s.paths)).toEqual([]);
+    } else {
+      expect(result).toMatchObject({ ok: false, code: "pane_process_not_ended" });
+      expect(folders(s.paths)).toEqual(["alpha"]);
+      expect(manifest(s.paths).skills.map((skill) => skill.id)).toEqual(["alpha"]);
+    }
   });
 
   it("keeps every copy while the seat's projection record can't be read", () => {
