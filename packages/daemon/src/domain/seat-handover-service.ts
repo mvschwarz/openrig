@@ -127,7 +127,7 @@ type ClaudeRestorePacketObservation =
 type RestorePacketDelivery =
   | { ok: true; confirmation: "confirmed" }
   | { ok: true; confirmation: "unconfirmed"; reason: string }
-  | { ok: false; message: string };
+  | { ok: false; message: string; kind?: "staged" };
 
 interface NodeRow {
   id: string;
@@ -693,6 +693,7 @@ export class SeatHandoverService {
       }
       sourceOutcome = { mode: "rebuild", primedArtifacts, gaps, ...(permissionContinuity ? { permissions: permissionContinuity } : {}), ...(emptyChainReason ? { emptyChainReason } : {}) };
       const delivered = await this.deliverRebuildPrimingPacket(launch.tmuxSession, {
+        runtime: node.runtime,
         seatRef: input.seatRef,
         reason,
         departingSession: latestSession.session_name,
@@ -710,10 +711,14 @@ export class SeatHandoverService {
           ok: false,
           code: "context_delivery_failed",
           message: `Handover failed at step "deliver-rebuild-priming": ${delivered.message}`,
-          guidance: "The successor candidate was unwound and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. Retry after tmux delivery is healthy.",
+          guidance: "The discovery candidate was marked vanished and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. The successor may still process the priming packet. Inspect the successor's screen and resolve its state before another attempt; retry only after tmux delivery is healthy.",
         };
       }
-      contextDelivered = true;
+      if (delivered.confirmation === "unconfirmed") {
+        restorePacket = { status: "unconfirmed", reason: delivered.reason };
+      } else {
+        contextDelivered = true;
+      }
     }
 
     // 4. Verify continuity + rebind via the EXISTING discovered->commit path.
@@ -1006,6 +1011,7 @@ export class SeatHandoverService {
   private async deliverRebuildPrimingPacket(
     successorSession: string,
     info: {
+      runtime: string | null;
       seatRef: string;
       reason: string;
       departingSession: string;
@@ -1016,7 +1022,7 @@ export class SeatHandoverService {
       guidanceNote?: string;
       startupFiles?: SeatStartupTextFile[];
     },
-  ): Promise<{ ok: true } | { ok: false; message: string }> {
+  ): Promise<RestorePacketDelivery> {
     const lines = [
       `# Seat rebuild handover — ${info.seatRef}`,
       `You are a REBUILT successor for this seat (reason: ${info.reason}, at ${this.now().toISOString()}). Your predecessor session was ${info.departingSession}; its live context was deliberately NOT carried. Prime yourself from the durable artifacts below, highest trust first.`,
@@ -1035,7 +1041,8 @@ export class SeatHandoverService {
       lines.push("", `The durable chain is EMPTY: ${info.emptyChainReason}. You start from seat identity alone — say so in your first status report.`);
     }
     if (info.guidanceNote) lines.push("", info.guidanceNote);
-    const sent = await this.tmuxAdapter.sendText(successorSession, lines.join("\n"));
+    const packet = lines.join("\n");
+    const sent = await this.tmuxAdapter.sendText(successorSession, packet);
     if (!sent.ok) {
       return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
     }
@@ -1045,7 +1052,11 @@ export class SeatHandoverService {
     if (!submit.ok) {
       return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
     }
-    return { ok: true };
+    const delivered = await this.confirmPacketSubmission(successorSession, packet, info.runtime);
+    if (!delivered.ok && delivered.kind === "staged") {
+      return { ok: true, confirmation: "unconfirmed", reason: delivered.message };
+    }
+    return delivered;
   }
 
   /** Deliver the captured restore packet to a fresh successor via the shipped
@@ -1085,7 +1096,15 @@ export class SeatHandoverService {
     if (!submit.ok) {
       return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
     }
-    if (info.runtime === "claude-code") {
+    return this.confirmPacketSubmission(successorSession, packet, info.runtime);
+  }
+
+  private async confirmPacketSubmission(
+    successorSession: string,
+    packet: string,
+    runtime: string | null,
+  ): Promise<RestorePacketDelivery> {
+    if (runtime === "claude-code") {
       const afterSubmit = await this.waitForClaudeRestorePacketComposer(successorSession, packet);
       if (afterSubmit.state === "clear") return { ok: true, confirmation: "confirmed" };
       if (afterSubmit.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: afterSubmit.reason === "unobservable"
@@ -1106,7 +1125,7 @@ export class SeatHandoverService {
       if (afterRetry.state === "clear") return { ok: true, confirmation: "confirmed" };
       if (afterRetry.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: afterRetry.reason === "unobservable"
         ? STARTUP_UNCONFIRMED_REASON.unobservable : STARTUP_UNCONFIRMED_REASON.unclear };
-      return { ok: false, message: STARTUP_UNCONFIRMED_REASON.staged };
+      return { ok: false, kind: "staged", message: STARTUP_UNCONFIRMED_REASON.staged };
     }
     return { ok: true, confirmation: "confirmed" };
   }
