@@ -370,7 +370,8 @@ export async function startServer(port?: number) {
         // PsProjectionService + node-inventory enrichment serve
         // fresh data on each request.
         // 5b82324b — the structural pane-activity cache runs on the same cadence.
-        // OPENRIG_SEAT_POLL_INTERVAL_MS slows both pollers down (default 1 s, unchanged).
+        // daemon.seat_poll_interval_ms (OPENRIG_SEAT_POLL_INTERVAL_MS) slows both pollers down (default 1 s,
+        // unchanged); startup-only: read once here.
         startSeatPollers(
           { activity: deps.seatActivityService, structural: deps.seatStructuralActivityService },
           deps.rigRepo.db,
