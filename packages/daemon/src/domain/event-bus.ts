@@ -176,10 +176,15 @@ export class EventBus {
    * watermark, never in a replay. For high-volume signals whose only readers are live (view.changed). The event carries
    * `transient: true` and, as its `seq`, `causeSeq` (the stored event that caused it; the newest stored seq without one).
    *
-   * Published during a fan-out (a subscriber reacting to a stored event, the usual case), it is queued and delivered
-   * at the end of that fan-out, before the rows that subscribers stored meanwhile are drained: every subscriber sees
-   * the cause, then its transients, then the next stored event. Published outside a fan-out, it is delivered before
-   * this call returns. Inside a notify envelope's transaction, it waits for the envelope's drain.
+   * Every published transient goes to one pending queue, and the whole queue is emptied at the end of every fan-out
+   * (notifySubscribers), before the rows that subscribers stored meanwhile are drained. Published during a fan-out (a
+   * subscriber reacting to a stored event, the usual case), it is therefore delivered at the end of that fan-out:
+   * every subscriber sees the cause, then its transients, then the next stored event. Published outside a fan-out and
+   * outside a notify envelope, it is delivered before this call returns. Published inside a notify envelope's
+   * transaction, it is only queued: the end of the next fan-out empties the queue (when the envelope drains rows, the
+   * fan-out of its first row, so before the envelope's later rows), or, when the envelope drained none, the envelope
+   * delivers it after its drain; a rollback drops only what the transaction queued. No current caller publishes
+   * inside an envelope.
    */
   publishTransient(event: RigEvent, causeSeq?: number): PersistedEvent {
     const transient = {
