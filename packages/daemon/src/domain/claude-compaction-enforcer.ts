@@ -1211,8 +1211,12 @@ export class ClaudeCompactionEnforcer {
     // delivered (or possibly delivered) in another conversation stops it.
     if (armed?.mode === "automatic" && armed.status === "sending" && armed.delivery === "not_sent"
       && !!input.sessionId && armed.sessionId !== input.sessionId) {
+      // A replacement moving to another conversation drops the gate it was replacing: in memory that gate fell on this
+      // same sample (another conversation), so a restart must not bring it back for the new conversation.
+      const dropGate = !!armed.sessionId && armed.afterEnded !== undefined;
+      if (dropGate) armed.afterEnded = undefined;
       armed.sessionId = input.sessionId;
-      this.persist(input.sessionName, armed.attemptId, { sessionId: input.sessionId });
+      this.persist(input.sessionName, armed.attemptId, { sessionId: input.sessionId, ...(dropGate ? { afterEnded: undefined } : {}) });
     }
     if (armed?.mode === "automatic" && armed.status === "waiting" && armed.compact === "not_sent" && !armed.compactInFlight
       && !!armed.sessionId && !!input.sessionId && armed.sessionId !== input.sessionId) {
