@@ -516,21 +516,29 @@ export function recordSeatSkillFollowing(skillsRoot: string, id: string, source:
   writeProjections(root, { ...record, following });
 }
 
-/** Record a no-op skill's policy only when every present file is already owned and unchanged. */
+/** Best-effort policy bookkeeping for a no-op skill; never make an unchanged copy fail launch. */
 export function recordUnchangedSeatSkillFollowing(skillsRoot: string, id: string, source: string | undefined): void {
-  const root = seatRootOfSkills(skillsRoot);
-  const dir = nodePath.resolve(skillsRoot, id);
-  if (!insideSeatStorageFolder(root, dir)) return;
-  const files = filesBelow(dir);
-  if (!files.includes("SKILL.md")) return;
-  const owned = recordedSeatSkillFiles({ root, skillsRoot, pluginDir: nodePath.join(root, "plugin"),
-    manifestPath: nodePath.join(root, "skill-loadout.json"), projectionsPath: nodePath.join(root, "skill-projections.json") });
-  for (const rel of files) {
-    const file = nodePath.join(dir, rel);
-    const entry = owned.get(file);
-    if (!entry || !insideSeatStorage(root, file) || !matchesRecordedFile(file, entry)) return;
+  try {
+    if (source === undefined) {
+      recordSeatSkillFollowing(skillsRoot, id, undefined);
+      return;
+    }
+    const root = seatRootOfSkills(skillsRoot);
+    const dir = nodePath.resolve(skillsRoot, id);
+    if (!insideSeatStorageFolder(root, dir)) return;
+    const files = filesBelow(dir);
+    if (!files.includes("SKILL.md")) return;
+    const owned = recordedSeatSkillFiles({ root, skillsRoot, pluginDir: nodePath.join(root, "plugin"),
+      manifestPath: nodePath.join(root, "skill-loadout.json"), projectionsPath: nodePath.join(root, "skill-projections.json") });
+    for (const rel of files) {
+      const file = nodePath.join(dir, rel);
+      const entry = owned.get(file);
+      if (!entry || !insideSeatStorage(root, file) || !matchesRecordedFile(file, entry)) return;
+    }
+    recordSeatSkillFollowing(skillsRoot, id, source);
+  } catch {
+    // An unreadable copy or unwritable record must leave the existing skill usable.
   }
-  recordSeatSkillFollowing(skillsRoot, id, source);
 }
 
 /** Today's skill selection for a seat, resolved from its spec as it is now. */

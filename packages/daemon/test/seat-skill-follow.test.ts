@@ -375,7 +375,7 @@ describe("a launch records which of a seat's skills follow their source", () => 
   };
 
   for (const runtime of ["claude-code", "codex"] as const) {
-    it.each(["projection", "loadout", "unowned", "edited", ...(process.platform === "win32" ? [] : ["linked"])])(`${runtime}: records no-op policy only for unchanged owned files (%s)`, async ownership => {
+    it.each(["projection", "loadout", "unowned", "edited", "unreadable", "record-failure", ...(process.platform === "win32" ? [] : ["linked"])])(`${runtime}: records no-op policy only for unchanged owned files (%s)`, async ownership => {
       const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime }, home);
       if (runtime === "claude-code") ensureSeatSkillPlugin(paths);
       const source = join(home, "review");
@@ -410,10 +410,29 @@ describe("a launch records which of a seat's skills follow their source", () => 
         if (!result.ok) throw new Error(result.errors.join("; "));
         expect(result.plan.entries[0]?.classification).toBe("no_op");
         const writes = vi.spyOn(realFs, "writeFile");
+        const storedRead = fs.readFileSync;
+        const reads = vi.spyOn(fs, "readFileSync").mockImplementation((...args: Parameters<typeof fs.readFileSync>) => {
+          if (ownership === "unreadable" && args[0] === join(target, "helper.txt")) {
+            throw Object.assign(new Error("Permission denied"), { code: "EACCES" });
+          }
+          return storedRead(...args);
+        });
+        const storedWrite = fs.writeFileSync;
+        const recordWrites = vi.spyOn(fs, "writeFileSync").mockImplementation((...args: Parameters<typeof fs.writeFileSync>) => {
+          if (ownership === "record-failure" && String(args[0]).startsWith(`${paths.projectionsPath}.openrig-`)) throw new Error("Read-only filesystem");
+          return storedWrite(...args);
+        });
         try {
           expect(await adapter.project(result.plan, binding)).toMatchObject({ projected: [], skipped: ["review"], failed: [] });
           expect(writes).not.toHaveBeenCalled();
-        } finally { writes.mockRestore(); }
+          if (onRestore === "follow_source" && ownership === "unreadable") {
+            expect(reads.mock.calls.some(([file]) => file === join(target, "helper.txt"))).toBe(true);
+          }
+          if (onRestore === "keep_saved") {
+            expect(reads.mock.calls.some(([file]) => String(file).startsWith(target))).toBe(false);
+          }
+        } finally { writes.mockRestore(); reads.mockRestore(); recordWrites.mockRestore(); }
+        expect(readFileSync(join(target, "SKILL.md"), "utf8")).toBe("review");
         expect(following()?.review).toEqual(onRestore === "follow_source" && ["projection", "loadout"].includes(ownership) ? { source } : undefined);
       }
     });
