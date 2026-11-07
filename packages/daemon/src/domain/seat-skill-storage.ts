@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { getOpenRigHome } from "../openrig-compat.js";
-import type { ReconcileSkillLoadoutResult, SkillLoadout, SkillLoadoutLocation, SkillRuntime } from "./skill-catalog.js";
+import { retireDirectPluginCopies, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillLoadoutLocation, type SkillRuntime } from "./skill-catalog.js";
 import { parseSkillFrontmatter } from "./skill-discovery.js";
 import { MANAGED_BLOCK_APPEND_SEPARATOR, hasEditedManagedBlock, managedBlockText } from "./managed-blocks.js";
 
@@ -514,6 +514,47 @@ export function recordSeatSkillFollowing(skillsRoot: string, id: string, source:
     following[id] = { source: nodePath.resolve(source) };
   }
   writeProjections(root, { ...record, following });
+}
+
+/**
+ * #2426: before a Claude seat that loads the vendored openrig-core itself starts, retire the copies of that plugin's
+ * skills its storage still holds from launches before #2433, so the seat loads each skill once. Only OpenRig's own
+ * unchanged copies go, with every record here that could put them back (the loadout's, and any projection record under
+ * them). Everything else stays and is named. Never refuses a launch: a failure is named and the seat starts as it is.
+ */
+export function retireSeatCoreSkillCopies(paths: SeatSkillPaths, coreDir: string): string[] {
+  const result = retireDirectPluginCopies({ runtime: "claude-code", location: seatSkillLocation(paths), pluginRoot: coreDir });
+  const notes: string[] = [];
+  if (result.removed.length > 0) {
+    const targets = result.removed.map((id) => nodePath.resolve(paths.skillsRoot, id));
+    const under = (file: string) => targets.some((target) => file === target || file.startsWith(target + nodePath.sep));
+    const record = readProjections(paths.projectionsPath);
+    const files = Object.fromEntries(Object.entries(record.files).filter(([file]) => !under(nodePath.resolve(file))));
+    const following = Object.fromEntries(Object.entries(record.following ?? {}).filter(([id]) => !result.removed.includes(id)));
+    if (Object.keys(files).length !== Object.keys(record.files).length || Object.keys(following).length !== Object.keys(record.following ?? {}).length) {
+      try { writeProjections(paths.root, { ...record, files, following }); } catch (err) {
+        notes.push(`Seat skills: ${paths.projectionsPath} still records the removed copies (${(err as Error).message})`);
+      }
+    }
+    notes.push(`Seat skills: removed ${result.removed.length === 1 ? "OpenRig's copy" : `${result.removed.length} OpenRig copies`} of openrig-core's ${result.removed.join(", ")}, which this seat now loads from the plugin itself`);
+  }
+  for (const copy of result.kept) notes.push(`Seat skills: kept ${copy.target}, though openrig-core also supplies ${copy.id}: ${copy.reason}`);
+  for (const error of result.errors) notes.push(`Seat skills: openrig-core's copies were left as they are: ${error.message}`);
+  return notes;
+}
+
+/** retireSeatCoreSkillCopies for a node's own storage, when it has one. */
+export function retireSeatCoreSkillCopiesForNode(
+  db: { prepare(sql: string): { get(...params: unknown[]): unknown } },
+  nodeId: string,
+  coreDir: string,
+): string[] {
+  try {
+    const paths = seatSkillPathsForNode(db, nodeId);
+    return paths && paths.skillsRoot === nodePath.join(paths.pluginDir, "skills") ? retireSeatCoreSkillCopies(paths, coreDir) : [];
+  } catch (err) {
+    return [`Seat skills: openrig-core's copies were left as they are: ${(err as Error).message}`];
+  }
 }
 
 /** Best-effort policy bookkeeping for a no-op skill; never make an unchanged copy fail launch. */

@@ -4,9 +4,10 @@ import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import {
-  inspectSkillDirectory, reconcileSkillLoadout, resolveSkillLoadout,
+  findDirectPluginCopies, inspectSkillDirectory, reconcileSkillLoadout, resolveSkillLoadout,
   type CatalogSkill, type ReconcileSkillLoadoutResult, type SkillRuntime,
 } from "./skill-catalog.js";
+import { seatCorePluginDir } from "./claude-core-plugin-env.js";
 import { parseSkillFrontmatter } from "./skill-discovery.js";
 import { readFootprintAnswer, type FootprintAnswer } from "./footprint-choice.js";
 import type { SettingsStore } from "./user-settings/settings-store.js";
@@ -193,7 +194,7 @@ export async function applySeatSkills(input: {
 }): Promise<SeatSkillApplyResult> {
   const { seat, db } = input;
   const paths = pathsOf(seat);
-  const disk = reconcileStoredSelection(seat, paths, input.catalogRoot);
+  const disk = reconcileStoredSelection(seat, paths, input.catalogRoot, seatCorePluginDir({ id: seat.nodeId, runtime: seat.runtime }, db));
   // The seat's generated router follows what is now in its storage, for either runtime. A router that isn't written
   // is reported (kept or refused) in the inspection; it never stops the apply.
   if (disk.ok && fs.existsSync(paths.root)) {
@@ -252,7 +253,7 @@ export async function applySeatSkills(input: {
 
 /** The seat's stored selection, from its own record: the catalog skills it selected (re-resolved against the catalog as it
  *  is now) and its plugin skills (re-inspected at their recorded sources), reconciled into its storage. */
-function reconcileStoredSelection(seat: SeatRef, paths: SeatSkillPaths, catalogRoot: string): SeatSkillApplyResult["disk"] {
+function reconcileStoredSelection(seat: SeatRef, paths: SeatSkillPaths, catalogRoot: string, directCore?: string): SeatSkillApplyResult["disk"] {
   let manifest: { topologySelections?: Record<string, string[]>; projectSelection?: string[]; skills?: Array<Record<string, unknown>> };
   let raw: string;
   try { raw = fs.readFileSync(paths.manifestPath, "utf8"); } catch (err) {
@@ -270,10 +271,21 @@ function reconcileStoredSelection(seat: SeatRef, paths: SeatSkillPaths, catalogR
   const owners = Object.keys(manifest.topologySelections ?? {});
   const owner = owners[0] ?? seat.sessionName;
   const selected = new Set(Object.values(manifest.topologySelections ?? {}).flat());
+  // #2426: a Claude seat that loads the vendored openrig-core itself no longer carries OpenRig's earlier copies of its
+  // skills. They are left out here, so the reconciler removes them as it removes any deselected copy (an edited one is
+  // never among them), and an apply never puts them back.
+  let retired = new Set<string>();
+  if (directCore) {
+    try {
+      retired = new Set(findDirectPluginCopies({ runtime: "claude-code", location: seatSkillLocation(paths, seat.runtime), pluginRoot: directCore })
+        .filter((copy) => copy.disposition === "retire").map((copy) => copy.id));
+    } catch { /* an unreadable record is the reconciler's to report */ }
+  }
   const pluginEntries: CatalogSkill[] = [];
   for (const skill of manifest.skills ?? []) {
     const pluginId = /^plugin:([^@]+)/.exec(String(skill["revision"] ?? ""))?.[1];
     if (!pluginId || typeof skill["sourceDir"] !== "string") continue;
+    if (retired.has(String(skill["id"]))) { selected.delete(String(skill["id"])); continue; }
     try {
       pluginEntries.push({ id: String(skill["id"]), sourceDir: skill["sourceDir"], sourceRoot: String(skill["sourceRoot"]), revision: String(skill["revision"]),
         ...inspectSkillDirectory(skill["sourceDir"]), selectedBy: ["topology"], pluginId });
