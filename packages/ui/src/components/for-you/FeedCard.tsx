@@ -446,7 +446,7 @@ export function FeedCard({
   // (Show context, Live terminal, evidence, review) stay on every card:
   // actionable kinds show them always; other cards, including decided and
   // shipped ones, reveal them on hover/focus-within.
-  const hideActions = renderedOutcome != null || isTerminalQueueItem(queueItem);
+  const hideActions = renderedOutcome != null || (isTerminalQueueItem(queueItem) && !hasQuestionControls);
   // OPR.0.4.1.27 Unit 6 — sender-or-owner terminal address.
   const terminalSession = resolveCardTerminalSession(card.kind, source, destination);
   return (
@@ -556,7 +556,7 @@ export function FeedCard({
         {renderedOutcome ? <ActionOutcomePanel outcome={renderedOutcome} /> : null}
         {!hideActions && qitemViewerData && (
           isActionableCard(card.kind, queueItem, renderedOutcome)
-          || (hasQuestionControls && (card.kind === "action-required" || card.kind === "approval"))
+          || (hasQuestionControls && !renderedOutcome && (card.kind === "action-required" || card.kind === "approval"))
         ) ? (
           <div
             data-testid={`feed-card-actions-${card.id}`}
