@@ -110,7 +110,10 @@ tmux outside herdr, or use `terminal.tmux_server isolated` (see `tmux-servers.md
 starts itself.
 
 The daemon keeps `HC_SESSION` and `HC_SOCKET`. The herdr-core they select is the one the herdr-app provider starts
-viewers in; `rig terminal status --provider herdr-app` names it (`core`).
+viewers in; `rig terminal status --provider herdr-app` names it (`core` and `assumption`), as do open failures
+(`viewer_start_failed`, `herdr_app_unavailable`) and the note when a window has not confirmed showing a view. If your
+herdr-app window is attached to a different herdr-core than the daemon's, its viewers will not appear there; start the
+daemon with that core's `HC_SESSION` and `HC_SOCKET`.
 
 ### The agent is waiting for permission or can't reach the daemon
 

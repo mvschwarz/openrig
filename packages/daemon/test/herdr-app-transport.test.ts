@@ -3,7 +3,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { classifyAppReply, createAppSocketExchange, resolveHerdrAppHome, WINDOW_DID_NOT_ANSWER } from "../src/domain/terminal/herdr-app-transport.js";
+import { classifyAppReply, createAppSocketExchange, createHcRunner, describeCore, hcEnv, resolveHerdrAppHome, WINDOW_DID_NOT_ANSWER } from "../src/domain/terminal/herdr-app-transport.js";
 
 // Real exchanges, captured from a live herdr-app 0.1.13 / hc 0.1.18 in an isolated sandbox.
 const CAPTURES = join(import.meta.dirname, "fixtures", "herdr-app-captures");
@@ -112,6 +112,18 @@ describe("createAppSocketExchange (one request per connection, as herdr-app's ow
     expect(resolveHerdrAppHome({ XDG_CONFIG_HOME: "/x", HOME: "/h" })).toBe("/x/herdr-app");
     expect(resolveHerdrAppHome({ HOME: "/h" })).toBe("/h/.config/herdr-app");
     expect(resolveHerdrAppHome({ HERDR_APP_HOME: "", HOME: "/h" })).toBe("/h/.config/herdr-app");
+  });
+
+  it("records the runner's herdr-core from the env it executes with, and describes it with or without a socket", () => {
+    const clean = hcEnv({ env: { HC_SCOPE: "s-1", HC_TERMINAL_ID: "t-1", HC_TERMINAL_SOCKET: "/t.sock", HC_SESSION: "work", HC_SOCKET: "/run/w.sock" } });
+    expect(clean).toEqual({ HC_SESSION: "work", HC_SOCKET: "/run/w.sock" });
+    const withSocket = createHcRunner({ env: { HC_SESSION: "work", HC_SOCKET: "/run/w.sock" } });
+    expect(withSocket.core).toEqual({ session: "work", socket: "/run/w.sock" });
+    expect(describeCore(withSocket)).toBe('herdr-core session "work" (socket /run/w.sock)');
+    const defaultCore = createHcRunner({ env: {} });
+    expect(defaultCore.core).toEqual({ session: "default" });
+    expect(describeCore(defaultCore)).toBe("herdr-core the default session");
+    expect(describeCore(async () => ({ exit: 0, json: null, stdout: "" }))).toBe("the daemon's herdr-core");
   });
 });
 

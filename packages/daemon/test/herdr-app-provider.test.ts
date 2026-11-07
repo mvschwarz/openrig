@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { HerdrAppProvider } from "../src/domain/terminal/herdr-app-provider.js";
 import { HerdrAppClientFiles } from "../src/domain/terminal/herdr-app-state.js";
 import { referencedTerminals, type LayoutNode } from "../src/domain/terminal/herdr-app-layout.js";
-import type { AppReply, HcResult } from "../src/domain/terminal/herdr-app-transport.js";
+import type { AppReply, HcResult, HcRunner } from "../src/domain/terminal/herdr-app-transport.js";
 import type { ComposedPane, ComposedView } from "../src/domain/terminal/terminal-provider.js";
 
 const BASE: LayoutNode = { id: "root", type: "row", children: [
@@ -100,7 +100,7 @@ let world: World;
 let files: HerdrAppClientFiles;
 let provider: HerdrAppProvider;
 
-function makeProvider(opts: { ackTimeoutMs?: number } = {}) {
+function makeProvider(opts: { ackTimeoutMs?: number; core?: { session: string; socket?: string } } = {}) {
   files = new HerdrAppClientFiles(join(home, "app"), join(home, "journal"));
   const realWrite = files.writeRig.bind(files);
   files.writeRig = async (tree) => {
@@ -115,8 +115,9 @@ function makeProvider(opts: { ackTimeoutMs?: number } = {}) {
   files.save = async (state) => { world.log.push("journal"); return realSave(state); };
   files.readAck = async () => world.ack;
   let n = 0;
+  const hc: HcRunner = Object.assign((args: string[]) => world.hc(args), opts.core ? { core: opts.core } : {});
   provider = new HerdrAppProvider({
-    files, app: world.app(files) as never, hc: world.hc, daemonInstance: "inst1", viewerCwd: join(home, "viewers"),
+    files, app: world.app(files) as never, hc, daemonInstance: "inst1", viewerCwd: join(home, "viewers"),
     ensureMods: async () => ({ ok: true }), ackTimeoutMs: opts.ackTimeoutMs ?? 300, nonce: () => `n${++n}`,
     runTmux: async (argv) => {
       world.tmuxCalls.push(argv);
@@ -298,19 +299,42 @@ describe("HerdrAppProvider removal: rewrite first, end only after the app applie
   });
 });
 
-describe("HerdrAppProvider.status", () => {
-  it("names the herdr-core its viewers live in, so a mismatch with the app's core can be seen", async () => {
+describe("HerdrAppProvider.status and core diagnostics", () => {
+  it("names the runner's herdr-core (not a mutated process.env) and the shared-core assumption in status and open diagnostics", async () => {
+    makeProvider({ core: { session: "herdr-app-sb", socket: "/srv/core.sock" } });
     const saved = { session: process.env.HC_SESSION, socket: process.env.HC_SOCKET };
     try {
-      delete process.env.HC_SESSION; delete process.env.HC_SOCKET;
-      expect((await provider.status()).core).toEqual({ session: "default" });
-      process.env.HC_SESSION = "herdr-app-sb"; process.env.HC_SOCKET = "/srv/core.sock";
-      expect((await provider.status()).core).toEqual({ session: "herdr-app-sb", socket: "/srv/core.sock" });
+      process.env.HC_SESSION = "wrong-env-session";
+      process.env.HC_SOCKET = "/wrong/env.sock";
+      const st = await provider.status();
+      expect(st.core).toEqual({ session: "herdr-app-sb", socket: "/srv/core.sock" });
+      expect(st.assumption).toBe("viewers are started with hc in this core; herdr-app must be a client of it");
     } finally {
       for (const [key, value] of [["HC_SESSION", saved.session], ["HC_SOCKET", saved.socket]] as const) {
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
     }
+
+    // 1. herdr_app_unavailable names the runner's core
+    world.statusKind = "unavailable";
+    const unavail = await provider.openView(composed([pane("dev.build@demo")]));
+    expect(unavail.error).toContain('herdr-core session "herdr-app-sb" (socket /srv/core.sock)');
+
+    // 2. viewer_start_failed names the runner's core and hc's error
+    world.statusKind = "ok";
+    world.failRun.add(1);
+    const startFailed = await provider.openView(composed([pane("dev.build@demo")]));
+    expect(startFailed.code).toBe("viewer_start_failed");
+    expect(startFailed.error).toContain('herdr-core session "herdr-app-sb" (socket /srv/core.sock)');
+    expect(startFailed.error).toContain("spawn failed");
+    expect(startFailed.error).toContain("herdr-app has to be one of its clients");
+
+    // 3. reveal() no-ack note names the runner's core
+    world.failRun.clear();
+    world.applies = false;
+    const noAck = await provider.openView(composed([pane("dev.build@demo")]));
+    expect(noAck.ok).toBe(true);
+    expect(noAck.notes?.join(" ")).toContain('herdr-core session "herdr-app-sb" (socket /srv/core.sock)');
   });
 });
 

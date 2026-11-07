@@ -92,17 +92,33 @@ export interface HcResult {
   error?: { kind?: string; message?: string };
 }
 
-export type HcRunner = (args: string[]) => Promise<HcResult>;
+export type HcRunner = ((args: string[]) => Promise<HcResult>) & {
+  core?: { session: string; socket?: string };
+};
 
-/** `hc` with an explicit core selection. Only HC_SESSION / HC_SOCKET select a core; nothing else is passed on from a
- *  terminal. */
-export function createHcRunner(opts: { bin?: string; session?: string; socket?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): HcRunner {
+/** Clean environment for `hc`: only `HC_SESSION` and `HC_SOCKET` select a core; terminal scope markers are stripped. */
+export function hcEnv(opts: { session?: string; socket?: string; env?: NodeJS.ProcessEnv } = {}): NodeJS.ProcessEnv {
   const base = opts.env ?? process.env;
   const env: NodeJS.ProcessEnv = { ...base };
   for (const key of ["HC_SCOPE", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET"]) delete env[key];
   if (opts.session !== undefined) env["HC_SESSION"] = opts.session;
   if (opts.socket !== undefined) env["HC_SOCKET"] = opts.socket;
-  return (args) => new Promise<HcResult>((resolve) => {
+  return env;
+}
+
+/** Human-readable description of the herdr-core an `HcRunner` addresses. */
+export function describeCore(hc: HcRunner): string {
+  const core = hc.core;
+  if (!core) return "the daemon's herdr-core";
+  const session = core.session === "default" ? "the default session" : `session ${JSON.stringify(core.session)}`;
+  return `herdr-core ${session}${core.socket ? ` (socket ${core.socket})` : ""}`;
+}
+
+/** `hc` with an explicit core selection. Only HC_SESSION / HC_SOCKET select a core; nothing else is passed on from a
+ *  terminal. */
+export function createHcRunner(opts: { bin?: string; session?: string; socket?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): HcRunner {
+  const env = hcEnv(opts);
+  const run: HcRunner = (args) => new Promise<HcResult>((resolve) => {
     execFile(opts.bin ?? "hc", args, { env, timeout: opts.timeoutMs ?? 30_000, maxBuffer: 16 * 1024 * 1024, encoding: "utf8" }, (err, stdout, stderr) => {
       const exit = err ? (typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : -1) : 0;
       const parse = (text: string) => { try { return JSON.parse(text.trim()); } catch { return null; } };
@@ -112,6 +128,8 @@ export function createHcRunner(opts: { bin?: string; session?: string; socket?: 
       resolve({ exit, json, stdout: stdout ?? "", ...(failure ? { error: failure } : {}) });
     });
   });
+  run.core = { session: env["HC_SESSION"] || "default", ...(env["HC_SOCKET"] ? { socket: env["HC_SOCKET"] } : {}) };
+  return run;
 }
 
 /** The app half: typed requests over one exchange. */

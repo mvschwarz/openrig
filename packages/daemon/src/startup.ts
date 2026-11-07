@@ -2190,17 +2190,18 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // viewer ends outside OpenRig.
     const { HerdrAppProvider, execTmux } = await import("./domain/terminal/herdr-app-provider.js");
     const { HerdrAppClientFiles } = await import("./domain/terminal/herdr-app-state.js");
-    const { HerdrAppClient, createAppSocketExchange, createHcRunner, herdrAppSocketPath, resolveHerdrAppHome } = await import("./domain/terminal/herdr-app-transport.js");
+    const { HerdrAppClient, createAppSocketExchange, createHcRunner, hcEnv, herdrAppSocketPath, resolveHerdrAppHome } = await import("./domain/terminal/herdr-app-transport.js");
     const { installRigMods, describeModInstall } = await import("./domain/terminal/herdr-app-install.js");
     const herdrAppDir = nodePath.join(OPENRIG_HOME, "private", "herdr-app");
     const herdrAppInstance = createHash("sha256").update(nodePath.resolve(OPENRIG_HOME)).digest("hex").slice(0, 12);
-    const herdrAppHc = createHcRunner();
+    const herdrAppHcEnv = hcEnv();
+    const herdrAppHc = createHcRunner({ env: herdrAppHcEnv });
     const herdrAppProviders = new Map<string, InstanceType<typeof HerdrAppProvider>>();
     let herdrAppEvents: import("node:child_process").ChildProcess | null = null;
     let herdrAppReconcile: ReturnType<typeof setTimeout> | null = null;
     const watchHerdrApp = () => {
       if (herdrAppEvents) return;
-      const child = spawn("hc", ["events", "--json", "--label", `openrig.daemon=${herdrAppInstance}`], { stdio: ["ignore", "pipe", "ignore"], env: { ...process.env } });
+      const child = spawn("hc", ["events", "--json", "--label", `openrig.daemon=${herdrAppInstance}`], { stdio: ["ignore", "pipe", "ignore"], env: herdrAppHcEnv });
       herdrAppEvents = child;
       child.stdout?.on("data", () => {
         if (herdrAppReconcile) return;

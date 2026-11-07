@@ -18,7 +18,7 @@ import { promisify } from "node:util";
 import { tileAttachArgv } from "./tile-attach.js";
 import { cellFor, deriveRigLayout, RIG_LAYOUT, RIG_STACK, type RigView } from "./herdr-app-layout.js";
 import { awaitApplied, newNonce, type ClientState, type HerdrAppClientFiles, type PendingEnd, type ViewerRecord, type ViewRecord } from "./herdr-app-state.js";
-import type { AppReply, HcRunner, HerdrAppClient } from "./herdr-app-transport.js";
+import { describeCore, type AppReply, type HcRunner, type HerdrAppClient } from "./herdr-app-transport.js";
 import type { ComposedPane, ComposedView, OpenViewResult, ProviderLiveness, ProviderStatus, TerminalProvider } from "./terminal-provider.js";
 
 export const HERDR_APP_PROVIDER = "herdr-app";
@@ -96,6 +96,10 @@ export class HerdrAppProvider implements TerminalProvider {
     // Bounded like the status request: a window that answers status and then stalls costs about a second more, not six.
     const commands = reply.kind === "ok" ? await this.deps.app.commands(1_000) : null;
     const names = commands?.kind === "ok" && Array.isArray(commands.value) ? (commands.value as { name?: unknown }[]).map((c) => c.name) : [];
+    const core = this.deps.hc.core ?? {
+      session: process.env.HC_SESSION || "default",
+      ...(process.env.HC_SOCKET ? { socket: process.env.HC_SOCKET } : {}),
+    };
     return {
       provider: HERDR_APP_PROVIDER,
       available: reply.kind === "ok",
@@ -105,8 +109,9 @@ export class HerdrAppProvider implements TerminalProvider {
         layoutSwitch: names.includes("layout.switch"),
         paneFocus: names.includes("pane.focus"),
       },
-      launch: { socketPath: `${this.deps.files.appHome}/herdr-app.sock`, ...(process.env.HC_SESSION ? { session: process.env.HC_SESSION } : {}) },
-      core: { session: process.env.HC_SESSION || "default", ...(process.env.HC_SOCKET ? { socket: process.env.HC_SOCKET } : {}) },
+      launch: { socketPath: `${this.deps.files.appHome}/herdr-app.sock`, ...(core.session !== "default" ? { session: core.session } : process.env.HC_SESSION ? { session: process.env.HC_SESSION } : {}) },
+      core,
+      assumption: "viewers are started with hc in this core; herdr-app must be a client of it",
     };
   }
 
@@ -151,7 +156,7 @@ export class HerdrAppProvider implements TerminalProvider {
         if (viewer.state !== "live" || !viewer.terminal) continue;
         const seen = await terminalState(this.deps.hc, viewer.terminal);
         if (seen.state === "unknown") {
-          notes.push(`${viewer.label}: its viewer ${viewer.terminal} could not be checked (${seen.reason}); it is kept as it is.`);
+          notes.push(`${viewer.label}: its viewer ${viewer.terminal} in ${describeCore(this.deps.hc)} could not be checked (${seen.reason}); it is kept as it is.`);
         } else if (seen.state === "gone") {
           viewer.state = "ended";
           viewer.terminal = null;
@@ -172,7 +177,7 @@ export class HerdrAppProvider implements TerminalProvider {
     const files = this.deps.files;
     const status = await this.deps.app.status(1_000);
     if (status.kind !== "ok") {
-      return fail("herdr_app_unavailable", `herdr-app is not answering at ${files.appHome} (${describe(status)}). Nothing was started.`,
+      return fail("herdr_app_unavailable", `herdr-app is not answering at ${files.appHome} (${describe(status)}). Nothing was started. Viewers start in ${describeCore(this.deps.hc)}; a window attached to a different core would not show them.`,
         { absent: view.absent, degraded: view.degraded });
     }
     const mods = await this.deps.ensureMods();
@@ -210,15 +215,16 @@ export class HerdrAppProvider implements TerminalProvider {
 
     // 2. Start the viewers.
     const failed: string[] = [];
+    let firstReason: string | undefined;
     for (const record of created) for (const viewer of record.viewers) {
       const started = await this.startViewer(record, viewer);
-      if (started) { viewer.terminal = started; viewer.state = "live"; }
-      else failed.push(viewer.seat);
+      if ("address" in started) { viewer.terminal = started.address; viewer.state = "live"; }
+      else { failed.push(viewer.seat); firstReason ??= started.reason; }
     }
     await files.save(state);
     if (failed.length) {
       const rollback = await this.remove(state, created.map((v) => v.id), [], { neverWritten: true });
-      return fail("viewer_start_failed", `herdr-core did not start viewers for ${failed.join(", ")}; this open was rolled back.`,
+      return fail("viewer_start_failed", `herdr-core did not start viewers for ${failed.join(", ")} (${describeCore(this.deps.hc)}): ${firstReason ?? "unknown error"}; this open was rolled back. The viewers run in that core; herdr-app has to be one of its clients (HC_SESSION/HC_SOCKET are kept when the daemon starts).`,
         { absent: view.absent, degraded: view.degraded, notes: [...notes, ...rollback] });
     }
 
@@ -242,19 +248,20 @@ export class HerdrAppProvider implements TerminalProvider {
     };
   }
 
-  private async startViewer(view: ViewRecord, viewer: ViewerRecord): Promise<string | null> {
+  private async startViewer(view: ViewRecord, viewer: ViewerRecord): Promise<{ address: string } | { reason: string }> {
     const labels = [
       `openrig.daemon=${this.deps.daemonInstance}`, "openrig.role=viewer", `openrig.view=${view.id}`,
       `openrig.op=${viewer.nonce}`, `openrig.seat=${viewer.seat}`, `openrig.cell=${viewer.cellId}`,
     ].flatMap((label) => ["--label", label]);
     const run = await this.deps.hc(["run", "--bg", "--no-parent", "--no-notify", "--json", "--cwd", this.deps.viewerCwd, ...labels, "--", ...viewer.argv]);
     const address = (run.json as { address?: unknown } | null)?.address;
-    if (run.exit === 0 && typeof address === "string") return address;
+    if (run.exit === 0 && typeof address === "string") return { address };
     // An uncertain start: look for it by its nonce rather than start another.
     const found = await this.deps.hc(["ls", "--json", "--label", `openrig.op=${viewer.nonce}`]);
     const terminals = (found.json as { terminals?: { address?: unknown }[] } | null)?.terminals ?? [];
     const hit = terminals.find((t) => typeof t.address === "string");
-    return hit ? hit.address as string : null;
+    if (hit) return { address: hit.address as string };
+    return { reason: run.error?.message || `hc exited ${run.exit}` };
   }
 
   /** Derive and write the Rig layout from the journal; every write lists live viewer terminals only. */
@@ -292,7 +299,7 @@ export class HerdrAppProvider implements TerminalProvider {
       if (switched.kind !== "ok") notes.push(`Showing OpenRig's Rig layout: ${describe(switched)}.`);
     }
     if (!await awaitApplied(this.deps.files, revision, [], { timeoutMs: this.deps.ackTimeoutMs ?? 8_000 })) {
-      notes.push("herdr-app has not confirmed showing this view yet. It is written to the Rig layout and appears there; its viewers stay read-only until it is shown.");
+      notes.push(`herdr-app has not confirmed showing this view yet. It is written to the Rig layout and appears there; its viewers stay read-only until it is shown. If this window is attached to a different herdr-core than the daemon's (${describeCore(this.deps.hc)}), the viewers never appear here; start the daemon with that core's HC_SESSION/HC_SOCKET.`);
       return notes;
     }
     const selected = await app.do("layout.select", { stack: RIG_STACK, child: view.id });
@@ -396,14 +403,14 @@ export class HerdrAppProvider implements TerminalProvider {
     const latest = state.revision;
     let safe: PendingEnd[] = [];
     if (status.kind !== "ok") {
-      notes.push(`${pending.length} viewer(s) left running: herdr-app's state is uncertain (${describe(status)}).`);
+      notes.push(`${pending.length} viewer(s) in ${describeCore(this.deps.hc)} left running: herdr-app's state is uncertain (${describe(status)}).`);
     } else if ((status.value as { layout?: unknown }).layout !== RIG_LAYOUT) {
       // Not shown: the app reads the current file whenever the Rig layout is shown next, so no block refers to them.
       safe = pending.filter((p) => p.revision !== "unwritten");
     } else if (latest && await awaitApplied(this.deps.files, latest, pending.map((p) => p.terminal), { timeoutMs: this.deps.ackTimeoutMs ?? 8_000 })) {
       safe = pending.filter((p) => p.revision !== "unwritten");
     } else {
-      notes.push(`${pending.length} viewer(s) left running: herdr-app has not confirmed the layout without them yet.`);
+      notes.push(`${pending.length} viewer(s) in ${describeCore(this.deps.hc)} left running: herdr-app has not confirmed the layout without them yet.`);
     }
     const kept: PendingEnd[] = pending.filter((p) => !safe.includes(p));
     for (const end of safe) {

@@ -98,15 +98,18 @@ running and named in the result.
 If a viewer ends some other way (killed outside OpenRig, herdr-core restarted), OpenRig rewrites its cell as an
 ended cell straight away.
 
-## Check
+## Which herdr-core
 
 ```sh
 rig terminal status --provider herdr-app [--app-home <dir>]
 ```
 
-`core` in the result names the herdr-core OpenRig starts and ends viewers in: the daemon's `HC_SESSION` (else
-`default`) and `HC_SOCKET` if set. The herdr-app window must run on that same core. Terminal addresses are per core,
-so a window on another core would show other terminals, or none, in the view's cells.
+`core` and `assumption` in the result name the herdr-core the daemon's `hc` runner starts and ends viewers in: the
+daemon's `HC_SESSION` (else `default`) and `HC_SOCKET` if set when the daemon started. The herdr-app window must be a
+client of that same core. Terminal addresses are per core, so a window attached to another core would show other
+terminals, or none, in the view's cells. Open failures (`herdr_app_unavailable`, `viewer_start_failed`) and the note
+when a window has not acknowledged a write also name the daemon's core (`HC_SESSION`/`HC_SOCKET`) so a mismatch is
+visible straight away.
 
 ## Limits
 
