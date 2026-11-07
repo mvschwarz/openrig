@@ -86,6 +86,23 @@ describe("rig config get --with-source", () => {
     expect(await run(["reset"])).toBe("Config reset to defaults.");
   });
 
+  it("reports a successful reset when reading effective configuration fails", async () => {
+    fs.writeFileSync(configPath, JSON.stringify({ daemon: { port: 7555 } }));
+    vi.stubEnv("OPENRIG_CONTEXT_PACKS_ROOT", "/old-context");
+    const previousExitCode = process.exitCode;
+    process.exitCode = 0;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await run(["reset"])).toBe("Config reset to defaults.");
+      expect(fs.existsSync(configPath)).toBe(false);
+      expect(errorSpy.mock.calls.flat().join(" ")).toContain("OPENRIG_CONTEXT_PACKS_ROOT was removed");
+      expect(process.exitCode).toBe(0);
+    } finally {
+      process.exitCode = previousExitCode;
+      errorSpy.mockRestore();
+    }
+  });
+
   it("does not promise a masked boot setting will take effect on restart", async () => {
     process.env["OPENRIG_PORT"] = "7666";
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});

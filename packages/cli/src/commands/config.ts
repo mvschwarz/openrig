@@ -224,9 +224,14 @@ Precedence: CLI flag > environment variable > config file > default`)
             ? `${key} file override cleared; effective value ${resolved.value} (source: env; default: ${resolved.defaultValue}).`
             : `${key} reset to default (${resolved.value}).`);
         } else {
-          const envKeys = Object.entries(store.resolveAllWithSource())
-            .filter(([, resolved]) => resolved.source === "env")
-            .map(([name]) => name);
+          let envKeys: string[] = [];
+          try {
+            envKeys = Object.entries(store.resolveAllWithSource())
+              .filter(([, resolved]) => resolved.source === "env")
+              .map(([name]) => name);
+          } catch (err) {
+            console.error(`note: could not read effective configuration after reset: ${(err as Error).message}`);
+          }
           console.log(envKeys.length
             ? `Config reset to defaults, except where the environment overrides them: ${envKeys.join(", ")}.`
             : "Config reset to defaults.");
