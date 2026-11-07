@@ -89,6 +89,21 @@ after an upgrade it can still hold the previous version's note.
 
 ## Behaviour that changed
 
+- **The event log is pruned.** The daily retention sweep (and the one at startup) now deletes the history-only event
+  types older than `retention.events_days` days (default 14): `view.changed`, `snapshot.created`,
+  `watchdog.evaluation_fired` and the `queue.created`, `queue.updated`, `queue.claimed`, `queue.unclaimed` and
+  `queue.handed_off` events. Every other type is kept at any age, because restore, startup proof and the seat readers
+  fold from them, and the newest event is always kept. The first start after the upgrade works through the old history
+  in short steps while the daemon keeps answering. `rig config set retention.events_days <n>` keeps more from the next
+  sweep on; `retention.enabled false` stops every retention pass from the next daemon start (it is read at startup).
+- **The database file does not shrink by itself.** Pruned rows free pages that new events reuse, so the file stops
+  growing. To give the space back to the disk: find the file with `rig config get db.path`, stop the daemon
+  (`rig daemon stop`), copy the file aside, run `sqlite3 <that file> "VACUUM;"` (it needs free disk about the size of
+  the file and can take a few minutes), then `rig daemon start`. Never vacuum the file of a running daemon.
+- **`rig telemetry events` reports the pruned ranges.** A page that spans pruned events now has a
+  `retained_sequence_gap` for each missing seq range and `coverage.status` `partial`, where an older window used to read
+  as complete.
+
 - **Team skills live in each seat's own storage** (`$OPENRIG_HOME/state/seats/<rig id>/<logical seat>/<runtime>/`), not
   in the project's `.claude/skills` or `.agents/skills`. Claude seats get them as a generated plugin (`openrig:<id>`),
   Codex seats as their own catalog. If a link sits in that path, the seat starts without them and the result names

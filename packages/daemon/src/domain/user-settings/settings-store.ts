@@ -223,6 +223,8 @@ export const SETTINGS_VALID_KEYS = [
   "retention.transitions_days",
   "retention.watchdog_days",
   "retention.usage_samples_days",
+  // The history-only event types of `events` (queue-retention PRUNABLE_EVENT_TYPES) older than N days.
+  "retention.events_days",
   "retention.watchdog_keep_per_job",
   // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
   "retention.stream_days",
@@ -346,6 +348,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
   "retention.watchdog_days": { primary: "OPENRIG_RETENTION_WATCHDOG_DAYS" },
   "retention.usage_samples_days": { primary: "OPENRIG_RETENTION_USAGE_SAMPLES_DAYS" },
+  "retention.events_days": { primary: "OPENRIG_RETENTION_EVENTS_DAYS" },
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.stream_days": { primary: "OPENRIG_RETENTION_STREAM_DAYS" },
   "retention.stream_max_items": { primary: "OPENRIG_RETENTION_STREAM_MAX_ITEMS" },
@@ -447,6 +450,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
   "retention.usage_samples_days": ["retention", "usageSamplesDays"],
+  "retention.events_days": ["retention", "eventsDays"],
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.stream_days": ["retention", "streamDays"],
   "retention.stream_max_items": ["retention", "streamMaxItems"],
@@ -766,6 +770,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "retention.transitions_days": return 30;
     case "retention.watchdog_days": return 14;
     case "retention.usage_samples_days": return 14;
+    case "retention.events_days": return 14;
     case "retention.watchdog_keep_per_job": return 50;
     case "retention.stream_days": return 30;
     case "retention.stream_max_items": return 20000;
@@ -977,6 +982,11 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "retention.usage_samples_days": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.usage_samples_days: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "retention.events_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.events_days: must be an integer >= 1, got "${raw}"`);
     }
   },
   "retention.watchdog_keep_per_job": (raw, coerced) => {

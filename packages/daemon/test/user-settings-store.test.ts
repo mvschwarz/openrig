@@ -194,6 +194,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "retention.transitions_days",
       "retention.watchdog_days",
       "retention.usage_samples_days", // 51-08 A2 (plan-lock rev-1): the PM-ruled 14d telemetry window
+      "retention.events_days", // the history-only event types of events
       "retention.watchdog_keep_per_job",
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",
@@ -263,6 +264,23 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(store.resolveOne("provider.selected")).toMatchObject({ value: "claude,codex", source: "file" });
     for (const raw of ["gemini", "both", "claude,", "Claude", "claude codex"]) {
       expect(() => store.set("provider.selected", raw)).toThrow(/provider\.selected/);
+    }
+  });
+
+  it("retention.events_days defaults to 14, resolves file then env, and accepts only an integer >= 1", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 14, source: "default" });
+    store.set("retention.events_days", "3");
+    expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 3, source: "file" });
+    expect(JSON.parse(readFileSync(configPath, "utf-8")).retention.eventsDays).toBe(3);
+    process.env.OPENRIG_RETENTION_EVENTS_DAYS = "5";
+    try {
+      expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 5, source: "env" });
+    } finally {
+      delete process.env.OPENRIG_RETENTION_EVENTS_DAYS;
+    }
+    for (const raw of ["0", "-3", "2.5", "3days"]) {
+      expect(() => store.set("retention.events_days", raw)).toThrow(/retention\.events_days/);
     }
   });
 
