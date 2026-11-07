@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,31 @@ describe("bin-wrapper", () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
       tempDir = null;
     }
+  });
+
+  it.each([
+    { args: [], explicitCache: false, expected: false },
+    { args: ["--version"], explicitCache: false, expected: true },
+    { args: [], explicitCache: true, expected: true },
+  ])("compile cache for args=$args, explicitCache=$explicitCache", ({ args, explicitCache, expected }) => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-bin-cache-"));
+    const dist = path.join(tempDir, "dist");
+    fs.mkdirSync(dist);
+    fs.writeFileSync(path.join(tempDir, "package.json"), '{ "type": "module" }');
+    const wrapper = path.join(dist, "bin-wrapper.js");
+    fs.copyFileSync(new URL("../dist/bin-wrapper.js", import.meta.url), wrapper);
+    const report = `import { getCompileCacheDir } from "node:module";
+export async function runProgram() { console.log(JSON.stringify({ enabled: !!getCompileCacheDir() })); }
+`;
+    fs.writeFileSync(path.join(dist, "index.js"), report + "export function createProgram() { return {}; }\n");
+    fs.writeFileSync(path.join(dist, "lazy-program.js"), report + "export async function createLazyProgram() { return {}; }\n");
+    const env = { ...process.env, TMPDIR: tempDir };
+    delete env.NODE_DISABLE_COMPILE_CACHE;
+    delete env.NODE_COMPILE_CACHE;
+    if (explicitCache) env.NODE_COMPILE_CACHE = path.join(tempDir, "explicit-cache");
+    const result = spawnSync(process.execPath, [wrapper, ...args], { env, encoding: "utf8", timeout: 5000 });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ enabled: expected });
   });
 
   it("resolves the real dist entry from a symlinked wrapper path", () => {
