@@ -161,11 +161,11 @@ describe("rig acp serve", () => {
     expect(lastOf(task.qitem_id).status).toBe("completed");
     const leadLines = ((lastOf(task.qitem_id).content as Array<{ content: { text: string } }>)[0]!.content.text);
     expect(leadLines).toMatch(/Z lead@team · in-progress: reproduced on Safari 19/);
-    // An app that shows the step collapsed (Zed) still shows its title, which carries the row's latest note.
+    // An app that shows the step collapsed (Zed) still shows its title, which leads with the row's latest note.
     const latest = db.prepare("SELECT actor_session, transition_note FROM queue_transitions WHERE qitem_id = ? AND transition_note IS NOT NULL ORDER BY transition_id DESC LIMIT 1")
       .get(task.qitem_id) as { actor_session: string; transition_note: string };
     const titled = updates.filter((u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === task.qitem_id && u.title).at(-1)!;
-    expect(titled.title).toBe(`Sent to ${LEAD} (${task.qitem_id}) · ${latest.actor_session}: ${latest.transition_note}`);
+    expect(titled.title).toBe(`${latest.actor_session}: ${latest.transition_note} · Sent to ${LEAD} (${task.qitem_id})`);
     expect(lastOf(next.qitem_id).status).toBe("completed");
     expect(messages(updates).at(-1)).toBe(`${IMPL} closed ${next.qitem_id} done.\n\nFixed in PR 123: the cookie lacked SameSite=None.`);
   });

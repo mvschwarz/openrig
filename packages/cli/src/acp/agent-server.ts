@@ -199,11 +199,11 @@ class ChainFollower {
         if (fresh.length > 0 || status !== entry.status) {
           for (const t of fresh) { entry.lines.push(transitionLine(t)); entry.lastId = Math.max(entry.lastId, t.transitionId); }
           entry.status = status;
-          // An app that shows a step collapsed still shows its title, so the latest note goes there as well.
+          // An app that shows a step collapsed still shows its title, so the latest note leads it: a narrow panel cuts the end.
           const noted = fresh.filter((t) => t.transitionNote).at(-1);
           this.emit({
             sessionUpdate: "tool_call_update", toolCallId: qitemId, status,
-            ...(noted ? { title: `${entry.title} · ${noted.actorSession}: ${oneLine(noted.transitionNote!, 100)}` } : {}),
+            ...(noted ? { title: `${noted.actorSession}: ${oneLine(noted.transitionNote!, 100)} · ${entry.title}` } : {}),
             ...(entry.lines.length > 0 ? { content: textContent(entry.lines.join("\n")) } : {}),
           });
         }
