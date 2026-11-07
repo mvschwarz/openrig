@@ -558,4 +558,15 @@ it('#2682 P2b: an ended attempt, an idle read, then a peer\'s turn before the se
  expect(prepPrompts(f)).toHaveLength(2);
  f.hooks.busy=true;await e.maybeAutoCompact(hs);
  expect(prepPrompts(f)).toHaveLength(2);
+ // A replacement that stops with its request never sent (each send found a turn begun) keeps the gate after a restart.
+ const g=fixture();const d=g.daemon();await endedPastCooldown(g,d);
+ const gateRead=g.transport.waitUntilIdle.bind(g.transport);
+ vi.spyOn(g.transport,'waitUntilIdle').mockImplementation(async(...args)=>{const r=await gateRead(...args);g.hooks.busy=true;return r;});
+ for(let i=0;i<3;i++){g.hooks.busy=false;await d.maybeAutoCompact(hs);}
+ expect(d.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'not_sent'});
+ expect(prepPrompts(g)).toHaveLength(1);
+ vi.mocked(g.transport.waitUntilIdle).mockRestore();
+ const restarted=g.daemon();g.hooks.busy=true;
+ expect(await restarted.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(g)).toHaveLength(1);
 });

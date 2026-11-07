@@ -1806,6 +1806,13 @@ export class ClaudeCompactionEnforcer {
         // it can be read, and a different occupant then discards it.
         && record.occupantGeneration !== null && (live === null || live === record.occupantGeneration)
         && this.now() - endedAt < this.restartRecoveryWindowMs) this.lastEnded.set(session, { endedAt, occupantGeneration: record.occupantGeneration, sessionId: record.sessionId ?? null });
+      // A replacement that stopped with its request never sent keeps the gate of the attempt it replaced, as in memory and
+      // as a replacement still preparing does below.
+      else if (record.mode === "automatic" && record.afterEnded !== undefined && record.delivery === "not_sent"
+        && record.occupantGeneration !== null && (live === null || live === record.occupantGeneration)
+        && this.now() - record.afterEnded < this.restartRecoveryWindowMs) {
+        this.lastEnded.set(session, { endedAt: record.afterEnded, occupantGeneration: record.occupantGeneration, sessionId: record.sessionId ?? null });
+      }
       return;
     }
     if (record.occupantGeneration !== null && live !== null && live !== record.occupantGeneration) return;
