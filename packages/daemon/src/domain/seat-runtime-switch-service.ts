@@ -1,8 +1,12 @@
+import { getOpenRigHome } from "../openrig-compat.js";
+import { piAccountStateRoot, piAccountSwitchStateRoot } from "./pi-account-state.js";
+import { piSeatPaths } from "../adapters/pi-runner-protocol.js";
+import { readSeatEffort } from "./seat-effort.js";
 import { claudeSeatTokenRefProblem, claudeSeatTokenFileProblem, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import { isolatedClaudeAccountProblem } from "./claude-credential-precedence.js";
 import nodePath from "node:path";
 import fs from "node:fs";
-import { RUNTIME_HOME_VAR } from "./seat-runtime-home.js";
+import { RUNTIME_HOME_VAR, seatRuntimeHome } from "./seat-runtime-home.js";
 import { ulid } from "ulid";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -33,6 +37,7 @@ import { CheckpointStore } from "./checkpoint-store.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { heldMessagesNotice } from "./outbox-handler.js";
 import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
+import { retireSeatCoreSkillCopies } from "./seat-skill-storage.js";
 import { planRuntimeSwitchMaterials, type RuntimeSwitchMaterials, type RuntimeSwitchMaterialsInput, type SwitchRuntime } from "./runtime-switch-materials.js";
 import { terminatePaneInPlace } from "./pane-cutover.js";
 import { inspectStartupStagedText, settleOwnStartupPaste, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, waitForClaudeInputBox } from "./startup-submission-evidence.js";
@@ -152,7 +157,17 @@ const COSTS = [
   "A second process runs on the target's account until cutover.",
   "Messages sent to the seat while it switches are held, not typed; rig send says the seat is switching and until when, and they need sending again afterwards.",
   "A failed switch can leave the target runtime's prepared files (its seat storage and projections).",
-  "Codex and Claude Code only, single-pane seats only.",
+  "Codex and Claude Code runtime switches, or Pi account-home changes; single-pane seats only.",
+];
+
+const PI_ACCOUNT_COSTS = [
+  "A new conversation: only the handover carries over; the previous conversation stays with the predecessor.",
+  "Same address, different terminal: the seat's session and address stay, its pane and scrollback change.",
+  "The runtime stays Pi. The seat keeps its model and saved effort choice unless explicitly changed; its launch wrapper is retained.",
+  "A second process runs on the selected account until cutover.",
+  "Messages sent to the seat while it switches are held, not typed; they need sending again afterwards.",
+  "A failed switch can leave the successor's prepared state directory under account-switches.",
+  "Pi account-home changes; single-pane seats only.",
 ];
 
 export class SeatRuntimeSwitchService {
@@ -179,8 +194,8 @@ export class SeatRuntimeSwitchService {
   /** Validate and plan a successor-first runtime/account move, executing it under the seat's lifecycle guard unless dry-run. */
   async setRuntime(input: SetRuntimeInput): Promise<SetRuntimeResult> {
     const refuse = (code: string, message: string, guidance?: string): RuntimeSwitchRefusal => ({ ok: false, code, message, ...(guidance ? { guidance } : {}) });
-    if (input.runtime !== "codex" && input.runtime !== "claude-code") {
-      return refuse("invalid_runtime_settings", "Choose --runtime codex or --runtime claude-code.");
+    if (input.runtime !== "codex" && input.runtime !== "claude-code" && input.runtime !== "pi") {
+      return refuse("invalid_runtime_settings", "Choose --runtime codex or --runtime claude-code; Pi supports account-home changes on an existing Pi seat.");
     }
     const target: SwitchRuntime = input.runtime;
     if (input.clearAccountHome !== undefined && typeof input.clearAccountHome !== "boolean") return refuse("invalid_runtime_settings", "clearAccountHome must be true or false.");
@@ -235,8 +250,18 @@ export class SeatRuntimeSwitchService {
           : open.phase === "abandoned" ? "whose staged successor hasn't been retired" : "in progress"} (${open.from_runtime} → ${open.to_runtime}, switch ${open.id}).`,
         `Inspect it with rig seat status ${seatRef}; finish an interrupted one with rig seat set-runtime ${seatRef} --recover.`), switchId: open.id };
     }
-    if (node.runtime !== "codex" && node.runtime !== "claude-code") {
-      return refuse("runtime_switch_unsupported", `${seatRef} runs ${node.runtime ?? "an unknown runtime"}; only Codex and Claude Code seats can switch.`);
+    if (node.runtime !== "codex" && node.runtime !== "claude-code" && node.runtime !== "pi") {
+      return refuse("runtime_switch_unsupported", `${seatRef} runs ${node.runtime ?? "an unknown runtime"}; only Codex and Claude Code seats can change runtime; Pi supports account-home changes.`);
+    }
+    if ((target === "pi" || node.runtime === "pi") && target !== node.runtime) {
+      return refuse("runtime_switch_unsupported", "Pi supports account-home changes on an existing Pi seat; changing to or from Pi is not supported.");
+    }
+    if (target === "pi" && input.accountHome !== undefined) {
+      try {
+        const auth = nodePath.join(input.accountHome, "auth.json");
+        if (!fs.statSync(auth).isFile()) throw new Error();
+        fs.accessSync(auth, fs.constants.R_OK);
+      } catch { return refuse("invalid_runtime_settings", `Pi account file ${JSON.stringify(nodePath.join(input.accountHome, "auth.json"))} must be readable; sign in to that home first, then retry. Nothing changed.`); }
     }
     const binding = sessionRegistry.getBindingForNode(node.id);
     const sessionName = binding?.tmuxSession ?? null;
@@ -251,6 +276,11 @@ export class SeatRuntimeSwitchService {
     if (input.accountHome !== undefined && target === "claude-code" && node.cwd) {
       const problem = isolatedClaudeAccountProblem(input.accountHome, node.cwd, !!input.accountToken, input.accountToken?.kind === "api-key");
       if (problem) return refuse("invalid_runtime_settings", problem);
+    }
+    // An account change keeps this Pi seat's current model and effort unless explicitly changed.
+    if (target === "pi") {
+      explicit.model ??= node.model ?? undefined;
+      explicit.effort ??= readSeatEffort(db, node.id)?.effective ?? node.effort ?? undefined;
     }
     const predecessorGeneration = sessionRegistry.currentOccupantTenure(node.id)?.generationUuid;
     const running = sessionRegistry.getSessionsForRig(node.rigId).filter((session) => session.nodeId === node.id && session.status === "running");
@@ -310,7 +340,7 @@ export class SeatRuntimeSwitchService {
       settings: materials.settings,
       permission: selection ? { mode: selection.mode, source: "explicit" } : { mode: "inherit", source: "member_or_rig_policy" },
       dropped,
-      costs: COSTS,
+      costs: target === "pi" ? PI_ACCOUNT_COSTS : COSTS,
       notRun: materials.notRun.map((command) => `startup slash command not run by a switch: ${command}`),
       warnings: materials.warnings,
     };
@@ -416,7 +446,29 @@ export class SeatRuntimeSwitchService {
         successorPane = pane;
         db.prepare("UPDATE seat_runtime_switches SET successor_pane = ?, updated_at = ? WHERE id = ?").run(pane, stamp(), id);
       },
-      staged: { prepare: (binding, adapter) => materials.prepare(binding, adapter),
+      staged: { prepare: (binding, adapter) => {
+        if (target === "pi") {
+          const base = nodePath.join(this.deps.openrigHome ?? getOpenRigHome(), "state", "pi");
+          const source = piSeatPaths(piAccountStateRoot(db, base, sessionName), sessionName).agentDir;
+          const destination = piSeatPaths(piAccountSwitchStateRoot(base, successorGeneration), sessionName).agentDir;
+          if (fs.existsSync(source)) fs.cpSync(source, destination, { recursive: true, verbatimSymlinks: true,
+            filter: file => file !== nodePath.join(source, "auth.json") && file !== nodePath.join(source, ".openrig-account") });
+          // Clearing without a configured home returns to the original seat-local login, if it had one.
+          const baseline = piSeatPaths(base, sessionName).agentDir;
+          if (ctx.input.clearAccountHome && !seatRuntimeHome(db, node.id, "pi", true).home && !fs.existsSync(nodePath.join(baseline, ".openrig-account")) && fs.existsSync(nodePath.join(baseline, "auth.json"))) {
+            fs.mkdirSync(destination, { recursive: true });
+            fs.copyFileSync(nodePath.join(baseline, "auth.json"), nodePath.join(destination, "auth.json"));
+          }
+        }
+        // #2426: a Claude successor that loads the vendored openrig-core itself starts without OpenRig's earlier copies of
+        // its skills, as a launch does, when the runtime changes: the predecessor then runs the other runtime, from that
+        // runtime's own storage. A same-runtime account move shares this storage with the live predecessor, so its copies
+        // wait for the next ordinary launch. The kept copies go unnamed here: the switch's own reconciliation below decides
+        // what becomes of them, as it did before, and names a plugin copy it keeps.
+        const coreCopyNotes = corePluginDir && node.runtime !== target
+          ? retireSeatCoreSkillCopies(materials.seatSkills, corePluginDir, { namesKept: false }) : [];
+        return materials.prepare(binding, adapter).then((notes) => [...coreCopyNotes, ...notes]);
+      },
         binding: { ...materials.bindingAdditions(), ...(ctx.input.accountHome !== undefined ? { accountHome: ctx.input.accountHome, accountToken: ctx.input.accountToken ?? null }
           : ctx.input.clearAccountHome || node.accountHome ? { accountHome: null, ...(node.accountHome ? { accountToken: null } : {}) } : {}), runtimeSwitchFrom: { runtime: node.runtime!, session: sessionName, pane: ctx.predecessorPane, generation: ctx.predecessorGeneration } } },
     });
@@ -532,10 +584,11 @@ export class SeatRuntimeSwitchService {
       }
       const at = this.now().toISOString();
       const spec = materials.resolvedSpec;
-      db.prepare(`UPDATE nodes SET runtime = ?, model = ?, effort = ?, effort_choice = NULL, advisor = ?, codex_config_profile = ?,
+      db.prepare(`UPDATE nodes SET runtime = ?, model = ?, effort = ?, effort_choice = ?, advisor = ?, codex_config_profile = ?,
         ${spec ? "resolved_spec_name = ?, resolved_spec_version = ?, resolved_spec_hash = ?, restore_policy = ?," : ""}
         occupant_lifecycle = 'active', continuity_outcome = 'fresh', handover_result = 'complete', previous_occupant = ?, handover_at = ? WHERE id = ?`)
-        .run(target, materials.settings.model.value, materials.settings.effort.value, materials.settings.advisor.value, materials.settings.codexConfigProfile.value,
+        .run(target, materials.settings.model.value, target === "pi" && ctx.input.effort === undefined ? node.effort ?? null : materials.settings.effort.value,
+          target === "pi" && ctx.input.effort === undefined ? readSeatEffort(db, node.id)?.choice ?? null : null, materials.settings.advisor.value, materials.settings.codexConfigProfile.value,
           ...(spec ? [spec.name, spec.version, spec.hash, spec.restorePolicy] : []), ctx.sessionName, at, node.id);
       db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = CASE WHEN ? THEN ? ELSE claude_token_ref END WHERE id = ?")
         .run(ctx.input.accountHome ?? null, ctx.input.accountHome !== undefined || node.accountHome ? 1 : 0,

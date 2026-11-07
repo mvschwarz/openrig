@@ -12,6 +12,7 @@ import { CLI_VERSION } from "./version.js";
 import { ConfigStore } from "./config-store.js";
 import { readRosters } from "./commands/roster.js";
 import { mcpPresenceFilePath, readPresence } from "./mcp-presence.js";
+import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "./queue-artifact.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
@@ -396,20 +397,6 @@ function outOfScope(what: string): TextResult {
   return errorResult(JSON.stringify({ ok: false, error: "out_of_scope", message }), "out_of_scope", message);
 }
 
-type SharedRoot = { name: string; path: string };
-type FileRead = { root?: string; path?: string; content?: string; binary?: boolean; size?: number; mtime?: string; truncated?: boolean; truncatedAtBytes?: number | null; totalBytes?: number };
-
-/** The shared root an absolute path falls under as written, and its path inside that root. The reference names a file
- *  where the daemon runs, which may be another machine, so it's never resolved through this machine's filesystem; the
- *  daemon still checks containment itself when the file is read. */
-function underSharedRoot(roots: SharedRoot[], absolute: string): { root: string; path: string } | null {
-  for (const root of roots) {
-    const inside = nodePath.relative(root.path, absolute);
-    if (inside && inside !== ".." && !inside.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(inside)) return { root: root.name, path: inside };
-  }
-  return null;
-}
-
 /** A file the daemon read through a shared root, as text from offset: at most CONTEXT_TEXT_LIMIT characters, with
  *  nextOffset when more of what the daemon read remains, and its byte cut when the file was longer than the daemon reads. */
 function artifactView(source: string, read: FileRead, offset: number): Record<string, unknown> {
@@ -418,7 +405,7 @@ function artifactView(source: string, read: FileRead, offset: number): Record<st
   const text = read.content ?? "";
   const end = wholeCharEnd(text, offset + CONTEXT_TEXT_LIMIT);
   return {
-    ...base, binary: false, offset, text: text.slice(offset, end), totalChars: text.length,
+    ...base, binary: false, offset, text: text.slice(offset, end), totalChars: text.length, ...codeResultOf(read),
     truncated: text.length > end || read.truncated === true,
     ...(text.length > end ? { nextOffset: end } : {}),
     ...(read.truncated ? { truncatedAtBytes: read.truncatedAtBytes, totalBytes: read.totalBytes } : {}),
@@ -572,16 +559,52 @@ const SHARED_INSTRUCTIONS = [
   "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
 ];
 const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
-const EXTERNAL_INSTRUCTIONS = SHARED_INSTRUCTIONS.join("\n");
+
+/** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
+ *  that works its inbox. The team's questions to it are the person's to answer. */
+export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v1";
+export const FRONT_DOOR_WORKFLOW = [
+  `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
+  "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
+  "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and the person's words in resolution, saying they're the person's (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them, and don't claim an item you can't close with their words.",
+  "Nothing wakes this conversation when the team finishes: check your work and your items when the person asks or comes back.",
+].join(" ");
+const FRONT_DOOR_INSTRUCTIONS = [...SHARED_INSTRUCTIONS, FRONT_DOOR_WORKFLOW].join("\n");
+const EXTERNAL_INSTRUCTIONS = [
+  "This connection sends requests to an OpenRig team as the caller named by its grant. The daemon attributes requests to that caller. Use only the tools this connection offers.",
+  "To ask the connected team to do work, use rig_queue_create with the task in body. You may omit destination to use the receiver configured by the server operator. If no receiver is available, ask the operator to configure it; don't guess an address. An explicit destination still must be within this connection's grant.",
+  "Keep the returned qitemId and use rig_queue_show to read the result. Acceptance is not completed work. If a create times out, check that same qitemId before retrying and reuse it; never retry with a new id. Use revises for a requested revision of earlier work, preserving its lineage. rig_queue_list shows your own work, including an empty list before your first request.",
+  "Read returned files with rig_artifact_read, within the shared roots and items this connection may reach. A question reserved for a person is theirs to answer; don't answer on their behalf.",
+].join("\n");
+
 /** For an external grant that names claim and update: how it works the items addressed to it, messages included. */
 const EXTERNAL_INBOX_INSTRUCTIONS = [...SHARED_INSTRUCTIONS,
   "Items addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it, close it done, and reply, when it needs one, with a new item to its sender. Nothing promises to wake you, so check your items again.",
 ].join("\n");
 
-function instructionsFor(access: McpAccess | undefined): string {
-  if (!access?.external) return INSTRUCTIONS;
+function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
+  if (!access?.external) return frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
   const tools = externalTools(access.external.objects);
   return tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? EXTERNAL_INBOX_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
+}
+
+/** A configured default must identify exactly one existing local node. No topology relationship, name convention
+ *  for a lead, caller identity or task history supplies a missing receiver. Resolve again on each omitted destination. */
+async function taskDestinationExists(client: DaemonClient, destination: string): Promise<boolean> {
+  const rigName = destination.split("@")[1]!;
+  const rig = await resolveRigHandle(client, rigName, { strict: true });
+  if (rig.kind !== "resolved") return false;
+  const nodes = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
+  if (nodes.status !== 200 || !Array.isArray(nodes.data)) return false;
+  let matches = 0;
+  for (const entry of nodes.data as unknown[]) {
+    const { logicalId, rigName: name } = (entry ?? {}) as Record<string, unknown>;
+    if (typeof logicalId !== "string" || name !== rigName) return false;
+    const dot = logicalId.indexOf(".");
+    if (dot <= 0 || dot === logicalId.length - 1) return false;
+    if (`${logicalId.slice(0, dot)}-${logicalId.slice(dot + 1)}@${name}` === destination) matches++;
+  }
+  return matches === 1;
 }
 
 /**
@@ -626,21 +649,73 @@ function mapResult(
   return opts.structured ? { content: [{ type: "text", text }], structuredContent: structured(res.data) } : { content: [{ type: "text", text }] };
 }
 
+/** A seat value an app passed on without filling it in: empty, or still a placeholder. */
+export interface UnfilledSeat { variable: "OPENRIG_SESSION_NAME" | "RIGGED_SESSION_NAME"; value: string }
+
+// An app that doesn't substitute its settings passes the template through as written: ${user_config.seat}, ${input:seat},
+// $SEAT. No seat address can contain these.
+const SEAT_PLACEHOLDER = /\$\{[^}]*\}|^\s*\$[A-Za-z_]/;
+
+/** Treat an empty or unfilled seat as no seat, for the whole process: drops both names from env, so neither requests
+ *  nor rig_whoami act as the placeholder, or as a seat inherited under the legacy name behind an empty one. A set
+ *  OPENRIG_SESSION_NAME decides; RIGGED_SESSION_NAME counts only when it's absent. Returns what was dropped. */
+export function dropUnfilledSeat(env: NodeJS.ProcessEnv = process.env): UnfilledSeat | undefined {
+  const variable = env.OPENRIG_SESSION_NAME !== undefined ? "OPENRIG_SESSION_NAME" : env.RIGGED_SESSION_NAME !== undefined ? "RIGGED_SESSION_NAME" : undefined;
+  const value = variable ? env[variable]! : undefined;
+  if (!variable || value === undefined || (value.trim() && !SEAT_PLACEHOLDER.test(value))) return undefined;
+  delete env.OPENRIG_SESSION_NAME;
+  delete env.RIGGED_SESSION_NAME;
+  return { variable, value };
+}
+
+/** How an MCP client named itself in its handshake, cut to one short line; it's the client's claim, never an identity. */
+function clientSaid(client: { name?: unknown; version?: unknown } | undefined): string | null {
+  const part = (value: unknown) => typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 60) : "";
+  const name = part(client?.name);
+  if (!name) return null;
+  const version = part(client?.version);
+  return JSON.stringify(version ? `${name} ${version}` : name);
+}
+
+export function unfilledSeatText(seat: UnfilledSeat): string {
+  return seat.value.trim()
+    ? `${seat.variable} is ${JSON.stringify(seat.value)}, a placeholder the app didn't fill in`
+    : `${seat.variable} is empty`;
+}
+
+/** A label for a caller with no seat: no seat's address, and random, so each `rig mcp serve` process has its own. */
+export function mintUnknownSender(): string {
+  return `unknown-mcp-${randomBytes(4).toString("hex")}`;
+}
+
 /**
  * Creates an MCP server wrapping the daemon HTTP API.
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; rostersFolder?: () => string; presenceFile?: () => string } = {}): McpServer {
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string } = {}): McpServer {
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
-  }, { instructions: instructionsFor(options.access) });
+  }, { instructions: instructionsFor(options.access, options.frontDoor === true) });
   const { access } = options;
   const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
   const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
   // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
   const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+  // With no seat (none configured, or one an app left unfilled), messages, new tasks and chat still go through, as an
+  // unknown sender. Its label is this server's own and no seat's, so two unknown callers never count as one author (a
+  // delegated decision compares authors). Its note says only what is known: why there's no seat, and how the client
+  // describes itself in its handshake, which is the client's claim, not an identity. Every other write keeps its rules.
+  // HTTP builds a server per request and passes its process's label, so a caller keeps the one rig_whoami names.
+  const unknownSender = options.unknownSender ?? mintUnknownSender();
+  const unknownSenderNote = (kind: "task" | "message"): string | null => {
+    if (seatOf()) return null;
+    const why = options.unfilledSeat ? unfilledSeatText(options.unfilledSeat) : "OPENRIG_SESSION_NAME isn't set where it was configured";
+    const said = clientSaid(server.server.getClientVersion());
+    return `[Unknown sender ${unknownSender}: this app has no OpenRig seat (${why}).${said ? ` Its MCP client says it is ${said}.` : ""}`
+      + (kind === "task" ? " There's no return address: it follows this by its task id.]" : " There's no return address.]");
+  };
   const accessClass = new Map(MCP_OPERATIONS.map((op) => [op.tool, op.access]));
   // A local caller (no access) is offered every tool; an authenticated one, its class's; an external caller, its
   // grant's pairs.
@@ -1035,9 +1110,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
         if (scope && !scope.session(session)) return outOfScope(`Session ${session}`);
         const waitForIdleMs = waitForIdleSeconds === undefined ? undefined : Math.ceil(waitForIdleSeconds * 1000);
+        // Unsigned, as before (the transport names it "<unknown sender>"); the note tells the recipient what is known.
+        const note = unknownSenderNote("message");
         const res = await client.post("/api/transport/send", {
           session,
-          text,
+          text: note ? `${note}\n${text}` : text,
           verify,
           force,
           waitForIdleMs,
@@ -1094,7 +1171,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_chatroom_send")) server.registerTool(
     "rig_chatroom_send",
     {
-      description: "Send a message to a rig's chatroom as this server's seat",
+      description: "Send a message to a rig's chatroom as this server's seat, or, with no seat, as an unknown sender with a note saying so",
       inputSchema: z.object({
         rigName: z.string().describe("Rig name or identifier"),
         body: z.string().describe("Message body"),
@@ -1108,10 +1185,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const rig = await chatRigId(client, rigName);
         if ("content" in rig) return rig;
         // P21: no body sender — the daemon derives it from the transport header (X-OpenRig-Session,
-        // stamped by the MCP server's DaemonClient from its seat env).
-        const res = await client.post(`/api/rigs/${encodeURIComponent(rig.id)}/chat/send`, {
-          body,
-        });
+        // stamped by the MCP server's DaemonClient from its seat env). With no seat, the unknown sender is declared.
+        const note = unknownSenderNote("message");
+        const res = await client.post(`/api/rigs/${encodeURIComponent(rig.id)}/chat/send`, note
+          ? { body: `${note}\n${body}`, sender: unknownSender } : { body });
         return mapResult(res);
       } catch (err) {
         return caught(err);
@@ -1199,7 +1276,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     {
       description: "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord.",
       inputSchema: z.object({
-        destination: z.string().describe("Destination seat (e.g. dev-impl@my-rig)"),
+        destination: access?.external
+          ? z.string().optional().describe("Destination seat; omit to use the connected team's configured receiver")
+          : z.string().describe("Destination seat (e.g. dev-impl@my-rig)"),
         body: z.string().describe("The task: what to do and what to return"),
         summary: z.string().optional().describe("One-line summary"),
         tags: z.array(z.string()).optional().describe("Tags, e.g. mission:<name>"),
@@ -1212,6 +1291,18 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       annotations: ADDITIVE,
     },
     async ({ destination, body, summary, tags, priority, tier, qitemId, revises, alert }) => {
+      if (destination === undefined && access?.external) {
+        destination = options.taskDestination;
+        const unavailable = () => errorResult("The connected team's task receiver is unavailable. Ask the server operator to configure it.",
+          "task_destination_unavailable", "The connected team's task receiver is unavailable. Ask the server operator to configure it.");
+        if (!destination) return unavailable();
+        // Check scope before looking up the configured receiver: configuration never expands a grant or reveals
+        // another rig's destination. An explicit destination continues through the existing path below.
+        if (!scope?.destination(destination)) return outOfScope("Configured task destination");
+        try {
+          if (!await taskDestinationExists(client, destination)) return unavailable();
+        } catch { return unavailable(); }
+      }
       if (scope && !scope.destination(destination)) return outOfScope(`Destination ${destination}`);
       // A revision carries its original's lineage as a handoff does: the original's chain, then the original.
       let lineage: { chainOfRecord: string[]; body: string } | undefined;
@@ -1229,9 +1320,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
       }
       const id = qitemId ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
+      // With no seat, the task goes to its destination as from the unknown sender, with the note at the top of its body.
+      const note = unknownSenderNote("task");
       try {
         const res = await client.post("/api/queue/create", {
-          qitemId: id, destinationSession: destination, body: lineage?.body ?? body, summary, priority, tier,
+          qitemId: id, destinationSession: destination, body: note ? `${note}\n\n${lineage?.body ?? body}` : lineage?.body ?? body,
+          ...(note ? { sourceSession: unknownSender } : {}), summary, priority, tier,
           tags: access?.external ? tags?.filter((tag) => !OPENRIG_PROVENANCE_TAG.test(tag)) : tags,
           ...(alert ? { humanAlert: true } : {}),
           ...(lineage ? { chainOfRecord: lineage.chainOfRecord } : {}),
@@ -1245,7 +1339,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
         // A create's return, a retry's stored row included, goes through the same external projection as show and list.
         const view = externalView(scope);
-        return mapResult(view && res.status < 400 ? { ...res, data: projectForExternal(res.data, view) } : res, undefined, { structured: true });
+        // An unknown sender has no return address, so it says how to follow the task.
+        const sent = note && res.status < 400 && res.data && typeof res.data === "object" ? { ...res, data: { ...res.data,
+          unknownSender: { label: unknownSender, followUp: `No return address: read this task with rig_queue_show and qitemId ${id}.` } } } : res;
+        return mapResult(view && sent.status < 400 ? { ...sent, data: projectForExternal(sent.data, view) } : sent, undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
         const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id} before retrying, and retry only with that same qitemId.`;
@@ -1388,7 +1485,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         resolution: z.string().optional().describe("The outcome the item keeps, stored only by the update that closes an open item (as rig queue update --resolution)"),
         reopen: z.boolean().optional().describe("Reopen a closed item: give an active state (pending, in-progress or blocked) and a note (as rig queue update --reopen)"),
         summary: z.string().optional().describe("Replace the one-line summary"),
-        evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it"),
+        evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it. For a code result, a JSON file of kind openrig.code-result/v1 with repo, base and revision (full commit ids) and paths lets a reader diff it exactly"),
         blockedOn: z.string().optional().describe("What it waits on, when blocking: another qitemId (this item returns to pending when that one closes), or the address of the person this item came from, not a shared channel (they're asked with this item's summary, and their answer returns it to you in progress)"),
         wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
       }),
@@ -1487,7 +1584,15 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const seat = seatOf();
         if (!seat) {
-          const none = { ok: true, seat: null, caller, message: "This server has no seat: OPENRIG_SESSION_NAME isn't set where it was configured, so its writes aren't attributed to a seat." };
+          const why = options.unfilledSeat ? unfilledSeatText(options.unfilledSeat) : "OPENRIG_SESSION_NAME isn't set where it was configured";
+          const message = `This server has no seat: ${why}, so it acts as no seat and never as another seat. Reads work. `
+            + `Messages (rig_send), new tasks (rig_queue_create) and chat go through as the unknown sender ${unknownSender}, each `
+            + "with a note saying so: there's no return address, so follow a task by its qitemId with rig_queue_show. "
+            + "Claiming, updating, handing off or deciding a task, answering a question asked of a seat, and listing your own "
+            + "items (owned or mine) need this app's seat; reply to the team's questions as a message or a new task naming the "
+            + "question's qitemId. To act as this app's address on the team, such as cursor@my-team, set OPENRIG_SESSION_NAME "
+            + "where the server is configured.";
+          const none = { ok: true, seat: null, caller, unknownSender, ...(options.unfilledSeat ? { unfilledSeat: options.unfilledSeat } : {}), message };
           return { content: [{ type: "text" as const, text: JSON.stringify(none) }], structuredContent: none };
         }
         const params = new URLSearchParams({ sessionName: seat, compact: "1" });
@@ -1501,6 +1606,17 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           const member = { ok: true, seat, rig: at >= 0 ? seat.slice(at + 1) : null, session: null, caller,
             message: "This seat has no session here: it's the seat this connection's grant names, such as a hosted member's. rig_team shows its rig and hosted members, and rig_queue_list with owned set lists its work." };
           return { content: [{ type: "text" as const, text: JSON.stringify(member) }], structuredContent: member };
+        }
+        // A front door (--front-door) usually has no session either: its seat is the address the person picked for their
+        // app, declared in OPENRIG_SESSION_NAME. Answer with it when its rig exists here, still marked declared.
+        if (res.status === 404 && !access && options.frontDoor === true) {
+          const at = seat.indexOf("@");
+          const rigName = at > 0 ? seat.slice(at + 1) : "";
+          if (rigName && (await resolveRigHandle(client, rigName, { strict: true })).kind === "resolved") {
+            const frontDoor = { ok: true, seat, rig: rigName, session: null, caller,
+              message: "This seat has no session here: it's the front-door address this server was configured with (OPENRIG_SESSION_NAME), declared, not verified. rig_team shows its rig and lead, and rig_queue_list with owned set lists the team's questions to it." };
+            return { content: [{ type: "text" as const, text: JSON.stringify(frontDoor) }], structuredContent: frontDoor };
+          }
         }
         if (res.status >= 400) return mapResult(res);
         return mapResult({ ...res, data: { ...(res.data as Record<string, unknown>), caller } }, undefined, { structured: true });
@@ -1661,7 +1777,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_artifact_read")) server.registerTool(
     "rig_artifact_read",
     {
-      description: `Read a finished item's artifact (its evidenceRef), or a named file, through the daemon's shared roots (OPENRIG_FILES_ALLOWLIST), as text: at most ${CONTEXT_TEXT_LIMIT} characters from offset; nextOffset reads on. An artifact outside every shared root, a link, or an item with no evidenceRef comes back as available: false with the reason and the shared roots' names; nothing outside those roots is read.`,
+      description: `Read a finished item's artifact (its evidenceRef), or a named file, through the daemon's shared roots (OPENRIG_FILES_ALLOWLIST), as text: at most ${CONTEXT_TEXT_LIMIT} characters from offset; nextOffset reads on. An artifact outside every shared root, a link, or an item with no evidenceRef comes back as available: false with the reason and the shared roots' names; nothing outside those roots is read. A code-result manifest (kind openrig.code-result/v1) also comes back parsed as codeResult: its repo, the exact base and revision commits, and paths; a branch or fetch ref in it is a hint, never the revision.`,
       inputSchema: z.object({
         qitemId: z.string().optional().describe("Read this item's evidenceRef"),
         root: z.string().optional().describe("A shared root's name: with path, the file to read; with qitemId, the root a relative evidenceRef is under"),
@@ -1694,15 +1810,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const unavailable = (reason: string) => mapResult({ status: 200, data: {
           available: false, qitemId, reason, evidenceRef: typeof ref === "string" ? ref : null, roots: roots.map((entry) => entry.name),
         } }, undefined, { structured: true });
-        if (typeof ref !== "string" || !ref.trim()) return unavailable("This item names no artifact: it has no evidenceRef.");
-        if (/^[a-z][a-z0-9+.-]*:\/\//i.test(ref)) return unavailable("The evidenceRef is a link, not a file in a shared root: open it where it lives.");
-        if (roots.length === 0) return unavailable("This daemon shares no roots (OPENRIG_FILES_ALLOWLIST is empty), so no artifact can be read through it.");
-        if (!nodePath.isAbsolute(ref)) {
-          return root ? await read("evidenceRef", root, ref) : unavailable("The evidenceRef is a relative path: name the shared root it's under (root).");
-        }
-        const shared = underSharedRoot(roots, ref);
-        if (!shared) return unavailable("The evidenceRef is outside every shared root as the daemon lists them, so it isn't read. If it reaches a root through a link, read the file with root and path.");
-        return await read("evidenceRef", shared.root, shared.path);
+        const plan = planItemArtifact(ref, roots, root);
+        if ("unavailable" in plan) return unavailable(plan.unavailable);
+        return await read("evidenceRef", plan.read.root, plan.read.path);
       } catch (err) {
         return caught(err);
       }

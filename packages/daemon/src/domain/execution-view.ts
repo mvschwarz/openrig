@@ -41,6 +41,12 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { parseFrontmatter } from "./slices/slice-indexer.js";
 import { lastMeaningfulTransition } from "./queue-waiting.js";
 import { derivePickup } from "./queue-pickup.js";
+
+/** #2661 (c): the dep's answer for a seat, or null when absent or failing (a read never breaks the view). */
+export function compactionOwedSinceOf(deps: { compactionOwedSince?: (sessionName: string) => string | null }, session: string | null | undefined): string | null {
+  if (!session) return null;
+  try { return deps.compactionOwedSince?.(session) ?? null; } catch { return null; }
+}
 import { resolveWorkNodeDirs } from "./current-work.js";
 import { resolveLegacyTopologyRigsRoot } from "./user-settings/settings-store.js";
 import { BUILD_INFO, type BuildInfo } from "../build-info.js";
@@ -68,8 +74,11 @@ export interface ExecutionViewDeps {
       needsInput: { count: number; reason: string | null };
       decidedBy: string | null;
       changedAt: string;
+      backgroundWork?: { observedAt: string } | null;
     } | null;
   };
+  /** #2661 (c): since when (ISO) a seat's managed post-compaction restore is owed, or null (the pickup's grace). */
+  compactionOwedSince?: (sessionName: string) => string | null;
   now?: () => Date;
   buildInfo?: BuildInfo;
   /** Injectable for tests; synchronous fakes are also accepted. */
@@ -890,6 +899,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       // A blocked row's pickup is parked before it reads its history, so that history is not read at all.
       lastMeaningfulAt: r.state === "blocked" ? undefined : lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
       activity: arbitrated?.activity, needsInput: arbitrated?.needsInput.count, needsInputReason: arbitrated?.needsInput.reason,
+      backgroundWork: arbitrated?.backgroundWork ?? null, compactionOwedSince: compactionOwedSinceOf(deps, r.destination_session),
       claimedAt: r.claimed_at,
       lastHeartbeat: r.last_heartbeat,
       postClaimMotionCount: Number(r.post_claim_motion ?? 0),
@@ -1228,6 +1238,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
         // As in Q1: a blocked row is parked before its history is read; its armed wake is still looked up below.
         lastMeaningfulAt: r.state === "blocked" ? undefined : lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
         activity: activity?.activity, needsInput: activity?.needsInput.count, needsInputReason: activity?.needsInput.reason,
+        backgroundWork: activity?.backgroundWork ?? null, compactionOwedSince: compactionOwedSinceOf(deps, r.destination_session),
         state: r.state,
         claimedAt: r.claimed_at,
         lastHeartbeat: r.last_heartbeat,

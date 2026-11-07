@@ -270,6 +270,17 @@ opt in with
 `rig config set terminal.inherit_tmux_environment true`. Setup points out this option
 when it detects custom tmux configuration; it never enables it automatically. The setting
 applies to future launches and successors, not running agents or your personal tmux server.
+
+Managed Codex seats run tool commands in a non-login shell: OpenRig passes Codex
+`-c allow_login_shell=false`. Tool commands inherit the environment their pane's shell set up,
+OpenRig's command folder included, so plain `rig` works however OpenRig was installed.
+Inherited setup isn't re-run for each command. Setup that lives only in login or rc files, such as
+lines in `~/.bashrc` that your login file doesn't source, or a tmux `default-command` that doesn't
+start a login shell, may be missing from tool commands, and so may shell functions and aliases.
+To defer to Codex's own setting instead, run `rig config set launch.codex_login_shell true`. That
+omits OpenRig's override rather than forcing login shells, and a login file that sets `PATH`
+outright can then hide `rig`. It applies at each seat's next launch; a restart in place keeps
+the running choice.
 If the scoped environment cannot be prepared, launch keeps its previous environment and
 reports a warning in fresh launch results and the daemon log. For handovers, check
 that log for this warning. This is not a promise that shell startup cannot add or override values.
@@ -871,6 +882,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | --- | --- |
 | Tool missing or login fails | Use the specific setup/auth hint; recheck that executable in the launch shell. Do not send work to an unready seat. |
 | "Startup attention" or "Startup details" names a prompt | Answer the login, trust or bypass prompt in that seat's terminal, then run the `rig seat continue <seat>` it shows. |
+| A restored seat still counts as needing attention after its prompt was answered | Its restore outcome is still `attention_required`, and answering the prompt or running `rig seat continue` doesn't change it. Once the agent is up in its pane, run `rig seat clear-attention <seat>`; see [After a restored seat's prompt](agent-startup-guide.md#after-a-restored-seats-prompt). |
 | "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
 | "Claude resume did not finish within Ns; Claude may still be starting, so the launch was kept" | A restored Claude seat was not interactive when the wait ended. Its pane and resume token are kept. Look at the pane; once Claude is up, run `rig seat clear-attention <seat>`. The wait is about `runtime.readiness_timeout_seconds` in total for each seat (default 30 s), counting the first 3.2 s, and the time adds up seat by seat in a restore. Raising the setting for slow fresh launches lengthens it. If `rig up` or `rig launch` times out at 120 s, that is not a rollback: check `rig ps` before running it again. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |

@@ -57,10 +57,12 @@ export function createProcessLiveness(deps: {
   readProcessState: (pid: number) => string | null;
 }): (pid: number) => ProcessLiveness {
   return (pid: number) => {
-    if (deps.signal(pid) === "missing") return "dead";
+    const signal = deps.signal(pid);
+    if (signal === "missing") return "dead";
     const state = deps.readProcessState(pid)?.trim();
     if (!state) return "unknown";
-    return state.startsWith("Z") ? "dead" : "alive";
+    if (state.startsWith("Z")) return "dead";
+    return signal === "not-permitted" ? "unknown" : "alive";
   };
 }
 

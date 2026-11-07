@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "openrig",
+  "version": "0.1.0",
+  "description": "Work with your OpenRig team from your coding agent: hand it work, follow that work, answer its questions and read what it returns.",
+  "author": {
+    "name": "Mike Schwarz",
+    "url": "https://github.com/mvschwarz"
+  },
+  "homepage": "https://github.com/mvschwarz/openrig",
+  "repository": "github:mvschwarz/openrig",
+  "license": "Apache-2.0",
+  "keywords": ["openrig", "agents", "team", "delegation", "mcp"]
+}

@@ -68,6 +68,17 @@ describe("Projection planner", () => {
     }
   });
 
+  it("marks a skill whose resource follows its source, and only that one", () => {
+    const follows = { effectiveId: "infra-review", sourceSpec: "base", sourcePath: "/agents/base",
+      resource: { id: "infra-review", path: "skills/infra-review", onRestore: "follow_source" } as QualifiedResource["resource"] };
+    const keeps = { effectiveId: "tdd", sourceSpec: "base", sourcePath: "/agents/base",
+      resource: { id: "tdd", path: "skills/tdd", onRestore: "keep_saved" } as QualifiedResource["resource"] };
+    const result = planProjection({ config: makeConfig({ selectedResources: { ...emptyResources(), skills: [follows, keeps, makeQR("plain", "skills/plain")] } }),
+      collisions: [], fsOps: mockFs() });
+    expect(result.ok && Object.fromEntries(result.plan.entries.map((e) => [e.effectiveId, e.onRestore])))
+      .toEqual({ "infra-review": "follow_source", tdd: undefined, plain: undefined });
+  });
+
   // T2: non-matching runtime_resources excluded
   it("excludes non-matching runtime_resources", () => {
     const config = makeConfig({

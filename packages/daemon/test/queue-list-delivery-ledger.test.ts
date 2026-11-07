@@ -214,4 +214,89 @@ describe("queue list: delivery ledgers", () => {
     expect(awaiting.length).toBeGreaterThan(0);
     expect(listed.map((item) => item.waiting)).toEqual(listed.map((item) => repo.waitingView(item.qitemId)));
   });
+
+  it("distinguishes relay-accepted asks and updates ('accepted by the bridge') from Slack-posted asks and updates ('posted to the human') in waitingView and getById", async () => {
+    const relayAsk = await repo.create({
+      sourceSession: "agent@pod.seat",
+      destinationSession: "human-founder@external",
+      body: "Approve bridge migration?",
+      summary: "Approve bridge migration?",
+      humanIntent: "decision",
+      nudge: false,
+    });
+    const relayAskKey = latestKey(relayAsk.qitemId);
+    repo.recordRelayOwnerNotificationAccepted({
+      qitemId: relayAsk.qitemId,
+      notificationKey: relayAskKey,
+      deliveryId: "dec-relay-ask-1",
+      connectorRef: "wa-primary",
+      replyRef: "rref-ask-1",
+      revision: repo.decisionRevision(relayAsk),
+      episodeKey: relayAskKey,
+      level: "ALERT",
+      kind: "human-required",
+    });
+
+    const relayUpdate = await repo.create({
+      sourceSession: "agent@pod.seat",
+      destinationSession: "human-founder@external",
+      body: "Bridge migration complete.",
+      summary: "Bridge migration complete",
+      humanIntent: "update",
+      nudge: false,
+    });
+    const relayUpdateKey = latestKey(relayUpdate.qitemId);
+    repo.recordRelayOwnerNotificationAccepted({
+      qitemId: relayUpdate.qitemId,
+      notificationKey: relayUpdateKey,
+      deliveryId: "dec-relay-update-1",
+      connectorRef: "wa-primary",
+      replyRef: null,
+      episodeKey: relayUpdateKey,
+      level: "NOTICE",
+      kind: "human-update",
+      closeUpdate: false,
+    });
+
+    const slackAsk = await repo.create({
+      sourceSession: "agent@pod.seat",
+      destinationSession: "human-founder@external",
+      body: "Approve Slack migration?",
+      summary: "Approve Slack migration?",
+      humanIntent: "decision",
+      nudge: false,
+    });
+    receipt(slackAsk.qitemId, "posted");
+
+    const slackUpdate = await repo.create({
+      sourceSession: "agent@pod.seat",
+      destinationSession: "human-founder@external",
+      body: "Slack migration complete.",
+      summary: "Slack migration complete",
+      humanIntent: "update",
+      nudge: false,
+    });
+    receipt(slackUpdate.qitemId, "posted");
+
+    const expectedRelayAsk = "none (accepted by the bridge; awaiting their decision)";
+    const expectedRelayUpdate = "none (accepted by the bridge; informational correspondence requires no claim)";
+    const expectedSlackAsk = "none (posted to the human; awaiting their decision)";
+    const expectedSlackUpdate = "none (posted to the human; informational correspondence requires no claim)";
+
+    expect(repo.waitingView(relayAsk.qitemId)?.nextBackstop.mechanism).toBe(expectedRelayAsk);
+    expect(repo.getById(relayAsk.qitemId)?.waiting?.nextBackstop.mechanism).toBe(expectedRelayAsk);
+    expect(repo.getById(relayAsk.qitemId)?.deliveryOutcome).toBe("accepted");
+
+    expect(repo.waitingView(relayUpdate.qitemId)?.nextBackstop.mechanism).toBe(expectedRelayUpdate);
+    expect(repo.getById(relayUpdate.qitemId)?.waiting?.nextBackstop.mechanism).toBe(expectedRelayUpdate);
+    expect(repo.getById(relayUpdate.qitemId)?.deliveryOutcome).toBe("accepted");
+
+    expect(repo.waitingView(slackAsk.qitemId)?.nextBackstop.mechanism).toBe(expectedSlackAsk);
+    expect(repo.getById(slackAsk.qitemId)?.waiting?.nextBackstop.mechanism).toBe(expectedSlackAsk);
+    expect(repo.getById(slackAsk.qitemId)?.deliveryOutcome).toBe("posted");
+
+    expect(repo.waitingView(slackUpdate.qitemId)?.nextBackstop.mechanism).toBe(expectedSlackUpdate);
+    expect(repo.getById(slackUpdate.qitemId)?.waiting?.nextBackstop.mechanism).toBe(expectedSlackUpdate);
+    expect(repo.getById(slackUpdate.qitemId)?.deliveryOutcome).toBe("posted");
+  });
 });

@@ -1192,6 +1192,9 @@ describe("Up CLI", () => {
     });
 
     it("S20: env-sourced OPENRIG_HOST creates NO bind intent through up auto-start (routing never crosses)", async () => {
+      const { default: net } = await import("node:net");
+      const socket = Object.assign(new EventEmitter(), { setTimeout: vi.fn(), destroy: vi.fn(), connect() { queueMicrotask(() => socket.emit("error", Object.assign(new Error("refused"), { code: "ECONNREFUSED" }))); } });
+      const socketSpy = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as import("node:net").Socket);
       const savedHost = process.env["OPENRIG_HOST"];
       const savedPort = process.env["OPENRIG_PORT"];
       // Use a distinct value so the discriminator can't pass vacuously:
@@ -1207,9 +1210,9 @@ describe("Up CLI", () => {
       prog.exitOverride();
       prog.addCommand(upCommand({ ...deps, preflightExec: healthyPreflightExec }));
 
-      await captureLogs(async () => {
+      try { await captureLogs(async () => {
         await prog.parseAsync(["node", "rig", "up", "/tmp/test.yaml"]);
-      });
+      }); } finally { socketSpy.mockRestore(); }
 
       if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
       else process.env["OPENRIG_HOST"] = savedHost;

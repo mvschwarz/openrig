@@ -114,6 +114,7 @@ export const SETTINGS_VALID_KEYS = [
   "skills.router_line.enabled",
   "onboarding.default_pack.enabled",
   "launch.non_interruptive",
+  "launch.codex_login_shell",
   "health.context_pressure.warning_percent",
   "health.context_pressure.critical_percent",
   "files.allowlist",
@@ -207,11 +208,15 @@ export const SETTINGS_VALID_KEYS = [
   // A verified Claude Code or Codex send reports on input-box evidence; daemon-read, twin of the CLI key.
   "transport.verify_input_box",
   "transport.local_user_guard",
+  // Whether an ordinary send or work notice reaches a seat whose prompt holds a person's draft; daemon-read, twin of the CLI key.
+  "transport.draft_delivery",
   // Slice 22 (OPR.0.7.2.22) — typed decisions (OpenRouter + Jev), off by default; read by the invoking
   // rig process, never by the daemon. Twin of the CLI keys.
   "decisions.enabled",
   "decisions.consumers",
   "decisions.template_dir",
+  // rig acp serve's receiver when --to isn't given; read by the invoking rig process, never by the daemon. Twin of the CLI key.
+  "acp.to",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (arch D3; closed-set,
   // arch-safe defaults BAKED in getDefaultValue, bounded validation in
   // KEY_CONSTRAINTS). CLI-settable twin: lockstep with cli/src/config-store.ts
@@ -276,6 +281,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "skills.router_line.enabled": { primary: "OPENRIG_SKILLS_ROUTER_LINE_ENABLED" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   "launch.non_interruptive": { primary: "OPENRIG_LAUNCH_NON_INTERRUPTIVE" },
+  "launch.codex_login_shell": { primary: "OPENRIG_LAUNCH_CODEX_LOGIN_SHELL" },
   "health.context_pressure.warning_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT" },
   "health.context_pressure.critical_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_CRITICAL_PERCENT" },
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST" },
@@ -336,9 +342,11 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "usage.pi_openrouter_charge": { primary: "OPENRIG_USAGE_PI_OPENROUTER_CHARGE" },
   "transport.local_user_guard": { primary: "OPENRIG_TRANSPORT_LOCAL_USER_GUARD" },
   "transport.verify_input_box": { primary: "OPENRIG_TRANSPORT_VERIFY_INPUT_BOX" },
+  "transport.draft_delivery": { primary: "OPENRIG_TRANSPORT_DRAFT_DELIVERY" },
   "decisions.enabled": { primary: "OPENRIG_DECISIONS_ENABLED" },
   "decisions.consumers": { primary: "OPENRIG_DECISIONS_CONSUMERS" },
   "decisions.template_dir": { primary: "OPENRIG_DECISIONS_TEMPLATE_DIR" },
+  "acp.to": { primary: "OPENRIG_ACP_TO" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -384,6 +392,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "skills.router_line.enabled": ["skills", "routerLine", "enabled"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "launch.non_interruptive": ["launch", "nonInterruptive"],
+  "launch.codex_login_shell": ["launch", "codexLoginShell"],
   "health.context_pressure.warning_percent": ["health", "contextPressure", "warningPercent"],
   "health.context_pressure.critical_percent": ["health", "contextPressure", "criticalPercent"],
   "files.allowlist": ["files", "allowlist"],
@@ -437,9 +446,11 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "usage.pi_openrouter_charge": ["usage", "piOpenRouterCharge"],
   "transport.local_user_guard": ["transport", "localUserGuard"],
   "transport.verify_input_box": ["transport", "verifyInputBox"],
+  "transport.draft_delivery": ["transport", "draftDelivery"],
   "decisions.enabled": ["decisions", "enabled"],
   "decisions.consumers": ["decisions", "consumers"],
   "decisions.template_dir": ["decisions", "templateDir"],
+  "acp.to": ["acp", "to"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
@@ -682,6 +693,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "skills.router_line.enabled": return false;
     case "onboarding.default_pack.enabled": return true;
     case "launch.non_interruptive": return false;
+    case "launch.codex_login_shell": return false;
     case "health.context_pressure.warning_percent": return 95;
     case "health.context_pressure.critical_percent": return 99;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
@@ -750,10 +762,13 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // Input-box evidence for verified Claude Code and Codex sends; off until the switch is on.
     case "transport.local_user_guard": return false;
     case "transport.verify_input_box": return false;
+    // Ordinary sends reach a seat with a draft at its prompt unless the setting says refuse.
+    case "transport.draft_delivery": return "deliver";
     // Slice 22 — typed decisions off, no consumers, shipped templates only.
     case "decisions.enabled": return false;
     case "decisions.consumers": return "";
     case "decisions.template_dir": return "";
+    case "acp.to": return "";
     // OPR.0.4.6.FS-1 W2 — retention defaults (arch D3 safe values: archive
     // terminal+aged transitions >30d; prune watchdog_history >14d keep-50/job;
     // 500 rows/qitems per bounded batch; enabled by default).
@@ -838,6 +853,9 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
     if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1000 || value > 2000) {
       throw new Error("Invalid daemon.seat_poll_interval_ms: must be a whole number of milliseconds in [1000, 2000]");
     }
+  },
+  "transport.draft_delivery": (raw) => {
+    if (raw !== "refuse" && raw !== "deliver") throw new Error(`Invalid value for transport.draft_delivery: must be "refuse" or "deliver", got "${raw}"`);
   },
   "transcripts.lines": (raw, value) => {
     if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
@@ -1016,6 +1034,12 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "decisions.template_dir": (_raw, value) => {
     if (typeof value !== "string" || (value !== "" && (!path.isAbsolute(value) || value.includes("\0")))) {
       throw new Error("Invalid decisions.template_dir: use an absolute path, or an empty string for the shipped templates only");
+    }
+  },
+  // rig acp serve's receiver when --to isn't given: a team seat, member@rig, or empty for none.
+  "acp.to": (_raw, value) => {
+    if (typeof value !== "string" || (value !== "" && !/^[^@\s]+@[^@\s]+$/.test(value))) {
+      throw new Error("Invalid acp.to: use the seat that receives your ACP tasks as member@rig, or an empty string for none");
     }
   },
 };

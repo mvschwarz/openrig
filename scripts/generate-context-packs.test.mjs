@@ -629,10 +629,10 @@ test("HELP ADDRESSES: every guide address taught in help.md resolves through the
       "reference/whats-new.md",
     ]);
     assert.deepEqual(await unresolvedAddresses(app, addresses), []);
-    // `rig acp run --help` names its guide by address too.
+    // `rig acp run --help` and `rig acp serve --help` name their guide by address too.
     const acpHelp = readFileSync(join(REPO, "packages/cli/src/commands/acp.ts"), "utf8");
     const acpAddresses = [...acpHelp.matchAll(/rig context get (reference\/[^`\s]+)/g)].map((m) => m[1]);
-    assert.deepEqual(acpAddresses, ["reference/acp-agents.md"]);
+    assert.deepEqual(acpAddresses, ["reference/acp-agents.md", "reference/acp-agents.md#openrig-as-an-agent-in-acp-apps"]);
     assert.deepEqual(await unresolvedAddresses(app, acpAddresses), []);
     const section = await (await app.request(
       `/api/context-packs/library/resolve-address?address=${encodeURIComponent("reference/getting-started.md#incomplete-setup-and-restart")}`,

@@ -11,7 +11,8 @@ import {
 import { normalizeWorkflowScope, WorkflowScopeError, type WorkflowScope } from "../domain/workflow-scope.js";
 import { ProjectReadError } from "../domain/workspace/project-catalog.js";
 import { declaredProject } from "../domain/workspace/project-read.js";
-import { WorkflowSpecError } from "../domain/workflow-spec-cache.js";
+import { WorkflowSpecError, type WorkflowSpecCache } from "../domain/workflow-spec-cache.js";
+import { unregisterWorkflowSpecs, WorkflowSpecUnregisterError } from "../domain/workflow-spec-unregister.js";
 import { WorkflowHumanDestinationError } from "../domain/workflow-human-destination.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 
@@ -48,6 +49,9 @@ export function workflowRoutes(): Hono {
   ): Response {
     if (err instanceof WorkflowScopeError) {
       return c.json({ error: err.code, message: err.message }, 400);
+    }
+    if (err instanceof WorkflowSpecUnregisterError) {
+      return c.json({ error: err.code, message: err.message }, err.code === "spec_not_found" ? 404 : 400);
     }
     if (err instanceof WorkflowHumanDestinationError) {
       return c.json({ error: err.code, message: err.message, ...err.details }, 409);
@@ -343,6 +347,26 @@ export function workflowRoutes(): Hono {
       isBuiltIn: builtinDirAbs ? isUnderDir(row.sourcePath, builtinDirAbs) : false,
     }));
     return c.json({ specs: payload });
+  });
+
+  // #2635: take a spec out of the registry by name[@version], or every version whose source
+  // file is gone (pruneMissing). Pinned versions and files still in a scanned folder are kept and
+  // named in `kept`. Mounted before /:instance_id like /specs.
+  app.post("/specs/unregister", async (c) => {
+    const body = await c.req.json<{ name?: string; version?: string; pruneMissing?: boolean }>().catch(() => ({} as never));
+    const runtime = getRuntime(c);
+    try {
+      return c.json(unregisterWorkflowSpecs({
+        cache: (c.get("workflowSpecCache" as never) as WorkflowSpecCache | undefined) ?? runtime.specCache,
+        eventBus: getEventBus(c),
+        name: body.name,
+        version: body.version,
+        pruneMissing: body.pruneMissing === true,
+        scannedDirs: [c.get("workflowsFolderDir" as never) as string | undefined, c.get("workflowBuiltinSpecsDir" as never) as string | undefined],
+      }));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
   });
 
   // SSE for workflow.* events. MUST precede /:instance_id (Phase A R1 lesson).

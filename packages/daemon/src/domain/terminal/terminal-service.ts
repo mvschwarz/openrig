@@ -213,8 +213,20 @@ export class TerminalService {
       if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return errorResult(selected.name, "preview_changed", "Task membership changed since preview; refresh before enabling following.");
     }
     const { enabled, maxTiles, graceMs, focusRetentionMs, pin, unpin, suppress, unsuppress, suppressionMs } = req;
-    return this.following.open({ view: req.view, provider: "herdr", ...(selected.session !== undefined ? { session: selected.session } : {}) },
+    const result = await this.following.open({ view: req.view, provider: "herdr", ...(selected.session !== undefined ? { session: selected.session } : {}) },
       { enabled, maxTiles, graceMs, focusRetentionMs, pin, unpin, suppress, unsuppress, suppressionMs });
+    if (result.code !== "follow_unsupported" || result.following?.enabled !== false) return result;
+    // The selector is durably retired BEFORE a one-shot snapshot is dispatched.
+    // A lost reply or restart must not make Core events repeat the open.
+    const composed = await this.resolveComposed(req.view, selected.provider.panesPerPage);
+    if ("code" in composed || !composed.task?.complete) return { ...result,
+      error: `${result.error ?? "Live following is unsupported."} No snapshot opened: ${"code" in composed ? composed.error : "task membership is incomplete."}` };
+    if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return errorResult(selected.name, "preview_changed", "Task membership changed before the snapshot; refresh its preview.");
+    const note = `Snapshot: this view will not track later owner changes. ${result.error ?? "Live following is unsupported."}`;
+    const snapshot = await selected.provider.openView({ ...composed, opened: composed.opened.map(p => this.viewerPane(p)), spaceLabel: `Snapshot: ${composed.task.name}` });
+    return { ...snapshot, following: result.following, task: composed.task,
+      ...(selected.session !== undefined ? { session: selected.session } : {}),
+      viewDescriptor: { kind: "fixed", name: composed.task.name }, notes: [...(snapshot.notes ?? []), note] };
   }
 
   private async renderFollowing(selector: FollowingSelector, controls: FollowControls): Promise<OpenViewResult> {

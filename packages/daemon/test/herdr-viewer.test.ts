@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync, existsSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { HerdrViewer, type HerdrViewerRun } from "../src/domain/terminal/herdr-viewer.js";
 import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
+import { tileAttachArgv078, tileAttachArgv079 } from "../src/domain/terminal/earlier-tile-attach.js";
 import { composeView } from "../src/domain/terminal/view-composer.js";
 import { Hono } from "hono";
 import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
@@ -22,6 +23,7 @@ function fixture() {
   let label = "", running = false, uncertainCreate = false, uncertainRun = false, idless = false;
   let gone = false, enumerable = true, unreadable = false, attachFlags = ["-f", "ignore-size"];
   let workspaceInventory: unknown[] | undefined, paneInventory: Record<string, unknown> | undefined;
+  let canonicalCreateCwd = false, changedCreateCwd = false, canonicalLimit = 0;
   const inspect = async () => ({ sessionId: "$1", nodeId: key.nodeId });
   const run: HerdrViewerRun = async args => {
     calls.push(args);
@@ -30,6 +32,8 @@ function fixture() {
     if (command === "workspace create") {
       gone = false; enumerable = true;
       ids.cwd = args[args.indexOf("--cwd") + 1]!; label = args[args.indexOf("--label") + 1]!;
+      if (canonicalCreateCwd) ids.cwd = realpathSync(ids.cwd);
+      if (changedCreateCwd) ids.cwd = tmpdir();
       if (uncertainCreate) { uncertainCreate = false; throw new Error("lost response"); }
       return JSON.stringify({ result: { root_pane: idless ? {} : ids } });
     }
@@ -40,6 +44,7 @@ function fixture() {
     if (command === "pane list") return JSON.stringify({ result: paneInventory ? paneInventory[args[args.indexOf("--workspace") + 1]!] : { panes: [ids] } });
     if (command === "pane get") { if (gone) throw new Error("pane not found"); return JSON.stringify({ result: { pane: ids } }); }
     if (command === "pane run") {
+      if (canonicalLimit && Buffer.byteLength(args[3]!) >= canonicalLimit) throw new Error("pane_send_failed: canonical mode line limit");
       running = true;
       if (uncertainRun) { uncertainRun = false; throw new Error("lost run response"); }
       return "";
@@ -48,8 +53,11 @@ function fixture() {
       ? ["/usr/bin/tmux", "-S", "/tmp/own-tmux.sock", "attach", ...attachFlags, "-t", "$1"] : ["/bin/bash"] }] } } });
     throw new Error(`Unexpected provider operation ${args}`);
   };
-  const viewer = () => new HerdrViewer(socket, run, "linux", root, inspect);
+  const viewer = (viewerRoot = root, platform: NodeJS.Platform = "linux", status = {}) => new HerdrViewer(socket, async args => args[0] === "status" ? JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket, ...status }) : run(args), platform, viewerRoot, inspect);
   return { root, target, calls, viewer, ids,
+    canonicalizeCreateCwd: () => { canonicalCreateCwd = true; },
+    changeCreateCwd: () => { changedCreateCwd = true; },
+    limitCanonicalInput: (bytes: number) => { canonicalLimit = bytes; },
     lose: (listed: boolean, malformed = false) => { gone = true; enumerable = listed; unreadable = malformed; },
     loseChanged: () => { gone = false; enumerable = false; },
     setEnumeration: (workspaces: unknown[], panes: Record<string, unknown>) => { workspaceInventory = workspaces; paneInventory = panes; },
@@ -58,6 +66,68 @@ function fixture() {
 }
 
 describe("owned Herdr viewer", () => {
+  it("uses received creation IDs when the shell changed cwd before the reply", async () => {
+    const f = fixture(); f.changeCreateCwd();
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: true });
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: false });
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
+  });
+  it("keeps a lost creation reply plus changed cwd uncertain without repeating create or run", async () => {
+    const f = fixture(); f.changeCreateCwd(); f.setCreateLost();
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false });
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false });
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
+    expect(f.calls.filter(args => args[1] === "run")).toHaveLength(0);
+  });
+  it("starts the exact attach through a short owned script under a canonical-mode line limit", async () => {
+    const f = fixture(); f.limitCanonicalInput(1024);
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true });
+    const command = f.calls.find(args => args[1] === "run")![3]!;
+    expect(Buffer.byteLength(command)).toBeLessThan(1024);
+    expect(command).toContain("/bin/sh ");
+    expect(readFileSync(path.join(f.ids.cwd, "attach.sh"), "utf8")).toBe(`exec ${f.target.paneCommand}\n`);
+  });
+
+  it.each(["linux", "darwin"] as const)("admits protocol 22 on %s independently of the release label", async platform => {
+    const f = fixture();
+    expect(await f.viewer(f.root, platform, { version: "0.9.6" }).ensure(key, f.target)).toMatchObject({ ok: true });
+    expect(await f.viewer(f.root, platform, { protocol: 23 }).lookup(key, f.target)).toMatchObject({ ok: false });
+  });
+  it("accepts an existing canonical endpoint alias", async () => {
+    const f = fixture(), endpoint = path.join(f.root, "endpoint.sock"), alias = path.join(f.root, "alias.sock");
+    writeFileSync(endpoint, ""); symlinkSync(endpoint, alias);
+    const run: HerdrViewerRun = async args => args[0] === "status"
+      ? JSON.stringify({ running: true, protocol: 22, version: "0.9.5", socket: endpoint })
+      : JSON.stringify({ result: { workspaces: [] } });
+    const v = new HerdrViewer(alias, run, "darwin", f.root, async () => ({ sessionId: "$1", nodeId: key.nodeId }));
+    expect(await v.lookup(key, f.target)).toMatchObject({ code: "viewer_not_provisioned" });
+  });
+  it("preserves a changed script when its viewer is confirmed absent", async () => {
+    const f = fixture(); expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true });
+    const file = path.join(f.ids.cwd, "attach.sh"); writeFileSync(file, "user change\n"); f.lose(false);
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(readFileSync(file, "utf8")).toBe("user change\n");
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
+  });
+  it("keeps a known viewer after its cwd changes and still checks its process", async () => {
+    const f = fixture(), v = f.viewer();
+    expect(await v.ensure(key, f.target)).toMatchObject({ ok: true, created: true });
+    const attributionDirectory = f.ids.cwd;
+    f.ids.cwd = tmpdir();
+    expect(await v.ensure(key, f.target)).toMatchObject({ ok: true, created: false });
+    expect(existsSync(attributionDirectory)).toBe(true);
+    f.exit();
+    expect(await v.ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+    expect(f.calls.filter(a => a[1] === "run")).toHaveLength(1);
+  });
+  it("recognizes a private creation directory returned through its realpath alias", async () => {
+    const f = fixture(), alias = path.join(f.root, "alias");
+    symlinkSync(f.root, alias, "dir");
+    f.canonicalizeCreateCwd();
+    expect(await f.viewer(alias).ensure(key, f.target)).toMatchObject({ ok: true, created: true });
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+  });
   it("creates once, verifies empty pane-run response, and reuses under concurrent requests", async () => {
     const f = fixture(), v = f.viewer();
     const result = await Promise.all([v.ensure(key, f.target), v.ensure(key, f.target), v.ensure(key, f.target)]);
@@ -165,9 +235,9 @@ describe("owned Herdr viewer", () => {
     expect(await wrong.ensure(key, f.target)).toMatchObject({ ok: false });
     expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
   });
-  it("supports only the qualified endpoint/version/platform", async () => {
+  it("refuses unsupported platforms and different endpoints", async () => {
     const f = fixture();
-    expect(await new HerdrViewer(socket, async () => { throw new Error("should not run"); }, "darwin", f.root).ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unsupported" });
+    expect(await new HerdrViewer(socket, async () => { throw new Error("should not run"); }, "win32", f.root).ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unsupported" });
     expect(await new HerdrViewer(socket, async () => JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket: "/other.sock" }), "linux", f.root).ensure(key, f.target)).toMatchObject({ ok: false });
   });
   it("sizes writable initial/fallback/replacement attaches and recovery, and preserves read-only", () => {
@@ -228,5 +298,72 @@ describe("owned Herdr viewer", () => {
     const send = (auth?: string) => app.request("/api/terminal/viewer/ensure", { method: "POST", headers: { "Content-Type": "application/json", ...(auth ? { Authorization: auth } : {}) }, body: JSON.stringify(body) });
     expect((await send()).status).toBe(401); expect(calls).toBe(0);
     expect((await send("Bearer fixture-owner-token")).status).toBe(200); expect(calls).toBe(1);
+  });
+});
+
+describe("viewers kept from an earlier release", () => {
+  const quote = (s: string) => "'" + s.replace(/'/g, "'\"'\"'") + "'";
+  const id = JSON.stringify([key.hostId, key.nodeId]);
+  const readOnlyTarget = () => composeView("qitem:qitem-root", [{ seat: "a@team", label: "a", tmuxSession: "a@team", host: null, alive: true, readOnly: true }],
+    { resolveHost: () => null, localTmux: "/usr/bin/tmux", localTmuxServer: ["-S", "/tmp/own-tmux.sock"] }).opened[0]!;
+  /** Rewrite the journal as an earlier release left it: that release's script for a seat, with the same tmux and server. */
+  function keepFrom(f: ReturnType<typeof fixture>, make: typeof tileAttachArgv079, readOnly: boolean, session = "a@team") {
+    const file = path.join(f.root, readdirSync(f.root).find(n => n.endsWith(".json"))!);
+    const journal = JSON.parse(readFileSync(file, "utf8"));
+    const entry = journal.entries[id];
+    entry.argv = make("/usr/bin/tmux", ["-S", "/tmp/own-tmux.sock"], session, readOnly);
+    entry.command = entry.argv.map(quote).join(" "); entry.readOnly = readOnly;
+    writeFileSync(file, JSON.stringify(journal));
+    return () => JSON.parse(readFileSync(file, "utf8")).entries[id] as { command: string; argv: string[] };
+  }
+
+  it.each([["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
+    "keeps a writable viewer recorded by %s and moves it to the current script", async (_, make) => {
+      const f = fixture(); expect((await f.viewer().ensure(key, f.target)).ok).toBe(true);
+      const stored = keepFrom(f, make, false);
+      expect(stored().command).not.toBe(f.target.paneCommand);
+      expect(await f.viewer().lookup(key, f.target)).toMatchObject({ ok: true });
+      expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true, created: false });
+      expect(stored()).toMatchObject({ command: f.target.paneCommand, argv: f.target.attachArgv });
+      expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+    });
+
+  it.each([["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
+    "keeps a read-only viewer recorded by %s", async (_, make) => {
+      const f = fixture(); f.setAttachFlags(["-r"]); const target = readOnlyTarget();
+      expect((await f.viewer().ensure(key, target)).ok).toBe(true);
+      keepFrom(f, make, true);
+      expect(await f.viewer().ensure(key, target)).toMatchObject({ ok: true, created: false });
+      expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+    });
+
+  it("still holds a kept viewer for another seat, for the other mode, or under a command that isn't a tile script", async () => {
+    const f = fixture(); expect((await f.viewer().ensure(key, f.target)).ok).toBe(true);
+    keepFrom(f, tileAttachArgv079, false, "other@team");
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    keepFrom(f, tileAttachArgv079, true);
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    const stored = keepFrom(f, tileAttachArgv079, false);
+    const file = path.join(f.root, readdirSync(f.root).find(n => n.endsWith(".json"))!);
+    const journal = JSON.parse(readFileSync(file, "utf8"));
+    journal.entries[id].argv[2] = "exec /usr/bin/tmux attach"; journal.entries[id].command = journal.entries[id].argv.map(quote).join(" ");
+    writeFileSync(file, JSON.stringify(journal));
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(stored().argv[2]).toBe("exec /usr/bin/tmux attach");
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+  });
+
+  it("holds a kept viewer whose script only shares a tile script's opening, and leaves its saved command", async () => {
+    const f = fixture(); expect((await f.viewer().ensure(key, f.target)).ok).toBe(true);
+    const stored = keepFrom(f, tileAttachArgv079, false);
+    const file = path.join(f.root, readdirSync(f.root).find(n => n.endsWith(".json"))!);
+    const journal = JSON.parse(readFileSync(file, "utf8"));
+    journal.entries[id].argv[2] = 'target=$1; shift; printf "%s\\n" "custom viewer";';
+    journal.entries[id].command = journal.entries[id].argv.map(quote).join(" ");
+    writeFileSync(file, JSON.stringify(journal));
+    const before = stored();
+    expect(await f.viewer().lookup(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(stored()).toEqual(before);
   });
 });

@@ -469,7 +469,7 @@ export class RigRepository {
       .get(nodeId) as { rig_id: string; env_json: string | null } | undefined;
     if (!row) return {};
     const env = withoutIgnoredRuntimeHomes(mergeSeatEnv(this.getRigEnv(row.rig_id), parseStoredSeatEnv(row.env_json)));
-    for (const runtime of ignoreAccountHome ? [] : ["codex", "claude-code"] as const) {
+    for (const runtime of ignoreAccountHome ? [] : ["codex", "claude-code", "pi"] as const) {
       const accountHome = seatAccountHome(this.db, nodeId, runtime);
       if (accountHome) env[RUNTIME_HOME_VAR[runtime]] = accountHome;
     }

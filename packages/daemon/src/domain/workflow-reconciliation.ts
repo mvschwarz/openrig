@@ -60,7 +60,8 @@ function proposal(db: Database.Database, instance: WorkflowInstance, fresh = fal
 
 function compare(db: Database.Database, instance: WorkflowInstance): { view: GraphReconciliation; compilation?: LifecycleCompilation } {
   const binding = instance.lifecycleBinding;
-  const oldSpec = new WorkflowSpecCache(db).getByNameVersion(instance.workflowName, instance.workflowVersion)?.spec;
+  // The spec this instance runs (#2607), with its rig placeholders as authored, so the graph comparison is unchanged.
+  const oldSpec = new WorkflowSpecCache(db).getForInstance({ ...instance, boundRig: null })?.spec;
   const mode = String((binding?.graphSource as { mode?: string } | undefined)?.mode ?? "unbound");
   const view: GraphReconciliation = {
     status: "unbound", adopted: null, boundDigest: instance.compiledInputDigest, proposedDigest: null,

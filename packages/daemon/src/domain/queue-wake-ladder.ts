@@ -72,6 +72,10 @@ import {
   resolveOperatorSeat,
   resolveSessionNodeId,
 } from "./queue-stuck-sweep.js";
+import {
+  RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
+  RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
+} from "./queue-transition-log.js";
 
 export const WAKE_RETRY_INTERVAL_KEY = "queue.wake_retry_interval_seconds";
 export const DEFAULT_WAKE_RETRY_INTERVAL_SECONDS = 300;
@@ -308,12 +312,16 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
       view.opOutcomeResolved = false;
     }
     // Outcome resolution (AM-F3, R1 B-3, R2 pre-marker discriminator): the S14
-    // posted receipt or the termination record closes the episode ONLY when it
+    // posted receipt, relay-owner-notification-accepted receipt, or the termination record closes the episode ONLY when it
     // (a) follows the dispatch marker chronologically (this loop resets the
     // flag at each dispatch, so pre-marker notes never survive) and (b) carries
     // the dispatched key when the marker is keyed. An unkeyed dispatch
     // (injected legacy ports) keeps the any-following-note shape.
-    if (note.startsWith("slack-owner-notification-posted ") || note.startsWith("delivery-termination:")) {
+    if (
+      note.startsWith("slack-owner-notification-posted ") ||
+      note.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `) ||
+      note.startsWith("delivery-termination:")
+    ) {
       if (view.opEngineKey === null || note.split(/\s+/).includes(`notification_key=${view.opEngineKey}`)) {
         view.opOutcomeResolved = true;
       }
@@ -357,6 +365,8 @@ function hasPickupEvidence(db: Database.Database, row: Pick<QueueItem, "qitemId"
       // a receipt/termination/deferral stamp must not pull the row out of the
       // ladder before the resolution pass reads it.
       note.startsWith("slack-owner-notification-") ||
+      note.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `) ||
+      note.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `) ||
       note.startsWith("delivery-termination:") ||
       note.startsWith("delivery-deferral-") ||
       // Quiet hours: holding an ask and releasing it are delivery machinery too, never someone picking it up.

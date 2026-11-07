@@ -20,6 +20,7 @@ import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import type { RunningCodexLaunch } from "../adapters/codex-runtime-adapter.js";
 import { emittedEffortFromArgv } from "./seat-effort.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
+import { CODEX_NON_LOGIN_SHELL_OVERRIDE } from "./native-resume-probe.js";
 
 /**
  * OPR.0.7.0.5 — restart ONE Codex seat in place so it reads its Codex home's current account: the same
@@ -1026,7 +1027,8 @@ function runningLaunch(argv: string[]): RunningCodexLaunch {
     else if ((arg === "-c" || arg === "--config") && argv[index + 1] !== undefined) configs.push(argv[++index]!);
     else if (arg.startsWith("--config=")) configs.push(arg.slice("--config=".length));
   }
-  return { networkOverride: configs.includes(CODEX_NETWORK_DEFAULT_OVERRIDE), daemonOptOut: argv.includes("--no-daemon"), addDirs };
+  return { networkOverride: configs.includes(CODEX_NETWORK_DEFAULT_OVERRIDE), daemonOptOut: argv.includes("--no-daemon"),
+    nonLoginShell: configs.includes(CODEX_NON_LOGIN_SHELL_OVERRIDE), addDirs };
 }
 
 /** The settings a Codex command line runs with. cwd, add-dirs, images and the resume target are not settings. */

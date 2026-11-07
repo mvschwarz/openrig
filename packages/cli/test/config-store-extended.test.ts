@@ -143,6 +143,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "skills.router_line.enabled",
       "onboarding.default_pack.enabled",
       "launch.non_interruptive",
+      "launch.codex_login_shell",
       "health.context_pressure.warning_percent",
       "health.context_pressure.critical_percent",
       "files.allowlist", "progress.scan_roots",
@@ -201,10 +202,12 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "usage.pi_openrouter_charge",
       "transport.verify_input_box",
       "transport.local_user_guard",
+      "transport.draft_delivery",
       // Slice 22 (OPR.0.7.2.22) — typed decisions, off by default.
       "decisions.enabled",
       "decisions.consumers",
       "decisions.template_dir",
+      "acp.to",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
       "retention.enabled",
       "retention.transitions_days",
@@ -328,11 +331,11 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
   it("transport.verify_input_box defaults off, resolves its env twin, and appears in the resolved config", () => {
     const store = new ConfigStore(configPath);
     expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: false, source: "default", defaultValue: false });
-    expect(store.resolve().transport).toEqual({ verifyInputBox: false, localUserGuard: false });
+    expect(store.resolve().transport).toEqual({ verifyInputBox: false, localUserGuard: false, draftDelivery: "deliver" });
     try {
       process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX = "1";
       expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: true, source: "env" });
-      expect(store.resolve().transport).toEqual({ verifyInputBox: true, localUserGuard: false });
+      expect(store.resolve().transport).toEqual({ verifyInputBox: true, localUserGuard: false, draftDelivery: "deliver" });
     } finally {
       delete process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX;
     }

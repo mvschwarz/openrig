@@ -350,7 +350,7 @@ export type RigEvent =
   // because its source file disappeared from the scanned workflows folder.
   // Provides a traceable audit-log entry for OQ-4 ("Remove cache row when
   // file disappears + audit-log entry. Clean Library + traceable.").
-  | { type: "workflow_spec.removed"; sourcePath: string; specId: string | null; specName: string | null; specVersion: string | null; reason: "file_disappeared" }
+  | { type: "workflow_spec.removed"; sourcePath: string; specId: string | null; specName: string | null; specVersion: string | null; reason: "file_disappeared" | "source_missing" | "unregistered" }
   // PL-005 Phase A: Mission Control / Queue Observability events.
   // Action audit + cross-CLI-version drift detection.
   | { type: "mission_control.action_executed"; actionId: string; actionVerb: string; qitemId: string | null; actorSession: string }
@@ -363,6 +363,9 @@ export type RigEvent =
 export type PersistedEvent = RigEvent & {
   seq: number;
   createdAt: string;
+  /** Set on an event delivered only in memory (EventBus.publishTransient): never stored, never replayed. Its `seq` is
+   *  the seq of the stored event that caused it, not a seq of its own. */
+  transient?: true;
 };
 
 // -- Composite types --
@@ -387,6 +390,8 @@ export interface PersistedProjectionEntry {
   resourceType?: string;
   mergeStrategy?: string;
   target?: string;
+  /** A skill whose resource says `on_restore: follow_source`, so a replay keeps it recorded as following. */
+  onRestore?: SkillOnRestore;
 }
 
 export interface NodeStartupSnapshot {
@@ -1050,7 +1055,10 @@ export interface LifecycleDefaults {
   restorePolicy?: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
 }
 
-export interface SkillResource { id: string; path: string; }
+/** What a restore that keeps a seat's conversation does with this skill's copy in the seat's storage: keep the saved
+ *  copy (the default), or follow the source, taking today's bytes and today's selection. */
+export type SkillOnRestore = "keep_saved" | "follow_source";
+export interface SkillResource { id: string; path: string; onRestore?: SkillOnRestore; }
 export interface GuidanceResource { id: string; path: string; target: string; merge: "managed_block" | "append"; }
 export interface SubagentResource { id: string; path: string; }
 export interface RuntimeResource { id: string; path: string; runtime: string; type: string; }
