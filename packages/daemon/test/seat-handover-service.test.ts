@@ -28,6 +28,9 @@ import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-obse
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { DefaultOccupantInvalidator, type OccupantInvalidator } from "../src/domain/occupant-invalidator.js";
 import { managedBlockText } from "../src/domain/managed-blocks.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 
 describe("SeatHandoverService", () => {
   let db: Database.Database;
@@ -1072,10 +1075,20 @@ describe("SeatHandoverService", () => {
     expect(sleeps).toContain(200);
   });
 
-  it.each((["fresh", "rebuild"] as const).flatMap(source =>
-    (["clear", "staged", "unreadable", "edited", "unrelated"] as const).map(screen => ({ source, screen })),
-  ))("#1544 $source packet submission with $screen composer evidence", async ({ source, screen }) => {
+  it.each([
+    ...(["fresh", "rebuild"] as const).flatMap(source =>
+      (["clear", "staged", "unreadable", "edited", "unrelated"] as const).map(screen => ({ source, screen, held: false }))),
+    ...(["clear", "edited", "unreadable"] as const).map(screen => ({ source: "rebuild" as const, screen, held: true })),
+  ])("#1544 $source packet submission with $screen composer evidence (held=$held)", async ({ source, screen, held }) => {
     const { node } = seedSeat({ runtime: "claude-code" });
+    db.exec(outboxEntriesSchema.sql);
+    db.exec(seatDeliveryGuardSchema.sql);
+    const outbox = new OutboxHandler(db);
+    if (held) outbox.retain({ outboxId: "held-rebuild", senderSession: "orch-lead@seat-rig",
+      destinationSession: "dev-impl@seat-rig", body: "Retain this work without replaying it." },
+    { nodeId: node.id, session: "dev-impl@seat-rig", occupant: null, pane: null });
+    const heldBefore = outbox.getById("held-rebuild");
+    const notice = "1 held message was kept for this seat and not delivered: read it with rig seat held-messages dev-impl@seat-rig.";
     const bindingBefore = sessionRegistry.getBindingForNode(node.id);
     const sleeps: number[] = [];
     const reads: Array<string | null> = [];
@@ -1091,7 +1104,7 @@ describe("SeatHandoverService", () => {
       if (reads.length > 8) throw new Error("fixture exceeded the finite submission observation budget");
       return pane;
     });
-    sendText.mockImplementation(async (_session: string, text: string) => { packet = text; return { ok: true }; });
+    sendText.mockImplementation(async (_session: string, text: string) => { if (!packet) packet = text; return { ok: true }; });
     sendKeys.mockImplementation(async (_session: string, keys: string[]) => { if (packet && keys.includes("Enter")) enters++; return { ok: true }; });
     launchHarness.mockResolvedValue({ ok: true, resumeToken: "22222222-2222-4222-8222-222222222222", resumeType: "claude_id" });
     const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
@@ -1105,10 +1118,18 @@ describe("SeatHandoverService", () => {
     const bindingAfter = sessionRegistry.getBindingForNode(node.id);
     const candidates = db.prepare("SELECT status,claimed_node_id FROM discovered_sessions").all();
     const completed = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed'").all() as Array<{ payload: string }>;
-    console.info("ISSUE1544_SUBMISSION", JSON.stringify({ source, screen, result, enters, sleeps, reads,
+    console.info("ISSUE1544_SUBMISSION", JSON.stringify({ source, screen, held, result, enters, sleeps, reads,
+      sent: sendText.mock.calls, keys: sendKeys.mock.calls, heldBefore, heldAfter: outbox.getById("held-rebuild"),
       visibleAfter: visible(), bindingBefore, bindingAfter, candidates, completed: completed.map(row => JSON.parse(row.payload)) }));
     expect(packet).toContain(source === "rebuild" ? "# Seat rebuild handover" : "OpenRig seat handover");
-    expect(sendText).toHaveBeenCalledTimes(1);
+    const typedNotice = held && screen === "clear";
+    expect(sendText.mock.calls).toEqual(typedNotice
+      ? [["dev-impl@seat-rig", packet], ["dev-impl@seat-rig", notice]] : [["dev-impl@seat-rig", packet]]);
+    if (held) {
+      expect(heldBefore).toMatchObject({ body: "Retain this work without replaying it.", deliveryState: "retained", deliveredAt: null });
+      expect(outbox.getById("held-rebuild")).toEqual(heldBefore);
+      expect(result).toMatchObject({ ok: true, result: { warnings: [notice] } });
+    }
     expect(sleeps[0]).toBe(200);
     expect(killSession).not.toHaveBeenCalled();
     expect.soft(result.ok && result.result.sideEffects.startupContextDelivered,
@@ -1126,7 +1147,8 @@ describe("SeatHandoverService", () => {
     expect(bindingAfter).toMatchObject({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9" });
     expect(candidates).toEqual([expect.objectContaining({ status: "claimed", claimed_node_id: node.id })]);
     expect(completed).toHaveLength(1);
-    expect(enters, "no repeated Enter against unreadable, edited or unrelated input").toBe(1);
+    expect(enters, "only confirmed submission permits the held notice's Enter").toBe(typedNotice ? 2 : 1);
+    expect(sendKeys.mock.calls).toEqual(Array.from({ length: typedNotice ? 2 : 1 }, () => ["dev-impl@seat-rig", ["Enter"]]));
     if (screen === "clear") expect(result.result.restorePacket).toBeUndefined();
     else {
       const reason = screen === "unreadable" ? "the input box could not be observed" : "the input box did not clearly show the prompt as submitted";
