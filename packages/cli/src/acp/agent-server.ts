@@ -99,6 +99,8 @@ export interface AcpAgentOptions {
 }
 
 const ACTIVE_STATES = new Set(["pending", "in-progress", "blocked"]);
+/** How long a cancel waits for the app to settle questions it was showing (ACP has the client answer them cancelled). */
+const QUESTION_SETTLE_MS = 2000;
 const AUTH_REQUIRED = -32000;
 const INVALID_PARAMS = -32602;
 
@@ -115,6 +117,14 @@ interface Session {
 }
 
 type ContentBlock = { type: string; text?: string; uri?: string; name?: string; resource?: { uri?: string; text?: string } };
+
+/** The questions one turn has put to the app. Once the turn has ended, nothing from them reaches the app or the queue. */
+interface TurnQuestions {
+  finished: boolean;
+  /** Questions the app is still showing, by tool call id. */
+  outstanding: Set<string>;
+  tasks: Set<Promise<void>>;
+}
 type Update = Record<string, unknown>;
 
 /** The prompt as plain text for the row's body: text as written, links and embedded text resources named. */
@@ -227,17 +237,20 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
     (await team.queue.sent(team.caller)).filter((row) => row.tags.includes(`${SESSION_TAG}${sessionId}`))
       .sort((a, b) => a.tsCreated.localeCompare(b.tsCreated));
 
-  /** Put one ask's open questions to the person as permission requests, one at a time, and record each choice. */
-  const askPerson = async (team: TeamConnection, sessionId: string, ask: TeamAsk) => {
-    const open = ask.questions.filter((q) => !ask.answered.includes(q.id));
+  /** Put one ask's open questions to the person as permission requests, one at a time, and record each choice. A reply
+   *  that arrives after the turn ended answers nothing here: the question stays open in the TUI and Slack. */
+  const askPerson = async (team: TeamConnection, sessionId: string, ask: TeamAsk, turn: TurnQuestions) => {
+    const emit = (body: Update) => { if (!turn.finished) update(sessionId, body); };
     if (ask.questions.length === 0) {
-      say(sessionId, `\n\n${ask.sourceSession} asks you: ${ask.summary ?? oneLine(ask.body, 200)} (${ask.qitemId}). It wants an answer in words, which this app can't send: answer it in the OpenRig TUI or Slack.\n\n`);
+      emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `\n\n${ask.sourceSession} asks you: ${ask.summary ?? oneLine(ask.body, 200)} (${ask.qitemId}). It wants an answer in words, which this app can't send: answer it in the OpenRig TUI or Slack.\n\n` } });
       return;
     }
-    for (const q of open) {
+    for (const q of ask.questions.filter((question) => !ask.answered.includes(question.id))) {
+      if (turn.finished) return;
       const toolCallId = `${ask.qitemId}#${q.id}`;
-      update(sessionId, { sessionUpdate: "tool_call", toolCallId, kind: "other", status: "pending", title: `${ask.sourceSession} asks: ${q.question}`, content: textContent(ask.body) });
+      emit({ sessionUpdate: "tool_call", toolCallId, kind: "other", status: "pending", title: `${ask.sourceSession} asks: ${q.question}`, content: textContent(ask.body) });
       let outcome: { outcome?: string; optionId?: string } | undefined;
+      turn.outstanding.add(toolCallId);
       try {
         const result = (await peer.request("session/request_permission", {
           sessionId,
@@ -246,16 +259,19 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
         })) as { outcome?: { outcome?: string; optionId?: string } } | undefined;
         outcome = result?.outcome;
       } catch (error) {
-        update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, content: textContent(`This app couldn't show the question (${(error as Error).message}). It's still open: answer it in the OpenRig TUI or Slack.`) });
+        emit({ sessionUpdate: "tool_call_update", toolCallId, content: textContent(`This app couldn't show the question (${(error as Error).message}). It's still open: answer it in the OpenRig TUI or Slack.`) });
         return;
+      } finally {
+        turn.outstanding.delete(toolCallId);
       }
+      if (turn.finished) return;
       const chosen = outcome?.outcome === "selected" ? q.options.find((o) => o.id === outcome?.optionId) : undefined;
       if (!chosen) {
-        update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, content: textContent("Not answered here. The question is still open in the OpenRig TUI and Slack.") });
+        emit({ sessionUpdate: "tool_call_update", toolCallId, content: textContent("Not answered here. The question is still open in the OpenRig TUI and Slack.") });
         return;
       }
       const recorded = await team.queue.answer(ask.qitemId, q.id, chosen.id).catch((error: Error) => ({ ok: false as const, reason: error.message }));
-      update(sessionId, recorded.ok
+      emit(recorded.ok
         ? { sessionUpdate: "tool_call_update", toolCallId, status: "completed", content: textContent(`You answered: ${chosen.label}. ${ask.sourceSession} gets it as your answer.`) }
         : { sessionUpdate: "tool_call_update", toolCallId, status: "failed", content: textContent(`Your choice (${chosen.label}) wasn't recorded: ${recorded.reason}`) });
       log(`session ${sessionId}: ${recorded.ok ? "answered" : "couldn't answer"} ${ask.qitemId} ${q.id}`);
@@ -357,6 +373,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
 
     let cancelled = false;
     let wake: () => void = () => {};
+    const questions: TurnQuestions = { finished: false, outstanding: new Set(), tasks: new Set() };
     session.turn = { cancel: () => { cancelled = true; wake(); } };
     let root: string | undefined;
     try {
@@ -370,7 +387,8 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       const lineage = earlier.length === 0 ? "" : `\nFollows up on ${earlier.map((s) => `${s.root} (${s.tail === s.root ? "" : `reached ${s.tail}, `}${s.state})`).join(", ")}.`;
       const body = `${text}${FOOTER}${team.caller} from ${clientName} through rig acp serve (session ${session.id}).${lineage}\n` +
         `The app shows this item's notes and handoffs as progress, and its closing resolution as the answer: close it with a resolution written for ${team.caller}. ` +
-        `A question you ask ${team.caller} with choices (rig queue create --destination ${team.caller} --human-questions-file …) appears in the app while this turn is open.`;
+        `A question with choices you ask ${team.caller} while this is open, tagged for this chat, appears in the app as a choice: ` +
+        `rig queue create --destination ${team.caller} --human-questions-file … --tags ${SESSION_TAG}${session.id}.`;
       const turnStarted = new Date().toISOString();
       const qitemId = newQitemId();
       try {
@@ -399,22 +417,42 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       // ponytail: polls the local daemon for the chain's rows, their transitions and the caller's open asks; the
       // daemon's event stream is the upgrade path if a poll per open turn ever costs too much.
       const follower = new ChainFollower(team.queue, (u) => update(session.id, u), root);
-      const asked = new Set<string>();
+      const seen = new Set<string>();
+      /** Close this turn's questions: any the app still shows are named as open elsewhere, then nothing more comes from them. */
+      const finishQuestions = (why: string) => {
+        for (const toolCallId of questions.outstanding) {
+          update(session.id, { sessionUpdate: "tool_call_update", toolCallId, content: textContent(`${why} The question is still open in the OpenRig TUI and Slack.`) });
+        }
+        questions.finished = true;
+      };
       for (;;) {
         const state = await follower.read();
         sent.tail = state.tail.qitemId;
         if (state.kind === "ended") {
+          finishQuestions("The work closed before this was answered here.");
           say(session.id, state.reply);
           return { stopReason: "end_turn" };
         }
-        // A question belongs to this turn when it names the session, or a seat the work reached asked it during the turn.
         for (const ask of await team.queue.openAsks(team.caller)) {
-          if (asked.has(ask.qitemId)) continue;
-          if (!ask.tags.includes(`${SESSION_TAG}${session.id}`) && !(follower.seats.has(ask.sourceSession) && ask.tsCreated >= turnStarted)) continue;
-          asked.add(ask.qitemId);
-          void askPerson(team, session.id, ask).catch((error: Error) => log(`session ${session.id}: asking about ${ask.qitemId} failed: ${error.message}`));
+          if (seen.has(ask.qitemId)) continue;
+          // An ask tagged for a chat belongs to that chat alone. An untagged one from a seat this work reached might be
+          // another chat's, so it isn't asked here; it's named, with where to answer it.
+          const chats = ask.tags.filter((tag) => tag.startsWith(SESSION_TAG));
+          if (chats.includes(`${SESSION_TAG}${session.id}`)) {
+            seen.add(ask.qitemId);
+            const task: Promise<void> = askPerson(team, session.id, ask, questions)
+              .catch((error: Error) => log(`session ${session.id}: asking about ${ask.qitemId} failed: ${error.message}`))
+              .finally(() => questions.tasks.delete(task));
+            questions.tasks.add(task);
+          } else if (chats.length === 0 && follower.seats.has(ask.sourceSession) && ask.tsCreated >= turnStarted) {
+            seen.add(ask.qitemId);
+            say(session.id, `\n\n${ask.sourceSession}, which this work reached, has a question for you that isn't tagged for this chat (${ask.qitemId}: ${ask.summary ?? oneLine(ask.body, 120)}). Answer it in the OpenRig TUI or Slack.\n\n`);
+          }
         }
         if (cancelled) {
+          // ACP has the app answer the questions it was showing as cancelled; let those answers land before the turn ends.
+          if (questions.tasks.size > 0) await Promise.race([Promise.allSettled([...questions.tasks]), sleep(QUESTION_SETTLE_MS)]);
+          finishQuestions("Not answered here: the turn was cancelled.");
           say(session.id, `Stopped waiting. ${state.tail.qitemId} is still ${state.tail.state} with ${state.tail.destinationSession}: cancelling here doesn't stop the team's work. A new prompt in this session goes to the team as a follow-up and shows where this stands.`);
           return { stopReason: "cancelled" };
         }
@@ -425,6 +463,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       say(session.id, `Lost track of ${root}: ${(error as Error).message}. The item stays with the team; its state is unknown from here.`);
       throw new AcpError(-32603, `Couldn't follow ${root}: ${(error as Error).message}`);
     } finally {
+      questions.finished = true;
       session.turn = undefined;
     }
   });

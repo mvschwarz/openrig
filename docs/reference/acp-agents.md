@@ -200,10 +200,11 @@ rig acp serve --to <member@rig>
 - **A follow-up** in the same session goes to `--to` as a new row whose body names the earlier rows and their states,
   and the app first shows any earlier row that's still open.
 - **A question the team asks you** while a turn is open comes to the app as a permission request, with the ask's own
-  choices. It belongs to the turn when a seat the work reached asked it during the turn, or when its row is tagged
-  with the session (`acp-session:<id>`). Your choice is recorded as your answer, exactly as a click in Slack or the TUI
-  would be, and the seat that asked gets it. Dismissing it records nothing: the question stays open in the TUI and
-  Slack. A question that wants an answer in words is shown with where to answer it.
+  choices, when its row is tagged for that chat (`acp-session:<id>`; the task's row tells the team how). An untagged
+  question from a seat the work reached is named in the chat with where to answer it, because it could be another
+  chat's. Your choice is recorded as your answer, exactly as a click in Slack or the TUI would be, and the seat that
+  asked gets it. Dismissing it, or cancelling the turn, records nothing: the question stays open in the TUI and Slack.
+  A question that wants an answer in words is shown with where to answer it.
 - **Sessions are kept in the queue:** the app can list your earlier sessions (`session/list`) and reopen one
   (`session/load`). Reopening replays each prompt, its work and the reply as they stand now, and a new prompt continues it.
 - **Cancel** stops `rig acp serve` waiting. The team's work carries on, and the reply says so.
