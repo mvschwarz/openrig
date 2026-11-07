@@ -191,6 +191,9 @@ The other direction: `rig acp serve`. An app that speaks ACP and can launch a cu
 rig acp serve --to <member@rig>
 ```
 
+Without `--to`, the receiver is this machine's `acp.to` setting: `rig config set acp.to <member@rig>`, set once. An
+app that starts the agent from the ACP registry passes no arguments, so that's how it reaches your team.
+
 - **A prompt** becomes a queue row from you to `--to`, the seat that takes your team's new work. The row's body is your
   prompt, plus a line saying which app sent it and that its closing resolution is your answer.
 - **Progress:** each row the work reaches shows in the app as a step (`Sent to …`, then `Handed to …` at each handoff),
@@ -225,7 +228,7 @@ reason and the fix. The agent talks only to the daemon on this computer, so star
 Other apps take the same command and arguments wherever they configure a custom ACP agent.
 
 **Limits:**
-- One receiver per agent command; the app has no team picker.
+- One receiver per agent command (or the `acp.to` setting); the app has no team picker.
 - Questions show only while a turn is open; one asked while no turn is open waits in your usual places (the TUI, Slack).
 - Prompts are text. Links and embedded text files are passed on as written; images and audio aren't accepted.
 - Progress is read every 2 seconds while a turn is open (`--poll-seconds`).

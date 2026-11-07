@@ -347,7 +347,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       return { stopReason: "end_turn" };
     }
     if (!team.receiver) {
-      say(session.id, "This OpenRig agent has no team receiver, so nothing was sent. Add `--to <member@rig>` (the seat that takes your team's new work) to the agent's command in your app's settings.");
+      say(session.id, "This OpenRig agent has no team receiver, so nothing was sent. Choose the seat that takes your team's new work with `rig config set acp.to <member@rig>`, or add `--to <member@rig>` to the agent's command in your app's settings.");
       return { stopReason: "end_turn" };
     }
 

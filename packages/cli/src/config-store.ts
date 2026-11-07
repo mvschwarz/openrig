@@ -207,6 +207,8 @@ export interface RiggedConfig {
     consumers: string;
     templateDir: string;
   };
+  // rig acp serve's receiver when --to isn't given (an ACP registry launch has no args). Lockstep with the daemon twin.
+  acp: { to: string };
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (twin of the daemon
   // settings-store): enabled + the four bounded numeric tunables.
   retention: {
@@ -394,6 +396,8 @@ const DEFAULTS = {
     consumers: "",
     templateDir: "",
   },
+  // No ACP receiver: rig acp serve needs --to until one is set.
+  acp: { to: "" },
   // Issue #1856 — stream intake default queue.worker; read live by the stream intake coordinator.
   stream: {
     intake: "queue.worker",
@@ -540,6 +544,8 @@ export const VALID_KEYS = [
   "decisions.enabled",
   "decisions.consumers",
   "decisions.template_dir",
+  // rig acp serve's receiver when --to isn't given; lockstep with the daemon twin.
+  "acp.to",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
   // lockstep with the daemon settings-store SETTINGS_VALID_KEYS.
   "retention.enabled",
@@ -660,6 +666,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "decisions.enabled": { primary: "OPENRIG_DECISIONS_ENABLED" },
   "decisions.consumers": { primary: "OPENRIG_DECISIONS_CONSUMERS" },
   "decisions.template_dir": { primary: "OPENRIG_DECISIONS_TEMPLATE_DIR" },
+  "acp.to": { primary: "OPENRIG_ACP_TO" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -762,6 +769,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "decisions.enabled": ["decisions", "enabled"],
   "decisions.consumers": ["decisions", "consumers"],
   "decisions.template_dir": ["decisions", "templateDir"],
+  "acp.to": ["acp", "to"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
@@ -1158,6 +1166,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error("Invalid decisions.template_dir: use an absolute path, or an empty string for the shipped templates only");
     }
   },
+  // rig acp serve's receiver when --to isn't given: a team seat, member@rig, or empty for none.
+  "acp.to": (_raw, value) => {
+    if (typeof value !== "string" || (value !== "" && !/^[^@\s]+@[^@\s]+$/.test(value))) {
+      throw new Error("Invalid acp.to: use the seat that receives your ACP tasks as member@rig, or an empty string for none");
+    }
+  },
 };
 
 function validateKeyConstraints(key: ValidKey, raw: string, coerced: string | number | boolean): void {
@@ -1392,6 +1406,7 @@ export class ConfigStore {
         consumers: v("decisions.consumers") as string,
         templateDir: v("decisions.template_dir") as string,
       },
+      acp: { to: v("acp.to") as string },
       retention: {
         enabled: v("retention.enabled") as boolean,
         transitionsDays: v("retention.transitions_days") as number,

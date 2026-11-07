@@ -253,7 +253,7 @@ describe("rig acp serve", () => {
     const before = (db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number }).n;
     expect(await client.request("session/prompt", prompt(sessionId, "anything"))).toEqual({ stopReason: "end_turn" });
     expect((db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number }).n).toBe(before);
-    expect(messages(updates).at(-1)).toContain("Add `--to <member@rig>`");
+    expect(messages(updates).at(-1)).toContain("`rig config set acp.to <member@rig>`, or add `--to <member@rig>`");
   });
 
   it("a question the working seat asks the caller comes as a permission request, and the choice is recorded as the caller's answer", async () => {

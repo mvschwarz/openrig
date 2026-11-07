@@ -12,6 +12,7 @@ import { findRunProcesses } from "../acp/run-processes.js";
 import { serveAcpAgent, type TeamAsk, type TeamConnection, type TeamQueue } from "../acp/agent-server.js";
 import { StreamJsonRpcPeer } from "../acp/json-rpc-stdio.js";
 import { CLI_VERSION } from "../version.js";
+import { ConfigStore } from "../config-store.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -224,7 +225,7 @@ Guide: rig context get reference/acp-agents.md`)
   cmd
     .command("serve")
     .description("Serve OpenRig as an ACP agent on stdio, for an ACP app (Zed, JetBrains and others) to launch: its prompts go to your team as queue rows")
-    .option("--to <member@rig>", "The seat that receives your tasks: your team's entry point (required to send anything)")
+    .option("--to <member@rig>", "The seat that receives your tasks: your team's entry point (default: rig config get acp.to)")
     .option("--as <address>", "Who the tasks come from (default: OPENRIG_SESSION_NAME, else this machine's default person)")
     .option("--poll-seconds <n>", "How often to read the work's progress while a turn is open", "2")
     .addHelpText("after", `
@@ -235,6 +236,9 @@ ask you meanwhile comes to the app as a choice, recorded as your answer. The app
 
 The turn ends when the team closes the item, or when you cancel. Cancelling stops this process waiting; the team's
 work carries on. A turn that ended doesn't mean the work was accepted: the reply says how the item was closed.
+
+Without --to, the receiver is the acp.to setting (rig config set acp.to <member@rig>), which is how an app that
+starts the agent from the ACP registry, with no arguments, reaches your team.
 
 It uses the OpenRig daemon on this computer, started with rig daemon start. The app's sign-in step ("OpenRig on this
 machine") checks that the daemon answers and that you resolve to an address: --as, OPENRIG_SESSION_NAME, or the
@@ -261,7 +265,9 @@ Guide: rig context get reference/acp-agents.md#openrig-as-an-agent-in-acp-apps`)
           if ("reason" in person) return { error: `OpenRig doesn't know who you are on this machine (${person.reason}). Choose the default person with rig gateway default <id>, or add --as <address> to the agent's command.` };
           caller = person.address;
         }
-        return { queue: daemonTeamQueue(new DaemonClient(getDaemonUrl(status), { sessionName: caller })), caller, receiver: opts.to?.trim() || undefined };
+        // An ACP registry launch has no args, so the receiver can come from this machine's settings instead.
+        const receiver = opts.to?.trim() || String(new ConfigStore().get("acp.to") ?? "").trim() || undefined;
+        return { queue: daemonTeamQueue(new DaemonClient(getDaemonUrl(status), { sessionName: caller })), caller, receiver };
       };
       const peer = new StreamJsonRpcPeer(process.stdin, process.stdout);
       serveAcpAgent(peer, {

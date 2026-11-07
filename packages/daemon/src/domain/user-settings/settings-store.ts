@@ -211,6 +211,8 @@ export const SETTINGS_VALID_KEYS = [
   "decisions.enabled",
   "decisions.consumers",
   "decisions.template_dir",
+  // rig acp serve's receiver when --to isn't given; read by the invoking rig process, never by the daemon. Twin of the CLI key.
+  "acp.to",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (arch D3; closed-set,
   // arch-safe defaults BAKED in getDefaultValue, bounded validation in
   // KEY_CONSTRAINTS). CLI-settable twin: lockstep with cli/src/config-store.ts
@@ -338,6 +340,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "decisions.enabled": { primary: "OPENRIG_DECISIONS_ENABLED" },
   "decisions.consumers": { primary: "OPENRIG_DECISIONS_CONSUMERS" },
   "decisions.template_dir": { primary: "OPENRIG_DECISIONS_TEMPLATE_DIR" },
+  "acp.to": { primary: "OPENRIG_ACP_TO" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -439,6 +442,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "decisions.enabled": ["decisions", "enabled"],
   "decisions.consumers": ["decisions", "consumers"],
   "decisions.template_dir": ["decisions", "templateDir"],
+  "acp.to": ["acp", "to"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
@@ -753,6 +757,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "decisions.enabled": return false;
     case "decisions.consumers": return "";
     case "decisions.template_dir": return "";
+    case "acp.to": return "";
     // OPR.0.4.6.FS-1 W2 — retention defaults (arch D3 safe values: archive
     // terminal+aged transitions >30d; prune watchdog_history >14d keep-50/job;
     // 500 rows/qitems per bounded batch; enabled by default).
@@ -1008,6 +1013,12 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "decisions.template_dir": (_raw, value) => {
     if (typeof value !== "string" || (value !== "" && (!path.isAbsolute(value) || value.includes("\0")))) {
       throw new Error("Invalid decisions.template_dir: use an absolute path, or an empty string for the shipped templates only");
+    }
+  },
+  // rig acp serve's receiver when --to isn't given: a team seat, member@rig, or empty for none.
+  "acp.to": (_raw, value) => {
+    if (typeof value !== "string" || (value !== "" && !/^[^@\s]+@[^@\s]+$/.test(value))) {
+      throw new Error("Invalid acp.to: use the seat that receives your ACP tasks as member@rig, or an empty string for none");
     }
   },
 };
