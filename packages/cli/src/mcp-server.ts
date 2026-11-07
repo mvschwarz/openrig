@@ -12,6 +12,7 @@ import { CLI_VERSION } from "./version.js";
 import { ConfigStore } from "./config-store.js";
 import { readRosters } from "./commands/roster.js";
 import { mcpPresenceFilePath, readPresence } from "./mcp-presence.js";
+import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "./queue-artifact.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
@@ -396,20 +397,6 @@ function outOfScope(what: string): TextResult {
   return errorResult(JSON.stringify({ ok: false, error: "out_of_scope", message }), "out_of_scope", message);
 }
 
-type SharedRoot = { name: string; path: string };
-type FileRead = { root?: string; path?: string; content?: string; binary?: boolean; size?: number; mtime?: string; truncated?: boolean; truncatedAtBytes?: number | null; totalBytes?: number };
-
-/** The shared root an absolute path falls under as written, and its path inside that root. The reference names a file
- *  where the daemon runs, which may be another machine, so it's never resolved through this machine's filesystem; the
- *  daemon still checks containment itself when the file is read. */
-function underSharedRoot(roots: SharedRoot[], absolute: string): { root: string; path: string } | null {
-  for (const root of roots) {
-    const inside = nodePath.relative(root.path, absolute);
-    if (inside && inside !== ".." && !inside.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(inside)) return { root: root.name, path: inside };
-  }
-  return null;
-}
-
 /** A file the daemon read through a shared root, as text from offset: at most CONTEXT_TEXT_LIMIT characters, with
  *  nextOffset when more of what the daemon read remains, and its byte cut when the file was longer than the daemon reads. */
 function artifactView(source: string, read: FileRead, offset: number): Record<string, unknown> {
@@ -418,7 +405,7 @@ function artifactView(source: string, read: FileRead, offset: number): Record<st
   const text = read.content ?? "";
   const end = wholeCharEnd(text, offset + CONTEXT_TEXT_LIMIT);
   return {
-    ...base, binary: false, offset, text: text.slice(offset, end), totalChars: text.length,
+    ...base, binary: false, offset, text: text.slice(offset, end), totalChars: text.length, ...codeResultOf(read),
     truncated: text.length > end || read.truncated === true,
     ...(text.length > end ? { nextOffset: end } : {}),
     ...(read.truncated ? { truncatedAtBytes: read.truncatedAtBytes, totalBytes: read.totalBytes } : {}),
@@ -1438,7 +1425,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         resolution: z.string().optional().describe("The outcome the item keeps, stored only by the update that closes an open item (as rig queue update --resolution)"),
         reopen: z.boolean().optional().describe("Reopen a closed item: give an active state (pending, in-progress or blocked) and a note (as rig queue update --reopen)"),
         summary: z.string().optional().describe("Replace the one-line summary"),
-        evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it"),
+        evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it. For a code result, a JSON file of kind openrig.code-result/v1 with repo, base and revision (full commit ids) and paths lets a reader diff it exactly"),
         blockedOn: z.string().optional().describe("What it waits on, when blocking: another qitemId (this item returns to pending when that one closes), or the address of the person this item came from, not a shared channel (they're asked with this item's summary, and their answer returns it to you in progress)"),
         wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
       }),
@@ -1722,7 +1709,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_artifact_read")) server.registerTool(
     "rig_artifact_read",
     {
-      description: `Read a finished item's artifact (its evidenceRef), or a named file, through the daemon's shared roots (OPENRIG_FILES_ALLOWLIST), as text: at most ${CONTEXT_TEXT_LIMIT} characters from offset; nextOffset reads on. An artifact outside every shared root, a link, or an item with no evidenceRef comes back as available: false with the reason and the shared roots' names; nothing outside those roots is read.`,
+      description: `Read a finished item's artifact (its evidenceRef), or a named file, through the daemon's shared roots (OPENRIG_FILES_ALLOWLIST), as text: at most ${CONTEXT_TEXT_LIMIT} characters from offset; nextOffset reads on. An artifact outside every shared root, a link, or an item with no evidenceRef comes back as available: false with the reason and the shared roots' names; nothing outside those roots is read. A code-result manifest (kind openrig.code-result/v1) also comes back parsed as codeResult: its repo, the exact base and revision commits, and paths; a branch or fetch ref in it is a hint, never the revision.`,
       inputSchema: z.object({
         qitemId: z.string().optional().describe("Read this item's evidenceRef"),
         root: z.string().optional().describe("A shared root's name: with path, the file to read; with qitemId, the root a relative evidenceRef is under"),
@@ -1755,15 +1742,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const unavailable = (reason: string) => mapResult({ status: 200, data: {
           available: false, qitemId, reason, evidenceRef: typeof ref === "string" ? ref : null, roots: roots.map((entry) => entry.name),
         } }, undefined, { structured: true });
-        if (typeof ref !== "string" || !ref.trim()) return unavailable("This item names no artifact: it has no evidenceRef.");
-        if (/^[a-z][a-z0-9+.-]*:\/\//i.test(ref)) return unavailable("The evidenceRef is a link, not a file in a shared root: open it where it lives.");
-        if (roots.length === 0) return unavailable("This daemon shares no roots (OPENRIG_FILES_ALLOWLIST is empty), so no artifact can be read through it.");
-        if (!nodePath.isAbsolute(ref)) {
-          return root ? await read("evidenceRef", root, ref) : unavailable("The evidenceRef is a relative path: name the shared root it's under (root).");
-        }
-        const shared = underSharedRoot(roots, ref);
-        if (!shared) return unavailable("The evidenceRef is outside every shared root as the daemon lists them, so it isn't read. If it reaches a root through a link, read the file with root and path.");
-        return await read("evidenceRef", shared.root, shared.path);
+        const plan = planItemArtifact(ref, roots, root);
+        if ("unavailable" in plan) return unavailable(plan.unavailable);
+        return await read("evidenceRef", plan.read.root, plan.read.path);
       } catch (err) {
         return caught(err);
       }
