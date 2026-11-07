@@ -1,4 +1,4 @@
-// rig acp serve against the real queue: the daemon's queueRoutes and QueueRepository over a fully migrated test DB, on
+// rig acp serve against the real queue: the daemon's queue and answer routes over a database with every migration, on
 // loopback, driven by a scripted ACP client over a stream pair. The team's moves go through the same HTTP routes a seat's
 // CLI uses, each as its own seat.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -6,10 +6,15 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { PassThrough } from "node:stream";
 import type Database from "better-sqlite3";
-import { createFullTestDb } from "../../daemon/test/helpers/test-app.js";
+import { createDb } from "../../daemon/src/db/connection.js";
+import { migrate } from "../../daemon/src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
 import { queueRoutes } from "../../daemon/src/routes/queue.js";
+import { missionControlRoutes } from "../../daemon/src/routes/mission-control.js";
+import { MissionControlWriteContract } from "../../daemon/src/domain/mission-control/mission-control-write-contract.js";
+import { MissionControlActionLog } from "../../daemon/src/domain/mission-control/mission-control-action-log.js";
 import { DaemonClient } from "../src/client.js";
 import { daemonTeamQueue } from "../src/commands/acp.js";
 import { AUTH_METHOD_ID, serveAcpAgent, type AcpAgentOptions, type TeamConnection } from "../src/acp/agent-server.js";
@@ -27,12 +32,21 @@ const ambient = ["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "OPENRIG_SESSION_N
 
 beforeAll(async () => {
   for (const [key] of ambient) delete process.env[key];
-  db = createFullTestDb();
+  db = createDb();
+  migrate(db, ALL_MIGRATIONS);
   const bus = new EventBus(db);
-  const repo = new QueueRepository(db, bus, { validateRig: () => true });
+  // The caller is a registered person, so the team's asks reach them and their answers record as theirs.
+  const registry = { ok: true as const, entities: [{ entityId: "human-ada", class: "human" as const, displayName: "Ada", address: CALLER, connectorBindings: [],
+    prefs: { deliveryClass: "B" as const, availability: "available" as const } }] };
+  const repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => registry as never });
+  const writeContract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
   const app = new Hono();
-  app.use("*", async (c, next) => { c.set("eventBus" as never, bus); c.set("queueRepo" as never, repo); await next(); });
+  app.use("*", async (c, next) => {
+    c.set("eventBus" as never, bus); c.set("queueRepo" as never, repo); c.set("missionControlWriteContract" as never, writeContract as never);
+    await next();
+  });
   app.route("/api/queue", queueRoutes());
+  app.route("/api/mission-control", missionControlRoutes());
   await new Promise<void>((resolve) => { server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 }, (info: { port: number }) => { port = info.port; resolve(); }); });
 });
 
@@ -95,7 +109,8 @@ describe("rig acp serve", () => {
     expect(init.authMethods).toEqual([expect.objectContaining({ id: AUTH_METHOD_ID, name: "OpenRig on this machine" })]);
     expect(init.authMethods[0].type).toBeUndefined();
     expect(init.agentInfo).toEqual({ name: "openrig", title: "OpenRig", version: "9.9.9-test" });
-    expect(init.agentCapabilities.loadSession).toBe(false);
+    expect(init.agentCapabilities.loadSession).toBe(true);
+    expect(init.agentCapabilities.sessionCapabilities).toEqual({ list: {} });
     expect(connected).toBe(0);
     for (const line of out.join("").split("\n").filter(Boolean)) expect(JSON.parse(line).jsonrpc).toBe("2.0");
   });
@@ -122,7 +137,7 @@ describe("rig acp serve", () => {
     expect(task.state).toBe("pending");
     expect(task.body).toMatch(/^Please fix the login bug\nIt fails on Safari\.\n\n---\nSent by human-ada@external from Zed through rig acp serve \(session acps-/);
     expect(task.body).toContain("close it with a resolution written for human-ada@external");
-    expect(JSON.parse(task.tags)).toEqual(["acp-serve", `acp-session:${sessionId}`]);
+    expect(JSON.parse(task.tags)).toEqual(["acp-serve", `acp-session:${sessionId}`, "acp-cwd:/tmp"]);
 
     await move(LEAD, `/api/queue/${task.qitem_id}/claim`, {});
     await move(LEAD, `/api/queue/${task.qitem_id}/update`, { state: "in-progress", transitionNote: "reproduced on Safari 19" });
@@ -172,6 +187,93 @@ describe("rig acp serve", () => {
     expect(await client.request("session/prompt", prompt(sessionId, "anything"))).toEqual({ stopReason: "end_turn" });
     expect((db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number }).n).toBe(before);
     expect(messages(updates).at(-1)).toContain("Add `--to <member@rig>`");
+  });
+
+  it("a question the working seat asks the caller comes as a permission request, and the choice is recorded as the caller's answer", async () => {
+    const { client, updates } = connect({}, "asker@team");
+    const asked: Array<Record<string, any>> = [];
+    client.onRequest("session/request_permission", async (params) => {
+      asked.push(params as Record<string, any>);
+      return { outcome: { outcome: "selected", optionId: "b" } };
+    });
+    const sessionId = await open(client);
+    // Asked before this turn by a seat the work never reaches: not this turn's question.
+    await move("bystander@team", "/api/queue/create", { qitemId: "qitem-unrelated-ask", destinationSession: CALLER, body: "unrelated", summary: "Unrelated", nudge: false,
+      humanQuestions: [{ id: "q1", question: "Unrelated?", options: [{ id: "y", label: "Yes" }, { id: "n", label: "No" }] }] });
+    const turn = client.request("session/prompt", prompt(sessionId, "Pick a database for the cache"));
+    const task = await until(() => rowsTo("asker@team")[0], "the work row");
+    await move("asker@team", `/api/queue/${task.qitem_id}/claim`, {});
+    await move("asker@team", "/api/queue/create", { qitemId: "qitem-ask-db", destinationSession: CALLER, body: "Redis is faster; SQLite is already here.", summary: "Which store?", nudge: false,
+      humanQuestions: [{ id: "q1", question: "Which store?", options: [{ id: "a", label: "Redis" }, { id: "b", label: "SQLite", recommended: true }] }] });
+    const answered = await until(() => {
+      const row = db.prepare("SELECT human_answers FROM queue_items WHERE qitem_id = 'qitem-ask-db'").get() as { human_answers: string | null };
+      return row.human_answers ? JSON.parse(row.human_answers) : undefined;
+    }, "the recorded answer");
+    expect(Object.keys(answered)).toEqual(["q1"]);
+    expect(JSON.stringify(answered)).toContain("b");
+    await move("asker@team", `/api/queue/${task.qitem_id}/update`, { state: "done", closureReason: "no-follow-on", resolution: "SQLite, as you chose." });
+    expect(await turn).toEqual({ stopReason: "end_turn" });
+
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!.toolCall).toMatchObject({ toolCallId: "qitem-ask-db#q1", title: "asker@team asks: Which store?" });
+    expect(asked[0]!.options).toEqual([{ optionId: "a", name: "Redis", kind: "allow_once" }, { optionId: "b", name: "SQLite (recommended)", kind: "allow_once" }]);
+    const result = updates.filter((u) => u.toolCallId === "qitem-ask-db#q1").at(-1)!;
+    expect(result.status).toBe("completed");
+    expect((result.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe("You answered: SQLite. asker@team gets it as your answer.");
+    // "asker@team gets it as your answer": the answer path's reply row, from the caller to the seat that asked.
+    const replies = db.prepare("SELECT body FROM queue_items WHERE source_session = ? AND destination_session = 'asker@team' AND reply_to = 'qitem-ask-db'").all(CALLER) as Array<{ body: string }>;
+    expect(replies).toHaveLength(1);
+    expect(replies[0]!.body).toContain("SQLite");
+    const unrelated = db.prepare("SELECT state, human_answers FROM queue_items WHERE qitem_id = 'qitem-unrelated-ask'").get() as { state: string; human_answers: string | null };
+    expect(unrelated).toEqual({ state: "pending", human_answers: null });
+  });
+
+  it("a question the caller dismisses stays open and unanswered", async () => {
+    const { client, updates } = connect({}, "asker2@team");
+    client.onRequest("session/request_permission", async () => ({ outcome: { outcome: "cancelled" } }));
+    const sessionId = await open(client);
+    const turn = client.request("session/prompt", prompt(sessionId, "Rename the service"));
+    const task = await until(() => rowsTo("asker2@team")[0], "the work row");
+    await move("asker2@team", "/api/queue/create", { qitemId: "qitem-ask-name", destinationSession: CALLER, body: "Two names", summary: "Name?", nudge: false,
+      tags: [`acp-session:${sessionId}`], humanQuestions: [{ id: "q1", question: "Which name?", options: [{ id: "a", label: "Atlas" }, { id: "b", label: "Beacon" }] }] });
+    await until(() => updates.find((u) => u.toolCallId === "qitem-ask-name#q1" && u.sessionUpdate === "tool_call_update"), "the dismissal");
+    await move("asker2@team", `/api/queue/${task.qitem_id}/claim`, {});
+    await move("asker2@team", `/api/queue/${task.qitem_id}/update`, { state: "done", closureReason: "no-follow-on", resolution: "Kept the old name." });
+    expect(await turn).toEqual({ stopReason: "end_turn" });
+    const dismissed = updates.filter((u) => u.toolCallId === "qitem-ask-name#q1").at(-1)!;
+    expect(dismissed.status).toBeUndefined();
+    expect((dismissed.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe("Not answered here. The question is still open in the OpenRig TUI and Slack.");
+    expect(db.prepare("SELECT state, human_answers FROM queue_items WHERE qitem_id = 'qitem-ask-name'").get()).toEqual({ state: "pending", human_answers: null });
+  });
+
+  it("a session is listed and reopened from its rows: the prompt, its work and the reply replay, and a follow-up continues it", async () => {
+    const first = connect({}, "keeper@team");
+    const sessionId = await open(first.client);
+    const turn = first.client.request("session/prompt", prompt(sessionId, "Summarize yesterday's incidents"));
+    const task = await until(() => rowsTo("keeper@team")[0], "the row");
+    await move("keeper@team", `/api/queue/${task.qitem_id}/claim`, {});
+    await move("keeper@team", `/api/queue/${task.qitem_id}/update`, { state: "done", closureReason: "no-follow-on", resolution: "Two incidents, both closed." });
+    await turn;
+
+    // A new process, as after the app restarts.
+    const second = connect({}, "keeper@team");
+    await second.client.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
+    const listed = (await second.client.request("session/list", {})) as { sessions: Array<Record<string, unknown>> };
+    expect(listed.sessions.find((s) => s.sessionId === sessionId)).toMatchObject({ cwd: "/tmp", title: "Summarize yesterday's incidents" });
+    expect(((await second.client.request("session/list", { cwd: "/elsewhere" })) as { sessions: unknown[] }).sessions.find((s) => (s as { sessionId: string }).sessionId === sessionId)).toBeUndefined();
+    expect(await second.client.request("session/load", { sessionId, cwd: "/tmp", mcpServers: [] })).toEqual({});
+    expect(second.updates.map((u) => u.sessionUpdate)).toEqual(["user_message_chunk", "tool_call", "tool_call_update", "agent_message_chunk"]);
+    expect((second.updates[0]!.content as { text: string }).text).toBe("Summarize yesterday's incidents");
+    expect(messages(second.updates).at(-1)).toBe(`keeper@team closed ${task.qitem_id} done.\n\nTwo incidents, both closed.`);
+
+    const followUp = second.client.request("session/prompt", prompt(sessionId, "And the week before?"));
+    const next = await until(() => rowsTo("keeper@team")[1], "the follow-up row");
+    expect(next.body).toContain(`Follows up on ${task.qitem_id} (done).`);
+    expect(JSON.parse(next.tags)).toContain(`acp-session:${sessionId}`);
+    second.client.notify("session/cancel", { sessionId });
+    expect(await followUp).toEqual({ stopReason: "cancelled" });
+    const missing = await second.client.request("session/load", { sessionId: "acps-nope", cwd: "/tmp", mcpServers: [] }).then(() => undefined, (e: unknown) => e);
+    expect((missing as JsonRpcRequestError).error.code).toBe(-32602);
   });
 
   it("an unknown method gets JSON-RPC's method-not-found", async () => {
