@@ -559,6 +559,17 @@ const SHARED_INSTRUCTIONS = [
   "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
 ];
 const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
+
+/** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
+ *  that works its inbox. The team's questions to it are the person's to answer. */
+export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v1";
+export const FRONT_DOOR_WORKFLOW = [
+  `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
+  "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
+  "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and the person's words in resolution, saying they're the person's (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them, and don't claim an item you can't close with their words.",
+  "Nothing wakes this conversation when the team finishes: check your work and your items when the person asks or comes back.",
+].join(" ");
+const FRONT_DOOR_INSTRUCTIONS = [...SHARED_INSTRUCTIONS, FRONT_DOOR_WORKFLOW].join("\n");
 const EXTERNAL_INSTRUCTIONS = [
   "This connection sends requests to an OpenRig team as the caller named by its grant. The daemon attributes requests to that caller. Use only the tools this connection offers.",
   "To ask the connected team to do work, use rig_queue_create with the task in body. You may omit destination to use the receiver configured by the server operator. If no receiver is available, ask the operator to configure it; don't guess an address. An explicit destination still must be within this connection's grant.",
@@ -571,8 +582,8 @@ const EXTERNAL_INBOX_INSTRUCTIONS = [...SHARED_INSTRUCTIONS,
   "Items addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it, close it done, and reply, when it needs one, with a new item to its sender. Nothing promises to wake you, so check your items again.",
 ].join("\n");
 
-function instructionsFor(access: McpAccess | undefined): string {
-  if (!access?.external) return INSTRUCTIONS;
+function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
+  if (!access?.external) return frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
   const tools = externalTools(access.external.objects);
   return tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? EXTERNAL_INBOX_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
 }
@@ -643,11 +654,11 @@ function mapResult(
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string } = {}): McpServer {
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean } = {}): McpServer {
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
-  }, { instructions: instructionsFor(options.access) });
+  }, { instructions: instructionsFor(options.access, options.frontDoor === true) });
   const { access } = options;
   const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
   const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
@@ -1527,6 +1538,17 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           const member = { ok: true, seat, rig: at >= 0 ? seat.slice(at + 1) : null, session: null, caller,
             message: "This seat has no session here: it's the seat this connection's grant names, such as a hosted member's. rig_team shows its rig and hosted members, and rig_queue_list with owned set lists its work." };
           return { content: [{ type: "text" as const, text: JSON.stringify(member) }], structuredContent: member };
+        }
+        // A front door (--front-door) usually has no session either: its seat is the address the person picked for their
+        // app, declared in OPENRIG_SESSION_NAME. Answer with it when its rig exists here, still marked declared.
+        if (res.status === 404 && !access && options.frontDoor === true) {
+          const at = seat.indexOf("@");
+          const rigName = at > 0 ? seat.slice(at + 1) : "";
+          if (rigName && (await resolveRigHandle(client, rigName, { strict: true })).kind === "resolved") {
+            const frontDoor = { ok: true, seat, rig: rigName, session: null, caller,
+              message: "This seat has no session here: it's the front-door address this server was configured with (OPENRIG_SESSION_NAME), declared, not verified. rig_team shows its rig and lead, and rig_queue_list with owned set lists the team's questions to it." };
+            return { content: [{ type: "text" as const, text: JSON.stringify(frontDoor) }], structuredContent: frontDoor };
+          }
         }
         if (res.status >= 400) return mapResult(res);
         return mapResult({ ...res, data: { ...(res.data as Record<string, unknown>), caller } }, undefined, { structured: true });

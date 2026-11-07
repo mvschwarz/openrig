@@ -62,7 +62,7 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
     .option("--member <name>", "Member name for pod attach mode")
     .option("--runtime <runtime>", "Runtime for pod attach mode; optional guard for node mode")
     .option("--cwd <path>", "Working directory to record", process.cwd())
-    .option("--display-name <name>", "Display label inside tmux; external session name outside tmux")
+    .option("--display-name <name>", "Display label inside tmux; external session address outside tmux (new bare names gain @rig)")
     .option("--print-env", "Print shell exports for OPENRIG_NODE_ID and OPENRIG_SESSION_NAME")
     .option("--json", "JSON output, including the activity env the attached app needs. Its token is a credential: don't print or paste it, and use rig whoami for identity")
     .action(async (opts: {

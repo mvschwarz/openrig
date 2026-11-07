@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess } from "../src/mcp-server.js";
+import { createMcpServer, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
@@ -24,9 +24,9 @@ describe("MCP Server", () => {
   let daemonClient: DaemonClient;
   let cleanup: () => Promise<void>;
 
-  async function setup(clientOverrides?: Parameters<typeof mockClient>[0]) {
+  async function setup(clientOverrides?: Parameters<typeof mockClient>[0], serverOptions?: Parameters<typeof createMcpServer>[1]) {
     daemonClient = mockClient(clientOverrides);
-    const server = createMcpServer(daemonClient);
+    const server = createMcpServer(daemonClient, serverOptions);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
     mcpClient = new Client({ name: "test-client", version: "1.0.0" });
@@ -352,6 +352,45 @@ describe("MCP Server", () => {
     expect(text.structuredContent).not.toHaveProperty("codeResult");
     expect(text.structuredContent).not.toHaveProperty("codeResultIssue");
     await cleanup();
+  });
+
+  it("a front door gets front-door instructions, not the member workflow, and its declared seat with no session reads as itself", async () => {
+    try {
+      vi.stubEnv("OPENRIG_SESSION_NAME", "claude-app@my-rig");
+      vi.stubEnv("RIGGED_SESSION_NAME", "");
+      vi.stubEnv("OPENRIG_TARGET_REPO", "");
+      vi.stubEnv("RIGGED_TARGET_REPO", "");
+      // A hosted address has no session, so whoami answers 404; the rig itself exists.
+      const getFn = vi.fn(async (p: string) => p.startsWith("/api/whoami") ? { status: 404, data: { error: "session not found" } }
+        : p.startsWith("/api/rigs/summary") ? { status: 200, data: [{ id: "rig-1", name: "my-rig", archivedAt: null }] } : { status: 404, data: {} });
+      await setup({ get: getFn }, { frontDoor: true });
+      const instructions = mcpClient.getInstructions() ?? "";
+      expect(FRONT_DOOR_WORKFLOW).toContain(`(${FRONT_DOOR_WORKFLOW_VERSION})`);
+      expect(instructions).toContain(FRONT_DOOR_WORKFLOW);
+      // The person's harm first: nothing tells this agent to work its inbox without asking.
+      expect(instructions).not.toContain(MEMBER_WORKFLOW);
+      expect(instructions).not.toContain("without asking whether you may");
+      for (const part of ["the person's to answer", "record only what the person tells you", "Never choose an answer for them"]) expect(FRONT_DOOR_WORKFLOW).toContain(part);
+      const front = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
+      expect(front.isError).toBeFalsy();
+      expect(front.structuredContent).toMatchObject({ ok: true, seat: "claude-app@my-rig", rig: "my-rig", session: null,
+        caller: { authenticated: false, identity: "declared" } });
+      await cleanup();
+
+      // Without --front-door, the same server is a member: the member workflow, and whoami's 404 as today.
+      await setup({ get: getFn });
+      expect(mcpClient.getInstructions() ?? "").toContain(MEMBER_WORKFLOW);
+      expect((await mcpClient.callTool({ name: "rig_whoami", arguments: {} })).isError).toBe(true);
+      await cleanup();
+
+      // A front door whose rig isn't here is a misconfiguration, still answered with the 404.
+      vi.stubEnv("OPENRIG_SESSION_NAME", "claude-app@no-such-rig");
+      await setup({ get: getFn }, { frontDoor: true });
+      expect((await mcpClient.callTool({ name: "rig_whoami", arguments: {} })).isError).toBe(true);
+      await cleanup();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("the queue tools return structured content; every error a tool returns carries one shape and keeps its old text", async () => {

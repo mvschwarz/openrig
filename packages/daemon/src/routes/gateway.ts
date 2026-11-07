@@ -10,6 +10,7 @@
 import { connectionsProjection } from "../domain/gateway/connections-projection.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import path from "node:path";
 import type { QueueRepository } from "../domain/queue-repository.js";
@@ -18,11 +19,17 @@ import { SeenStore } from "../domain/gateway/slack/state-store.js";
 import { makeQueuePorts, seedBacklogAsHistory } from "../domain/gateway/slack/queue-access.js";
 import { postOpenAsks } from "../domain/gateway/slack/open-asks.js";
 import { DispatchBuffer } from "../domain/gateway/dispatch-buffer.js";
-import { OPENRIG_HOME } from "../openrig-compat.js";
+import { OPENRIG_HOME, getOpenRigHome } from "../openrig-compat.js";
 import { loadHumanRegistry } from "../domain/gateway/human-registry.js";
-import { participantsJsonView } from "../domain/gateway/participants.js";
+import { participantsJsonView, sharedChannelAddresses } from "../domain/gateway/participants.js";
+import { resolvePrimaryRelayBinding, type RelayPayloadCarry } from "../domain/gateway/relay-outbound.js";
 import { resolveSecret } from "../domain/gateway/slack/secrets.js";
 import { resolveHumanDeliveryReadiness, type HumanDeliveryReadiness } from "../domain/gateway/human-readiness.js";
+import {
+  RELAY_INBOUND_MAX_BODY_BYTES,
+  isDirectLoopbackPeer,
+  type RelayInboundHandler,
+} from "../domain/gateway/relay-inbound.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
 import { runChannelOperation } from "../domain/gateway/channel-operations.js";
 import { buildSlackAppManifest } from "../domain/gateway/slack/manifest.js";
@@ -49,12 +56,66 @@ export function gatewayRoutes(opts: {
   /** The daemon's auth bearer (OPENRIG_AUTH_BEARER_TOKEN, the one `rig host pair` issues); a relay from a
    *  shared app's hub must carry it. Null: no bearer configured, so the route trusts the bind (loopback or tailnet). */
   relayBearerToken?: string | null;
+  /** Concrete local relay inbound handler (`POST /api/gateway/relay/inbound`). */
+  relayInboundHandler?: RelayInboundHandler;
   /** The clock quiet hours are resolved against (tests inject one). */
   now?: () => Date;
   /** The Slack directory reads' fetch and secret environment (tests inject both). */
   slack?: { fetchImpl?: FetchImpl; env?: NodeJS.ProcessEnv };
 } = {}): Hono {
   const app = new Hono();
+
+  app.post(
+    "/relay/inbound",
+    async (c, next) => {
+      const remoteAddress = (
+        c.env as { incoming?: { socket?: { remoteAddress?: string | null } } } | undefined
+      )?.incoming?.socket?.remoteAddress;
+      if (!isDirectLoopbackPeer(remoteAddress)) {
+        return c.json(
+          {
+            error: "loopback_peer_required",
+            message: "Relay inbound requests must originate from a direct local loopback TCP peer.",
+          },
+          403,
+        );
+      }
+
+      return next();
+    },
+    bodyLimit({
+      maxSize: RELAY_INBOUND_MAX_BODY_BYTES,
+      onError: (c) =>
+        c.json(
+          {
+            error: "payload_too_large",
+            message: `relay inbound payload exceeds ${RELAY_INBOUND_MAX_BODY_BYTES} bytes`,
+          },
+          413,
+        ),
+    }),
+    async (c) => {
+      const handler =
+        opts.relayInboundHandler ??
+        (c.get("relayInboundHandler" as never) as RelayInboundHandler | undefined);
+      if (!handler) {
+        return c.json(
+          {
+            error: "relay_inbound_unavailable",
+            message: "Relay inbound handler is not configured on this daemon.",
+          },
+          503,
+        );
+      }
+
+      const rawBody = await c.req.text();
+      const result = await handler.handle({
+        authorizationHeader: c.req.header("Authorization") ?? c.req.header("authorization"),
+        rawBody,
+      });
+      return c.json(result.body, result.status as never);
+    },
+  );
 
   // A shared Slack app across machines: the hub relays an event or click for a channel this machine
   // owns, and it runs through this machine's own inbound router. 503 keeps it in the hub's retry.
@@ -74,12 +135,12 @@ export function gatewayRoutes(opts: {
     const subsystem = c.get("gatewaySubsystem" as never) as SubsystemHandle | undefined;
     let status: Record<string, unknown> | null = null;
     try { status = subsystem?.status() ?? null; } catch { /* unavailable is preserved */ }
-    return c.json(connectionsProjection(opts.home ?? OPENRIG_HOME, status,
+    return c.json(connectionsProjection(opts.home ?? getOpenRigHome(), status,
       c.get("settingsStore" as never) as SettingsStore | undefined));
   });
 
   app.get("/participants", (c) => {
-    const result = participantsJsonView(opts.home ?? OPENRIG_HOME, c.req.query("organization"));
+    const result = participantsJsonView(opts.home ?? getOpenRigHome(), c.req.query("organization"));
     return result.ok ? c.json(result) : c.json({ error: "human_registry_unavailable", message: result.error }, 503);
   });
 
@@ -131,14 +192,17 @@ export function gatewayRoutes(opts: {
       const readiness = await opts.readiness(entityId, gatewayState);
       return readiness ? c.json({ ok: true, readiness }) : c.json({ error: "human_not_found", entityId }, 404);
     }
-    const home = opts.home ?? OPENRIG_HOME;
+    const home = opts.home ?? getOpenRigHome();
     const registry = loadHumanRegistry(home);
     if (!registry.ok) return c.json({ error: "human_registry_unavailable", message: registry.error }, 503);
     const human = registry.entities.find((candidate) => candidate.entityId === entityId);
     if (!human) return c.json({ error: "human_not_found", entityId }, 404);
     const cfg = loadConfig(home);
     const botToken = resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg.secretsEnvFile ?? undefined });
-    const readiness = await resolveHumanDeliveryReadiness({ human, config: cfg, gatewayState, botToken });
+    const readiness = await resolveHumanDeliveryReadiness(
+      { human, config: cfg, gatewayState, botToken, home },
+      { entities: registry.entities },
+    );
     return c.json({ ok: true, readiness });
   });
 
@@ -370,10 +434,28 @@ export function gatewayRoutes(opts: {
                 "Register a human with rig gateway human add, or repair and re-project the existing human registry before enabling delivery.",
             }, 503) });
             const seen = new SeenStore(path.join(home, "state", "slack-outbound-seen.jsonl"));
+            const slackOnlyRegistry = {
+              ...registry,
+              entities: registry.entities.filter((entity) =>
+                entity.connectorBindings.some((b) => b.role === "primary" && b.kind === "slack"),
+              ),
+            };
+            const dispatchBuffer = new DispatchBuffer(home);
             value = await seedBacklogAsHistory({
-              queue: makeQueuePorts(queueRepo!, { loadHumanRegistry: () => registry }), seen,
+              queue: makeQueuePorts(queueRepo!, {
+                loadHumanRegistry: () => slackOnlyRegistry,
+                sharedChannels: () => sharedChannelAddresses(home),
+              }),
+              seen,
               filter: { minimumLevel: cfg.minimumLevelThatPosts },
-              buffer: new DispatchBuffer(home),
+              buffer: {
+                pending: () =>
+                  dispatchBuffer.pending().filter((d) => {
+                    const p = (d.payload ?? {}) as RelayPayloadCarry;
+                    if (p.relayConnectorRef || p.relayEnvelope) return false;
+                    return resolvePrimaryRelayBinding(p.destinationSession ?? d.entityBindingRef, registry) === null;
+                  }),
+              },
             });
           } else value.onlineStatus = "slack connector disabled";
           saveConfig({ ...cfg, enabled }, home);

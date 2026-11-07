@@ -1271,3 +1271,135 @@ export function reconcileSkillLoadout(input: {
     };
   }
 }
+
+/** #2426: one owned or found copy of a skill that a directly loaded plugin supplies, and what becomes of it. */
+export interface DirectPluginCopy {
+  id: string;
+  target: string;
+  /** retire: OpenRig's own automatic copy, now loaded from the plugin itself. keep: anything that can't be shown to be. */
+  disposition: "retire" | "keep";
+  reason: string;
+}
+
+export interface DirectPluginCopyInput {
+  runtime: SkillRuntime;
+  location: SkillLoadoutLocation;
+  pluginRoot: string;
+  /** Why another record outside this loadout could put a copy back (so it isn't the loadout's alone to remove), or
+   *  undefined when none does. */
+  otherRecord?: (id: string, target: string) => string | undefined;
+}
+
+function sameDirectory(a: string, b: string): boolean {
+  const real = (path: string) => { try { return realpathSync(path); } catch { return nodePath.resolve(path); } };
+  return real(a) === real(b);
+}
+
+/**
+ * #2426: the copies a loadout holds of skills that a plugin the runtime now loads itself supplies (the vendored
+ * openrig-core on a Claude seat, which #2433 stopped copying). A copy is retired only when its owned record says plugin
+ * expansion wrote it (a `plugin:` revision, which an explicit selection never gets) from this very plugin root, the
+ * plugin still supplies that skill, no project selection names it, and its folder is absent or still exactly the recorded
+ * tree. Everything else with a supplied skill's name is kept and named: an edited, linked or unreadable folder, a copy
+ * recorded from another root, a project selection, a folder with no record, and one that `otherRecord` says another record
+ * could put back.
+ */
+export function findDirectPluginCopies(input: DirectPluginCopyInput): DirectPluginCopy[] {
+  const { targetRoot, manifestPath } = input.location;
+  const supplied = new Set(resolvePluginSkills({ pluginId: "direct", pluginRoot: input.pluginRoot, runtime: input.runtime }).entries.map((skill) => skill.id));
+  if (supplied.size === 0) return [];
+  const manifest = readOwnershipManifest(manifestPath, input.runtime, targetRoot);
+  const copies: DirectPluginCopy[] = [];
+  for (const skill of manifest.skills) {
+    if (!supplied.has(skill.id) || !pluginIdOf(skill.revision)) continue;
+    const keep = (reason: string) => copies.push({ id: skill.id, target: skill.target, disposition: "keep", reason });
+    const retire = (reason: string) => {
+      const other = input.otherRecord?.(skill.id, skill.target);
+      if (other) keep(other); else copies.push({ id: skill.id, target: skill.target, disposition: "retire", reason });
+    };
+    if (!sameDirectory(skill.sourceRoot, input.pluginRoot)) { keep(`recorded from ${skill.sourceRoot}, not from ${input.pluginRoot}`); continue; }
+    if (manifest.projectSelection.includes(skill.id)) { keep("the project selects it"); continue; }
+    if (!pathEntryExists(skill.target)) { retire("its folder is already gone"); continue; }
+    try {
+      if (inspectSkillDirectory(skill.target).digest !== skill.digest) { keep("it was changed after OpenRig wrote it"); continue; }
+    } catch (err) {
+      keep(`it can't be read as the folder OpenRig wrote (${(err as Error).message})`);
+      continue;
+    }
+    retire("unchanged since OpenRig wrote it");
+  }
+  const recorded = new Set(manifest.skills.map((skill) => skill.id));
+  for (const id of [...supplied].sort(compareBytes)) {
+    const target = nodePath.join(targetRoot, id);
+    if (!recorded.has(id) && pathEntryExists(target)) copies.push({ id, target, disposition: "keep", reason: "OpenRig has no record of writing it" });
+  }
+  return copies.sort((a, b) => compareBytes(a.id, b.id));
+}
+
+/**
+ * #2426: remove the copies findDirectPluginCopies retires, and their records (each skill record, and its id from every
+ * topology selection, so a later reconcile, restore or apply has nothing to put back). The folders move into a staging
+ * folder beside the skills before the manifest is replaced, and move back if anything fails, as reconcileSkillLoadout
+ * stages. Nothing else in the loadout is read, refreshed or removed. Never throws: a failure changes nothing and is named.
+ */
+export function retireDirectPluginCopies(input: DirectPluginCopyInput): {
+  removed: string[];
+  kept: DirectPluginCopy[];
+  errors: SkillCatalogFailure[];
+} {
+  const { targetRoot, manifestPath } = input.location;
+  let copies: DirectPluginCopy[];
+  let manifest: OwnershipManifest;
+  try {
+    copies = findDirectPluginCopies(input);
+    manifest = readOwnershipManifest(manifestPath, input.runtime, targetRoot);
+  } catch (err) {
+    return { removed: [], kept: [], errors: [{ code: "skill_ownership_unreadable", message: (err as Error).message, path: manifestPath }] };
+  }
+  const kept = copies.filter((copy) => copy.disposition === "keep");
+  const retired = new Set(copies.filter((copy) => copy.disposition === "retire").map((copy) => copy.id));
+  if (retired.size === 0) return { removed: [], kept, errors: [] };
+  const refusal = input.location.refuseMutation?.();
+  if (refusal) return { removed: [], kept, errors: [{ code: "seat_storage_refused", message: refusal, path: targetRoot }] };
+
+  const topologySelections: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
+  for (const owner of Object.keys(manifest.topologySelections).sort(compareBytes)) {
+    const ids = manifest.topologySelections[owner]!.filter((id) => !retired.has(id));
+    if (ids.length > 0) topologySelections[owner] = ids;
+  }
+  const rollback: Array<{ target: string; backup: string }> = [];
+  const stagingRoot = nodePath.join(nodePath.dirname(targetRoot), `.openrig-skill-stage-${randomUUID()}`);
+  try {
+    mkdirSync(stagingRoot, { recursive: true });
+    for (const skill of manifest.skills.filter((owned) => retired.has(owned.id) && pathEntryExists(owned.target))) {
+      const backup = nodePath.join(stagingRoot, `removed-${skill.id}`);
+      renameSync(skill.target, backup);
+      rollback.push({ target: skill.target, backup });
+    }
+    const nextManifest: OwnershipManifest = {
+      schema: MANIFEST_SCHEMA,
+      runtime: input.runtime,
+      targetRoot,
+      updatedAt: new Date().toISOString(),
+      topologySelections,
+      projectSelection: manifest.projectSelection,
+      skills: manifest.skills.filter((owned) => !retired.has(owned.id)),
+    };
+    const tmpManifest = `${manifestPath}.${randomUUID()}.tmp`;
+    writeFileSync(tmpManifest, `${JSON.stringify(nextManifest, null, 2)}\n`, "utf8");
+    renameSync(tmpManifest, manifestPath);
+  } catch (err) {
+    // Put each folder back; one that can't go back stays in the staging folder, which is then kept and named.
+    const stranded = rollback.reverse().filter((action) => {
+      try { if (!pathEntryExists(action.target)) renameSync(action.backup, action.target); } catch { /* named below */ }
+      return pathEntryExists(action.backup);
+    });
+    if (stranded.length === 0) { try { rmSync(stagingRoot, { recursive: true, force: true }); } catch { /* an empty folder left behind */ } }
+    return { removed: [], kept, errors: [{ code: "retire_failed", path: targetRoot, message: stranded.length === 0
+      ? `copies were not removed: ${(err as Error).message}`
+      : `copies were not removed (${(err as Error).message}), and ${stranded.map((action) => action.target).join(", ")} couldn't be put back: ${stagingRoot} holds them` }] };
+  }
+  // The new manifest is in place; the staging folder holds only the retired copies.
+  try { rmSync(stagingRoot, { recursive: true, force: true }); } catch { /* left behind; it holds nothing OpenRig records */ }
+  return { removed: [...retired].sort(compareBytes), kept, errors: [] };
+}

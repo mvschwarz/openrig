@@ -922,6 +922,31 @@ test("authoring regeneration writes each generated copy from the skill's one hom
   }
 });
 
+test("a further flat edge is another plugin's copy, written from the skill's home; other extra edges and missing ones refuse", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-authoring-bundle-"));
+  try {
+    const { repoRoot, inputs } = homeFixture(root);
+    const layout = {
+      ...inputs.layout,
+      edges: { ...inputs.layout.edges, bundle: { path: "bundle", layout: "flat" } },
+      skills: { ...inputs.layout.skills, two: { edges: ["bundle", "canonical", "spec"], category: "core" } },
+    };
+    const first = await mirror.regeneratePublicSkills({ ...inputs, layout });
+    assert.deepEqual(first.undeclared, []);
+    assert.deepEqual(snapshotTree(join(repoRoot, "bundle/two")), snapshotTree(join(repoRoot, "spec/core/two")));
+    assert.equal(existsSync(join(repoRoot, "bundle/three")), false);
+
+    const nested = { ...layout, edges: { ...layout.edges, bundle: { path: "bundle", layout: "categorized" } } };
+    await assert.rejects(mirror.regeneratePublicSkills({ ...inputs, layout: nested }), /any other edge must be a flat plugin copy/);
+    const { plugin: _plugin, ...withoutPlugin } = inputs.layout.edges;
+    await assert.rejects(mirror.regeneratePublicSkills({ ...inputs, layout: { ...inputs.layout, edges: withoutPlugin } }),
+      /must contain canonical, plugin, and spec edges/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("authoring regeneration repairs permission-only drift in generated copies from the home's modes", async () => {
   const mirror = await import("./mirror-skills.mjs");
   const root = mkdtempSync(join(tmpdir(), "openrig-authoring-modes-"));

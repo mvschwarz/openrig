@@ -18,6 +18,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { Policy, PolicyJob, PolicyEvaluation } from "./types.js";
+import { BACKGROUND_SHELL_GRACE_MINUTES } from "../queue-pickup.js";
 import type { WatchdogHistoryEntry } from "../watchdog-history-log.js";
 
 /** Structural view of the shipped SeatParkedDiagnosis (parked-query.ts). */
@@ -25,7 +26,11 @@ export interface ParkedSeatDiagnosisView {
   sessionName: string;
   parked: boolean | "indeterminate";
   /** `since`: when the seat's arbitrated state last changed, so for a stopped seat, when it began waiting. */
-  activity: { value: string; needsInput: { count: number; reason: string | null }; since?: string | null };
+  activity: {
+    value: string; needsInput: { count: number; reason: string | null }; since?: string | null;
+    /** #2661 (b): a live background shell, first seen at observedAt. */
+    backgroundWork?: { observedAt: string } | null;
+  };
   obligations: {
     items: Array<{ qitemId: string; state: string; summary: string | null }>;
     held: Array<{ qitemId: string; healthy: boolean }>;
@@ -73,6 +78,8 @@ export interface ParkedOwnerConsumerDeps {
   retentionState?: (sessionName: string) => string | null;
   /** The clock the waiting grace is measured on; the wall clock when absent. */
   now?: () => number;
+  /** #2661 (b): how long a live background shell defers the reminder; BACKGROUND_SHELL_GRACE_MINUTES when absent. */
+  backgroundShellGraceMs?: number;
 }
 
 export const PARKED_OWNER_POLICY_NAME = "parked-owner-consumer";
@@ -295,6 +302,15 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           continue;
         }
 
+        // #2661 (b): the turn is over but a shell the owner started still runs (a CI watch, a test suite). It is working
+        // in the background, up to a ceiling, so a forgotten shell still gets its reminder. Unreserved, as above.
+        const shell = seat.activity.backgroundWork?.observedAt ? Date.parse(seat.activity.backgroundWork.observedAt) : Number.NaN;
+        const shellGraceMs = deps.backgroundShellGraceMs ?? BACKGROUND_SHELL_GRACE_MINUTES * 60_000;
+        if (seat.activity.needsInput.count === 0 && Number.isFinite(shell) && (deps.now?.() ?? Date.now()) - shell < shellGraceMs) {
+          skipped.push({ seat: seat.sessionName, why: "background-shell" });
+          continue;
+        }
+
         // A seat idle for moments has just handed off or asked someone, not got stuck holding work. The diagnosis says
         // how long its waiting state has been unchanged; with no start known, the reminder goes as before. A seat at a
         // prompt gets no grace: this attempt's refusal is what alerts whoever can clear the prompt.
@@ -395,7 +411,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
             idsHash,
             primaryRow,
             obligations: namedIds,
-            evidence: "arbitrated-idle-at-prompt",
+            evidence: Number.isFinite(shell) && seat.activity.needsInput.count === 0 ? "arbitrated-idle-at-prompt; background-shell-past-ceiling" : "arbitrated-idle-at-prompt",
             episodeClosures: closures,
             skippedSeats: skipped,
           },

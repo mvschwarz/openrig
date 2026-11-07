@@ -112,4 +112,181 @@ describe("S10 in-process gateway wire — durability contract receipts", () => {
     expect(subsystem.status().state).toBe("active");
     expect(subsystem.dispatch("post_message", "mike#slack", {}).ok).toBe(true);
   });
+
+  it("prepare(decision) runs synchronously BEFORE durable enqueue and replay sends the exact frozen payload without re-running prepare", async () => {
+    let prepareCalls = 0;
+    let bufferedDuringPrepare = -1;
+    let releaseFirst: (o: SubsystemDeliveryOutcome) => void = () => {};
+    const firstGate = new Promise<SubsystemDeliveryOutcome>((r) => { releaseFirst = r; });
+
+    const w1 = buildInProcessWire({
+      home,
+      ops: ["post_message"],
+      prepare: (decision) => {
+        prepareCalls++;
+        bufferedDuringPrepare = new DispatchBuffer(home).pending().length;
+        const p = (decision.payload ?? {}) as Record<string, unknown>;
+        return {
+          ...decision,
+          payload: {
+            ...p,
+            relayEnvelope: {
+              v: 1,
+              deliveryId: decision.decisionId,
+              replyRef: `frozen-ref-${prepareCalls}`,
+            },
+          },
+        };
+      },
+      deliver: () => firstGate,
+    });
+
+    const r1 = w1.dispatcher.dispatch("post_message", "sam@external", { qitemId: "q-freeze-1" }, { decisionId: "d-freeze-1" });
+    expect(r1.ok).toBe(true);
+    expect(prepareCalls).toBe(1);
+    expect(bufferedDuringPrepare, "prepare must run BEFORE durable buffer.enqueue").toBe(0);
+
+    // Durable buffer immediately holds the frozen payload before delivery resolves.
+    const pendingBefore = new DispatchBuffer(home).pending();
+    expect(pendingBefore).toHaveLength(1);
+    expect((pendingBefore[0]!.payload as { relayEnvelope?: { replyRef?: string } }).relayEnvelope?.replyRef).toBe("frozen-ref-1");
+
+    // Duplicate dispatch of same decisionId while pending does not re-run prepare or overwrite frozen payload.
+    const dup = w1.dispatcher.dispatch("post_message", "sam@external", { qitemId: "q-freeze-1", mutated: true }, { decisionId: "d-freeze-1" });
+    expect(dup.ok).toBe(true);
+    expect(prepareCalls).toBe(1);
+
+    // Fail first delivery so it stays in the buffer for replay.
+    releaseFirst({ ok: false, class: "transport", detail: "bridge down" });
+    await tick();
+    expect(new DispatchBuffer(home).pending()).toHaveLength(1);
+
+    // Run 2: replayPending sends the exact frozen payload from the buffer without calling prepare again.
+    const replayed: OutboundDecision[] = [];
+    const w2 = buildInProcessWire({
+      home,
+      ops: ["post_message"],
+      prepare: (decision) => {
+        prepareCalls++;
+        return {
+          ...decision,
+          payload: { ...(decision.payload as object), relayEnvelope: { v: 1, deliveryId: decision.decisionId, replyRef: "recomputed-ref" } },
+        };
+      },
+      deliver: async (d) => {
+        replayed.push(d);
+        return { ok: true };
+      },
+    });
+    w2.startServices?.();
+    await tick();
+
+    expect(prepareCalls, "replayPending must not re-run prepare").toBe(1);
+    expect(replayed).toHaveLength(1);
+    expect(replayed[0]!.decisionId).toBe("d-freeze-1");
+    expect((replayed[0]!.payload as { relayEnvelope?: { replyRef?: string } }).relayEnvelope?.replyRef).toBe("frozen-ref-1");
+    expect(new DispatchBuffer(home).pending()).toHaveLength(0);
+  });
+
+  describe("dispatcher prepare hook rails", () => {
+    it("preserves caller's advertised op, entityBindingRef, kind, and decisionId when prepare mutates argument in place and returns void", async () => {
+      let dispatchedDecision: OutboundDecision | undefined;
+      const wire = buildInProcessWire({
+        home,
+        ops: ["post_message"],
+        prepare: (decision) => {
+          // Attempt malicious/accidental mutation of rails in place and return void
+          (decision as any).op = "unadvertised_bypassed_op";
+          (decision as any).entityBindingRef = "hacked#channel";
+          (decision as any).kind = "forged_kind";
+          (decision as any).decisionId = "hacked_decision_id";
+          // Valid payload preparation:
+          const p = (decision.payload ?? {}) as Record<string, unknown>;
+          p.preparedPayloadField = "frozen_value";
+        },
+        deliver: async (d) => {
+          dispatchedDecision = d;
+          return { ok: true };
+        },
+      });
+
+      const res = wire.dispatcher.dispatch("post_message", "alice@external", { orig: 1 }, { decisionId: "d-fixed-1" });
+      expect(res.ok).toBe(true);
+      expect((res as { decisionId: string }).decisionId).toBe("d-fixed-1");
+      await tick();
+
+      expect(dispatchedDecision).toBeDefined();
+      expect(dispatchedDecision!.op).toBe("post_message");
+      expect(dispatchedDecision!.entityBindingRef).toBe("alice@external");
+      expect(dispatchedDecision!.kind).toBe("outbound_decision");
+      expect(dispatchedDecision!.decisionId).toBe("d-fixed-1");
+      expect((dispatchedDecision!.payload as any).preparedPayloadField).toBe("frozen_value");
+      expect((dispatchedDecision!.payload as any).orig).toBe(1);
+
+      // Verify what was durably persisted in the buffer matches the rails
+      const bufferEntries = new DispatchBuffer(home).pending();
+      expect(bufferEntries).toHaveLength(0); // Drained because delivery returned ok: true
+    });
+
+    it("preserves caller's advertised op, entityBindingRef, kind, and decisionId when prepare returns a mutated decision object", async () => {
+      let dispatchedDecision: OutboundDecision | undefined;
+      const wire = buildInProcessWire({
+        home,
+        ops: ["post_message"],
+        prepare: (decision) => {
+          // Return new object attempting to alter op, entityBindingRef, kind, decisionId
+          return {
+            kind: "other_kind" as any,
+            decisionId: "hijacked_id",
+            op: "malicious_op",
+            entityBindingRef: "attacker#ref",
+            payload: {
+              ...(decision.payload as object),
+              frozenPayload: "persisted",
+            },
+          };
+        },
+        deliver: async (d) => {
+          dispatchedDecision = d;
+          return { ok: true };
+        },
+      });
+
+      const res = wire.dispatcher.dispatch("post_message", "bob@external", { count: 42 }, { decisionId: "d-fixed-2" });
+      expect(res.ok).toBe(true);
+      expect((res as { decisionId: string }).decisionId).toBe("d-fixed-2");
+      await tick();
+
+      expect(dispatchedDecision).toBeDefined();
+      expect(dispatchedDecision!.op).toBe("post_message");
+      expect(dispatchedDecision!.entityBindingRef).toBe("bob@external");
+      expect(dispatchedDecision!.kind).toBe("outbound_decision");
+      expect(dispatchedDecision!.decisionId).toBe("d-fixed-2");
+      expect((dispatchedDecision!.payload as any).frozenPayload).toBe("persisted");
+      expect((dispatchedDecision!.payload as any).count).toBe(42);
+    });
+
+    it("refuses unadvertised original op before prepare or send is ever executed", async () => {
+      let prepareCalled = false;
+      let sendCalled = false;
+      const wire = buildInProcessWire({
+        home,
+        ops: ["post_message"],
+        prepare: () => {
+          prepareCalled = true;
+        },
+        deliver: async () => {
+          sendCalled = true;
+          return { ok: true };
+        },
+      });
+
+      const res = wire.dispatcher.dispatch("unsupported_op", "alice@external", {});
+      expect(res.ok).toBe(false);
+      expect((res as { error: string }).error).toContain("not advertised");
+      expect(prepareCalled).toBe(false);
+      expect(sendCalled).toBe(false);
+      expect(new DispatchBuffer(home).pending()).toHaveLength(0);
+    });
+  });
 });

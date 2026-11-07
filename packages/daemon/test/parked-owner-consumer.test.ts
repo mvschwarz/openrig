@@ -739,6 +739,55 @@ describe("#1933: the first reminder waits a grace after the seat starts waiting"
 });
 
 
+// #2661 (b) — the turn is over but a shell the owner started still runs: no parked reminder within the ceiling.
+describe("#2661: a live background shell defers the parked reminder up to its ceiling", () => {
+  const NOW = Date.parse("2026-11-07T12:00:00.000Z");
+  const CEILING_MS = 60 * 60_000;
+  const withShell = (ms: number, needsInput = 0) => parkedSeat({
+    activity: { value: "idle-at-prompt", needsInput: { count: needsInput, reason: needsInput ? "selection_prompt" : null },
+      since: new Date(NOW - 2 * CEILING_MS).toISOString(), backgroundWork: { observedAt: new Date(NOW - ms).toISOString() } },
+  } as Partial<ParkedSeatDiagnosisView>);
+  const evaluate = (seat: ParkedSeatDiagnosisView, store = new RowStore()) =>
+    makeParkedOwnerConsumerPolicy({ ...makeDeps([seat], store), now: () => NOW } as ParkedOwnerConsumerDeps).evaluate(makeJob());
+
+  it("a seat whose shell started 20 min ago is not reminded, and nothing is reserved", async () => {
+    const store = new RowStore();
+    const ev = await evaluate(withShell(20 * 60_000), store);
+    expect(ev.action).toBe("skip");
+    expect((ev as { notes?: { skippedSeats?: unknown } }).notes?.skippedSeats).toEqual([{ seat: SEAT, why: "background-shell" }]);
+    expect(store.appended).toEqual([]);
+  });
+
+  it("past the ceiling the reminder goes, and its evidence names the shell", async () => {
+    const ev = await evaluate(withShell(CEILING_MS + 60_000));
+    expect(ev.action).toBe("send");
+    expect((ev as { notes?: { evidence?: string } }).notes?.evidence).toBe("arbitrated-idle-at-prompt; background-shell-past-ceiling");
+  });
+
+  it("a seat at a prompt is still attempted, shell or not", async () => {
+    const ev = await evaluate(withShell(60_000, 1));
+    expect(ev.action).toBe("send");
+    expect((ev as { notes?: { evidence?: string } }).notes?.evidence).toBe("arbitrated-idle-at-prompt");
+  });
+
+  it("the shell reaches the consumer from the shipped diagnosis", async () => {
+    const { diagnoseRigParked } = await import("../src/domain/parked-query.js");
+    const diagnose = (shellAt: string | null) => diagnoseRigParked({
+      getSeatState: () => ({
+        seatNodeId: "node-1", activity: "idle-at-prompt" as const, needsInput: { count: 0, reason: null }, needsInputEvidence: null,
+        backgroundWork: shellAt ? { rung: "self-report" as const, observedAt: shellAt } : null,
+        decidedBy: "self-report" as const, seq: 3, changedAt: new Date(NOW - 2 * CEILING_MS).toISOString(), rungs: [], lastSwap: null,
+      }),
+      listOpenObligations: (_d, limit) => ({ rows: [{ qitemId: ROW_IDS[0]!, state: "in-progress" }], limit }),
+    }, [{ seatNodeId: "node-1", sessionName: SEAT }]);
+    const run = (shellAt: string | null) => makeParkedOwnerConsumerPolicy({
+      ...makeDeps([], new RowStore()), diagnoseRig: () => diagnose(shellAt) as never, now: () => NOW,
+    } as ParkedOwnerConsumerDeps).evaluate(makeJob());
+    expect((await run(new Date(NOW - 5 * 60_000).toISOString())).action).toBe("skip");
+    expect((await run(null)).action).toBe("send");
+  });
+});
+
 describe("parked reminders after a positive no-input quota rejection", () => {
   const quotaState = "guard-revision-a:100:8192";
   const failedQuota = (result: Awaited<ReturnType<ReturnType<typeof makeParkedOwnerConsumerPolicy>["evaluate"]>>, phase: string | undefined = "not_reached") => {
