@@ -498,8 +498,8 @@ interface PreparationAttempt extends PreparationState {
   stoppedAt?: number;
   /** An explicit cancel, even one after a stop: a decision about this seat, never retried automatically. */
   cancelled?: boolean;
-  /** A held attempt's newest fresh sample was below the threshold (this.now() of that sample): its window stays closed,
-   *  for a stale-sample drain too, until a fresh sample is back above. */
+  /** The armed automatic attempt's newest fresh sample was below the threshold (this.now() of that sample), until a fresh
+   *  sample is back above. Once the attempt is held, its window stays closed meanwhile, for a stale-sample drain too. */
   belowSince?: number;
   /** The /compact write has begun and its result isn't back: the attempt is never held then, only stopped as before. */
   compactInFlight?: boolean;
@@ -548,8 +548,8 @@ interface CompactionRecord {
   prepared?: true;
   preparedAt?: number;
   preparedReason?: string;
-  /** A held attempt's window is closed (its newest fresh sample was below the threshold). Kept across a restart, so
-   *  a stale-sample drain there can't send /compact into a context that already dropped. */
+  /** The attempt's newest fresh sample was below the threshold: a held attempt's window is closed. Kept across a
+   *  restart, so a stale-sample drain there can't send /compact into a context that already dropped. */
   belowSince?: number;
   lastDelivery?: RestoreDeliveryAttempt;
   updatedAt: number;
@@ -557,6 +557,8 @@ interface CompactionRecord {
 
 /** What an automatic attempt returns while it is held, its map complete, until a window opens (#2682). */
 const PREPARED_AWAITING_WINDOW = "prepared_awaiting_window";
+/** The final check's refusal for a held attempt whose window is closed (see `belowSince`); it never stops the attempt. */
+const PREPARED_WINDOW_CLOSED = "prepared_window_closed";
 /** Refusals of the /compact before any input that hold a completed map instead of stopping it: a draft in the box (in
  *  the receipt or thrown by the guard) and a pane in a tmux mode. Every other refusal stops as before. */
 const HOLD_REASONS = new Set(["draft_input_busy", "draft_input_unknown", "draft_input_changed", "pane_in_mode"]);
@@ -1097,8 +1099,11 @@ export class ClaudeCompactionEnforcer {
       if (preparation?.status === "compact-sent") this.pendingPreCompactPrep.delete(input.sessionName);
       // A usage dip is not cancellation: retain an unfinished attempt and its
       // deadline so a later high sample can use its map without another prep.
-      // A held attempt keeps its map too, but its window closes while the context is below the threshold (#2682).
-      if (preparation?.prepared && preparation.status === "waiting" && preparation.belowSince === undefined) {
+      // A held attempt keeps its map too, but its window closes while the context is below the threshold (#2682). The
+      // dip is recorded on every armed automatic attempt, so one held later (a draft at the stale drain, the idle grace
+      // running out) inherits a window that is already closed.
+      if (preparation?.mode === "automatic" && preparation.status === "waiting" && preparation.compact === "not_sent"
+        && preparation.belowSince === undefined) {
         preparation.belowSince = this.now();
         this.persist(input.sessionName, preparation.attemptId, { belowSince: preparation.belowSince });
       }
@@ -1420,6 +1425,8 @@ export class ClaudeCompactionEnforcer {
       if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.status !== "waiting" || attempt.controller.signal.aborted)
         throw new DeliveryGuardError(attempt.reason ?? "preparation_stopped", "Compaction preparation ended; no further input is authorized.");
       if (!skipMap && !this.mapReady(attempt, true)) throw new DeliveryGuardError("preparation_incomplete", "This attempt's restore map is incomplete; /compact was not submitted.");
+      // Rechecked at the write: the attempt may have been held, its window already closed, while this send waited.
+      if (attempt.prepared && attempt.belowSince !== undefined) throw new DeliveryGuardError(PREPARED_WINDOW_CLOSED, "The held attempt's window is closed: the context is below the threshold.");
     };
     const composed = composeManagedCompactCommand({ compactInstruction: attempt.compactInstruction, mapPath: skipMap ? null : attempt.mapPath });
     // Whatever the command could not carry, the restore request carries instead. An explicitly
@@ -1470,6 +1477,8 @@ export class ClaudeCompactionEnforcer {
       // for a send that never reached its write.
       const notSent = !writeAttempted && (guardRefused || result.outcome === "retained" || result.sent === false);
       if (notSent && marked) this.persist(input.sessionName, attempt.attemptId, { compactSending: undefined });
+      // A held attempt whose window closed during the send keeps waiting for it; nothing went in.
+      if (notSent && result.reason === PREPARED_WINDOW_CLOSED && attempt.prepared) return { ok: false, reason: PREPARED_AWAITING_WINDOW };
       // A completed map whose /compact was refused before any input, for a window that isn't open yet, is held with the
       // same map instead of stopped and asked for again after the retry cooldown (#2682).
       if (notSent && typeof result.reason === "string" && HOLD_REASONS.has(result.reason) && this.holdPrepared(input.sessionName, attempt, result.reason)) {
@@ -1680,8 +1689,8 @@ export class ClaudeCompactionEnforcer {
         compactInstruction: record.compactInstruction,
         // A held attempt comes back held, with its recorded hold (never stamped again) and its window as it was.
         ...(held ? { prepared: true as const, preparedAt: record.preparedAt ?? record.updatedAt,
-          preparedReason: record.preparedReason ?? "map_complete_seat_never_idle",
-          ...(record.belowSince !== undefined ? { belowSince: record.belowSince } : {}) } : {}),
+          preparedReason: record.preparedReason ?? "map_complete_seat_never_idle" } : {}),
+        ...(record.mode === "automatic" && record.belowSince !== undefined ? { belowSince: record.belowSince } : {}),
       });
       if (record.mode === "manual") this.stopPreparation(session, "daemon_restarted");
       return;

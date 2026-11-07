@@ -712,3 +712,53 @@ it('automatic: completed map survives the prep deadline and sends once at the ne
   expect(f.texts().filter(t => t.startsWith('/compact'))).toHaveLength(1);
   expect(f.e.getPreparationState(seat)).toMatchObject({attemptId: first.attemptId, status: 'compact-sent'});
 });
+
+// #2682 review: a dip in the context BEFORE the hold (during the idle grace) closes the held attempt's window too.
+for (const how of ['draft at the stale drain', 'idle grace running out'] as const) {
+  it(`automatic: a fresh below-threshold sample before the hold (${how}) keeps the held window closed; a fresh sample above reopens it (#2682)`, async () => {
+    const f = fixture();
+    await armed(f);
+    const attemptId = f.e.getPreparationState(seat)!.attemptId;
+    expect(await f.e.maybeAutoCompact({...input, usedPercentage: 30})).toEqual({triggered: false, reason: 'below_threshold'});
+    if (how === 'draft at the stale drain') {
+      f.onText((text) => (text.startsWith('/compact') ? {ok: false, code: 'draft_input_busy', message: 'The seat has an unsubmitted input.'} : undefined));
+      await f.e.drainPendingPreparedCompact({sessionName: seat, runtime: 'claude-code'});
+      f.onText(() => undefined);
+    } else {
+      f.activity('running');
+      f.advance(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1);
+      f.e.reconcilePreparations();
+      f.activity('idle');
+    }
+    expect(f.e.getPreparationState(seat)).toMatchObject({attemptId, status: 'waiting', prepared: true});
+    const before = compactWrites(f);
+    // An idle seat with an empty box and a stale sample: the monitor's drain sends nothing into the dropped context.
+    expect(await f.e.drainPendingPreparedCompact({sessionName: seat, runtime: 'claude-code'})).toEqual({triggered: false, reason: 'prepared_awaiting_window'});
+    expect(compactWrites(f)).toBe(before);
+    expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: true});
+    expect(compactWrites(f)).toBe(before + 1);
+    expect(f.e.getPreparationState(seat)).toMatchObject({attemptId, status: 'compact-sent'});
+    expect(f.texts().filter((t) => !t.startsWith('/compact'))).toHaveLength(1);
+  });
+}
+
+it('automatic: the idle grace running out while the drain waits for the delivery lease holds the attempt with its window closed; nothing is written (#2682)', async () => {
+  const f = fixture();
+  await armed(f);
+  const attemptId = f.e.getPreparationState(seat)!.attemptId;
+  expect(await f.e.maybeAutoCompact({...input, usedPercentage: 30})).toEqual({triggered: false, reason: 'below_threshold'});
+  const guard = (f.transport as any).deliveryGuard;
+  const real = guard.lifecycle.bind(guard);
+  let first = true;
+  vi.spyOn(guard, 'lifecycle').mockImplementation(async (ids: any, fn: any) => {
+    // The lease is taken only after the grace has run out.
+    if (first) { first = false; f.advance(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1); }
+    return real(ids, fn);
+  });
+  const before = compactWrites(f);
+  expect(await f.e.drainPendingPreparedCompact({sessionName: seat, runtime: 'claude-code'})).toEqual({triggered: false, reason: 'prepared_awaiting_window'});
+  expect(compactWrites(f)).toBe(before);
+  expect(f.e.getPreparationState(seat)).toMatchObject({attemptId, status: 'waiting', prepared: true, compact: 'not_sent'});
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: true});
+  expect(compactWrites(f)).toBe(before + 1);
+});
