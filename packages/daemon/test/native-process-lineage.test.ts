@@ -483,6 +483,8 @@ describe("Claude identity with inline settings in ps output", () => {
       permissions: { allow: ["Bash(npm run test:*)"] },
       hooks: { PreToolUse: [{ hooks: [{ type: "command", command: 'node "/fixture with spaces/check.cjs" --label "it\'s fine"', timeout: 5 }] }] },
     })],
+    // #2508: a proxy that writes its settings with spaces between JSON members, as ps shows the argument.
+    ["spaced JSON", '{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8080", "ANTHROPIC_AUTH_TOKEN": "fixture"}}'],
   ];
   function input(args: string) {
     const list = [
@@ -513,6 +515,8 @@ describe("Claude identity with inline settings in ps output", () => {
     `--settings /fixture/settings.json --session-id ${token}`,
     `--settings /fixture/review's-settings.json --session-id ${token}`,
     `--settings /fixture/review"settings.json --session-id ${token}`,
+    // #2508: a brace inside a spaced value's string doesn't end the value.
+    `--settings {"env": {"note": "a } b {"}} --resume ${token}`,
   ])("accepts inline and file settings: %s", async args => {
     expect((await verifyClaudePaneProcess(input(args)))?.process.pid).toBe(21);
     expect((await observeClaudeDelivery(input(args))).state).toBe("verified");
@@ -594,6 +598,9 @@ describe("Claude identity with inline settings in ps output", () => {
   it.each([
     `--settings ${JSON.stringify({ label: `two words --session-id ${token}` })}`,
     `--settings {"env":{"note":"text --session-id ${token} --model trailing`,
+    // #2508: spaced settings stay one value, so an identity inside them, or after a value that never closes, proves nothing.
+    `--settings {"env": {"note": "text --session-id ${token}"}}`,
+    `--settings {"env": {"note": "x"} --session-id ${token}`,
     `--settings ${settings[0]![1]} --session-id ${token} --session-id different`,
     `--settings ${settings[1]![1]} --session-id ${token} --unknown`,
   ])("does not promote ambiguous argv: %s", async args => {
