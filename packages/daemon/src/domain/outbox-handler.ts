@@ -16,6 +16,10 @@ import type Database from "better-sqlite3";
 export const WAKE_INTENT_PREFIX = "wake-intent-";
 /** The sender a watchdog's reminders carry; their audit pointer is the job. */
 const WATCHDOG_SENDER = "watchdog@system";
+/** Who a coalesced held message records as having retired it (#2430). */
+export const COALESCE_ACTOR = "outbox@system";
+/** The retirement reason of a held message coalesced into a newer one from the same sender; the id follows. */
+export const COALESCED_INTO = "coalesced into ";
 
 // Outcomes retain unresolved uncertainty. Wake recovery can claim failed/indeterminate
 // work again; it never steals a live sending claim or interprets unknown as unsent.
@@ -204,7 +208,8 @@ export class OutboxHandler {
 
   /** Retention shares the existing outbox ID. Committed wakes preserve each member,
    * even if guard activation happened after staging and quota is now exhausted. */
-  retain(input: OutboxRecordInput & { outboxId: string }, binding: NonNullable<OutboxEntry["guardBinding"]>, precommitted = false): OutboxEntry {
+  retain(input: OutboxRecordInput & { outboxId: string }, binding: NonNullable<OutboxEntry["guardBinding"]>, precommitted = false,
+    opts: { sameSend?: readonly string[]; coalesce?: boolean } = {}): OutboxEntry {
     return this.db.transaction(() => {
       const existing = this.getById(input.outboxId);
       if (existing) {
@@ -227,6 +232,17 @@ export class OutboxHandler {
           .run(new Date().toISOString(), WATCHDOG_SENDER, "superseded by a newer reminder from the same watchdog job",
             WATCHDOG_SENDER, input.auditPointer, binding.nodeId);
       }
+      // A full quota never drops a sender's newest message for good (#2430): at capacity, a sender that already holds
+      // messages at this seat coalesces them into the new one, which then takes their room. Below capacity each message
+      // keeps its own record. Held messages are never replayed; a coalesced one is retired, stays readable by ID, and
+      // the newest names it (heldForNode's `coalesced`). Never coalesced: a precommitted wake (committed wakes keep each
+      // member, even past the quota), the other parts of this same send, a watchdog's
+      // reminders (kept per job above), an unattributed sender, and a draft-aware attempt (coalesce: false), which moves
+      // on to sending and may still be typed.
+      if (!precommitted && opts.coalesce !== false && input.senderSession && input.senderSession !== "unknown" && input.senderSession !== WATCHDOG_SENDER
+          && !this.hasRetentionCapacity(binding.nodeId, input.body)) {
+        this.coalesceInto(input.outboxId, input.senderSession, binding.nodeId, opts.sameSend ?? []);
+      }
       if (!precommitted) this.assertRetentionCapacity(binding.nodeId, input.body);
       if (!existing) this.record(input);
       this.db.prepare(`UPDATE outbox_entries SET delivery_state='retained', guard_binding=?, delivered_at=NULL
@@ -236,12 +252,43 @@ export class OutboxHandler {
     })();
   }
 
-  assertRetentionCapacity(nodeId: string, body: string): void {
-    // Provisional bounded defaults. Historical/retired rows and already committed
-    // overflow are deliberately not evicted to make these active quotas fit.
+  /** #2430: retire the sender's earlier held messages at this seat into `newestId`, and repoint the ones they had
+   *  coalesced, so the newest names every message it stands for. */
+  private coalesceInto(newestId: string, senderSession: string, nodeId: string, sameSend: readonly string[]): void {
+    const keep = new Set([newestId, ...sameSend]);
+    const older = (this.db.prepare(`SELECT outbox_id FROM outbox_entries
+      WHERE delivery_state='retained' AND sender_session=? AND json_extract(guard_binding,'$.nodeId')=? ORDER BY ts_dispatched,outbox_id`)
+      .all(senderSession, nodeId) as Array<{ outbox_id: string }>).map(row => row.outbox_id).filter(id => !keep.has(id));
+    if (older.length === 0) return;
+    const now = new Date().toISOString();
+    const reason = `${COALESCED_INTO}${newestId}`;
+    const retire = this.db.prepare(`UPDATE outbox_entries SET delivery_state='retired', retired_at=?, retired_by=?, retirement_reason=?
+      WHERE outbox_id=? AND delivery_state='retained'`);
+    const repoint = this.db.prepare(`UPDATE outbox_entries SET retirement_reason=? WHERE delivery_state='retired' AND retirement_reason=?`);
+    for (const id of older) {
+      retire.run(now, COALESCE_ACTOR, reason, id);
+      repoint.run(reason, `${COALESCED_INTO}${id}`);
+    }
+  }
+
+  /** #2430: the held messages coalesced into this one, oldest first. */
+  coalescedInto(outboxId: string): string[] {
+    return (this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE delivery_state='retired' AND retirement_reason=?
+      ORDER BY ts_dispatched,outbox_id`).all(`${COALESCED_INTO}${outboxId}`) as Array<{ outbox_id: string }>).map(row => row.outbox_id);
+  }
+
+  /** Whether one more held message of this size fits the seat's active quota. */
+  private hasRetentionCapacity(nodeId: string, body: string): boolean {
     const usage = this.retentionUsage(nodeId);
     const size = Buffer.byteLength(body, "utf8");
-    if (size > 1024 * 1024 || usage.count >= 100 || usage.bytes + size > 8 * 1024 * 1024) {
+    return !(size > 1024 * 1024 || usage.count >= 100 || usage.bytes + size > 8 * 1024 * 1024);
+  }
+
+  assertRetentionCapacity(nodeId: string, body: string): void {
+    // Provisional bounded defaults. Historical/retired rows and already committed
+    // overflow are deliberately not evicted to make these active quotas fit; only a sender's own
+    // earlier held messages are coalesced into its newest (#2430, in retain).
+    if (!this.hasRetentionCapacity(nodeId, body)) {
       throw new OutboxHandlerError("retained_quota_full", "Held-message quota is full. Retire a specific held message to release active quota; no input was written.");
     }
   }
@@ -272,7 +319,11 @@ export class OutboxHandler {
     const rows = this.db.prepare(`SELECT * FROM outbox_entries
       WHERE delivery_state='retained' AND json_extract(guard_binding,'$.nodeId')=? ORDER BY ts_dispatched,outbox_id LIMIT ? OFFSET ?`)
       .all(nodeId, limit, offset) as OutboxEntryRow[];
-    return { items: rows.map(r => this.rowToEntry(r)), total, limit, offset, truncated: offset + rows.length < total };
+    return { items: rows.map(r => {
+      const entry = this.rowToEntry(r);
+      const coalesced = this.coalescedInto(entry.outboxId);
+      return coalesced.length > 0 ? { ...entry, coalesced: { count: coalesced.length, outboxIds: coalesced } } : entry;
+    }), total, limit, offset, truncated: offset + rows.length < total };
   }
 
   markDelivered(outboxId: string): OutboxEntry {

@@ -104,7 +104,8 @@ describe("delivery pause and durable custody", () => {
   });
   it("rolls back rejected staging but retains committed overflow members with original bodies", () => {
     const { db, targets, outbox } = fixture();
-    for(let i=0;i<100;i++) outbox.retain({ outboxId: `h${i}`, senderSession: "s", destinationSession:"a", body:`body${i}` },targets.a!);
+    // Distinct senders fill the quota: at capacity a sender's own earlier held messages coalesce into its newest (#2430).
+    for(let i=0;i<100;i++) outbox.retain({ outboxId: `h${i}`, senderSession: `s${i}`, destinationSession:"a", body:`body${i}` },targets.a!);
     const next={outboxId:"next",senderSession:"s",destinationSession:"a",body:"new"};
     expect(() => db.transaction(() => { outbox.retain(next,targets.a!); })()).toThrow("quota");
     expect(outbox.getById("next")).toBeNull();
@@ -263,7 +264,8 @@ describe("real queue transaction and retained delivery",()=>{
     const f=queueFixture();
     try {
       await f.guard.set("a",true,"person","draft");
-      for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:"sender@test",destinationSession:"worker@test",body:"held"},f.guard.target("a"));
+      // Other senders fill the quota; the creator holds nothing there, so its wake has no room (#2430).
+      for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:`filler-${i}@test`,destinationSession:"worker@test",body:"held"},f.guard.target("a"));
       const row=await f.repo.create({sourceSession:"sender@test",destinationSession:"worker@test",body:"keep this task"});
       expect(f.repo.getById(row.qitemId)!.body).toBe("keep this task");
       expect(row.lastNudgeResult).toMatch(/^failed:.*quota/i);

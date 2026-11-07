@@ -236,6 +236,16 @@ false` and the protection reason, rather than claiming durable custody.
 Reading never sends. Retirement frees that record's active retention quota while
 preserving evidence; it does not deliver a message or close queue work.
 
+A full held quota does not drop a sender's newest message for good. When a seat's
+quota is full and the sender already holds messages there, its earlier held messages
+are retired into the new one (`retired_by: outbox@system`, reason `coalesced into
+<id>`), which takes their room. The newest names them: `rig seat held-messages`
+shows `coalesced: { count, outboxIds }` on it, and each coalesced record stays
+readable with `--id`. Below the quota, every message keeps its own record. A sender
+with nothing held there is still refused, and nothing from another sender is touched.
+Never coalesced: a committed wake, the other parts of the same send, a watchdog's
+reminders (already one per job), an unattributed sender, and a draft-aware attempt.
+
 ## Input evidence and outcomes
 
 The cursor-aware reader lives in `session-transport.ts` and shares the composer

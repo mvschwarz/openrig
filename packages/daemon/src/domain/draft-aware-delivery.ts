@@ -64,7 +64,7 @@ export class DraftAwareDelivery {
           this.outbox.retain(entry ? { ...entry, tags: entry.tags ?? undefined, auditPointer: entry.auditPointer ?? undefined }
             : { outboxId: id, senderSession: opts.actorSession ?? "unknown", destinationSession: session, body: text,
               auditPointer: opts.auditPointer, identityProvenance: opts.identityProvenance, identityPrincipal: opts.identityPrincipal, ...(opts.urgent ? { urgency: "urgent" } : {}) },
-            target, !!opts.committedOutboxIds);
+            target, !!opts.committedOutboxIds, { coalesce: false });
           this.db.prepare("UPDATE outbox_entries SET delivery_state='sending',guard_delivery=? WHERE outbox_id=?")
             .run(JSON.stringify(receipt), id);
         }

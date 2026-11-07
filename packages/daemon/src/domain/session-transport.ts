@@ -2671,7 +2671,7 @@ export class SessionTransport {
             outbox.retain(prior ? { ...prior, outboxId: id, tags: prior.tags ?? undefined, auditPointer: prior.auditPointer ?? undefined } : {
               outboxId: id, senderSession: opts?.actorSession ?? "unknown", destinationSession: sessionName, body: text, auditPointer: opts?.auditPointer,
               identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal, ...(opts?.urgent ? { urgency: "urgent" } : {}),
-            }, target, !!opts?.committedOutboxIds);
+            }, target, !!opts?.committedOutboxIds, { sameSend: ids });
           }
         })();
         // P2: observed only after the retention above committed; a submit-only

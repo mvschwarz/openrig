@@ -75,7 +75,8 @@ seatRoutes.get("/held-messages/:seatRef", c => {
       const entry = outbox.getById(id);
       if (entry?.guardBinding?.nodeId !== target.nodeId) return c.json({ error: "No retained history for this node and ID" }, 404);
       const delivery = guarded?.lookup(id);
-      return c.json({ entry, ...(delivery ? { delivery } : {}) });
+      const coalesced = outbox.coalescedInto(id);
+      return c.json({ entry, ...(delivery ? { delivery } : {}), ...(coalesced.length > 0 ? { coalesced: { count: coalesced.length, outboxIds: coalesced } } : {}) });
     }
     const page = outbox.heldForNode(target.nodeId, Number(c.req.query("limit") ?? 100), Number(c.req.query("offset") ?? 0));
     return c.json({ ...page, items: page.items.map(entry => {
