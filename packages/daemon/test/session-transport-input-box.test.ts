@@ -1024,12 +1024,12 @@ describe("transport.draft_delivery through the input-box reader (framed drafts t
   });
   afterEach(() => db.close());
 
-  async function send(screen: string, cursorX: number, row: number, choice: "deliver" | "refuse" | undefined) {
+  async function send(screen: string, cursorX: number, row: number, choice: "deliver" | "refuse" | undefined, opts?: { waitForIdleMs?: number }) {
     const { tmux, log } = phasedTmux({ frames: { prePaste: screen, afterPaste: screen, afterEnter: screen } });
     const cursorReads = vi.fn(async () => ({ x: cursorX, y: row, width: 120, height: 40 }));
     (tmux as unknown as { getPaneCursorPosition: typeof cursorReads }).getPaneCursorPosition = cursorReads;
     const result = await new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, sleep: async () => {},
-      ...(choice ? { deliverOverDraft: () => choice === "deliver" } : {}) }).send(SESSION, "hello team");
+      ...(choice ? { deliverOverDraft: () => choice === "deliver" } : {}) }).send(SESSION, "hello team", opts);
     return { result, log, cursorReads };
   }
 
@@ -1039,6 +1039,14 @@ describe("transport.draft_delivery through the input-box reader (framed drafts t
     expect(result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false, inputPhase: "not_reached",
       activity: { state: "needs_input", reason: "prompt_draft" } });
     expect(result.error).toContain("transport.draft_delivery is refuse");
+    expect(log.filter((call) => call === "sendText" || call.startsWith("sendKeys"))).toEqual([]);
+  });
+
+  it("with --wait-for-idle under refuse, the refusal reports the draft, not the idle the wait ended on, and keeps the wait's time", async () => {
+    const { screen, row } = framed(DRAFT);
+    const { result, log } = await send(screen, 2 + DRAFT.length, row, "refuse", { waitForIdleMs: 1_000 });
+    expect(result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false,
+      activity: { state: "needs_input", reason: "prompt_draft" }, waitedMs: expect.any(Number), attempts: expect.any(Number) });
     expect(log.filter((call) => call === "sendText" || call.startsWith("sendKeys"))).toEqual([]);
   });
 

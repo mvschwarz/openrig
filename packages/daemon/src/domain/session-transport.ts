@@ -1047,13 +1047,13 @@ function safeRecord(sink: CaptureObserverSink, input: ObservationInput): void {
   try { sink.record(input); } catch { /* observer failure never reaches the caller */ }
 }
 
-/** transport.draft_delivery as the daemon reads it. deliver is the product default, so only a readable `refuse` opts out:
- *  an unset, unreadable or invalid value follows the default, as other settings fall back to theirs. */
 /** What a send under transport.draft_delivery = deliver says when it meets a person's draft. */
 function draftJoinedAdvisory(sessionName: string): string {
   return `'${sessionName}' had a draft at its prompt and transport.draft_delivery is deliver: this message was pasted at the current cursor into that draft (normally its end), then Enter was sent to submit the combined input. The delivery result says whether that was confirmed.`;
 }
 
+/** transport.draft_delivery as the daemon reads it. deliver is the product default, so only a readable `refuse` opts out:
+ *  an unset, unreadable or invalid value follows the default, as other settings fall back to theirs. */
 export function draftDeliveryAllows(read: () => unknown): boolean {
   try { return read() !== "refuse"; } catch { return true; }
 }
@@ -2089,8 +2089,9 @@ interface SessionTransportDeps {
   runtimeAdapters?: Record<string, TransportReadinessChecker>;
   /** transport.verify_input_box, read per verified Claude Code or Codex send. Absent means off. */
   verifyInputBox?: () => boolean;
-  /** Whether transport.draft_delivery lets this send through a person's draft, read per send that meets one. The daemon
-   *  wires draftDeliveryAllows (deliver by default); a transport built without it keeps refusing. */
+  /** Whether transport.draft_delivery lets this send through a person's draft, read on every ordinary Claude Code or Codex
+   *  send (and on any send that meets a recognised draft). The daemon wires draftDeliveryAllows (deliver by default); a
+   *  transport built without it keeps refusing. */
   deliverOverDraft?: () => boolean;
 }
 
@@ -3431,9 +3432,10 @@ export class SessionTransport {
         if (draftChoice === "refuse") {
           const activity: AgentActivity = { state: "needs_input", reason: "prompt_draft", evidenceSource: "pane_heuristic",
             sampledAt: this.now().toISOString(), evidence: `input box reads ${box.status}`, fallback: true };
-          return observe({ ok: false, sessionName, reason: "target_needs_input", sent: false, inputPhase: "not_reached", activity,
-            error: `Refused: '${sessionName}' is at an interactive prompt (prompt_draft): its input box holds a draft and transport.draft_delivery is refuse. No text was sent.`,
-            ...(waitMode ? waitEvidence : {}) });
+          // Wait evidence keeps its waitedMs and attempts; the activity is this draft's, not the idle the wait ended on.
+          return observe({ ok: false, sessionName, reason: "target_needs_input", sent: false, inputPhase: "not_reached",
+            ...(waitMode ? waitEvidence : {}), activity,
+            error: `Refused: '${sessionName}' is at an interactive prompt (prompt_draft): its input box holds a draft and transport.draft_delivery is refuse. No text was sent.` });
         }
         sendAdvisory = [sendAdvisory, draftJoinedAdvisory(sessionName)].filter(Boolean).join(" ");
       }
@@ -3853,15 +3855,15 @@ export class SessionTransport {
     return paneCommand.replace(/^-/, "");
   }
 
-  /** transport.draft_delivery = deliver (the default): a person's draft at the prompt is the one needs_input an ordinary send or work
-   *  notice goes through. Menus, permission prompts and hook-reported requests still refuse, and so does a send that must
-   *  not join a draft (preserveInput: managed compaction). A send that waits for idle keeps waiting. */
   /** transport.draft_delivery as this transport's reader gives it; undefined without a reader, which keeps today's sends. */
   private draftDeliveryChoice(): "deliver" | "refuse" | undefined {
     if (!this.deliverOverDraft) return undefined;
     try { return this.deliverOverDraft() ? "deliver" : "refuse"; } catch { return undefined; }
   }
 
+  /** transport.draft_delivery = deliver (the default): a person's draft at the prompt is the one needs_input an ordinary send or work
+   *  notice goes through. Menus, permission prompts and hook-reported requests still refuse, and so does a send that must
+   *  not join a draft (preserveInput: managed compaction). A send that waits for idle keeps waiting. */
   private deliversOverDraft(readiness: AgentActivity, opts?: SendOpts): boolean {
     if (readiness.state !== "needs_input" || readiness.reason !== "prompt_draft" || readiness.evidenceSource !== "pane_heuristic") return false;
     if (opts?.preserveInput) return false;
