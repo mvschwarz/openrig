@@ -363,6 +363,10 @@ over that token. Without it, the target's `POST /api/hosts/pair-request` answers
 registered person can approve (none, or several with no default; name one with
 `--human`) (`packages/daemon/src/routes/hosts.ts:167-186`).
 
+The request stays open on the target for as long as `--timeout` waits (600 seconds by default), and the person's
+approval says how long and until when, in UTC. A target older than this CLI ignores the timeout and keeps the request
+10 minutes.
+
 Registration makes a host visible in topology; remote FEED attention remains opt-in.
 The human-readable success output of `host add` and `host pair` now includes the FEED
 next step alongside the existing `host doctor` suggestion. For an HTTP entry named

@@ -785,7 +785,7 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
     .description("Pair with a remote host from one pasted address — one approval on the target, done (FR-6)")
     .argument("<url>", "The target daemon's address (http[s]://host:port, or host:port); that daemon must run with OPENRIG_AUTH_BEARER_TOKEN set")
     .option("--id <id>", "Registry id for the new host (default: derived from the hostname)")
-    .option("--timeout <seconds>", "How long to wait for the target-side approval", "600")
+    .option("--timeout <seconds>", "How long to wait for the target-side approval; the request stays open that long on the target (a target older than this CLI keeps it 10 minutes)", "600")
     .option("--human <address>", "Registered @external approval recipient on the target (required when several exist)")
     .option("--json", "JSON output")
     .action(async (rawUrl: string, opts: { id?: string; timeout?: string; json?: boolean; human?: string }) => {
@@ -857,11 +857,17 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         try { return JSON.parse(s) as Record<string, unknown>; } catch { return {}; }
       };
 
+      // The wait is BOUNDED: a non-finite or overflowing --timeout is clamped to
+      // MAX_PAIR_TIMEOUT_MS, so a target that stops answering can never spin the
+      // retry loop forever. Values that work today keep their wait. The target
+      // keeps the request open as long as this side waits, and its approval says so.
+      const timeoutMs = resolvePairTimeoutMs(opts.timeout);
       let issued: { pairId?: string; code?: string; approvalQitemId?: string; error?: string; message?: string };
       try {
         const res = await httpPost(`${targetBase}/api/hosts/pair-request`, {
           requester: `${userInfo().username}@${osHostname()}`,
           ...(opts.human ? { human: opts.human } : {}),
+          timeoutMs,
         });
         issued = parseJson(res.body) as typeof issued;
         if (res.status !== 200 || !issued.pairId || !issued.code) {
@@ -881,25 +887,25 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         console.log(`On the target: rig queue update ${issued.approvalQitemId ?? "<qitem-id>"} --state done --closure-reason no-follow-on`);
       }
 
-      // The wait is BOUNDED: a non-finite or overflowing --timeout is clamped to
-      // MAX_PAIR_TIMEOUT_MS, so a target that stops answering can never spin the
-      // retry loop forever. Values that work today keep their wait. A note names
-      // the bound actually used so a clamped value is not silently absorbed.
-      const timeoutMs = resolvePairTimeoutMs(opts.timeout);
+      // A note names the bound actually used so a clamped value is not silently absorbed.
       if (!opts.json && timeoutMs === MAX_PAIR_TIMEOUT_MS) {
         console.log(`Waiting up to ~${(MAX_PAIR_TIMEOUT_MS / 86_400_000).toFixed(1)} days for approval on the target (--timeout capped at the maximum).`);
       }
+      // Poll at once, then every 2 s, never sleeping past the deadline: the target keeps the request open only as long
+      // as this side waits, so a short --timeout still sees an approval that's already there.
       const deadline = Date.now() + timeoutMs;
       let outcome: { status?: string; token?: string } = {};
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2000));
+      for (;;) {
         try {
           const res = await deps.httpGet(`${targetBase}/api/hosts/pair-request/${issued.pairId}`);
           outcome = parseJson(res.body) as typeof outcome;
+          if (outcome.status && outcome.status !== "pending") break;
         } catch {
-          continue; // transient poll failure: keep waiting until the deadline
+          // transient poll failure: keep waiting until the deadline
         }
-        if (outcome.status && outcome.status !== "pending") break;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await new Promise((r) => setTimeout(r, Math.min(2000, remaining)));
       }
 
       if (outcome.status !== "approved" || !outcome.token) {
