@@ -414,6 +414,7 @@ do not establish connectivity to a live peer.
 |---|---|---|
 | `rig acp` | — | — |
 | `rig acp run <qitemId> <agent...>` | — | `--cwd <dir>`<br>`--permissions-to <session>`<br>`--load-session <id>`<br>`--poll-seconds <n>` |
+| `rig acp serve` | — | `--to <member@rig>`<br>`--as <address>`<br>`--poll-seconds <n>` |
 | `rig acp cancel <runId>` | — | — |
 | `rig acp stop <runId> [stopCommand...]` | — | — |
 
