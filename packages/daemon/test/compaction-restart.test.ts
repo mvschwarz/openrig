@@ -535,3 +535,27 @@ it('#2682 P1: a fresh high sample from another conversation, in process or after
   }
  }
 });
+
+it('#2682 P2a: an ended attempt, an idle read, then a stale observation, then a busy seat: no fresh request on the busy poll',async()=>{
+ const f=fixture();const e=f.daemon();await endedPastCooldown(f,e);
+ expect(await e.maybeAutoCompact({...hs,isObservationCurrent:()=>false})).toEqual({triggered:false,reason:'stale_observation'});
+ f.hooks.busy=true;
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(f)).toHaveLength(1);
+});
+
+it('#2682 P2b: an ended attempt, an idle read, then a peer\'s turn before the send: the request waits for a real idle window, and goes once',async()=>{
+ const f=fixture();const e=f.daemon();await endedPastCooldown(f,e);
+ const read=f.transport.waitUntilIdle.bind(f.transport);
+ // A peer's message starts a turn right after the gate's idle read.
+ vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async(...args)=>{const r=await read(...args);f.hooks.busy=true;return r;});
+ expect(await e.maybeAutoCompact(hs)).toMatchObject({triggered:false});
+ expect(prepPrompts(f)).toHaveLength(1);
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(f)).toHaveLength(1);
+ f.hooks.busy=false;
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:true});
+ expect(prepPrompts(f)).toHaveLength(2);
+ f.hooks.busy=true;await e.maybeAutoCompact(hs);
+ expect(prepPrompts(f)).toHaveLength(2);
+});
