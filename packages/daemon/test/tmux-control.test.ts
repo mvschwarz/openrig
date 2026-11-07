@@ -320,6 +320,64 @@ describe("tmuxControlExec", () => {
     }
   });
 
+  it("#161 says once per server version that control mode is off, why, and what to do", async () => {
+    let server = "3.4|\n";
+    let clock = 0;
+    const logged: string[] = [];
+    const exec = tmuxControlExec(async (argv) => (argv[1] === "list-sessions" ? server : ""), {
+      spawnClient: () => { throw new Error("no client expected"); }, now: () => clock, log: (message) => logged.push(message),
+    });
+    try {
+      expect(exec.status()).toEqual({ state: "undecided" });
+      for (const at of [0, 1_000, 10_000, 60_000]) {
+        clock = at;
+        await exec(["tmux", "has-session", "-t", "=seat@rig"]);
+      }
+      expect(exec.status()).toEqual({ state: "off", serverVersion: "3.4" });
+      expect(logged).toHaveLength(1);
+      expect(logged[0]).toMatch(/^\[tmux\] OPENRIG_TMUX_CONTROL=1 is set, but this daemon's tmux server runs tmux 3\.4/);
+      expect(logged[0]).toContain("3.7c or later");
+      expect(logged[0]).toContain("spawned client");
+      expect(logged[0]).toContain("tmux-servers.md");
+
+      // A server started again at another version is read again: one more line, for it.
+      server = "next-3.8|\n";
+      clock = 200_000;
+      await exec(["tmux", "has-session", "-t", "=seat@rig"]);
+      expect(exec.status()).toEqual({ state: "off", serverVersion: "next-3.8" });
+      expect(logged).toHaveLength(2);
+      expect(logged[1]).toContain("tmux next-3.8, which isn't a tmux release known to be 3.7c or later");
+
+      // No server, or none read yet: what was last read stands, and nothing more is said.
+      server = "";
+      clock = 400_000;
+      await exec(["tmux", "has-session", "-t", "=seat@rig"]);
+      expect(exec.status()).toEqual({ state: "off", serverVersion: "next-3.8" });
+      expect(logged).toHaveLength(2);
+    } finally {
+      await exec.close();
+    }
+  });
+
+  it("#161 says once that control mode is on when its server is a fixed release", async () => {
+    const client = fakeClient();
+    const { fallback } = fakeSpawned();
+    const logged: string[] = [];
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, replyTimeoutMs: 1000, log: (message) => logged.push(message) });
+    try {
+      for (const n of [1, 2]) {
+        const read = exec(["tmux", "display-message", "-p", "-t", "=seat@rig:", `r${n}`]);
+        await vi.waitFor(() => expect(client.written).toHaveLength(n));
+        client.answer(`r${n}`);
+        expect(await read).toBe(`r${n}\n`);
+      }
+      expect(exec.status()).toEqual({ state: "on", serverVersion: "3.8" });
+      expect(logged).toEqual(["[tmux] Control mode is on: this daemon's tmux server runs tmux 3.8."]);
+    } finally {
+      await exec.close();
+    }
+  });
+
   it("keeps a client whose line moves: each reply restarts the wait of the command behind it", async () => {
     const client = fakeClient();
     const { spawned, fallback } = fakeSpawned();
