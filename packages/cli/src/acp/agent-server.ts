@@ -22,7 +22,10 @@ export interface TeamRow {
   destinationSession: string;
   handedOffTo: string | null;
   closureReason: string | null;
+  closureTarget: string | null;
   resolution: string | null;
+  /** Who closed the row, from its closing transition (a note written after the close doesn't change it); null while open. */
+  closer: string | null;
 }
 
 export interface TeamTransition {
@@ -57,8 +60,11 @@ export interface SentRow {
 
 /** The queue verbs the adapter uses, acting as the caller. */
 export interface TeamQueue {
-  create(row: { destination: string; body: string; summary: string; tags: string[] }): Promise<string>;
+  /** Create the row under the id the adapter chose, so a create whose answer is lost can be read back by that id. */
+  create(row: { qitemId: string; destination: string; body: string; summary: string; tags: string[] }): Promise<void>;
   show(qitemId: string): Promise<TeamRow>;
+  /** The row, or null when this machine has no such row; throws when it can't tell. */
+  find(qitemId: string): Promise<TeamRow | null>;
   transitions(qitemId: string): Promise<TeamTransition[]>;
   /** The row a handoff of `qitemId` created on this machine, if any. */
   successor(qitemId: string): Promise<string | undefined>;
@@ -120,6 +126,9 @@ export function promptText(prompt: ContentBlock[]): string {
   return parts.join("\n\n").trim();
 }
 
+/** A queue row id in the form the CLI mints (`qitem-<UTC yyyymmddhhmmss>-<16 hex>`). */
+export const newQitemId = () => `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
+
 function oneLine(text: string, max: number): string {
   const line = text.split("\n").find((l) => l.trim())?.trim() ?? "";
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
@@ -150,12 +159,10 @@ class ChainFollower {
   async read(): Promise<ChainState> {
     for (;;) {
       let tail!: TeamRow;
-      let closing: TeamTransition | undefined;
       for (const qitemId of this.chain) {
         const row = await this.queue.show(qitemId);
         const transitions = await this.queue.transitions(qitemId);
         tail = row;
-        closing = transitions.at(-1);
         this.seats.add(row.destinationSession);
         const status = toolStatus(row.state);
         let entry = this.seen.get(qitemId);
@@ -175,16 +182,18 @@ class ChainFollower {
           this.emit({ sessionUpdate: "tool_call_update", toolCallId: qitemId, status, ...(entry.lines.length > 0 ? { content: textContent(entry.lines.join("\n")) } : {}) });
         }
       }
-      if (tail.state === "handed-off") {
+      // Both handoff forms pass the work on: `handoff` leaves the row handed-off, `handoff-and-complete` closes it done
+      // with closure reason handed_off_to. Either way the answer is the successor's, not this row's.
+      if (tail.state === "handed-off" || (tail.state === "done" && tail.closureReason === "handed_off_to")) {
         const next = await this.queue.successor(tail.qitemId);
         if (next) { this.chain.push(next); continue; }
-        return { kind: "ended", tail, reply: `${tail.qitemId} was handed to ${tail.handedOffTo ?? "another seat"}, whose row isn't on this machine, so this app can't follow it further. The work goes on there; ask your team for its result.` };
+        return { kind: "ended", tail, reply: `${tail.qitemId} was handed to ${tail.handedOffTo ?? tail.closureTarget ?? "another seat"}, whose row isn't on this machine, so this app can't follow it further. The work goes on there; ask your team for its result.` };
       }
       if (ACTIVE_STATES.has(tail.state)) return { kind: "open", tail };
       // A done row's closure reason says how it ended (canceled is a done close too); the ordinary one goes unsaid.
       const reason = tail.closureReason && tail.closureReason !== "no-follow-on" ? ` (${tail.closureReason})` : "";
       const how = tail.state === "done" ? `done${reason}` : `as ${tail.state}${reason}`;
-      return { kind: "ended", tail, reply: `${closing?.actorSession ?? tail.destinationSession} closed ${tail.qitemId} ${how}.\n\n${tail.resolution?.trim() || "(No resolution was written.)"}` };
+      return { kind: "ended", tail, reply: `${tail.closer ?? tail.destinationSession} closed ${tail.qitemId} ${how}.\n\n${tail.resolution?.trim() || "(No resolution was written.)"}` };
     }
   }
 }
@@ -347,18 +356,36 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
     session.turn = { cancel: () => { cancelled = true; wake(); } };
     let root: string | undefined;
     try {
-      const earlier = await Promise.all(session.sent.map(async (s) => ({ ...s, row: await team.queue.show(s.tail) })));
-      const open = earlier.filter((s) => ACTIVE_STATES.has(s.row.state));
-      if (open.length > 0) say(session.id, `${open.map((s) => `${s.row.qitemId} is still ${s.row.state} with ${s.row.destinationSession}`).join("; ")}. Sending this as a follow-up.\n\n`);
-      const lineage = earlier.length === 0 ? "" : `\nFollows up on ${earlier.map((s) => `${s.root} (${s.tail === s.root ? "" : `reached ${s.tail}, `}${s.row.state})`).join(", ")}.`;
+      // Each earlier item as it stands; one whose create was never confirmed may not exist, or can't be read: say which.
+      const earlier = await Promise.all(session.sent.map(async (s) => {
+        const row = await team.queue.find(s.tail).catch(() => undefined);
+        return { ...s, row, state: row === undefined ? "state unknown" : row === null ? "not on this machine" : row.state };
+      }));
+      const open = earlier.filter((s) => s.row && ACTIVE_STATES.has(s.row.state));
+      if (open.length > 0) say(session.id, `${open.map((s) => `${s.row!.qitemId} is still ${s.row!.state} with ${s.row!.destinationSession}`).join("; ")}. Sending this as a follow-up.\n\n`);
+      const lineage = earlier.length === 0 ? "" : `\nFollows up on ${earlier.map((s) => `${s.root} (${s.tail === s.root ? "" : `reached ${s.tail}, `}${s.state})`).join(", ")}.`;
       const body = `${text}${FOOTER}${team.caller} from ${clientName} through rig acp serve (session ${session.id}).${lineage}\n` +
         `The app shows this item's notes and handoffs as progress, and its closing resolution as the answer: close it with a resolution written for ${team.caller}. ` +
         `A question you ask ${team.caller} with choices (rig queue create --destination ${team.caller} --human-questions-file …) appears in the app while this turn is open.`;
       const turnStarted = new Date().toISOString();
-      root = await team.queue.create({
-        destination: team.receiver, body, summary: `ACP: ${oneLine(text, 100)}`,
-        tags: ["acp-serve", `${SESSION_TAG}${session.id}`, ...(session.cwd ? [`${CWD_TAG}${session.cwd}`] : [])],
-      });
+      const qitemId = newQitemId();
+      try {
+        await team.queue.create({
+          qitemId, destination: team.receiver, body, summary: `ACP: ${oneLine(text, 100)}`,
+          tags: ["acp-serve", `${SESSION_TAG}${session.id}`, ...(session.cwd ? [`${CWD_TAG}${session.cwd}`] : [])],
+        });
+      } catch (error) {
+        // The answer was lost, not necessarily the row: read it back by its id before saying what happened.
+        const landed = await team.queue.find(qitemId).catch(() => undefined);
+        if (landed === null) throw new AcpError(-32603, `Couldn't send the task (${(error as Error).message}); nothing reached the team.`);
+        if (landed === undefined) {
+          session.sent.push({ root: qitemId, tail: qitemId });
+          say(session.id, `Sending ${qitemId} to ${team.receiver} wasn't confirmed (${(error as Error).message}), and it couldn't be read back: it may or may not have reached the team. Its state is unknown from here; a new prompt in this session names it, and \`rig queue show ${qitemId}\` shows it if it exists.`);
+          throw new AcpError(-32603, `Couldn't confirm ${qitemId}: ${(error as Error).message}`);
+        }
+        log(`session ${session.id}: ${qitemId}'s create wasn't acknowledged, but it reads back`);
+      }
+      root = qitemId;
       const sent = { root, tail: root };
       session.sent.push(sent);
       log(`session ${session.id}: sent ${root} to ${team.receiver}`);

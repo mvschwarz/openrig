@@ -53,24 +53,30 @@ export function daemonTeamQueue(client: DaemonClient): TeamQueue {
     if (response.status >= 400) throw new Error(`${what} returned HTTP ${response.status}: ${JSON.stringify(response.data)}`);
     return response.data;
   };
+  const face = (data: Record<string, unknown>) => {
+    const row = (data.item ?? data) as Record<string, unknown>;
+    const text = (value: unknown) => (typeof value === "string" ? value : null);
+    return {
+      qitemId: String(row.qitemId), state: String(row.state), destinationSession: String(row.destinationSession),
+      handedOffTo: text(row.handedOffTo), closureReason: text(row.closureReason), closureTarget: text(row.closureTarget), resolution: text(row.resolution),
+      closer: text((row.closingTransition as { actorSession?: unknown } | null | undefined)?.actorSession),
+    };
+  };
   const list = async (query: string, what: string): Promise<Array<Record<string, unknown>>> => {
     const data = ok(await client.get<unknown>(`/api/queue/list?${query}`), what);
     return (Array.isArray(data) ? data : ((data as { items?: unknown[] }).items ?? [])) as Array<Record<string, unknown>>;
   };
   return {
     async create(row) {
-      const qitemId = newId("qitem", 8);
-      ok(await client.post("/api/queue/create", { qitemId, destinationSession: row.destination, body: row.body, summary: row.summary, tags: row.tags }), `queue create for ${row.destination}`);
-      return qitemId;
+      ok(await client.post("/api/queue/create", { qitemId: row.qitemId, destinationSession: row.destination, body: row.body, summary: row.summary, tags: row.tags }), `queue create for ${row.destination}`);
     },
     async show(qitemId) {
-      const data = ok(await client.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`), `queue show ${qitemId}`);
-      const row = (data.item ?? data) as Record<string, unknown>;
-      const text = (value: unknown) => (typeof value === "string" ? value : null);
-      return {
-        qitemId: String(row.qitemId), state: String(row.state), destinationSession: String(row.destinationSession),
-        handedOffTo: text(row.handedOffTo), closureReason: text(row.closureReason), resolution: text(row.resolution),
-      };
+      return face(ok(await client.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`), `queue show ${qitemId}`));
+    },
+    async find(qitemId) {
+      const response = await client.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`);
+      if (response.status === 404) return null;
+      return face(ok(response, `queue show ${qitemId}`));
     },
     async transitions(qitemId) {
       const data = ok(await client.get<Array<Record<string, unknown>>>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`), `queue transitions ${qitemId}`);
