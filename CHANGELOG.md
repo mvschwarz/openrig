@@ -154,6 +154,12 @@ A verified export, a finished task and an exact restore haven't been shown.
   now has the agent point npm's prefix at a folder the person owns whose `bin` is
   on their login PATH, or use a version manager's Node, saying first what that
   changes, and install inside the project only if neither works. ([#2611](https://github.com/mvschwarz/openrig/pull/2611))
+- **Plain `rig` works in managed Codex seats however OpenRig was installed.**
+  OpenRig now passes Codex `-c allow_login_shell=false`, so tool commands run in
+  a non-login shell and inherit the environment their pane's shell set up,
+  OpenRig's command folder included. To defer to Codex's own setting instead,
+  run `rig config set launch.codex_login_shell true`; it applies at each seat's
+  next launch, and a restart in place keeps the running choice. ([#2613](https://github.com/mvschwarz/openrig/pull/2613))
 - **Agent spec advisories show where you'll see them:** `rig up`, a fresh restore
   and a first-start retry report each as a launch warning naming the member,
   spec and path, and `rig agent validate` prints them whether or not the spec is
@@ -204,6 +210,15 @@ A verified export, a finished task and an exact restore haven't been shown.
 
 ### Behaviour that changed
 
+- **Managed Codex seats run tool commands in a non-login shell** (above).
+  Inherited setup isn't re-run for each command, so setup that lives only in
+  login or rc files (such as `~/.bashrc` lines your login file doesn't source, or
+  a tmux `default-command` that doesn't start a login shell), shell functions and
+  aliases may be missing from tool commands. A model request for `login: true`
+  gets Codex's own refusal, "login shell is disabled by config". With
+  `launch.codex_login_shell` on, OpenRig omits its override rather than forcing
+  login shells, so a login file that sets `PATH` outright can then hide `rig`.
+  ([#2613](https://github.com/mvschwarz/openrig/pull/2613))
 - **A held post-compaction step goes in after two idle polls that can't read the
   input box** (above). A draft OpenRig can't recognise in that box may receive
   the restore text. ([#2576](https://github.com/mvschwarz/openrig/pull/2576))
@@ -301,13 +316,6 @@ A verified export, a finished task and an exact restore haven't been shown.
   required" until relaunched; in that upgrade test, one seat restarted with
   OpenRig's managed restart showed no review afterwards. 0.7.10 changes
   openrig-core's files again.
-- **Codex seats can still report `rig: command not found`** when `rig` isn't on
-  the login shell's PATH: with Node outside it, or when npm can't install
-  globally and OpenRig is installed inside the project instead. Preflight warns
-  at launch, and the getting-started guide describes a `~/.profile` fix. The
-  rigs skill now tries a user-writable npm prefix first (above), but after a
-  project-local install Codex seats can still be left without `rig`.
-  ([#2611](https://github.com/mvschwarz/openrig/pull/2611))
 - **The runner contract** has run natively only at the scope its status section
   states (`docs/reference/harness-runner-contract.md`); any other runner,
   provider or path is unqualified until shown.
@@ -315,7 +323,9 @@ A verified export, a finished task and an exact restore haven't been shown.
   and owned-delete inventory (fixed in the source, not yet run end to end), a
   restore request held after a managed compaction, `rig broadcast`'s `FAILED`
   for an uncertain recipient, the refusal for a seat handed over before 0.7.9,
-  and where to read what has run under the runner contract.
+  where to read what has run under the runner contract, and Codex seats'
+  `rig: command not found` (now a non-login shell by default; see Behaviour that
+  changed).
 - **The 0.7.8 limits that 0.7.9 didn't fix or change, and the 0.7.7 and 0.7.6
   limits, below still apply.**
 

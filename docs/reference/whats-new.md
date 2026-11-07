@@ -36,6 +36,15 @@ startup.
   no review afterwards.
 - **OpenShell:** rebuild a guest image with this release's `guest.py` before
   using it; the CA repair is in that file, which the image carries.
+- **Codex tool commands use a non-login shell:** managed Codex seats now pass
+  Codex `-c allow_login_shell=false`, so plain `rig` works however OpenRig was
+  installed. Setup that lives only in login or rc files, and shell functions and
+  aliases, may be missing from tool commands, and a model request for
+  `login: true` gets Codex's refusal, "login shell is disabled by config". To
+  defer to Codex's own setting, run `rig config set launch.codex_login_shell
+  true`; a login file that sets `PATH` outright can then hide `rig`. It applies
+  at each seat's next launch, and a restart in place keeps the running choice.
+  ([#2613](https://github.com/mvschwarz/openrig/pull/2613))
 
 ## Finite runs: `rig exec`
 
@@ -163,10 +172,6 @@ daemon's main API port (normally 7433)."
   `✔ Update installed · Restart to update` on its own line can still hold
   deliveries at an empty prompt, queue wakes included; 0.7.10 doesn't recognize
   that bare banner. A held message isn't replayed automatically by that path.
-- **Codex seats can still report `rig: command not found`** when `rig` isn't on
-  the login shell's PATH: with Node outside it, or after a project-local
-  install. Preflight warns at launch; `getting-started.md` explains the
-  `~/.profile` line and how to check it with `bash -lc 'command -v node rig'`.
 - **Seats handed over before 0.7.9** keep their adopted origin until a later
   launched handover or managed launch records a new session. Until then
   `rig seat stop`, `clean` and in-place restart refuse them, and now say why.
@@ -179,8 +184,9 @@ daemon's main API port (normally 7433)."
 - **The other 0.7.9 limits below still apply:** open updates for a person, Slack,
   SSH host status, shared asks, permit records, existing seats, Codex hooks, and
   grant-service assistants not being woken. 0.7.9's limits on a restore request
-  held after compaction, `rig broadcast`'s `FAILED`, and what has run under the
-  runner contract are fixed or changed. The 0.7.8 limits below that 0.7.9
+  held after compaction, `rig broadcast`'s `FAILED`, what has run under the
+  runner contract, and Codex seats' `rig: command not found` are fixed or
+  changed. The 0.7.8 limits below that 0.7.9
   didn't fix or change, and the
   [0.7.7](https://github.com/mvschwarz/openrig/releases/tag/v0.7.7) and
   [0.7.6](https://github.com/mvschwarz/openrig/releases/tag/v0.7.6) limits, still
