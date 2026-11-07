@@ -654,9 +654,8 @@ setInterval(() => {}, 1000);
         expect(res).toMatchObject({ ok: true });
       }
 
-      for (let i = 0; i < 100 && !fs.existsSync(codexRecordPath); i++) {
-        await new Promise(resolve => setTimeout(resolve, 20));
-      }
+      // The wrapper and its Node child can take more than two seconds to start under suite load.
+      await vi.waitFor(() => expect(fs.existsSync(codexRecordPath)).toBe(true), { timeout: 10_000, interval: 25 });
       const wrapperRec = JSON.parse(fs.readFileSync(wrapperRecordPath, "utf8"));
       const codexRec = JSON.parse(fs.readFileSync(codexRecordPath, "utf8"));
       expect(wrapperRec.wrapperPid).toBe(codexRec.codexPid);
@@ -673,9 +672,7 @@ setInterval(() => {}, 1000);
       expect(codexRec.generation).toBe(mode === "resume" ? "codex-gen-1" : "codex-gen-2");
 
       process.kill(codexRec.codexPid, "SIGUSR2");
-      for (let i = 0; i < 100 && !fs.existsSync(codexExitFile); i++) {
-        await new Promise(resolve => setTimeout(resolve, 20));
-      }
+      await vi.waitFor(() => expect(fs.existsSync(codexExitFile)).toBe(true), { timeout: 10_000, interval: 25 });
       expect(codexRec.signalHandlerReady).toBe(true);
       expect(JSON.parse(fs.readFileSync(codexExitFile, "utf8"))).toEqual({ code: 13, pid: codexRec.codexPid });
     } finally {
