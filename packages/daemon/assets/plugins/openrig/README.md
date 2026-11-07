@@ -8,7 +8,9 @@ This plugin is for a person's own agent in an app such as Claude Code or Codex. 
 
 ## What it ships
 
-- **The MCP server entry** (Claude Code): `rig mcp serve`, acting as the seat you set in the plugin's settings.
+- **The MCP server entry**, in the Claude Code manifest only: `rig mcp serve`, acting as the seat you set in the plugin's
+  settings. Claude Code substitutes that setting into the server's environment. Codex doesn't, so the plugin ships no
+  shared MCP file, and Codex gets the server from one command (below).
 - **One skill,** `working-with-an-openrig-team`: the loop around the tools. It covers handing work to the team's lead,
   following it along its handoffs, answering the team's questions with your own words, reading the result and coming
   back to it later.
@@ -35,14 +37,13 @@ Set the plugin's **OpenRig seat** to your address, then start a new session.
 
 **Codex**
 
-Connect the MCP server with your address:
+Install the plugin for its skill, then connect the MCP server with your address:
 
 ```sh
+codex plugin marketplace add "$(npm root -g)/@openrig/cli/daemon/assets/plugins/openrig"
+codex plugin add openrig@openrig
 codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve
 ```
-
-Installing the skill through Codex's plugin menu isn't qualified yet. Until it is, the MCP server's own instructions
-carry the loop.
 
 ## What it doesn't do
 

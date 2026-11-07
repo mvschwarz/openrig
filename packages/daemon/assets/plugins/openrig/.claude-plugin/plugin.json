@@ -11,7 +11,15 @@
   "license": "Apache-2.0",
   "keywords": ["openrig", "agents", "team", "delegation", "mcp"],
   "skills": "./skills",
-  "mcpServers": "./.mcp.json",
+  "mcpServers": {
+    "openrig": {
+      "command": "rig",
+      "args": ["mcp", "serve"],
+      "env": {
+        "OPENRIG_SESSION_NAME": "${user_config.seat}"
+      }
+    }
+  },
   "userConfig": {
     "seat": {
       "type": "string",
