@@ -5151,6 +5151,15 @@ export class QueueRepository {
   private activityReader?: WaitingActivityReader;
   attachActivityReader(reader: WaitingActivityReader): void { this.activityReader = reader; }
 
+  /** #2661 (c): since when (ISO) the daemon owes a seat its managed post-compaction stages, or null. */
+  private compactionReader?: (session: string) => string | null;
+  attachCompactionReader(reader: (session: string) => string | null): void { this.compactionReader = reader; }
+
+  compactionOwedSince(session: string | null | undefined): string | null {
+    if (!session) return null;
+    try { return this.compactionReader?.(session) ?? null; } catch { return null; }
+  }
+
   private workflowGuidance?: (packetId: string) => string[];
   attachWorkflowGuidance(reader: (packetId: string) => string[]): void { this.workflowGuidance = reader; }
 
@@ -5262,6 +5271,8 @@ export class QueueRepository {
       activity: activity?.activity,
       needsInput: activity?.needsInput.count,
       needsInputReason: activity?.needsInput.reason,
+      backgroundWork: activity?.backgroundWork ?? null,
+      compactionOwedSince: this.compactionOwedSince(row.destination_session),
       claimedAt: row.claimed_at,
       lastHeartbeat: row.last_heartbeat,
       postClaimMotionCount: 0, // this reader supplies the current meaningful timestamp

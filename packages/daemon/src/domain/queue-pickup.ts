@@ -24,10 +24,18 @@ import { SettingsStore } from "./user-settings/settings-store.js";
 
 export const PICKUP_STALL_THRESHOLD_KEY = "queue.pickup_stall_threshold_minutes";
 export const DEFAULT_PICKUP_STALL_THRESHOLD_MINUTES = 3;
+/** #2661 (b): how long a live background shell (the owner's turn is over, a shell it started still runs) counts as
+ *  life past the stall threshold. A ceiling, so a forgotten shell still surfaces: CI watches, test suites and mutation
+ *  runs seen in the field took 20-65 min. */
+export const BACKGROUND_SHELL_GRACE_MINUTES = 60;
+/** #2661 (c): how long a pending managed post-compaction restore (the daemon owns the seat's recovery) counts as life
+ *  past the stall threshold. A ceiling, so a restore that never comes still surfaces. */
+export const COMPACTION_RESTORE_GRACE_MINUTES = 20;
 
 export interface PickupReceipt {
   state: "unclaimed" | "working" | "needs-input" | "stalled-after-claim" | "parked" | "terminal";
-  /** Present when waiting for input, stalled or terminal: the named evidence replacing the manual cross-surface join. */
+  /** Present when waiting for input, stalled or terminal, or working on a named grace (a background shell, a pending
+   *  restore): the named evidence replacing the manual cross-surface join. */
   evidence?: string;
   /** needs-input only: the stall evidence this claim would read without the input wait. */
   stall?: string;
@@ -61,8 +69,14 @@ export interface PickupFacts {
   activity?: string;
   needsInput?: number;
   needsInputReason?: string | null;
+  /** #2661 (b): the owner is idle at the prompt with a live background shell, first seen at observedAt. */
+  backgroundWork?: { observedAt: string } | null;
+  /** #2661 (c): the daemon owes the owner its managed post-compaction stages since this time (ISO). */
+  compactionOwedSince?: string | null;
   now?: Date;
   thresholdMinutes?: number;
+  backgroundShellGraceMinutes?: number;
+  compactionRestoreGraceMinutes?: number;
 }
 
 /** The ONE derivation rule — every projection surface (rowToItem, the pickup view lens, the
@@ -98,13 +112,30 @@ function deriveClaimPickup(facts: PickupFacts): PickupReceipt {
   const anchor = Math.max(claimedMs, Date.parse(facts.lastMeaningfulAt ?? facts.claimedAt), heartbeatAfterClaim ? Date.parse(facts.lastHeartbeat!) : claimedMs);
   const ageMs = now.getTime() - anchor;
   if (ageMs <= thresholdMs) return { state: "working" };
+  // #2661: two signals the daemon owns are life past the threshold, each up to its ceiling. A pending input keeps
+  // today's needs-input reading (derivePickup), so neither applies with one.
+  const past: string[] = [];
+  if (!facts.needsInput) {
+    for (const g of [
+      { since: facts.backgroundWork?.observedAt, ceiling: facts.backgroundShellGraceMinutes ?? BACKGROUND_SHELL_GRACE_MINUTES,
+        live: "owner idle at prompt with a live background shell", over: "background shell live" },
+      { since: facts.compactionOwedSince ?? undefined, ceiling: facts.compactionRestoreGraceMinutes ?? COMPACTION_RESTORE_GRACE_MINUTES,
+        live: "managed post-compaction restore owed", over: "managed restore owed" },
+    ]) {
+      const sinceMs = g.since ? Date.parse(g.since) : NaN;
+      if (!Number.isFinite(sinceMs)) continue;
+      const m = Math.max(0, Math.floor((now.getTime() - sinceMs) / 60_000));
+      if (now.getTime() - sinceMs <= g.ceiling * 60_000) {
+        return { state: "working", evidence: `${g.live} for ${m} min (grace ${g.ceiling} min)` };
+      }
+      past.push(`${g.over} ${m} min, past its ${g.ceiling} min ceiling`);
+    }
+  }
   const minutes = Math.floor(ageMs / 60_000);
-  return {
-    state: "stalled-after-claim",
-    evidence: facts.lastMeaningfulAt === undefined
-      ? `claimed ${minutes} min ago, zero substantive transitions since`
-      : `no meaningful queue change for ${minutes} min; owner activity ${facts.activity ?? "unknown"} (queue age does not prove idle)`,
-  };
+  const base = facts.lastMeaningfulAt === undefined
+    ? `claimed ${minutes} min ago, zero substantive transitions since`
+    : `no meaningful queue change for ${minutes} min; owner activity ${facts.activity ?? "unknown"} (queue age does not prove idle)`;
+  return { state: "stalled-after-claim", evidence: [base, ...past].join("; ") };
 }
 
 /** S02 INPUT CONTRACT — the finding shape the standing sweep consumes (routed to the claimant
