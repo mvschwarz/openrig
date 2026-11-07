@@ -343,9 +343,10 @@ export class SelfAttachService {
       return context;
     }
     const explicit = context?.attachmentType === "external_cli" ? context.sessionName?.trim() : displayName?.trim();
+    const sessionName = explicit || logicalId.replace(/\./g, "-");
     return {
       attachmentType: "external_cli",
-      sessionName: explicit || `${logicalId.replace(/\./g, "-")}@${rigName}`,
+      sessionName: sessionName.includes("@") ? sessionName : `${sessionName}@${rigName}`,
     };
   }
 
