@@ -1,0 +1,32 @@
+{
+  "name": "openrig",
+  "version": "0.1.0",
+  "description": "Work with your OpenRig team from your coding agent: hand it work, follow that work, answer its questions and read what it returns.",
+  "author": {
+    "name": "Mike Schwarz",
+    "url": "https://github.com/mvschwarz"
+  },
+  "homepage": "https://github.com/mvschwarz/openrig",
+  "repository": "github:mvschwarz/openrig",
+  "license": "Apache-2.0",
+  "keywords": ["openrig", "agents", "team", "delegation", "mcp"],
+  "skills": "./skills",
+  "mcpServers": {
+    "openrig": {
+      "command": "rig",
+      "args": ["mcp", "serve", "--front-door"],
+      "env": {
+        "OPENRIG_SESSION_NAME": "${user_config.seat}"
+      }
+    }
+  },
+  "userConfig": {
+    "seat": {
+      "type": "string",
+      "title": "OpenRig seat",
+      "description": "This app's address on your OpenRig team, such as cursor@my-team. Your requests are recorded as coming from it, and the team's questions about them come back to it.",
+      "required": false,
+      "default": ""
+    }
+  }
+}

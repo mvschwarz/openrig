@@ -312,6 +312,8 @@ export type McpHttpOptions = {
   grantService?: GrantServiceOptions;
   /** Operator-configured receiver for external callers omitting a task destination; never an authority grant. */
   taskDestination?: string;
+  /** rig mcp serve --front-door: a caller that isn't external gets the front-door instructions, not the member workflow. */
+  frontDoor?: boolean;
   /** With grantService: OAuth discovery for clients that sign in with OAuth. The public resource this server is reached
    *  as and the authorization server that issues its keys, both served exactly as given. */
   oauth?: { resource: string; issuer: string };
@@ -391,7 +393,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     // Never a default seat: a request reaches the handler only with its caller decided.
     if (!caller) throw new Error("a request reached the MCP handler without its caller");
     return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access,
-      taskDestination: opts.taskDestination, presenceFile: () => presenceFile });
+      taskDestination: opts.taskDestination, presenceFile: () => presenceFile, frontDoor: opts.frontDoor === true });
   });
   const serveMcp = toNodeHandler(mcpHandler);
   const bearer = (req: http.IncomingMessage): string | undefined => /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? "")?.[1];

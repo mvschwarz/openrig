@@ -23,6 +23,14 @@ import type { ProjectionEntry, ProjectionPlan } from "../src/domain/projection-p
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { MANAGED_BLOCK_START } from "../src/domain/managed-blocks.js";
+import { PodRepository } from "../src/domain/pod-repository.js";
+import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
+import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
+import { createDesiredClaudeActivityHooksReader, resolveDesiredClaudeActivityHooks } from "../src/domain/desired-claude-activity-hooks.js";
+import { resolveAgentRef } from "../src/domain/agent-resolver.js";
+import { RestoreCheckService } from "../src/domain/restore-check-service.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
+import type { NodeLaunchRecipe } from "../src/domain/types.js";
 
 // Real snapshot/restore/startup/projection and settings files; only terminal and
 // native launch/readiness are simulated. No Claude, provider or daemon is started.
@@ -730,13 +738,119 @@ profiles:
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
 
-  it("reports unknown when the real agent file is missing", async () => {
-    const { result } = await restoreWithRealSpec(true, false);
+  function recipeForRoot(rigRoot: string, agentRef: string): NodeLaunchRecipe {
+    return { version: 1, rigRoot, rigSpec: { version: "0.2", name: "recipe-root", edges: [],
+      pods: [{ id: "p", label: "Builders", members: [{ id: "seat", agentRef, profile: "default", runtime: "claude-code", cwd }] }],
+    } };
+  }
+
+  it("a saved recipe re-anchors a shipped local: agent instead of reading the old packaged selection", () => {
+    const agentRef = "local:../../../agents/development/implementer";
+    const olderSpecs = path.join(root, "old-prefix/lib/node_modules/@openrig/cli/daemon/specs");
+    const olderRoot = path.join(olderSpecs, "rigs/launch/demo");
+    const olderAgent = path.join(olderSpecs, "agents/development/implementer");
+    fs.mkdirSync(olderRoot, { recursive: true });
+    fs.mkdirSync(olderAgent, { recursive: true });
+    fs.writeFileSync(path.join(olderRoot, "rig.yaml"), "version: '0.2'\nname: recipe-root\npods: []\n");
+    fs.writeFileSync(path.join(olderAgent, "agent.yaml"), "name: implementer\nversion: '1.0'\nprofiles:\n  default:\n    uses:\n      runtime_resources: []\n");
+    const recipe = recipeForRoot(olderRoot, agentRef);
+    const rig = rigs.createRig("recipe-shipped");
+    const node = rigs.addNode(rig.id, "p.seat", { runtime: "claude-code", cwd, launchRecipe: recipe });
+    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ?, resolved_spec_name = ? WHERE id = ?")
+      .run(agentRef, "default", "implementer", node.id);
+    expect(rigs.getNodeLaunchRecipe(node.id)).toEqual(recipe);
+    expect(path.isAbsolute(rigs.getNodeLaunchRecipe(node.id)!.rigRoot)).toBe(true);
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(node.id)).toBeUndefined();
+    const readerFs = { exists: fs.existsSync, readFile: (p: string) => fs.readFileSync(p, "utf8") };
+    const saved = { resolvedSpecName: "implementer", resolvedStartupFiles: [] };
+    expect(resolveDesiredClaudeActivityHooks(`path:${olderAgent}`, "default", readerFs)).toEqual({ status: "known", selected: false });
+    const currentAgent = path.resolve(import.meta.dirname, "../specs/agents/development/implementer");
+    expect(resolveDesiredClaudeActivityHooks(`path:${currentAgent}`, "default", readerFs)).toEqual({ status: "known", selected: true });
+    expect(resolveDesiredClaudeActivityHooks(agentRef, "default", readerFs, saved)).toMatchObject({ status: "unknown" });
+    const desired = createDesiredClaudeActivityHooksReader(db, readerFs)(node.id);
+    expect(desired).toEqual({ status: "known", selected: true });
+    expect(rigs.getNodeLaunchRecipe(node.id)).toEqual(recipe);
+    console.info("PR2617_P3_REANCHOR", { desired, oldSelection: false, currentSelection: true, savedRecipeUnchanged: true });
+  });
+
+  it.each([
+    { rootKind: "absolute", expectedOutcome: "known-selected with hook projection" },
+    { rootKind: "relative", expectedOutcome: "unknown/no projection" },
+  ])("a valid-shape $rootKind recipe root expects $expectedOutcome", async ({ rootKind }) => {
+    const actualRoot = path.join(root, "recipe-agent");
+    fs.mkdirSync(path.join(actualRoot, "runtime"), { recursive: true });
+    fs.writeFileSync(path.join(actualRoot, "runtime/activity.json"), "{}\n");
+    fs.writeFileSync(path.join(actualRoot, "agent.yaml"), `name: impl
+version: "1.0.0"
+resources:
+  runtime_resources:
+    - id: activity
+      path: runtime/activity.json
+      runtime: claude-code
+      type: claude_activity_hooks
+profiles:
+  default:
+    uses:
+      runtime_resources: [activity]
+`);
+    const rigRoot = rootKind === "absolute" ? actualRoot : path.relative(process.cwd(), actualRoot);
+    expect(path.isAbsolute(rigRoot)).toBe(rootKind === "absolute");
+    expect(path.resolve(rigRoot)).toBe(actualRoot);
+    const recipe = recipeForRoot(rigRoot, "local:.");
+    const f = seed(true, false);
+    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ?, resolved_spec_name = ?, launch_recipe_json = ? WHERE id = ?")
+      .run("local:.", "default", "impl", JSON.stringify(recipe), f.node.id);
+    expect(rigs.getNodeLaunchRecipe(f.node.id)).toEqual(recipe);
+    const readerFs = { exists: fs.existsSync, readFile: (p: string) => fs.readFileSync(p, "utf8") };
+    expect(resolveDesiredClaudeActivityHooks(`path:${actualRoot}`, "default", readerFs)).toEqual({ status: "known", selected: true });
+    // Test the resolver directly: the reader's earlier absolute-root check otherwise hides this guard.
+    const direct = resolveDesiredClaudeActivityHooks("local:.", "default", readerFs,
+      { resolvedSpecName: "impl", resolvedStartupFiles: [], rigRoot });
+    const read = createDesiredClaudeActivityHooksReader(db, readerFs);
+    const desired = read(f.node.id);
+    if (rootKind === "absolute") {
+      expect(direct).toEqual({ status: "known", selected: true });
+      expect(desired).toEqual({ status: "known", selected: true });
+    } else {
+      expect(direct).toMatchObject({ status: "unknown" });
+      expect(desired).toMatchObject({ status: "unknown" });
+    }
+    const project = vi.spyOn(adapter, "project");
+    const sentAtRestore = vi.mocked(tmux.sendText).mock.calls.length;
+    const result = await restore(f, adapter, () => {}, read);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    if (rootKind === "absolute") expect(owned().length).toBeGreaterThan(0);
+    else expect(owned()).toEqual([]);
+    expect(result.result.warnings.some(w => w.startsWith("Restore activity hooks:") && w.includes("could not be determined")))
+      .toBe(rootKind === "relative");
+    const recovery = project.mock.calls.filter(([p]) => p.entries.some(e => e.resourceType === "claude_activity_hooks"));
+    expect(recovery).toHaveLength(rootKind === "absolute" ? 1 : 0);
+    if (recovery.length) expect(recovery[0]![0].startup).toEqual({ files: [], actions: [] });
+    expect(tmux.sendText).toHaveBeenCalledTimes(sentAtRestore);
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toEqual(f.saved);
+    expect(settings().hooks.Stop).toContainEqual(userHook);
+    expect(settings().env).toEqual(originalSettings.env);
+    console.info("PR2617_P3_ROOT", { rootKind, direct, desired, projectedHookCount: owned().length, savedContextUnchanged: true });
+  });
+
+  it.each([
+    { ref: "path" as const, evidence: "Current agent specification could not be resolved" },
+    { ref: "local" as const, evidence: "wasn't found" },
+  ])("reports an absent agent file for a $ref reference", async ({ ref, evidence }) => {
+    const { f, result } = await restoreWithRealSpec(true, false, ref);
+    expect(fs.existsSync(path.join(root, "spec/agent.yaml"))).toBe(false);
+    const desired = createDesiredClaudeActivityHooksReader(db, { exists: fs.existsSync, readFile: p => fs.readFileSync(p, "utf8") })(f.node.id);
+    expect(desired).toMatchObject({ status: "unknown", evidence: expect.stringContaining(evidence) });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(owned()).toEqual([]);
-    expect(result.result.warnings.some((w) => w.includes("could not be determined"))).toBe(true);
+    expect(result.result.warnings.some((w) => w.includes("could not be determined") && w.includes(evidence)),
+      JSON.stringify(result.result.warnings)).toBe(true);
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toEqual(f.saved);
+    expect(settings().hooks.Stop).toContainEqual(userHook);
+    expect(settings().env).toEqual(originalSettings.env);
   });
 
   // #1530 follow-up: a local: agent (a shipped-spec seat) resolves as at launch, against the rig root its saved launch
@@ -836,5 +950,231 @@ profiles:
         orientation: "role", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }]));
     const read = createDesiredClaudeActivityHooksReader(db, { exists: fs.existsSync, readFile: (p) => fs.readFileSync(p, "utf8") });
     expect(read(node.id)).toMatchObject({ status: "unknown" });
+  });
+
+  it.each([
+    ...[false, true].flatMap(selects => [
+      { placement: "ordinary", selects, startupFiles: true, recipe: "valid", specExists: true },
+      { placement: "ordinary", selects, startupFiles: false, recipe: "valid", specExists: true },
+      { placement: "added", selects, startupFiles: true, recipe: "valid", specExists: true },
+      { placement: "added", selects, startupFiles: true, recipe: "missing", specExists: true },
+      { placement: "added", selects, startupFiles: true, recipe: "malformed", specExists: true },
+      { placement: "added", selects, startupFiles: true, recipe: "invalid-root", specExists: true },
+    ]),
+    { placement: "added", selects: true, startupFiles: true, recipe: "valid", specExists: false },
+    { placement: "retained-development", selects: false, startupFiles: true, recipe: "valid", specExists: true },
+    { placement: "retained-development-non-dot", selects: false, startupFiles: true, recipe: "valid", specExists: true },
+    { placement: "retained-development-reverse", selects: true, startupFiles: true, recipe: "valid", specExists: true },
+    { placement: "retained-development-missing-agent", selects: false, startupFiles: true, recipe: "valid", specExists: false },
+  ].map(row => ({ ...row,
+    agentRef: row.placement === "retained-development-non-dot" ? "local:../../../agents/development/implementer" : "local:.",
+    expectedOutcome: row.placement === "retained-development-missing-agent" ? "known-selected after re-anchoring"
+      : row.recipe === "valid" && row.specExists ? row.selects ? "known-selected" : "known-unselected" : "unknown/no projection" })))
+    ("a $placement $agentRef seat expects $expectedOutcome (recipe=$recipe, selection=$selects, files=$startupFiles, spec=$specExists)",
+    async ({ placement, selects, startupFiles, recipe, specExists, agentRef }) => {
+    const originalRoot = path.join(root, "original-rig");
+    const development = placement.startsWith("retained-development");
+    const nonDot = placement === "retained-development-non-dot";
+    const reverse = placement === "retained-development-reverse";
+    const missingDevelopmentAgent = placement === "retained-development-missing-agent";
+    const expectedSelection = missingDevelopmentAgent ? true : selects;
+    const specName = development ? "implementer" : "impl";
+    const currentProfile = development ? "default" : "current";
+    const actualRoot = development ? path.join(root, "checkout/packages/daemon/specs/agents/development/implementer")
+      : placement === "ordinary" ? originalRoot : path.join(root, "added-agent");
+    const rigRoot = nonDot ? path.join(root, "checkout/packages/daemon/specs/rigs/development/retained") : actualRoot;
+    const runningAgent = path.resolve(import.meta.dirname, "../specs/agents/development/implementer");
+    const modeledRunningAgent = path.join(root, "modeled-running/implementer");
+    const writeAgent = (dir: string, selected: boolean, defaultSelected = selected) => {
+      fs.mkdirSync(path.join(dir, "runtime"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "runtime/activity.json"), "{}\n");
+      fs.writeFileSync(path.join(dir, "agent.yaml"), `name: ${specName}
+version: "1.0.0"
+resources:
+  runtime_resources:
+    - id: activity
+      path: runtime/activity.json
+      runtime: claude-code
+      type: claude_activity_hooks
+profiles:
+  default:
+    uses:
+      runtime_resources: ${defaultSelected ? "[activity]" : "[]"}
+  current:
+    uses:
+      runtime_resources: ${selected ? "[activity]" : "[]"}
+`);
+    };
+    writeAgent(originalRoot, !selects);
+    // Start without hooks. Ordinary/added rows later switch profiles; the retained
+    // development row keeps its default profile opposite to the running source.
+    writeAgent(actualRoot, false);
+    fs.writeFileSync(path.join(originalRoot, "CULTURE.md"), "Original rig culture.\n");
+    const nodeLauncher = new NodeLauncher({ db, rigRepo: rigs, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux });
+    const instantiator = new PodRigInstantiator({ db, rigRepo: rigs, podRepo: new PodRepository(db), sessionRegistry: registry,
+      eventBus: events, nodeLauncher, tmuxAdapter: tmux,
+      startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux }),
+      fsOps: { exists: fs.existsSync, readFile: p => fs.readFileSync(p, "utf8") },
+      adapters: { "claude-code": adapter }, onboardingEnabledResolver: () => false, exec: async () => "" });
+    const authoredYaml = `version: "0.2"
+name: origin-1530
+${startupFiles ? "culture_file: CULTURE.md" : ""}
+pods:
+  - id: p
+    label: Builders
+    members:
+      - id: ${placement === "ordinary" ? "seat" : "existing"}
+        runtime: ${placement === "ordinary" ? "claude-code" : "terminal"}
+        agent_ref: ${placement === "ordinary" ? "local:." : "builtin:terminal"}
+        profile: ${placement === "ordinary" ? "default" : "none"}
+        cwd: ${cwd}
+`;
+    if (nonDot || missingDevelopmentAgent) {
+      fs.mkdirSync(rigRoot, { recursive: true });
+      fs.writeFileSync(path.join(rigRoot, "rig.yaml"), authoredYaml);
+    }
+    const materialized = await instantiator.materialize(authoredYaml, originalRoot);
+    expect(materialized.ok, JSON.stringify(materialized)).toBe(true);
+    if (!materialized.ok) return;
+    const rigId = materialized.result.rigId;
+    if (placement === "ordinary") {
+      const launched = await instantiator.launchMaterialized(authoredYaml, originalRoot, rigId);
+      expect(launched.ok, JSON.stringify(launched)).toBe(true);
+      if (!launched.ok) return;
+      expect(launched.result.nodes, JSON.stringify(launched)).toEqual([
+        expect.objectContaining({ logicalId: "p.seat", status: "launched" }),
+      ]);
+    }
+    if (placement !== "ordinary") {
+      const added = await instantiator.addMemberToPod(rigId, "p", {
+        id: "seat", runtime: "claude-code", agent_ref: agentRef, profile: "default", cwd,
+      }, rigRoot);
+      expect(added.ok, JSON.stringify(added)).toBe(true);
+      if (!added.ok) return;
+      expect(added.result.node.status, JSON.stringify(added)).not.toBe("failed");
+    }
+    const node = rigs.getRig(rigId)!.nodes.find(n => n.logicalId === "p.seat")!;
+    expect(node).toMatchObject({ agentRef, resolvedSpecName: specName });
+    const recordedRecipe = rigs.getNodeLaunchRecipe(node.id);
+    expect(recordedRecipe).toMatchObject({ version: 1, rigRoot });
+    expect(recordedRecipe!.rigSpec.pods[0]!.members.find(member => member.id === "seat")).toMatchObject({ agentRef, profile: "default" });
+    expect(path.resolve(rigRoot, agentRef.slice("local:".length))).toBe(actualRoot);
+    expect(fs.existsSync(path.join(actualRoot, "agent.yaml"))).toBe(true);
+    const persisted = db.prepare("SELECT resolved_files_json FROM node_startup_context WHERE node_id=?").get(node.id);
+    expect(persisted).toBeDefined();
+    // Explicit legacy empty-files control, after real first-launch persistence; built-in files may have been saved.
+    if (!startupFiles) db.prepare("UPDATE node_startup_context SET resolved_files_json = ? WHERE node_id=?").run("[]", node.id);
+    const saved = db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(node.id) as {
+      runtime: string; resolved_files_json: string; projection_entries_json: string; startup_actions_json: string;
+    };
+    expect(saved).toBeDefined();
+    const files = JSON.parse(saved.resolved_files_json) as Array<{ ownerRoot: string; absolutePath: string }>;
+    if (startupFiles) {
+      expect(files).toContainEqual(expect.objectContaining({ ownerRoot: originalRoot, absolutePath: path.join(originalRoot, "CULTURE.md") }));
+    } else expect(files).toEqual([]);
+    if (placement !== "ordinary") expect(files.some(file => file.ownerRoot === actualRoot)).toBe(false);
+    expect(JSON.parse(saved.projection_entries_json).some((entry: ProjectionEntry) => entry.resourceType === "claude_activity_hooks")).toBe(false);
+    expect(owned()).toEqual([]);
+    // The saved recipe names the launch profile; the live node's profile and current file decide recovery.
+    writeAgent(actualRoot, selects, development ? selects : !selects);
+    db.prepare("UPDATE nodes SET profile = ? WHERE id = ?").run(currentProfile, node.id);
+    if (recipe !== "valid") {
+      const damaged = recipe === "missing" ? null : recipe === "malformed" ? "{unreadable recipe"
+        : JSON.stringify({ ...recordedRecipe, rigRoot: 42 });
+      db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(damaged, node.id);
+      expect(rigs.getNodeLaunchRecipe(node.id)).toBeNull();
+    }
+    const realReaderFs = { exists: fs.existsSync, readFile: (p: string) => fs.readFileSync(p, "utf8") };
+    if (missingDevelopmentAgent) {
+      expect(fs.existsSync(path.join(rigRoot, "rig.yaml"))).toBe(true);
+      expect(resolveDesiredClaudeActivityHooks(`path:${actualRoot}`, currentProfile, realReaderFs)).toEqual({ status: "known", selected: false });
+    }
+    if (!specExists) fs.rmSync(path.join(actualRoot, "agent.yaml"));
+    if (reverse) writeAgent(modeledRunningAgent, false);
+    // Only the running alternative's filesystem view is modeled; the saved source,
+    // re-anchor helper, resolver, profile checks and restore path remain real.
+    const readerPath = (p: string) => reverse && (p === runningAgent || p.startsWith(runningAgent + path.sep))
+      ? path.join(modeledRunningAgent, path.relative(runningAgent, p)) : p;
+    const readerFs = { exists: (p: string) => fs.existsSync(readerPath(p)), readFile: (p: string) => fs.readFileSync(readerPath(p), "utf8") };
+    if (specExists) expect(resolveDesiredClaudeActivityHooks(`path:${actualRoot}`, currentProfile, readerFs)).toEqual({ status: "known", selected: selects });
+    if (placement !== "ordinary") expect(resolveDesiredClaudeActivityHooks(`path:${originalRoot}`, currentProfile, readerFs)).toEqual({ status: "known", selected: !selects });
+    if (development) {
+      expect(fs.existsSync(path.join(actualRoot, "agent.yaml"))).toBe(specExists);
+      expect(fs.existsSync(path.join(rigRoot, "rig.yaml"))).toBe(nonDot || missingDevelopmentAgent);
+      expect(fs.existsSync(path.join(runningAgent, "agent.yaml"))).toBe(true);
+      expect(resolveDesiredClaudeActivityHooks(`path:${runningAgent}`, currentProfile, realReaderFs)).toEqual({ status: "known", selected: true });
+      const running = resolveAgentRef(`path:${runningAgent}`, runningAgent, readerFs);
+      expect(running.ok).toBe(true);
+      if (!running.ok) return;
+      expect(running.resolved.spec.name).toBe(specName);
+      expect(resolveDesiredClaudeActivityHooks(`path:${runningAgent}`, currentProfile, readerFs)).toEqual({ status: "known", selected: !reverse });
+      if (nonDot) {
+        expect(agentRef).not.toBe("local:.");
+        expect(rigRoot).not.toBe(actualRoot);
+        expect(fs.existsSync(path.join(rigRoot, "agent.yaml"))).toBe(false);
+      }
+    }
+    const read = createDesiredClaudeActivityHooksReader(db, readerFs);
+    const desired = read(node.id);
+    const known = recipe === "valid" && (specExists || missingDevelopmentAgent);
+    if (known) expect.soft(desired, "the validated recipe locates this seat's current agent").toEqual({ status: "known", selected: expectedSelection });
+    else expect.soft(desired, "unusable source evidence must not borrow the same-name old rig agent").toMatchObject({ status: "unknown" });
+    if (recipe !== "valid") expect.soft(desired).toMatchObject({ evidence: expect.stringMatching(/independent.*source|source.*independent/i) });
+    const session = registry.getSessionsForRig(rigId).find(s => s.nodeId === node.id)!;
+    registry.updateResumeToken(session.id, "claude_id", token);
+    const snap = capture.captureSnapshot(rigId, "manual", { intendedNodeIds: [node.id] });
+    const check = new RestoreCheckService({ stateDir: path.join(root, "state"),
+      listRigs: () => [{ rigId, name: "origin-1530" }], getNodeInventory: id => getNodeInventory(db, id),
+      getStartupContext: () => ({ status: "ok", runtime: saved.runtime,
+        resolvedStartupFiles: JSON.parse(saved.resolved_files_json), projectionEntries: JSON.parse(saved.projection_entries_json) }),
+      hasSnapshot: () => true, getRestoreInputs: () => ({ snapshot: snap, servicesRecord: null }),
+      probeDaemonHealth: () => ({ healthy: true, evidence: "isolated fixture" }),
+      probeQueueStore: () => ({ available: true, evidence: "isolated SQLite" }),
+      exists: readerFs.exists, readFile: readerFs.readFile, getDesiredClaudeActivityHooks: read,
+    }).check({});
+    const hookCheck = check.checks.find(item => item.check === `seat.${session.sessionName}.hooks`);
+    expect.soft(hookCheck, "known-unselected is green; selected hooks absent from saved context are stale, not unknown").toMatchObject({
+      status: known && !expectedSelection ? "green" : "yellow",
+      evidence: expect.stringContaining(known ? expectedSelection ? "Current desired activity hooks are selected" : "not selected" : "unknown"),
+    });
+    if (recipe !== "valid") expect.soft(hookCheck).toMatchObject({ evidence: expect.stringMatching(/independent.*source|source.*independent/i) });
+    registry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id=?").run(node.id);
+    const project = vi.spyOn(adapter, "project");
+    const sentAtRestore = vi.mocked(tmux.sendText).mock.calls.length;
+    const result = await restore({ rig: rigs.getRig(rigId)!.rig, node, snap, saved }, adapter, () => {}, read);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    if (known && expectedSelection) expect.soft(owned().length, "current selected hooks must be recovered").toBeGreaterThan(0);
+    else expect.soft(owned(), "unselected or unknown sources must not project current hooks").toEqual([]);
+    expect.soft(result.result.warnings.some(w => w.startsWith("Restore activity hooks:") && w.includes("could not be determined")),
+      JSON.stringify(result.result.warnings)).toBe(!known);
+    if (known) {
+      expect.soft(result.result.warnings.some(w => w.startsWith("Restore activity hooks:") && w.includes("current marker was re-applied"))).toBe(expectedSelection);
+      expect.soft(result.result.nodes[0].restoreGaps).toBeUndefined();
+    } else {
+      expect.soft(result.result.warnings.some(w => w.startsWith("Restore activity hooks:") && w.includes("current marker was re-applied"))).toBe(false);
+    }
+    const recovery = project.mock.calls.filter(([p]) => p.entries.some(e => e.resourceType === "claude_activity_hooks"));
+    expect.soft(recovery).toHaveLength(known && expectedSelection ? 1 : 0);
+    if (recovery.length) expect.soft(recovery[0]![0].startup).toEqual({ files: [], actions: [] });
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(node.id)).toEqual(saved);
+    if (recipe === "valid") expect(rigs.getNodeLaunchRecipe(node.id)).toEqual(recordedRecipe);
+    expect(settings().hooks.Stop).toContainEqual(userHook);
+    expect(settings().env).toEqual(originalSettings.env);
+    expect(tmux.sendText).toHaveBeenCalledTimes(sentAtRestore);
+    console.info("PR2617_RECIPE", { placement, recipe, specExists, startupFiles, legacyEmptyFiles: !startupFiles, actualSelection: selects, oldRootSelection: !selects,
+      recordedRigRoot: recordedRecipe?.rigRoot, actualRoot, currentProfile,
+      savedOwnerRoots: files.map(file => file.ownerRoot), desired, hookCheck,
+      projectedHookCount: owned().length, warnings: result.result.warnings, savedContextUnchanged: true });
+    if (nonDot || reverse || missingDevelopmentAgent) console.info("PR2617_INPUT_STATE", JSON.stringify({
+      placement, agentRef, rigRoot, actualRoot, currentProfile, expectedSelection,
+      targetAgentPresent: fs.existsSync(path.join(actualRoot, "agent.yaml")), rigYamlPresent: fs.existsSync(path.join(rigRoot, "rig.yaml")),
+      misleadingRootAgentPresent: fs.existsSync(path.join(rigRoot, "agent.yaml")),
+      runningInput: reverse ? "modeled reader-FS view backed by owned fixture files" : "checked-out running source",
+      runningSelection: !reverse, retainedSelectionBeforeRemoval: selects, recordedRecipe,
+      savedOwnerRoots: files.map(file => file.ownerRoot), desired, hookCheck, projectedHookCount: owned().length,
+      recoveryCount: recovery.length, warnings: result.result.warnings, savedContextUnchanged: true,
+    }));
   });
 });

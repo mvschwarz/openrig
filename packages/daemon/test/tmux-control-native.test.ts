@@ -184,7 +184,7 @@ describe.skipIf(!supportsControlMode(version))("tmux control mode against a real
     expect(await control(["tmux", "list-sessions", "-F", `${own}#{session_name}`])).toBe(`${own}seat@rig\n`);
     expect(await control(["tmux", "list-sessions", "-F", "#{session_name}", ";", "display-message", "-p", "-t", "=seat@rig:", `${own}x`]))
       .toBe(`seat@rig\n${own}x\n`);
-    // A chain the spawned client runs (load-buffer is never routed) keeps them too.
+    // A chain the spawned client runs (load-buffer in a chain is never routed) keeps them too.
     writeFileSync(join(dir, "buffer.txt"), "b");
     expect(await control(["tmux", "load-buffer", "-b", "own", join(dir, "buffer.txt"), ";", "list-sessions", "-F", `${own}#{session_name}`]))
       .toBe(`${own}seat@rig\n`);
@@ -353,6 +353,8 @@ describe.skipIf(!supportsControlMode(version))("tmux control mode against a real
     await control(["tmux", "load-buffer", "-b", "b1", file]);
     await control(["tmux", "paste-buffer", "-t", "=typed@rig:", "-b", "b1", "-d", "-r"]);
     await control(["tmux", "send-keys", "-t", "=typed@rig:", "Enter"]);
+    // A short one-line text goes by set-buffer through the client: nothing is spawned for it.
+    expect(spawned.filter((argv) => argv[1] !== "list-sessions")).toEqual([]);
     // cat echoes each line it reads: the typed line, then cat's copy. Its copy is awaited before the next line is typed,
     // else the two can interleave on the screen.
     const lines = (count: number) => vi.waitFor(() => {
@@ -363,6 +365,64 @@ describe.skipIf(!supportsControlMode(version))("tmux control mode against a real
     await control(["tmux", "send-keys", "-t", "=typed@rig:", "-l", text]);
     await control(["tmux", "send-keys", "-t", "=typed@rig:", "Enter"]);
     await lines(4);
+  });
+
+  it("keeps a load spawned while a buffer hook is set, globally or on a session, so the user's hook runs as with a spawned client", async () => {
+    const file = join(dir, "hooked.txt");
+    writeFileSync(file, "one short line");
+    // Distinct hooks on both names, each leaving its own mark: the observable effect tells which command ran.
+    const loadHook = "set-environment -g OPENRIG_HOOK load";
+    const setHook = "set-environment -g OPENRIG_HOOK set";
+    const hookRan = () => tmux("show-environment", "-g", "OPENRIG_HOOK").trim();
+    const loadThrough = async (via: "spawned" | "control"): Promise<string> => {
+      tmux("set-environment", "-g", "OPENRIG_HOOK", "none");
+      const argv = ["tmux", "load-buffer", "-b", "hb", file];
+      if (via === "spawned") tmux(...argv.slice(1));
+      else await control(argv);
+      expect(tmux("show-buffer", "-b", "hb")).toBe("one short line");
+      return hookRan();
+    };
+    const loadsSpawned = () => spawned.filter((argv) => argv[1] === "load-buffer").length;
+    tmux("set-buffer", "-b", "hb", "x");
+
+    // Global hooks: the control path keeps the load-buffer and its hook, as a spawned client runs them.
+    tmux("set-hook", "-g", "after-load-buffer", loadHook);
+    tmux("set-hook", "-g", "after-set-buffer", setHook);
+    expect(await loadThrough("spawned")).toBe("OPENRIG_HOOK=load");
+    tmux("set-buffer", "-b", "hb", "x");
+    expect(await loadThrough("control")).toBe("OPENRIG_HOOK=load");
+    expect(loadsSpawned()).toBe(1);
+    await control.close();
+
+    // A session's hook only (no global one): a new client asks again and still keeps the load spawned.
+    tmux("set-hook", "-gu", "after-load-buffer");
+    tmux("set-hook", "-gu", "after-set-buffer");
+    tmux("set-hook", "-t", "=seat@rig:", "after-load-buffer", loadHook);
+    control = tmuxControlExec((argv) => { spawned.push(argv); return execArgvCommand(argv); });
+    tmux("set-buffer", "-b", "hb", "x");
+    await loadThrough("control");
+    expect(loadsSpawned()).toBe(2);
+    await control.close();
+
+    // No buffer hook anywhere: the same load goes by set-buffer through the client, spawning nothing.
+    tmux("set-hook", "-u", "-t", "=seat@rig:", "after-load-buffer");
+    control = tmuxControlExec((argv) => { spawned.push(argv); return execArgvCommand(argv); });
+    tmux("set-buffer", "-b", "hb", "x");
+    expect(await loadThrough("control")).toBe("OPENRIG_HOOK=none");
+    expect(loadsSpawned()).toBe(2);
+  });
+
+  it("sets a targeted option through its client as a spawned client does, the seat's own and not its session's", async () => {
+    await control(["tmux", "set-option", "-w", "-t", "=seat@rig:", "@openrig-t", "w1"]);
+    await control(["tmux", "set-option", "-t", "=seat@rig:", "@openrig-s", "s1"]);
+    await control(["tmux", "set-option", "-p", "-t", "=seat@rig:", "remain-on-exit", "on"]);
+    expect(tmux("show-options", "-w", "-v", "-t", "=seat@rig:", "@openrig-t").trim()).toBe("w1");
+    expect(tmux("show-options", "-v", "-t", "=seat@rig:", "@openrig-s").trim()).toBe("s1");
+    expect(tmux("show-options", "-p", "-v", "-t", "=seat@rig:", "remain-on-exit").trim()).toBe("on");
+    expect(tmux("show-options", "-q", "-v", "-t", `=${controlSessionName(control.owner)}:`, "@openrig-s").trim()).toBe("");
+    expect(await outcome(control, ["tmux", "set-option", "-t", "=nope@rig:", "@openrig-s", "s1"]))
+      .toEqual(await outcome(execArgvCommand, ["tmux", "set-option", "-t", "=nope@rig:", "@openrig-s", "s1"]));
+    expect(spawned.filter((argv) => argv[1] === "set-option")).toEqual([]);
   });
 
   it("keeps working when its session is killed, and comes back", async () => {

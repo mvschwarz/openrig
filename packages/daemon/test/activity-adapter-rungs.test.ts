@@ -66,6 +66,12 @@ describe("S19 A5 — readClaudeSelfReportEvidence: the pid.json rung, undocument
     expect(readClaudeSelfReportEvidence(input(readOf({ "1.json": record({ status: "shell" }) })))!.activity).toBe("idle-at-prompt");
   });
 
+  it("shell keeps its own fact, backgroundWork, and idle carries none (#2661)", () => {
+    expect(readClaudeSelfReportEvidence(input(readOf({ "1.json": record({ status: "shell" }) })))!.backgroundWork).toBe(true);
+    expect(readClaudeSelfReportEvidence(input(readOf({ "1.json": record({ status: "idle" }) })))!.backgroundWork).toBeUndefined();
+    expect(readClaudeSelfReportEvidence(input(readOf({ "1.json": record({ status: "busy" }) })))!.backgroundWork).toBeUndefined();
+  });
+
   it("waiting → needs-input count+reason (Claude's dialog state — kept OUT of the activity enum)", () => {
     const ev = readClaudeSelfReportEvidence(input(readOf({ "1.json": record({ status: "waiting" }) })))!;
     expect(ev.activity).toBeUndefined();

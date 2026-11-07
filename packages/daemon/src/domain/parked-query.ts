@@ -79,6 +79,9 @@ export interface SeatParkedDiagnosis {
     /** When the arbitrated state last changed (activity, or needs-input count, reason or evidence rung). For a stopped
      *  seat, when its current waiting state began. Null without a state. */
     since: string | null;
+    /** #2661 (b): a background shell outlives the turn, first seen at observedAt; null otherwise. The verdict does
+     *  not change on it: the parked-owner consumer gives it a bounded grace. */
+    backgroundWork: { rung: string; observedAt: string } | null;
   };
   obligations: {
     /** The EXACT scope that ran — named, so a false absence is auditable. */
@@ -159,6 +162,7 @@ export function diagnoseSeatParked(
     decidedBy: state?.decidedBy ?? null,
     confidence: activityKnown ? "oracle" : "unknown",
     since: state?.changedAt ?? null,
+    backgroundWork: state?.backgroundWork ?? null,
   };
   const confidence: SeatParkedDiagnosis["confidence"] = {
     activity: activityKnown ? "high" : "none",
