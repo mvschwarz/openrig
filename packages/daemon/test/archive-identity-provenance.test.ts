@@ -8,6 +8,7 @@ import {
   QueueTransitionLog,
   formatRelayOwnerNotificationAccepted,
   parseRelayOwnerNotificationAccepted,
+  parseRelayOwnerNotificationTransportFailed,
 } from "../src/domain/queue-transition-log.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -194,6 +195,15 @@ describe("archived audit identity — real migration, writer and history readers
     };
     expect(log.getRelayOwnerNotificationReceipt(qitemId, key)).toEqual(expectedReceipt);
     expect(repo.getRelayOwnerNotificationReceipt(qitemId, key)).toEqual(expectedReceipt);
+    expect(log.findRelayOwnerNotificationReceiptByReplyRef(rawReplyRef)).toEqual({
+      qitemId,
+      ...expectedReceipt,
+    });
+    expect(repo.findRelayOwnerNotificationReceiptByReplyRef(rawReplyRef)).toEqual({
+      qitemId,
+      ...expectedReceipt,
+    });
+    expect(log.findRelayOwnerNotificationReceiptByReplyRef("tg:msg:unknown")).toBeNull();
     expect(log.hasRelayOwnerNotificationReceipt(qitemId, key)).toBe(true);
     expect(log.hasRelayOwnerNotificationReceipt(qitemId, "other:key")).toBe(false);
     expect(log.hasOwnerNotificationReceipt(qitemId, key)).toBe(true);
@@ -216,6 +226,14 @@ describe("archived audit identity — real migration, writer and history readers
     expect(archiveAgedTerminalTransitions(db, { nowIso: NOW }).archivedQitems).toBe(1);
     expect(log.getOwnerNotificationReceipt(qitemId, key)).toBeNull();
     expect(log.getRelayOwnerNotificationReceipt(qitemId, key)).toEqual(expectedReceipt);
+    expect(log.findRelayOwnerNotificationReceiptByReplyRef(rawReplyRef)).toEqual({
+      qitemId,
+      ...expectedReceipt,
+    });
+    expect(repo.findRelayOwnerNotificationReceiptByReplyRef(rawReplyRef)).toEqual({
+      qitemId,
+      ...expectedReceipt,
+    });
     expect(log.hasRelayOwnerNotificationReceipt(qitemId, key)).toBe(true);
     expect(log.hasOwnerNotificationReceipt(qitemId, key)).toBe(true);
 
@@ -311,7 +329,11 @@ describe("archived audit identity — real migration, writer and history readers
       detail: "backup bridge bad gateway",
     });
     expect(repo.listTransitions(failedAsk.qitemId)).toHaveLength(countAfterFirstFailure + 1);
-    expect(repo.getRelayOwnerNotificationTransportFailure(failedAsk.qitemId, failedKey)).toMatchObject({
+    const parsedFailures = repo
+      .listTransitions(failedAsk.qitemId)
+      .map((t) => parseRelayOwnerNotificationTransportFailed(t.transitionNote))
+      .filter((f): f is NonNullable<typeof f> => f !== null);
+    expect(parsedFailures.at(-1)).toMatchObject({
       notificationKey: failedKey,
       connectorRef: "wa-backup",
       failureClass: "relay-http-502",

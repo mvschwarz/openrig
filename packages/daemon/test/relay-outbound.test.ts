@@ -9,12 +9,12 @@ import { SeenStore, type StateFsOps } from "../src/domain/gateway/slack/state-st
 import type { OutboundDecision } from "../src/domain/gateway/protocol.js";
 import {
   RELAY_PROTOCOL_VERSION,
-  RELAY_ENVELOPE_MAX_BYTES,
   encodeRelayReplyRef,
   decodeRelayReplyRef,
+  hashRelayConnectorRef,
   hashRelayReplyRef,
+  hashRelayReplyRefPayload,
   validateRelayOutboundEnvelope,
-  splitRelayOutboundEnvelope,
   findPendingRelayReplyRef,
   resolvePrimaryRelayBinding,
   prepareRelayDecision,
@@ -25,10 +25,7 @@ import {
   type RelayPayloadCarry,
   type RelayReplyRefPayload,
 } from "../src/domain/gateway/relay-outbound.js";
-import {
-  reassembleRelayEnvelopeParts,
-  startRecordingRelay,
-} from "./fixtures/recording-relay.js";
+import { startRecordingRelay } from "./fixtures/recording-relay.js";
 
 function memFs(): StateFsOps & { files: Map<string, string>; failReadsFor: Set<string> } {
   const files = new Map<string, string>();
@@ -127,7 +124,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("encodes, decodes, validates, and hashes opaque base64url replyRef payloads with closed schema", () => {
+  it("encodes, decodes, validates, and hashes fixed-size opaque base64url replyRef tokens with closed schema for arbitrary high-entropy ID lengths", () => {
     const payload: RelayReplyRefPayload = {
       v: RELAY_PROTOCOL_VERSION,
       qitemId: "qitem-ask-1",
@@ -140,17 +137,68 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     };
     const encoded = encodeRelayReplyRef(payload);
     expect(encoded).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(encoded.length).toBe(266);
+    expect(encoded.length).toBeLessThanOrEqual(4096);
 
     const decoded = decodeRelayReplyRef(encoded);
-    expect(decoded).toEqual({ ok: true, ref: payload });
+    expect(decoded).toEqual({
+      ok: true,
+      ref: {
+        v: RELAY_PROTOCOL_VERSION,
+        payloadHash: hashRelayReplyRefPayload(payload),
+        connectorHash: hashRelayConnectorRef(payload.connectorRef),
+        mode: "park",
+        digest: true,
+      },
+    });
     expect(hashRelayReplyRef(encoded)).toMatch(/^[0-9a-f]{64}$/);
 
-    // Closed schema: reject unknown keys, wrong version, bad mode, or non-base64url
-    const withUnknownKey = Buffer.from(JSON.stringify({ ...payload, extra: "nope" }), "utf8").toString("base64url");
+    // High-entropy IDs (> 6,000 chars each) that cannot compress below 4,096 chars still produce the exact same constant token length
+    const highEntropyBlock = Array.from({ length: 200 }, (_, i) =>
+      hashRelayReplyRef(`entropy-seed-${i}-${i * 7919}`),
+    ).join("");
+    expect(highEntropyBlock.length).toBe(12_800);
+    const hugePayload: RelayReplyRefPayload = {
+      v: RELAY_PROTOCOL_VERSION,
+      qitemId: `q-${highEntropyBlock}`,
+      episodeKey: `q-${highEntropyBlock}:99999`,
+      decisionRevision: "dr1-abcdef0123456789abcdef01",
+      decisionId: `dec-${highEntropyBlock}`,
+      connectorRef: `conn-${highEntropyBlock}`,
+      mode: "park",
+      digest: true,
+    };
+    const hugeEncoded = encodeRelayReplyRef(hugePayload);
+    expect(hugeEncoded).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(hugeEncoded.length).toBe(encoded.length);
+    expect(hugeEncoded.length).toBeLessThanOrEqual(4096);
+    expect(decodeRelayReplyRef(hugeEncoded)).toEqual({
+      ok: true,
+      ref: {
+        v: RELAY_PROTOCOL_VERSION,
+        payloadHash: hashRelayReplyRefPayload(hugePayload),
+        connectorHash: hashRelayConnectorRef(hugePayload.connectorRef),
+        mode: "park",
+        digest: true,
+      },
+    });
+
+    // Closed schema: reject unknown keys, wrong version, bad hashes, bad mode, or non-base64url
+    const validTokenObj = {
+      v: RELAY_PROTOCOL_VERSION,
+      payloadHash: hashRelayReplyRefPayload(payload),
+      connectorHash: hashRelayConnectorRef(payload.connectorRef),
+      mode: "park",
+      digest: true,
+    };
+    const withUnknownKey = Buffer.from(JSON.stringify({ ...validTokenObj, extra: "nope" }), "utf8").toString("base64url");
     expect(decodeRelayReplyRef(withUnknownKey).ok).toBe(false);
 
-    const wrongVersion = Buffer.from(JSON.stringify({ ...payload, v: 2 }), "utf8").toString("base64url");
+    const wrongVersion = Buffer.from(JSON.stringify({ ...validTokenObj, v: 2 }), "utf8").toString("base64url");
     expect(decodeRelayReplyRef(wrongVersion).ok).toBe(false);
+
+    const shortHash = Buffer.from(JSON.stringify({ ...validTokenObj, payloadHash: "abc123" }), "utf8").toString("base64url");
+    expect(decodeRelayReplyRef(shortHash).ok).toBe(false);
 
     expect(decodeRelayReplyRef("not valid json base64!").ok).toBe(false);
   });
@@ -245,18 +293,27 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     expect(envPark.body).toContain("Extra detail line.");
     expect(envPark.replyRef).not.toBeNull();
     const decodedRef = decodeRelayReplyRef(envPark.replyRef!);
+    const expectedParkPayload: RelayReplyRefPayload = {
+      v: 1,
+      qitemId: "q-park-1",
+      episodeKey: "q-park-1:7",
+      decisionRevision: "dr1-rev-park-1",
+      decisionId: "dec-park-1",
+      connectorRef: "wa-primary",
+      mode: "park",
+    };
     expect(decodedRef).toEqual({
       ok: true,
       ref: {
         v: 1,
-        qitemId: "q-park-1",
-        episodeKey: "q-park-1:7",
-        decisionRevision: "dr1-rev-park-1",
-        decisionId: "dec-park-1",
-        connectorRef: "wa-primary",
+        payloadHash: hashRelayReplyRefPayload(expectedParkPayload),
+        connectorHash: hashRelayConnectorRef("wa-primary"),
         mode: "park",
       },
     });
+    expect((preparedPark.payload as { relayReplyRefs?: Record<string, RelayReplyRefPayload> }).relayReplyRefs?.[envPark.replyRef!]).toEqual(
+      expectedParkPayload,
+    );
 
     // 2. Informational update -> replyRef is strictly null
     const updateDecision: OutboundDecision = {
@@ -310,8 +367,11 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     expect(envDigest.items![0]!.replyRef).not.toBe(envDigest.items![1]!.replyRef);
     const dRef1 = decodeRelayReplyRef(envDigest.items![0]!.replyRef!);
     const dRef2 = decodeRelayReplyRef(envDigest.items![1]!.replyRef!);
-    expect(dRef1.ok && dRef1.ref.qitemId === "q-park-1" && dRef1.ref.digest === true && dRef1.ref.mode === "park").toBe(true);
-    expect(dRef2.ok && dRef2.ref.qitemId === "q-ask-2" && dRef2.ref.digest === true && dRef2.ref.mode === "ask").toBe(true);
+    const digestReplyRefs = (preparedDigest.payload as { relayReplyRefs?: Record<string, RelayReplyRefPayload> }).relayReplyRefs!;
+    expect(dRef1.ok && dRef1.ref.digest === true && dRef1.ref.mode === "park").toBe(true);
+    expect(dRef2.ok && dRef2.ref.digest === true && dRef2.ref.mode === "ask").toBe(true);
+    expect(digestReplyRefs[envDigest.items![0]!.replyRef!]?.qitemId).toBe("q-park-1");
+    expect(digestReplyRefs[envDigest.items![1]!.replyRef!]?.qitemId).toBe("q-ask-2");
 
     // 4. Missing queue row or noncurrent episode NEVER mints a synthetic replyRef
     const missingRowDecision: OutboundDecision = {
@@ -349,7 +409,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
       releaseDeliver = () => r({ ok: true });
     });
 
-    const offeredRef = encodeRelayReplyRef({
+    const pendingPayload: RelayReplyRefPayload = {
       v: 1,
       qitemId: "q-pending-1",
       episodeKey: "q-pending-1:2",
@@ -357,7 +417,8 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
       decisionId: "dec-pending-1",
       connectorRef: "wa-main",
       mode: "park",
-    });
+    };
+    const offeredRef = encodeRelayReplyRef(pendingPayload);
 
     const wire = buildInProcessWire({
       home,
@@ -367,6 +428,9 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
         payload: {
           ...(d.payload as object),
           relayConnectorRef: "wa-main",
+          relayReplyRefs: {
+            [offeredRef]: pendingPayload,
+          },
           relayEnvelope: {
             v: 1,
             deliveryId: d.decisionId,
@@ -598,8 +662,17 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     expect(bridge.callCount()).toBe(2);
     expect(bridge.custodyByDeliveryId.size, "bridge deduplicates same deliveryId").toBe(1);
     expect(bridge.attempts[1]!.envelope).toEqual(bridge.attempts[0]!.envelope);
-    const replayedRef = decodeRelayReplyRef(bridge.attempts[1]!.envelope.replyRef!);
-    expect(replayedRef.ok && replayedRef.ref.decisionRevision).toBe("dr1-initial-rev-001");
+    expect(bridge.attempts[1]!.envelope.replyRef).toBe(
+      encodeRelayReplyRef({
+        v: 1,
+        qitemId: "q-replay-1",
+        episodeKey: "q-replay-1:1",
+        decisionRevision: "dr1-initial-rev-001",
+        decisionId: "dec-replay-1",
+        connectorRef: "wa-main",
+        mode: "park",
+      }),
+    );
 
     expect(receipts).toHaveLength(1);
     expect(receipts[0]).toMatchObject({
@@ -888,7 +961,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     });
   });
 
-  describe("R1-C Fix 3 — full long-text, multibyte CJK, emoji boundary, digest, and multi-part replay", () => {
+  describe("R3 — single complete JSON envelope (> 64 KiB), full content preservation, whole-decision replay, and stopSignal handling", () => {
     const reg = {
       ok: true as const,
       entities: [
@@ -911,7 +984,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
       ],
     };
 
-    it("renders and splits full ASCII, multibyte CJK, emoji, humanDetail, and humanQuestions/options without silent clipping or surrogate corruption", () => {
+    it("freezes and POSTs a single complete > 64 KiB JSON envelope with full ASCII, multibyte CJK, emoji, summary overflow, humanDetail, and humanQuestions/options without multipart splitting or clipping", async () => {
       const asciiBlock = "ASCII-LINE-0123456789-abcdefghijklmnopqrstuvwxyz\n".repeat(900) + "ASCII-TAIL-MARKER";
       const cjkBlock = "日本語と中国語と한국어の長文テスト検証データ".repeat(1400) + "CJK-TAIL-終端";
       const emojiBlock = "🚀👩‍💻🎉🔥🧪".repeat(1200) + "EMOJI-TAIL-🏁";
@@ -968,9 +1041,16 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
         },
       );
 
-      const carry = prepared.payload as RelayPayloadCarry;
+      const carry = prepared.payload as RelayPayloadCarry & Record<string, unknown>;
+      expect(carry.relayEnvelopes).toBeUndefined();
+
       const fullEnvelope = carry.relayEnvelope!;
       expect(fullEnvelope).toBeDefined();
+      expect(fullEnvelope.deliveryId).toBe("dec-long-cjk-1");
+      expect((fullEnvelope as Record<string, unknown>).part).toBeUndefined();
+      expect(fullEnvelope.summary.length).toBeLessThanOrEqual(1000);
+      expect(fullEnvelope.summary).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+      expect(fullEnvelope.body).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
       expect(fullEnvelope.body).toContain("SUMMARY-TAIL");
       expect(fullEnvelope.body).toContain("ASCII-TAIL-MARKER");
       expect(fullEnvelope.body).toContain("CJK-TAIL-終端");
@@ -983,31 +1063,27 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
       expect(fullEnvelope.body).toContain("Blue/Green Cutover");
       expect(fullEnvelope.body).toContain("Switch full traffic to green standby with instant DNS rollback");
 
-      const parts = carry.relayEnvelopes ?? splitRelayOutboundEnvelope(fullEnvelope);
-      expect(parts.length).toBeGreaterThan(2);
+      const serializedBytes = Buffer.byteLength(JSON.stringify(fullEnvelope), "utf8");
+      expect(serializedBytes).toBeGreaterThan(65_536);
 
-      for (let i = 0; i < parts.length; i++) {
-        const part = parts[i]!;
-        const raw = JSON.stringify(part);
-        expect(Buffer.byteLength(raw, "utf8")).toBeLessThanOrEqual(RELAY_ENVELOPE_MAX_BYTES);
-        expect(part.deliveryId).toBe(`dec-long-cjk-1:part:${i + 1}`);
-        expect(part.part).toEqual({
-          parentDeliveryId: "dec-long-cjk-1",
-          index: i + 1,
-          total: parts.length,
-        });
-        expect(part.replyRef).toBe(fullEnvelope.replyRef);
-        // Verify no unpaired UTF-16 surrogates in any part
-        expect(part.body).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
-      }
-
-      const reassembled = reassembleRelayEnvelopeParts(parts);
-      expect(reassembled).toEqual(fullEnvelope);
+      const bridge = recordingBridgeFixture();
+      const postRes = await postRelayEnvelope({
+        url: "http://127.0.0.1:43110/outbound",
+        outboundToken: "out-tok-valid-123456",
+        envelope: fullEnvelope,
+        fetchImpl: bridge.fetchImpl,
+      });
+      expect(postRes).toEqual({
+        ok: true,
+        status: 200,
+      });
+      expect(bridge.callCount()).toBe(1);
+      expect(bridge.custodyByDeliveryId.get("dec-long-cjk-1")).toEqual(fullEnvelope);
     });
 
-    it("replays failed/ACK-lost middle part across bridge and transport restart with stable part identities/bytes and commits custody only after all parts succeed", async () => {
+    it("replays a lost-ACK > 64 KiB whole-decision envelope across bridge and transport restart with identical deliveryId and bytes without duplicate custody", async () => {
       const fsx = memFs();
-      const relayDir = mkdtempSync(join(tmpdir(), "openrig-relay-mp-"));
+      const relayDir = mkdtempSync(join(tmpdir(), "openrig-relay-whole-"));
       const relay = await startRecordingRelay({
         custodyFilePath: join(relayDir, "bridge-state.jsonl"),
         outboundToken: "out-tok-valid-123456",
@@ -1022,60 +1098,54 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
         const releasedKeys: string[] = [];
 
         const cjkBody =
-          "第一段内容：多字节UTF-8编码边界与分片恢复测试。".repeat(950) +
+          "第一段内容：多字节UTF-8编码边界与整包恢复测试。".repeat(950) +
           "\nMIDDLE-MARKER-中間標記\n" +
-          "第二段内容：确保在中间分片丢失ACK后重启不会丢失尾部也不会重复接管。".repeat(950) +
+          "第二段内容：确保在整包丢失ACK后重启不会丢失尾部也不会重复接管。".repeat(950) +
           "\nFINAL-TAIL-MARKER-最終尾部";
 
         const prepared = prepareRelayDecision(
           {
             kind: "outbound_decision",
-            decisionId: "dec-mp-ack-lost-1",
+            decisionId: "dec-whole-ack-lost-1",
             op: OUTBOUND_OP,
             entityBindingRef: "sam@external",
             payload: {
-              qitemId: "q-mp-1",
-              notificationKey: "q-mp-1:1",
+              qitemId: "q-whole-1",
+              notificationKey: "q-whole-1:1",
               ownerNotificationKind: "human-required",
               ownerNotificationLevel: "ALERT",
               humanIntent: "decision",
               destinationSession: "sam@external",
               state: "blocked",
-              summary: "Multi-part lost ACK test",
+              summary: "Whole-decision lost ACK > 64 KiB test",
               body: cjkBody,
             } satisfies OutboundPostPayload,
           },
           {
             loadHumanRegistry: () => reg,
             lookupQuestionState: () => ({
-              qitemId: "q-mp-1",
+              qitemId: "q-whole-1",
               mode: "park",
-              episodeKey: "q-mp-1:1",
-              decisionRevision: "dr1-mp-1",
+              episodeKey: "q-whole-1:1",
+              decisionRevision: "dr1-whole-1",
               humanIntent: "decision",
             }),
           },
         );
 
-        const expectedParts = (prepared.payload as RelayPayloadCarry).relayEnvelopes!;
-        expect(expectedParts).toBeDefined();
-        expect(expectedParts.length).toBe(3);
+        const carry = prepared.payload as RelayPayloadCarry & Record<string, unknown>;
+        expect(carry.relayEnvelopes).toBeUndefined();
+        const frozenEnvelope = carry.relayEnvelope!;
+        expect(Buffer.byteLength(JSON.stringify(frozenEnvelope), "utf8")).toBeGreaterThan(65_536);
 
-        // Fail HTTP ACK on the 2nd part (index 2 of 3) AFTER the bridge persists custody for part 2
-        let outboundCallIndex = 0;
-        const realFetch: typeof fetch = async (url, init) => {
-          outboundCallIndex += 1;
-          if (outboundCallIndex === 2) {
-            relay.setLoseNextAck(true);
-          }
-          return fetch(url, init);
-        };
+        // Fail HTTP ACK on the first whole-envelope POST AFTER the bridge persists custody
+        relay.setLoseNextAck(true);
 
         const transport1 = createRelayOutboundTransport({
           attempted,
           delivered,
           outboundSeen,
-          fetchImpl: realFetch,
+          fetchImpl: fetch,
           resolveProfile: (connectorRef) => ({
             ok: true,
             connectorRef,
@@ -1093,26 +1163,28 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
         });
 
         wire1.dispatcher.dispatch(OUTBOUND_OP, "sam@external", prepared.payload, {
-          decisionId: "dec-mp-ack-lost-1",
+          decisionId: "dec-whole-ack-lost-1",
         });
         for (let i = 0; i < 40 && relay.getSanitizedStats().lostAckCount === 0; i++) {
           await tick();
         }
         await tick();
 
-        // Part 1 succeeded (200), Part 2 committed custody on bridge then returned 502 (lost ACK), Part 3 not sent yet.
-        expect(relay.getSanitizedStats().custodyCount).toBe(2);
-        expect(receipts, "logical custody receipt must NOT fire before all parts succeed").toHaveLength(0);
-        expect(outboundSeen.load().has("q-mp-1:1")).toBe(false);
-        expect(delivered.load().has("dec-mp-ack-lost-1")).toBe(false);
+        // Single POST committed custody on bridge then returned 502 (lost ACK)
+        expect(relay.getSanitizedStats().relayPostCount).toBe(1);
+        expect(relay.getSanitizedStats().custodyCount).toBe(1);
+        expect(relay.getSanitizedStats().lostAckCount).toBe(1);
+        expect(receipts, "logical custody receipt must NOT fire when HTTP ACK was lost").toHaveLength(0);
+        expect(outboundSeen.load().has("q-whole-1:1")).toBe(false);
+        expect(delivered.load().has("dec-whole-ack-lost-1")).toBe(false);
         expect(releasedKeys).toEqual([]);
         expect(new DispatchBuffer(home).pending()).toHaveLength(1);
 
-        // Pending replyRef lookup still correlates parent decisionId while buffered
-        const parentReplyRef = (prepared.payload as RelayPayloadCarry).relayEnvelope!.replyRef!;
+        // Pending replyRef lookup correlates parent decisionId while buffered
+        const parentReplyRef = frozenEnvelope.replyRef!;
         const pendingRef = findPendingRelayReplyRef(home, parentReplyRef);
         expect(pendingRef.found).toBe(true);
-        expect(pendingRef.decisionId).toBe("dec-mp-ack-lost-1");
+        expect(pendingRef.decisionId).toBe("dec-whole-ack-lost-1");
 
         // Restart the recording relay server (reloads persisted custody from disk) and create fresh transport/wire
         await relay.restart();
@@ -1143,29 +1215,31 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
         }
         await tick();
 
-        // Part 1 was skipped (already delivered locally), Part 2 replayed with identical deliveryId/bytes (deduplicated), Part 3 delivered fresh!
-        expect(relay.getSanitizedStats().custodyCount, "exactly 3 unique part deliveries in bridge custody").toBe(3);
-        expect(relay.getSanitizedStats().deduplicatedCount, "middle part replay deduplicated by bridge without conflict").toBe(1);
+        // Replay sent the exact same whole deliveryId and bytes, deduplicated cleanly by bridge
+        expect(relay.getSanitizedStats().custodyCount).toBe(1);
+        expect(relay.getSanitizedStats().deduplicatedCount).toBe(1);
         expect(receipts).toHaveLength(1);
-        expect(receipts[0]?.deliveryId).toBe("dec-mp-ack-lost-1");
-        expect(outboundSeen.load().has("q-mp-1:1")).toBe(true);
-        expect(delivered.load().has("dec-mp-ack-lost-1")).toBe(true);
-        expect(releasedKeys).toEqual(["q-mp-1:1"]);
+        expect(receipts[0]?.deliveryId).toBe("dec-whole-ack-lost-1");
+        expect(outboundSeen.load().has("q-whole-1:1")).toBe(true);
+        expect(delivered.load().has("dec-whole-ack-lost-1")).toBe(true);
+        expect(releasedKeys).toEqual(["q-whole-1:1"]);
         expect(new DispatchBuffer(home).pending()).toHaveLength(0);
 
-        const committedEnvelopes = relay.getCustodyRecords().map((d) => d.envelope);
-        const reassembled = reassembleRelayEnvelopeParts(committedEnvelopes);
-        expect(relay.getReassembledDeliveries()).toEqual([reassembled]);
-        expect(reassembled.body).toBe(cjkBody);
-        expect(reassembled.body).toContain("MIDDLE-MARKER-中間標記");
-        expect(reassembled.body).toContain("FINAL-TAIL-MARKER-最終尾部");
+        const committedRecords = relay.getCustodyRecords();
+        expect(committedRecords).toHaveLength(1);
+        const committed = committedRecords[0]!.envelope;
+        expect(committed.deliveryId).toBe("dec-whole-ack-lost-1");
+        expect((committed as Record<string, unknown>).part).toBeUndefined();
+        expect(committed.body).toBe(cjkBody);
+        expect(committed.body).toContain("MIDDLE-MARKER-中間標記");
+        expect(committed.body).toContain("FINAL-TAIL-MARKER-最終尾部");
       } finally {
         await relay.stop();
         rmSync(relayDir, { recursive: true, force: true });
       }
     });
 
-    it("splits and delivers oversized multi-item digests with full item content and records all member receipts only on complete acceptance", async () => {
+    it("delivers an oversized > 64 KiB multi-item digest in a single POST with full item content and records all member receipts on acceptance", async () => {
       const fsx = memFs();
       const attempted = new SeenStore("/state/relay-attempted-decisions.jsonl", fsx);
       const delivered = new SeenStore("/state/relay-delivered-decisions.jsonl", fsx);
@@ -1227,12 +1301,11 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
         },
       );
 
-      const parts = (prepared.payload as RelayPayloadCarry).relayEnvelopes!;
-      expect(parts).toBeDefined();
-      expect(parts.length).toBeGreaterThan(1);
-      for (const part of parts) {
-        expect(Buffer.byteLength(JSON.stringify(part), "utf8")).toBeLessThanOrEqual(RELAY_ENVELOPE_MAX_BYTES);
-      }
+      const carry = prepared.payload as RelayPayloadCarry & Record<string, unknown>;
+      expect(carry.relayEnvelopes).toBeUndefined();
+      const digestEnvelope = carry.relayEnvelope!;
+      expect((digestEnvelope as Record<string, unknown>).part).toBeUndefined();
+      expect(Buffer.byteLength(JSON.stringify(digestEnvelope), "utf8")).toBeGreaterThan(65_536);
 
       const transport = createRelayOutboundTransport({
         attempted,
@@ -1257,25 +1330,30 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
       });
 
       expect(outcome.ok).toBe(true);
-      expect(bridge.custodyByDeliveryId.size).toBe(parts.length);
+      expect(bridge.callCount()).toBe(1);
+      expect(bridge.custodyByDeliveryId.size).toBe(1);
       expect(receipts.map((r) => `${r.qitemId}:${r.notificationKey}`)).toEqual([
         "q-dig-1:q-dig-1:1",
         "q-dig-2:q-dig-2:1",
       ]);
 
-      const reassembled = reassembleRelayEnvelopeParts(Array.from(bridge.custodyByDeliveryId.values()));
-      expect(reassembled.body).toContain("ITEM-1-TAIL");
-      expect(reassembled.body).toContain("ITEM-2-TAIL");
-      expect(reassembled.items).toHaveLength(2);
-      expect(reassembled.items?.[0]?.body).toContain("ITEM-1-TAIL");
-      expect(reassembled.items?.[1]?.body).toContain("ITEM-2-TAIL");
-      const ref1 = decodeRelayReplyRef(reassembled.items?.[0]?.replyRef ?? "");
-      const ref2 = decodeRelayReplyRef(reassembled.items?.[1]?.replyRef ?? "");
-      expect(ref1.ok && ref1.ref.qitemId).toBe("q-dig-1");
-      expect(ref2.ok && ref2.ref.qitemId).toBe("q-dig-2");
+      const deliveredEnvelope = bridge.custodyByDeliveryId.get("dec-digest-long-1")!;
+      expect(deliveredEnvelope).toBeDefined();
+      expect((deliveredEnvelope as Record<string, unknown>).part).toBeUndefined();
+      expect(deliveredEnvelope.body).toContain("ITEM-1-TAIL");
+      expect(deliveredEnvelope.body).toContain("ITEM-2-TAIL");
+      expect(deliveredEnvelope.items).toHaveLength(2);
+      expect(deliveredEnvelope.items?.[0]?.body).toContain("ITEM-1-TAIL");
+      expect(deliveredEnvelope.items?.[1]?.body).toContain("ITEM-2-TAIL");
+      const ref1 = decodeRelayReplyRef(deliveredEnvelope.items?.[0]?.replyRef ?? "");
+      const ref2 = decodeRelayReplyRef(deliveredEnvelope.items?.[1]?.replyRef ?? "");
+      expect(ref1.ok && ref1.ref.digest === true && ref1.ref.mode === "ask").toBe(true);
+      expect(ref2.ok && ref2.ref.digest === true && ref2.ref.mode === "ask").toBe(true);
+      expect(receipts[0]?.replyRef).toBe(deliveredEnvelope.items?.[0]?.replyRef);
+      expect(receipts[1]?.replyRef).toBe(deliveredEnvelope.items?.[1]?.replyRef);
     });
 
-    it("distinguishes stopSignal abort from genuine timeout: in-flight stop suppresses failure ledger, retains pending decision and part ACKs, replays stable IDs/bytes on restart, while genuine timeout still records failure", async () => {
+    it("distinguishes stopSignal abort from genuine timeout on a whole > 64 KiB envelope: in-flight stop suppresses failure ledger, records no false acceptance, retains pending decision, replays identical ID/bytes on restart, while genuine timeout records failure", async () => {
       const fsx = memFs();
       const attempted = new SeenStore("/state/relay-attempted-decisions.jsonl", fsx);
       const delivered = new SeenStore("/state/relay-delivered-decisions.jsonl", fsx);
@@ -1288,7 +1366,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
       const prepared = prepareRelayDecision(
         {
           kind: "outbound_decision",
-          decisionId: "dec-stop-mp-1",
+          decisionId: "dec-stop-whole-1",
           op: OUTBOUND_OP,
           entityBindingRef: "sam@external",
           payload: {
@@ -1299,7 +1377,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
             humanIntent: "decision",
             destinationSession: "sam@external",
             state: "blocked",
-            summary: "Stop during in-flight multi-part send",
+            summary: "Stop during in-flight whole-envelope send",
             body: longBody,
           } satisfies OutboundPostPayload,
         },
@@ -1315,16 +1393,18 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
         },
       );
 
-      const expectedParts = (prepared.payload as RelayPayloadCarry).relayEnvelopes!;
-      expect(expectedParts.length).toBe(2);
+      const carry = prepared.payload as RelayPayloadCarry & Record<string, unknown>;
+      expect(carry.relayEnvelopes).toBeUndefined();
+      const frozenEnvelope = carry.relayEnvelope!;
+      const frozenBodyJson = JSON.stringify(frozenEnvelope);
+      expect(Buffer.byteLength(frozenBodyJson, "utf8")).toBeGreaterThan(65_536);
 
       const stopCtl1 = new AbortController();
       let postCalls = 0;
-      const stopOnSecondPartFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      let firstAttemptRawBody = "";
+      const stopInFlightFetch = async (_url: string, init?: RequestInit): Promise<Response> => {
         postCalls += 1;
-        if (postCalls === 1) {
-          return bridge.fetchImpl(url, init);
-        }
+        firstAttemptRawBody = typeof init?.body === "string" ? init.body : "";
         return await new Promise<Response>((_resolve, reject) => {
           const sig = init?.signal;
           const onAbort = () => {
@@ -1335,7 +1415,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
             return;
           }
           sig?.addEventListener("abort", onAbort, { once: true });
-          // Simulate subsystem stop while Part 2 HTTP POST is in flight
+          // Simulate subsystem stop while the single whole-envelope HTTP POST is in flight
           queueMicrotask(() => stopCtl1.abort(new Error("subsystem stop requested")));
         });
       };
@@ -1344,7 +1424,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
         attempted,
         delivered,
         outboundSeen,
-        fetchImpl: stopOnSecondPartFetch,
+        fetchImpl: stopInFlightFetch,
         stopSignal: stopCtl1.signal,
         resolveProfile: (connectorRef) => ({
           ok: true,
@@ -1363,15 +1443,16 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
       });
 
       wire1.dispatcher.dispatch(OUTBOUND_OP, "sam@external", prepared.payload, {
-        decisionId: "dec-stop-mp-1",
+        decisionId: "dec-stop-whole-1",
       });
       await tick();
 
-      // Part 1 succeeded and was recorded; Part 2 was aborted by stopSignal -> NO failure ledger entry, NO acceptance, decision retained
-      expect(bridge.custodyByDeliveryId.size).toBe(1);
-      expect(delivered.load().has("dec-stop-mp-1:part:1")).toBe(true);
-      expect(delivered.load().has("dec-stop-mp-1:part:2")).toBe(false);
-      expect(delivered.load().has("dec-stop-mp-1")).toBe(false);
+      // Whole POST was aborted in flight by stopSignal -> NO failure ledger entry, NO acceptance, decision retained
+      expect(postCalls).toBe(1);
+      expect(firstAttemptRawBody).toBe(frozenBodyJson);
+      expect(bridge.custodyByDeliveryId.size).toBe(0);
+      expect(attempted.load().has("dec-stop-whole-1")).toBe(true);
+      expect(delivered.load().has("dec-stop-whole-1")).toBe(false);
       expect(failures, "stopSignal abort must not record transport failure").toEqual([]);
       expect(receipts, "stopSignal abort must not record false acceptance").toEqual([]);
       expect(new DispatchBuffer(home).pending()).toHaveLength(1);
@@ -1380,7 +1461,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
       const callsBeforePreAborted = postCalls;
       const preAbortedOutcome = await transport1.deliver({
         kind: "outbound_decision",
-        decisionId: "dec-stop-mp-1",
+        decisionId: "dec-stop-whole-1",
         op: OUTBOUND_OP,
         entityBindingRef: "sam@external",
         payload: prepared.payload,
@@ -1393,7 +1474,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
       expect(postCalls).toBe(callsBeforePreAborted);
       expect(failures).toEqual([]);
 
-      // Restart with a fresh transport/wire: Part 1 is skipped, Part 2 is sent with identical frozen ID/bytes, custody completes
+      // Restart with a fresh transport/wire: replays the exact same whole deliveryId and bytes in 1 POST
       const stopCtl2 = new AbortController();
       const transport2 = createRelayOutboundTransport({
         attempted,
@@ -1419,14 +1500,14 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
       wire2.startServices?.();
       await tick();
 
-      expect(bridge.callCount(), "Part 1 posted once before stop + Part 2 posted once on replay").toBe(2);
-      expect(bridge.custodyByDeliveryId.size).toBe(2);
-      expect(bridge.attempts[0]!.envelope.deliveryId).toBe("dec-stop-mp-1:part:1");
-      expect(bridge.attempts[1]!.envelope.deliveryId).toBe("dec-stop-mp-1:part:2");
-      expect(bridge.attempts[1]!.envelope).toEqual(expectedParts[1]);
+      expect(bridge.callCount()).toBe(1);
+      expect(bridge.custodyByDeliveryId.size).toBe(1);
+      expect(bridge.attempts[0]!.envelope.deliveryId).toBe("dec-stop-whole-1");
+      expect(bridge.attempts[0]!.envelope).toEqual(frozenEnvelope);
+      expect(JSON.stringify(bridge.attempts[0]!.envelope)).toBe(firstAttemptRawBody);
       expect(receipts).toHaveLength(1);
       expect(failures).toEqual([]);
-      expect(delivered.load().has("dec-stop-mp-1")).toBe(true);
+      expect(delivered.load().has("dec-stop-whole-1")).toBe(true);
       expect(new DispatchBuffer(home).pending()).toHaveLength(0);
 
       // Genuine timeout (when stopSignal is NOT aborted) still reports class "timeout" and invokes onTransportFailed

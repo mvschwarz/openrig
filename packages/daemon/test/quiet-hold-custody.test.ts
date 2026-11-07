@@ -541,7 +541,7 @@ describe("custody of asks held for quiet hours", () => {
     );
     expect(quietHoldCustody(db, acceptedRow.qitemId)).toBeNull();
     expect(repo.waitingView(acceptedRow.qitemId)!.nextBackstop).toMatchObject({
-      mechanism: "none (posted to the human; awaiting their decision)",
+      mechanism: "none (accepted by the bridge; awaiting their decision)",
     });
     expect(findingFor(await sweep(), acceptedRow)).toEqual([]);
   });

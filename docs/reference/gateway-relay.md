@@ -24,13 +24,11 @@ OpenRig does not embed third-party messaging platform SDKs (such as WhatsApp, Ma
 
 ### Outbound Custody & Recovery
 - OpenRig enqueues outbound decisions to a local `DispatchBuffer` before issuing any HTTP `POST` to `OPENRIG_RELAY_URL`.
-- Each logical decision freezes its complete representation (`relayEnvelope`, plus ordered `relayEnvelopes` parts when split) onto the parent `DispatchBuffer` entry before the first network attempt.
-- Transport is at-least-once:
-  - Normal small messages (`<= 65,536` serialized UTF-8 bytes) are sent in a single HTTP `POST` with `deliveryId = <decisionId>` and no `part` field.
-  - Oversized messages (`> 65,536` serialized UTF-8 bytes, including long ASCII, multibyte CJK, emoji, `humanDetail`, `humanQuestions`/options, and large digests) are split into ordered HTTP `POST` part envelopes (`<= 65,536` UTF-8 bytes each) with `deliveryId = "<parentDeliveryId>:part:<index>"` and `part: { parentDeliveryId, index, total }`.
-- An HTTP `2xx` response from the bridge acknowledges durable bridge custody of that specific envelope (`deliveryId`) only. For multi-part messages, the bridge must persist each part by its per-part `deliveryId`, deduplicate replayed part `deliveryId`s, and **durably assemble all ordered parts (`1..total`) before forwarding the complete logical message once** to the recipient on the external platform.
-- OpenRig records the logical queue acceptance receipt (`relay-owner-notification-accepted` with the parent `deliveryId`) and drains the parent decision from `DispatchBuffer` **only after all parts (`1..total`) have returned `2xx`**. Bridge acceptance confirms custody by the bridge process only (and is projected as `accepted` / `"Accepted by bridge"`, whereas Slack posts use `posted` / `"Delivered"`). It does not indicate downstream platform delivery, posting, or human receipt.
-- Failed dispatches remain in OpenRig's `DispatchBuffer` and record a relay-specific failure transition note (`relay-owner-notification-transport-failed` naming the `connectorRef`, distinct from Slack's `slack-owner-notification-transport-failed`). Already-acknowledged parts of a multi-part message are tracked in `relay-delivered-decisions.jsonl` (`delivered-part`) so replays after a lost ACK or daemon/bridge restart re-send only unacknowledged parts with their exact frozen `deliveryId` and bytes. There is currently no periodic background timer redriving outbound dispatches on timeout.
+- Each logical decision freezes its complete `relayEnvelope` onto the parent `DispatchBuffer` entry before the first network attempt, with no self-imposed outbound 64 KiB cap or multi-part splitting.
+- Transport is at-least-once: OpenRig sends the complete JSON envelope in a single HTTP `POST` per attempt with `deliveryId = <decisionId>` (preserving the full `body`, `humanDetail`, `humanQuestions`/options, `summary` overflow, and digest `items` without silent clipping).
+- An HTTP `2xx` response from the bridge acknowledges durable bridge custody of that complete envelope (`deliveryId`). The bridge must persist each envelope by `deliveryId` and deduplicate replayed `deliveryId`s idempotently.
+- OpenRig records the logical queue acceptance receipt (`relay-owner-notification-accepted` with `deliveryId`) and drains the decision from `DispatchBuffer` once the HTTP `POST` returns `2xx`. Bridge acceptance confirms custody by the bridge process only (and is projected as `accepted` / `"Accepted by bridge"`, whereas Slack posts use `posted` / `"Delivered"`). It does not indicate downstream platform delivery, posting, or human receipt.
+- Failed dispatches remain in OpenRig's `DispatchBuffer` and record a relay-specific failure transition note (`relay-owner-notification-transport-failed` naming the `connectorRef`, distinct from Slack's `slack-owner-notification-transport-failed`). Replays after a lost ACK or daemon/bridge restart re-send the exact frozen `relayEnvelope` with the same `deliveryId` and bytes. If the relay subsystem stops while an outbound HTTP `POST` is in flight (or before it starts), the transport aborts cleanly (`stopped`) without recording a false failure transition note or false acceptance receipt, retaining the buffered decision for replay on restart. There is currently no periodic background timer redriving outbound dispatches on timeout.
 
 ### Inbound Custody & Resolution
 - The operator bridge posts replies to `POST /api/gateway/relay/inbound`.
@@ -81,20 +79,19 @@ OPENRIG_RELAY_INBOUND_TOKEN=sec_inbound_token_value
   "outcome": "interrupt",
   "summary": "Database Migration Approval",
   "body": "Production migration script 004_add_indexes.sql is ready to execute. Reply YES to approve, NO to abort.",
-  "replyRef": "eyJ2IjoxLCJxaXRlbUlkIjoicS0x...<base64url>"
+  "replyRef": "eyJ2IjoxLCJwYXlsb2FkSGFzaCI6...<base64url>"
 }
 ```
 
 - `v`: Protocol version integer (`1`).
-- `deliveryId`: Stable delivery identifier (`<decisionId>` for single-part envelopes, or `"<parentDeliveryId>:part:<index>"` for multi-part envelopes).
+- `deliveryId`: Stable whole-decision delivery identifier (`<decisionId>`).
 - `recipient.handle`: Recipient's registered safe alias for this connector.
 - `intent`: `"decision"` (actionable question) or `"update"` (informational notice).
 - `outcome`: Delivery classification (`"interrupt"`, `"notify"`, or `"digest"`).
-- `summary`: Plain text summary (up to 1,000 characters on the `summary` field, cut on a code-point boundary; any summary text exceeding 1,000 characters is preserved in full at the beginning of `body`).
-- `body`: Complete plain text content (including full `body`, `humanDetail`, and rendered `humanQuestions` headers, prompts, and option labels/descriptions) without silent character clipping. Each HTTP request envelope is capped at 65,536 UTF-8 bytes when JSON-serialized; when the full logical envelope exceeds 65,536 UTF-8 bytes, OpenRig splits it into ordered multi-part envelopes (`part: { parentDeliveryId, index, total }`) cut strictly on Unicode code-point boundaries so concatenating `part.body` for `index = 1..total` reconstructs the exact full `body`.
-- `replyRef`: Opaque base64url string for actionable decisions; `null` for informational updates (and `null` at the top level of multi-item digests). Preserved across all parts of a multi-part decision envelope.
-- `items`: Present when `outcome` is `"digest"`. Array of objects with `qitemId`, `notificationKey`, `summary`, optional `body`, and per-item `replyRef` (or `null`). For oversized digests, items (and oversized item bodies) are packed in order across part envelopes within each part's 65,536-byte UTF-8 budget.
-- `part`: Present only on multi-part split envelopes (`total >= 2`). Object `{ parentDeliveryId: string, index: number, total: number }` where `1 <= index <= total`. Bridges must persist each part by `deliveryId`, deduplicate replayed part `deliveryId`s, and durably reassemble all parts `1..total` in `index` order before forwarding the complete logical message once to the human recipient.
+- `summary`: Plain text summary preview (up to 1,000 characters on the `summary` field, cut on a Unicode code-point boundary; any summary text exceeding 1,000 characters is preserved in full at the beginning of `body` or `item.body`).
+- `body`: Complete plain text content (including full `summary` overflow, `body`, `humanDetail`, and rendered `humanQuestions` headers, prompts, and option labels/descriptions) sent in a single complete JSON envelope without silent character clipping or self-imposed outbound byte splitting.
+- `replyRef`: Fixed-size opaque base64url token (`<= 4,096` characters for any supported ID lengths — `246`–`266` characters in protocol v1, hashing the canonical frozen `RelayReplyRefPayload` and binding `connectorHash`, `mode`, and optional `digest: true`) for actionable decisions; `null` for informational updates (and `null` at the top level of multi-item digests).
+- `items`: Present when `outcome` is `"digest"`. Array of objects with `qitemId`, `notificationKey`, `summary`, optional `body`, and per-item `replyRef` (or `null`).
 
 ### Inbound Envelope (`POST /api/gateway/relay/inbound`)
 
@@ -102,7 +99,7 @@ OPENRIG_RELAY_INBOUND_TOKEN=sec_inbound_token_value
 {
   "eventId": "evt-relay-20261107-001",
   "sender": { "handle": "alice-ops" },
-  "replyRef": "eyJ2IjoxLCJxaXRlbUlkIjoicS0x...<base64url>",
+  "replyRef": "eyJ2IjoxLCJwYXlsb2FkSGFzaCI6...<base64url>",
   "text": "Approved. Proceed with rollout.",
   "ordering": "after-question"
 }
@@ -110,7 +107,7 @@ OPENRIG_RELAY_INBOUND_TOKEN=sec_inbound_token_value
 
 - `eventId`: Bridge-assigned identifier (`1..256` chars, matching `/^[A-Za-z0-9._:-]{1,256}$/`).
 - `sender.handle`: Sender's alias, matching `/^[A-Za-z0-9._-]+$/`. Must match a human fragment bound to the authenticated connector. Harmless extra fields inside `sender` or on the top-level JSON object are ignored and never override `sender.handle` resolution or affect the event fingerprint.
-- `replyRef`: Exact opaque string copied from the outbound envelope (maximum 4,096 characters). Bridges must not parse or alter `replyRef`.
+- `replyRef`: Exact fixed-size opaque base64url token copied from the outbound envelope (maximum 4,096 characters). Bridges must not parse or alter `replyRef`.
 - `text`: Plain text response (maximum 32,768 characters, non-empty after trim, no NUL bytes). Processed as unstructured text without automatic natural-language approval parsing.
 - `ordering`: Optional enum (`"after-question"` | `"uncertain"`, default `"uncertain"`). When `"uncertain"`, text is accepted as recorded context rather than verified sequence relative to the question.
 
@@ -124,7 +121,8 @@ OPENRIG_RELAY_INBOUND_TOKEN=sec_inbound_token_value
 - **413 Payload Too Large**: Request body exceeds 64 KiB (65,536 bytes).
 - **503 Service Unavailable**:
   - `human_registry_unavailable`: Local human registry (`gateway/humans/*.yaml`) failed to load due to a broken fragment or filesystem read error (normal `noHumans` returns `401`).
-  - `dispatch_buffer_unavailable`: An un-receipted `replyRef` required fallback verification against `<openrig-home>/gateway/dispatch-buffer.json`, and reading the buffer failed (`pendingStrict()`), returning `503` with zero seen-store reservation or Mission Control action side effects. (`replyRef`s already vouched for by durable accepted receipts in `queue_transitions` are verified before consulting the buffer and still succeed.)
+  - `queue_store_unavailable`: Local SQLite queue/transition store read failed while resolving or verifying `replyRef`, returning `503` with zero seen-store reservation or Mission Control action side effects.
+  - `dispatch_buffer_unavailable`: An un-receipted `replyRef` required fallback verification against `<openrig-home>/gateway/dispatch-buffer.json`, and reading the buffer failed (`pendingStrict()`), returning `503` with zero seen-store reservation or Mission Control action side effects. (`replyRef`s already vouched for by durable accepted receipts in `queue_transitions` or `queue_transitions_archive` are verified before consulting the buffer and still succeed.)
   - `seen_store_unavailable` (response includes `seenPath`): Local seen-ledger (`state/relay-inbound-seen.jsonl`) is unreadable, contains unparseable JSONL or unkeyable records (missing `id`), failed a reservation/processed mark, or has a corrupt/unvouched record for the requested `eventId`'s key. Keyed suspect records (`missing/invalid status` or conflicting recorded fingerprints for the same key; diagnostic `ts` or extra metadata fields are ignored) scope refusal to that `eventId` key only so unrelated `eventId`s continue to operate normally, while never treating unparseable or suspect history as unseen.
 
 ---

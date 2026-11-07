@@ -16,8 +16,6 @@ export const RELAY_ATTEMPTED_DECISIONS_FILE = "relay-attempted-decisions.jsonl";
 export const RELAY_DELIVERED_DECISIONS_FILE = "relay-delivered-decisions.jsonl";
 
 export const RELAY_SUMMARY_MAX_CHARS = 1000;
-export const RELAY_BODY_MAX_CHARS = 32_000;
-export const RELAY_ENVELOPE_MAX_BYTES = 65_536;
 export const RELAY_DEFAULT_TIMEOUT_MS = 15_000;
 
 export type RelayQuestionMode = "ask" | "park";
@@ -35,18 +33,20 @@ export interface RelayReplyRefPayload {
   digest?: boolean;
 }
 
+export interface RelayReplyRefToken {
+  v: 1;
+  payloadHash: string;
+  connectorHash: string;
+  mode: RelayQuestionMode;
+  digest?: boolean;
+}
+
 export interface RelayDigestItem {
   qitemId: string;
   notificationKey: string;
   summary: string;
   body?: string;
   replyRef: string | null;
-}
-
-export interface RelayEnvelopePart {
-  parentDeliveryId: string;
-  index: number;
-  total: number;
 }
 
 export interface RelayOutboundEnvelope {
@@ -61,14 +61,13 @@ export interface RelayOutboundEnvelope {
   body: string;
   replyRef: string | null;
   items?: RelayDigestItem[];
-  part?: RelayEnvelopePart;
 }
 
 export interface RelayPayloadCarry extends OutboundPostPayload {
   relayConnectorRef?: string;
   relayEnvelope?: RelayOutboundEnvelope;
-  relayEnvelopes?: RelayOutboundEnvelope[];
   relayRevision?: string | null;
+  relayReplyRefs?: Record<string, RelayReplyRefPayload>;
   deliveryDigestPost?: boolean;
   digestId?: string;
   memberReceipts?: Array<{
@@ -88,16 +87,15 @@ function asRelayPayloadCarry(v: unknown): RelayPayloadCarry | null {
   return v as unknown as RelayPayloadCarry;
 }
 
-const ALLOWED_REPLY_REF_KEYS = new Set([
+const ALLOWED_REPLY_REF_TOKEN_KEYS = new Set([
   "v",
-  "qitemId",
-  "episodeKey",
-  "decisionRevision",
-  "decisionId",
-  "connectorRef",
+  "payloadHash",
+  "connectorHash",
   "mode",
   "digest",
 ]);
+
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 
 const ALLOWED_ENVELOPE_KEYS = new Set([
   "v",
@@ -109,12 +107,10 @@ const ALLOWED_ENVELOPE_KEYS = new Set([
   "body",
   "replyRef",
   "items",
-  "part",
 ]);
 
 const ALLOWED_RECIPIENT_KEYS = new Set(["handle"]);
 const ALLOWED_DIGEST_ITEM_KEYS = new Set(["qitemId", "notificationKey", "summary", "body", "replyRef"]);
-const ALLOWED_PART_KEYS = new Set(["parentDeliveryId", "index", "total"]);
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -131,9 +127,8 @@ function unknownKey(obj: Record<string, unknown>, allowed: Set<string>): string 
   return undefined;
 }
 
-/** Encode structured correlation fields into an opaque base64url replyRef string. */
-export function encodeRelayReplyRef(payload: RelayReplyRefPayload): string {
-  const canonical: RelayReplyRefPayload = {
+function canonicalizeRelayReplyRefPayload(payload: RelayReplyRefPayload): RelayReplyRefPayload {
+  return {
     v: RELAY_PROTOCOL_VERSION,
     qitemId: payload.qitemId,
     episodeKey: payload.episodeKey,
@@ -143,13 +138,37 @@ export function encodeRelayReplyRef(payload: RelayReplyRefPayload): string {
     mode: payload.mode,
     ...(payload.digest === true ? { digest: true } : {}),
   };
-  return Buffer.from(JSON.stringify(canonical), "utf8").toString("base64url");
 }
 
-/** Decode and strictly validate an opaque base64url replyRef string. */
+/** Deterministic SHA-256 hex digest of the canonical frozen RelayReplyRefPayload. */
+export function hashRelayReplyRefPayload(payload: RelayReplyRefPayload): string {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalizeRelayReplyRefPayload(payload)), "utf8")
+    .digest("hex");
+}
+
+/** Deterministic SHA-256 hex digest of a relay connectorRef for bounded token binding. */
+export function hashRelayConnectorRef(connectorRef: string): string {
+  return createHash("sha256").update(connectorRef, "utf8").digest("hex");
+}
+
+/** Encode structured correlation fields into a fixed-size opaque base64url replyRef token. */
+export function encodeRelayReplyRef(payload: RelayReplyRefPayload): string {
+  const canonical = canonicalizeRelayReplyRefPayload(payload);
+  const token: RelayReplyRefToken = {
+    v: RELAY_PROTOCOL_VERSION,
+    payloadHash: hashRelayReplyRefPayload(canonical),
+    connectorHash: hashRelayConnectorRef(canonical.connectorRef),
+    mode: canonical.mode,
+    ...(canonical.digest === true ? { digest: true } : {}),
+  };
+  return Buffer.from(JSON.stringify(token), "utf8").toString("base64url");
+}
+
+/** Decode and strictly validate a fixed-size opaque base64url replyRef token. */
 export function decodeRelayReplyRef(
   raw: unknown,
-): { ok: true; ref: RelayReplyRefPayload } | { ok: false; error: string } {
+): { ok: true; ref: RelayReplyRefToken } | { ok: false; error: string } {
   if (typeof raw !== "string" || raw.length === 0 || raw.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(raw)) {
     return { ok: false, error: "replyRef must be a non-empty base64url string" };
   }
@@ -160,17 +179,14 @@ export function decodeRelayReplyRef(
     return { ok: false, error: "replyRef is not valid base64url JSON" };
   }
   if (!isObj(parsed)) return { ok: false, error: "replyRef payload must be a JSON object" };
-  const uk = unknownKey(parsed, ALLOWED_REPLY_REF_KEYS);
+  const uk = unknownKey(parsed, ALLOWED_REPLY_REF_TOKEN_KEYS);
   if (uk) return { ok: false, error: `replyRef has unknown key "${uk}"` };
   if (parsed.v !== RELAY_PROTOCOL_VERSION) return { ok: false, error: `replyRef.v must be ${RELAY_PROTOCOL_VERSION}` };
-  if (!nonEmptyStr(parsed.qitemId)) return { ok: false, error: "replyRef.qitemId must be a non-empty string" };
-  if (!nonEmptyStr(parsed.episodeKey)) return { ok: false, error: "replyRef.episodeKey must be a non-empty string" };
-  if (!nonEmptyStr(parsed.decisionRevision)) {
-    return { ok: false, error: "replyRef.decisionRevision must be a non-empty string" };
+  if (typeof parsed.payloadHash !== "string" || !SHA256_HEX_PATTERN.test(parsed.payloadHash)) {
+    return { ok: false, error: "replyRef.payloadHash must be a 64-char lowercase hex sha256" };
   }
-  if (!nonEmptyStr(parsed.decisionId)) return { ok: false, error: "replyRef.decisionId must be a non-empty string" };
-  if (!nonEmptyStr(parsed.connectorRef)) {
-    return { ok: false, error: "replyRef.connectorRef must be a non-empty string" };
+  if (typeof parsed.connectorHash !== "string" || !SHA256_HEX_PATTERN.test(parsed.connectorHash)) {
+    return { ok: false, error: "replyRef.connectorHash must be a 64-char lowercase hex sha256" };
   }
   if (parsed.mode !== "ask" && parsed.mode !== "park") {
     return { ok: false, error: "replyRef.mode must be ask|park" };
@@ -182,11 +198,8 @@ export function decodeRelayReplyRef(
     ok: true,
     ref: {
       v: RELAY_PROTOCOL_VERSION,
-      qitemId: parsed.qitemId,
-      episodeKey: parsed.episodeKey,
-      decisionRevision: parsed.decisionRevision,
-      decisionId: parsed.decisionId,
-      connectorRef: parsed.connectorRef,
+      payloadHash: parsed.payloadHash,
+      connectorHash: parsed.connectorHash,
       mode: parsed.mode,
       ...(parsed.digest === true ? { digest: true } : {}),
     },
@@ -261,31 +274,6 @@ export function validateRelayOutboundEnvelope(
       });
     }
   }
-  let part: RelayEnvelopePart | undefined;
-  if (raw.part !== undefined) {
-    if (!isObj(raw.part)) return { ok: false, error: "relay envelope.part must be an object when present" };
-    const puk = unknownKey(raw.part, ALLOWED_PART_KEYS);
-    if (puk) return { ok: false, error: `relay envelope.part has unknown key "${puk}"` };
-    if (!nonEmptyStr(raw.part.parentDeliveryId)) {
-      return { ok: false, error: "relay envelope.part.parentDeliveryId must be a non-empty string" };
-    }
-    if (
-      typeof raw.part.index !== "number" ||
-      !Number.isInteger(raw.part.index) ||
-      raw.part.index < 1 ||
-      typeof raw.part.total !== "number" ||
-      !Number.isInteger(raw.part.total) ||
-      raw.part.total < 2 ||
-      raw.part.index > raw.part.total
-    ) {
-      return { ok: false, error: "relay envelope.part index/total must be integers with 1 <= index <= total and total >= 2" };
-    }
-    part = {
-      parentDeliveryId: raw.part.parentDeliveryId,
-      index: raw.part.index,
-      total: raw.part.total,
-    };
-  }
   return {
     ok: true,
     envelope: {
@@ -298,7 +286,6 @@ export function validateRelayOutboundEnvelope(
       body: raw.body,
       replyRef: raw.replyRef,
       ...(items !== undefined ? { items } : {}),
-      ...(part !== undefined ? { part } : {}),
     },
   };
 }
@@ -313,188 +300,6 @@ function snapCodePointIndex(str: string, idx: number): number {
     return idx - 1;
   }
   return idx;
-}
-
-/** Advance by at least one full Unicode code point from `pos`. */
-function nextCodePointIndex(str: string, pos: number): number {
-  if (pos >= str.length) return str.length;
-  const code = str.charCodeAt(pos);
-  if (code >= 0xd800 && code <= 0xdbff && pos + 1 < str.length) {
-    const next = str.charCodeAt(pos + 1);
-    if (next >= 0xdc00 && next <= 0xdfff) return pos + 2;
-  }
-  return pos + 1;
-}
-
-/** Exact UTF-8 byte count of a string's JSON-escaped content (excluding surrounding quotes). */
-function jsonStringContentBytes(str: string): number {
-  return Buffer.byteLength(JSON.stringify(str), "utf8") - 2;
-}
-
-/** Split `str` into non-overlapping code-point-aligned slices where each slice's JSON-escaped
- *  UTF-8 content is `<= maxJsonStringBytes`. Never clips or splits surrogate pairs. */
-function sliceByJsonUtf8Budget(str: string, maxJsonStringBytes: number): string[] {
-  if (str.length === 0) return [""];
-  const budget = Math.max(16, maxJsonStringBytes);
-  if (jsonStringContentBytes(str) <= budget) return [str];
-
-  const chunks: string[] = [];
-  let pos = 0;
-  while (pos < str.length) {
-    if (jsonStringContentBytes(str.slice(pos)) <= budget) {
-      chunks.push(str.slice(pos));
-      break;
-    }
-    const minEnd = nextCodePointIndex(str, pos);
-    let lo = minEnd;
-    let hi = str.length;
-    let best = minEnd;
-    while (lo <= hi) {
-      const rawMid = Math.floor((lo + hi) / 2);
-      const mid = Math.max(minEnd, snapCodePointIndex(str, rawMid));
-      const candidate = str.slice(pos, mid);
-      if (jsonStringContentBytes(candidate) <= budget) {
-        best = mid;
-        lo = mid < rawMid ? rawMid + 1 : mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    chunks.push(str.slice(pos, best));
-    pos = best;
-  }
-  return chunks;
-}
-
-/** Split an outbound relay envelope into bounded protocol v1 HTTP part envelopes (`<= RELAY_ENVELOPE_MAX_BYTES` UTF-8 JSON bytes).
- *  Envelopes that already fit within `RELAY_ENVELOPE_MAX_BYTES` are returned unchanged as `[envelope]` with no `part` metadata. */
-export function splitRelayOutboundEnvelope(
-  envelope: RelayOutboundEnvelope,
-): RelayOutboundEnvelope[] {
-  const maxBytes = RELAY_ENVELOPE_MAX_BYTES;
-  const fullBytes = Buffer.byteLength(JSON.stringify(envelope), "utf8");
-  if (fullBytes <= maxBytes && !envelope.part) {
-    return [envelope];
-  }
-
-  const parentDeliveryId = envelope.part?.parentDeliveryId ?? envelope.deliveryId;
-  const worstCaseShell: RelayOutboundEnvelope = {
-    v: RELAY_PROTOCOL_VERSION,
-    deliveryId: `${parentDeliveryId}:part:999999`,
-    recipient: { handle: envelope.recipient.handle },
-    intent: envelope.intent,
-    outcome: envelope.outcome,
-    summary: envelope.summary,
-    body: "",
-    replyRef: envelope.replyRef,
-    ...(envelope.items !== undefined ? { items: [] } : {}),
-    part: {
-      parentDeliveryId,
-      index: 999999,
-      total: 999999,
-    },
-  };
-  const baseShellBytes = Buffer.byteLength(JSON.stringify(worstCaseShell), "utf8");
-  const safeBodyBudget = Math.max(256, maxBytes - baseShellBytes - 64);
-
-  const bodyChunks = sliceByJsonUtf8Budget(envelope.body, safeBodyBudget);
-
-  if (envelope.items === undefined) {
-    const total = bodyChunks.length;
-    if (total === 1 && fullBytes <= maxBytes && !envelope.part) {
-      return [envelope];
-    }
-    return bodyChunks.map((chunk, idx) => ({
-      v: RELAY_PROTOCOL_VERSION,
-      deliveryId: `${parentDeliveryId}:part:${idx + 1}`,
-      recipient: { handle: envelope.recipient.handle },
-      intent: envelope.intent,
-      outcome: envelope.outcome,
-      summary: envelope.summary,
-      body: chunk,
-      replyRef: envelope.replyRef,
-      part: {
-        parentDeliveryId,
-        index: idx + 1,
-        total,
-      },
-    }));
-  }
-
-  const expandedItems: RelayDigestItem[] = [];
-  for (const item of envelope.items) {
-    if (item.body === undefined || item.body.length === 0) {
-      expandedItems.push(item);
-      continue;
-    }
-    const singleItemShell: RelayOutboundEnvelope = {
-      ...worstCaseShell,
-      items: [
-        {
-          qitemId: item.qitemId,
-          notificationKey: item.notificationKey,
-          summary: item.summary,
-          body: "",
-          replyRef: item.replyRef,
-        },
-      ],
-    };
-    const itemBudget = Math.max(256, maxBytes - Buffer.byteLength(JSON.stringify(singleItemShell), "utf8") - 64);
-    const itemSlices = sliceByJsonUtf8Budget(item.body, itemBudget);
-    for (const slice of itemSlices) {
-      expandedItems.push({
-        qitemId: item.qitemId,
-        notificationKey: item.notificationKey,
-        summary: item.summary,
-        body: slice,
-        replyRef: item.replyRef,
-      });
-    }
-  }
-
-  const drafts: Array<{ body: string; items: RelayDigestItem[] }> = bodyChunks.map((chunk) => ({
-    body: chunk,
-    items: [],
-  }));
-  if (drafts.length === 0) {
-    drafts.push({ body: "", items: [] });
-  }
-
-  for (const item of expandedItems) {
-    const lastDraft = drafts[drafts.length - 1]!;
-    const candidateEnvelope: RelayOutboundEnvelope = {
-      ...worstCaseShell,
-      body: lastDraft.body,
-      items: [...lastDraft.items, item],
-    };
-    if (Buffer.byteLength(JSON.stringify(candidateEnvelope), "utf8") <= maxBytes - 32) {
-      lastDraft.items.push(item);
-    } else {
-      drafts.push({ body: "", items: [item] });
-    }
-  }
-
-  const total = drafts.length;
-  if (total === 1 && fullBytes <= maxBytes && !envelope.part) {
-    return [envelope];
-  }
-
-  return drafts.map((draft, idx) => ({
-    v: RELAY_PROTOCOL_VERSION,
-    deliveryId: `${parentDeliveryId}:part:${idx + 1}`,
-    recipient: { handle: envelope.recipient.handle },
-    intent: envelope.intent,
-    outcome: envelope.outcome,
-    summary: envelope.summary,
-    body: draft.body,
-    replyRef: envelope.replyRef,
-    items: draft.items,
-    part: {
-      parentDeliveryId,
-      index: idx + 1,
-      total,
-    },
-  }));
 }
 
 export interface RelayQuestionState {
@@ -624,23 +429,27 @@ export function prepareRelayDecision(decision: OutboundDecision, opts: PrepareRe
   let replyRef: string | null = null;
   let items: RelayDigestItem[] | undefined;
   let relayRevision: string | null = null;
+  const relayReplyRefs: Record<string, RelayReplyRefPayload> = {};
 
   if (memberReceipts && memberReceipts.length > 0) {
     items = memberReceipts.map((m) => {
       const qState = lookup(m.qitemId, m.notificationKey);
       const isDecisionMember = m.kind === "human-required" && qState !== null && qState.humanIntent !== "update";
-      const memberRef = isDecisionMember
-        ? encodeRelayReplyRef({
-            v: RELAY_PROTOCOL_VERSION,
-            qitemId: m.qitemId,
-            episodeKey: qState.episodeKey,
-            decisionRevision: qState.decisionRevision,
-            decisionId: decision.decisionId,
-            connectorRef: binding.connectorRef,
-            mode: qState.mode,
-            digest: true,
-          })
-        : null;
+      let memberRef: string | null = null;
+      if (isDecisionMember) {
+        const memberPayload: RelayReplyRefPayload = {
+          v: RELAY_PROTOCOL_VERSION,
+          qitemId: m.qitemId,
+          episodeKey: qState.episodeKey,
+          decisionRevision: qState.decisionRevision,
+          decisionId: decision.decisionId,
+          connectorRef: binding.connectorRef,
+          mode: qState.mode,
+          digest: true,
+        };
+        memberRef = encodeRelayReplyRef(memberPayload);
+        relayReplyRefs[memberRef] = memberPayload;
+      }
       const rawItemSummary = qState?.summary ?? m.summary;
       const rawItemBody = qState?.body ?? m.body;
       const cleanedItemSummary =
@@ -671,7 +480,7 @@ export function prepareRelayDecision(decision: OutboundDecision, opts: PrepareRe
       const qState = lookup(p.qitemId, p.notificationKey);
       if (qState) {
         relayRevision = qState.decisionRevision;
-        replyRef = encodeRelayReplyRef({
+        const askPayload: RelayReplyRefPayload = {
           v: RELAY_PROTOCOL_VERSION,
           qitemId: p.qitemId,
           episodeKey: qState.episodeKey,
@@ -680,7 +489,9 @@ export function prepareRelayDecision(decision: OutboundDecision, opts: PrepareRe
           connectorRef: binding.connectorRef,
           mode: qState.mode,
           ...(outcome === "digest" ? { digest: true } : {}),
-        });
+        };
+        replyRef = encodeRelayReplyRef(askPayload);
+        relayReplyRefs[replyRef] = askPayload;
       }
     }
   }
@@ -697,17 +508,14 @@ export function prepareRelayDecision(decision: OutboundDecision, opts: PrepareRe
     ...(items ? { items } : {}),
   };
 
-  const envelopes = splitRelayOutboundEnvelope(envelope);
-  const { relayEnvelopes: _staleRelayEnvelopes, ...cleanPayload } = p;
-
   return {
     ...decision,
     payload: {
-      ...cleanPayload,
+      ...p,
       relayConnectorRef: binding.connectorRef,
       relayEnvelope: envelope,
-      ...(envelopes.length > 1 ? { relayEnvelopes: envelopes } : {}),
       ...(relayRevision ? { relayRevision } : {}),
+      ...(Object.keys(relayReplyRefs).length > 0 ? { relayReplyRefs } : {}),
     } satisfies RelayPayloadCarry,
   };
 }
@@ -735,22 +543,43 @@ export function findPendingRelayReplyRef(home: string, replyRef: string): Pendin
     if (!env) continue;
     const matchedTop = env.replyRef === replyRef;
     const matchedItem = env.items?.some((it) => it.replyRef === replyRef) ?? false;
-    const matchedPart =
-      p.relayEnvelopes?.some(
-        (partEnv) => partEnv.replyRef === replyRef || (partEnv.items?.some((it) => it.replyRef === replyRef) ?? false),
-      ) ?? false;
-    if (!matchedTop && !matchedItem && !matchedPart) continue;
-    if (decision.decisionId !== decoded.ref.decisionId) continue;
-    if (p.relayConnectorRef && p.relayConnectorRef !== decoded.ref.connectorRef) continue;
+    if (!matchedTop && !matchedItem) continue;
+    const frozen = p.relayReplyRefs?.[replyRef];
+    if (
+      !isObj(frozen) ||
+      frozen.v !== RELAY_PROTOCOL_VERSION ||
+      !nonEmptyStr(frozen.qitemId) ||
+      !nonEmptyStr(frozen.episodeKey) ||
+      !nonEmptyStr(frozen.decisionRevision) ||
+      !nonEmptyStr(frozen.decisionId) ||
+      !nonEmptyStr(frozen.connectorRef) ||
+      (frozen.mode !== "ask" && frozen.mode !== "park") ||
+      (frozen.digest !== undefined && typeof frozen.digest !== "boolean")
+    ) {
+      continue;
+    }
+    const candidate: RelayReplyRefPayload = {
+      v: RELAY_PROTOCOL_VERSION,
+      qitemId: frozen.qitemId,
+      episodeKey: frozen.episodeKey,
+      decisionRevision: frozen.decisionRevision,
+      decisionId: frozen.decisionId,
+      connectorRef: frozen.connectorRef,
+      mode: frozen.mode,
+      ...(frozen.digest === true ? { digest: true } : {}),
+    };
+    if (encodeRelayReplyRef(candidate) !== replyRef) continue;
+    if (decision.decisionId !== candidate.decisionId) continue;
+    if (p.relayConnectorRef && p.relayConnectorRef !== candidate.connectorRef) continue;
     return {
       found: true,
       decisionId: decision.decisionId,
-      connectorRef: decoded.ref.connectorRef,
-      qitemId: decoded.ref.qitemId,
-      episodeKey: decoded.ref.episodeKey,
-      decisionRevision: decoded.ref.decisionRevision,
-      mode: decoded.ref.mode,
-      ...(decoded.ref.digest ? { digest: true } : {}),
+      connectorRef: candidate.connectorRef,
+      qitemId: candidate.qitemId,
+      episodeKey: candidate.episodeKey,
+      decisionRevision: candidate.decisionRevision,
+      mode: candidate.mode,
+      ...(candidate.digest ? { digest: true } : {}),
     };
   }
   return { found: false };
@@ -769,7 +598,7 @@ export type RelayHttpResult =
   | { ok: true; status: number }
   | { ok: false; status: number; class: string; detail: string };
 
-/** Bounded loopback HTTP POST to the operator's relay bridge.
+/** Loopback HTTP POST to the operator's relay bridge.
  *  - Validates loopback HTTP URL via `validateRelayUrl`.
  *  - Rejects redirects (`redirect: "error"`).
  *  - Does not buffer or log arbitrary bridge response bodies (status is sufficient for custody). */
@@ -802,15 +631,6 @@ export async function postRelayEnvelope(input: PostRelayEnvelopeInput): Promise<
     };
   }
   const bodyJson = JSON.stringify(valid.envelope);
-  const bodyBytes = Buffer.byteLength(bodyJson, "utf8");
-  if (bodyBytes > RELAY_ENVELOPE_MAX_BYTES) {
-    return {
-      ok: false,
-      status: 0,
-      class: "payload-too-large",
-      detail: `relay envelope ${bodyBytes} bytes exceeds ${RELAY_ENVELOPE_MAX_BYTES}-byte limit`,
-    };
-  }
 
   if (input.stopSignal?.aborted) {
     return {
@@ -927,7 +747,7 @@ function buildExpectedReceipts(decision: OutboundDecision, p: RelayPayloadCarry,
     return p.memberReceipts.map((m) => {
       const itemEntry = envelope.items?.find((it) => it.qitemId === m.qitemId && it.notificationKey === m.notificationKey);
       const itemRef = itemEntry?.replyRef ?? (p.memberReceipts!.length === 1 ? envelope.replyRef : null);
-      const decodedItemRef = itemRef ? decodeRelayReplyRef(itemRef) : null;
+      const frozenItemRef = itemRef ? p.relayReplyRefs?.[itemRef] : undefined;
       return {
         qitemId: m.qitemId,
         notificationKey: m.notificationKey,
@@ -935,8 +755,8 @@ function buildExpectedReceipts(decision: OutboundDecision, p: RelayPayloadCarry,
         deliveryId: decision.decisionId,
         replyRef: itemRef,
         refHash: itemRef ? hashRelayReplyRef(itemRef) : null,
-        revision: decodedItemRef && decodedItemRef.ok ? decodedItemRef.ref.decisionRevision : null,
-        episodeKey: decodedItemRef && decodedItemRef.ok ? decodedItemRef.ref.episodeKey : m.notificationKey,
+        revision: frozenItemRef?.decisionRevision ?? null,
+        episodeKey: frozenItemRef?.episodeKey ?? m.notificationKey,
         level: m.level,
         kind: m.kind,
         humanIntent: m.kind === "human-required" ? "decision" : "update",
@@ -946,7 +766,7 @@ function buildExpectedReceipts(decision: OutboundDecision, p: RelayPayloadCarry,
   }
   if (p.qitemId) {
     const key = p.notificationKey ?? p.qitemId;
-    const decodedRef = envelope.replyRef ? decodeRelayReplyRef(envelope.replyRef) : null;
+    const frozenRef = envelope.replyRef ? p.relayReplyRefs?.[envelope.replyRef] : undefined;
     return [
       {
         qitemId: p.qitemId,
@@ -955,8 +775,8 @@ function buildExpectedReceipts(decision: OutboundDecision, p: RelayPayloadCarry,
         deliveryId: decision.decisionId,
         replyRef: envelope.replyRef,
         refHash: envelope.replyRef ? hashRelayReplyRef(envelope.replyRef) : null,
-        revision: decodedRef && decodedRef.ok ? decodedRef.ref.decisionRevision : (p.relayRevision ?? null),
-        episodeKey: decodedRef && decodedRef.ok ? decodedRef.ref.episodeKey : key,
+        revision: frozenRef?.decisionRevision ?? (p.relayRevision ?? null),
+        episodeKey: frozenRef?.episodeKey ?? key,
         level: p.ownerNotificationLevel ?? "RECORD",
         kind: p.ownerNotificationKind ?? "unclassified",
         humanIntent: p.humanIntent ?? null,
@@ -1063,66 +883,25 @@ export function createRelayOutboundTransport(opts: RelayOutboundTransportOpts): 
       }
     }
 
-    const partEnvelopes =
-      Array.isArray(p.relayEnvelopes) && p.relayEnvelopes.length > 1
-        ? p.relayEnvelopes
-        : splitRelayOutboundEnvelope(envelope);
-    const isMultiPart = partEnvelopes.length > 1;
+    const res = await postRelayEnvelope({
+      url: profile.url,
+      outboundToken: profile.outboundToken,
+      envelope,
+      fetchImpl: opts.fetchImpl,
+      timeoutMs: opts.timeoutMs,
+      stopSignal: opts.stopSignal,
+    });
 
-    for (const partEnvelope of partEnvelopes) {
-      if (isMultiPart && deliveredMap.has(partEnvelope.deliveryId)) {
-        continue;
-      }
-
-      if (opts.stopSignal?.aborted) {
-        return { ok: false, class: "stopped", detail: "relay transport stopped" };
-      }
-
-      if (isMultiPart && !attemptedMap.has(partEnvelope.deliveryId)) {
+    if (!res.ok) {
+      if (res.class !== "stopped") {
         try {
-          opts.attempted.mark(
-            partEnvelope.deliveryId,
-            `attempted-part:${connectorRef}:${partEnvelope.part?.index ?? 1}/${partEnvelope.part?.total ?? partEnvelopes.length}`,
-          );
-          attemptedMap.set(partEnvelope.deliveryId, "attempted-part");
-        } catch (error) {
-          const detail = (error as Error).message || "failed to record relay part attempt";
-          log(`relay part attempt record FAILED for ${partEnvelope.deliveryId}: ${detail} — retained`);
-          return { ok: false, class: "relay-attempt-unrecorded", detail };
+          opts.onTransportFailed?.(p, res.class, res.detail);
+        } catch (e) {
+          log(`relay transport-failed receipt write FAILED for ${p.qitemId ?? decision.decisionId}: ${(e as Error).message}`);
+          return { ok: false, class: "receipt-failed", detail: (e as Error).message };
         }
       }
-
-      const res = await postRelayEnvelope({
-        url: profile.url,
-        outboundToken: profile.outboundToken,
-        envelope: partEnvelope,
-        fetchImpl: opts.fetchImpl,
-        timeoutMs: opts.timeoutMs,
-        stopSignal: opts.stopSignal,
-      });
-
-      if (!res.ok) {
-        if (res.class !== "stopped") {
-          try {
-            opts.onTransportFailed?.(p, res.class, res.detail);
-          } catch (e) {
-            log(`relay transport-failed receipt write FAILED for ${p.qitemId ?? decision.decisionId}: ${(e as Error).message}`);
-            return { ok: false, class: "receipt-failed", detail: (e as Error).message };
-          }
-        }
-        return { ok: false, class: res.class, detail: res.detail };
-      }
-
-      if (isMultiPart && !deliveredMap.has(partEnvelope.deliveryId)) {
-        try {
-          opts.delivered.mark(partEnvelope.deliveryId, "delivered-part");
-          deliveredMap.set(partEnvelope.deliveryId, "delivered-part");
-        } catch (error) {
-          const detail = (error as Error).message || "relay part state write failed";
-          log(`relay part local state mark FAILED for ${partEnvelope.deliveryId}: ${detail} — retained for replay`);
-          return { ok: false, class: "relay-state-write-failed", detail };
-        }
-      }
+      return { ok: false, class: res.class, detail: res.detail };
     }
 
     try {

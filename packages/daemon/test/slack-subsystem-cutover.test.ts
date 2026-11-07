@@ -490,7 +490,6 @@ describe("Capability 3 — single-wire relay port isolation and attempted-replay
     const {
       relayConnectorRef: _oldRef,
       relayEnvelope: _oldEnv,
-      relayEnvelopes: _oldEnvs,
       ...unpreparedPayload
     } = (originalPending.payload ?? {}) as Record<string, unknown>;
     const w1b = makeWire();

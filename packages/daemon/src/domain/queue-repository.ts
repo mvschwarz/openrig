@@ -4131,19 +4131,10 @@ export class QueueRepository {
     return this.transitionLog.hasRelayOwnerNotificationReceipt(qitemId, notificationKey);
   }
 
-  listRelayOwnerNotificationTransportFailures(qitemId: string): RelayOwnerNotificationTransportFailure[] {
-    return this.transitionLog.listRelayOwnerNotificationTransportFailures(qitemId);
-  }
-
-  getRelayOwnerNotificationTransportFailure(
-    qitemId: string,
-    notificationKey?: string,
-  ): RelayOwnerNotificationTransportFailure | null {
-    return this.transitionLog.getRelayOwnerNotificationTransportFailure(qitemId, notificationKey);
-  }
-
-  hasRelayOwnerNotificationTransportFailure(qitemId: string, notificationKey: string): boolean {
-    return this.transitionLog.hasRelayOwnerNotificationTransportFailure(qitemId, notificationKey);
+  findRelayOwnerNotificationReceiptByReplyRef(
+    replyRef: string,
+  ): (RelayOwnerNotificationReceipt & { qitemId: string }) | null {
+    return this.transitionLog.findRelayOwnerNotificationReceiptByReplyRef(replyRef);
   }
 
   recordRelayOwnerNotificationTransportFailed(input: RecordRelayOwnerNotificationTransportFailedInput): QueueItem {
@@ -4946,22 +4937,29 @@ export class QueueRepository {
     return ledger ? { outcome: ledger.outcome, detail: ledger.detail } : null;
   }
 
-  /** #514 — true only when this row's CURRENT human-notification episode (OWNER history addressed
-   *  to a registered human, aliases included) has a POSTED receipt. Legacy rows with no OWNER
+  /** OPR.0.5.6.14 + #514 — true when the row's CURRENT ask episode (create-time pending ask
+   *  to a registered human, aliases included) has a POSTED or ACCEPTED receipt. Legacy rows with no OWNER
    *  history, inactive episodes, never-posted and transport-failed all read false. Same derivation
    *  as deliveryOutcomeFor; it reads row fields, never the waiting view. */
   humanNotificationPostedThisEpisode(qitemId: string, listed?: ListedLedger): boolean {
-    if (!this.hasQueueTransitionsTable) return false;
+    return this.humanNotificationDeliveryThisEpisode(qitemId, listed) !== null;
+  }
+
+  private humanNotificationDeliveryThisEpisode(qitemId: string, listed?: ListedLedger): "posted" | "accepted" | null {
+    if (!this.hasQueueTransitionsTable) return null;
     const owners = listed?.owners ?? this.transitionLog.ownerNotificationsForQitems([qitemId]).get(qitemId) ?? [];
     const owner = this.currentAskNotification(qitemId, owners);
-    if (!owner) return false;
+    if (!owner) return null;
     // The ledger's episode exists only when the destination resolves to a registered human (aliases included).
     const ledger = listed ? listed.ledger : this.deliveryLedger(qitemId, owners);
-    return (
+    if (
       ledger !== null &&
       (ledger.outcome === "posted" || ledger.outcome === "accepted") &&
       ledger.episode?.notificationKey === `${qitemId}:${owner.transitionId}`
-    );
+    ) {
+      return ledger.outcome;
+    }
+    return null;
   }
 
   /** The ask's own notification while it still binds its recipient. Only that notification does: create writes it in
@@ -5369,7 +5367,8 @@ export class QueueRepository {
     if (view && ["pending", "in-progress"].includes(view.state)) {
       // #514 — the unclaimed sweep skips a pending ask already posted to its human in the current
       // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
-      const posted = view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId, listed);
+      const episodeDelivery = view.state === "pending" ? this.humanNotificationDeliveryThisEpisode(qitemId, listed) : null;
+      const posted = episodeDelivery !== null;
       const onSteering = !posted && view.state === "pending" && this.humanAskWithoutAlert(qitemId, listed);
       const row = view.state === "pending" && !onSteering
         ? this.db.prepare(`SELECT state, ${this.hasHumanIntentColumn ? "human_intent" : "NULL AS human_intent"}, destination_session, last_nudge_result FROM queue_items WHERE qitem_id = ?`).get(qitemId) as { state: QueueItem["state"]; human_intent: QueueItem["humanIntent"]; destination_session: string; last_nudge_result: string | null } | undefined
@@ -5380,13 +5379,14 @@ export class QueueRepository {
         && this.isLocalHumanDecisionWithoutGateway({ state: row.state, humanIntent: row.human_intent, destinationSession: row.destination_session, lastNudgeResult: row.last_nudge_result });
       const awaitingHuman = posted || onSteering || localOnly;
       if (awaitingHuman || humanUpdate) {
+        const deliveryPhrase = episodeDelivery === "accepted" ? "accepted by the bridge" : "posted to the human";
         view.nextBackstop = { owner: view.owner, mechanism: localOnly ? "local attention feed (no registered human gateway)" : onSteering
           ? "none (on Steering for the human, with no Slack alert; awaiting their decision)"
           : humanUpdate
             ? posted
-              ? "none (posted to the human; informational correspondence requires no claim)"
+              ? `none (${deliveryPhrase}; informational correspondence requires no claim)`
               : "none (informational correspondence to the human; no claim required)"
-            : "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
+            : `none (${deliveryPhrase}; awaiting their decision)`, dueAt: null, intervalSeconds: null };
       }
       // Quiet hours: a held ask is owned by its window's release job until it posts.
       const quiet = awaitingHuman ? null : quietCustodyBackstop(view.owner, quietHoldCustody(this.db, qitemId));

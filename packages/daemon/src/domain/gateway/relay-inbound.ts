@@ -12,16 +12,16 @@ import {
   loadRelayProfiles,
 } from "./relay-config.js";
 import {
+  RELAY_PROTOCOL_VERSION,
   decodeRelayReplyRef,
+  encodeRelayReplyRef,
   findPendingRelayReplyRef,
-  hashRelayReplyRef,
+  hashRelayConnectorRef,
   type RelayReplyRefPayload,
+  type RelayReplyRefToken,
 } from "./relay-outbound.js";
 import { SeenStore, nodeStateFs, type StateFsOps } from "./slack/state-store.js";
-import {
-  parseRelayOwnerNotificationAccepted,
-  type RelayOwnerNotificationReceipt,
-} from "../queue-transition-log.js";
+import type { RelayOwnerNotificationReceipt } from "../queue-transition-log.js";
 import type { QueueRepository } from "../queue-repository.js";
 import {
   MissionControlWriteContractError,
@@ -259,105 +259,204 @@ function parseInboundEnvelope(
   };
 }
 
-function receiptMatchesReplyRef(
-  receipt: RelayOwnerNotificationReceipt,
+function reconstructPayloadFromReceipt(
+  receipt: RelayOwnerNotificationReceipt & { qitemId: string },
   replyRef: string,
-  ref: RelayReplyRefPayload,
-): boolean {
-  if (receipt.kind === "human-update") return false;
-  if (receipt.notificationKey !== ref.episodeKey && receipt.episodeKey !== ref.episodeKey) {
-    return false;
+  tokenRef: RelayReplyRefToken,
+): { ok: true; payload: RelayReplyRefPayload; receiptKind: string | null } | { ok: false } {
+  const episodeKey = receipt.episodeKey ?? receipt.notificationKey;
+  const decisionRevision = receipt.revision;
+  const decisionId = receipt.deliveryId;
+  const connectorRef = receipt.connectorRef;
+  if (
+    typeof receipt.qitemId !== "string" ||
+    receipt.qitemId.length === 0 ||
+    typeof episodeKey !== "string" ||
+    episodeKey.length === 0 ||
+    typeof decisionRevision !== "string" ||
+    decisionRevision.length === 0 ||
+    typeof decisionId !== "string" ||
+    decisionId.length === 0 ||
+    typeof connectorRef !== "string" ||
+    connectorRef.length === 0
+  ) {
+    return { ok: false };
   }
-  if (receipt.connectorRef && receipt.connectorRef !== ref.connectorRef) {
-    return false;
+  const candidate: RelayReplyRefPayload = {
+    v: RELAY_PROTOCOL_VERSION,
+    qitemId: receipt.qitemId,
+    episodeKey,
+    decisionRevision,
+    decisionId,
+    connectorRef,
+    mode: tokenRef.mode,
+    ...(tokenRef.digest === true ? { digest: true } : {}),
+  };
+  if (encodeRelayReplyRef(candidate) !== replyRef) {
+    return { ok: false };
   }
-  if (receipt.revision && receipt.revision !== ref.decisionRevision) {
-    return false;
-  }
-  if (receipt.deliveryId && !ref.digest && receipt.deliveryId !== ref.decisionId) {
-    return false;
-  }
-  if (receipt.replyRef !== null) {
-    return receipt.replyRef === replyRef;
-  }
-  const fullHash = hashRelayReplyRef(replyRef);
-  if (receipt.replyRefHash === fullHash) return true;
-  return false;
+  return { ok: true, payload: candidate, receiptKind: receipt.kind ?? null };
 }
 
-function verifyOfferedReplyRef(
+function resolveOfferedReplyRefContext(
   home: string,
   queueRepo: QueueRepository,
   replyRef: string,
-  ref: RelayReplyRefPayload,
-): { ok: true } | { ok: false; code: string; message: string } {
-  const item = queueRepo.getById(ref.qitemId);
+  tokenRef: RelayReplyRefToken,
+  authenticatedConnectorRef: string,
+):
+  | { ok: true; ref: RelayReplyRefPayload; receiptKind: string | null }
+  | { ok: false; status: 403 | 409 | 503; code: string; message: string } {
+  let resolvedRef: RelayReplyRefPayload | null = null;
+  let receiptKind: string | null = null;
+
+  // 1. Check durable accepted receipts FIRST (active queue_transitions + queue_transitions_archive)
+  let receipt: (RelayOwnerNotificationReceipt & { qitemId: string }) | null = null;
+  try {
+    if (typeof queueRepo.findRelayOwnerNotificationReceiptByReplyRef === "function") {
+      receipt = queueRepo.findRelayOwnerNotificationReceiptByReplyRef(replyRef);
+    }
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      code: "queue_store_unavailable",
+      message: "Relay inbound receipt lookup failed because queue transition store is unavailable",
+    };
+  }
+
+  if (receipt) {
+    const reconstructed = reconstructPayloadFromReceipt(receipt, replyRef, tokenRef);
+    if (reconstructed.ok) {
+      resolvedRef = reconstructed.payload;
+      receiptKind = reconstructed.receiptKind;
+    } else if (receipt.kind === "human-update") {
+      return {
+        ok: false,
+        status: 409,
+        code: "reply_not_allowed_for_update",
+        message: `qitem ${receipt.qitemId} is an informational update and cannot be answered`,
+      };
+    }
+  }
+
+  // 2. Fallback to pending DispatchBuffer ONLY when no durable accepted receipt matched
+  if (!resolvedRef) {
+    try {
+      const pending = findPendingRelayReplyRef(home, replyRef);
+      if (
+        pending.found &&
+        pending.qitemId &&
+        pending.episodeKey &&
+        pending.decisionRevision &&
+        pending.decisionId &&
+        pending.connectorRef &&
+        pending.mode
+      ) {
+        const candidate: RelayReplyRefPayload = {
+          v: RELAY_PROTOCOL_VERSION,
+          qitemId: pending.qitemId,
+          episodeKey: pending.episodeKey,
+          decisionRevision: pending.decisionRevision,
+          decisionId: pending.decisionId,
+          connectorRef: pending.connectorRef,
+          mode: pending.mode,
+          ...(pending.digest === true ? { digest: true } : {}),
+        };
+        if (encodeRelayReplyRef(candidate) === replyRef) {
+          resolvedRef = candidate;
+        }
+      }
+    } catch {
+      return {
+        ok: false,
+        status: 503,
+        code: "dispatch_buffer_unavailable",
+        message:
+          "Relay outbound dispatch buffer is unreadable; refusing to reject or reserve un-receipted replyRef",
+      };
+    }
+  }
+
+  if (!resolvedRef) {
+    return {
+      ok: false,
+      status: 409,
+      code: "unrecognized_reply_ref",
+      message: "replyRef does not match any active or accepted outbound relay decision",
+    };
+  }
+
+  if (resolvedRef.connectorRef !== authenticatedConnectorRef) {
+    return {
+      ok: false,
+      status: 403,
+      code: "connector_ref_mismatch",
+      message: "replyRef connectorRef does not match the authenticated relay profile",
+    };
+  }
+
+  return { ok: true, ref: resolvedRef, receiptKind };
+}
+
+function verifyOfferedReplyTarget(
+  queueRepo: QueueRepository,
+  resolvedRef: RelayReplyRefPayload,
+  receiptKind: string | null,
+): { ok: true } | { ok: false; status: 404 | 409 | 503; code: string; message: string } {
+  if (receiptKind === "human-update") {
+    return {
+      ok: false,
+      status: 409,
+      code: "reply_not_allowed_for_update",
+      message: `qitem ${resolvedRef.qitemId} is an informational update and cannot be answered`,
+    };
+  }
+
+  let item: ReturnType<QueueRepository["getById"]>;
+  let transitions: ReturnType<QueueRepository["listTransitions"]>;
+  try {
+    item = queueRepo.getById(resolvedRef.qitemId);
+    transitions = item ? queueRepo.listTransitions(resolvedRef.qitemId) : [];
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      code: "queue_store_unavailable",
+      message: "Relay inbound target verification failed because queue store is unavailable",
+    };
+  }
+
   if (!item) {
     return {
       ok: false,
+      status: 404,
       code: "qitem_not_found",
-      message: `qitem ${ref.qitemId} not found`,
+      message: `qitem ${resolvedRef.qitemId} not found`,
     };
   }
 
   if (item.humanIntent === "update") {
     return {
       ok: false,
+      status: 409,
       code: "reply_not_allowed_for_update",
-      message: `qitem ${ref.qitemId} is an informational update and cannot be answered`,
+      message: `qitem ${resolvedRef.qitemId} is an informational update and cannot be answered`,
     };
   }
 
-  const transitions = queueRepo.listTransitions(ref.qitemId);
-  const episodeIdPart = Number(ref.episodeKey.slice(`${ref.qitemId}:`.length));
+  const episodeIdPart = Number(resolvedRef.episodeKey.slice(`${resolvedRef.qitemId}:`.length));
   const episodeTransition = transitions.find((t) => t.transitionId === episodeIdPart);
   if (episodeTransition?.ownerNotificationKind === "human-update") {
     return {
       ok: false,
+      status: 409,
       code: "reply_not_allowed_for_update",
-      message: `episode ${ref.episodeKey} is an informational update and cannot be answered`,
+      message: `episode ${resolvedRef.episodeKey} is an informational update and cannot be answered`,
     };
   }
 
-  // 1. Check durable accepted receipts via QueueRepository / transition log
-  const receipts =
-    typeof queueRepo.listRelayOwnerNotificationReceipts === "function"
-      ? queueRepo.listRelayOwnerNotificationReceipts(ref.qitemId)
-      : transitions
-          .map((t) => parseRelayOwnerNotificationAccepted(t.transitionNote))
-          .filter((r): r is RelayOwnerNotificationReceipt => r !== null);
-  for (const receipt of receipts) {
-    if (receiptMatchesReplyRef(receipt, replyRef, ref)) {
-      return { ok: true };
-    }
-  }
-
-  // 2. Check pending DispatchBuffer (when outbound relay HTTP POST returned 2xx and inbound reply arrives before ack drain)
-  try {
-    const pending = findPendingRelayReplyRef(home, replyRef);
-    if (
-      pending.found &&
-      pending.connectorRef === ref.connectorRef &&
-      pending.qitemId === ref.qitemId &&
-      pending.episodeKey === ref.episodeKey &&
-      pending.decisionRevision === ref.decisionRevision
-    ) {
-      return { ok: true };
-    }
-  } catch {
-    return {
-      ok: false,
-      code: "dispatch_buffer_unavailable",
-      message:
-        "Relay outbound dispatch buffer is unreadable; refusing to reject or reserve un-receipted replyRef",
-    };
-  }
-
-  return {
-    ok: false,
-    code: "unrecognized_reply_ref",
-    message: "replyRef does not match any active or accepted outbound relay decision",
-  };
+  return { ok: true };
 }
 
 function formatDecisionText(text: string, ordering: RelayInboundOrdering): string {
@@ -508,7 +607,7 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
       }
       const { envelope } = parsedEnv;
 
-      // 3. Decode replyRef and enforce profile match + sender handle resolution
+      // 3. Decode replyRef token and enforce profile match + sender handle resolution
       const decodedRef = decodeRelayReplyRef(envelope.replyRef);
       if (!decodedRef.ok) {
         return {
@@ -519,9 +618,9 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
           },
         };
       }
-      const ref = decodedRef.ref;
+      const tokenRef = decodedRef.ref;
 
-      if (ref.connectorRef !== authenticatedConnectorRef) {
+      if (tokenRef.connectorHash !== hashRelayConnectorRef(authenticatedConnectorRef)) {
         return {
           status: 403,
           body: {
@@ -548,22 +647,9 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
 
       const actorSession = senderResolution.address;
       const eventKey = computeRelayEventKey(authenticatedConnectorRef, envelope.eventId);
-      const fingerprint = computeRelayEventFingerprint({
-        connectorRef: authenticatedConnectorRef,
-        eventId: envelope.eventId,
-        senderHandle: envelope.sender.handle,
-        actorSession,
-        replyRef: envelope.replyRef,
-        qitemId: ref.qitemId,
-        episodeKey: ref.episodeKey,
-        decisionRevision: ref.decisionRevision,
-        mode: ref.mode,
-        ordering: envelope.ordering,
-        text: envelope.text,
-      });
 
       return runSerialized(eventKey, async () => {
-        // 4. Strict SeenStore read path: fail closed (503) if corrupt/unreadable
+        // 4. Strict SeenStore read path: fail closed (503) if corrupt/unreadable or keyed suspect
         let statuses: Map<string, string>;
         try {
           statuses = seenStore.statuses();
@@ -578,11 +664,8 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
           };
         }
 
-        const receivedTag = `received:${fingerprint}`;
-        const processedTag = `processed:${fingerprint}`;
         const existingStatus = statuses.get(eventKey);
-        const verb = ref.mode === "ask" ? ("answer" as const) : ("resolve" as const);
-
+        let existingFp: string | undefined;
         if (existingStatus !== undefined) {
           const match = VALID_SEEN_STATUS_PATTERN.exec(existingStatus);
           if (!match) {
@@ -595,7 +678,48 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
               },
             };
           }
-          const existingFp = match[2];
+          existingFp = match[2];
+        }
+
+        // 5. Resolve offered replyRef context (durable accepted receipt first, then pending DispatchBuffer)
+        const resolved = resolveOfferedReplyRefContext(
+          deps.home,
+          deps.queueRepo,
+          envelope.replyRef,
+          tokenRef,
+          authenticatedConnectorRef,
+        );
+        if (!resolved.ok) {
+          return {
+            status: resolved.status,
+            body: {
+              error: resolved.code,
+              message: resolved.message,
+            },
+          };
+        }
+
+        const ref = resolved.ref;
+        const fingerprint = computeRelayEventFingerprint({
+          connectorRef: authenticatedConnectorRef,
+          eventId: envelope.eventId,
+          senderHandle: envelope.sender.handle,
+          actorSession,
+          replyRef: envelope.replyRef,
+          qitemId: ref.qitemId,
+          episodeKey: ref.episodeKey,
+          decisionRevision: ref.decisionRevision,
+          mode: ref.mode,
+          ordering: envelope.ordering,
+          text: envelope.text,
+        });
+
+        const receivedTag = `received:${fingerprint}`;
+        const processedTag = `processed:${fingerprint}`;
+        const verb = ref.mode === "ask" ? ("answer" as const) : ("resolve" as const);
+
+        // 6. Check existing seen-store status BEFORE reading current queue target so processed replays never depend on current getById/listTransitions
+        if (existingStatus !== undefined) {
           if (existingFp !== fingerprint) {
             return {
               status: 409,
@@ -617,28 +741,19 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
               },
             };
           }
-        }
-
-        // 5. Verify offered replyRef & non-update target before first reservation
-        if (existingStatus === undefined) {
-          const verified = verifyOfferedReplyRef(
-            deps.home,
+        } else {
+          // 7. Verify current target & non-update guards only for new actions before first reservation
+          const targetVerified = verifyOfferedReplyTarget(
             deps.queueRepo,
-            envelope.replyRef,
             ref,
+            resolved.receiptKind,
           );
-          if (!verified.ok) {
-            const status =
-              verified.code === "qitem_not_found"
-                ? 404
-                : verified.code === "dispatch_buffer_unavailable"
-                  ? 503
-                  : 409;
+          if (!targetVerified.ok) {
             return {
-              status,
+              status: targetVerified.status,
               body: {
-                error: verified.code,
-                message: verified.message,
+                error: targetVerified.code,
+                message: targetVerified.message,
               },
             };
           }

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { serve, type ServerType } from "@hono/node-server";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -12,6 +13,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
@@ -1839,5 +1841,552 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
       configured: true,
       ready: true,
     });
+  });
+
+  it("keeps generated replyRef fixed-size (<= 4096 chars and fitting 64 KiB body) for arbitrary high-entropy qitemId, connectorRef, episodeKey, and decisionId across pending DispatchBuffer, active/archived accepted receipts, digest items, and 503/dedup target guards", async () => {
+    const f = await createRelayFixture({ registerSecondaryRelay: true });
+
+    const highEntropyStream = (label: string, blocks: number) =>
+      Array.from({ length: blocks }, (_, idx) =>
+        createHash("sha512").update(`${label}:${idx}`).digest("base64url"),
+      ).join("-");
+
+    // Register a relay connector profile with a > 19,000-char high-entropy connectorRef and two bound humans
+    const hugeConnectorRef = `relay-${highEntropyStream("connector-ref", 220)}`;
+    const hugeInboundToken = "in-tok-huge-connector-654321";
+    const hugeOutboundToken = "out-tok-huge-connector-123456";
+    const hugeEnvPath = join(f.home, "secrets", "relay-huge.env");
+    writeFileSync(
+      hugeEnvPath,
+      [
+        "OPENRIG_RELAY_URL=http://127.0.0.1:43199/outbound",
+        `OPENRIG_RELAY_OUTBOUND_TOKEN=${hugeOutboundToken}`,
+        `OPENRIG_RELAY_INBOUND_TOKEN=${hugeInboundToken}`,
+      ].join("\n") + "\n",
+      { mode: 0o600 },
+    );
+    chmodSync(hugeEnvPath, 0o600);
+
+    addHumanFragment(
+      {
+        entityId: "longfounder",
+        class: "human",
+        displayName: "Long Founder",
+        address: "longfounder@external",
+        connectorBindings: [
+          {
+            kind: "relay",
+            connectorRef: hugeConnectorRef,
+            handle: "longfounder-handle",
+            secretsRef: `file:${hugeEnvPath}`,
+            role: "primary",
+          },
+        ],
+        prefs: { deliveryClass: "A" },
+      },
+      f.home,
+    );
+    addHumanFragment(
+      {
+        entityId: "longpartner",
+        class: "human",
+        displayName: "Long Partner",
+        address: "longpartner@external",
+        connectorBindings: [
+          {
+            kind: "relay",
+            connectorRef: hugeConnectorRef,
+            handle: "longpartner-handle",
+            secretsRef: `file:${hugeEnvPath}`,
+            role: "primary",
+          },
+        ],
+        prefs: { deliveryClass: "A" },
+      },
+      f.home,
+    );
+
+    const rekeyQitemId = (oldId: string, newId: string) => {
+      f.db.pragma("foreign_keys = OFF");
+      try {
+        f.db.prepare("UPDATE queue_items SET qitem_id = ? WHERE qitem_id = ?").run(newId, oldId);
+        f.db.prepare("UPDATE queue_transitions SET qitem_id = ? WHERE qitem_id = ?").run(newId, oldId);
+        f.db.prepare("UPDATE outbox_entries SET audit_pointer = ? WHERE audit_pointer = ?").run(newId, oldId);
+      } finally {
+        f.db.pragma("foreign_keys = ON");
+      }
+    };
+
+    // 1. Pending DispatchBuffer round-trip with > 19,000-char qitemId, episodeKey, connectorRef, and decisionId
+    //    (old inline base64url encoding > 100,000 chars > 4096 chars and > 64 KiB body; new token is exactly 246 chars)
+    const seededPending = await f.daemon.queueRepo.create({
+      sourceSession: "architect@rig",
+      destinationSession: "longfounder@external",
+      summary: "High-entropy pending ask",
+      body: "Approve high-entropy pending deployment?",
+      humanIntent: "decision",
+      humanAlert: true,
+      humanQuestions: [
+        {
+          id: "q-huge-pending",
+          header: "Deploy",
+          question: "Ship high-entropy pending build?",
+          options: [
+            { id: "yes", label: "Yes", description: "Proceed" },
+            { id: "no", label: "No", description: "Hold" },
+          ],
+        },
+      ],
+      nudge: false,
+    });
+    const hugeQitemIdPending = `qi-${highEntropyStream("qitem-pending", 220)}`;
+    rekeyQitemId(seededPending.qitemId, hugeQitemIdPending);
+
+    const hugeEpisodeKeyPending = f.daemon.queueRepo.currentHumanRequiredEpisode(hugeQitemIdPending)!.key;
+    const hugeDecisionIdPending = `dec-${highEntropyStream("decision-pending", 220)}`;
+    expect(hugeQitemIdPending.length).toBeGreaterThan(19_000);
+    expect(hugeConnectorRef.length).toBeGreaterThan(19_000);
+    expect(hugeEpisodeKeyPending.length).toBeGreaterThan(19_000);
+    expect(hugeDecisionIdPending.length).toBeGreaterThan(19_000);
+
+    const preparedPendingHuge = prepareRelayDecision(
+      {
+        kind: "outbound_decision",
+        decisionId: hugeDecisionIdPending,
+        op: OUTBOUND_OP,
+        entityBindingRef: "longfounder@external",
+        payload: {
+          qitemId: hugeQitemIdPending,
+          notificationKey: hugeEpisodeKeyPending,
+          destinationSession: "longfounder@external",
+          summary: "High-entropy pending ask",
+          body: "Approve high-entropy pending deployment?",
+          humanIntent: "decision",
+          ownerNotificationKind: "human-required",
+        },
+        enqueuedAt: new Date().toISOString(),
+      },
+      {
+        loadHumanRegistry: () => loadHumanRegistry(f.home),
+        queueRepo: f.daemon.queueRepo,
+        resolveOutcome: () => "interrupt",
+      },
+    );
+    const pendingHugeEnv = (preparedPendingHuge.payload as { relayEnvelope?: { replyRef: string | null } }).relayEnvelope!;
+    expect(pendingHugeEnv.replyRef).not.toBeNull();
+    expect(pendingHugeEnv.replyRef!.length).toBeLessThanOrEqual(4096);
+    expect(pendingHugeEnv.replyRef!.length).toBe(246);
+
+    const buffer = new DispatchBuffer(f.home);
+    buffer.enqueue(preparedPendingHuge);
+
+    // Cross-connector guard: relay-main token rejected (403) when trying to answer hugeConnectorRef's replyRef
+    const crossConnRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "evt-huge-cross-conn-1",
+        sender: { handle: "founder-handle" },
+        replyRef: pendingHugeEnv.replyRef,
+        text: "Cross connector attempt",
+        ordering: "after-question",
+      }),
+    });
+    expect(crossConnRes.status).toBe(403);
+    expect(await crossConnRes.json()).toMatchObject({ error: "connector_ref_mismatch" });
+
+    const inboundPendingBody = JSON.stringify({
+      eventId: "evt-huge-pending-1",
+      sender: { handle: "longfounder-handle" },
+      replyRef: pendingHugeEnv.replyRef,
+      text: "Yes, ship from pending buffer.",
+      ordering: "after-question",
+    });
+    expect(Buffer.byteLength(inboundPendingBody, "utf8")).toBeLessThanOrEqual(65_536);
+
+    const pendingRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${hugeInboundToken}`,
+        "Content-Type": "application/json",
+      },
+      body: inboundPendingBody,
+    });
+    expect(pendingRes.status).toBe(200);
+    expect(await pendingRes.json()).toMatchObject({
+      ok: true,
+      qitemId: hugeQitemIdPending,
+      verb: "answer",
+      actorSession: "longfounder@external",
+      deduplicated: false,
+    });
+    expect(f.daemon.queueRepo.getById(hugeQitemIdPending)?.state).toBe("done");
+    buffer.ack(hugeDecisionIdPending);
+
+    // 2. Accepted receipt round-trip after buffer drain (with corrupt dispatch-buffer.json + fresh handler + registered partner attribution + archive)
+    const seededReceipt = await f.daemon.queueRepo.create({
+      sourceSession: "architect@rig",
+      destinationSession: "longfounder@external",
+      summary: "High-entropy receipt ask",
+      body: "Approve high-entropy receipt deployment?",
+      humanIntent: "decision",
+      humanAlert: true,
+      humanQuestions: [
+        {
+          id: "q-huge-receipt",
+          header: "Deploy Receipt",
+          question: "Ship high-entropy receipt build?",
+          options: [
+            { id: "yes", label: "Yes", description: "Proceed" },
+            { id: "no", label: "No", description: "Hold" },
+          ],
+        },
+      ],
+      nudge: false,
+    });
+    const hugeQitemIdReceipt = `qi-${highEntropyStream("qitem-receipt", 220)}`;
+    rekeyQitemId(seededReceipt.qitemId, hugeQitemIdReceipt);
+
+    const receiptHugeRow = f.daemon.queueRepo.getById(hugeQitemIdReceipt)!;
+    const hugeEpisodeKeyReceipt = f.daemon.queueRepo.currentHumanRequiredEpisode(hugeQitemIdReceipt)!.key;
+    const hugeRevisionReceipt = f.daemon.queueRepo.decisionRevision(receiptHugeRow);
+    const hugeDecisionIdReceipt = `dec-${highEntropyStream("decision-receipt", 220)}`;
+
+    const preparedReceiptHuge = prepareRelayDecision(
+      {
+        kind: "outbound_decision",
+        decisionId: hugeDecisionIdReceipt,
+        op: OUTBOUND_OP,
+        entityBindingRef: "longfounder@external",
+        payload: {
+          qitemId: hugeQitemIdReceipt,
+          notificationKey: hugeEpisodeKeyReceipt,
+          destinationSession: "longfounder@external",
+          summary: "High-entropy receipt ask",
+          body: "Approve high-entropy receipt deployment?",
+          humanIntent: "decision",
+          ownerNotificationKind: "human-required",
+        },
+        enqueuedAt: new Date().toISOString(),
+      },
+      {
+        loadHumanRegistry: () => loadHumanRegistry(f.home),
+        queueRepo: f.daemon.queueRepo,
+        resolveOutcome: () => "interrupt",
+      },
+    );
+    const receiptHugeEnv = (preparedReceiptHuge.payload as { relayEnvelope?: { replyRef: string | null } }).relayEnvelope!;
+    expect(receiptHugeEnv.replyRef).not.toBeNull();
+    expect(receiptHugeEnv.replyRef!.length).toBeLessThanOrEqual(4096);
+    expect(receiptHugeEnv.replyRef!.length).toBe(246);
+
+    // Record durable accepted receipt (no pending buffer entry) and corrupt dispatch-buffer.json on disk
+    f.daemon.queueRepo.recordRelayOwnerNotificationAccepted({
+      qitemId: hugeQitemIdReceipt,
+      actorSession: "relay-connector",
+      notificationKey: hugeEpisodeKeyReceipt,
+      connectorRef: hugeConnectorRef,
+      deliveryId: hugeDecisionIdReceipt,
+      replyRef: receiptHugeEnv.replyRef,
+      replyRefHash: hashRelayReplyRef(receiptHugeEnv.replyRef!),
+      revision: hugeRevisionReceipt,
+      episodeKey: hugeEpisodeKeyReceipt,
+      level: "ALERT",
+      kind: "human-required",
+      closeUpdate: false,
+    });
+    const bufferPath = join(f.home, "gateway", "dispatch-buffer.json");
+    writeFileSync(bufferPath, "{corrupt-buffer-while-receipt-valid\n", "utf8");
+
+    const inboundReceiptBody = JSON.stringify({
+      eventId: "evt-huge-receipt-partner-1",
+      sender: { handle: "longpartner-handle" },
+      replyRef: receiptHugeEnv.replyRef,
+      text: "Partner approves from durable receipt with corrupt buffer.",
+      ordering: "after-question",
+    });
+    expect(Buffer.byteLength(inboundReceiptBody, "utf8")).toBeLessThanOrEqual(65_536);
+
+    // Fresh handler instance (simulating restart) resolves from durable accepted receipt despite corrupt buffer
+    const restartedHandler = createRelayInboundHandler({
+      home: f.home,
+      queueRepo: f.daemon.queueRepo,
+      missionControlWriteContract: f.daemon.missionControlWriteContract,
+      missionControlActionLog: f.daemon.missionControlActionLog,
+    });
+    const receiptPartnerRes = await restartedHandler.handle({
+      authorizationHeader: `Bearer ${hugeInboundToken}`,
+      rawBody: inboundReceiptBody,
+    });
+    expect(receiptPartnerRes.status).toBe(200);
+    expect(receiptPartnerRes.body).toMatchObject({
+      ok: true,
+      qitemId: hugeQitemIdReceipt,
+      verb: "answer",
+      actorSession: "longpartner@external",
+      deduplicated: false,
+    });
+    expect(f.daemon.queueRepo.getById(hugeQitemIdReceipt)?.state).toBe("done");
+
+    // Restore valid empty dispatch-buffer.json, archive the terminal transitions into queue_transitions_archive, and verify HTTP replay
+    writeFileSync(bufferPath, "[]\n", "utf8");
+    const oldIso = "2025-01-01T00:00:00.000Z";
+    f.db.prepare("UPDATE queue_items SET ts_updated = ? WHERE qitem_id = ?").run(oldIso, hugeQitemIdReceipt);
+    f.db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(oldIso, hugeQitemIdReceipt);
+    expect(
+      archiveAgedTerminalTransitions(f.db, { nowIso: "2026-11-07T00:00:00.000Z" }).archivedQitems,
+    ).toBeGreaterThanOrEqual(1);
+
+    const archivedReplayRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${hugeInboundToken}`,
+        "Content-Type": "application/json",
+      },
+      body: inboundReceiptBody,
+    });
+    expect(archivedReplayRes.status).toBe(200);
+    expect(await archivedReplayRes.json()).toMatchObject({
+      ok: true,
+      qitemId: hugeQitemIdReceipt,
+      actorSession: "longpartner@external",
+      deduplicated: true,
+    });
+
+    // 3. Processed-event dedup runs BEFORE current-target getById/listTransitions verification:
+    //    - When getById returns null (target missing) or throws (target DB read error) while receipt + processed seen ledger exist:
+    //      * exact duplicate replay still returns 200 OK (deduplicated: true) without touching getById
+    //      * fresh new eventId with the same replyRef returns 404 (when missing) or 503 (when throwing) with zero seen reservation
+    let getByIdCalls = 0;
+    const missingTargetRepo = new Proxy(f.daemon.queueRepo, {
+      get(target, prop, receiver) {
+        if (prop === "getById") {
+          return () => {
+            getByIdCalls++;
+            return null;
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const missingTargetHandler = createRelayInboundHandler({
+      home: f.home,
+      queueRepo: missingTargetRepo,
+      missionControlWriteContract: f.daemon.missionControlWriteContract,
+      missionControlActionLog: f.daemon.missionControlActionLog,
+    });
+    const dedupWhenMissingRes = await missingTargetHandler.handle({
+      authorizationHeader: `Bearer ${hugeInboundToken}`,
+      rawBody: inboundReceiptBody,
+    });
+    expect(dedupWhenMissingRes.status).toBe(200);
+    expect(dedupWhenMissingRes.body).toMatchObject({
+      ok: true,
+      qitemId: hugeQitemIdReceipt,
+      deduplicated: true,
+    });
+    expect(getByIdCalls).toBe(0);
+
+    const seen = new SeenStore(join(f.home, "state", RELAY_INBOUND_SEEN_FILE));
+    const freshMissingEventId = "evt-fresh-when-target-missing-1";
+    const freshWhenMissingRes = await missingTargetHandler.handle({
+      authorizationHeader: `Bearer ${hugeInboundToken}`,
+      rawBody: JSON.stringify({
+        eventId: freshMissingEventId,
+        sender: { handle: "longpartner-handle" },
+        replyRef: receiptHugeEnv.replyRef,
+        text: "Fresh event when target row is gone",
+        ordering: "after-question",
+      }),
+    });
+    expect(freshWhenMissingRes.status).toBe(404);
+    expect(freshWhenMissingRes.body.error).toBe("qitem_not_found");
+    expect(seen.statuses().get(computeRelayEventKey(hugeConnectorRef, freshMissingEventId))).toBeUndefined();
+
+    const throwingTargetRepo = new Proxy(f.daemon.queueRepo, {
+      get(target, prop, receiver) {
+        if (prop === "getById") {
+          return () => {
+            throw new Error("SQLITE_IOERR: simulated getById failure");
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const throwingTargetHandler = createRelayInboundHandler({
+      home: f.home,
+      queueRepo: throwingTargetRepo,
+      missionControlWriteContract: f.daemon.missionControlWriteContract,
+      missionControlActionLog: f.daemon.missionControlActionLog,
+    });
+    const dedupWhenThrowingRes = await throwingTargetHandler.handle({
+      authorizationHeader: `Bearer ${hugeInboundToken}`,
+      rawBody: inboundReceiptBody,
+    });
+    expect(dedupWhenThrowingRes.status).toBe(200);
+    expect(dedupWhenThrowingRes.body).toMatchObject({
+      ok: true,
+      qitemId: hugeQitemIdReceipt,
+      deduplicated: true,
+    });
+
+    const freshThrowingEventId = "evt-fresh-when-target-throws-1";
+    const freshWhenThrowingRes = await throwingTargetHandler.handle({
+      authorizationHeader: `Bearer ${hugeInboundToken}`,
+      rawBody: JSON.stringify({
+        eventId: freshThrowingEventId,
+        sender: { handle: "longpartner-handle" },
+        replyRef: receiptHugeEnv.replyRef,
+        text: "Fresh event when target getById throws",
+        ordering: "after-question",
+      }),
+    });
+    expect(freshWhenThrowingRes.status).toBe(503);
+    expect(freshWhenThrowingRes.body.error).toBe("queue_store_unavailable");
+    expect(seen.statuses().get(computeRelayEventKey(hugeConnectorRef, freshThrowingEventId))).toBeUndefined();
+
+    // 4. Multi-item digest with per-item fixed-size replyRef tokens (264 chars for ask-digest) scopes each reply to its individual question
+    const digAsk1 = await f.daemon.queueRepo.create({
+      sourceSession: "architect@rig",
+      destinationSession: "founder@external",
+      summary: "Digest ask 1",
+      body: "Question 1?",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+    const digAsk2 = await f.daemon.queueRepo.create({
+      sourceSession: "architect@rig",
+      destinationSession: "founder@external",
+      summary: "Digest ask 2",
+      body: "Question 2?",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+    const ep1 = f.daemon.queueRepo.currentHumanRequiredEpisode(digAsk1.qitemId)!.key;
+    const ep2 = f.daemon.queueRepo.currentHumanRequiredEpisode(digAsk2.qitemId)!.key;
+    const digestDecisionId = `digest:${highEntropyStream("digest-id", 60)}`;
+    const preparedDigest = prepareRelayDecision(
+      {
+        kind: "outbound_decision",
+        decisionId: digestDecisionId,
+        op: OUTBOUND_OP,
+        entityBindingRef: "founder@external",
+        payload: {
+          deliveryDigestPost: true,
+          digestId: "multi-huge",
+          qitemId: digAsk1.qitemId,
+          destinationSession: "founder@external",
+          summary: "Digest summary",
+          body: "• Question 1?\n• Question 2?",
+          memberReceipts: [
+            { qitemId: digAsk1.qitemId, notificationKey: ep1, level: "ALERT", kind: "human-required" },
+            { qitemId: digAsk2.qitemId, notificationKey: ep2, level: "ALERT", kind: "human-required" },
+          ],
+        },
+        enqueuedAt: new Date().toISOString(),
+      },
+      {
+        loadHumanRegistry: () => loadHumanRegistry(f.home),
+        queueRepo: f.daemon.queueRepo,
+        resolveOutcome: () => "digest",
+      },
+    );
+    const digestEnv = (
+      preparedDigest.payload as {
+        relayEnvelope?: { replyRef: string | null; items?: Array<{ qitemId: string; replyRef: string | null }> };
+      }
+    ).relayEnvelope!;
+    expect(digestEnv.replyRef).toBeNull();
+    const itemRef1 = digestEnv.items![0]!.replyRef!;
+    const itemRef2 = digestEnv.items![1]!.replyRef!;
+    expect(itemRef1.length).toBeLessThanOrEqual(4096);
+    expect(itemRef2.length).toBeLessThanOrEqual(4096);
+    expect(itemRef1.length).toBe(264);
+    expect(itemRef2.length).toBe(264);
+
+    // Record accepted receipts for both digest member items
+    f.daemon.queueRepo.recordRelayOwnerNotificationAccepted({
+      qitemId: digAsk1.qitemId,
+      actorSession: "relay-connector",
+      notificationKey: ep1,
+      connectorRef: "relay-main",
+      deliveryId: digestDecisionId,
+      replyRef: itemRef1,
+      replyRefHash: hashRelayReplyRef(itemRef1),
+      revision: f.daemon.queueRepo.decisionRevision(digAsk1),
+      episodeKey: ep1,
+      level: "ALERT",
+      kind: "human-required",
+    });
+    f.daemon.queueRepo.recordRelayOwnerNotificationAccepted({
+      qitemId: digAsk2.qitemId,
+      actorSession: "relay-connector",
+      notificationKey: ep2,
+      connectorRef: "relay-main",
+      deliveryId: digestDecisionId,
+      replyRef: itemRef2,
+      replyRefHash: hashRelayReplyRef(itemRef2),
+      revision: f.daemon.queueRepo.decisionRevision(digAsk2),
+      episodeKey: ep2,
+      level: "ALERT",
+      kind: "human-required",
+    });
+
+    const digReply1 = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "evt-digest-item-1",
+        sender: { handle: "founder-handle" },
+        replyRef: itemRef1,
+        text: "Answer for digest item 1 only",
+        ordering: "after-question",
+      }),
+    });
+    expect(digReply1.status).toBe(200);
+    expect(f.daemon.queueRepo.getById(digAsk1.qitemId)?.state).toBe("done");
+    expect(f.daemon.queueRepo.getById(digAsk2.qitemId)?.state).toBe("pending");
+
+    // 5. Unavailable DB read during receipt lookup returns 503 queue_store_unavailable with zero seen-store reservation or action side effects
+    const dbThrowingRepo = new Proxy(f.daemon.queueRepo, {
+      get(target, prop, receiver) {
+        if (prop === "findRelayOwnerNotificationReceiptByReplyRef") {
+          return () => {
+            throw new Error("SQLITE_IOERR: simulated receipt lookup failure");
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const dbFailureHandler = createRelayInboundHandler({
+      home: f.home,
+      queueRepo: dbThrowingRepo,
+      missionControlWriteContract: f.daemon.missionControlWriteContract,
+      missionControlActionLog: f.daemon.missionControlActionLog,
+    });
+    const dbFailEventId = "evt-db-unavailable-1";
+    const dbFailRes = await dbFailureHandler.handle({
+      authorizationHeader: `Bearer ${f.inboundTokenMain}`,
+      rawBody: JSON.stringify({
+        eventId: dbFailEventId,
+        sender: { handle: "founder-handle" },
+        replyRef: itemRef2,
+        text: "Should fail 503 before seen reservation",
+        ordering: "after-question",
+      }),
+    });
+    expect(dbFailRes.status).toBe(503);
+    expect(dbFailRes.body.error).toBe("queue_store_unavailable");
+    expect(seen.statuses().get(computeRelayEventKey("relay-main", dbFailEventId))).toBeUndefined();
+    expect(f.daemon.queueRepo.getById(digAsk2.qitemId)?.state).toBe("pending");
+    expect(f.daemon.missionControlActionLog.listForQitem(digAsk2.qitemId, 5)).toHaveLength(0);
   });
 });

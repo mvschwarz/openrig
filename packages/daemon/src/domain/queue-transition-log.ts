@@ -765,36 +765,37 @@ export class QueueTransitionLog {
     return null;
   }
 
-  listRelayOwnerNotificationTransportFailures(qitemId: string): RelayOwnerNotificationTransportFailure[] {
+  findRelayOwnerNotificationReceiptByReplyRef(
+    replyRef: string,
+  ): (RelayOwnerNotificationReceipt & { qitemId: string }) | null {
+    const trimmed = replyRef.trim();
+    if (!trimmed) return null;
+    const fullHash = createHash("sha256").update(trimmed, "utf8").digest("hex");
     const rows = this.db
       .prepare(
-        `SELECT transition_id, transition_note FROM ${this.historySource}
-          WHERE qitem_id = ? AND transition_note LIKE 'relay-owner-notification-transport-failed %'
+        `SELECT qitem_id, transition_note FROM ${this.historySource}
+          WHERE transition_note LIKE 'relay-owner-notification-accepted %'
+            AND (
+              instr(' ' || transition_note || ' ', ' reply_ref_hash=' || ? || ' ') > 0
+              OR instr(' ' || transition_note || ' ', ' reply_ref=' || ? || ' ') > 0
+            )
           ORDER BY transition_id DESC`,
       )
-      .all(qitemId) as Array<{ transition_id: number; transition_note: string }>;
-    const failures: RelayOwnerNotificationTransportFailure[] = [];
+      .all(fullHash, trimmed) as Array<{ qitem_id: string; transition_note: string }>;
     for (const row of rows) {
-      const parsed = parseRelayOwnerNotificationTransportFailed(row.transition_note);
-      if (parsed) failures.push(parsed);
-    }
-    return failures;
-  }
-
-  getRelayOwnerNotificationTransportFailure(
-    qitemId: string,
-    notificationKey?: string,
-  ): RelayOwnerNotificationTransportFailure | null {
-    for (const parsed of this.listRelayOwnerNotificationTransportFailures(qitemId)) {
-      if (notificationKey === undefined || parsed.notificationKey === notificationKey) {
-        return parsed;
+      const parsed = parseRelayOwnerNotificationAccepted(row.transition_note);
+      if (!parsed) continue;
+      if (parsed.replyRef !== null) {
+        if (parsed.replyRef === trimmed && parsed.replyRefHash === fullHash) {
+          return { qitemId: row.qitem_id, ...parsed };
+        }
+        continue;
+      }
+      if (parsed.replyRefHash === fullHash) {
+        return { qitemId: row.qitem_id, ...parsed };
       }
     }
     return null;
-  }
-
-  hasRelayOwnerNotificationTransportFailure(qitemId: string, notificationKey: string): boolean {
-    return this.getRelayOwnerNotificationTransportFailure(qitemId, notificationKey) !== null;
   }
 
   private rowToTransition(row: QueueTransitionRow): QueueTransition {

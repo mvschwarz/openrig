@@ -27,6 +27,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { OPENRIG_HOME } from "../src/openrig-compat.js";
 import { createDaemon } from "../src/startup.js";
+import { parseRelayOwnerNotificationTransportFailed } from "../src/domain/queue-transition-log.js";
 import {
   addHumanFragment,
   loadHumanRegistry,
@@ -46,7 +47,6 @@ import {
   RELAY_INBOUND_SEEN_FILE,
 } from "../src/domain/gateway/relay-inbound.js";
 import {
-  reassembleRelayEnvelopeParts,
   startRecordingRelay,
   type RecordingRelayHandle,
 } from "./fixtures/recording-relay.js";
@@ -247,7 +247,7 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
   });
 
   it(
-    "proves post-bind network discipline, multi-part CJK/emoji ordinary ask outbound custody via real daemon poller, probe filtering, and inbound reply with ignored proxy headers/extras and real attribution",
+    "proves post-bind network discipline, single-POST > 64 KiB CJK/emoji ordinary ask outbound custody via real daemon poller, probe filtering, and inbound reply with ignored proxy headers/extras and real attribution",
     async () => {
       const outboundToken = "sec-relay-out-integration-01";
       const inboundToken = "sec-relay-in-integration-01";
@@ -294,7 +294,6 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
         "[BODY-TAIL-MARKER-902]";
       const longDetail =
         "Canary telemetry detail: p99=42ms, error_rate=0.00% 🛰️ [DETAIL-TAIL-MARKER-903]";
-      const expectedPartCount = 3;
 
       const ask = await daemon.deps.queueRepo!.create({
         sourceSession: "planner@ops-rig",
@@ -335,23 +334,23 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
       expect(bridge.getSanitizedStats().relayPostCount).toBe(0);
 
       // Start post-bind services: do NOT call manual sweepOutboundOnce for this first ask.
-      // Wait for actual composition-owned default 30-second poller to produce all multi-part bridge custody records.
+      // Wait for actual composition-owned default 30-second poller to produce the single complete > 64 KiB bridge custody record.
       // We budget 38,000ms (38s) for the ~30s production polling cadence to fire.
       daemon.deps.gatewaySubsystem?.startServices();
       await waitForCondition(
         () =>
-          bridge.getCustodyRecords().length === expectedPartCount &&
+          bridge.getCustodyRecords().length === 1 &&
           daemon.deps.queueRepo!.hasRelayOwnerNotificationReceipt(ask.qitemId),
         38_000,
       );
 
       const stats = bridge.getSanitizedStats();
-      expect(stats.relayPostCount).toBe(expectedPartCount);
-      expect(stats.acceptedCount).toBe(expectedPartCount);
-      expect(stats.custodyCount).toBe(expectedPartCount);
+      expect(stats.relayPostCount).toBe(1);
+      expect(stats.acceptedCount).toBe(1);
+      expect(stats.custodyCount).toBe(1);
 
       const custodyRecords = bridge.getCustodyRecords();
-      expect(custodyRecords).toHaveLength(expectedPartCount);
+      expect(custodyRecords).toHaveLength(1);
 
       const receipt = daemon.deps.queueRepo!.getRelayOwnerNotificationReceipt(ask.qitemId);
       expect(receipt?.connectorRef).toBe("local-bridge");
@@ -359,48 +358,38 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
 
       const loneSurrogateRe =
         /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
-      for (let i = 0; i < expectedPartCount; i++) {
-        const rec = custodyRecords[i]!;
-        expect(Buffer.byteLength(JSON.stringify(rec.envelope), "utf8")).toBeLessThanOrEqual(
-          65_536,
-        );
-        expect(rec.deliveryId).toBe(`${parentDeliveryId}:part:${i + 1}`);
-        expect(rec.envelope.part).toEqual({
-          parentDeliveryId,
-          index: i + 1,
-          total: expectedPartCount,
-        });
-        expect(rec.envelope.summary.length).toBeLessThanOrEqual(1000);
-        expect(rec.envelope.summary).not.toMatch(loneSurrogateRe);
-        expect(rec.envelope.body).not.toMatch(loneSurrogateRe);
-      }
-
-      const reassembled = reassembleRelayEnvelopeParts(
-        custodyRecords.map((r) => r.envelope),
+      const rec = custodyRecords[0]!;
+      expect(Buffer.byteLength(JSON.stringify(rec.envelope), "utf8")).toBeGreaterThan(
+        65_536,
       );
-      expect(bridge.getReassembledDeliveries()).toEqual([reassembled]);
-      expect(reassembled).toMatchObject({
+      expect(rec.deliveryId).toBe(parentDeliveryId);
+      expect((rec.envelope as Record<string, unknown>).part).toBeUndefined();
+      expect(rec.envelope.summary.length).toBeLessThanOrEqual(1000);
+      expect(rec.envelope.summary).not.toMatch(loneSurrogateRe);
+      expect(rec.envelope.body).not.toMatch(loneSurrogateRe);
+
+      const deliveredEnvelope = rec.envelope;
+      expect(deliveredEnvelope).toMatchObject({
         v: 1,
         deliveryId: parentDeliveryId,
         recipient: { handle: "alice_ops" },
         intent: "decision",
         outcome: "interrupt",
       });
-      expect(reassembled.part).toBeUndefined();
-      expect(typeof reassembled.replyRef).toBe("string");
-      expect(reassembled.body).toContain(longSummary);
-      expect(reassembled.body).toContain("[SUMMARY-TAIL-MARKER-901]");
-      expect(reassembled.body).toContain(longBody);
-      expect(reassembled.body).toContain("[BODY-TAIL-MARKER-902]");
-      expect(reassembled.body).toContain(longDetail);
-      expect(reassembled.body).toContain("[DETAIL-TAIL-MARKER-903]");
-      expect(reassembled.body).toContain(
+      expect(typeof deliveredEnvelope.replyRef).toBe("string");
+      expect(deliveredEnvelope.body).toContain(longSummary);
+      expect(deliveredEnvelope.body).toContain("[SUMMARY-TAIL-MARKER-901]");
+      expect(deliveredEnvelope.body).toContain(longBody);
+      expect(deliveredEnvelope.body).toContain("[BODY-TAIL-MARKER-902]");
+      expect(deliveredEnvelope.body).toContain(longDetail);
+      expect(deliveredEnvelope.body).toContain("[DETAIL-TAIL-MARKER-903]");
+      expect(deliveredEnvelope.body).toContain(
         "Promote release candidate v2.4? [QUESTION-TAIL-MARKER-904]",
       );
-      expect(reassembled.body).toContain(
+      expect(deliveredEnvelope.body).toContain(
         "- Promote now [OPT-YES-TAIL-905] (recommended)",
       );
-      expect(reassembled.body).toContain(
+      expect(deliveredEnvelope.body).toContain(
         "- Hold [OPT-HOLD-TAIL-906]",
       );
       // Receipt records bridge custody acceptance only; the ask remains pending until an inbound reply settles it.
@@ -435,7 +424,7 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
               displayName: "Spoofed Display Name",
               externalId: "ext-999",
             },
-            replyRef: reassembled.replyRef!,
+            replyRef: deliveredEnvelope.replyRef!,
             text: "Promote now — canary metrics are clean.",
             ordering: "after-question",
             actorSession: "spoofed-actor@external",
@@ -456,7 +445,7 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
       const replayWithoutExtras = await bridge.sendInboundReply(running.baseUrl, {
         eventId: "evt-ordinary-ask-1",
         sender: { handle: "alice_ops" },
-        replyRef: reassembled.replyRef!,
+        replyRef: deliveredEnvelope.replyRef!,
         text: "Promote now — canary metrics are clean.",
         ordering: "after-question",
       });
@@ -693,9 +682,9 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
       ),
     ).toBe(true);
     expect(
-      daemon1.daemon.deps.queueRepo!.getRelayOwnerNotificationTransportFailure(
-        ask.qitemId,
-      ),
+      transitionNotes
+        .map((n) => parseRelayOwnerNotificationTransportFailed(n))
+        .find((f) => f !== null),
     ).toMatchObject({
       connectorRef: "local-bridge",
       failureClass: "http-502",
