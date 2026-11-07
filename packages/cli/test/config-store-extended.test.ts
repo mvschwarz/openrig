@@ -207,6 +207,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "decisions.enabled",
       "decisions.consumers",
       "decisions.template_dir",
+      "acp.to",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
       "retention.enabled",
       "retention.transitions_days",
