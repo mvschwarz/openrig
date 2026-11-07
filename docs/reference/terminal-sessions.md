@@ -226,13 +226,17 @@ Live following supports **Linux and macOS with Herdr protocol 22**. Admission
 checks the live protocol and selected socket, then confirms each pane's IDs,
 focus state and foreground attachment. A shell startup `cd` does not change
 pane identity; filesystem aliases of the same existing path are accepted.
+If a creation response is lost and shell startup changes the directory, Core
+may be unable to attribute that pane. It reports uncertainty and does not
+repeat the creation.
 The detected Herdr version remains visible in provider status. The native
 qualification version is 0.9.5; a matching release label alone is not proof of
 compatibility, and future protocol numbers are not assumed compatible.
 
 If a new view's platform or protocol cannot support following, Core opens a
 labelled **snapshot** instead and disables automatic following. It will not
-track later owner changes. A failed endpoint/identity read or an existing
+track later owner changes. Incomplete membership prevents that snapshot from
+opening; the result explains why. A failed endpoint/identity read or an existing
 canvas stays unconfirmed, preserving it instead of creating a fallback view.
 Other providers and selector kinds retain ordinary one-shot open. Use
 `--provider herdr --json` to operate without opening a desktop window, and
