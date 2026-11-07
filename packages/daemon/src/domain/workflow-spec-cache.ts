@@ -591,23 +591,31 @@ export class WorkflowSpecCache {
 
   /**
    * #2607: before another file takes this id and version's row, keep the unfinished runs started from the row's file on
-   * what that file gave them. A file read at a new path with the same bytes after its old path is gone is taken as moved,
-   * and its runs follow it there. Any other file leaves them the replaced row's spec, the newest their own file gave
-   * them (a file moved and edited in one step is treated that way too).
+   * what that file gave them. A file read at a new path with the same bytes after its old path is gone is taken as moved:
+   * its runs follow it there, carrying the row's spec with the path. Any other file leaves them the replaced row's spec,
+   * the newest their own file gave them (a file moved and edited in one step is treated that way too).
+   * The move test is a heuristic: an unrelated copy with the same bytes, read after the old file is gone, also counts as
+   * the moved file, and its later edits reach those runs.
+   * Runs inside the caller's transaction with the row's replacement; returns what to log once that commits.
    */
-  private keepRunsOnTheirFile(existing: SpecRow, sourcePath: string, sourceHash: string): void {
-    if (!this.hasInstanceSpecColumns || !existing.version || sameSourceFile(existing.source_path, sourcePath)) return;
+  private keepRunsOnTheirFile(existing: SpecRow, sourcePath: string, sourceHash: string): string | null {
+    if (!this.hasInstanceSpecColumns || !existing.version || sameSourceFile(existing.source_path, sourcePath)) return null;
     const runs = (this.db
       .prepare(`SELECT instance_id, spec_source_path FROM workflow_instances WHERE workflow_name = ? AND workflow_version = ? AND spec_source_path IS NOT NULL AND status IN ('active', 'waiting', 'failed')`)
       .all(existing.name, existing.version) as Array<{ instance_id: string; spec_source_path: string }>)
       .filter((run) => sameSourceFile(run.spec_source_path, existing.source_path));
     const moved = !existsSync(existing.source_path) && existing.source_hash === sourceHash;
-    if (runs.length === 0 || (!moved && !existing.spec_json)) return;
-    const update = this.db.prepare(`UPDATE workflow_instances SET ${moved ? "spec_source_path" : "spec_json"} = ? WHERE instance_id = ?`);
-    for (const run of runs) update.run(moved ? sourcePath : existing.spec_json, run.instance_id);
-    console.warn(moved
+    if (runs.length === 0 || (!moved && !existing.spec_json)) return null;
+    const update = moved
+      ? this.db.prepare(`UPDATE workflow_instances SET spec_source_path = ?, spec_json = COALESCE(?, spec_json) WHERE instance_id = ?`)
+      : this.db.prepare(`UPDATE workflow_instances SET spec_json = ? WHERE instance_id = ?`);
+    for (const run of runs) {
+      if (moved) update.run(sourcePath, existing.spec_json ?? null, run.instance_id);
+      else update.run(existing.spec_json, run.instance_id);
+    }
+    return moved
       ? `workflow spec ${existing.name}@${existing.version} moved from ${existing.source_path} to ${sourcePath}: ${runs.length} unfinished run(s) follow it there.`
-      : `workflow spec ${existing.name}@${existing.version} from ${existing.source_path} was replaced by ${sourcePath}: ${runs.length} unfinished run(s) started from the first file keep the spec it last gave them.`);
+      : `workflow spec ${existing.name}@${existing.version} from ${existing.source_path} was replaced by ${sourcePath}: ${runs.length} unfinished run(s) started from the first file keep the spec it last gave them.`;
   }
 
   /**
@@ -680,7 +688,6 @@ export class WorkflowSpecCache {
     const stepsJson = JSON.stringify(spec.steps);
     const coordinationTerminalTurnRule = spec.coordination_terminal_turn_rule ?? "hot_potato";
     if (existing) {
-      this.keepRunsOnTheirFile(existing, sourcePath, sourceHash);
       // Update in place (same name+version, content changed).
       const specJsonSet = this.hasSpecJsonColumn ? ", spec_json = ?" : "";
       const diagnosticSet = this.hasDiagnosticColumns ? ", status = 'valid', error_message = NULL" : "";
@@ -698,7 +705,7 @@ export class WorkflowSpecCache {
       ];
       if (this.hasSpecJsonColumn) updateParams.push(JSON.stringify(spec));
       updateParams.push(existing.spec_id);
-      this.db
+      const replaceRow = this.db
         .prepare(
           `UPDATE workflow_specs SET
              name = ?, version = ?,
@@ -706,8 +713,15 @@ export class WorkflowSpecCache {
              coordination_terminal_turn_rule = ?, source_path = ?,
              source_hash = ?, cached_at = ?${specJsonSet}${diagnosticSet}
            WHERE spec_id = ?`,
-        )
-        .run(...(updateParams as never[]));
+        );
+      // The runs' kept copies and the row's replacement are one transaction, so a stop between them can't leave a run
+      // on a new path with an old spec (#2607).
+      const kept = this.db.transaction(() => {
+        const note = this.keepRunsOnTheirFile(existing, sourcePath, sourceHash);
+        replaceRow.run(...(updateParams as never[]));
+        return note;
+      })();
+      if (kept) console.warn(kept);
       return rowToWorkflowSpec({
         ...existing,
         name: spec.id,

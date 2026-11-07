@@ -196,4 +196,31 @@ describe("#2607: a running workflow keeps the roles it started with", () => {
     new WorkflowSpecCache(db).readThrough(own);
     expect(await builderOf(run)).toBe("feature-1-builder-b@rig");
   });
+
+  it("a move is one step: a failure before the cache row changes leaves the runs and the row as they were", async () => {
+    const own = write("feature-1", featureSpec("feature-1"));
+    const run = await start(own);
+    writeFileSync(own, featureSpec("feature-1", "feature-1-builder-b"));
+    new WorkflowSpecCache(db).readThrough(own);
+    const renamed = join(tmp, "renamed.yaml");
+    renameSync(own, renamed);
+    const runRow = () => db.prepare(`SELECT spec_source_path, spec_json FROM workflow_instances WHERE instance_id = ?`)
+      .get(run.instance.instanceId) as { spec_source_path: string; spec_json: string };
+    const cacheRow = () => db.prepare(`SELECT source_path, spec_json FROM workflow_specs WHERE name = 'feature-flow' AND version = '1'`).get();
+    const builderNow = () => new WorkflowSpecCache(db).getForInstance(runtime.instanceStore.getById(run.instance.instanceId)!)?.spec.roles.builder?.preferred_targets;
+    const before = { run: runRow(), cache: cacheRow() };
+
+    // The cache row's replacement fails after the runs were updated, as a stop between the two writes would.
+    db.exec(`CREATE TRIGGER fail_spec_replacement BEFORE UPDATE ON workflow_specs BEGIN SELECT RAISE(ABORT, 'injected'); END;`);
+    expect(() => new WorkflowSpecCache(db).readThrough(renamed)).toThrow("injected");
+    expect({ run: runRow(), cache: cacheRow() }).toEqual(before);
+    expect(builderNow()).toEqual(["feature-1-builder-b@rig"]);
+
+    // Once the move reads cleanly, the run follows it, carrying the row's spec with the new path.
+    db.exec(`DROP TRIGGER fail_spec_replacement`);
+    new WorkflowSpecCache(db).readThrough(renamed);
+    expect(runRow().spec_source_path).toBe(renamed);
+    expect((JSON.parse(runRow().spec_json) as { roles: { builder: { preferred_targets: string[] } } }).roles.builder.preferred_targets).toEqual(["feature-1-builder-b@rig"]);
+    expect(await builderOf(run, new WorkflowRuntime({ db, eventBus: bus, queueRepo }))).toBe("feature-1-builder-b@rig");
+  });
 });
