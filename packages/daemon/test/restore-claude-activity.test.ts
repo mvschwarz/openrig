@@ -29,6 +29,7 @@ import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { createDesiredClaudeActivityHooksReader, resolveDesiredClaudeActivityHooks } from "../src/domain/desired-claude-activity-hooks.js";
 import { RestoreCheckService } from "../src/domain/restore-check-service.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
+import type { NodeLaunchRecipe } from "../src/domain/types.js";
 
 // Real snapshot/restore/startup/projection and settings files; only terminal and
 // native launch/readiness are simulated. No Claude, provider or daemon is started.
@@ -736,6 +737,102 @@ profiles:
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
 
+  function recipeForRoot(rigRoot: string, agentRef: string): NodeLaunchRecipe {
+    return { version: 1, rigRoot, rigSpec: { version: "0.2", name: "recipe-root", edges: [],
+      pods: [{ id: "p", label: "Builders", members: [{ id: "seat", agentRef, profile: "default", runtime: "claude-code", cwd }] }],
+    } };
+  }
+
+  it("a saved recipe re-anchors a shipped local: agent instead of reading the old packaged selection", () => {
+    const agentRef = "local:../../../agents/development/implementer";
+    const olderSpecs = path.join(root, "old-prefix/lib/node_modules/@openrig/cli/daemon/specs");
+    const olderRoot = path.join(olderSpecs, "rigs/launch/demo");
+    const olderAgent = path.join(olderSpecs, "agents/development/implementer");
+    fs.mkdirSync(olderRoot, { recursive: true });
+    fs.mkdirSync(olderAgent, { recursive: true });
+    fs.writeFileSync(path.join(olderRoot, "rig.yaml"), "version: '0.2'\nname: recipe-root\npods: []\n");
+    fs.writeFileSync(path.join(olderAgent, "agent.yaml"), "name: implementer\nversion: '1.0'\nprofiles:\n  default:\n    uses:\n      runtime_resources: []\n");
+    const recipe = recipeForRoot(olderRoot, agentRef);
+    const rig = rigs.createRig("recipe-shipped");
+    const node = rigs.addNode(rig.id, "p.seat", { runtime: "claude-code", cwd, launchRecipe: recipe });
+    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ?, resolved_spec_name = ? WHERE id = ?")
+      .run(agentRef, "default", "implementer", node.id);
+    expect(rigs.getNodeLaunchRecipe(node.id)).toEqual(recipe);
+    expect(path.isAbsolute(rigs.getNodeLaunchRecipe(node.id)!.rigRoot)).toBe(true);
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(node.id)).toBeUndefined();
+    const readerFs = { exists: fs.existsSync, readFile: (p: string) => fs.readFileSync(p, "utf8") };
+    const saved = { resolvedSpecName: "implementer", resolvedStartupFiles: [] };
+    expect(resolveDesiredClaudeActivityHooks(`path:${olderAgent}`, "default", readerFs)).toEqual({ status: "known", selected: false });
+    const currentAgent = path.resolve(import.meta.dirname, "../specs/agents/development/implementer");
+    expect(resolveDesiredClaudeActivityHooks(`path:${currentAgent}`, "default", readerFs)).toEqual({ status: "known", selected: true });
+    expect(resolveDesiredClaudeActivityHooks(agentRef, "default", readerFs, saved)).toMatchObject({ status: "unknown" });
+    const desired = createDesiredClaudeActivityHooksReader(db, readerFs)(node.id);
+    expect(desired).toEqual({ status: "known", selected: true });
+    expect(rigs.getNodeLaunchRecipe(node.id)).toEqual(recipe);
+    console.info("PR2617_P3_REANCHOR", { desired, oldSelection: false, currentSelection: true, savedRecipeUnchanged: true });
+  });
+
+  it.each([
+    { rootKind: "absolute", expectedOutcome: "known-selected with hook projection" },
+    { rootKind: "relative", expectedOutcome: "unknown/no projection" },
+  ])("a valid-shape $rootKind recipe root expects $expectedOutcome", async ({ rootKind }) => {
+    const actualRoot = path.join(root, "recipe-agent");
+    fs.mkdirSync(path.join(actualRoot, "runtime"), { recursive: true });
+    fs.writeFileSync(path.join(actualRoot, "runtime/activity.json"), "{}\n");
+    fs.writeFileSync(path.join(actualRoot, "agent.yaml"), `name: impl
+version: "1.0.0"
+resources:
+  runtime_resources:
+    - id: activity
+      path: runtime/activity.json
+      runtime: claude-code
+      type: claude_activity_hooks
+profiles:
+  default:
+    uses:
+      runtime_resources: [activity]
+`);
+    const rigRoot = rootKind === "absolute" ? actualRoot : path.relative(process.cwd(), actualRoot);
+    expect(path.isAbsolute(rigRoot)).toBe(rootKind === "absolute");
+    expect(path.resolve(rigRoot)).toBe(actualRoot);
+    const recipe = recipeForRoot(rigRoot, "local:.");
+    const f = seed(true, false);
+    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ?, resolved_spec_name = ?, launch_recipe_json = ? WHERE id = ?")
+      .run("local:.", "default", "impl", JSON.stringify(recipe), f.node.id);
+    expect(rigs.getNodeLaunchRecipe(f.node.id)).toEqual(recipe);
+    const readerFs = { exists: fs.existsSync, readFile: (p: string) => fs.readFileSync(p, "utf8") };
+    expect(resolveDesiredClaudeActivityHooks(`path:${actualRoot}`, "default", readerFs)).toEqual({ status: "known", selected: true });
+    // Test the resolver directly: the reader's earlier absolute-root check otherwise hides this guard.
+    const direct = resolveDesiredClaudeActivityHooks("local:.", "default", readerFs,
+      { resolvedSpecName: "impl", resolvedStartupFiles: [], rigRoot });
+    const read = createDesiredClaudeActivityHooksReader(db, readerFs);
+    const desired = read(f.node.id);
+    if (rootKind === "absolute") {
+      expect(direct).toEqual({ status: "known", selected: true });
+      expect(desired).toEqual({ status: "known", selected: true });
+    } else {
+      expect(direct).toMatchObject({ status: "unknown" });
+      expect(desired).toMatchObject({ status: "unknown" });
+    }
+    const project = vi.spyOn(adapter, "project");
+    const sentAtRestore = vi.mocked(tmux.sendText).mock.calls.length;
+    const result = await restore(f, adapter, () => {}, read);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    if (rootKind === "absolute") expect(owned().length).toBeGreaterThan(0);
+    else expect(owned()).toEqual([]);
+    expect(result.result.warnings.some(w => w.startsWith("Restore activity hooks:") && w.includes("could not be determined")))
+      .toBe(rootKind === "relative");
+    const recovery = project.mock.calls.filter(([p]) => p.entries.some(e => e.resourceType === "claude_activity_hooks"));
+    expect(recovery).toHaveLength(rootKind === "absolute" ? 1 : 0);
+    if (recovery.length) expect(recovery[0]![0].startup).toEqual({ files: [], actions: [] });
+    expect(tmux.sendText).toHaveBeenCalledTimes(sentAtRestore);
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toEqual(f.saved);
+    expect(settings().hooks.Stop).toContainEqual(userHook);
+    expect(settings().env).toEqual(originalSettings.env);
+    console.info("PR2617_P3_ROOT", { rootKind, direct, desired, projectedHookCount: owned().length, savedContextUnchanged: true });
+  });
+
   it.each([
     { ref: "path" as const, evidence: "Current agent specification could not be resolved" },
     { ref: "local" as const, evidence: "wasn't found" },
@@ -864,7 +961,9 @@ profiles:
       { placement: "added", selects, startupFiles: true, recipe: "invalid-root", specExists: true },
     ]),
     { placement: "added", selects: true, startupFiles: true, recipe: "valid", specExists: false },
-  ])("a $placement local:. seat uses its $recipe recipe and current selection=$selects (files=$startupFiles, spec=$specExists)",
+  ].map(row => ({ ...row, expectedOutcome: row.recipe === "valid" && row.specExists
+    ? row.selects ? "known-selected" : "known-unselected" : "unknown/no projection" })))
+    ("a $placement local:. seat expects $expectedOutcome (recipe=$recipe, selection=$selects, files=$startupFiles, spec=$specExists)",
     async ({ placement, selects, startupFiles, recipe, specExists }) => {
     const originalRoot = path.join(root, "original-rig");
     const actualRoot = placement === "ordinary" ? originalRoot : path.join(root, "added-agent");
