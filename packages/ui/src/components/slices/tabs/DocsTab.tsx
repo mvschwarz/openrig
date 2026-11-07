@@ -30,9 +30,9 @@ export function DocsTab({ sliceName, tree }: { sliceName: string; tree: DocsTree
 
   return (
     <div data-testid="docs-tab" className="flex h-full flex-col sm:flex-row">
-      <aside className="w-full max-h-48 shrink-0 overflow-y-auto border-b border-outline-variant bg-background p-2 sm:w-56 sm:max-h-none sm:border-b-0 sm:border-r" data-testid="docs-tree">
+      <aside className="w-full max-h-48 shrink-0 overflow-y-auto border-b border-outline-variant bg-background p-2 text-xs sm:w-56 sm:max-h-none sm:border-b-0 sm:border-r" data-testid="docs-tree">
         {tree.length === 0 && (
-          <div className="font-mono text-[10px] text-on-surface-variant">Empty slice folder.</div>
+          <div className="text-xs text-on-surface-variant">Empty slice folder.</div>
         )}
         {tree.map((entry) => (
           <button
@@ -42,10 +42,10 @@ export function DocsTab({ sliceName, tree }: { sliceName: string; tree: DocsTree
             data-selected={entry.relPath === selected}
             disabled={entry.type === "dir"}
             onClick={() => entry.type === "file" && setSelected(entry.relPath)}
-            className={`block w-full text-left font-mono text-[10px] ${
+            className={`block w-full rounded-md text-left font-mono text-xs ${
               entry.type === "dir"
                 ? "py-1 text-on-surface-variant"
-                : `cursor-pointer py-1 hover:bg-surface-low ${entry.relPath === selected ? "bg-surface-high/80 text-on-surface" : "text-on-surface"}`
+                : `cursor-pointer py-1 hover:bg-surface-low ${entry.relPath === selected ? "bg-surface-high text-on-surface" : "text-on-surface"}`
             }`}
             style={{ paddingLeft: `${(entry.relPath.split("/").length - 1) * 0.75 + 0.25}rem` }}
           >
@@ -60,22 +60,22 @@ export function DocsTab({ sliceName, tree }: { sliceName: string; tree: DocsTree
           </button>
         ))}
       </aside>
-      <main className="flex-1 min-w-0 overflow-y-auto bg-surface-lowest" data-testid="docs-viewer">
+      <main className="flex-1 min-w-0 overflow-y-auto bg-surface-lowest text-sm" data-testid="docs-viewer">
         {!selected && (
-          <div className="m-auto p-4 font-mono text-[10px] text-on-surface-variant">Select a file from the tree</div>
+          <div className="m-auto p-4 text-xs text-on-surface-variant">Select a file from the tree</div>
         )}
         {selected && doc.isLoading && (
-          <div className="p-4 font-mono text-[10px] text-on-surface-variant">Loading…</div>
+          <div className="p-4 text-xs text-on-surface-variant">Loading…</div>
         )}
         {selected && doc.isError && (
-          <div className="p-4 font-mono text-[10px] text-red-600">Error loading doc.</div>
+          <div className="p-4 text-xs text-destructive">Error loading doc.</div>
         )}
         {selected && doc.data && (
           <div data-testid="docs-viewer-content" className="p-4">
             {selected.toLowerCase().endsWith(".md") ? (
               <MarkdownViewer content={doc.data.content} />
             ) : (
-              <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-on-surface">
+              <pre className="whitespace-pre-wrap break-words rounded-lg bg-background p-3 font-mono text-xs text-on-surface">
                 {doc.data.content}
               </pre>
             )}

@@ -31,7 +31,7 @@ describe("slice 20: FilesWorkspace responsive two-pane shape", () => {
   it("/files route mounts FilesWorkspace instead of falling through to Not Found", async () => {
     const source = await readSource("src/routes.tsx");
     expect(source).toMatch(/import \{ FilesWorkspace \} from "\.\/components\/files\/FilesWorkspace\.js";/);
-    expect(source).toMatch(/path: "\/files",\n\s+component: FilesWorkspace/);
+    expect(source).toMatch(/path: "\/files",\r?\n\s+component: FilesWorkspace/);
   });
 
   it("outer container uses flex-col on mobile + sm:flex-row on desktop", async () => {
@@ -72,22 +72,20 @@ describe("slice 20: DocsTab responsive two-pane shape", () => {
 });
 
 describe("slice 20: AppShell mobile slide-over hamburger orientation", () => {
-  it("Rail invocation inside mobile slide-over uses `vertical` (not vertical={false})", async () => {
+  it("Sidebar invocation inside mobile slide-over uses `vertical` (not vertical={false})", async () => {
     const source = await readSource("src/components/AppShell.tsx");
-    // The slide-over rail invocation gates on Rail being passed vertical=true.
-    // The prior shape was `vertical={false}`; the new shape is `vertical`
-    // (or `vertical={true}`). Match the new shape; absence of the old.
-    expect(source).toMatch(/<Rail pathname=\{pathname\} vertical onMobileClose/);
+    // C06: Rail became Sidebar; the slide-over sidebar invocation passes
+    // vertical + onMobileClose. Match the new shape; absence of the old.
+    expect(source).toMatch(/<Sidebar[\s\S]*?vertical[\s\S]*?onMobileClose/);
     expect(source).not.toMatch(/<Rail pathname=\{pathname\} vertical=\{false\} onMobileClose/);
   });
 
-  it("Rail icon tap targets are h-11 w-11 on mobile + lg:h-10 lg:w-10 on desktop", async () => {
-    const source = await readSource("src/components/AppShell.tsx");
-    // Mobile default 44px + desktop lg: override back to 40px. Both
-    // tokens must appear on the same className line; the prior global-
-    // bump shape (`h-11 w-11 items-center justify-center` with no
-    // lg: override) is gone.
-    expect(source).toMatch(/h-11 w-11 items-center justify-center transition-colors lg:h-10 lg:w-10/);
-    expect(source).not.toMatch(/h-10 w-10 items-center justify-center transition-colors[^l]/);
+  it("Sidebar nav items are h-11 on mobile + lg:h-9 on desktop", async () => {
+    const source = await readSource("src/components/shell/SidebarNavItem.tsx");
+    // C06: labeled sidebar rows — mobile 44px tall (h-11), compact 36px
+    // at lg: (lg:h-9). Prior icon-rail shape (h-11 w-11 + lg:h-10 lg:w-10)
+    // is gone.
+    expect(source).toMatch(/flex h-11 lg:h-9 items-center/);
+    expect(source).not.toMatch(/lg:h-10 lg:w-10/);
   });
 });

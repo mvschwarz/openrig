@@ -129,11 +129,11 @@ describe("PackageInstallFlow", () => {
     });
   });
 
-  // T5-AS-T14: Heading contains "(Legacy)"
-  it("heading contains (Legacy)", async () => {
+  // T5-AS-T14: Heading contains "(legacy)" (sentence case per C14e sweep)
+  it("heading contains (legacy)", async () => {
     renderFlow();
     await waitFor(() => {
-      expect(screen.getByText(/INSTALL PACKAGE \(Legacy\)/)).toBeTruthy();
+      expect(screen.getByText(/Install package \(legacy\)/)).toBeTruthy();
     });
   });
 
@@ -142,7 +142,7 @@ describe("PackageInstallFlow", () => {
     renderFlow();
     await waitFor(() => {
       const step1 = screen.getByTestId("step-1");
-      expect(step1.className).toContain("bg-foreground/10");
+      expect(step1.className).toContain("bg-surface-mid");
     });
   });
 
@@ -230,7 +230,7 @@ describe("PackageInstallFlow", () => {
     expect(screen.getByTestId("result-install-id").textContent).toBe("inst-123");
     expect(screen.getByTestId("result-applied").textContent).toBe("1");
     expect(screen.getByTestId("result-deferred").textContent).toBe("1");
-    expect(screen.getByTestId("result-verified").textContent).toBe("PASS");
+    expect(screen.getByTestId("result-verified").textContent).toBe("Pass");
   });
 
   // Test 9: Error with TRY AGAIN

@@ -57,7 +57,7 @@ export function StatusPip({
       <span
         data-testid={testId}
         className={cn(
-          "inline-flex items-center gap-1 px-1.5 py-0.5 border font-mono text-[9px] uppercase tracking-wide",
+          "inline-flex items-center gap-1 px-1.5 py-0.5 border text-[11px] ",
           tonePill[status],
           className,
         )}
@@ -78,7 +78,7 @@ export function StatusPip({
     >
       <span className={cn("w-2 h-2 rounded-full", toneDot[status])} aria-hidden="true" />
       {label ? (
-        <span className={cn("font-mono text-[9px] uppercase tracking-wide text-on-surface-variant", labelClassName)}>
+        <span className={cn("text-[11px] text-on-surface-variant", labelClassName)}>
           {label}
         </span>
       ) : null}

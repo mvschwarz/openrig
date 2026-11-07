@@ -319,7 +319,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
           <button
             type="button"
             data-testid="terminal-launcher-button"
-            className="inline-flex items-center gap-2 border border-stone-700 bg-white px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-stone-900 hover:bg-stone-100 focus:outline-none focus:ring-1 focus:ring-stone-400 dark:bg-transparent dark:text-on-surface dark:border-outline"
+            className="inline-flex items-center gap-2 border border-stone-700 bg-white px-3 py-2 text-[11px] text-stone-900 hover:bg-stone-100 focus:outline-none focus:ring-1 focus:ring-stone-400 dark:bg-transparent dark:text-on-surface dark:border-outline"
           >
             <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
             Open in terminal
@@ -343,9 +343,9 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
           <div className="bg-stone-900 text-white px-5 py-3 flex items-baseline justify-between">
             <div className="flex items-baseline gap-2">
               <Terminal className="h-3.5 w-3.5 translate-y-0.5 text-stone-300" aria-hidden="true" />
-              <span className="font-mono text-[11px] uppercase tracking-[0.18em]">Open terminal view</span>
+              <span className="text-[11px] ">Open terminal view</span>
             </div>
-            <span className="font-mono text-[9px] uppercase tracking-[0.18em] text-stone-400">
+            <span className="text-[11px] text-stone-400">
               {resolvedRigName.replace(/^rig_/, "")} · topology
             </span>
           </div>
@@ -353,7 +353,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
           <div className="p-5 grid gap-5">
             {/* ── PROVIDER ── */}
             <section data-testid="launcher-provider">
-              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant mb-2">Provider</div>
+              <div className="text-[11px] text-on-surface-variant mb-2">Provider</div>
               <div role="tablist" className="flex gap-6 items-center border-b border-outline-variant">
                 {PROVIDERS.map((p) => (
                   <button
@@ -364,7 +364,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                     data-testid={`launcher-provider-${p.id}`}
                     onClick={() => setProvider(p.id)}
                     className={cn(
-                      "-mb-px py-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] border-b-2",
+                      "-mb-px py-2 flex items-center gap-2 text-[11px] border-b-2",
                       provider === p.id
                         ? "border-on-surface text-on-surface"
                         : "border-transparent text-on-surface-variant hover:text-on-surface",
@@ -373,7 +373,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                     {p.label}
                     <span
                       className={cn(
-                        "px-1 py-0.5 text-[8px] tracking-[0.12em] border",
+                        "px-1 py-0.5 text-[11px] border",
                         p.id === "herdr" ? "border-success/60 text-success" : "border-outline text-on-surface-variant",
                       )}
                     >
@@ -382,24 +382,24 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                   </button>
                 ))}
               </div>
-              <p className="mt-2 font-mono text-[9px] text-on-surface-variant leading-relaxed">
+              <p className="mt-2 font-mono text-[11px] text-on-surface-variant leading-relaxed">
                 {PROVIDERS.find((p) => p.id === provider)!.note}
               </p>
             </section>
 
             {/* ── VIEW ── */}
             <section data-testid="launcher-view">
-              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant mb-2">View</div>
+              <div className="text-[11px] text-on-surface-variant mb-2">View</div>
               <div className="max-h-[236px] overflow-y-auto border border-outline-variant divide-y divide-outline-variant">
                 {views.length === 0 ? (
-                  <div className="px-3 py-4 font-mono text-[9px] text-on-surface-variant">Loading views…</div>
+                  <div className="px-3 py-4 font-mono text-[11px] text-on-surface-variant">Loading views…</div>
                 ) : null}
                 {KIND_GROUP.map((group) => {
                   const groupViews = views.filter((v) => group.kinds.includes(v.kind));
                   if (groupViews.length === 0) return null;
                   return (
                     <div key={group.heading}>
-                      <div className="px-3 pt-2 pb-1 font-mono text-[8px] uppercase tracking-[0.2em] text-on-surface-variant/70 bg-surface-low">
+                      <div className="px-3 pt-2 pb-1 text-[11px] text-on-surface-variant/70 bg-surface-low">
                         {group.heading}
                       </div>
                       {groupViews.map((v) => {
@@ -426,21 +426,21 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                               <span className="flex items-center gap-2">
                                 <span className="font-mono text-[11px] text-on-surface truncate">{v.label}</span>
                                 {v.crossRig ? (
-                                  <span className="inline-flex items-center gap-1 px-1 py-0.5 text-[8px] font-mono uppercase tracking-[0.12em] border border-outline text-on-surface-variant">
-                                    <Eye className="h-2.5 w-2.5" aria-hidden="true" /> read-only
+                                  <span className="inline-flex items-center gap-1 px-1 py-0.5 text-[11px] border border-outline text-on-surface-variant">
+                                    <Eye className="h-2.5 w-2.5" aria-hidden="true" /> Read-only
                                   </span>
                                 ) : null}
                               </span>
-                              <span className="block font-mono text-[9px] text-on-surface-variant truncate">{v.sub}</span>
+                              <span className="block font-mono text-[11px] text-on-surface-variant truncate">{v.sub}</span>
                             </span>
                             <span className="shrink-0 text-right">
                               {vlive === null ? (
-                                <span className="block font-mono text-[9px] text-on-surface-variant">derived</span>
+                                <span className="block font-mono text-[11px] text-on-surface-variant">Derived</span>
                               ) : (
                                 <>
-                                  <span className="block font-mono text-[10px] text-on-surface">{vlive} live</span>
+                                  <span className="block font-mono text-[11px] text-on-surface">{vlive} live</span>
                                   {vabsent > 0 ? (
-                                    <span className="block font-mono text-[8px] text-warning">{vabsent} absent</span>
+                                    <span className="block font-mono text-[11px] text-warning">{vabsent} absent</span>
                                   ) : null}
                                 </>
                               )}
@@ -456,7 +456,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                   type="button"
                   disabled
                   data-testid="launcher-save-view"
-                  className="w-full text-left px-3 py-2 flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant/60 hover:bg-surface-low disabled:cursor-default"
+                  className="w-full text-left px-3 py-2 flex items-center gap-2 text-[11px] text-on-surface-variant/60 hover:bg-surface-low disabled:cursor-default"
                 >
                   <Plus className="h-3 w-3" aria-hidden="true" /> Save current arrangement as a view…
                 </button>
@@ -477,14 +477,14 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                 </div>
               </div>
               <div>
-                <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant mb-1">Layout</div>
+                <div className="text-[11px] text-on-surface-variant mb-1">Layout</div>
                 <div className="font-mono text-[11px] text-on-surface">
                   Auto grid · {layout.cols}×{layout.rows} · {layout.shown} pane{layout.shown === 1 ? "" : "s"}
                 </div>
                 {layout.paged > 0 ? (
-                  <div className="font-mono text-[9px] text-warning mt-0.5">{layout.paged} more paged{preview ? " · from terminal preview" : " · raise the show-limit in settings"}</div>
+                  <div className="font-mono text-[11px] text-warning mt-0.5">{layout.paged} more paged{preview ? " · from terminal preview" : " · raise the show-limit in settings"}</div>
                 ) : (
-                  <div className="font-mono text-[9px] text-on-surface-variant mt-0.5">{preview ? "Layout from terminal preview · no paging" : `Fits the show-limit (${PANE_CAP}) · no paging`}</div>
+                  <div className="font-mono text-[11px] text-on-surface-variant mt-0.5">{preview ? "Layout from terminal preview · no paging" : `Fits the show-limit (${PANE_CAP}) · no paging`}</div>
                 )}
               </div>
             </section>
@@ -498,7 +498,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                   label={readOnly ? "read-only · cross-rig" : "interactive"}
                   testId="launcher-mode-pip"
                 />
-                <div className="mt-1.5 font-mono text-[9px] text-on-surface-variant leading-relaxed">
+                <div className="mt-1.5 font-mono text-[11px] text-on-surface-variant leading-relaxed">
                   {previewUnavailable ? "Terminal membership is not confirmed" : <>Opens <span className="text-on-surface">{layout.shown}</span> pane{layout.shown === 1 ? "" : "s"}</>}
                   {absent.length > 0 ? (
                     <>
@@ -511,7 +511,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                     <>{previewUnavailable ? "" : " · every seat live"}</>
                   )}
                 </div>
-                {previewNotice ? <div data-testid="launcher-preview-notice" className="mt-1 font-mono text-[9px] text-warning">{previewNotice}</div> : null}
+                {previewNotice ? <div data-testid="launcher-preview-notice" className="mt-1 font-mono text-[11px] text-warning">{previewNotice}</div> : null}
                 {openMut.data
                   ? (() => {
                       // Guard G2: a 200 body is authoritative, not automatically green —
@@ -519,7 +519,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                       const d = describeOpenResult(openMut.data);
                       return (
                         <div
-                          className={cn("mt-1 font-mono text-[9px]", d.ok ? "text-success" : "text-error")}
+                          className={cn("mt-1 font-mono text-[11px]", d.ok ? "text-success" : "text-error")}
                           data-testid={d.ok ? "launcher-open-result" : "launcher-open-zero"}
                         >
                           {d.headline}
@@ -528,7 +528,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                       );
                     })()
                   : openMut.isError ? (
-                      <div className="mt-1 font-mono text-[9px] text-error" data-testid="launcher-open-error">
+                      <div className="mt-1 font-mono text-[11px] text-error" data-testid="launcher-open-error">
                         {(openMut.error as Error).message}
                       </div>
                     ) : null}
@@ -538,7 +538,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                 data-testid="launcher-open"
                 disabled={openMut.isPending || !selected || previewUnavailable}
                 onClick={() => openMut.mutate()}
-                className="shrink-0 inline-flex items-center gap-2 bg-inverse-surface text-background px-4 py-2.5 font-headline font-bold uppercase tracking-widest text-[11px] hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 disabled:opacity-60"
+                className="shrink-0 inline-flex items-center gap-2 bg-inverse-surface text-background px-4 py-2.5 font-headline font-bold text-[11px] hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 disabled:opacity-60"
               >
                 <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
                 {openMut.isPending ? "Opening…" : previewUnavailable ? "Preview unavailable" : `Open ${layout.shown} in ${providerLabel}`}

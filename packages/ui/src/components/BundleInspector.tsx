@@ -1,8 +1,31 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useBundleInspect, type InspectResult } from "../hooks/useBundles.js";
-import { cn } from "@/lib/utils";
+import { PageHeader } from "@/components/ui/page-header.js";
+import { StatusBadge, StatusDot } from "@/components/ui/status-badge.js";
 import { WorkspacePage } from "./WorkspacePage.js";
+
+/** C14e: map installer file-integrity states to the shared status vocabulary. */
+function fileStatusKey(status: string): string {
+  switch (status) {
+    case "OK": return "done";
+    case "MISMATCH":
+    case "MISSING": return "failed";
+    case "EXTRA": return "attention_required";
+    default: return status;
+  }
+}
+
+/** C14e: map installer file-integrity states to sentence-case labels. */
+function fileStatusLabel(status: string): string {
+  switch (status) {
+    case "OK": return "Ok";
+    case "MISMATCH": return "Mismatch";
+    case "MISSING": return "Missing";
+    case "EXTRA": return "Extra";
+    default: return status.replace(/[_-]+/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+  }
+}
 
 export function BundleInspector() {
   const [bundlePath, setBundlePath] = useState("");
@@ -18,25 +41,31 @@ export function BundleInspector() {
   return (
     <WorkspacePage>
     <div data-testid="bundle-inspector">
-      <h2 className="text-headline-lg uppercase mb-spacing-4">INSPECT BUNDLE</h2>
+      <PageHeader
+        title="Inspect bundle"
+        description="Inspect a bundle archive to review its manifest, integrity, and contents before installing."
+      />
 
       <div className="mb-spacing-4">
-        <label className="text-label-md uppercase block mb-spacing-2">BUNDLE PATH</label>
+        <label className="text-xs text-on-surface-variant block mb-spacing-2">Bundle path</label>
         <input
           data-testid="bundle-path-input"
           type="text"
           value={bundlePath}
           onChange={(e) => setBundlePath(e.target.value)}
           placeholder="/path/to/my-rig.rigbundle"
-          className="w-full bg-transparent border-b border-foreground/20 py-spacing-2 text-body-md font-mono focus:outline-none focus:border-primary"
+          className="w-full bg-transparent border-b border-foreground/20 py-spacing-2 text-sm font-mono focus:outline-none focus:border-primary"
         />
-        <Button variant="tactical" onClick={handleInspect} disabled={!bundlePath.trim() || inspectMutation.isPending} className="mt-spacing-3" data-testid="inspect-btn">
-          {inspectMutation.isPending ? "INSPECTING..." : "INSPECT"}
-        </Button>
+        <div className="flex items-center justify-between gap-2">
+          <span />
+          <Button variant="default" onClick={handleInspect} disabled={!bundlePath.trim() || inspectMutation.isPending} className="mt-spacing-3" data-testid="inspect-btn">
+            {inspectMutation.isPending ? "Inspecting..." : "Inspect bundle"}
+          </Button>
+        </div>
       </div>
 
       {inspectMutation.isError && (
-        <div className="text-destructive text-body-md mb-spacing-4" data-testid="inspect-error">
+        <div className="text-destructive text-sm mb-spacing-4" data-testid="inspect-error">
           {inspectMutation.error.message}
         </div>
       )}
@@ -44,21 +73,19 @@ export function BundleInspector() {
       {result && (
         <div data-testid="inspect-result">
           {/* Manifest summary */}
-          <div className="card-dark p-spacing-4 mb-spacing-4" data-testid="manifest-summary">
+          <div className="rounded-lg border bg-surface-lowest p-spacing-4 mb-spacing-4 shadow-sm" data-testid="manifest-summary">
             <div className="flex items-center gap-spacing-2 mb-spacing-2">
-              <h3 className="text-headline-md uppercase">{result.manifest.name}</h3>
-              <span className="text-label-sm font-mono px-spacing-2 py-px bg-foreground/10" data-testid="schema-badge">
+              <h3 className="text-sm font-semibold text-on-surface">{result.manifest.name}</h3>
+              <span className="text-xs font-mono px-spacing-2 py-px bg-foreground/10" data-testid="schema-badge">
                 v{result.manifest.schemaVersion ?? 1}
               </span>
             </div>
-            <div className="text-label-sm font-mono text-foreground-muted-on-dark">v{result.manifest.version}</div>
-            <div className="text-label-sm font-mono text-foreground-muted-on-dark">Spec: {result.manifest.rigSpec}</div>
-            <div className="mt-spacing-2 flex gap-spacing-3">
-              <span className={cn("text-label-sm", result.digestValid ? "text-success" : "text-destructive")}>
-                DIGEST: {result.digestValid ? "VALID" : "INVALID"}
-              </span>
-              <span className={cn("text-label-sm", result.integrityResult.passed ? "text-success" : "text-destructive")} data-testid="integrity-status">
-                INTEGRITY: {result.integrityResult.passed ? "PASS" : "FAIL"}
+            <div className="text-xs font-mono text-on-surface-variant">v{result.manifest.version}</div>
+            <div className="text-xs text-on-surface-variant">Spec: <span className="font-mono">{result.manifest.rigSpec}</span></div>
+            <div className="mt-spacing-2 flex flex-wrap gap-spacing-3">
+              <StatusBadge status={result.digestValid ? "done" : "failed"} label={result.digestValid ? "Digest valid" : "Digest invalid"} />
+              <span data-testid="integrity-status">
+                <StatusBadge status={result.integrityResult.passed ? "done" : "failed"} label={result.integrityResult.passed ? "Integrity pass" : "Integrity fail"} />
               </span>
             </div>
           </div>
@@ -66,22 +93,22 @@ export function BundleInspector() {
           {/* v2: Agents list, v1: Packages list */}
           {result.manifest.schemaVersion === 2 && result.manifest.agents ? (
             <>
-              <h3 className="text-headline-md uppercase mb-spacing-3">AGENTS</h3>
+              <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">Agents</h3>
               <div className="space-y-spacing-1 mb-spacing-4" data-testid="agent-list">
                 {result.manifest.agents.map((agent) => (
-                  <div key={agent.name} className="text-label-sm font-mono" data-testid="agent-entry">
-                    {agent.name} v{agent.version} — {agent.path}
+                  <div key={agent.name} className="text-xs" data-testid="agent-entry">
+                    {agent.name} <span className="font-mono text-on-surface-variant">v{agent.version} — {agent.path}</span>
                   </div>
                 ))}
               </div>
             </>
           ) : (
             <>
-              <h3 className="text-headline-md uppercase mb-spacing-3">PACKAGES</h3>
+              <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">Packages</h3>
               <div className="space-y-spacing-1 mb-spacing-4" data-testid="package-list">
                 {(result.manifest.packages ?? []).map((pkg) => (
-                  <div key={pkg.name} className="text-label-sm font-mono" data-testid="package-entry">
-                    {pkg.name} v{pkg.version} — {pkg.path}
+                  <div key={pkg.name} className="text-xs" data-testid="package-entry">
+                    {pkg.name} <span className="font-mono text-on-surface-variant">v{pkg.version} — {pkg.path}</span>
                   </div>
                 ))}
               </div>
@@ -91,42 +118,42 @@ export function BundleInspector() {
           {/* Item 1 / slice-05: Provenance block (rendered when bundle carries it) */}
           {result.manifest.provenance && (
             <>
-              <h3 className="text-headline-md uppercase mb-spacing-3">PROVENANCE</h3>
-              <div className="card-dark p-spacing-4 mb-spacing-4 space-y-spacing-1" data-testid="provenance-block">
+              <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">Provenance</h3>
+              <div className="rounded-lg border bg-surface-lowest p-spacing-4 mb-spacing-4 space-y-spacing-1 shadow-sm" data-testid="provenance-block">
                 {result.manifest.provenance.createdAt && (
-                  <div className="text-label-sm font-mono" data-testid="provenance-createdAt">
-                    <span className="text-foreground-muted-on-dark">Created: </span>{result.manifest.provenance.createdAt}
+                  <div className="text-xs" data-testid="provenance-createdAt">
+                    <span className="text-on-surface-variant">Created: </span><span className="font-mono">{result.manifest.provenance.createdAt}</span>
                   </div>
                 )}
                 {result.manifest.provenance.sourceHost && (
-                  <div className="text-label-sm font-mono" data-testid="provenance-sourceHost">
-                    <span className="text-foreground-muted-on-dark">Host: </span>{result.manifest.provenance.sourceHost}
+                  <div className="text-xs" data-testid="provenance-sourceHost">
+                    <span className="text-on-surface-variant">Host: </span><span className="font-mono">{result.manifest.provenance.sourceHost}</span>
                   </div>
                 )}
                 {result.manifest.provenance.authorSession && (
-                  <div className="text-label-sm font-mono" data-testid="provenance-authorSession">
-                    <span className="text-foreground-muted-on-dark">Author: </span>{result.manifest.provenance.authorSession}
+                  <div className="text-xs" data-testid="provenance-authorSession">
+                    <span className="text-on-surface-variant">Author: </span><span className="font-mono">{result.manifest.provenance.authorSession}</span>
                   </div>
                 )}
                 {result.manifest.provenance.sourceRigName && (
-                  <div className="text-label-sm font-mono" data-testid="provenance-sourceRigName">
-                    <span className="text-foreground-muted-on-dark">Rig: </span>{result.manifest.provenance.sourceRigName}
+                  <div className="text-xs" data-testid="provenance-sourceRigName">
+                    <span className="text-on-surface-variant">Rig: </span>{result.manifest.provenance.sourceRigName}
                     {result.manifest.provenance.sourceRigId && (
-                      <span className="text-foreground-muted-on-dark"> ({result.manifest.provenance.sourceRigId})</span>
+                      <span className="font-mono text-on-surface-variant"> ({result.manifest.provenance.sourceRigId})</span>
                     )}
                   </div>
                 )}
                 {(result.manifest.provenance.daemonVersion || result.manifest.provenance.cliVersion) && (
-                  <div className="text-label-sm font-mono" data-testid="provenance-versions">
-                    <span className="text-foreground-muted-on-dark">Built with: </span>
+                  <div className="text-xs font-mono" data-testid="provenance-versions">
+                    <span className="text-on-surface-variant">Built with: </span>
                     {result.manifest.provenance.daemonVersion && <>daemon {result.manifest.provenance.daemonVersion}</>}
                     {result.manifest.provenance.daemonVersion && result.manifest.provenance.cliVersion && " / "}
                     {result.manifest.provenance.cliVersion && <>cli {result.manifest.provenance.cliVersion}</>}
                   </div>
                 )}
                 {result.manifest.provenance.notes && (
-                  <div className="text-label-sm font-mono whitespace-pre-wrap mt-spacing-2" data-testid="provenance-notes">
-                    <span className="text-foreground-muted-on-dark">Notes: </span>{result.manifest.provenance.notes}
+                  <div className="text-xs whitespace-pre-wrap mt-spacing-2" data-testid="provenance-notes">
+                    <span className="text-on-surface-variant">Notes: </span>{result.manifest.provenance.notes}
                   </div>
                 )}
               </div>
@@ -136,21 +163,21 @@ export function BundleInspector() {
           {/* Item 2 / slice-05: Compatibility block (rendered when bundle carries it). Live "compatible against this daemon" comparison is deferred — UI surfaces the bundle's stated minimums; the install-time check at /api/bundles/install enforces actual compatibility with the running daemon. */}
           {result.manifest.compatibility && (
             <>
-              <h3 className="text-headline-md uppercase mb-spacing-3">COMPATIBILITY</h3>
-              <div className="card-dark p-spacing-4 mb-spacing-4 space-y-spacing-1" data-testid="compatibility-block">
+              <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">Compatibility</h3>
+              <div className="rounded-lg border bg-surface-lowest p-spacing-4 mb-spacing-4 space-y-spacing-1 shadow-sm" data-testid="compatibility-block">
                 {result.manifest.compatibility.minDaemonVersion && (
-                  <div className="text-label-sm font-mono" data-testid="compatibility-minDaemonVersion">
-                    <span className="text-foreground-muted-on-dark">Min daemon: </span>{result.manifest.compatibility.minDaemonVersion}
+                  <div className="text-xs" data-testid="compatibility-minDaemonVersion">
+                    <span className="text-on-surface-variant">Min daemon: </span><span className="font-mono">{result.manifest.compatibility.minDaemonVersion}</span>
                   </div>
                 )}
                 {result.manifest.compatibility.minCliVersion && (
-                  <div className="text-label-sm font-mono" data-testid="compatibility-minCliVersion">
-                    <span className="text-foreground-muted-on-dark">Min CLI: </span>{result.manifest.compatibility.minCliVersion}
+                  <div className="text-xs" data-testid="compatibility-minCliVersion">
+                    <span className="text-on-surface-variant">Min CLI: </span><span className="font-mono">{result.manifest.compatibility.minCliVersion}</span>
                   </div>
                 )}
                 {result.manifest.compatibility.schemaVersion !== undefined && (
-                  <div className="text-label-sm font-mono" data-testid="compatibility-schemaVersion">
-                    <span className="text-foreground-muted-on-dark">Schema: </span>v{result.manifest.compatibility.schemaVersion}
+                  <div className="text-xs" data-testid="compatibility-schemaVersion">
+                    <span className="text-on-surface-variant">Schema: </span><span className="font-mono">v{result.manifest.compatibility.schemaVersion}</span>
                   </div>
                 )}
               </div>
@@ -158,34 +185,34 @@ export function BundleInspector() {
           )}
 
           {result.integrityResult.errors.map(message => (
-            <p key={message} className="text-destructive text-body-md mb-spacing-2">{message}</p>
+            <p key={message} className="text-destructive text-sm mb-spacing-2">{message}</p>
           ))}
           {(result.integrityResult.warnings ?? []).map(message => (
-            <p key={message} className="text-warning text-body-md mb-spacing-2">{message}</p>
+            <p key={message} className="text-warning text-sm mb-spacing-2">{message}</p>
           ))}
 
           {/* Per-file integrity */}
           {result.integrityResult && (
             <>
-              <h3 className="text-headline-md uppercase mb-spacing-3">FILE INTEGRITY</h3>
+              <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">File integrity</h3>
               <div className="space-y-spacing-1 mb-spacing-4" data-testid="file-integrity">
                 {Object.keys((result.manifest.packages ?? result.manifest.agents ?? []).length > 0 ? (result as unknown as { manifest: { integrity?: { files: Record<string, string> } } }).manifest?.integrity?.files ?? {} : {}).map((file) => {
                   const isMismatch = result.integrityResult.mismatches.includes(file);
                   const isMissing = result.integrityResult.missing.includes(file);
                   const status = isMismatch ? "MISMATCH" : isMissing ? "MISSING" : "OK";
                   return (
-                    <div key={file} className="flex items-center gap-spacing-3 text-label-sm font-mono" data-testid="file-row">
-                      <span className={cn("w-2 h-2", status === "OK" ? "bg-success" : "bg-destructive")} data-testid="file-dot" />
-                      <span>{file}</span>
-                      <span className="text-foreground-muted ml-auto">{status}</span>
+                    <div key={file} className="flex items-center gap-spacing-3 text-xs" data-testid="file-row">
+                      <StatusDot status={fileStatusKey(status)} />
+                      <span className="font-mono">{file}</span>
+                      <span className="text-on-surface-variant ml-auto">{fileStatusLabel(status)}</span>
                     </div>
                   );
                 })}
                 {result.integrityResult.extra.map((file) => (
-                  <div key={file} className="flex items-center gap-spacing-3 text-label-sm font-mono" data-testid="file-row">
-                    <span className="w-2 h-2 bg-warning" data-testid="file-dot" />
-                    <span>{file}</span>
-                    <span className="text-foreground-muted ml-auto">EXTRA</span>
+                  <div key={file} className="flex items-center gap-spacing-3 text-xs" data-testid="file-row">
+                    <StatusDot status={fileStatusKey("EXTRA")} />
+                    <span className="font-mono">{file}</span>
+                    <span className="text-on-surface-variant ml-auto">{fileStatusLabel("EXTRA")}</span>
                   </div>
                 ))}
               </div>
@@ -193,9 +220,12 @@ export function BundleInspector() {
           )}
 
           {/* Install button */}
-          <Button variant="tactical" data-testid="install-btn" onClick={() => window.location.href = `/bundles/install?bundlePath=${encodeURIComponent(bundlePath)}`}>
-            INSTALL THIS BUNDLE
-          </Button>
+          <div className="flex items-center justify-between gap-2">
+            <span />
+            <Button variant="default" data-testid="install-btn" onClick={() => window.location.href = `/bundles/install?bundlePath=${encodeURIComponent(bundlePath)}`}>
+              Install bundle
+            </Button>
+          </div>
         </div>
       )}
     </div>

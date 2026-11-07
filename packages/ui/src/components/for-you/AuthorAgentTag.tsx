@@ -41,7 +41,7 @@ export function AuthorAgentTag({ authorSession, rigId, className, testId }: Auth
     return (
       <span
         data-testid={testId ?? "author-agent-tag"}
-        className={className ?? "inline-flex items-center gap-1 font-mono text-[10px] text-on-surface-variant"}
+        className={className ?? "inline-flex items-center gap-1 font-mono text-[11px] text-on-surface-variant"}
       >
         {humanActor ? <ActorMark actor={authorSession} size="xs" /> : null}
         <span>{authorSession}</span>
@@ -62,7 +62,7 @@ export function AuthorAgentTag({ authorSession, rigId, className, testId }: Auth
       }}
       className={
         className ??
-        "inline-flex items-center gap-1 font-mono text-[10px] text-on-surface-variant hover:text-on-surface hover:underline"
+        "inline-flex items-center gap-1 font-mono text-[11px] text-on-surface-variant hover:text-on-surface hover:underline"
       }
     >
       {humanActor ? <ActorMark actor={authorSession} size="xs" /> : null}

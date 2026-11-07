@@ -26,6 +26,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import { cn } from "../../lib/utils.js";
 import { SectionHeader } from "../ui/section-header.js";
+import { PageHeader } from "../ui/page-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { useWorkspaceName } from "../../hooks/useWorkspaceName.js";
 import { useHosts, useHostSelection, useLocalFilesAllowed } from "../../hooks/useHosts.js";
@@ -148,7 +149,7 @@ function TabNav<T extends string>({
           data-active={active === t.id}
           onClick={() => onSelect(t.id)}
           className={cn(
-            "px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] border-b-2 -mb-px shrink-0",
+            "px-3 py-2 text-sm border-b-2 -mb-px shrink-0",
             active === t.id
               ? "border-on-surface text-on-surface"
               : "border-transparent text-on-surface-variant hover:text-on-surface",
@@ -169,7 +170,7 @@ function TabNav<T extends string>({
  *  known-remote ⇒ the honest not-available state below. */
 function ReviewSelectionPending({ testId }: { testId: string }) {
   return (
-    <div data-testid={testId} className="font-mono text-[11px] text-on-surface-variant">
+    <div data-testid={testId} className="text-xs text-on-surface-variant">
       Resolving host selection…
     </div>
   );
@@ -214,15 +215,19 @@ function ScopeShell({
   const liveCap = useTerminalCap();
   return (
     <LiveTerminalProvider cap={liveCap}>
-    <div className="mx-auto w-full max-w-[1200px] px-6 py-8">
+    <div className="mx-auto w-full max-w-[1200px] px-6 py-8 text-sm">
+      <PageHeader
+        title="Projects"
+        description="Missions and slices your agents are working through."
+      />
       <header className="border-b border-outline-variant pb-4 mb-4">
         <SectionHeader tone="muted">{eyebrow}</SectionHeader>
-        <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-on-surface mt-1">
+        <h1 className="text-xl font-semibold text-on-surface mt-1">
           {title}
           {hostChip ? (
             <span
               data-testid="scope-host-chip"
-              className="ml-3 inline-flex translate-y-[-0.15em] items-center bg-inverse-surface px-2 py-0.5 align-middle font-mono text-[11px] font-bold uppercase tracking-[0.14em] text-background"
+              className="ml-3 inline-flex translate-y-[-0.15em] items-center rounded-full bg-inverse-surface px-2 py-0.5 align-middle text-xs font-medium text-background"
             >
               on {hostChip}
             </span>
@@ -299,23 +304,23 @@ function ScopeProgressRollup({
   isLoading: boolean;
 }) {
   if (isLoading && rows.length === 0) {
-    return <PlaceholderTab label="LOADING PROGRESS" description="Reading scoped slice progress." />;
+    return <PlaceholderTab label="Loading progress" description="Reading scoped slice progress." />;
   }
   if (rows.length === 0) {
-    return <EmptyState label="NO SCOPED SLICES" description="No slices are indexed for this scope." variant="card" testId="scope-progress-empty" />;
+    return <EmptyState label="No scoped slices" description="No slices are indexed for this scope." variant="card" testId="scope-progress-empty" />;
   }
   return (
     <div data-testid="scope-progress-rollup" className="space-y-3">
       {rows.map((row) => {
         const detail = detailsByName.get(row.name);
         return (
-          <article key={row.name} className="border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm">
+          <article key={row.name} className="rounded-lg border bg-surface-lowest p-3 shadow-sm">
             <div className="flex items-start justify-between gap-3 border-b border-outline-variant pb-2">
               <div className="min-w-0">
                 <Link
                   to="/project/slice/$sliceId"
                   params={{ sliceId: row.name }}
-                  className="font-mono text-[12px] uppercase tracking-[0.12em] text-on-surface hover:underline"
+                  className="text-sm text-on-surface hover:underline"
                 >
                   {row.displayName}
                 </Link>
@@ -326,7 +331,7 @@ function ScopeProgressRollup({
                 </div>
               </div>
             </div>
-            <div className="mt-3 grid gap-2 font-mono text-[10px] text-on-surface sm:grid-cols-4">
+            <div className="mt-3 grid gap-2 text-xs text-on-surface sm:grid-cols-4">
               <SliceMetric label="Qitems" value={detail?.qitemIds.length ?? row.qitemCount} />
               <SliceMetric label="Proof" value={detail ? detail.tests.proofPackets.length : row.hasProofPacket ? 1 : 0} />
               <SliceMetric label="Progress" value={detail ? `${detail.acceptance.percentage}%` : "unknown"} />
@@ -361,12 +366,12 @@ function ScopeQueueRollup({
     return tsA < tsB ? 1 : -1; // DESC
   });
   if (sortedQitemIds.length === 0) {
-    return <EmptyState label="NO QITEMS" description="No queue items are indexed for this scope." variant="card" testId="scope-queue-empty" />;
+    return <EmptyState label="No queue items" description="No queue items are indexed for this scope." variant="card" testId="scope-queue-empty" />;
   }
   return (
     <div data-testid="scope-queue-rollup">
       {isFetching ? (
-        <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant">
+        <div className="mb-2 text-xs text-on-surface-variant">
           Loading queue bodies...
         </div>
       ) : null}
@@ -374,11 +379,11 @@ function ScopeQueueRollup({
         {sortedQitemIds.map((qitemId) => {
           const item = queueItemsById.get(qitemId);
           return (
-            <li key={qitemId} className="bg-surface-lowest/35 backdrop-blur-sm">
+            <li key={qitemId} className="rounded-lg border bg-surface-lowest">
               <QueueItemTrigger
                 data={queueItemViewerData(qitemId, item)}
                 testId={`scope-queue-trigger-${qitemId}`}
-                className="block w-full px-3 py-2 text-left font-mono text-xs transition-colors hover:bg-surface-lowest/55"
+                className="block w-full px-3 py-2 text-left text-xs transition-colors hover:bg-surface-low"
               >
                 <span className="flex flex-wrap items-center gap-2">
                   {item?.state ? <QueueStateBadge state={item.state} compact /> : <EventBadge kind="queue.item" compact />}
@@ -412,7 +417,7 @@ function ScopeArtifactsRollup({
   detailsByName: Map<string, SliceDetail>;
 }) {
   if (rows.length === 0) {
-    return <EmptyState label="NO ARTIFACTS" description="No slices are indexed for this scope." variant="card" testId="scope-artifacts-empty" />;
+    return <EmptyState label="No artifacts" description="No slices are indexed for this scope." variant="card" testId="scope-artifacts-empty" />;
   }
   return (
     <div data-testid="scope-artifacts-rollup" className="space-y-3">
@@ -421,11 +426,11 @@ function ScopeArtifactsRollup({
         const proofCount = detail?.tests.proofPackets.length ?? (row.hasProofPacket ? 1 : 0);
         const screenshotCount = detail?.tests.proofPackets.reduce((count, packet) => count + packet.screenshots.length, 0) ?? 0;
         return (
-          <article key={row.name} className="border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm">
+          <article key={row.name} className="rounded-lg border bg-surface-lowest p-3 shadow-sm">
             <Link
               to="/project/slice/$sliceId"
               params={{ sliceId: row.name }}
-              className="font-mono text-[12px] uppercase tracking-[0.12em] text-on-surface hover:underline"
+              className="text-sm font-medium text-on-surface hover:underline"
             >
               {row.displayName}
             </Link>
@@ -433,7 +438,7 @@ function ScopeArtifactsRollup({
               <ProjectPill token={scopeToken("slice")} compact />
               <ProjectPill token={{ label: row.status, tone: stateTone(row.status) }} compact />
             </div>
-            <div className="mt-3 grid gap-2 font-mono text-[10px] text-on-surface sm:grid-cols-4">
+            <div className="mt-3 grid gap-2 text-xs text-on-surface sm:grid-cols-4">
               <SliceMetric label="Files" value={detail?.docs.tree.length ?? "unknown"} />
               <SliceMetric label="Commits" value={detail?.commitRefs.length ?? "unknown"} />
               <SliceMetric label="Proof packets" value={proofCount} />
@@ -575,7 +580,7 @@ function WorkspaceOverviewPanel() {
   if (isLoading) {
     return (
       <EmptyState
-        label="LOADING WORKSPACE"
+        label="Loading workspace"
         description="Reading slice index."
         variant="card"
         testId="workspace-overview-loading"
@@ -586,7 +591,7 @@ function WorkspaceOverviewPanel() {
   if (data && "unavailable" in data) {
     return (
       <EmptyState
-        label="WORKSPACE INDEX UNAVAILABLE"
+        label="Workspace index unavailable"
         description={data.hint ?? "Slice index is not available from the configured workspace."}
         variant="card"
         testId="workspace-overview-unavailable"
@@ -599,19 +604,19 @@ function WorkspaceOverviewPanel() {
       key={mission.id}
       data-testid={`workspace-overview-mission-${mission.id}`}
       data-mission-bucket={bucket}
-      className="border border-outline-variant bg-surface-lowest/20 px-3 py-3"
+      className="rounded-lg border bg-surface-lowest px-3 py-3 shadow-sm"
     >
       <div className="flex items-start justify-between gap-3 border-b border-outline-variant pb-2">
         <div className="min-w-0">
-          <h3 className="font-mono text-[12px] uppercase tracking-[0.12em] text-on-surface truncate">
+          <h3 className="truncate text-sm font-semibold text-on-surface">
             {mission.label}
           </h3>
-          <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
+          <p className="text-xs text-on-surface-variant">
             {mission.slices.length} slice{mission.slices.length === 1 ? "" : "s"} ·{" "}
             {formatLastActivity(latestProjectMissionActivity(mission))}
           </p>
         </div>
-        <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
+        <span className="text-xs text-on-surface-variant">
           {mission.statusLabel ?? mission.status}
         </span>
       </div>
@@ -626,7 +631,7 @@ function WorkspaceOverviewPanel() {
                 data-testid={`workspace-overview-slice-${slice.name}`}
                 title={`${slice.displayName} — ${meta}`}
                 aria-label={`${slice.displayName} (${meta})`}
-                className="flex items-start gap-2 px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-low hover:text-on-surface"
+                className="flex items-start gap-2 px-2 py-1 text-xs text-on-surface hover:bg-surface-low hover:text-on-surface"
               >
                 <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">{slice.displayName}</span>
                 <span
@@ -652,10 +657,10 @@ function WorkspaceOverviewPanel() {
     <div data-testid="workspace-overview-panel" className="grid gap-4 lg:grid-cols-2">
       <section data-testid="workspace-overview-current" className="space-y-3">
         <div className="flex items-center justify-between border-b border-outline-variant pb-2">
-          <h2 className="font-mono text-[11px] uppercase tracking-[0.16em] text-on-surface">
-            Current Work
+          <h2 className="text-sm font-semibold text-on-surface">
+            Current work
           </h2>
-          <span className="font-mono text-[10px] text-on-surface-variant">
+          <span className="text-xs text-on-surface-variant tabular-nums">
             {sections.current.length}
           </span>
         </div>
@@ -663,7 +668,7 @@ function WorkspaceOverviewPanel() {
           sections.current.map((mission) => renderMissionCard(mission, "current"))
         ) : (
           <EmptyState
-            label="NO CURRENT WORK"
+            label="No current work"
             description="No live qitem-backed or recent active slices are indexed."
             variant="card"
             testId="workspace-overview-current-empty"
@@ -672,10 +677,10 @@ function WorkspaceOverviewPanel() {
       </section>
       <section data-testid="workspace-overview-archive" className="space-y-3">
         <div className="flex items-center justify-between border-b border-outline-variant pb-2">
-          <h2 className="font-mono text-[11px] uppercase tracking-[0.16em] text-on-surface">
+          <h2 className="text-sm font-semibold text-on-surface">
             Archive
           </h2>
-          <span className="font-mono text-[10px] text-on-surface-variant">
+          <span className="text-xs text-on-surface-variant tabular-nums">
             {sections.archive.length}
           </span>
         </div>
@@ -683,7 +688,7 @@ function WorkspaceOverviewPanel() {
           sections.archive.map((mission) => renderMissionCard(mission, "archive"))
         ) : (
           <EmptyState
-            label="NO ARCHIVE"
+            label="No archive"
             description="No archived slices are indexed."
             variant="card"
             testId="workspace-overview-archive-empty"
@@ -719,7 +724,7 @@ export function WorkspaceScopePage() {
     return (
       <div className="mx-auto w-full max-w-[960px] px-6 py-12">
         <EmptyState
-          label="NO WORKSPACE CONNECTED"
+          label="No workspace connected"
           description="Configure a workspace root to browse missions and slices in this destination."
           variant="card"
           testId="workspace-scope-no-workspace"
@@ -846,7 +851,7 @@ export function MissionScopePage() {
       {active === "overview" ? (
         <div data-testid="mission-overview-panel" className="space-y-6">
           {missionReadme.content && (
-            <section data-testid="mission-overview-readme" className="border border-outline-variant bg-surface-lowest/20 p-4">
+            <section data-testid="mission-overview-readme" className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
               <MarkdownViewer content={missionReadme.content} hideFrontmatter hideRawToggle />
             </section>
           )}
@@ -855,7 +860,7 @@ export function MissionScopePage() {
               rollup.rows.map((slice) => {
                 const meta = projectSliceMeta(slice);
                 return (
-                  <article key={slice.name} className="border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm">
+                  <article key={slice.name} className="rounded-lg border bg-surface-lowest p-3 shadow-sm">
                     <div className="flex items-start gap-3">
                       <Link
                         to="/project/slice/$sliceId"
@@ -863,7 +868,7 @@ export function MissionScopePage() {
                         data-testid={`mission-overview-slice-${slice.name}`}
                         title={`${slice.displayName} — ${meta}`}
                         aria-label={`${slice.displayName} (${meta})`}
-                        className="min-w-0 flex-1 whitespace-normal break-words font-mono text-[12px] uppercase leading-snug tracking-[0.12em] text-on-surface hover:underline"
+                        className="min-w-0 flex-1 whitespace-normal break-words text-sm font-medium leading-snug text-on-surface hover:underline"
                       >
                         {slice.displayName}
                       </Link>
@@ -884,7 +889,7 @@ export function MissionScopePage() {
               })
             ) : (
               <EmptyState
-                label="NO SLICES"
+                label="No slices"
                 description="No indexed slices are attached to this mission."
                 variant="card"
                 testId="mission-overview-empty"
@@ -910,7 +915,7 @@ export function MissionScopePage() {
           />
           {scopeAudit.data && (scopeAudit.data.mission.railStatus === "missing" || scopeAudit.data.mission.railStatus === "malformed") ? (
             <EmptyState
-              label={scopeAudit.data.mission.railStatus === "malformed" ? "PROGRESS RAIL MALFORMED" : "PROGRESS RAIL MISSING"}
+              label={scopeAudit.data.mission.railStatus === "malformed" ? "Progress rail malformed" : "Progress rail missing"}
               description={
                 scopeAudit.data.mission.railStatus === "malformed"
                   ? `Mission progress rail has errors (${scopeAudit.data.mission.frontmatterError ?? "malformed frontmatter"}). Run the audit command to diagnose.`
@@ -931,19 +936,19 @@ export function MissionScopePage() {
             // through to the loading/absence treatment. The data-level null-path gating
             // via filesAllowed (missionPath above) is unchanged.
             <EmptyState
-              label="LOCAL FILES NOT SHOWN"
+              label="Local files not shown"
               description="Local files not shown — mission progress markdown reads this host's local filesystem, which the remote read view does not browse."
               variant="card"
               testId="mission-progress-remote-gated"
             />
           ) : missionProgress.content ? (
-            <section data-testid="mission-progress-readme" className="border border-outline-variant bg-surface-lowest/20 p-4">
+            <section data-testid="mission-progress-readme" className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
               <MarkdownViewer content={missionProgress.content} hideFrontmatter hideRawToggle />
             </section>
           ) : missionProgress.state === "read_error" ? (
             // R1: the read failed — NOT an empty progress file.
             <EmptyState
-              label="PROGRESS READ FAILED"
+              label="Progress read failed"
               description="The daemon could not read PROGRESS.md — this is a read failure, not an empty progress file. Check daemon logs and file permissions."
               variant="card"
               testId="mission-progress-read-error"
@@ -951,25 +956,25 @@ export function MissionScopePage() {
           ) : missionProgress.state === "unresolved" ? (
             // R1: the mission path is outside the allowlisted file roots (config).
             <EmptyState
-              label="PROGRESS OUTSIDE FILE ROOTS"
+              label="Progress outside file roots"
               description="The mission path is not under any allowlisted file root, so PROGRESS.md cannot be read. Check OPENRIG_FILES_ALLOWLIST / the daemon's file-roots settings."
               variant="card"
               testId="mission-progress-unresolved"
             />
           ) : !scopeAudit.isLoading ? (
             <EmptyState
-              label="NO PROGRESS YET"
+              label="No progress yet"
               description="No progress data has been written for this mission."
               variant="card"
               testId="mission-progress-empty"
             />
           ) : null}
           {scopeAudit.data && scopeAudit.data.totalFindings > 0 && (
-            <section data-testid="mission-scope-findings" className="border border-outline-variant bg-amber-50/40 p-4">
+            <section data-testid="mission-scope-findings" className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
               <SectionHeader>Scope Audit Findings ({scopeAudit.data.totalFindings})</SectionHeader>
-              <ul className="mt-2 space-y-1 font-mono text-[11px]">
+              <ul className="mt-2 space-y-1 text-xs">
                 {[...scopeAudit.data.mission.findings, ...scopeAudit.data.slices.flatMap((s) => s.findings)].map((f, i) => (
-                  <li key={i} className={cn("px-2 py-1", f.severity === "high" ? "text-red-700" : "text-on-surface-variant")}>
+                  <li key={i} className={cn("px-2 py-1 text-on-surface-variant", f.severity === "high" && "text-destructive")}>
                     [{f.severity}] {f.kind}: {f.message}
                   </li>
                 ))}
@@ -1072,7 +1077,7 @@ function SliceQueueTab({
   if (qitemIds.length === 0) {
     return (
       <EmptyState
-        label="NO QITEMS"
+        label="No queue items"
         description="No queue items associated with this slice."
         variant="card"
         testId="slice-queue-empty"
@@ -1084,23 +1089,23 @@ function SliceQueueTab({
       {queueItemsFetching ? (
         <div
           data-testid="slice-queue-fetching"
-          className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
+          className="mb-2 text-xs text-on-surface-variant"
         >
           Loading queue bodies...
         </div>
       ) : null}
       <ul
         data-testid="slice-queue-list"
-        className="divide-y divide-outline-variant border border-outline-variant"
+        className="divide-y divide-outline-variant rounded-lg border bg-surface-lowest"
       >
         {qitemIds.map((qitemId) => {
           const item = queueItemsById.get(qitemId);
           return (
-            <li key={qitemId} className="bg-surface-lowest/35 backdrop-blur-sm">
+            <li key={qitemId}>
               <QueueItemTrigger
                 data={queueItemViewerData(qitemId, item)}
                 testId={`slice-queue-trigger-${qitemId}`}
-                className="block w-full px-3 py-2 text-left hover:bg-surface-lowest/55 transition-colors font-mono text-xs"
+                className="block w-full px-3 py-2 text-left hover:bg-surface-low transition-colors text-xs"
               >
                 <span className="flex flex-wrap items-center gap-2">
                   {item?.state ? <QueueStateBadge state={item.state} compact /> : <EventBadge kind="queue.item" compact />}
@@ -1112,7 +1117,7 @@ function SliceQueueTab({
                 {item ? (
                   <span
                     data-testid={`slice-queue-meta-${qitemId}`}
-                    className="mt-2 block space-y-2 text-[10px] text-on-surface-variant"
+                    className="mt-2 block space-y-2 text-xs text-on-surface-variant"
                   >
                     <FlowChips source={item.sourceSession} destination={item.destinationSession} muted />
                     <span className="flex flex-wrap gap-1.5">
@@ -1136,9 +1141,9 @@ function formatMaybeDate(ts: string | null): string {
 
 function SliceMetric({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm">
-      <div className="font-mono text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">{label}</div>
-      <div className="mt-1 font-mono text-sm font-bold text-on-surface">{value}</div>
+    <div className="rounded-lg border bg-surface-lowest p-3">
+      <div className="text-xs text-on-surface-variant">{label}</div>
+      <div className="mt-1 font-mono text-sm font-semibold tabular-nums text-on-surface">{value}</div>
     </div>
   );
 }
@@ -1162,44 +1167,44 @@ function SliceOverviewTab({ detail, remoteGated }: { detail: SliceDetail; remote
       </section>
 
       {readmeMd.content && (
-        <section data-testid="slice-overview-readme" className="border border-outline-variant bg-surface-lowest/20 p-4">
+        <section data-testid="slice-overview-readme" className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
           <MarkdownViewer content={readmeMd.content} hideFrontmatter hideRawToggle />
         </section>
       )}
 
-      <section data-testid="slice-overview-current-step" className="border border-outline-variant bg-surface-lowest/20 p-4">
-        <SectionHeader tone="muted">Current Step</SectionHeader>
+      <section data-testid="slice-overview-current-step" className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
+        <SectionHeader tone="muted">Current step</SectionHeader>
         {currentStep ? (
-          <div className="mt-3 grid gap-2 font-mono text-[10px] text-on-surface sm:grid-cols-2">
+          <div className="mt-3 grid gap-2 text-xs text-on-surface sm:grid-cols-2">
             <div>
-              <div className="text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">Step</div>
-              <div className="font-bold text-on-surface">{currentStep.stepId}</div>
+              <div className="text-xs text-on-surface-variant">Step</div>
+              <div className="font-mono font-semibold text-on-surface">{currentStep.stepId}</div>
             </div>
             <div>
-              <div className="text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">Role</div>
-              <div className="font-bold text-on-surface">{currentStep.role}</div>
+              <div className="text-xs text-on-surface-variant">Role</div>
+              <div className="font-semibold text-on-surface">{currentStep.role}</div>
             </div>
             <div className="sm:col-span-2">
-              <div className="text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">Objective</div>
+              <div className="text-xs text-on-surface-variant">Objective</div>
               <div>{currentStep.objective ?? "No objective declared."}</div>
             </div>
             <div>
-              <div className="text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">Allowed exits</div>
-              <div>{currentStep.allowedExits.join(", ") || "-"}</div>
+              <div className="text-xs text-on-surface-variant">Allowed exits</div>
+              <div className="font-mono">{currentStep.allowedExits.join(", ") || "-"}</div>
             </div>
             <div>
-              <div className="text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">Hop count</div>
-              <div>{currentStep.hopCount}</div>
+              <div className="text-xs text-on-surface-variant">Hop count</div>
+              <div className="font-mono tabular-nums">{currentStep.hopCount}</div>
             </div>
           </div>
         ) : (
-          <div className="mt-3 font-mono text-[10px] text-on-surface-variant">No workflow step is currently bound.</div>
+          <div className="mt-3 text-xs text-on-surface-variant">No workflow step is currently bound.</div>
         )}
       </section>
 
-      <section data-testid="slice-overview-readiness" className="border border-outline-variant bg-surface-lowest/20 p-4">
+      <section data-testid="slice-overview-readiness" className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
         <SectionHeader tone="muted">Readiness</SectionHeader>
-        <div className="mt-3 space-y-2 font-mono text-[10px] text-on-surface">
+        <div className="mt-3 space-y-2 text-xs text-on-surface">
           <div>{detail.acceptance.doneItems} of {detail.acceptance.totalItems} acceptance items complete.</div>
           <div>{detail.tests.aggregate.passCount} proof packets passing / {detail.tests.aggregate.failCount} failing.</div>
           {detail.acceptance.closureCallout && (
@@ -1250,7 +1255,7 @@ export function SliceScopePage() {
         onSelect={(id) => setActive(id as SliceTab)}
       >
         <EmptyState
-          label="LOADING"
+          label="Loading slice"
           description={`Fetching /api/slices/${sliceId}…`}
           variant="card"
           testId="slice-scope-loading"
@@ -1269,7 +1274,7 @@ export function SliceScopePage() {
         onSelect={(id) => setActive(id as SliceTab)}
       >
         <EmptyState
-          label="SLICE NOT AVAILABLE"
+          label="Slice not available"
           description={
             detailQuery.error instanceof Error
               ? detailQuery.error.message
@@ -1328,7 +1333,7 @@ export function SliceScopePage() {
         <div className="space-y-6">
           {sliceAuditEntry && (sliceAuditEntry.railStatus === "missing" || sliceAuditEntry.railStatus === "malformed") && (
             <EmptyState
-              label={sliceAuditEntry.railStatus === "malformed" ? "PROGRESS RAIL MALFORMED" : "PROGRESS RAIL MISSING"}
+              label={sliceAuditEntry.railStatus === "malformed" ? "Progress rail malformed" : "Progress rail missing"}
               description={
                 sliceAuditEntry.railStatus === "malformed"
                   ? `Slice progress rail has errors (${sliceAuditEntry.frontmatterError ?? "malformed frontmatter"}). Run the audit command to diagnose.`
@@ -1340,11 +1345,11 @@ export function SliceScopePage() {
             />
           )}
           {sliceAuditEntry && sliceAuditEntry.findings.length > 0 && (
-            <section data-testid="slice-scope-findings" className="border border-outline-variant bg-amber-50/40 p-4">
-              <SectionHeader>Scope Findings ({sliceAuditEntry.findings.length})</SectionHeader>
-              <ul className="mt-2 space-y-1 font-mono text-[11px]">
+            <section data-testid="slice-scope-findings" className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
+              <SectionHeader>Scope findings ({sliceAuditEntry.findings.length})</SectionHeader>
+              <ul className="mt-2 space-y-1 text-xs">
                 {sliceAuditEntry.findings.map((f, i) => (
-                  <li key={i} className={cn("px-2 py-1", f.severity === "high" ? "text-red-700" : "text-on-surface-variant")}>
+                  <li key={i} className={cn("px-2 py-1 text-on-surface-variant", f.severity === "high" && "text-destructive")}>
                     [{f.severity}] {f.kind}: {f.message}
                   </li>
                 ))}

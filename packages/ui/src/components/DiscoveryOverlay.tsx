@@ -69,7 +69,7 @@ function DiscoveryActionButton({
       aria-label={label}
       onClick={() => { void handleClick(); }}
       className={cn(
-        "inline-flex items-center gap-1.5 px-spacing-2 py-1 border font-mono text-[10px] uppercase transition-colors duration-150 ease-tactical",
+        "inline-flex items-center gap-1.5 px-spacing-2 py-1 border text-[11px] transition-colors duration-150 ease-tactical",
         active
           ? "bg-inverse-surface text-background border-on-surface"
           : "bg-surface-lowest text-on-surface border-outline-variant hover:bg-surface-low",
@@ -105,16 +105,16 @@ function DiscoveredSessionCard({ session, onAdopt }: { session: DiscoveredSessio
             {session.confidence === "medium" ? (
               <div
                 data-testid="runtime-inferred-note"
-                className="text-[10px] uppercase tracking-[0.08em] text-foreground-muted"
+                className="text-[11px] text-foreground-muted"
               >
-                runtime inferred
+                Runtime inferred
               </div>
             ) : null}
           </div>
           {session.cwd ? (
             <div className="mt-spacing-2 min-w-0">
-              <div className="text-[10px] uppercase tracking-[0.08em] text-foreground-muted">
-                cwd
+              <div className="text-[11px] text-foreground-muted">
+                Cwd
               </div>
               <div
                 className="font-mono text-[12px] leading-5 text-foreground-muted truncate"
@@ -269,7 +269,7 @@ export function DiscoveryOverlay() {
         <div>
         <div className="flex flex-col gap-spacing-4 border-b border-foreground/10 pb-spacing-5 sm:flex-row sm:items-end sm:justify-between">
           <div className="max-w-[620px]">
-            <h2 className="text-headline-lg uppercase">DISCOVERY</h2>
+            <h2 className="text-headline-lg">DISCOVERY</h2>
             <p className="mt-spacing-1 text-body-md text-foreground-muted">
               Running agent sessions currently visible on this machine. Copy a tmux attach command,
               review the working directory, or adopt the session into a rig.
@@ -299,7 +299,7 @@ export function DiscoveryOverlay() {
         ) : (
           <div className="mt-spacing-6 space-y-spacing-3" data-testid="discovery-active-section">
             <div className="mb-spacing-2">
-              <h3 className="text-headline-sm uppercase">Running agents</h3>
+              <h3 className="text-headline-sm">Running agents</h3>
               <p className="text-label-md text-foreground-muted">
                 {visibleSessions.length} session{visibleSessions.length !== 1 ? "s" : ""} available to inspect or adopt
               </p>
@@ -316,12 +316,12 @@ export function DiscoveryOverlay() {
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent data-testid="adopt-dialog">
           <DialogHeader>
-            <DialogTitle className="text-headline-md uppercase">ADOPT SESSION</DialogTitle>
+            <DialogTitle className="text-headline-md">ADOPT SESSION</DialogTitle>
             <DialogDescription>Bind this session to an existing logical node in the rig.</DialogDescription>
           </DialogHeader>
           <div className="space-y-spacing-3">
             <div>
-              <label className="text-label-sm uppercase block mb-spacing-1">RIG</label>
+              <label className="text-label-sm block mb-spacing-1">RIG</label>
               <select
                 data-testid="adopt-rig-input"
                 value={rigId}
@@ -335,7 +335,7 @@ export function DiscoveryOverlay() {
               </select>
             </div>
             <div>
-              <label className="text-label-sm uppercase block mb-spacing-1">LOGICAL ID (required)</label>
+              <label className="text-label-sm block mb-spacing-1">LOGICAL ID (required)</label>
               <input
                 data-testid="adopt-logical-input"
                 type="text"

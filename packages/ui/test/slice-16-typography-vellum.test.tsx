@@ -1,10 +1,15 @@
-// Slice 16 typography + vellum density assertions for FeedCard.
+// Slice 16 typography assertions for FeedCard.
 //
 // Updated 2026-05-14 for the FeedCard vellum-coherent refactor per
 // for-you-feedcard-redesign-spec-2026-05-14.md. The chrome moved from
 // VellumCard + bg-white/35 to the vellum recipe (bg-stone-100/45 +
 // backdrop-blur-[10px] + ambient 3-stop box-shadow + 4 CornerBrackets)
 // and prose body sizes bumped to 12px per the legibility north star.
+//
+// Updated for C11 Inbox v2: FeedCard renders as a list row (StatusDot +
+// text-sm title + muted one-line body preview) inside one
+// `rounded-lg border divide-y` container in Feed.tsx — no framed card,
+// no CornerBrackets, no hard shadows, no uppercase.
 
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
@@ -18,35 +23,41 @@ async function readSource(packageRelPath: string): Promise<string> {
   return readFileSync(nodePath.join(packageRoot, packageRelPath), "utf-8");
 }
 
-describe("FeedCard typography + vellum-coherent chrome", () => {
-  it("FeedCard outer chrome uses the vellum recipe (bg-stone-100/45 + backdrop-blur-[10px])", async () => {
+describe("FeedCard typography + list-row chrome (C11 Inbox v2)", () => {
+  it("FeedCard renders as a list row (no framed card, no hard shadow, no registration marks)", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    // Card surface = vellum-coherent (matches CardShell in
-    // storytelling-cards.tsx so /for-you reads as one surface).
-    expect(source).toContain("bg-surface-low/45 backdrop-blur-[10px]");
-    // The old VellumCard + left-stripe chrome is gone.
+    // Rows live inside one `rounded-lg border divide-y` container in Feed.tsx.
+    const feed = await readSource("src/components/for-you/Feed.tsx");
+    expect(feed).toContain("rounded-lg border");
+    expect(feed).toContain("divide-y");
+    // The old framed-card chrome is gone.
     expect(source).not.toMatch(/VellumCard/);
+    expect(source).not.toMatch(/CornerBracket/);
     expect(source).not.toMatch(/border-l-4 border-l-/);
-    // Ambient 3-stop shadow defines the card edges through the vellum.
-    expect(source).toContain("CARD_SHADOW_STYLE");
-    expect(source).toContain("0 2px 4px rgba(0, 0, 0, 0.14)");
+    expect(source).not.toMatch(/0 2px 4px rgba\(0, 0, 0, 0\.14\)/);
+    // No uppercase prose on the row.
+    expect(source).not.toMatch(/tracking-\[0\.16em\]/);
   });
 
-  it("FeedCard imports CornerBracket from the dashboard/vellum barrel", async () => {
+  it("FeedCard no longer imports the dashboard/vellum barrel (C11 replaces the old CornerBracket test)", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    expect(source).toContain('from "../dashboard/vellum/index.js"');
-    expect(source).toContain("CornerBracket");
+    expect(source).not.toContain('from "../dashboard/vellum/index.js"');
+    expect(source).not.toMatch(/boxShadow:\s*"0 /);
   });
 
-  it("FeedCard title is 16px font-headline bold (legibility north star)", async () => {
+  it("FeedCard row puts a StatusDot before the title (C11 replaces the old 16px headline test)", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    expect(source).toContain("font-headline text-[16px] font-bold leading-tight text-on-surface");
+    expect(source).toContain("<StatusDot status={KIND_STATUS[card.kind]}");
+    expect(source).not.toContain("font-headline text-[16px] font-bold");
   });
 
-  it("FeedCard qitem body paragraph is 12px font-body (prose; not font-mono; not 11px)", async () => {
+  it("FeedCard title is text-sm font-medium with a muted one-line body preview", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    expect(source).toContain("font-body text-[12px] leading-relaxed text-on-surface whitespace-pre-line");
-    expect(source).not.toMatch(/font-mono text-xs leading-relaxed text-on-surface-variant whitespace-pre-line/);
+    expect(source).toContain("truncate text-sm font-medium text-on-surface");
+    // Body preview keeps the muted one-line truncate (F17 builds the class
+    // list conditionally for the expanded state, so assert the parts).
+    expect(source).toContain("mt-0.5 text-sm text-on-surface-variant");
+    expect(source).toContain("truncate");
   });
 
   it("FeedCard ActionOutcomePanel outcome sentence stays prose font-body 12px", async () => {
@@ -54,19 +65,19 @@ describe("FeedCard typography + vellum-coherent chrome", () => {
     expect(source).toContain("font-body text-[12px] leading-relaxed text-on-surface");
   });
 
-  it("FeedCard prose copy is font-body 12px (bumped from 11px; the 'Your turn' hint itself is GONE per corrective \u00a77.1)", async () => {
+  it("FeedCard prose copy is font-body 12px (bumped from 11px; the 'Your turn' hint itself is GONE per corrective §7.1)", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
     expect(source).toContain("font-body text-[12px] leading-relaxed text-on-surface");
   });
 
-  it("FeedCard kind indicator uses mono+leading-dot (no colored pills)", async () => {
+  it("FeedCard kind maps to a StatusDot status (no colored pills)", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
-    // KIND_DOT map maps each FeedCardKind to a design-token dot color.
-    expect(source).toContain("KIND_DOT");
-    expect(source).toContain('"action-required": "bg-tertiary"');
-    expect(source).toContain('approval: "bg-warning"');
-    expect(source).toContain('shipped: "bg-success"');
-    expect(source).toContain('progress: "bg-secondary"');
+    // KIND_STATUS maps each FeedCardKind to a status-vocabulary status.
+    expect(source).toContain("KIND_STATUS");
+    expect(source).toContain('"action-required": "attention_required"');
+    expect(source).toContain('shipped: "done"');
+    expect(source).toContain('progress: "running"');
+    expect(source).toContain('observation: "idle"');
     // Old colored-pill chrome should be gone.
     expect(source).not.toMatch(/bg-emerald-50/);
     expect(source).not.toMatch(/bg-rose-50/);

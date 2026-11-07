@@ -1,297 +1,235 @@
-// OPR.0.4.1.14 — Dashboard route visual refresh (founder-LOCKED fidelity twin).
+// C10: Dashboard v2 — "what's running, and what needs you."
 //
-// A pure visual refresh of the welcome/home LAUNCHER surface. No behaviour
-// change: the same six destinations route to the same paths, and the global
-// AppShell header + left rail are untouched (the twin's "header + sidebar =
-// keep as-is" is that shell chrome). The big-numeral vellum card wall is
-// replaced by the disciplined paper-draft launcher grid + Field Environment
-// readout + drafting footer of the locked twin
-// (digital-twin/opr-0.4.1.14/dashboard-fidelity.intent.html), built with the
-// founder-ratified existing-code glyph set.
-//
-// Real-data wiring — every Field Environment row reads live runtime state
-// (OPR.0.4.1.14 functional refinement; no placeholder rows):
-//   useRigSummary    → RIGS count                (REAL, own line)
-//   usePsEntries     → AGENTS count              (REAL, own line)
-//   window.location.hostname → STATION ID        (REAL)
-//   useSettings(agents.operator_session) → OPERATOR ID, with an honest
-//     "OPERATOR" fallback when unset (best-available identity: there is no
-//     per-user identity and /api/whoami needs a session param a browser
-//     cannot supply — see the slice handoff note).
-//   useDaemonVersion → VERSION                   (REAL running daemon version,
-//     via /api/health-summary/version; NOT the UI bundle's build-time version).
-// The earlier placeholder SESSION row and decorative DECLINATION flourish were
-// dropped so the card shows only real runtime data.
+// Replaces the OPR.0.4.1.14 paper-draft launcher surface (destination cards
+// with drawings, field-environment box, drafting footer). The vellum files
+// under components/dashboard/vellum/ stay for /lab/vellum-lab; this component
+// just stops rendering them.
 
-import "./dashboard-fidelity.css";
-
+import * as Collapsible from "@radix-ui/react-collapsible";
 import { Link } from "@tanstack/react-router";
-import { useRigSummary } from "../../hooks/useRigSummary.js";
+import { PageHeader } from "../ui/page-header.js";
+import { Button } from "../ui/button.js";
+import { EmptyState } from "../ui/empty-state.js";
+import { MetricTile } from "../ui/metric-tile.js";
+import { StatusBadge, StatusDot } from "../ui/status-badge.js";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "../ui/table.js";
+import { ErrorBoundary } from "../ui/ErrorBoundary.js";
+import { relativeTime } from "../../lib/relative-time.js";
+import { daemonStatus } from "../../lib/daemon-status.js";
 import { usePsEntries } from "../../hooks/usePsEntries.js";
-import { useSettings } from "../../hooks/useSettings.js";
-import { useDaemonVersion } from "../../hooks/useDaemonVersion.js";
-import { parseSessionName } from "../../lib/session-name.js";
+import { useAttentionItems } from "../../hooks/useAttentionItems.js";
+import { useFeedSubscriptions } from "../../hooks/useFeedSubscriptions.js";
+import { useDaemonHealth } from "../../hooks/useDaemonHealth.js";
+import { useActivityFeed } from "../../hooks/useActivityFeed.js";
+import { VerbActions } from "../mission-control/components/VerbActions.js";
+import { GettingStarted } from "./GettingStarted.js";
 import { KernelStatusCard } from "../KernelStatusCard.js";
 import { HostConfigCard } from "./HostConfigCard.js";
-import { ErrorBoundary } from "../ui/ErrorBoundary.js";
-import {
-  TopologyGlyph,
-  ProjectGlyph,
-  ForYouGlyph,
-  LibraryGlyph,
-  SearchGlyph,
-  SettingsGlyph,
-  FieldGlobeGlyph,
-  CaptionGlyph,
-  type CaptionGlyphKind,
-} from "./vellum/fidelity-glyphs.js";
 
-interface Destination {
-  num: string;
-  to: string;
-  label: string;
-  caption: string;
-  glyph: React.ReactNode;
-  captionGlyph: CaptionGlyphKind;
-  /** FOR YOU is the single amber-accented caption (prioritized-for-you). */
-  amber?: boolean;
+/** `rig.started` -> "Rig started" (fallback: the raw type). */
+function humanizeEventType(type: string): string {
+  return type
+    .split(".")
+    .map((w) => (w.length > 0 ? w[0]!.toUpperCase() + w.slice(1) : w))
+    .join(" ");
 }
 
-// Routes + order are UNCHANGED from the prior dashboard (no behaviour change).
-const DESTINATIONS: Destination[] = [
-  { num: "01", to: "/topology", label: "TOPOLOGY", caption: "VIEW RIG GRAPH", glyph: <TopologyGlyph />, captionGlyph: "cross" },
-  { num: "02", to: "/project", label: "PROJECT", caption: "BROWSE PROJECTS", glyph: <ProjectGlyph />, captionGlyph: "square" },
-  { num: "03", to: "/for-you", label: "FOR YOU", caption: "PRIORITIZED FOR YOU", glyph: <ForYouGlyph />, captionGlyph: "square", amber: true },
-  { num: "04", to: "/specs", label: "LIBRARY", caption: "SPECS & ARTIFACTS", glyph: <LibraryGlyph />, captionGlyph: "cross" },
-  { num: "05", to: "/search", label: "SEARCH & AUDIT", caption: "FIND & VERIFY", glyph: <SearchGlyph />, captionGlyph: "circle" },
-  { num: "06", to: "/settings", label: "SETTINGS", caption: "CONFIGURE · STATUS", glyph: <SettingsGlyph />, captionGlyph: "circle" },
-];
-
-function pad2(n: number): string {
-  return String(Math.max(0, n)).padStart(2, "0");
-}
-
-/** Read a string ConfigStore setting from the useSettings payload. */
-function readSetting(
-  data: { settings?: Record<string, { value?: unknown }> } | undefined,
-  key: string,
-): string {
-  const v = data?.settings?.[key]?.value;
-  return typeof v === "string" ? v : "";
-}
-
-export function Dashboard() {
-  const { data: rigs } = useRigSummary();
-  const { data: psEntries, isError: psError } = usePsEntries();
-  const { data: settings } = useSettings();
-  const { data: versionData } = useDaemonVersion();
-
-  const totalRigs = rigs?.length ?? 0;
-  const totalAgents = psEntries?.reduce((acc, p) => acc + p.nodeCount, 0) ?? 0;
-
-  const hostname =
-    typeof window === "undefined" ? "localhost" : window.location.hostname || "localhost";
-  const station = hostname.toUpperCase();
-  const online = !psError && psEntries !== undefined;
-
-  // Operator identity from the configured operator seat (logicalId@rigId), with
-  // an honest "OPERATOR" fallback when unset — the best-available real source.
-  const operatorSession = readSetting(settings, "agents.operator_session");
-  // OPR.0.4.6.MH1 FR-8: the shared parse contract.
-  const parsedOperator = parseSessionName(operatorSession);
-  const operatorId =
-    parsedOperator.kind === "canonical" ? parsedOperator.member.toUpperCase() : "OPERATOR";
-
-  // Running daemon version (real, via useDaemonVersion). Honest em-dash fallback
-  // while the query is loading or on a fetch failure; the daemon itself already
-  // returns "unknown" if it cannot read its own package.json.
-  const version = (versionData?.version ?? "").toUpperCase() || "—";
-
+function NeedsYou() {
+  const { anyRemoteEnabled } = useFeedSubscriptions();
+  const attention = useAttentionItems(50, anyRemoteEnabled);
+  const items = (attention.data?.items ?? []).slice(0, 5);
   return (
-    <div data-testid="dashboard-surface" className="df-root">
-      <div className="df-main">
-        <div className="df-head">
-          <div className="df-eyebrow">
-            <span className="df-eyebrow-l">
-              <span className="df-gd" aria-hidden="true" />
-              OPERATOR
-            </span>
-            <span className="df-eyebrow-r">DASHBOARD · LAUNCHER · CONFIGSTORE-BACKED</span>
-          </div>
-
-          <h1 data-testid="dashboard-greeting" className="df-h1">
-            Welcome back, operator.
-          </h1>
-          <div className="df-sub">
-            STATION {station} IS <b>[ {online ? "ONLINE" : "CONNECTING"} ]</b>
-          </div>
-
-          <FieldEnvironment
-            station={station}
-            operatorId={operatorId}
-            rigs={totalRigs}
-            agents={totalAgents}
-            version={version}
-          />
-          <div className="df-reg" aria-hidden="true" />
-        </div>
-
-        {/* OPR.0.4.3.22 — kernel status FIRST (from /api/kernel/status, NEVER
-            daemon /healthz), with a Restore-kernel recovery control. */}
-        <section data-testid="dashboard-kernel-section" className="mb-6 max-w-md">
-          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-secondary mb-2">
-            Host / kernel
-          </div>
-          <ErrorBoundary label="Kernel status">
-            <KernelStatusCard />
-          </ErrorBoundary>
-        </section>
-
-        {/* OPR.0.4.6.MH1 FR-5 — the host-config component (own host +
-            added hosts + add affordance + switcher). */}
-        <ErrorBoundary label="Hosts">
-          <HostConfigCard />
-        </ErrorBoundary>
-
-        <div className="df-grid" data-testid="dashboard-launcher-grid">
-          {DESTINATIONS.map((d) => (
-            <LauncherCard key={d.num} dest={d} />
+    <section data-testid="dashboard-needs-you" aria-label="Needs you">
+      <h2 className="text-sm font-semibold text-on-surface">Needs you</h2>
+      {items.length === 0 ? (
+        <EmptyState
+          title="You're all caught up"
+          label="Nothing needs you"
+          description="Approvals and questions from your agents show up here."
+        />
+      ) : (
+        <ul className="mt-2 flex flex-col gap-2">
+          {items.map((item) => (
+            <li
+              key={item.qitemId}
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border bg-surface-lowest px-3 py-2 shadow-sm"
+            >
+              <StatusDot status="attention_required" />
+              <span className="min-w-0 flex-1 text-sm text-on-surface">
+                {item.summary ?? item.body.split("\n")[0]}
+              </span>
+              <span className="font-mono text-xs text-on-surface-variant">{item.sourceSession}</span>
+              <span className="text-xs text-on-surface-variant">{relativeTime(item.tsUpdated)}</span>
+              <VerbActions
+                bare
+                qitemId={item.qitemId}
+                actorSession="human@host"
+                hostId={item.hostId}
+                enabledVerbs={["approve"]}
+                oneClickVerbs={["approve"]}
+              />
+            </li>
           ))}
-        </div>
-      </div>
+        </ul>
+      )}
+      <Link to="/for-you" className="mt-2 inline-block text-sm text-brand hover:underline">
+        Open inbox
+      </Link>
+    </section>
+  );
+}
 
-      <DashboardFooter />
+function MetricTiles({ attentionCount }: { attentionCount: number }) {
+  const { data: ps } = usePsEntries();
+  const { query, signal } = useDaemonHealth();
+  const rigsRunning = (ps ?? []).filter((r) => r.status !== "stopped").length;
+  const rigsTotal = (ps ?? []).length;
+  const activeAgents = (ps ?? []).reduce((acc, r) => acc + (r.activeCount ?? 0), 0);
+  const aliveAgents = (ps ?? []).reduce((acc, r) => acc + r.runningCount, 0);
+  const daemon = daemonStatus(query, signal);
+  return (
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <MetricTile label="Rigs running" value={rigsRunning} sublabel={`${rigsTotal} total`} to="/topology" testId="dashboard-tile-rigs" />
+      <MetricTile label="Active agents" value={activeAgents} sublabel={`${aliveAgents} alive`} to="/agents" testId="dashboard-tile-agents" />
+      <MetricTile label="Needs you" value={attentionCount} sublabel="approvals and questions" to="/for-you" testId="dashboard-tile-needs-you" />
+      <MetricTile
+        label="Daemon"
+        value={<StatusBadge status={daemon.status} label={daemon.label} />}
+        sublabel="control plane"
+        to="/settings/status"
+        testId="dashboard-tile-daemon"
+      />
     </div>
   );
 }
 
-interface FieldEnvironmentProps {
-  station: string;
-  operatorId: string;
-  rigs: number;
-  agents: number;
-  version: string;
-}
-
-function FieldEnvironment({
-  station,
-  operatorId,
-  rigs,
-  agents,
-  version,
-}: FieldEnvironmentProps) {
-  // Every row is REAL runtime data (OPR.0.4.1.14): the placeholder SESSION and
-  // decorative DECLINATION rows were dropped; RIGS and AGENTS are split onto
-  // their own lines as single live counts; VERSION is the running daemon
-  // version. The vintage mono / dotted-leader treatment is unchanged.
-  const rows: Array<{ k: string; v: string }> = [
-    { k: "STATION ID", v: station },
-    { k: "OPERATOR ID", v: operatorId },
-    { k: "RIGS", v: pad2(rigs) },
-    { k: "AGENTS", v: pad2(agents) },
-    { k: "VERSION", v: version },
-  ];
+function RigsTable() {
+  const { data: ps } = usePsEntries();
+  const rows = ps ?? [];
+  if (rows.length === 0) {
+    return (
+      <section data-testid="dashboard-rigs" aria-label="Rigs">
+        <h2 className="text-sm font-semibold text-on-surface">Rigs</h2>
+        <EmptyState
+          title="No rigs yet"
+          label="No rigs yet"
+          description="A rig is a team of agents defined by a spec. Create one from the Library or import an existing one."
+          action={{ label: "New rig", href: "/specs/rig" }}
+        />
+      </section>
+    );
+  }
   return (
-    <section
-      data-testid="dashboard-field-environment"
-      className="df-fieldenv"
-      aria-label="Field environment"
-    >
-      <div className="df-feh">
-        <span>FIELD ENVIRONMENT</span>
-        <span className="df-feh-mark" aria-hidden="true" />
-      </div>
-      <div className="df-fe-body">
-        <div className="df-fe-list">
-          {rows.map((r) => (
-            <div className="df-fe-row" key={r.k}>
-              <span className="df-k">{r.k}</span>
-              <span className="df-dots" aria-hidden="true" />
-              <span className="df-v">{r.v}</span>
-            </div>
-          ))}
-        </div>
-        <div className="df-fe-globe" aria-hidden="true">
-          <FieldGlobeGlyph />
-        </div>
+    <section data-testid="dashboard-rigs" aria-label="Rigs">
+      <h2 className="text-sm font-semibold text-on-surface">Rigs</h2>
+      <div className="mt-2">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Agents</TableHead>
+              <TableHead>Has work</TableHead>
+              <TableHead>Uptime</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((r) => (
+              <TableRow key={r.rigId}>
+                <TableCell>
+                  <Link to="/topology/rig/$rigId" params={{ rigId: r.rigId }} className="text-brand hover:underline">
+                    {r.name}
+                  </Link>
+                </TableCell>
+                <TableCell>
+                  <StatusBadge status={r.lifecycleState ?? r.status} />
+                </TableCell>
+                <TableCell>
+                  {r.activeCount ?? 0}/{r.nodeCount}
+                </TableCell>
+                <TableCell>{r.hasWorkCount ?? 0}</TableCell>
+                <TableCell className="font-mono text-xs">{r.uptime ?? "—"}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
       </div>
     </section>
   );
 }
 
-function LauncherCard({ dest }: { dest: Destination }) {
+function RecentActivity() {
+  const { events } = useActivityFeed();
+  const last = events.slice(0, 10);
   return (
-    <div className="df-cell">
-      <Link
-        to={dest.to}
-        data-testid={`dashboard-card-${dest.num}`}
-        aria-label={dest.label}
-        className="df-card"
-      >
-        <span className="df-plus" aria-hidden="true" />
-        <span className="df-idx">
-          {dest.num} <i className="df-idx-sq" aria-hidden="true" />
-        </span>
-        <span className="df-glyph" aria-hidden="true">
-          {dest.glyph}
-        </span>
-        <span className="df-clabel">{dest.label}</span>
-        <span className="df-half" aria-hidden="true" />
-        <span className="df-crop" aria-hidden="true">
-          <i className="df-crop-tl" />
-          <i className="df-crop-br" />
-        </span>
-      </Link>
-      <div className={`df-cap${dest.amber ? " df-cap--amber" : ""}`}>
-        <span className="df-cap-glyph" aria-hidden="true">
-          <CaptionGlyph kind={dest.captionGlyph} />
-        </span>
-        <span className="df-lead" aria-hidden="true" />
-        {dest.caption}
-      </div>
-    </div>
+    <section data-testid="dashboard-activity" aria-label="Recent activity">
+      <h2 className="text-sm font-semibold text-on-surface">Recent activity</h2>
+      {last.length === 0 ? (
+        <p className="mt-2 text-sm text-on-surface-variant">No activity yet.</p>
+      ) : (
+        <ul className="mt-2 flex flex-col gap-1">
+          {last.map((e) => {
+            const rig = typeof e.payload["rigId"] === "string" ? (e.payload["rigId"] as string) : null;
+            const session = typeof e.payload["session"] === "string" ? (e.payload["session"] as string) : null;
+            return (
+              <li key={e.seq} className="flex flex-wrap items-baseline gap-x-2 text-sm">
+                <span className="text-xs text-on-surface-variant">{relativeTime(e.createdAt)}</span>
+                <span className="text-on-surface">{humanizeEventType(e.type)}</span>
+                {rig ? <span className="font-mono text-xs text-on-surface-variant">{rig}</span> : null}
+                {session ? <span className="font-mono text-xs text-on-surface-variant">{session}</span> : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
   );
 }
 
-function DashboardFooter() {
-  // Semi-random drafting "artifacts" — fixed scatter (deterministic so the
-  // surface is stable across renders), per the locked twin.
-  const arts: Array<{ left: number; top: number; w: number; h: number }> = [
-    { left: 6, top: 14, w: 4, h: 1 },
-    { left: 16, top: 9, w: 1, h: 1 },
-    { left: 24, top: 16, w: 3, h: 1 },
-    { left: 34, top: 6, w: 1, h: 1 },
-    { left: 30, top: 13, w: 1, h: 1 },
-    { left: 46, top: 11, w: 5, h: 1 },
-    { left: 58, top: 7, w: 1, h: 1 },
-    { left: 66, top: 15, w: 2, h: 1 },
-    { left: 78, top: 10, w: 1, h: 1 },
-    { left: 90, top: 13, w: 4, h: 1 },
-  ];
+export function Dashboard() {
+  const { anyRemoteEnabled } = useFeedSubscriptions();
+  const attention = useAttentionItems(50, anyRemoteEnabled);
+  const attentionCount = attention.data?.items.length ?? 0;
   return (
-    <div className="df-foot" data-testid="dashboard-footer">
-      <div className="df-foot-fl">
-        <span className="df-foot-sq" aria-hidden="true" />
-        [ LOG ] .0001 · A SOLO BUILD, DELIBERATE, YEAR OVER YEAR
+    <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6">
+      <PageHeader
+        title="Dashboard"
+        description="What's running, and what needs you."
+        actions={
+          <>
+            <Button variant="outline" asChild>
+              <Link to="/import">Import</Link>
+            </Button>
+            <Button asChild>
+              <Link to="/specs/rig">New rig</Link>
+            </Button>
+          </>
+        }
+      />
+      <div className="flex flex-col gap-8">
+        <GettingStarted />
+        <NeedsYou />
+        <MetricTiles attentionCount={attentionCount} />
+        <RigsTable />
+        <RecentActivity />
+        <Collapsible.Root defaultOpen={false}>
+          <section data-testid="dashboard-host-section" aria-label="Host">
+            <Collapsible.Trigger className="text-sm font-semibold text-on-surface">
+              Host
+            </Collapsible.Trigger>
+            <Collapsible.Content>
+              <div className="mt-2 flex flex-col gap-4">
+                <ErrorBoundary label="Kernel status">
+                  <KernelStatusCard />
+                </ErrorBoundary>
+                <ErrorBoundary label="Hosts">
+                  <HostConfigCard />
+                </ErrorBoundary>
+              </div>
+            </Collapsible.Content>
+          </section>
+        </Collapsible.Root>
       </div>
-      <span className="df-plus2" aria-hidden="true" />
-      <span className="df-foot-dots" aria-hidden="true" />
-      <div className="df-dissolve" aria-hidden="true">
-        <span className="df-dissolve-blk" />
-      </div>
-      <div className="df-arts" aria-hidden="true">
-        {arts.map((a, i) => (
-          <i
-            key={i}
-            style={{ left: `${a.left}px`, top: `${a.top}px`, width: `${a.w}px`, height: `${a.h}px` }}
-          />
-        ))}
-      </div>
-      <div className="df-sqs" aria-hidden="true">
-        <span className="df-sq-o" />
-        <span className="df-sq-b" />
-      </div>
-      <span className="df-plus2" aria-hidden="true" />
     </div>
   );
 }

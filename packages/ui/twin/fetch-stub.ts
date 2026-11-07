@@ -12,6 +12,7 @@ import {
   psEntries,
   specLibrary,
   nodeInventoryByRig,
+  attentionItems,
   rigGraphByRig,
   nodeDetailByKey,
   sessionPreviewByName,
@@ -44,12 +45,30 @@ const realFetch: typeof fetch | undefined = globalThis.fetch ? globalThis.fetch.
 function route(pathname: string, search: URLSearchParams): Response {
   if (pathname === "/api/rigs/summary") return json(rigSummary);
   if (pathname === "/api/ps") return json(psEntries);
+  // C10 Dashboard v2: attention (Needs you), daemon health, hosts, kernel, settings.
+  if (pathname === "/api/queue/attention-aggregate") return json(attentionItems);
+  if (pathname === "/api/queue/list") return json(attentionItems.items);
+  if (pathname === "/healthz") return json({ status: "ok" });
+  if (pathname === "/api/hosts") return json({ ownName: "localhost", selected: "local", hosts: [] });
+  if (pathname === "/api/kernel/status") return json({ error: "kernel_boot_tracker_unavailable", message: "twin" });
   // Settings (useSettings, staleTime:0). workspace.root unblocks the /project surface
   // (useWorkspaceName); preview settings keep the terminal pane consistent.
   if (pathname === "/api/config") {
     return json({
       settings: {
-        "workspace.root": { value: "/Users/x/code/workspace", source: "config", defaultValue: "" },
+        "daemon.port": { value: 7433, source: "default", defaultValue: 7433 },
+        "daemon.host": { value: "127.0.0.1", source: "default", defaultValue: "127.0.0.1" },
+        "db.path": { value: "~/.openrig/openrig.db", source: "default", defaultValue: "~/.openrig/openrig.db" },
+        "transcripts.enabled": { value: true, source: "default", defaultValue: true },
+        "transcripts.path": { value: "~/.openrig/transcripts", source: "default", defaultValue: "~/.openrig/transcripts" },
+        "workspace.root": { value: "/Users/x/code/workspace", source: "file", defaultValue: "" },
+        "workspace.slices_root": { value: "/Users/x/code/workspace/slices", source: "default", defaultValue: "" },
+        "workspace.steering_path": { value: "/Users/x/code/workspace/steering", source: "default", defaultValue: "" },
+        "workspace.specs_root": { value: "/Users/x/code/workspace/specs", source: "default", defaultValue: "" },
+        "workspace.projects_root": { value: "/Users/x/code/workspace/projects", source: "default", defaultValue: "" },
+        "workspace.catalog_path": { value: "/Users/x/code/workspace/catalog.json", source: "default", defaultValue: "" },
+        "files.allowlist": { value: "workspace:/Users/x/code/workspace", source: "default", defaultValue: "" },
+        "progress.scan_roots": { value: "workspace:/Users/x/code/workspace", source: "env", defaultValue: "" },
         "ui.preview.default_lines": { value: 100, source: "default", defaultValue: 100 },
         "ui.preview.refresh_interval_seconds": { value: 3, source: "default", defaultValue: 3 },
       },

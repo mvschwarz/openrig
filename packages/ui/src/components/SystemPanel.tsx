@@ -108,21 +108,21 @@ export function SystemPanel({ onClose, events, initialTab = "log" }: SystemPanel
         <button
           data-testid="system-tab-log"
           onClick={() => setActiveTab("log")}
-          className={`flex-1 py-2 text-xs font-mono uppercase text-center ${activeTab === "log" ? "border-b-2 border-on-surface font-bold text-on-surface" : "text-on-surface-variant"}`}
+          className={`flex-1 py-2 text-xs text-center ${activeTab === "log" ? "border-b-2 border-on-surface font-bold text-on-surface" : "text-on-surface-variant"}`}
         >
           Recent Log
         </button>
         <button
           data-testid="system-tab-status"
           onClick={() => setActiveTab("status")}
-          className={`flex-1 py-2 text-xs font-mono uppercase text-center ${activeTab === "status" ? "border-b-2 border-on-surface font-bold text-on-surface" : "text-on-surface-variant"}`}
+          className={`flex-1 py-2 text-xs text-center ${activeTab === "status" ? "border-b-2 border-on-surface font-bold text-on-surface" : "text-on-surface-variant"}`}
         >
           Status
         </button>
         <button
           data-testid="system-tab-settings"
           onClick={() => setActiveTab("settings")}
-          className={`flex-1 py-2 text-xs font-mono uppercase text-center ${activeTab === "settings" ? "border-b-2 border-on-surface font-bold text-on-surface" : "text-on-surface-variant"}`}
+          className={`flex-1 py-2 text-xs text-center ${activeTab === "settings" ? "border-b-2 border-on-surface font-bold text-on-surface" : "text-on-surface-variant"}`}
         >
           Settings
         </button>
@@ -136,8 +136,8 @@ export function SystemPanel({ onClose, events, initialTab = "log" }: SystemPanel
       {activeTab === "status" && (
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4" data-testid="system-status-tab">
           <section className="border border-outline-variant/28 bg-surface-lowest/[0.12] px-3 py-3">
-            <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-3">Runtime</div>
-            <div className="space-y-3 font-mono text-[10px]">
+            <div className="text-[11px] text-on-surface-variant mb-3">Runtime</div>
+            <div className="space-y-3 font-mono text-[11px]">
               <div className="flex items-start gap-3">
                 <ServerCog className={`mt-[1px] h-3.5 w-3.5 shrink-0 ${daemonStateTone(daemonState)}`} />
                 <div className="min-w-0">

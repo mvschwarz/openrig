@@ -20,12 +20,14 @@ export interface VellumCardProps extends React.HTMLAttributes<HTMLElement> {
 }
 
 const variantSurface: Record<VellumCardVariant, string> = {
-  primary: "bg-surface-lowest border border-on-surface",
-  ghost: "bg-transparent border border-outline-variant",
+  primary: "rounded-lg border bg-surface-lowest shadow-sm",
+  ghost: "rounded-lg border bg-surface-lowest shadow-sm",
 };
 
 const elevationShadow: Record<VellumCardElevation, string> = {
-  elevated: "hard-shadow",
+  // Clean theme (ui-redesign C03): no vellum hard offset shadows; the card
+  // surface in variantSurface already carries shadow-sm.
+  elevated: "",
   flat: "",
 };
 
@@ -57,7 +59,7 @@ export function VellumCard({
   const inner = (
     <>
       {header ? (
-        <div className="bg-inverse-surface text-background px-4 py-1.5 font-mono text-[10px]">
+        <div className="px-4 py-1.5 text-sm font-semibold text-on-surface">
           {header}
         </div>
       ) : null}

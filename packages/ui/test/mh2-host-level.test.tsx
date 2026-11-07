@@ -5,7 +5,7 @@
 
 import type { ReactElement } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, cleanup, act } from "@testing-library/react";
 import {
   createMemoryHistory,
   RouterProvider,
@@ -497,7 +497,7 @@ describe("SubscriptionToggleList HOSTS section (FR-5 — complete, don't rebuild
     });
     renderWithRouter(() => <SubscriptionToggleList />);
     await waitFor(() => expect(screen.getByTestId("subscription-host-toggle-list")).toBeTruthy());
-    expect(screen.getByTestId("subscription-host-toggle-local").textContent).toContain("forced ON");
+    expect(screen.getByTestId("subscription-host-toggle-local").textContent).toContain("Forced on");
     expect(screen.getByTestId("subscription-host-toggle-vps-a").getAttribute("data-on")).toBe("true");
     expect(screen.getByTestId("subscription-host-toggle-vps-b").getAttribute("data-on")).toBe("false");
     expect(screen.getByTestId("subscription-host-toggle-vps-gone").getAttribute("data-on")).toBe("true");
@@ -689,7 +689,7 @@ describe("rev1-r2 B1/B2 — remote action gates (topology table / terminal grid 
   });
 
   it("seat page remote (B1+B2): host-keyed detail fetch, NO bare local URL, actions row read-only, inline terminal gated, ZERO POSTs", async () => {
-    wireB1Fetch();
+    wireB1Fetch("vps-a");
     renderPrimed(() => <LiveNodeDetails rigId="r1" logicalId="a1" />, "vps-a");
     await waitFor(() => expect(screen.getByTestId("live-node-actions-remote-readonly")).toBeTruthy());
     // B1: no local action affordances, terminal honestly gated
@@ -757,6 +757,72 @@ describe("rev1-r2 B1/B2 — remote action gates (topology table / terminal grid 
     expect(screen.queryByTestId("rig-status-remote-readonly")).toBeNull();
     const statusCalls = mockFetch.mock.calls.map(([u]) => String(u)).filter((u) => u.includes("/status"));
     expect(statusCalls).toContain("/api/rigs/r1/status");
+  });
+
+  // F11 (#2417): after switching remote→local while on a rig URL, the
+  // previous host's summary rides as placeholder data — local actions
+  // must wait for the fresh local summary, not the stale remote rig.
+  it("rig-scope host switch: stale placeholder summary does not mount local actions", async () => {
+    const REMOTE_SUMMARY = [{ id: "r1", name: "remote-rig-one", nodeCount: 1 }];
+    // Deferred for the in-flight local summary: resolves when the test
+    // decides the local data has crossed the network (phase 3).
+    let resolveLocalSummary: ((v: unknown) => void) | null = null;
+    mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") return { ok: true, json: async () => ({ ok: true }) };
+      const u = String(url);
+      if (u.startsWith("/api/hosts")) return { ok: true, json: async () => hostsPayload("vps-a") };
+      if (u.startsWith("/api/ps")) return { ok: true, json: async () => [] };
+      if (u.startsWith("/api/rigs/summary")) {
+        if (u.includes("host=vps-a")) return { ok: true, json: async () => REMOTE_SUMMARY };
+        // Local data still crossing the network: hang until phase 3.
+        return new Promise((resolve) => { resolveLocalSummary = resolve; });
+      }
+      if (u.includes("/status")) return { ok: true, json: async () => RIG_STATUS };
+      if (u.includes("/graph")) return { ok: true, json: async () => ({ nodes: [], edges: [] }) };
+      if (u.includes("/nodes/")) return { ok: true, json: async () => NODE_DETAIL_MIN };
+      if (u.includes("/nodes")) return { ok: true, json: async () => NODES_R1 };
+      return { ok: true, json: async () => ({}) };
+    });
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 5 * 60_000 } },
+    });
+    const rootRoute = createRootRoute({ component: () => <Outlet /> });
+    const indexRoute = createRoute({
+      getParentRoute: () => rootRoute,
+      path: "/topology/rig/$rigId",
+      component: () => <RigScopePage />,
+    });
+    const router = createRouter({
+      routeTree: rootRoute.addChildren([indexRoute]),
+      history: createMemoryHistory({ initialEntries: ["/topology/rig/r1"] }),
+    });
+    render(
+      <QueryClientProvider client={qc}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    // Phase 1: remote selected — honest marker, no actions.
+    await waitFor(() => expect(screen.getByTestId("rig-status-remote-readonly")).toBeTruthy());
+    expect(document.querySelector('[data-testid^="rig-primary-action"]')).toBeNull();
+    // Phase 2: operator switches to local while the summary is in flight.
+    act(() => {
+      qc.setQueryData(["hosts"], {
+        ownName: "Linkpix Proof Host",
+        selected: LOCAL_HOST_ID,
+        hosts: [{ id: "vps-a", transport: "http", url: "http://vps-a:7433", selected: false, status: "reachable" }],
+      });
+    });
+    await waitFor(() => expect(screen.queryByTestId("rig-status-remote-readonly")).toBeNull());
+    // Placeholder data is the stale REMOTE summary: no local actions yet
+    // (RigActionsMenu), and the menu must not carry the remote rig's name.
+    expect(screen.queryByTestId("rig-actions")).toBeNull();
+    expect(document.querySelector('[data-testid^="rig-primary-action"]')).toBeNull();
+    expect(postCalls()).toEqual([]);
+    // Phase 3: local summary lands — actions mount with the LOCAL rig name.
+    act(() => {
+      resolveLocalSummary?.({ ok: true, json: async () => RIG_SUMMARY });
+    });
+    await waitFor(() => expect(screen.getByTestId("rig-actions")).toBeTruthy());
   });
 
   it("project tree remote: the local rescan (refresh) affordance never renders", async () => {

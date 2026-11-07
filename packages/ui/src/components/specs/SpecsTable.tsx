@@ -19,7 +19,7 @@ const COLUMNS: ColumnDef<SpecLibraryEntry>[] = [
     accessorKey: "kind",
     header: "Kind",
     cell: ({ getValue }) => (
-      <span className="font-mono text-[10px] uppercase tracking-wide">
+      <span className="text-[11px] ">
         {String(getValue())}
       </span>
     ),
@@ -48,7 +48,7 @@ const COLUMNS: ColumnDef<SpecLibraryEntry>[] = [
     accessorKey: "sourceType",
     header: "Source",
     cell: ({ getValue }) => (
-      <span className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">
+      <span className="text-[11px] text-on-surface-variant">
         {String(getValue()).replace("_", " ")}
       </span>
     ),
@@ -59,7 +59,7 @@ const COLUMNS: ColumnDef<SpecLibraryEntry>[] = [
     cell: ({ getValue }) => {
       const v = String(getValue() ?? "");
       return (
-        <span className="font-mono text-[10px] text-on-surface-variant">
+        <span className="font-mono text-[11px] text-on-surface-variant">
           {v ? v.slice(0, 10) : "—"}
         </span>
       );
@@ -105,7 +105,7 @@ export function SpecsTable() {
           className="max-w-xs"
           testId="specs-search-input"
         />
-        <span className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant ml-auto">
+        <span className="text-[11px] text-on-surface-variant ml-auto">
           {table.getFilteredRowModel().rows.length} of {data.length}
         </span>
       </div>
@@ -118,7 +118,7 @@ export function SpecsTable() {
                   <th
                     key={h.id}
                     onClick={h.column.getToggleSortingHandler()}
-                    className="px-3 py-2 font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant cursor-pointer select-none"
+                    className="px-3 py-2 text-[11px] text-on-surface-variant cursor-pointer select-none"
                   >
                     {flexRender(h.column.columnDef.header, h.getContext())}
                     {{ asc: " ↑", desc: " ↓" }[h.column.getIsSorted() as string] ?? null}

@@ -178,7 +178,8 @@ describe("FleetPage — the glance (locked twin fleet-glance-route-dark anatomy)
     const { getByTestId } = renderFleetPage();
     await waitFor(() => expect(getByTestId("fleet-rollup")).toBeTruthy());
     const rollup = getByTestId("fleet-rollup").textContent ?? "";
-    expect(rollup).toContain("● 7 need you");
+    // C14c: need-you count renders via StatusBadge (tone+label), not a ● glyph.
+    expect(rollup).toContain("7 need you");
     expect(rollup).toContain("▲ 9 exceptions");
     expect(rollup).toContain("3 hosts");
     expect(rollup).toContain("1 unreachable");
@@ -191,7 +192,8 @@ describe("FleetPage — the glance (locked twin fleet-glance-route-dark anatomy)
     const vpsA = getByTestId("fleet-host-vps-a");
     expect(vpsA.textContent).toContain("▲ 1 overdue");
     expect(vpsA.textContent).toContain("▲ 1 stuck");
-    expect(vpsA.textContent).toContain("1 rigs · 4 seats");
+    // C14c: prose says "agent" (brief §4.2); machine math kept in title.
+    expect(vpsA.textContent).toContain("1 rig · 4 agents");
     expect(getByTestId("fleet-host-vps-a-open")).toBeTruthy();
     // Header-math property on an HONEST payload: rollup == per-host sums.
     const local = getByTestId("fleet-host-local");

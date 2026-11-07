@@ -66,6 +66,7 @@
 
     --destructive: var(--tertiary);
     --destructive-foreground: 0 0% 100%;
+    --secondary-foreground: var(--on-surface-variant);
     --warning: 40 90% 50%;
     --accent: var(--secondary);
   }
@@ -642,6 +643,7 @@
      inherit the dark values automatically (--foreground/--card/--border/--input/
      --ring/--muted/--destructive/--accent/--popover). */
   --destructive-foreground: 0 0% 100%;
+  --secondary-foreground: var(--on-surface-variant);
 }
 
 /* --- Co-located .dark variants for the hardcoded-hex/rgba escape hatches that
@@ -685,3 +687,201 @@
    can ever win; the component div's own token surface remains the visible fill. Live-browser
    QC still owns the final visual confirmation of the stacked-layer behavior. */
 .dark .react-flow__node-podGroup { background: transparent !important; }
+
+/* =====================================================================
+   CLEAN THEME (ui-redesign C02). Overrides the Vellum token VALUES while
+   keeping every token NAME, so all existing Tailwind classes keep working.
+   This block must stay LAST in globals.css so it wins the cascade.
+   --secondary stays a NEUTRAL slate on purpose: many components use
+   text-secondary for small labels. Links/focus use the new --brand.
+   ===================================================================== */
+:root {
+  --background: 0 0% 100%;
+  --surface-container-lowest: 0 0% 100%;
+  --surface-container-low: 240 5% 97%;
+  --surface-container: 240 5% 95%;
+  --surface-container-high: 240 5% 92%;
+  --surface-container-highest: 240 4% 89%;
+  --on-surface: 240 10% 10%;
+  --on-surface-variant: 240 4% 42%;
+  --secondary: 240 4% 46%;
+  --secondary-container: 240 5% 94%;
+  --secondary-foreground: var(--on-surface-variant);
+  --brand: 221 83% 53%;
+  --brand-foreground: 0 0% 100%;
+  --tertiary: 0 72% 51%;
+  --error: 0 72% 51%;
+  --primary: 240 6% 10%;
+  --inverse-surface: 240 6% 10%;
+  --outline: 240 5% 65%;
+  --outline-variant: 240 6% 88%;
+  --success: 142 72% 29%;
+  --warning: 32 95% 34%;
+  --ring: var(--brand);
+  --radius: 0.5rem;
+  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --sidebar-width: 15rem;
+  --sidebar-width-collapsed: 3.5rem;
+}
+.dark {
+  --background: 240 6% 6%;
+  --surface-container-lowest: 240 6% 8%;
+  --surface-container-low: 240 5% 10%;
+  --surface-container: 240 5% 13%;
+  --surface-container-high: 240 4% 16%;
+  --surface-container-highest: 240 4% 20%;
+  --on-surface: 0 0% 95%;
+  --on-surface-variant: 240 5% 65%;
+  --secondary: 240 5% 65%;
+  --secondary-container: 240 4% 16%;
+  --secondary-foreground: var(--on-surface-variant);
+  --brand: 217 91% 60%;
+  --brand-foreground: 0 0% 100%;
+  --tertiary: 0 84% 60%;
+  --error: 0 84% 60%;
+  --primary: 0 0% 95%;
+  --inverse-surface: 0 0% 95%;
+  --outline: 240 4% 46%;
+  --outline-variant: 240 4% 20%;
+  --success: 142 69% 45%;
+  --warning: 38 92% 55%;
+  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+}
+* { border-color: hsl(var(--outline-variant)); }
+body, .dark body { background-image: none; }
+.vellum, .vellum-heavy, .dark .vellum, .dark .vellum-heavy {
+  background: hsl(var(--surface-container-lowest));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.hard-shadow, .hard-shadow-light, .dark .hard-shadow { box-shadow: var(--shadow-card); }
+.hard-shadow-hover:hover, .dark .hard-shadow-hover:hover { box-shadow: var(--shadow-card); translate: none; }
+.reg-tl, .reg-tr, .reg-bl, .reg-br, .reg-mark::before, .reg-mark::after { display: none; }
+
+/* F4 (#2417): HostConfigCard's df-hosts-* rules, moved out of the retired
+   dashboard-fidelity.css (.df-root scope, no longer imported) into the
+   active Clean theme. Scoped to the component's own .df-hosts root so no
+   .df-root ancestor is required; colors ride theme tokens. */
+.df-hosts {
+  margin: 0 0 24px;
+  max-width: 640px;
+}
+.df-hosts-own,
+.df-hosts-row,
+.df-hosts-add,
+.df-hosts-pairing,
+.df-hosts-rename {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  padding: 4px 0;
+}
+.df-hosts-name { font-weight: 600; }
+.df-hosts-tag,
+.df-hosts-transport,
+.df-hosts-status { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.7; }
+.df-hosts-status-unreachable { color: hsl(var(--error)); opacity: 1; }
+.df-hosts-selected { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; border: 1px solid hsl(var(--outline-variant)); padding: 1px 6px; }
+.df-hosts-marker { width: 10px; }
+.df-hosts-id { font-size: 9px; opacity: 0.7; }
+.df-hosts-addr { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.df-hosts-list { border-top: 1px solid hsl(var(--outline-variant)); margin-top: 4px; }
+.df-hosts-row { border-bottom: 1px dashed hsl(var(--outline-variant)); }
+.df-hosts-btn {
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border: 1px solid hsl(var(--outline-variant));
+  padding: 2px 8px;
+  background: transparent;
+  cursor: pointer;
+}
+.df-hosts-btn:hover { background: hsl(var(--surface-container-low)); }
+.df-hosts-input {
+  font-family: inherit;
+  font-size: 11px;
+  border: 1px solid hsl(var(--outline-variant));
+  padding: 3px 6px;
+  background: transparent;
+  flex: 1;
+  max-width: 320px;
+}
+.df-hosts-empty { font-size: 11px; opacity: 0.7; padding: 6px 0; }
+.df-hosts-banner { font-size: 10px; padding: 4px 0; opacity: 0.85; }
+.df-hosts-error { color: hsl(var(--error)); font-size: 10px; }
+
+/* F8 (#2417): cmdk command-palette styling (cmdk@1.1.1 ships unstyled).
+   Modeled on the shadcn Dialog overlay/content pattern above; all colors
+   ride theme tokens so dark mode follows automatically. */
+.cmdk-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: hsl(var(--background) / 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.cmdk-content {
+  position: fixed;
+  left: 50%;
+  top: 12vh;
+  z-index: 50;
+  width: min(36rem, calc(100vw - 2rem));
+  transform: translateX(-50%);
+  overflow: hidden;
+  border-radius: 0.5rem;
+  border: 1px solid hsl(var(--outline-variant));
+  background: hsl(var(--surface-container-lowest));
+  box-shadow: 0 20px 40px rgba(46, 52, 46, 0.12);
+}
+.cmdk-input {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  color: hsl(var(--on-surface));
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid hsl(var(--outline-variant));
+  outline: none;
+}
+.cmdk-input::placeholder {
+  color: hsl(var(--on-surface-variant));
+}
+.cmdk-list {
+  max-height: 22rem;
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+.cmdk-group {
+  padding: 0.25rem 0;
+}
+.cmdk-group [cmdk-group-heading] {
+  padding: 0.375rem 0.5rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: hsl(var(--on-surface-variant));
+}
+.cmdk-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  font-size: 0.875rem;
+  color: hsl(var(--on-surface));
+  border-radius: 0.375rem;
+  cursor: pointer;
+}
+.cmdk-item[data-selected="true"] {
+  background: hsl(var(--surface-container-low));
+}
+.cmdk-empty {
+  padding: 1.5rem 1rem;
+  text-align: center;
+  font-size: 0.875rem;
+  color: hsl(var(--on-surface-variant));
+}

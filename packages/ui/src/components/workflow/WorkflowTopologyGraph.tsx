@@ -148,7 +148,7 @@ function WorkflowStepNode({ data }: { data: WorkflowStepData }) {
       <Handle type="source" position={Position.Bottom} id={H_OUT_BOTTOM} className="opacity-0" />
       <Handle type="target" position={Position.Right} id={H_IN_SIDE} className="opacity-0" />
       <Handle type="source" position={Position.Right} id={H_OUT_SIDE} className="opacity-0" />
-      <div className="font-mono text-[10px] leading-tight">
+      <div className="font-mono text-[11px] leading-tight">
         <div className="flex items-center justify-between gap-2 font-bold">
           <span>
             {data.isCurrent ? <span aria-hidden>● </span> : null}
@@ -157,9 +157,9 @@ function WorkflowStepNode({ data }: { data: WorkflowStepData }) {
           {data.isTerminal ? <ToolMark tool="terminal" size="xs" title="Terminal step" decorative /> : null}
         </div>
         <div className="text-on-surface-variant">{data.role}</div>
-        {data.preferredTarget && <div className="text-[8px] text-on-surface-variant">→ {data.preferredTarget}</div>}
+        {data.preferredTarget && <div className="text-[11px] text-on-surface-variant">→ {data.preferredTarget}</div>}
         {hasPins && (
-          <div className="text-[8px] text-on-surface-variant">
+          <div className="text-[11px] text-on-surface-variant">
             {data.harness ? <span data-testid={`wf-node-harness-${data.stepId}`}>⌁ {data.harness}</span> : null}
             {data.host ? <span data-testid={`wf-node-host-${data.stepId}`}>{data.harness ? " · " : ""}host: {data.host}</span> : null}
             {data.gate ? (

@@ -42,7 +42,7 @@ export function VellumSheet({
   return (
     <div
       className={cn(
-        "vellum-heavy relative flex flex-col h-full shadow-[0_0_24px_rgba(0,0,0,0.08)]",
+        "vellum-heavy relative flex flex-col h-full shadow-[0_0_24px_rgba(0,0,0,0.08)] pb-16 lg:pb-0",
         widthClass[width],
         edgeClass[edge],
         className,
@@ -57,7 +57,7 @@ export function VellumSheet({
           type="button"
           onClick={onClose}
           aria-label="Close sheet"
-          className="absolute top-2 right-2 z-10 px-2 py-0.5 border border-on-surface bg-surface-lowest font-mono text-[10px] hover:bg-surface-low"
+          className="absolute top-2 right-2 z-10 px-2 py-0.5 border border-on-surface bg-surface-lowest font-mono text-[11px] hover:bg-surface-low"
           data-testid={testId ? `${testId}-close` : undefined}
         >
           ×

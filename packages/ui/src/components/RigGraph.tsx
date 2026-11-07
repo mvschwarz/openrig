@@ -47,7 +47,7 @@ function PodGroupNode({
             : ""
       }`}
     >
-      <div className="absolute left-4 top-3 inline-flex items-center font-mono text-[12px] font-bold leading-none tracking-[0.08em] text-on-surface">
+      <div className="absolute left-4 top-3 inline-flex items-center font-mono text-[12px] font-bold leading-none text-on-surface">
         {`${label} pod`}
       </div>
     </div>
@@ -60,9 +60,9 @@ function DiscoveredNode({ data }: { data: { session: DiscoveredSession } }) {
   return (
     <div data-testid="discovered-graph-node" className="border-dashed border-2 border-foreground/30 bg-surface-low/50 p-spacing-3 min-w-[180px]">
       <Handle type="target" position={Position.Top} className="opacity-0" />
-      <div className="text-label-sm font-mono uppercase mb-spacing-1">{s.tmuxSession}:{s.tmuxPane}</div>
+      <div className="text-label-sm mb-spacing-1">{s.tmuxSession}:{s.tmuxPane}</div>
       <div className="flex gap-spacing-2 items-center mb-spacing-1">
-        <span className="text-label-sm uppercase text-foreground-muted">{s.runtimeHint}</span>
+        <span className="text-label-sm text-foreground-muted">{s.runtimeHint}</span>
         <span className="text-label-sm text-foreground-muted">{s.confidence}</span>
       </div>
       {s.cwd && <div className="text-label-sm font-mono text-foreground-muted truncate">{s.cwd}</div>}
@@ -93,7 +93,7 @@ function EmptyTopologyGhost() {
         <line x1="200" y1="100" x2="300" y2="180" stroke="currentColor" strokeWidth="1" strokeDasharray="4 4" />
       </svg>
       <div className="relative z-10 text-center">
-        <h2 className="text-headline-md uppercase">EMPTY TOPOLOGY</h2>
+        <h2 className="text-headline-md">EMPTY TOPOLOGY</h2>
       </div>
     </div>
   );
@@ -523,7 +523,7 @@ export function RigGraph({
         </div>
       )}
       {focusMessage && (
-        <div className={`absolute top-spacing-4 left-spacing-4 z-20 px-spacing-4 py-spacing-2 font-mono text-[10px] border ${
+        <div className={`absolute top-spacing-4 left-spacing-4 z-20 px-spacing-4 py-spacing-2 font-mono text-[11px] border ${
           focusMessage.type === "success" ? "bg-surface-lowest border-on-surface text-on-surface" :
           focusMessage.type === "error" ? "bg-tertiary/10 border-tertiary text-tertiary" :
           "bg-surface-lowest border-outline-variant text-on-surface-variant"
@@ -534,7 +534,7 @@ export function RigGraph({
       {placementMode && !graphIsRemote && (
         <div
           data-testid="graph-placement-banner"
-          className="absolute top-spacing-4 left-1/2 z-20 -translate-x-1/2 border border-emerald-300/90 bg-[rgba(236,253,245,0.92)] px-3.5 py-2 font-mono text-[10px] text-emerald-950 shadow-[0_12px_28px_rgba(34,197,94,0.14)] backdrop-blur-sm"
+          className="absolute top-spacing-4 left-1/2 z-20 -translate-x-1/2 border border-emerald-300/90 bg-[rgba(236,253,245,0.92)] px-3.5 py-2 font-mono text-[11px] text-emerald-950 shadow-[0_12px_28px_rgba(34,197,94,0.14)] backdrop-blur-sm"
         >
           PLACEMENT MODE / click an available node to bind, or click a pod to add a new node.
         </div>

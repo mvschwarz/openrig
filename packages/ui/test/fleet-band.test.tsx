@@ -155,7 +155,7 @@ describe("FleetBand — rollup + worst line (the LOCKED band twin's anatomy)", (
     );
     const { getByTestId } = renderBand();
     await waitFor(() => expect(getByTestId("fleet-band")).toBeTruthy());
-    expect(getByTestId("fleet-band").textContent).toContain("quiet");
+    expect(getByTestId("fleet-band").textContent).toContain("Quiet");
   });
 
   it("unreachable members surface in the band rollup (ambient honesty)", async () => {

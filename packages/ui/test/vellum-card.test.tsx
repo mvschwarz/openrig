@@ -14,12 +14,14 @@ describe("VellumCard (Phase 1 primitive)", () => {
     expect(screen.getByText("HELLO")).toBeTruthy();
   });
 
-  it("default container carries vellum classes (bg-white + border-stone-900 + hard-shadow)", () => {
+  it("default container carries clean-theme card classes (rounded-lg border bg-surface-lowest shadow-sm)", () => {
     const { container } = render(<VellumCard testId="vc">x</VellumCard>);
     const el = container.querySelector("[data-testid='vc']") as HTMLElement;
     expect(el.className).toContain("bg-surface-lowest");
-    expect(el.className).toContain("border-on-surface");
-    expect(el.className).toContain("hard-shadow");
+    // Clean theme (ui-redesign C03): neutral border + small shadow, no vellum hard-shadow.
+    expect(el.className).toContain("rounded-lg");
+    expect(el.className).toContain("shadow-sm");
+    expect(el.className).not.toContain("hard-shadow");
   });
 
   it("renders 4 registration mark corners by default", () => {
@@ -45,13 +47,14 @@ describe("VellumCard (Phase 1 primitive)", () => {
     expect(screen.getByText("RIG: VELOCITY")).toBeTruthy();
   });
 
-  it("variant=ghost replaces primary surface classes", () => {
+  it("variant=ghost keeps the clean-theme card surface", () => {
     const { container } = render(
       <VellumCard variant="ghost" testId="vc-g">x</VellumCard>,
     );
     const el = container.querySelector("[data-testid='vc-g']") as HTMLElement;
-    expect(el.className).toContain("bg-transparent");
-    expect(el.className).not.toContain("bg-white");
+    // Clean theme (ui-redesign C03): ghost and primary share the neutral card surface.
+    expect(el.className).toContain("bg-surface-lowest");
+    expect(el.className).toContain("rounded-lg");
   });
 
   it("elevation=flat omits hard-shadow", () => {

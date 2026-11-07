@@ -82,7 +82,7 @@ function HybridPodGroupNodeInner({ data }: { data: HybridPodGroupNodeData }) {
       data-testid="hybrid-pod-group-node"
       className="relative h-full w-full border border-dashed border-outline/55 bg-background/25"
     >
-      <div className="absolute left-2 top-2 flex items-center gap-2 font-mono text-[9px] lowercase tracking-[0.02em] text-on-surface-variant">
+      <div className="absolute left-2 top-2 flex items-center gap-2 font-mono text-[11px] lowercase text-on-surface-variant">
         <span>{label}</span>
         {typeof data.agentCount === "number" ? (
           <span className="text-on-surface-variant">{data.agentCount}</span>
@@ -164,7 +164,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
       <Handle type="target" position={Position.Left} className="opacity-0" />
       <div
         className={cn(
-          "flex items-center justify-between gap-1 px-2 py-1 font-mono text-[8px]",
+          "flex items-center justify-between gap-1 px-2 py-1 font-mono text-[11px]",
           isInfra
             ? "bg-outline text-white border-b border-on-surface"
             : core
@@ -242,7 +242,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
           <span
             data-testid={`hybrid-cmux-error-${data.logicalId}`}
             role="alert"
-            className="absolute right-1.5 top-14 z-20 max-w-[180px] border border-rose-300 bg-rose-50 px-1.5 py-1 font-mono text-[8px] leading-tight text-rose-700 whitespace-normal break-words shadow-sm"
+            className="absolute right-1.5 top-14 z-20 max-w-[180px] border border-rose-300 bg-rose-50 px-1.5 py-1 font-mono text-[11px] leading-tight text-rose-700 whitespace-normal break-words shadow-sm"
           >
             {cmuxLaunch.error instanceof Error ? cmuxLaunch.error.message : String(cmuxLaunch.error)}
           </span>
@@ -250,7 +250,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
         </>
       ) : null}
       <div className="space-y-1 px-2 py-1.5">
-        <div className="truncate font-mono text-[8px] leading-tight text-on-surface-variant">
+        <div className="truncate font-mono text-[11px] leading-tight text-on-surface-variant">
           {data.canonicalSessionName ?? data.logicalId}
         </div>
         <div className="min-w-0">
@@ -263,7 +263,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
             className="max-w-full"
           />
           {!runtimeTitle && (data.resolvedSpecName || data.profile) ? (
-            <span className="ml-1 font-mono text-[7px] uppercase tracking-[0.12em] text-on-surface-variant">
+            <span className="ml-1 text-[11px] text-on-surface-variant">
               {data.resolvedSpecName || data.profile}
             </span>
           ) : null}
@@ -277,7 +277,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
           </div>
           <div
             className={cn(
-              "font-mono text-[13px] font-bold leading-none tracking-[0.02em]",
+              "font-mono text-[13px] font-bold leading-none",
               tokenLabel ? "text-on-surface-variant" : "text-on-surface-variant",
             )}
             data-testid="hybrid-token-total"

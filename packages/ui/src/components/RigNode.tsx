@@ -163,12 +163,12 @@ export function RigNode({ data }: { data: RigNodeData }) {
   };
 
   const buttonClass = (kind: "cmux") =>
-    `inline-flex items-center gap-1 px-1.5 py-0.5 border font-mono text-[7px] uppercase transition-colors ${
+    `inline-flex items-center gap-1 px-1.5 py-0.5 border text-[11px] transition-colors ${
       actionFeedback === kind
         ? "bg-inverse-surface text-background border-on-surface"
         : "bg-surface-lowest text-on-surface border-outline-variant hover:bg-surface-low"
     }`;
-  const toolbarIconButtonClass = "border font-mono text-[7px] uppercase transition-colors bg-surface-lowest text-on-surface border-outline-variant hover:bg-surface-low inline-flex h-6 w-6 items-center justify-center px-0 py-0";
+  const toolbarIconButtonClass = "border text-[11px] transition-colors bg-surface-lowest text-on-surface border-outline-variant hover:bg-surface-low inline-flex h-6 w-6 items-center justify-center px-0 py-0";
   const terminalSessionName = data.canonicalSessionName ?? data.binding?.tmuxSession ?? null;
 
   const card = (
@@ -194,7 +194,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
       <Handle type="target" position={Position.Top} />
 
       {/* Header stripe — dark for core, muted for infra, light for workers */}
-      <div className={`px-3 py-1 font-mono text-[10px] flex justify-between items-center ${
+      <div className={`px-3 py-1 font-mono text-[11px] flex justify-between items-center ${
         isInfra
           ? "bg-outline text-white border-b border-on-surface"
           : core
@@ -208,10 +208,10 @@ export function RigNode({ data }: { data: RigNodeData }) {
           {activityIsStale && (
             <span
               data-testid={`activity-staleness-${data.logicalId}`}
-              className="font-mono text-[7px] uppercase tracking-[0.10em] text-on-surface-variant"
+              className="text-[11px] text-on-surface-variant"
               title={`Activity sample is older than threshold; daemon may not be probing this seat`}
             >
-              stale
+              Stale
             </span>
           )}
           <span
@@ -237,7 +237,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
 
       {/* Body */}
       <div className="space-y-1 px-2 py-1.5">
-        <div className="truncate font-mono text-[8px] leading-tight text-on-surface-variant">
+        <div className="truncate font-mono text-[11px] leading-tight text-on-surface-variant">
           {data.canonicalSessionName ?? data.logicalId}
         </div>
 
@@ -251,7 +251,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
             className="max-w-full"
           />
           {!runtimeTitle && data.profile ? (
-            <span className="ml-1 font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">
+            <span className="ml-1 text-[11px] text-on-surface-variant">
               {data.profile}
             </span>
           ) : null}
@@ -259,7 +259,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
 
         {/* Spec hint */}
         {data.resolvedSpecName && (
-          <div className="font-mono text-[8px] text-on-surface-variant" data-testid="spec-hint">
+          <div className="font-mono text-[11px] text-on-surface-variant" data-testid="spec-hint">
             {data.resolvedSpecName}{data.profile ? ` · ${data.profile}` : ""}
           </div>
         )}
@@ -284,7 +284,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
             </div>
           )}
           <div
-            className={`font-mono text-base font-bold leading-none tracking-[0.02em] ${tokenLabel ? "text-on-surface-variant" : "text-on-surface-variant"}`}
+            className={`font-mono text-base font-bold leading-none ${tokenLabel ? "text-on-surface-variant" : "text-on-surface-variant"}`}
             data-testid="token-total"
             title={tokenTitle ?? "Token sample unavailable"}
           >
@@ -294,7 +294,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
 
         {/* Restore outcome */}
         {data.restoreOutcome && data.restoreOutcome !== "n-a" && (
-          <div className="font-mono text-[8px] text-on-surface-variant">
+          <div className="font-mono text-[11px] text-on-surface-variant">
             RESTORE: {data.restoreOutcome}
           </div>
         )}
@@ -305,7 +305,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
             silently "green + oriented" without a proof. `n-a` (resumed /
             non-agent) is hidden, mirroring the RESTORE badge. */}
         {data.oriented && data.oriented !== "n-a" && (
-          <div className="font-mono text-[8px] text-on-surface-variant" data-testid="orientation-badge">
+          <div className="font-mono text-[11px] text-on-surface-variant" data-testid="orientation-badge">
             ORIENT: {data.oriented}
           </div>
         )}
@@ -315,7 +315,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
           <div
             data-testid="package-badge"
             title={data.packageRefs.join(", ")}
-            className="font-mono text-[8px] text-on-surface-variant"
+            className="font-mono text-[11px] text-on-surface-variant"
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => e.stopPropagation()}
           >
@@ -374,7 +374,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
           <div className="pt-1">
             <span
               data-testid={`placement-chip-${data.logicalId}`}
-              className={`inline-flex items-center border px-1.5 py-0.5 font-mono text-[7px] uppercase tracking-[0.12em] ${
+              className={`inline-flex items-center border px-1.5 py-0.5 text-[11px] ${
                 data.placementState === "selected"
                   ? "border-emerald-700 bg-emerald-700 text-white"
                   : "border-emerald-300 bg-emerald-50 text-emerald-800"
@@ -389,7 +389,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
       {hoverHintLines.length > 0 && (
         <div
           data-testid="node-hover-hint"
-          className="pointer-events-none absolute left-2 top-full z-20 mt-2 hidden min-w-[180px] border border-on-surface bg-surface-lowest px-2 py-1 font-mono text-[8px] text-on-surface shadow-[4px_4px_0_rgba(28,25,23,0.14)] group-hover:block"
+          className="pointer-events-none absolute left-2 top-full z-20 mt-2 hidden min-w-[180px] border border-on-surface bg-surface-lowest px-2 py-1 font-mono text-[11px] text-on-surface shadow-[4px_4px_0_rgba(28,25,23,0.14)] group-hover:block"
         >
           {hoverHintLines.map((line) => (
             <div key={line}>{line}</div>

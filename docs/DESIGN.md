@@ -1,358 +1,297 @@
-# OpenRig Design
+# OpenRig Design (Clean theme)
 
-This document captures the current OpenRig visual system so the product can be
-recreated, extended, or translated into other media without reverse-engineering
-the UI from code.
+This document is the visual and interaction spec for the OpenRig web UI in
+`packages/ui`. It describes the Clean theme: a calm, neutral, light-and-dark
+operator console built on design tokens, one status vocabulary, and a small set
+of shared primitives.
 
-It describes the web UI in `packages/ui`, which is in maintenance mode (see
-`docs/reference/developing.md`). The terminal UI has its own theme layer in
-`packages/tui/src/theme.ts`.
+The web UI is **experimental**, in **maintenance mode**, supported
+**best-effort**; **the CLI is primary**. There is no scheduled removal and PRs
+are welcome.
 
 ## Essence
 
-OpenRig is a local control plane for multi-agent work. The interface should feel
-like an operator's tactical dossier: precise, technical, calm, and legible under
-pressure. It is not a consumer SaaS dashboard and not a decorative terminal skin.
-It is a paper-and-glass workspace for watching work move through rigs, agents,
-queues, projects, files, and proof packets.
+OpenRig is a local control plane for multi-agent work. The screen answers, in
+order: what is happening, does it need me, what do I do. "Needs you" items sit
+above everything else on the Dashboard and in the Inbox.
 
-The brand should communicate:
+The interface feels like a serious local cockpit, not a consumer SaaS
+dashboard and not a decorative terminal skin. It is calm, legible, and plain in
+its words: sentence-case labels a first-time operator can read without a
+glossary.
 
-- Operator confidence: the human can see what is happening and what needs action.
-- Composable systems: workspace, mission, slice, rig, pod, seat, queue, file, and
-  proof surfaces share primitives instead of bespoke one-off cards.
-- Live work: activity, flow, context usage, proofs, and terminal state are visible
-  without turning the UI into a log dump.
-- Local-first control: the app looks like a serious local cockpit, not a cloud
-  marketing product.
+## Design principles
 
-## Design Language
+Decided; do not re-litigate.
 
-OpenRig currently uses two deliberate surface languages.
+1. **The screen answers, in order: what is happening, does it need me, what
+   do I do.** Put "needs you" items above everything else on Dashboard and
+   Inbox.
+2. **Plain words, sentence case.** Labels and headings are sentence case
+   ("Needs you", not "NEEDS YOU"). No `uppercase` + `tracking-widest` on
+   anything a human reads as prose.
+3. **Machine values look machine-made.** IDs, session names
+   (`coordinator@acme-build`), token counts, timestamps, commands: `font-mono`.
+   Everything else: the body font (Inter).
+4. **One status vocabulary.** Every state renders through `StatusBadge` /
+   `StatusDot` with the same tone and label everywhere.
+5. **Hierarchy through structure, not decoration.** No paper grid, no
+   registration marks, no hard offset shadows, no translucent blur sheets.
+   Cards: `rounded-lg border bg-surface-lowest` and at most `shadow-sm`.
+6. **Every empty state says what to do first** and offers one button that does
+   it.
+7. **Show local action results in place; toast only for actions** (start, stop,
+   snapshot, restore, import, approve). Never toast state that is already
+   visible on the current screen.
+8. **Everything reachable in two clicks from the sidebar, or one ⌘K.**
 
-### Vellum Paper
+## Names
 
-Vellum is the default light surface language. It appears on navigation chrome,
-dashboard cards, topology cards, project cards, drawers, file viewers, and
-metadata containers.
+Labels changed; URLs did not. Route paths in `packages/ui/src/routes.tsx` work
+exactly as before.
 
-Use vellum for persistent product surfaces:
+| Label | URL (unchanged) |
+|---|---|
+| Dashboard | `/` |
+| Inbox | `/for-you` |
+| Rigs | `/topology` |
+| Agents | `/agents` |
+| Hosts | `/fleet` |
+| Projects | `/project` |
+| Workflows | `/workflows` |
+| Files | `/files` |
+| Library | `/specs` |
+| Settings | `/settings` |
+| Advisor | resolved at render time (`resolveChatTo`) |
+| Operator | resolved at render time |
 
-- Explorer sidebars
-- Dashboard cards
-- Topology rig, pod, and agent cards
-- Project and For You cards
-- Drawer sheets and document viewers
-- File and markdown surfaces
+The sidebar keeps the long-standing `rail-*` testids (`rail-dashboard`,
+`rail-topology`, `rail-for-you`, `rail-project`, `rail-specs`, `rail-settings`,
+`rail-advisor`, `rail-operator`, plus `rail-agents`, `rail-fleet`,
+`rail-workflows`, `rail-files`) so existing contract tests keep passing.
 
-Core vellum traits:
+In new or rewritten UI copy, say "agent" where the old copy said "seat"; "rig"
+stays "rig". URLs that contain the old words are unchanged.
 
-- Paper-grid background visible behind and sometimes through surfaces
-- White translucent fills, usually `bg-white/25` to `bg-white/40`
-- `backdrop-blur-[8px]` for layered paper
-- 1px outline or ghost border
-- Hard shadow only on paper cards, not on floating glass
-- Registration marks for framed tactical sheets
-- Square corners everywhere except tiny status dots
+## Design language
 
-Vellum should never become fully transparent. If the paper-grid makes text hard
-to read, increase opacity before adding heavy borders.
+One surface language for product surfaces and one treatment for temporary
+overlays.
 
-### Black Glass
+Product surfaces are flat and neutral: `bg-surface-lowest` cards with
+`rounded-lg`, a 1px `outline-variant` border, and at most `shadow-sm`
+(`--shadow-card`). Sections inside a card use the same recipe at a smaller
+scale. Hierarchy comes from spacing, section labels, and structure — never
+from grids, corner marks, shadows, or blur.
 
-Black glass is the floating dark surface language. It is currently used for the
-topology terminal preview and screenshot/proof overlays.
+Temporary previews (terminal popovers, image viewers, quick-look overlays)
+float above the canvas with minimal chrome and only the content needed for
+comprehension.
 
-Use black glass for temporary preview surfaces:
+Both a light and a dark theme ship. The selector offers light, dark, and system
+(`packages/ui/src/lib/theme.ts`); with no stored choice the UI follows the
+operating system's color scheme, stored under the `openrig.theme`
+local-storage key.
 
-- Terminal popovers
-- Image proof viewers
-- Other quick-look overlays where the content should float above the canvas
-
-Core black-glass traits:
-
-- Transparent dark fill, currently around `bg-stone-950/65`
-- Light text, usually `text-stone-50`
-- Optional subtle backdrop blur
-- No hard shadow
-- No 1px vellum border
-- Chrome stripped to the minimum needed for comprehension
-
-Black glass should feel like a smoked sheet above the canvas, not a framed
-terminal emulator.
-
-## Color Tokens
+## Color tokens
 
 The canonical tokens live in `packages/ui/src/globals.css` and are surfaced to
-Tailwind in `packages/ui/tailwind.config.ts`.
+Tailwind in `packages/ui/tailwind.config.ts`. Every token *name* is unchanged
+from the previous theme; the Clean theme block appended last in `globals.css`
+only changes the *values*, so all existing Tailwind classes keep working.
 
-The values below are the light set (`:root`). A `.dark` block in the same file
-redeclares the same names for Vellum Dark. The theme selector offers Vellum
-Light, Vellum Dark and System (`packages/ui/src/lib/theme.ts`). With no stored
-choice the UI follows the operating system's color scheme (`system`); the choice
-is stored under the `openrig.theme` local-storage key.
+Light (`:root`):
 
-Paper:
+| Token | Value |
+|---|---|
+| `--background` | `0 0% 100%` |
+| `--surface-container-lowest` | `0 0% 100%` |
+| `--surface-container-low` | `240 5% 97%` |
+| `--surface-container` | `240 5% 95%` |
+| `--surface-container-high` | `240 5% 92%` |
+| `--surface-container-highest` | `240 4% 89%` |
+| `--on-surface` | `240 10% 10%` |
+| `--on-surface-variant` | `240 4% 42%` |
+| `--secondary` | `240 4% 46%` (neutral slate on purpose — see usage rules) |
+| `--secondary-container` | `240 5% 94%` |
+| `--brand` | `221 83% 53%` |
+| `--brand-foreground` | `0 0% 100%` |
+| `--tertiary` / `--error` | `0 72% 51%` |
+| `--primary` / `--inverse-surface` | `240 6% 10%` |
+| `--outline` | `240 5% 65%` |
+| `--outline-variant` | `240 6% 88%` |
+| `--success` | `142 71% 36%` |
+| `--warning` | `38 92% 50%` |
+| `--ring` | `var(--brand)` |
+| `--radius` | `0.5rem` |
+| `--shadow-card` | `0 1px 2px 0 rgb(0 0 0 / 0.05)` |
 
-- `--background: 47 20% 97%` - base paper, `#faf9f5`
-- `--surface-container-lowest: 0 0% 100%` - card body white
-- `--surface-container-low: 80 10% 95%`
-- `--surface-container: 80 10% 92%`
-- `--surface-container-high: 100 10% 89%`
-- `--surface-container-highest: 100 10% 87%`
-
-Ink:
-
-- `--on-surface: 120 8% 19%` - primary text, `#2e342e`
-- `--on-surface-variant: 108 5% 36%` - secondary text, `#5b615a`
-- `--inverse-surface: 120 10% 4%` - dark strip fills, near black
-
-Technical linework:
-
-- `--secondary: 213 15% 39%` - connectors, handles, registration marks
-- `--secondary-container: 220 39% 91%`
-
-Status:
-
-- `--success: 145 63% 35%`
-- `--warning: 40 90% 50%`
-- `--tertiary: 1 63% 42%` - stamped red / critical
-- `--error: 0 43% 44%`
-
-Borders:
-
-- `--outline: 108 4% 47%`
-- `--outline-variant: 108 4% 68%`
+Dark (`.dark`): `--background 240 6% 6%`, surfaces from `240 6% 8%`
+(lowest) through `240 4% 20%` (highest), `--on-surface 0 0% 95%`,
+`--on-surface-variant 240 5% 65%`, `--secondary 240 5% 65%`,
+`--secondary-container 240 4% 16%`, `--brand 217 91% 60%`,
+`--tertiary` / `--error 0 84% 60%`, `--primary` / `--inverse-surface
+0 0% 95%`, `--outline 240 4% 46%`, `--outline-variant 240 4% 20%`,
+`--success 142 69% 45%`, `--warning 38 92% 55%`, `--shadow-card
+0 1px 2px 0 rgb(0 0 0 / 0.4)`. `--brand-foreground` stays white and `--ring`
+stays `var(--brand)`.
 
 Usage rules:
 
-- Use `outline-variant` for most structural borders.
-- Reserve stone-900 borders for important card edges, active tabs, and hard
-  tactical emphasis.
-- Do not create one-off color systems for each feature. Classify the state first,
+- `--secondary` stays a neutral slate: many components use `text-secondary`
+  for small labels. Links, focus rings, and the Inbox badge use the new
+  `--brand` / `text-brand`.
+- `outline-variant` is the default structural border. Reserve strong borders
+  for card edges that need hard tactical emphasis.
+- Do not create one-off color systems per feature. Classify the state first,
   then map to the shared neutral, info, success, warning, or danger tones.
+
+## Radius scale
+
+`--radius` is `0.5rem`. Tailwind radii derive from it
+(`packages/ui/tailwind.config.ts`):
+
+| Token | Value |
+|---|---|
+| `none` | `0px` |
+| `sm` | `calc(var(--radius) - 4px)` |
+| `DEFAULT`, `md` | `calc(var(--radius) - 2px)` |
+| `lg` | `var(--radius)` |
+| `xl` | `calc(var(--radius) + 4px)` |
+| `2xl` | `calc(var(--radius) + 8px)` |
+| `3xl` | `calc(var(--radius) + 12px)` |
+| `full` | `9999px` |
 
 ## Typography
 
-Tailwind font families:
+- Prose uses Inter (`font-body`), the default for everything a human reads.
+- Machine values use JetBrains Mono (`font-mono`): IDs, session names, token
+  counts, timestamps, commands, paths, versions, terminal and transcript
+  content.
+- Human-readable labels and headings are sentence case. Uppercase with letter
+  spacing never applies to prose; sidebar section labels are small
+  (`text-xs font-medium text-on-surface-variant`) sentence-case text.
+- Translate raw codes into human-readable labels where possible instead of
+  showing them raw. Terminal and transcript content stays mono but must not
+  force the rest of the product to read like a log.
 
-- `font-body`: Inter for readable body text
-- `font-headline`: Space Grotesk for display and stamped headings
-- `font-mono`: JetBrains Mono for labels, IDs, queue state, technical metadata,
-  terminal previews, tabs, chips, and counters
+## Status vocabulary
 
-General typography rules:
+Every state renders through `StatusBadge` / `StatusDot`
+(`packages/ui/src/components/ui/status-badge.tsx`), driven by
+`packages/ui/src/lib/status-vocabulary.ts`. Raw strings map to one tone and
+one sentence-case label; unknown strings fall back to tone `neutral` with the
+raw text humanized (`_`/`-` to spaces, first letter uppercased).
 
-- Product labels use uppercase mono with letter spacing around `tracking-[0.10em]`.
-- Body copy should be sentence case when it is meant for humans to read.
-- Code identifiers should be transformed into human-readable labels where
-  possible, not displayed raw.
-- Terminal and transcript content stays mono but should not force the rest of the
-  product to read like a log.
+| Raw key | Tone | Label |
+|---|---|---|
+| `running` | running | Running |
+| `active` | running | Active |
+| `ready` | success | Ready |
+| `done` | success | Done |
+| `shipped` | success | Shipped |
+| `clean` | success | Healthy |
+| `partial` | warning | Partly running |
+| `degraded` | warning | Degraded |
+| `recoverable` | warning | Recoverable |
+| `pending` | info | Starting |
+| `draft` | neutral | Draft |
+| `idle` | neutral | Idle |
+| `stopped` | neutral | Stopped |
+| `blocked` | danger | Blocked |
+| `failed` | danger | Failed |
+| `error` | danger | Error |
+| `attention_required` | danger | Needs attention |
+| `needs-input`, `needs_input` | danger | Needs input |
+| `unknown` (or empty) | neutral | Unknown |
+
+Tones render as `bg-success`, pulsing `bg-success` (running, disabled under
+`motion-reduce`), `bg-warning`, `bg-destructive`, `bg-brand`, and `bg-outline`
+dots, with matching tinted badge backgrounds. The running dot honors
+`prefers-reduced-motion`.
+
+## Components inventory
+
+Shared primitives in `packages/ui/src/components/ui/` — reuse these before
+adding new component styles:
+
+- `PageHeader` — page title (`text-xl font-semibold`), optional description,
+  actions row, and meta row. Every page opens with one.
+- `MetricTile` — big tabular-nums value plus label, sublabel, and optional
+  icon and link target. Used for the Dashboard's four tiles.
+- `StatusBadge` / `StatusDot` — the status vocabulary rendered as a pill or a
+  dot; badge carries `data-tone`, dot carries an accessible label.
+- `EmptyState` — centered icon, title, one sentence, and one primary action
+  (link or button). Every empty state offers the next step.
+- `DropdownMenu` — thin styled wrappers over Radix dropdown (Root, Trigger,
+  Content, Item with `destructive` support, Separator).
+- `Kbd` — `<kbd>` chip for shortcuts (e.g. ⌘K).
+- `Skeleton` — `animate-pulse` loading placeholder rows.
+- `Sidebar` — labeled primary navigation with collapsible sections (Fleet,
+  Work, Build, Chat), New-rig action, search entry, live rig list, and Inbox
+  badge; auto-collapses when an Explorer column is open.
+- `TopBar` — breadcrumbs plus host indicator and theme selector.
+- `CommandPalette` — ⌘K palette over pages (old names still match), rigs, and
+  actions, plus `g d` / `g i` / `g r` shortcuts.
+
+Supporting shell pieces: `MobileBottomNav` (opaque bottom nav on small
+screens), toasts for user-initiated rig mutations only (`notifySuccess` /
+`notifyError`), and the `Explorer` per-destination tree column.
+
+Runtime and tool brand marks (`RuntimeMark`, `runtime-brand.ts`,
+`tool-brand.ts`) are product logos, not design tokens — their hex colors stay
+as they are.
 
 ## Layout
 
-The shell is route-first and explorer-first:
+The shell is route-first: Sidebar for primary navigation, Explorer for
+route-specific tree context, center workspace for destination content, right
+drawer for transient detail and file views, preview stack for pinned
+quick-look panes. Breadcrumbs in the top bar show where the current page sits;
+⌘K reaches anything in one keystroke.
 
-- 48px icon rail on desktop
-- Explorer sidebar for route-specific tree context
-- Center workspace for destination content
-- Right drawer for transient detail and file views
-- Preview stack for pinned quick-look panes
+Primary destinations: `/` Dashboard, `/for-you` Inbox, `/topology` Rigs,
+`/agents` Agents, `/fleet` Hosts, `/project` Projects, `/workflows` Workflows,
+`/files` Files, `/specs` Library, `/settings` Settings. Advisor and Operator
+chat targets resolve at render time.
 
-Primary destinations:
-
-- `/` Dashboard
-- `/topology` host topology
-- `/for-you` For You feed
-- `/project` workspace/project observability
-- `/specs` Library
-- `/settings` Settings
-
-Topology and project both use hierarchical scopes:
-
-- Topology: host -> rig -> pod -> seat
-- Project: workspace -> mission -> slice
-
-Each lower scope narrows the filter. Each higher scope widens the context.
-
-## Core Primitives
-
-Use these primitives before adding new component styles.
-
-Vellum:
-
-- `VellumCard`
-- `VellumSheet`
-- `RegistrationMarks`
-- `StatusPip`
-- `SectionHeader`
-- `EmptyState`
-
-Graphics:
-
-- `RuntimeMark`
-- `RuntimeBadge`
-- `ToolMark`
-- `ToolBadge`
-- `ActorMark`
-- `OperatorMoodMark`
-- `runtime-brand.ts`
-- `tool-brand.ts`
-
-Project metadata:
-
-- `ProjectPill`
-- `EventBadge`
-- `QueueStateBadge`
-- `TagPill`
-- `ActorChip`
-- `DateChip`
-- `FlowChips`
-- `ProofThumbnailGrid`
-- `ProofPacketHeader`
-
-Topology:
-
-- `HostMultiRigGraph`
-- `HybridAgentNode`
-- `HybridPodGroupNode`
-- `RigGroupNode`
-- `ActivityRing`
-- `HotPotatoEdge`
-- `TerminalPreviewPopover`
-- `TopologyTableView`
-- `TopologyTerminalView`
-
-Preview and documents:
-
-- `SessionPreviewPane`
-- `ProofImageViewer`
-- `FileViewer`
-- `MarkdownViewer`
-
-## Graphics System
-
-OpenRig uses a shared graphics package rather than scattering literal icon logic
-through product surfaces.
-
-Runtime marks:
-
-- Claude: pixel-style Claude mark, label `Claude`
-- Codex: Codex CLI terminal-circle mark, label `Codex`
-- Pi: blue rounded-square π mark, label `Pi`
-- Oh My Pi: violet rounded-square π mark, label `Oh My Pi` (short label `OMP`)
-- Terminal: compact terminal glyph, label `TTY` or `Terminal`
-- Unknown: neutral fallback
-
-Tool marks:
-
-- CMUX: blue chevron mark
-- tmux: pane-grid mark with green base
-- VS Code: blue code mark
-- Terminal, file, markdown, config, code, screenshot, proof, transcript, commit,
-  folder, skill, video, and trace each have a central brand entry
-
-Actor marks:
-
-- Human/operator uses the monochrome climber mask
-- Agent/runtime actors reuse runtime marks
-
-Graphics placement rules:
-
-- Use runtime marks where the runtime is the important scan dimension.
-- Do not duplicate the same runtime mark in adjacent columns on the same row.
-- Use tool marks for actions, not runtime marks.
-- Prefer inline marks and open metadata rows over stacking more rectangular pill
-  badges when a card is already visually dense.
-- Keep marks small enough to support scanning. They are landmarks, not mascots.
-
-## Interaction Patterns
-
-Hover-only actions:
-
-- Dense topology cards show CMUX and terminal actions on hover/focus.
-- Keyboard focus must reveal the same actions as mouse hover.
-- Action clicks must stop propagation so row or node navigation does not also
-  fire.
-
-Drawers and overlays:
-
-- Drawers close with their close button and by clicking outside the sheet.
-- Image viewers and terminal popovers are quick-look surfaces.
-- Topology terminal popovers are portaled above React Flow node stacking contexts.
-
-Queue and project:
-
-- Queue is operational: what is pending, actionable, routed, or closed.
-- Story is narrative: what happened over time, with body text primary and
-  metadata secondary.
-- For You is attention routing: your turn, approvals, shipped proof, progress,
-  and observations.
+Rigs and Projects both use hierarchical scopes — host → rig → pod → agent, and
+workspace → mission → slice. Each lower scope narrows the filter; each higher
+scope widens the context.
 
 ## Motion
 
-Motion should explain state, not decorate.
-
-Current motion vocabulary:
-
-- Activity card pulse for active, needs-input, and blocked states
-- Source and target flash for handoff events
-- Hot-potato packet animation on topology graph edges
-- Rig frame pulse for aggregate activity
-- Subtle route and node enter fades
-
-Rules:
-
-- Prefer slow pulses to blinking.
-- Make directional work movement obvious enough to see at graph zoom levels.
-- Honor `prefers-reduced-motion`: remove pulse/travel animation and keep static
-  state signals.
+Motion explains state; it does not decorate. The vocabulary is small: activity
+pulse for active/needs-input states, source/target flash for handoffs,
+directional travel on graph edges, subtle route enter fades. Prefer slow
+pulses to blinking, and honor `prefers-reduced-motion` by keeping static state
+signals and removing travel animation.
 
 ## Accessibility
 
 - Icon-only actions need labels or tooltips.
-- Decorative marks should use `aria-hidden`.
-- Semantic status should use `StatusPip`, not activity animation classes.
-- Keyboard focus must expose hover-only controls.
-- Do not rely on color alone for action outcomes.
-- Keep dense cards readable at the expected topology zoom range.
+- Decorative marks use `aria-hidden`; semantic status uses `StatusBadge` /
+  `StatusDot`, never color alone.
+- Keyboard focus exposes hover-only controls; action clicks stop propagation
+  so row navigation does not also fire.
+- Drawers close with their close button and by clicking outside.
 
-## Do And Do Not
+## Vellum (retired)
 
-Do:
+The previous Vellum paper / Black Glass surface languages are retired. The
+`.vellum`, `.hard-shadow`, and `.reg-*` classes remain in `globals.css` only
+as neutralized compatibility shims — flat `surface-lowest` backgrounds, the
+standard card shadow, and hidden registration marks — so older markup keeps
+rendering without the old look. Do not use them in new UI.
 
-- Use vellum and black-glass as distinct surface paradigms.
-- Keep square geometry, 1px lines, and hard paper shadows.
-- Centralize graphics through brand helpers.
-- Translate raw event/state codes into human-readable labels.
-- Make proof and terminal previews available where thumbnails or terminal marks
-  appear.
-- Keep hierarchy visible: workspace -> mission -> slice, host -> rig -> pod ->
-  seat.
+## Implementation references
 
-Do not:
-
-- Add new one-off card styles when a primitive can do the job.
-- Use emojis as product graphics.
-- Turn metadata into a wall of rectangular pills.
-- Make terminal/log aesthetics dominate human decision surfaces.
-- Add decorative gradient blobs or generic SaaS hero styling.
-- Add black borders or hard shadows to black-glass popovers.
-- Duplicate runtime/tool brand logic outside `runtime-brand.ts`,
-  `tool-brand.ts`, and `RuntimeMark.tsx`.
-
-## Implementation References
-
-- Tokens: `packages/ui/src/globals.css`
+- Tokens: `packages/ui/src/globals.css` (the Clean theme block is last and
+  must stay last so it wins the cascade)
 - Tailwind theme: `packages/ui/tailwind.config.ts`
-- Shell: `packages/ui/src/components/AppShell.tsx`
+- Status vocabulary: `packages/ui/src/lib/status-vocabulary.ts`
+- Navigation model: `packages/ui/src/lib/nav.ts`
+- Shell: `packages/ui/src/components/AppShell.tsx`,
+  `packages/ui/src/components/shell/`
 - Routes: `packages/ui/src/routes.tsx`
-- Vellum primitives: `packages/ui/src/components/ui/`
-- Graphics primitives: `packages/ui/src/components/graphics/RuntimeMark.tsx`
-- Runtime brands: `packages/ui/src/lib/runtime-brand.ts`
-- Tool brands: `packages/ui/src/lib/tool-brand.ts`
-- Project metadata primitives: `packages/ui/src/components/project/ProjectMetaPrimitives.tsx`
-- Topology graph nodes: `packages/ui/src/components/topology/HybridTopologyNodes.tsx`
-- Terminal popover: `packages/ui/src/components/topology/TerminalPreviewPopover.tsx`
-- Session preview: `packages/ui/src/components/preview/SessionPreviewPane.tsx`
+- Primitives: `packages/ui/src/components/ui/`

@@ -37,7 +37,7 @@ export function ProofImageViewer({
           data-testid={imageTestId}
           className="min-h-0 max-h-[78vh] max-w-full object-contain"
         />
-        <div className="mt-2 flex shrink-0 items-center justify-between gap-3 font-mono text-[10px] text-stone-50">
+        <div className="mt-2 flex shrink-0 items-center justify-between gap-3 font-mono text-[11px] text-stone-50">
           <span className="truncate">{relPath}</span>
           <button
             type="button"

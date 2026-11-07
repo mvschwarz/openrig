@@ -1,25 +1,29 @@
 import { useNavigate } from "@tanstack/react-router";
 import { usePackages, type PackageSummary } from "../hooks/usePackages.js";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header.js";
+import { EmptyState } from "@/components/ui/empty-state.js";
+import { StatusBadge } from "@/components/ui/status-badge.js";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { cn } from "@/lib/utils";
 import { WorkspacePage } from "./WorkspacePage.js";
 
-function statusColor(status: string | null): string {
+/** C14e: map legacy package install status to the shared status vocabulary. */
+function installStatusKey(status: string | null): string {
   switch (status) {
-    case "applied": return "bg-success";
-    case "rolled_back": return "bg-warning";
-    case "failed": return "bg-destructive";
-    default: return "bg-foreground-muted-on-dark";
+    case "applied": return "done";
+    case "rolled_back": return "recoverable";
+    case "failed": return "failed";
+    default: return "unknown";
   }
 }
 
-function statusLabel(status: string | null): string {
+/** C14e: map legacy package install status to a sentence-case label. */
+function installStatusLabel(status: string | null): string {
   switch (status) {
-    case "applied": return "APPLIED";
-    case "rolled_back": return "ROLLED BACK";
-    case "failed": return "FAILED";
-    default: return "NONE";
+    case "applied": return "Applied";
+    case "rolled_back": return "Rolled back";
+    case "failed": return "Failed";
+    default: return "None";
   }
 }
 
@@ -29,35 +33,32 @@ function PackageCard({ pkg, onSelect }: { pkg: PackageSummary; onSelect: (id: st
       data-testid="package-card"
       role="link"
       tabIndex={0}
-      className="card-dark p-spacing-6 mb-spacing-3 cursor-pointer"
+      className="rounded-lg border bg-surface-lowest mb-spacing-3 p-spacing-6 cursor-pointer shadow-sm"
       onClick={() => onSelect(pkg.id)}
       onKeyDown={(e) => { if (e.key === "Enter") onSelect(pkg.id); }}
     >
       <div className="flex items-baseline justify-between mb-spacing-2">
-        <h3 className="text-headline-md uppercase">{pkg.name}</h3>
-        <span className="text-label-md font-mono text-foreground-muted-on-dark">v{pkg.version}</span>
+        <h3 className="text-sm font-semibold text-on-surface">{pkg.name}</h3>
+        <span className="text-xs font-mono text-on-surface-variant">v{pkg.version}</span>
       </div>
 
       {pkg.summary && (
-        <p className="text-body-sm text-foreground-muted-on-dark mb-spacing-4">{pkg.summary}</p>
+        <p className="text-sm text-on-surface-variant mb-spacing-4">{pkg.summary}</p>
       )}
 
-      <div className="flex items-center gap-spacing-4 text-label-sm">
-        <span className="text-foreground-muted-on-dark">
-          SOURCE <span className="font-mono text-foreground-on-dark">{pkg.sourceRef}</span>
+      <div className="flex items-center gap-spacing-4 text-xs">
+        <span className="text-on-surface-variant">
+          Source <span className="font-mono text-on-surface">{pkg.sourceRef}</span>
         </span>
       </div>
 
-      <div className="flex items-center gap-spacing-4 mt-spacing-3 text-label-sm">
-        <span className="text-foreground-muted-on-dark">
-          INSTALLS <span className="font-mono text-foreground-on-dark" data-testid="install-count">{pkg.installCount}</span>
+      <div className="flex items-center gap-spacing-4 mt-spacing-3 text-xs">
+        <span className="text-on-surface-variant">
+          Installs <span className="font-mono text-on-surface" data-testid="install-count">{pkg.installCount}</span>
         </span>
 
         <span className="flex items-center gap-spacing-1">
-          <span className={cn("inline-block w-[6px] h-[6px]", statusColor(pkg.latestInstallStatus))} />
-          <span className="text-foreground-muted-on-dark" data-testid="install-status">
-            {statusLabel(pkg.latestInstallStatus)}
-          </span>
+          <StatusBadge status={installStatusKey(pkg.latestInstallStatus)} label={installStatusLabel(pkg.latestInstallStatus)} testId="install-status" />
         </span>
       </div>
     </div>
@@ -81,7 +82,7 @@ export function PackageList() {
           <div className="h-8 w-28 shimmer" />
         </div>
         {[1, 2].map((i) => (
-          <div key={i} className="card-dark p-spacing-6 mb-spacing-3">
+          <div key={i} className="rounded-lg border bg-surface-lowest p-spacing-6 mb-spacing-3">
             <div className="h-6 w-48 shimmer-dark mb-spacing-4" />
             <div className="h-12 shimmer-dark mb-spacing-4" />
             <div className="h-4 w-64 shimmer-dark" />
@@ -109,29 +110,53 @@ export function PackageList() {
   if (sortedPackages.length === 0) {
     return (
       <WorkspacePage>
-      <div className="flex flex-col items-center justify-center min-h-[60vh]" data-testid="packages-empty">
-        <h2 className="text-display-lg text-foreground mb-spacing-4">NO LEGACY PACKAGE INSTALLS</h2>
-        <p className="text-body-md text-foreground-muted mb-spacing-8">
-          Legacy package tools remain available for bootstrap internals while Library becomes the main authoring surface.
-        </p>
-        <div className="flex flex-col items-center gap-spacing-3">
-          <Button
-            variant="default"
-            size="lg"
-            data-testid="empty-import-btn"
-            onClick={() => navigate({ to: "/import" })}
-          >
-            IMPORT RIGSPEC
-          </Button>
-          <Button
-            variant="ghost"
-            size="lg"
-            data-testid="empty-bootstrap-btn"
-            onClick={() => navigate({ to: "/bootstrap" })}
-          >
-            BOOTSTRAP
-          </Button>
-        </div>
+      <PageHeader
+        title="Legacy package tools"
+        description="Legacy package tools remain available for bootstrap internals, while Library is the main authoring surface."
+        actions={
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              data-testid="header-bootstrap-btn"
+              onClick={() => navigate({ to: "/bootstrap" })}
+            >
+              Bootstrap
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              data-testid="header-import-btn"
+              onClick={() => navigate({ to: "/import" })}
+            >
+              Import rigspec
+            </Button>
+          </>
+        }
+      />
+      <EmptyState
+        label="No legacy package installs"
+        title="No legacy package installs"
+        description="Legacy package tools remain available for bootstrap internals while Library becomes the main authoring surface."
+        testId="packages-empty"
+      />
+      <div className="flex flex-col items-center gap-spacing-3">
+        <Button
+          variant="default"
+          size="lg"
+          data-testid="empty-import-btn"
+          onClick={() => navigate({ to: "/import" })}
+        >
+          Import rigspec
+        </Button>
+        <Button
+          variant="ghost"
+          size="lg"
+          data-testid="empty-bootstrap-btn"
+          onClick={() => navigate({ to: "/bootstrap" })}
+        >
+          Bootstrap
+        </Button>
       </div>
       </WorkspacePage>
     );
@@ -141,32 +166,30 @@ export function PackageList() {
     <WorkspacePage>
     <div>
       {/* Page header */}
-      <div className="flex justify-between items-baseline mb-spacing-6">
-        <div>
-          <h2 className="text-headline-lg uppercase">LEGACY PACKAGE TOOLS</h2>
-          <p className="text-label-md text-foreground-muted font-grotesk mt-spacing-1">
-            {sortedPackages.length} legacy package install{sortedPackages.length !== 1 ? "s" : ""} retained for bootstrap internals
-          </p>
-        </div>
-        <div className="flex flex-col items-end gap-spacing-2">
-          <Button
-            variant="default"
-            size="sm"
-            data-testid="header-import-btn"
-            onClick={() => navigate({ to: "/import" })}
-          >
-            IMPORT RIGSPEC
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            data-testid="header-bootstrap-btn"
-            onClick={() => navigate({ to: "/bootstrap" })}
-          >
-            BOOTSTRAP
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        title="Legacy package tools"
+        description={`${sortedPackages.length} legacy package install${sortedPackages.length !== 1 ? "s" : ""} retained for bootstrap internals.`}
+        actions={
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              data-testid="header-bootstrap-btn"
+              onClick={() => navigate({ to: "/bootstrap" })}
+            >
+              Bootstrap
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              data-testid="header-import-btn"
+              onClick={() => navigate({ to: "/import" })}
+            >
+              Import rigspec
+            </Button>
+          </>
+        }
+      />
 
       {sortedPackages.map((pkg) => (
         <PackageCard

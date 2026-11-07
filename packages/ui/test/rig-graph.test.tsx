@@ -742,7 +742,7 @@ describe("RigNode", () => {
         }} />
       </ReactFlowProvider>
     );
-    expect(screen.getByTestId("activity-staleness-stale-node").textContent).toBe("stale");
+    expect(screen.getByTestId("activity-staleness-stale-node").textContent).toBe("Stale");
   });
 
   it("PL-019: when running with currentQitems, the hover hint includes 'On: <short tail> — <excerpt>'", () => {

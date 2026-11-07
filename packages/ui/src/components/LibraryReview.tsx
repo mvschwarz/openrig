@@ -54,7 +54,7 @@ interface LibraryReviewProps {
 
 function ProvenanceBadge({ sourcePath, sourceState }: { sourcePath: string; sourceState: string }) {
   return (
-    <div className="font-mono text-[9px] text-on-surface-variant" data-testid="library-provenance">
+    <div className="font-mono text-xs text-on-surface-variant" data-testid="library-provenance">
       Source: {sourcePath} · {sourceState}
     </div>
   );
@@ -233,7 +233,7 @@ function LibrarySpecReview({ entryId }: LibraryReviewProps) {
   if (isLoading) {
     return (
       <WorkspacePage>
-        <div className="font-mono text-[10px] text-on-surface-variant">Loading spec review...</div>
+        <div className="text-xs text-on-surface-variant">Loading spec review…</div>
       </WorkspacePage>
     );
   }
@@ -335,7 +335,7 @@ function LibraryWorkflowReviewPage({ review }: { review: LibraryWorkflowReview }
           }
         />
         <ProvenanceBadge sourcePath={review.sourcePath} sourceState="library_item" />
-        {error && <div data-testid="workflow-lens-error" className="font-mono text-[10px] text-red-600">{error}</div>}
+        {error && <div data-testid="workflow-lens-error" className="text-xs text-red-600">{error}</div>}
 
         <WorkflowSummaryGrid>
           <WorkflowSummaryCard label="Format" value="WorkflowSpec" testId="lib-wf-format" />
@@ -346,9 +346,9 @@ function LibraryWorkflowReviewPage({ review }: { review: LibraryWorkflowReview }
           <WorkflowSummaryCard label="Source" value={review.isBuiltIn ? "built-in" : "user file"} testId="lib-wf-source" />
         </WorkflowSummaryGrid>
 
-        <div data-testid="workflow-terminal-rule" className="flex items-center gap-2 border border-outline-variant/40 bg-surface-lowest/10 px-3 py-2 font-mono text-[10px] text-on-surface">
+        <div data-testid="workflow-terminal-rule" className="flex items-center gap-2 rounded-lg border bg-surface-lowest px-3 py-2 text-sm text-on-surface shadow-sm">
           <ToolMark tool="terminal" size="xs" decorative />
-          <span className="text-on-surface-variant uppercase tracking-[0.16em] text-[8px]">Coordination Terminal Turn:</span>
+          <span className="text-xs text-on-surface-variant">Coordination terminal turn:</span>
           {review.terminalTurnRule}
         </div>
 
@@ -360,26 +360,26 @@ function LibraryWorkflowReviewPage({ review }: { review: LibraryWorkflowReview }
         <WorkflowInstancesBand workflowName={review.name} workflowVersion={review.version} testId="library-instances-band" />
 
         <div className="space-y-2">
-          <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">Steps</div>
+          <h2 className="text-sm font-semibold text-on-surface-variant">Steps</h2>
           <div className="space-y-1">
             {review.steps.map((step) => (
               <div
                 key={step.stepId}
                 data-testid={`workflow-step-${step.stepId}`}
-                className="border border-outline-variant/40 bg-surface-lowest/5 px-3 py-2"
+                className="rounded-lg border bg-surface-lowest px-3 py-2 shadow-sm"
               >
                 <div className="flex items-center justify-between">
-                  <span className="font-mono text-[11px] font-bold text-on-surface">{step.stepId}</span>
-                  <span className="font-mono text-[9px] text-on-surface-variant">{step.role}</span>
+                  <span className="font-mono text-xs font-bold text-on-surface">{step.stepId}</span>
+                  <span className="text-xs text-on-surface-variant">{step.role}</span>
                 </div>
-                {step.objective && <div className="mt-1 text-[10px] text-on-surface-variant leading-tight">{step.objective}</div>}
+                {step.objective && <div className="mt-1 text-xs leading-tight text-on-surface-variant">{step.objective}</div>}
                 {step.allowedNextSteps.length > 0 && (
-                  <div className="mt-1 font-mono text-[9px] text-on-surface-variant">
+                  <div className="mt-1 font-mono text-xs text-on-surface-variant">
                     next: {step.allowedNextSteps.map((n) => `${n.stepId} (${n.role})`).join(", ")}
                   </div>
                 )}
                 {step.allowedExits.length > 0 && (
-                  <div className="font-mono text-[9px] text-on-surface-variant">
+                  <div className="font-mono text-xs text-on-surface-variant">
                     exits: {step.allowedExits.join(", ")}
                   </div>
                 )}
@@ -405,7 +405,7 @@ function LibraryContextPackReviewPage({ entryId }: { entryId: string }) {
   if (packsLoading) {
     return (
       <WorkspacePage>
-        <div className="font-mono text-[10px] text-on-surface-variant">Loading context pack…</div>
+        <div className="text-xs text-on-surface-variant">Loading context pack…</div>
       </WorkspacePage>
     );
   }
@@ -461,12 +461,12 @@ function ContextPackReviewBody({
           <WorkflowSummaryCard label="Source" value={entry.sourceType} testId="lib-pack-source" />
         </WorkflowSummaryGrid>
 
-        <div data-testid="lib-pack-source-path" className="font-mono text-[9px] text-on-surface-variant">
+        <div data-testid="lib-pack-source-path" className="font-mono text-xs text-on-surface-variant">
           path: {entry.sourcePath}
         </div>
 
-        <section className="border border-outline-variant/40 bg-surface-lowest/[0.08]">
-          <header className="border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
+        <section className="rounded-lg border bg-surface-lowest shadow-sm">
+          <header className="border-b border-outline-variant px-3 py-2 text-sm font-semibold text-on-surface-variant">
             Files
           </header>
           <ul data-testid="lib-pack-file-list" className="divide-y divide-outline-variant">
@@ -477,7 +477,7 @@ function ContextPackReviewBody({
                   key={f.path}
                   data-testid={`lib-pack-file-${f.path}`}
                   data-missing={missing ? "true" : "false"}
-                  className={`font-mono text-[10px] ${missing ? "text-red-700" : "text-on-surface"}`}
+                  className={`font-mono text-xs ${missing ? "text-red-700" : "text-on-surface"}`}
                 >
                   <FileReferenceTrigger
                     data={{ path: f.path, absolutePath: f.absolutePath }}
@@ -486,7 +486,7 @@ function ContextPackReviewBody({
                   >
                     <div className="flex items-baseline justify-between gap-2">
                       <span className="font-bold truncate underline decoration-dotted decoration-outline">{f.path}</span>
-                      <span className="font-mono text-[8px] text-on-surface-variant shrink-0">
+                      <span className="shrink-0 font-mono text-xs text-on-surface-variant">
                         role: {f.role}
                         {missing
                           ? " · MISSING"
@@ -494,7 +494,7 @@ function ContextPackReviewBody({
                       </span>
                     </div>
                     {f.summary && (
-                      <div className="mt-0.5 text-on-surface-variant text-[9px]">{f.summary}</div>
+                      <div className="mt-0.5 text-xs text-on-surface-variant">{f.summary}</div>
                     )}
                   </FileReferenceTrigger>
                 </li>
@@ -503,23 +503,23 @@ function ContextPackReviewBody({
           </ul>
         </section>
 
-        <section className="border border-outline-variant/40 bg-surface-lowest/[0.08]">
-          <header className="border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
+        <section className="rounded-lg border bg-surface-lowest shadow-sm">
+          <header className="border-b border-outline-variant px-3 py-2 text-sm font-semibold text-on-surface-variant">
             Bundle preview
           </header>
           {previewLoading && (
-            <div className="px-3 py-2 font-mono text-[9px] text-on-surface-variant">Loading bundle…</div>
+            <div className="px-3 py-2 text-xs text-on-surface-variant">Loading bundle…</div>
           )}
           {preview && (
             <>
               {preview.missingFiles.length > 0 && (
-                <div data-testid="lib-pack-missing-warning" className="px-3 py-2 font-mono text-[9px] text-red-700 border-b border-outline-variant">
+                <div data-testid="lib-pack-missing-warning" className="border-b border-outline-variant px-3 py-2 text-xs text-red-700">
                   Warning: {preview.missingFiles.length} file{preview.missingFiles.length === 1 ? "" : "s"} referenced by manifest but missing on disk.
                 </div>
               )}
               <pre
                 data-testid="lib-pack-bundle-text"
-                className="font-mono text-[9px] text-on-surface bg-background px-3 py-2 max-h-96 overflow-y-auto whitespace-pre-wrap"
+                className="max-h-96 overflow-y-auto whitespace-pre-wrap bg-background px-3 py-2 font-mono text-xs text-on-surface"
               >
                 {preview.bundleText}
               </pre>
@@ -544,7 +544,7 @@ function LibraryAgentImageReviewPage({ entryId }: { entryId: string }) {
   if (imagesLoading) {
     return (
       <WorkspacePage>
-        <div className="font-mono text-[10px] text-on-surface-variant">Loading agent image…</div>
+        <div className="text-xs text-on-surface-variant">Loading agent image…</div>
       </WorkspacePage>
     );
   }
@@ -631,7 +631,7 @@ function AgentImageReviewBody({
           <WorkflowSummaryCard label="Size" value={`${entry.stats.estimatedSizeBytes}B`} testId="lib-image-size" />
         </WorkflowSummaryGrid>
 
-        <div data-testid="lib-image-source" className="font-mono text-[9px] text-on-surface-variant space-y-0.5">
+        <div data-testid="lib-image-source" className="space-y-0.5 font-mono text-xs text-on-surface-variant">
           <div>source seat: {entry.sourceSeat}</div>
           {/* Surface source_cwd so operators see
             * WHERE the parent session was created. Older
@@ -644,11 +644,11 @@ function AgentImageReviewBody({
         </div>
 
         {entry.lineage.length > 0 && (
-          <section data-testid="lib-image-lineage" className="border border-outline-variant/40 bg-surface-lowest/[0.08]">
-            <header className="border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
+          <section data-testid="lib-image-lineage" className="rounded-lg border bg-surface-lowest shadow-sm">
+            <header className="border-b border-outline-variant px-3 py-2 text-sm font-semibold text-on-surface-variant">
               Lineage
             </header>
-            <div className="px-3 py-2 font-mono text-[10px] text-on-surface">
+            <div className="px-3 py-2 font-mono text-xs text-on-surface">
               {entry.lineage.join(" → ")} → <span className="font-bold">{entry.name}</span>
             </div>
           </section>
@@ -656,9 +656,9 @@ function AgentImageReviewBody({
 
         <ForkNowAction entry={entry} />
 
-        <section data-testid="lib-image-starter-snippet" className="border border-outline bg-surface-lowest px-3 py-3 space-y-2">
+        <section data-testid="lib-image-starter-snippet" className="space-y-2 rounded-lg border bg-surface-lowest px-3 py-3 shadow-sm">
           <div className="flex items-center justify-between">
-            <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface">Use as starter</div>
+            <h2 className="text-sm font-semibold text-on-surface">Use as starter</h2>
             <Button
               variant="outline"
               size="sm"
@@ -669,15 +669,15 @@ function AgentImageReviewBody({
               {snippetCopied ? "Copied" : "Copy snippet"}
             </Button>
           </div>
-          <div className="font-mono text-[9px] text-on-surface-variant">
+          <div className="text-xs text-on-surface-variant">
             Paste into your agent.yaml's session_source. The instantiator resolves the image
             via the daemon AgentImageLibraryService at startup time.
           </div>
-          {previewLoading && <div className="font-mono text-[9px] text-on-surface-variant">Loading snippet…</div>}
+          {previewLoading && <div className="text-xs text-on-surface-variant">Loading snippet…</div>}
           {preview?.starterSnippet && (
             <pre
               data-testid="lib-image-snippet-text"
-              className="font-mono text-[10px] bg-background border border-outline-variant px-2 py-1 whitespace-pre-wrap"
+              className="whitespace-pre-wrap border border-outline-variant bg-background px-2 py-1 font-mono text-xs"
             >
               {preview.starterSnippet}
             </pre>
@@ -685,19 +685,19 @@ function AgentImageReviewBody({
         </section>
 
         {pinError && (
-          <div data-testid="lib-image-pin-error" className="font-mono text-[9px] text-red-600">{pinError}</div>
+          <div data-testid="lib-image-pin-error" className="text-xs text-red-600">{pinError}</div>
         )}
 
         {entry.files.length > 0 && (
-          <section className="border border-outline-variant/40 bg-surface-lowest/[0.08]">
-            <header className="border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
+          <section className="rounded-lg border bg-surface-lowest shadow-sm">
+            <header className="border-b border-outline-variant px-3 py-2 text-sm font-semibold text-on-surface-variant">
               Supplementary files
             </header>
             <ul className="divide-y divide-outline-variant">
               {entry.files.map((f) => (
                 <li
                   key={f.path}
-                  className="font-mono text-[10px] text-on-surface"
+                  className="font-mono text-xs text-on-surface"
                   data-testid={`lib-image-file-${f.path}`}
                 >
                   <FileReferenceTrigger
@@ -707,12 +707,12 @@ function AgentImageReviewBody({
                   >
                     <div className="flex items-baseline justify-between gap-2">
                       <span className="font-bold truncate underline decoration-dotted decoration-outline">{f.path}</span>
-                      <span className="font-mono text-[8px] text-on-surface-variant shrink-0">
+                      <span className="shrink-0 font-mono text-xs text-on-surface-variant">
                         role: {f.role}
                         {f.bytes === null ? " · MISSING" : ` · ${f.bytes}B`}
                       </span>
                     </div>
-                    {f.summary && <div className="mt-0.5 text-on-surface-variant text-[9px]">{f.summary}</div>}
+                    {f.summary && <div className="mt-0.5 text-xs text-on-surface-variant">{f.summary}</div>}
                   </FileReferenceTrigger>
                 </li>
               ))}

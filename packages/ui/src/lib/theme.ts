@@ -36,8 +36,8 @@ export interface ThemeOption {
  * resolver over the two, not a third palette.
  */
 export const THEMES: readonly ThemeOption[] = [
-  { id: "light", label: "Vellum Light" },
-  { id: "dark", label: "Vellum Dark" },
+  { id: "light", label: "Light" },
+  { id: "dark", label: "Dark" },
   { id: "system", label: "System" },
 ] as const;
 

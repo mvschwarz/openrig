@@ -50,26 +50,25 @@ describe("EmptyState (Phase 1 primitive)", () => {
     expect(link.getAttribute("href")).toBe("/foo");
   });
 
-  it("variant=card wraps in a VellumCard ghost+flat composition", () => {
+  it("variant=card wraps in a clean-theme card (rounded-lg border bg-surface-lowest)", () => {
     const { container } = render(
       <EmptyState label="X" variant="card" testId="es-c" />,
     );
     const body = container.querySelector("[data-testid='es-c']") as HTMLElement;
-    // The VellumCard wrapper renders the body inside an inner flex container,
-    // so VellumCard root = body.parentElement.parentElement.
-    const wrapper = body.parentElement?.parentElement as HTMLElement;
-    expect(wrapper.className).toContain("bg-transparent");
-    expect(wrapper.className).toContain("border-outline-variant");
-    // Flat elevation = no hard-shadow.
+    // Clean theme (ui-redesign C03): card variant wraps the body in a neutral card.
+    const wrapper = body.parentElement as HTMLElement;
+    expect(wrapper.className).toContain("rounded-lg");
+    expect(wrapper.className).toContain("bg-surface-lowest");
+    expect(wrapper.className).toContain("shadow-sm");
     expect(wrapper.className).not.toContain("hard-shadow");
   });
 
-  it("variant=minimal does NOT wrap in VellumCard", () => {
+  it("variant=minimal does NOT wrap in a card", () => {
     const { container } = render(<EmptyState label="X" testId="es-m" />);
     const root = container.querySelector("[data-testid='es-m']") as HTMLElement;
-    // No vellum-card wrapper around the testid.
+    // No card wrapper around the testid.
     const parent = root.parentElement as HTMLElement;
-    expect(parent.className ?? "").not.toContain("bg-transparent");
-    expect(parent.className ?? "").not.toContain("border-stone-900");
+    expect(parent.className ?? "").not.toContain("bg-surface-lowest");
+    expect(parent.className ?? "").not.toContain("shadow-sm");
   });
 });

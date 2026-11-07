@@ -48,7 +48,7 @@ export function RigCard({ rig, psEntry, onSelect, onSnapshot, onExport, onDown }
       onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) { e.preventDefault(); onSelect(rig.id); } }}
     >
       {/* Dark header stripe */}
-      <div className="bg-inverse-surface text-background px-4 py-1.5 font-mono text-[10px] flex justify-between items-center">
+      <div className="bg-inverse-surface text-background px-4 py-1.5 font-mono text-[11px] flex justify-between items-center">
         <span>RIG: {rig.name.toUpperCase()}</span>
         <span className="material-symbols-outlined text-[12px]" style={{ fontVariationSettings: "'FILL' 0, 'wght' 300" }}>
           settings
@@ -59,8 +59,8 @@ export function RigCard({ rig, psEntry, onSelect, onSnapshot, onExport, onDown }
       <div className="p-4 space-y-3">
         {/* Name + status */}
         <div className="flex justify-between items-end border-b border-outline-variant pb-2">
-          <span className="font-headline font-bold text-lg tracking-tight uppercase">{rig.name}</span>
-          <span className={`px-2 py-0.5 border font-mono text-[8px] uppercase ${
+          <span className="font-headline font-bold text-lg tracking-tight">{rig.name}</span>
+          <span className={`px-2 py-0.5 border text-[11px] ${
             isRunning ? "border-on-surface" : "border-outline text-on-surface-variant"
           }`}>
             {statusLabel}
@@ -69,16 +69,16 @@ export function RigCard({ rig, psEntry, onSelect, onSnapshot, onExport, onDown }
 
         {/* Telemetry grid */}
         <div className="space-y-1">
-          <div className="flex justify-between font-mono text-[9px] text-secondary">
+          <div className="flex justify-between font-mono text-[11px] text-secondary">
             <span>NODES</span>
             <span data-testid={`node-count-${rig.id}`}>{animatedCount}</span>
           </div>
-          <div className="flex justify-between font-mono text-[9px] text-secondary">
+          <div className="flex justify-between font-mono text-[11px] text-secondary">
             <span>SNAPSHOT</span>
             <span data-testid={`snapshot-age-${rig.id}`}>{formatAge(rig.latestSnapshotAt)}</span>
           </div>
           {psEntry && psEntry.uptime != null && (
-            <div className="flex justify-between font-mono text-[9px] text-secondary">
+            <div className="flex justify-between font-mono text-[11px] text-secondary">
               <span>UPTIME</span>
               <span>{psEntry.uptime}</span>
             </div>
@@ -89,34 +89,34 @@ export function RigCard({ rig, psEntry, onSelect, onSnapshot, onExport, onDown }
         {isRunning && (
           <div className="bg-success/10 border border-success/20 px-2 py-1 flex items-center gap-2">
             <div className="w-2 h-2 rounded-full bg-success" />
-            <span className="font-mono text-[9px] text-success font-bold">ACTIVE</span>
+            <span className="font-mono text-[11px] text-success font-bold">ACTIVE</span>
           </div>
         )}
 
         {/* Action buttons */}
         <div className="flex gap-spacing-2 pt-1">
           <button
-            className="px-2 py-0.5 border border-outline font-mono text-[9px] text-secondary hover:border-on-surface hover:text-on-surface transition-colors"
+            className="px-2 py-0.5 border border-outline font-mono text-[11px] text-secondary hover:border-on-surface hover:text-on-surface transition-colors"
             onClick={(e) => { e.stopPropagation(); onSnapshot(); }}
           >
             SNAPSHOT
           </button>
           <button
-            className="px-2 py-0.5 border border-outline font-mono text-[9px] text-secondary hover:border-on-surface hover:text-on-surface transition-colors"
+            className="px-2 py-0.5 border border-outline font-mono text-[11px] text-secondary hover:border-on-surface hover:text-on-surface transition-colors"
             onClick={(e) => { e.stopPropagation(); onExport(); }}
           >
             EXPORT
           </button>
           {isRunning && (
             <button
-              className="px-2 py-0.5 border border-tertiary/30 font-mono text-[9px] text-tertiary hover:bg-tertiary hover:text-white transition-colors"
+              className="px-2 py-0.5 border border-tertiary/30 font-mono text-[11px] text-tertiary hover:bg-tertiary hover:text-white transition-colors"
               onClick={(e) => { e.stopPropagation(); onDown(); }}
             >
               DOWN
             </button>
           )}
           <button
-            className="px-2 py-0.5 bg-inverse-surface text-background font-mono text-[9px] hover:bg-inverse-surface transition-colors ml-auto"
+            className="px-2 py-0.5 bg-inverse-surface text-background font-mono text-[11px] hover:bg-inverse-surface transition-colors ml-auto"
             onClick={(e) => { e.stopPropagation(); onSelect(rig.id); }}
           >
             GRAPH &rarr;

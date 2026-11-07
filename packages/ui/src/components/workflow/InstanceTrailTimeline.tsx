@@ -49,35 +49,35 @@ function TrailRow({
         onClick={onToggle}
         className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-surface-variant/50"
       >
-        <span className="font-mono text-[10px] text-on-surface-variant w-6 shrink-0">{index + 1}.</span>
+        <span className="font-mono text-[11px] text-on-surface-variant w-6 shrink-0">{index + 1}.</span>
         <span className="font-mono text-[11px] font-bold text-on-surface w-28 shrink-0">{entry.stepId}</span>
-        <span className="font-mono text-[10px] text-on-surface-variant w-20 shrink-0">{entry.stepRole}</span>
+        <span className="font-mono text-[11px] text-on-surface-variant w-20 shrink-0">{entry.stepRole}</span>
         <span className={cn("font-mono text-[11px] w-20 shrink-0", exit.cls)}>
           {exit.glyph} {entry.closureReason}
         </span>
         <span className="min-w-0 flex-1 truncate text-[11px] text-on-surface-variant">{note ?? "—"}</span>
-        <span className="hidden font-mono text-[10px] text-on-surface-variant lg:inline">{entry.actorSession}</span>
-        <span className="font-mono text-[10px] text-on-surface-variant">{fmtTime(entry.closedAt)}</span>
+        <span className="hidden font-mono text-[11px] text-on-surface-variant lg:inline">{entry.actorSession}</span>
+        <span className="font-mono text-[11px] text-on-surface-variant">{fmtTime(entry.closedAt)}</span>
       </button>
       {expanded ? (
         <div
           data-testid={`workflow-trail-expanded-${entry.trailId}`}
-          className="space-y-1 border-t border-outline-variant/50 bg-surface-lowest/10 px-8 py-2 font-mono text-[10px]"
+          className="space-y-1 border-t border-outline-variant/50 bg-surface-lowest/10 px-8 py-2 font-mono text-[11px]"
         >
           <p>
-            <span className="uppercase text-on-surface-variant">actor: </span>
+            <span className="text-on-surface-variant">actor: </span>
             {entry.actorSession}
           </p>
           <p>
-            <span className="uppercase text-on-surface-variant">closed packet: </span>
+            <span className="text-on-surface-variant">closed packet: </span>
             {entry.priorQitemId}
           </p>
           <p>
-            <span className="uppercase text-on-surface-variant">routed next: </span>
+            <span className="text-on-surface-variant">routed next: </span>
             {entry.nextQitemId ?? "(terminal — no next packet)"}
           </p>
           {entry.closureEvidence ? (
-            <pre className="overflow-x-auto border border-outline-variant/40 bg-surface-lowest/20 p-2 text-[9px] leading-snug">
+            <pre className="overflow-x-auto border border-outline-variant/40 bg-surface-lowest/20 p-2 text-[11px] leading-snug">
               {JSON.stringify(entry.closureEvidence, null, 2)}
             </pre>
           ) : (
@@ -109,7 +109,7 @@ export function InstanceTrailTimeline({
 
   return (
     <div className="space-y-2">
-      <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">
+      <div className="text-[11px] text-on-surface-variant">
         Routing History
         <span className="ml-2 normal-case tracking-normal">
           {trail.length} closed step{trail.length === 1 ? "" : "s"} · append-only trail · deterministic path
@@ -142,12 +142,12 @@ export function InstanceTrailTimeline({
             frontierAnchored ? "border-amber-700 bg-amber-700/5" : "border-outline-variant",
           )}
         >
-          <span className="font-mono text-[10px] text-on-surface-variant w-6 shrink-0">{trail.length + 1}.</span>
+          <span className="font-mono text-[11px] text-on-surface-variant w-6 shrink-0">{trail.length + 1}.</span>
           <span className="font-mono text-[11px] font-bold text-on-surface w-28 shrink-0">
             {instance.currentStepId}
           </span>
           <span className="font-mono text-[11px] text-emerald-800 w-20 shrink-0">● open</span>
-          <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-on-surface-variant">
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-on-surface-variant">
             frontier packet {instance.currentFrontier[0] ?? "(none)"}
             {instance.deadline.evidence ? ` · held by ${instance.deadline.evidence.ownerSession}` : ""}
           </span>

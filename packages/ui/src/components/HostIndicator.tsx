@@ -33,9 +33,9 @@ export function HostIndicator() {
         data-testid="host-indicator"
         data-host={LOCAL_HOST_ID}
         data-state="local"
-        className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant"
+        className="hidden text-xs text-on-surface-variant sm:inline"
       >
-        {ownName} · local
+        <span className="font-mono">{ownName}</span> · Local
       </span>
     );
   }
@@ -47,9 +47,9 @@ export function HostIndicator() {
         data-testid="host-indicator"
         data-host={selected}
         data-state="unreachable"
-        className="inline-flex items-center gap-1 border border-error px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.18em] text-error"
+        className="inline-flex max-w-[40vw] items-center gap-1 truncate rounded-full border border-error px-2 py-0.5 text-xs font-medium text-error"
       >
-        ⊕ {selected} · unreachable
+        ⊕ <span className="font-mono">{selected}</span> · Unreachable
       </span>
     );
   }
@@ -59,9 +59,9 @@ export function HostIndicator() {
         data-testid="host-indicator"
         data-host={selected}
         data-state="connecting"
-        className="inline-flex animate-pulse items-center gap-1 border border-outline px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface"
+        className="inline-flex max-w-[40vw] animate-pulse items-center gap-1 truncate rounded-full border border-outline px-2 py-0.5 text-xs font-medium text-on-surface motion-reduce:animate-none"
       >
-        ⊕ connecting to {selected}…
+        ⊕ Connecting to <span className="font-mono">{selected}</span>…
       </span>
     );
   }
@@ -70,9 +70,9 @@ export function HostIndicator() {
       data-testid="host-indicator"
       data-host={selected}
       data-state="viewing"
-      className="inline-flex items-center gap-1 bg-inverse-surface px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-background"
+      className="inline-flex max-w-[40vw] items-center gap-1 truncate rounded-full bg-inverse-surface px-2 py-0.5 text-xs font-medium text-background"
     >
-      ⊕ viewing {selected}
+      ⊕ Viewing <span className="font-mono">{selected}</span>
     </span>
   );
 }

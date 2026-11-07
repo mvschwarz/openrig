@@ -101,3 +101,15 @@ if (!globalThis.DOMMatrixReadOnly) {
     }
   } as unknown as typeof DOMMatrixReadOnly;
 }
+
+// ui-redesign C01: jsdom lacks these; cmdk calls scrollIntoView on the active
+// item, and Radix menus call the pointer-capture APIs.
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function scrollIntoView() {};
+}
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false;
+}
+if (!Element.prototype.releasePointerCapture) {
+  Element.prototype.releasePointerCapture = () => {};
+}

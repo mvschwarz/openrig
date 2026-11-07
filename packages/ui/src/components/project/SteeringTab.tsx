@@ -30,14 +30,14 @@ function SteeringPanel() {
   let body: ReactNode;
   if (isLoading) {
     body = (
-      <div data-testid="steering-panel-loading" className="font-mono text-[11px] text-on-surface-variant">
+      <div data-testid="steering-panel-loading" className="text-xs text-on-surface-variant">
         Loading…
       </div>
     );
   } else if (error) {
     body = (
       <EmptyState
-        label="STEERING UNAVAILABLE"
+        label="Steering unavailable"
         description={(error as Error)?.message ?? "Could not load /api/steering."}
         variant="card"
         testId="steering-panel-error"
@@ -48,7 +48,7 @@ function SteeringPanel() {
     body = (
       <div data-testid="steering-panel-unavailable">
         <EmptyState
-          label="NO STEERING CONFIGURED"
+          label="No steering configured"
           description={
             data.hint ??
             "Set workspace.steering_path to a STEERING.md so the live directive projects here."
@@ -66,7 +66,7 @@ function SteeringPanel() {
           <MarkdownViewer content={ps.content} hideFrontmatter hideRawToggle />
         </div>
         {/* Off-intent → traceable-to-source: the live directive + where it lives. */}
-        <div data-testid="steering-panel-source" className="mt-2 font-mono text-[10px] text-on-surface-variant">
+        <div data-testid="steering-panel-source" className="mt-2 font-mono text-xs text-on-surface-variant">
           source: {ps.absolutePath} · updated {new Date(ps.mtime).toLocaleString()}
         </div>
       </>
@@ -74,7 +74,7 @@ function SteeringPanel() {
   } else {
     body = (
       <EmptyState
-        label="NO STEERING.md YET"
+        label="No STEERING.md yet"
         description="No STEERING.md content at the configured workspace.steering_path. The live directive projects here once it exists."
         variant="card"
         testId="steering-panel-empty"
@@ -83,7 +83,7 @@ function SteeringPanel() {
   }
 
   return (
-    <section data-testid="steering-panel" className="border border-outline-variant bg-surface-lowest/30 p-4">
+    <section data-testid="steering-panel" className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
       <SectionHeader>Steering · STEERING.md</SectionHeader>
       {body}
     </section>
@@ -135,7 +135,7 @@ function parseBrief(markdown: string): ParsedBrief {
 function BriefSectionBlock({ header, body }: { header: string; body: string | undefined }) {
   return (
     <div data-testid={`brief-section-${header}`} className="border-t border-outline-variant/60 py-2">
-      <div className="font-mono text-[11px] uppercase tracking-[0.08em] text-on-surface">{header}</div>
+      <div className="text-sm font-medium text-on-surface">{header}</div>
       {body && body.length > 0 ? (
         <div className="mt-1">
           <MarkdownViewer content={body} hideFrontmatter hideRawToggle />
@@ -143,7 +143,7 @@ function BriefSectionBlock({ header, body }: { header: string; body: string | un
       ) : (
         // Missing OR empty canonical section → muted dash (degrade-to-dash; shows the
         // expected shape + tells the populator what to fill).
-        <div data-testid={`brief-section-${header}-dash`} className="mt-1 font-mono text-[12px] text-on-surface-variant">
+        <div data-testid={`brief-section-${header}-dash`} className="mt-1 text-xs text-on-surface-variant">
           —
         </div>
       )}
@@ -169,7 +169,7 @@ function BriefPanel({ missionId }: { missionId: string | null }) {
     body = (
       <div data-testid="brief-panel-remote-gated">
         <EmptyState
-          label="LOCAL FILES NOT SHOWN"
+          label="Local files not shown"
           description="The mission brief lives on the selected host's filesystem, which the remote read view does not browse. Select the local host to read local briefs."
           variant="card"
           testId="brief-panel-remote-gated-state"
@@ -178,7 +178,7 @@ function BriefPanel({ missionId }: { missionId: string | null }) {
     );
   } else if (!selectionKnown || mission.isLoading || brief.isLoading) {
     body = (
-      <div data-testid="brief-panel-loading" className="font-mono text-[11px] text-on-surface-variant">
+      <div data-testid="brief-panel-loading" className="text-xs text-on-surface-variant">
         Loading…
       </div>
     );
@@ -187,7 +187,7 @@ function BriefPanel({ missionId }: { missionId: string | null }) {
     body = (
       <div data-testid="brief-panel-read-error">
         <EmptyState
-          label="BRIEF READ FAILED"
+          label="Brief read failed"
           description="The daemon could not read MISSION_BRIEF.md — this is a read failure, not a missing brief. Check daemon logs and file permissions."
           variant="card"
           testId="brief-panel-read-error-state"
@@ -200,7 +200,7 @@ function BriefPanel({ missionId }: { missionId: string | null }) {
     body = (
       <div data-testid="brief-panel-unresolved">
         <EmptyState
-          label="BRIEF OUTSIDE FILE ROOTS"
+          label="Brief outside file roots"
           description="The mission path is not under any allowlisted file root, so MISSION_BRIEF.md cannot be read. Check OPENRIG_FILES_ALLOWLIST / the daemon's file-roots settings."
           variant="card"
           testId="brief-panel-unresolved-state"
@@ -211,7 +211,7 @@ function BriefPanel({ missionId }: { missionId: string | null }) {
     body = (
       <div data-testid="brief-panel-empty">
         <EmptyState
-          label="NO BRIEF YET"
+          label="No brief yet"
           description="No MISSION_BRIEF.md at the mission root. The human-facing brief (what we're building · how far · what's proven · what needs you) projects here once the mission is briefed."
           variant="card"
           testId="brief-panel-empty-state"
@@ -226,9 +226,9 @@ function BriefPanel({ missionId }: { missionId: string | null }) {
     body = (
       <div data-testid="brief-panel-content">
         {parsed.title && (
-          <div className="font-mono text-[13px] uppercase tracking-[0.08em] text-on-surface">{parsed.title}</div>
+          <div className="text-sm font-semibold text-on-surface">{parsed.title}</div>
         )}
-        {parsed.tldr && <p className="mt-0.5 text-[12px] italic text-on-surface-variant">{parsed.tldr}</p>}
+        {parsed.tldr && <p className="mt-0.5 text-xs italic text-on-surface-variant">{parsed.tldr}</p>}
         {/* Canonical sections, in contract order, by EXACT header match. */}
         {BRIEF_SECTIONS.map((header) => (
           <BriefSectionBlock key={header} header={header} body={bodyByHeader.get(header)} />
@@ -242,7 +242,7 @@ function BriefPanel({ missionId }: { missionId: string | null }) {
   }
 
   return (
-    <section data-testid="brief-panel" className="border border-outline-variant bg-surface-lowest/20 p-4">
+    <section data-testid="brief-panel" className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
       <SectionHeader>Brief · human-facing</SectionHeader>
       {body}
     </section>

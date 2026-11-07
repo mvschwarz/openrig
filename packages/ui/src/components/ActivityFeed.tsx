@@ -26,12 +26,12 @@ export function LogFeedList({ events }: { events: ActivityEvent[] }) {
     >
       <div
         data-testid="feed-disclosure"
-        className="px-spacing-3 py-2 border-b border-outline-variant/20 font-mono text-[9px] uppercase tracking-[0.06em] text-on-surface-variant"
+        className="px-spacing-3 py-2 border-b border-outline-variant/20 text-[11px] text-on-surface-variant"
       >
         Showing last {MAX_ACTIVITY_EVENTS} live events in this panel.
       </div>
       {events.length === 0 ? (
-        <div data-testid="feed-empty" className="px-spacing-3 py-spacing-4 font-mono text-[10px] text-on-surface-variant text-center">
+        <div data-testid="feed-empty" className="px-spacing-3 py-spacing-4 font-mono text-[11px] text-on-surface-variant text-center">
           No recent log entries
         </div>
       ) : (
@@ -50,7 +50,7 @@ export function LogFeedList({ events }: { events: ActivityEvent[] }) {
                 onClick={isNavigable ? () => navigate({ to: route }) : undefined}
                 onKeyDown={isNavigable ? (e) => { if (e.key === "Enter") navigate({ to: route }); } : undefined}
                 className={cn(
-                  "flex items-center gap-2 px-spacing-3 py-1.5 border-b border-outline-variant/20 transition-colors duration-150 ease-tactical font-mono text-[10px] leading-4",
+                  "flex items-center gap-2 px-spacing-3 py-1.5 border-b border-outline-variant/20 transition-colors duration-150 ease-tactical font-mono text-[11px] leading-4",
                   isNavigable && "cursor-pointer hover:bg-surface-lowest/24"
                 )}
               >
@@ -61,7 +61,7 @@ export function LogFeedList({ events }: { events: ActivityEvent[] }) {
 
                 <span
                   data-testid="feed-time"
-                  className="shrink-0 text-[9px] text-on-surface-variant tabular-nums"
+                  className="shrink-0 text-[11px] text-on-surface-variant tabular-nums"
                 >
                   {formatLogTime(event.createdAt)}
                 </span>
@@ -77,7 +77,7 @@ export function LogFeedList({ events }: { events: ActivityEvent[] }) {
           {isCapped ? (
             <div
               data-testid="feed-end-of-history"
-              className="px-spacing-3 py-2 font-mono text-[9px] uppercase tracking-[0.06em] text-on-surface-variant text-center"
+              className="px-spacing-3 py-2 text-[11px] text-on-surface-variant text-center"
             >
               Older events are not loaded in this panel yet.
             </div>
@@ -106,7 +106,7 @@ export function ActivityFeed({ events, open, onClose }: ActivityFeedProps) {
       <div className="relative flex max-h-[50vh] flex-col">
         {/* Header */}
         <div className="relative z-10 flex items-center justify-between px-spacing-3 py-spacing-2 border-b border-outline-variant/35 shrink-0">
-          <span className="text-label-sm uppercase tracking-[0.06em] text-on-surface">
+          <span className="text-label-sm text-on-surface">
             RECENT LOG
           </span>
           <button

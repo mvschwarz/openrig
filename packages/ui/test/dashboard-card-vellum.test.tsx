@@ -1,14 +1,11 @@
 // Dashboard source-level tests.
 //
-// OPR.0.4.1.14 — the Dashboard route is now the founder-LOCKED fidelity
-// refresh: a paper-draft launcher grid + Field Environment + drafting footer
-// built from ./vellum/fidelity-glyphs.js + the scoped ./dashboard-fidelity.css.
-// The legacy big-numeral vellum primitives (DestinationsLayer / TopLayerContent
-// / VellumDestinationCard / etc.) are NO LONGER used by the production
-// dashboard — they are retained only for the /lab/vellum-lab design
-// experiment. This test verifies (a) Dashboard.tsx composes the new fidelity
-// surface + wires the right real-data hooks, and (b) the legacy primitives are
-// still intact for the lab.
+// C10 (Dashboard v2) replaced the OPR.0.4.1.14 paper-draft launcher surface
+// (fidelity-glyphs + Field Environment + drafting footer) with the
+// needs-you / tiles / rigs / activity composition. Per rule 4, the three
+// assertions below that encoded the OLD launcher copy/layout were rewritten
+// to assert the new surface; the legacy vellum primitives stay intact for
+// /lab/vellum-lab (unchanged tests at the bottom).
 
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
@@ -30,43 +27,42 @@ const CARD_SRC = readFileSync(
   path.resolve(__dirname, "../src/components/dashboard/vellum/VellumDestinationCard.tsx"),
   "utf8",
 );
+const GLOBALS_CSS = readFileSync(path.resolve(__dirname, "../src/globals.css"), "utf8");
+const HOST_CONFIG_SRC = readFileSync(
+  path.resolve(__dirname, "../src/components/dashboard/HostConfigCard.tsx"),
+  "utf8",
+);
 
-describe("Dashboard (OPR.0.4.1.14 fidelity refresh)", () => {
-  it("Dashboard.tsx composes the fidelity launcher surface", () => {
-    // New fidelity primitives + scoped stylesheet.
-    expect(DASHBOARD_SRC).toContain('from "./vellum/fidelity-glyphs.js"');
-    expect(DASHBOARD_SRC).toContain('import "./dashboard-fidelity.css"');
-    // Paper-draft surface + Field Environment + footer.
-    expect(DASHBOARD_SRC).toContain("df-root");
-    expect(DASHBOARD_SRC).toContain("FieldEnvironment");
-    expect(DASHBOARD_SRC).toContain("DashboardFooter");
-    // The legacy big-numeral layer composition is gone from the production
-    // dashboard (moved to lab-only).
+describe("Dashboard (C10 v2 composition)", () => {
+  it("Dashboard.tsx composes the v2 needs-you surface (no vellum launcher)", () => {
+    // C10: the vellum launcher decorations are gone from THIS component
+    // (files stay for /lab/vellum-lab).
+    expect(DASHBOARD_SRC).not.toContain('from "./vellum/fidelity-glyphs.js"');
+    expect(DASHBOARD_SRC).not.toContain('import "./dashboard-fidelity.css"');
+    expect(DASHBOARD_SRC).not.toContain("df-root");
     expect(DASHBOARD_SRC).not.toContain("DestinationsLayer");
     expect(DASHBOARD_SRC).not.toContain("TopLayerContent");
+    // The new surface: needs-you + tiles + rigs + activity + host section.
+    expect(DASHBOARD_SRC).toContain("dashboard-needs-you");
+    expect(DASHBOARD_SRC).toContain("dashboard-rigs");
+    expect(DASHBOARD_SRC).toContain("dashboard-activity");
+    expect(DASHBOARD_SRC).toContain("dashboard-host-section");
+    expect(DASHBOARD_SRC).toContain("KernelStatusCard");
   });
 
-  it("Dashboard.tsx declares all 6 destinations with their routes (no behaviour change)", () => {
-    for (const route of ["/topology", "/project", "/for-you", "/specs", "/search", "/settings"]) {
-      expect(DASHBOARD_SRC).toContain(`to: "${route}"`);
-    }
-    for (const num of ["01", "02", "03", "04", "05", "06"]) {
-      expect(DASHBOARD_SRC).toContain(`num: "${num}"`);
+  it("Dashboard.tsx links to the v2 destinations (import / new rig / tiles)", () => {
+    for (const route of ["/import", "/specs/rig", "/topology", "/for-you", "/agents", "/settings/status"]) {
+      expect(DASHBOARD_SRC).toContain(`"${route}"`);
     }
   });
 
-  it("Dashboard.tsx wires real-data hooks for the Field Environment", () => {
-    // OPR.0.4.1.14 functional refinement: STATION/RIGS/AGENTS/OPERATOR were
-    // already real; VERSION is the new real wire (running daemon version). The
-    // active sub-count was dropped (AGENTS is a single live count per its row).
-    expect(DASHBOARD_SRC).toContain("useRigSummary");
+  it("Dashboard.tsx wires the v2 real-data hooks", () => {
+    // C10: ps + attention + daemon health + activity feed (+ nodes via useAllAgents).
     expect(DASHBOARD_SRC).toContain("usePsEntries");
-    expect(DASHBOARD_SRC).toContain("useSettings");
-    expect(DASHBOARD_SRC).toContain("useDaemonVersion");
-    expect(DASHBOARD_SRC).toContain("totalRigs");
-    expect(DASHBOARD_SRC).toContain("totalAgents");
-    expect(DASHBOARD_SRC).toContain("version");
-    expect(DASHBOARD_SRC).toContain("hostname");
+    expect(DASHBOARD_SRC).toContain("useAttentionItems");
+    expect(DASHBOARD_SRC).toContain("useDaemonHealth");
+    expect(DASHBOARD_SRC).toContain("useActivityFeed");
+    expect(DASHBOARD_SRC).toContain("useFeedSubscriptions");
   });
 
   // ── Legacy vellum primitives — retained ONLY for /lab/vellum-lab ──────────
@@ -94,5 +90,17 @@ describe("Dashboard (OPR.0.4.1.14 fidelity refresh)", () => {
     expect(TOP_LAYER_SRC).toContain("Field Station");
     expect(TOP_LAYER_SRC).toContain("Eyes Everywhere");
     expect(TOP_LAYER_SRC).toContain("backdrop-blur-[6px]");
+  });
+
+  // F4 (#2417): every df-hosts-* class HostConfigCard uses must be defined
+  // in the imported Clean theme (dashboard-fidelity.css is no longer loaded).
+  it("HostConfigCard's df-hosts classes are defined in globals.css", () => {
+    const used = new Set(
+      [...HOST_CONFIG_SRC.matchAll(/df-hosts[a-z-]*/g)].map((m) => m[0]),
+    );
+    expect(used.size).toBeGreaterThan(0);
+    for (const cls of used) {
+      expect(GLOBALS_CSS).toContain(`.${cls}`);
+    }
   });
 });

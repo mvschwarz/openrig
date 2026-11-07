@@ -83,7 +83,7 @@ export interface NodeInventoryEntry {
   codexConfigProfile?: string | null;
 }
 
-async function fetchNodeInventory(rigId: string, hostId: string): Promise<NodeInventoryEntry[]> {
+export async function fetchNodeInventory(rigId: string, hostId: string): Promise<NodeInventoryEntry[]> {
   // OPR.0.4.6.MH2 FR-2 — selected-host envelope; origin shape verbatim;
   // local path unchanged (withHostParam is identity for local).
   const res = await fetch(withHostParam(`/api/rigs/${encodeURIComponent(rigId)}/nodes`, hostId));

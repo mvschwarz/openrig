@@ -25,28 +25,31 @@ describe("Tailwind Foundation", () => {
     const root = document.documentElement;
     const styles = getComputedStyle(root);
 
-    expect(styles.getPropertyValue("--background").trim()).toContain("47 20% 97%");
-    expect(styles.getPropertyValue("--on-surface").trim()).toContain("120 8% 19%");
-    expect(styles.getPropertyValue("--primary").trim()).toContain("0 1% 37%");
-    expect(styles.getPropertyValue("--tertiary").trim()).toContain("1 63% 42%");
+    // Clean theme (ui-redesign C02) values; the CLEAN THEME block is last in globals.css.
+    expect(styles.getPropertyValue("--background").trim()).toContain("0 0% 100%");
+    expect(styles.getPropertyValue("--on-surface").trim()).toContain("240 10% 10%");
+    expect(styles.getPropertyValue("--primary").trim()).toContain("240 6% 10%");
+    expect(styles.getPropertyValue("--tertiary").trim()).toContain("0 72% 51%");
+    expect(styles.getPropertyValue("--brand").trim()).toContain("221 83% 53%");
   });
 
-  // Test 2: ALL borderRadius tokens zeroed in config
-  it("ALL borderRadius tokens are 0px", () => {
+  // Test 2: borderRadius tokens derive from --radius (Clean theme)
+  it("borderRadius tokens derive from --radius (Clean theme)", () => {
     const config = readFileSync(resolve(__dirname, "../tailwind.config.ts"), "utf-8");
 
     const radiusMatch = config.match(/borderRadius:\s*\{([^}]+)\}/);
     expect(radiusMatch).not.toBeNull();
 
-    const pairs = [...radiusMatch![1]!.matchAll(/(\w+):\s*"([^"]+)"/g)];
-    expect(pairs.length).toBeGreaterThanOrEqual(6);
+    // Matches bare keys (sm, DEFAULT) and quoted keys ("2xl", "3xl").
+    const pairs = [...radiusMatch![1]!.matchAll(/"?(\w+)"?:\s*"([^"]+)"/g)];
+    expect(pairs.map(([, k]) => k).sort()).toEqual(["2xl", "3xl", "DEFAULT", "full", "lg", "md", "none", "sm", "xl"]);
     for (const [, key, value] of pairs) {
-      if (key === "full") {
-        expect(value).toBe("9999px");
-      } else {
-        expect(value).toBe("0px");
-      }
+      if (key === "full") expect(value).toBe("9999px");
+      else if (key === "none") expect(value).toBe("0px");
+      else expect(value).toContain("var(--radius)");
     }
+    const css = readFileSync(resolve(__dirname, "../src/globals.css"), "utf-8");
+    expect(css).toMatch(/--radius:\s*0\.5rem;/);
   });
 
   // Test 3: cn() utility

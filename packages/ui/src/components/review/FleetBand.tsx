@@ -27,7 +27,7 @@ function BandHostChip({ hostId }: { hostId: string }) {
   return (
     <span
       className={cn(
-        "shrink-0 border px-1 font-mono text-[9px] uppercase tracking-wide",
+        "shrink-0 border px-1 text-[11px] ",
         hostId === "local" ? "border-outline-variant text-on-surface-variant" : "border-on-surface text-on-surface",
       )}
     >
@@ -64,8 +64,8 @@ export function FleetBand() {
 
   return (
     <div data-testid="fleet-band" className={cn("flex flex-wrap items-center gap-2 px-2 py-1.5", VELLUM_CARD)}>
-      <span className="font-mono text-[10px] uppercase tracking-wide text-on-surface">FLEET</span>
-      <span data-testid="fleet-band-rollup" className="flex items-center gap-2 font-mono text-[10px]">
+      <span className="text-[11px] text-on-surface">FLEET</span>
+      <span data-testid="fleet-band-rollup" className="flex items-center gap-2 font-mono text-[11px]">
         <span className="text-emerald-700">● {data.rollup.needsYouCount}</span>
         <span className="text-amber-700">▲ {data.rollup.exceptionCount}</span>
         <span className="text-on-surface-variant">
@@ -74,18 +74,18 @@ export function FleetBand() {
         </span>
       </span>
       {data.registryError ? (
-        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-error">
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-error">
           host registry unreadable — local-only glance
         </span>
       ) : worst ? (
-        <span data-testid="fleet-band-worst" className="flex min-w-0 flex-1 items-center gap-1.5 truncate font-mono text-[10px] text-on-surface-variant">
+        <span data-testid="fleet-band-worst" className="flex min-w-0 flex-1 items-center gap-1.5 truncate font-mono text-[11px] text-on-surface-variant">
           worst: <BandHostChip hostId={worst.hostId} />
           <span className="min-w-0 truncate">{worst.summary}</span>
         </span>
       ) : (
-        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-on-surface-variant">quiet</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-on-surface-variant">Quiet</span>
       )}
-      <a href="/fleet" data-testid="fleet-band-open" className="font-mono text-[10px] uppercase text-on-surface hover:underline">
+      <a href="/fleet" data-testid="fleet-band-open" className="text-[11px] text-on-surface hover:underline">
         open fleet →
       </a>
     </div>

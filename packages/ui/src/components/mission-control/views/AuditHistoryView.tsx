@@ -52,8 +52,8 @@ export function AuditHistoryView() {
   return (
     <div data-testid="mc-view-audit-history" className="space-y-3 p-3">
       <header className="space-y-0.5">
-        <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-on-surface-variant">
-          audit-history
+        <div className="text-[11px] text-on-surface-variant">
+          Audit-history
         </div>
         <h2 className="font-headline text-lg text-on-surface">Audit history</h2>
         <p className="text-xs text-on-surface-variant">
@@ -118,7 +118,7 @@ export function AuditHistoryView() {
           type="button"
           data-testid="mc-audit-filter-apply"
           onClick={applyFilters}
-          className="border border-on-surface bg-inverse-surface px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-background"
+          className="border border-on-surface bg-inverse-surface px-2 py-1 text-[11px] text-background"
         >
           Apply filters
         </button>
@@ -126,7 +126,7 @@ export function AuditHistoryView() {
 
       {/* Results */}
       {query.isLoading ? (
-        <div data-testid="mc-audit-loading" className="font-mono text-[10px] text-on-surface-variant">
+        <div data-testid="mc-audit-loading" className="font-mono text-[11px] text-on-surface-variant">
           loading...
         </div>
       ) : query.isError ? (
@@ -147,10 +147,10 @@ export function AuditHistoryView() {
               className="border border-outline-variant bg-surface-lowest p-2 text-[11px]"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="font-mono uppercase tracking-[0.1em] text-on-surface">
+                <span className="text-on-surface">
                   {row.actionVerb}
                 </span>
-                <span className="font-mono text-[10px] text-on-surface-variant">
+                <span className="font-mono text-[11px] text-on-surface-variant">
                   {row.actedAt}
                 </span>
               </div>
@@ -178,7 +178,7 @@ export function AuditHistoryView() {
       {/* Pagination */}
       <footer
         data-testid="mc-audit-pagination"
-        className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
+        className="flex items-center justify-between text-[11px] text-on-surface-variant"
       >
         <button
           type="button"

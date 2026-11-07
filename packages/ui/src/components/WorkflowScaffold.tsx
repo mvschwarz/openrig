@@ -17,10 +17,10 @@ export function WorkflowHeader({
   return (
     <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
       <div className="space-y-3">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant">{eyebrow}</p>
-        <h2 className="text-2xl font-bold uppercase tracking-[0.04em] text-on-surface sm:text-3xl">{title}</h2>
+        <p className="text-xs font-medium text-on-surface-variant">{eyebrow}</p>
+        <h2 className="text-xl font-semibold text-on-surface">{title}</h2>
         {description && (
-          <p className="max-w-2xl text-base leading-8 text-on-surface-variant">{description}</p>
+          <p className="max-w-2xl text-sm text-on-surface-variant">{description}</p>
         )}
       </div>
       {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
@@ -65,17 +65,17 @@ export function WorkflowStepIndicator({
               data-testid={`step-${step.num}`}
               data-step-state={state}
               className={cn(
-                "inline-flex min-h-0 items-center gap-2 border-b-2 px-1 py-1 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors",
+                "inline-flex min-h-0 items-center gap-2 border-b-2 px-1 py-1 text-[11px] transition-colors",
                 isCompleted && "border-primary/35 text-foreground-muted",
                 isActive && "border-on-surface text-foreground",
                 isPending && "border-transparent text-foreground-muted/35",
               )}
             >
-              <span className="text-[9px] tracking-[0.22em]">
+              <span className="text-[11px]">
                 {isCompleted ? "\u2713 " : ""}
                 {String(step.num).padStart(2, "0")}
               </span>
-              <span className="text-[10px] leading-none tracking-[0.2em]">{step.label}</span>
+              <span className="text-[11px] leading-none">{step.label}</span>
             </div>
             {index < steps.length - 1 ? (
               <div
@@ -114,7 +114,7 @@ export function WorkflowSection({
       )}
     >
       <div className="space-y-2">
-        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant">{title}</div>
+        <div className="text-[11px] text-on-surface-variant">{title}</div>
         {description ? (
           <p className="text-base leading-8 text-on-surface-variant">{description}</p>
         ) : null}
@@ -141,8 +141,8 @@ export function WorkflowSummaryCard({
 }: WorkflowSummaryCardProps) {
   return (
     <div className="border border-outline-variant/35 bg-surface-lowest/10 px-4 py-4">
-      <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">{label}</div>
-      <div data-testid={testId} className="mt-2 text-2xl font-semibold uppercase tracking-[0.04em] text-on-surface">
+      <div className="text-[11px] text-on-surface-variant">{label}</div>
+      <div data-testid={testId} className="mt-2 text-2xl font-semibold text-on-surface">
         {value}
       </div>
     </div>

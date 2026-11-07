@@ -64,14 +64,14 @@ export function SliceWorkflowGraph({ specGraph }: { specGraph: SpecGraphPayload 
       data-spec-name={specGraph.specName}
       data-spec-version={specGraph.specVersion}
       data-layout="react-flow-dagre"
-      className="border border-outline-variant bg-surface-lowest/20"
+      className="overflow-hidden rounded-lg border bg-surface-lowest shadow-sm"
     >
-      <header className="flex items-center justify-between gap-3 border-b border-outline-variant bg-surface-lowest/30 px-3 py-2">
-        <div className="flex min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
+      <header className="flex items-center justify-between gap-3 border-b border-outline-variant bg-surface-lowest px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2 text-xs text-on-surface-variant">
           <span className="text-on-surface-variant">Workflow spec</span>
           <span className="text-on-surface-variant">·</span>
           <span className="truncate font-semibold text-on-surface">{specGraph.specName}</span>
-          <span className="text-on-surface-variant">v{specGraph.specVersion}</span>
+          <span className="font-mono text-on-surface-variant">v{specGraph.specVersion}</span>
           {hasLoopBack && (
             <>
               <span className="text-on-surface-variant">·</span>
@@ -82,10 +82,10 @@ export function SliceWorkflowGraph({ specGraph }: { specGraph: SpecGraphPayload 
           )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant">
+          <span className="font-mono text-xs tabular-nums text-on-surface-variant">
             {specGraph.nodes.length} steps / {specGraph.edges.length} edges
           </span>
-          <span className="border border-outline-variant px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-[0.14em] text-on-surface-variant">
+          <span className="rounded-full border border-outline-variant px-1.5 py-0.5 font-mono text-xs text-on-surface-variant">
             read-only
           </span>
         </div>
@@ -178,10 +178,8 @@ export function buildSliceWorkflowGraph(specGraph: SpecGraphPayload): { nodes: S
     label: edge.isLoopBack ? "reject → rework" : undefined,
     labelStyle: {
       fill: LOOPBACK_STROKE,
-      fontSize: 9,
+      fontSize: 11,
       fontFamily: "monospace",
-      letterSpacing: "0.08em",
-      textTransform: "uppercase",
     },
     labelBgStyle: { fill: "hsl(var(--surface-container-lowest))", fillOpacity: 0.85 },
   }));
@@ -199,7 +197,7 @@ function SliceWorkflowStepNode({ data }: NodeProps<SliceWorkflowNode>) {
       data-is-entry={step.isEntry}
       data-is-terminal={step.isTerminal}
       style={{ width: NODE_WIDTH, height: NODE_HEIGHT }}
-      className={`relative border bg-surface-lowest font-mono hard-shadow ${
+      className={`relative rounded-lg border bg-surface-lowest ${
         active ? "border-emerald-500/70" : "border-outline/80"
       }`}
     >
@@ -208,9 +206,9 @@ function SliceWorkflowStepNode({ data }: NodeProps<SliceWorkflowNode>) {
       <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-outline-variant !bg-outline" />
       {/* dark topology-style header: role + live-state affordance */}
       <div className="flex items-center justify-between bg-inverse-surface px-2 py-1 text-background">
-        <span className="truncate text-[10px] tracking-[0.04em]">{step.role}</span>
+        <span className="truncate text-xs">{step.role}</span>
         <span className="flex shrink-0 items-center gap-1.5">
-          <span className="text-[7px] tracking-[0.14em] text-on-surface-variant">STATE</span>
+          <span className="text-xs text-on-surface-variant">State</span>
           <span
             data-testid={`spec-node-${step.stepId}-state-dot`}
             data-active={active ? "true" : "false"}
@@ -222,14 +220,14 @@ function SliceWorkflowStepNode({ data }: NodeProps<SliceWorkflowNode>) {
       {/* body: step identity + bound seat + lifecycle markers */}
       <div className={`px-2 py-1.5 ${active ? "bg-emerald-50/70" : "bg-surface-lowest"}`}>
         <div className="flex items-start justify-between gap-2">
-          <span className="truncate text-[11px] font-bold uppercase tracking-[0.04em] text-on-surface">
+          <span className="truncate text-xs font-semibold text-on-surface">
             {step.stepId}
           </span>
           <span className="flex shrink-0 flex-col items-end gap-0.5">
             {step.isEntry && (
               <span
                 data-testid={`spec-node-${step.stepId}-entry-badge`}
-                className="border border-blue-300 bg-blue-50 px-1 text-[8px] uppercase tracking-[0.10em] text-blue-900"
+                className="rounded-full border border-blue-300 bg-blue-50 px-1 text-xs text-blue-900"
               >
                 entry
               </span>
@@ -237,7 +235,7 @@ function SliceWorkflowStepNode({ data }: NodeProps<SliceWorkflowNode>) {
             {step.isCurrent && (
               <span
                 data-testid={`spec-node-${step.stepId}-current-badge`}
-                className="border border-emerald-400 bg-emerald-100 px-1 text-[8px] uppercase tracking-[0.10em] text-emerald-900"
+                className="rounded-full border border-emerald-400 bg-emerald-100 px-1 text-xs text-emerald-900"
               >
                 current
               </span>
@@ -245,7 +243,7 @@ function SliceWorkflowStepNode({ data }: NodeProps<SliceWorkflowNode>) {
             {step.isTerminal && (
               <span
                 data-testid={`spec-node-${step.stepId}-terminal-badge`}
-                className="inline-flex items-center gap-1 border border-outline-variant bg-surface-low px-1 text-[8px] uppercase tracking-[0.10em] text-on-surface"
+                className="inline-flex items-center gap-1 rounded-full border border-outline-variant bg-surface-low px-1 text-xs text-on-surface"
               >
                 <ToolMark tool="terminal" size="xs" />
                 terminal
@@ -254,11 +252,11 @@ function SliceWorkflowStepNode({ data }: NodeProps<SliceWorkflowNode>) {
           </span>
         </div>
         {step.preferredTarget && (
-          <div className="mt-1 truncate text-[9px] text-on-surface-variant" title={step.preferredTarget}>
+          <div className="mt-1 truncate font-mono text-xs text-on-surface-variant" title={step.preferredTarget}>
             {step.preferredTarget}
           </div>
         )}
-        <div className="mt-0.5 line-clamp-2 text-[9px] leading-snug text-on-surface-variant">{step.label}</div>
+        <div className="mt-0.5 line-clamp-2 text-xs leading-snug text-on-surface-variant">{step.label}</div>
       </div>
     </div>
   );

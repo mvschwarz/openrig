@@ -56,7 +56,7 @@ export function MarkdownViewer({ content, assetBasePath, hideFrontmatter = false
             data-testid="markdown-viewer-mode-rendered"
             data-active={mode === "rendered"}
             onClick={() => setMode("rendered")}
-            className={`border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] ${
+            className={`border px-2 py-0.5 text-[11px] ${
               mode === "rendered"
                 ? "border-on-surface bg-inverse-surface text-background"
                 : "border-outline-variant text-on-surface hover:bg-surface-low"
@@ -69,7 +69,7 @@ export function MarkdownViewer({ content, assetBasePath, hideFrontmatter = false
             data-testid="markdown-viewer-mode-raw"
             data-active={mode === "raw"}
             onClick={() => setMode("raw")}
-            className={`border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] ${
+            className={`border px-2 py-0.5 text-[11px] ${
               mode === "raw"
                 ? "border-on-surface bg-inverse-surface text-background"
                 : "border-outline-variant text-on-surface hover:bg-surface-low"
@@ -83,7 +83,7 @@ export function MarkdownViewer({ content, assetBasePath, hideFrontmatter = false
         <FrontmatterHeader frontmatter={parsed.frontmatter} />
       )}
       {mode === "raw" ? (
-        <pre data-testid="markdown-viewer-raw" className="overflow-x-auto whitespace-pre-wrap break-words bg-background p-3 font-mono text-[10px] text-on-surface">
+        <pre data-testid="markdown-viewer-raw" className="overflow-x-auto whitespace-pre-wrap break-words bg-background p-3 font-mono text-[11px] text-on-surface">
           {content}
         </pre>
       ) : (
@@ -267,14 +267,14 @@ function FrontmatterHeader({ frontmatter }: { frontmatter: Record<string, string
       data-testid="markdown-frontmatter"
       className="mb-4 border border-outline-variant bg-background p-3"
     >
-      <div className="mb-2 font-mono text-[8px] uppercase tracking-[0.18em] text-on-surface-variant">
+      <div className="mb-2 text-[11px] text-on-surface-variant">
         Frontmatter
       </div>
       <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
         {entries.map(([k, v]) => (
           <Fragment key={k}>
-            <dt className="font-mono text-[10px] font-bold text-on-surface">{k}</dt>
-            <dd className="font-mono text-[10px] text-on-surface break-all">{v}</dd>
+            <dt className="font-mono text-[11px] font-bold text-on-surface">{k}</dt>
+            <dd className="font-mono text-[11px] text-on-surface break-all">{v}</dd>
           </Fragment>
         ))}
       </dl>
@@ -302,10 +302,10 @@ function BlockRenderer({ block, assetBasePath }: { block: Block; assetBasePath?:
     if (block.isMermaid) {
       return (
         <div data-testid="md-mermaid-placeholder" className="border border-amber-300 bg-amber-50 p-3">
-          <div className="mb-2 font-mono text-[8px] uppercase tracking-[0.18em] text-amber-700">
+          <div className="mb-2 text-[11px] text-amber-700">
             mermaid diagram (v0+1 trigger: render-on-click flow)
           </div>
-          <pre className="overflow-x-auto bg-stone-900 p-2 font-mono text-[10px] text-stone-100">
+          <pre className="overflow-x-auto bg-stone-900 p-2 font-mono text-[11px] text-stone-100">
             <code>{block.text}</code>
           </pre>
           <button
@@ -313,7 +313,7 @@ function BlockRenderer({ block, assetBasePath }: { block: Block; assetBasePath?:
             data-testid="md-mermaid-render-btn"
             disabled
             title="Mermaid rendering not bundled at v0 (named v0+1 trigger). Inspect the source above."
-            className="mt-2 cursor-not-allowed border border-amber-400 bg-amber-100 px-2 py-1 font-mono text-[9px] uppercase tracking-[0.10em] text-amber-800"
+            className="mt-2 cursor-not-allowed border border-amber-400 bg-amber-100 px-2 py-1 text-[11px] text-amber-800"
           >
             [render mermaid] (v0+1)
           </button>
@@ -341,7 +341,7 @@ function BlockRenderer({ block, assetBasePath }: { block: Block; assetBasePath?:
   if (block.type === "table") {
     return (
       <div data-testid="md-table-wrapper" className="overflow-x-auto">
-        <table className="w-full border-collapse border border-outline-variant text-[10px]">
+        <table className="w-full border-collapse border border-outline-variant text-[11px]">
           <thead className="bg-surface-low">
             <tr>{block.headers.map((h, i) => <th key={i} className="border border-outline-variant px-2 py-1 text-left font-bold text-on-surface">{renderInline(h, assetBasePath)}</th>)}</tr>
           </thead>
@@ -418,7 +418,7 @@ function renderInline(text: string, assetBasePath?: string): React.ReactNode {
           <code
             key={key++}
             data-testid="md-inline-code"
-            className="bg-surface-low px-1 font-mono text-[10px] text-on-surface"
+            className="bg-surface-low px-1 font-mono text-[11px] text-on-surface"
           >
             {remaining.slice(1, close)}
           </code>,

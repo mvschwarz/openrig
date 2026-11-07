@@ -13,13 +13,14 @@
 // Startup section in Details no longer shows the preview pane (since
 // the terminal moved up to Overview).
 
-import { useMemo, useState } from "react";
-import { CirclePlay } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { CirclePlay, SlidersHorizontal } from "lucide-react";
 import { useNodeDetail, type NodeDetailData } from "../hooks/useNodeDetail.js";
 import { useTopologyActivity } from "../hooks/useTopologyActivity.js";
 import { useSpecLibrary, useLibraryReview } from "../hooks/useSpecLibrary.js";
 import { WorkspacePage } from "./WorkspacePage.js";
-import { WorkflowHeader } from "./WorkflowScaffold.js";
+import { PageHeader } from "./ui/page-header.js";
+import { AgentPropertiesPanel } from "./AgentPropertiesPanel.js";
 import { AgentSpecDisplay } from "./AgentSpecDisplay.js";
 // Slice 3.3 fix-B — Plugins section per dispatch §3.2 / velocity-qa
 // VM verify failure #2. Reads plugin IDs from the agent spec review
@@ -36,7 +37,7 @@ import { SeatOverviewTable } from "./SeatOverviewTable.js";
 import { SeatOverviewSecondary } from "./SeatOverviewSecondary.js";
 import { SeatNotificationBanner } from "./SeatNotificationBanner.js";
 import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js";
-import { displayPodName, inferPodName } from "../lib/display-name.js";
+import { displayAgentName, displayPodName, inferPodName } from "../lib/display-name.js";
 import { copyText } from "../lib/copy-text.js";
 import { useSelectedHostId } from "../hooks/useHosts.js";
 import { LOCAL_HOST_ID } from "../lib/host-param.js";
@@ -87,7 +88,7 @@ function resolveAgentName(agentRef: string | null): string | null {
 function InfoRow({ label, value }: { label: string; value: string | number | null | undefined }) {
   if (value === null || value === undefined || value === "") return null;
   return (
-    <div className="flex justify-between gap-3 font-mono text-[10px]">
+    <div className="flex justify-between gap-3 font-mono text-[11px]">
       <span className="text-on-surface-variant">{label}</span>
       <span className="truncate text-right text-on-surface">{value}</span>
     </div>
@@ -109,7 +110,7 @@ function AgentSpecSection({ data }: { data: NodeDetailData }) {
     <div data-testid="live-agent-spec-section" className="space-y-4">
       {data.compactSpec.name && (
         <section data-testid="detail-compact-spec" className={SECTION_CLASS}>
-          <div className="mb-2 font-mono text-[8px] uppercase tracking-wider text-on-surface-variant">Resolved Agent Spec</div>
+          <div className="mb-2 text-[11px] text-on-surface-variant">Resolved Agent Spec</div>
           <div className="space-y-0.5">
             <InfoRow label="Spec" value={data.compactSpec.name} />
             <InfoRow label="Version" value={data.compactSpec.version} />
@@ -121,17 +122,17 @@ function AgentSpecSection({ data }: { data: NodeDetailData }) {
       )}
 
       {!agentName ? (
-        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[10px] text-on-surface-variant">No agent spec available</div>
+        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[11px] text-on-surface-variant">No agent spec available</div>
       ) : entriesLoading || reviewLoading ? (
-        <div className="p-4 font-mono text-[10px] text-on-surface-variant">Loading agent spec...</div>
+        <div className="p-4 font-mono text-[11px] text-on-surface-variant">Loading agent spec...</div>
       ) : matches.length === 0 ? (
-        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[10px] text-on-surface-variant">No agent spec available</div>
+        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[11px] text-on-surface-variant">No agent spec available</div>
       ) : matches.length > 1 ? (
-        <div data-testid="agent-spec-ambiguous" className="p-4 font-mono text-[10px] text-amber-600">
+        <div data-testid="agent-spec-ambiguous" className="p-4 font-mono text-[11px] text-amber-600">
           Agent spec ambiguous ({matches.length} matches for &quot;{agentName}&quot;)
         </div>
       ) : !review || review.kind !== "agent" ? (
-        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[10px] text-on-surface-variant">No agent spec available</div>
+        <div data-testid="agent-spec-unavailable" className="p-4 font-mono text-[11px] text-on-surface-variant">No agent spec available</div>
       ) : (
         <>
           <AgentSpecDisplay
@@ -149,7 +150,7 @@ function AgentSpecSection({ data }: { data: NodeDetailData }) {
             data-testid="live-agent-plugins-section"
             className="border border-outline-variant bg-surface-lowest/30 p-3"
           >
-            <div className="mb-2 font-mono text-[8px] uppercase tracking-wider text-on-surface-variant">
+            <div className="mb-2 text-[11px] text-on-surface-variant">
               Plugins
             </div>
             <AgentPluginsList pluginIds={extractAgentPluginIds(review)} />
@@ -184,7 +185,17 @@ function extractAgentPluginIds(review: unknown): string[] {
   return ids;
 }
 
-function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId: string; data: NodeDetailData }) {
+function ActionButtonsRow({
+  rigId,
+  logicalId,
+  data,
+  onOpenProperties,
+}: {
+  rigId: string;
+  logicalId: string;
+  data: NodeDetailData;
+  onOpenProperties?: () => void;
+}) {
   // OPR.0.4.6.MH2 rev1-r2 B1: every button here is a LOCAL action (cmux-open
   // POST; tmux-attach / resume commands for THIS host's sessions). Under a
   // remote selection the row renders an honest read-only marker instead —
@@ -205,12 +216,26 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
   };
   if (actionsAreRemote) {
     return (
-      <div
-        data-testid="live-node-actions-remote-readonly"
-        data-remote-readonly="true"
-        className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant"
-      >
-        read-only — remote host
+      <div data-testid="live-node-actions" className="flex flex-wrap items-center gap-2">
+        <div
+          data-testid="live-node-actions-remote-readonly"
+          data-remote-readonly="true"
+          className="text-[11px] text-on-surface-variant"
+        >
+          read-only — remote host
+        </div>
+        {onOpenProperties && (
+          <button
+            type="button"
+            onClick={onOpenProperties}
+            data-testid="detail-open-properties"
+            className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 text-[11px] text-on-surface hover:bg-surface-low/60 lg:hidden"
+            aria-label="Inspect agent properties"
+          >
+            <SlidersHorizontal aria-hidden="true" className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+            Properties
+          </button>
+        )}
       </div>
     );
   }
@@ -219,7 +244,7 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
       <button
         onClick={handleOpenCmux}
         data-testid="detail-cmux-open"
-        className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
+        className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 text-[11px] text-on-surface hover:bg-surface-low/60"
       >
         <ToolMark tool="cmux" size="sm" />
         Open CMUX
@@ -228,7 +253,7 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
         <button
           onClick={handleCopyAttach}
           data-testid="detail-copy-attach"
-          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
+          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 text-[11px] text-on-surface hover:bg-surface-low/60"
         >
           <ToolMark tool="tmux" size="sm" />
           Copy tmux attach
@@ -238,10 +263,22 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
         <button
           onClick={handleCopyResume}
           data-testid="detail-copy-resume"
-          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
+          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 text-[11px] text-on-surface hover:bg-surface-low/60"
         >
           <CirclePlay aria-hidden="true" className="h-4 w-4 shrink-0" strokeWidth={1.5} />
           Copy resume command
+        </button>
+      )}
+      {onOpenProperties && (
+        <button
+          type="button"
+          onClick={onOpenProperties}
+          data-testid="detail-open-properties"
+          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 text-[11px] text-on-surface hover:bg-surface-low/60 lg:hidden"
+          aria-label="Inspect agent properties"
+        >
+          <SlidersHorizontal aria-hidden="true" className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+          Properties
         </button>
       )}
     </div>
@@ -259,13 +296,13 @@ function StatusSection({ data }: { data: NodeDetailData }) {
       className="grid gap-2 border border-outline-variant bg-surface-lowest/30 p-3 sm:grid-cols-2"
     >
       <div className="flex items-baseline gap-2">
-        <span className="font-mono text-[8px] uppercase tracking-wider text-on-surface-variant">Startup</span>
+        <span className="text-[11px] text-on-surface-variant">Startup</span>
         <span className={statusColor(data.startupStatus)} data-testid="detail-startup-status">
           {startupStatusLabel(data.startupStatus)}
         </span>
       </div>
       <div className="flex items-baseline gap-2">
-        <span className="font-mono text-[8px] uppercase tracking-wider text-on-surface-variant">Restore</span>
+        <span className="text-[11px] text-on-surface-variant">Restore</span>
         <span
           className={`font-mono text-xs font-bold ${getRestoreStatusColorClass(data.restoreOutcome)}`}
           data-testid="detail-restore-outcome"
@@ -283,7 +320,7 @@ function StatusSection({ data }: { data: NodeDetailData }) {
           data-testid="detail-failure-banner"
         >
           <div
-            className={`font-mono text-[9px] font-bold mb-1 ${
+            className={`font-mono text-[11px] font-bold mb-1 ${
               data.startupStatus === "attention_required" ? "text-orange-700" : "text-red-700"
             }`}
           >
@@ -295,14 +332,14 @@ function StatusSection({ data }: { data: NodeDetailData }) {
           </div>
           {data.latestError && (
             <div
-              className={`font-mono text-[9px] mb-1 ${
+              className={`font-mono text-[11px] mb-1 ${
                 data.startupStatus === "attention_required" ? "text-orange-700" : "text-red-600"
               }`}
             >
               {data.latestError}
             </div>
           )}
-          <div className="font-mono text-[8px] text-on-surface-variant">
+          <div className="font-mono text-[11px] text-on-surface-variant">
             {data.startupStatus === "attention_required"
               ? `Use rig capture ${data.canonicalSessionName ?? "<session>"} to inspect the prompt, then rig send ${data.canonicalSessionName ?? "<session>"} to clear it.`
               : data.startupStatus === "failed"
@@ -311,18 +348,18 @@ function StatusSection({ data }: { data: NodeDetailData }) {
           </div>
           {data.recoveryGuidance && (
             <div className="mt-2 border-t border-outline-variant pt-2" data-testid="detail-recovery-guidance">
-              <div className="font-mono text-[8px] font-bold text-on-surface mb-1">Recovery</div>
-              <div className="font-mono text-[8px] text-on-surface-variant mb-1">{data.recoveryGuidance.summary}</div>
+              <div className="font-mono text-[11px] font-bold text-on-surface mb-1">Recovery</div>
+              <div className="font-mono text-[11px] text-on-surface-variant mb-1">{data.recoveryGuidance.summary}</div>
               <div className="space-y-0.5 mb-1">
                 {data.recoveryGuidance.commands.map((command, index) => (
-                  <code key={`${command}-${index}`} className="font-mono text-[8px] text-on-surface bg-surface-low px-1 py-0.5 block">
+                  <code key={`${command}-${index}`} className="font-mono text-[11px] text-on-surface bg-surface-low px-1 py-0.5 block">
                     {command}
                   </code>
                 ))}
               </div>
               <div className="space-y-0.5">
                 {data.recoveryGuidance.notes.map((note, index) => (
-                  <div key={`${note}-${index}`} className="font-mono text-[8px] text-on-surface-variant">
+                  <div key={`${note}-${index}`} className="font-mono text-[11px] text-on-surface-variant">
                     {note}
                   </div>
                 ))}
@@ -345,12 +382,12 @@ function RecentEventsSection({ data }: { data: NodeDetailData }) {
   if (!data.recentEvents || data.recentEvents.length === 0) return null;
   return (
     <section data-testid="live-node-recent-events" className={SECTION_CLASS}>
-      <div className="font-mono text-[8px] uppercase tracking-wider text-on-surface-variant mb-2">
+      <div className="text-[11px] text-on-surface-variant mb-2">
         Recent Events
       </div>
       <div className="space-y-0.5">
         {data.recentEvents.slice(0, 10).map((e, i) => (
-          <div key={`${e.type}-${i}`} className="font-mono text-[9px] flex justify-between gap-3">
+          <div key={`${e.type}-${i}`} className="font-mono text-[11px] flex justify-between gap-3">
             <span className="text-on-surface truncate">{e.type}</span>
             <span className="text-on-surface-variant ml-2 shrink-0">{e.createdAt}</span>
           </div>
@@ -369,8 +406,8 @@ function EdgesSection({ data }: { data: NodeDetailData }) {
   if (outgoing.length === 0 && incoming.length === 0) return null;
   return (
     <section data-testid="detail-edges" className={SECTION_CLASS}>
-      <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Edges</div>
-      <div className="space-y-0.5 font-mono text-[10px]">
+      <div className="text-[11px] text-on-surface-variant mb-2">Edges</div>
+      <div className="space-y-0.5 font-mono text-[11px]">
         {outgoing.map((e, i) => (
           <div key={`out-${i}`} className="flex gap-1">
             <span className="text-on-surface-variant">-&gt;</span>
@@ -394,8 +431,8 @@ function PeersSection({ data }: { data: NodeDetailData }) {
   if (data.peers.length === 0) return null;
   return (
     <section data-testid="detail-peers" className={SECTION_CLASS}>
-      <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Peers</div>
-      <div className="space-y-1 font-mono text-[10px]">
+      <div className="text-[11px] text-on-surface-variant mb-2">Peers</div>
+      <div className="space-y-1 font-mono text-[11px]">
         {data.peers.map((p) => (
           <div key={p.logicalId} className="space-y-0">
             <div className="flex justify-between gap-3">
@@ -403,7 +440,7 @@ function PeersSection({ data }: { data: NodeDetailData }) {
               <span className="text-on-surface-variant">{p.runtime ?? "-"}</span>
             </div>
             {p.canonicalSessionName && (
-              <div className="text-[9px] text-on-surface-variant truncate">{p.canonicalSessionName}</div>
+              <div className="text-[11px] text-on-surface-variant truncate">{p.canonicalSessionName}</div>
             )}
           </div>
         ))}
@@ -416,9 +453,9 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
   const contextUsage = data.contextUsage;
   return (
     <section data-testid="detail-context-usage" className={SECTION_CLASS}>
-      <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Context</div>
+      <div className="text-[11px] text-on-surface-variant mb-2">Context</div>
       {contextUsage?.availability === "known" ? (
-        <div className="space-y-0.5 font-mono text-[10px]">
+        <div className="space-y-0.5 font-mono text-[11px]">
           <InfoRow label="Used" value={contextUsage.usedPercentage != null ? `${contextUsage.usedPercentage}%` : null} />
           <InfoRow label="Remaining" value={contextUsage.remainingPercentage != null ? `${contextUsage.remainingPercentage}%` : null} />
           <InfoRow label="Window" value={contextUsage.contextWindowSize?.toLocaleString()} />
@@ -426,11 +463,11 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
           <InfoRow label="Output tokens" value={contextUsage.totalOutputTokens?.toLocaleString()} />
           <InfoRow label="Sampled" value={contextUsage.sampledAt} />
           {contextUsage.fresh === false && (
-            <div className="font-mono text-[9px] text-amber-600 mt-1">Stale sample</div>
+            <div className="font-mono text-[11px] text-amber-600 mt-1">Stale sample</div>
           )}
         </div>
       ) : (
-        <div className="font-mono text-[10px] text-on-surface-variant">
+        <div className="font-mono text-[11px] text-on-surface-variant">
           unknown{contextUsage?.reason ? ` (${contextUsage.reason})` : ""}
         </div>
       )}
@@ -505,7 +542,7 @@ function InlineTerminal({ data }: { data: NodeDetailData }) {
     return (
       <div
         data-testid="node-detail-terminal-remote-gated"
-        className="font-mono text-[10px] text-on-surface-variant p-4"
+        className="font-mono text-[11px] text-on-surface-variant p-4"
       >
         Terminal not available for remote hosts — terminal streams are this
         host&apos;s local sessions. Viewing a remote host is read-only.
@@ -514,7 +551,7 @@ function InlineTerminal({ data }: { data: NodeDetailData }) {
   }
   if (!data.canonicalSessionName) {
     return (
-      <div className="font-mono text-[10px] text-on-surface-variant p-4">
+      <div className="font-mono text-[11px] text-on-surface-variant p-4">
         No canonical session name; terminal preview unavailable.
       </div>
     );
@@ -547,10 +584,10 @@ function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId:
 
       {data.infrastructureStartupCommand && (
         <section data-testid="live-node-infra-startup" className={SECTION_CLASS}>
-          <div className="font-mono text-[8px] uppercase tracking-wider text-on-surface-variant mb-2">
+          <div className="text-[11px] text-on-surface-variant mb-2">
             Startup Command
           </div>
-          <code className="font-mono text-[9px] text-on-surface bg-surface-low px-2 py-1 block">
+          <code className="font-mono text-[11px] text-on-surface bg-surface-low px-2 py-1 block">
             {data.infrastructureStartupCommand}
           </code>
         </section>
@@ -558,10 +595,10 @@ function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId:
 
       {data.startupActions.length > 0 && (
         <section data-testid="live-startup-actions" className={SECTION_CLASS}>
-          <div className="font-mono text-[8px] uppercase tracking-wider text-on-surface-variant mb-2">Startup Actions</div>
+          <div className="text-[11px] text-on-surface-variant mb-2">Startup Actions</div>
           <div className="space-y-1">
             {data.startupActions.map((action, index) => (
-              <div key={`${action.type}-${action.value}-${index}`} className="font-mono text-[10px] text-on-surface">
+              <div key={`${action.type}-${action.value}-${index}`} className="font-mono text-[11px] text-on-surface">
                 <span className="text-on-surface-variant">{action.type}:</span> {action.value}
               </div>
             ))}
@@ -583,14 +620,14 @@ function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId:
                 <FileReferenceTrigger
                   data={{ path: f.path, absolutePath: f.absolutePath }}
                   testId={`live-startup-file-trigger-${f.path}`}
-                  className="block w-full px-3 py-2 text-left hover:bg-surface-low/60 transition-colors font-mono text-[10px]"
+                  className="block w-full px-3 py-2 text-left hover:bg-surface-low/60 transition-colors font-mono text-[11px]"
                 >
                   <span className="font-bold underline decoration-dotted decoration-outline">
                     {f.path}
                   </span>
                   <span className="text-on-surface-variant ml-2">({f.deliveryHint})</span>
                   {f.required && (
-                    <span className="text-red-500 text-[8px] ml-1">REQUIRED</span>
+                    <span className="text-red-500 text-[11px] ml-1">REQUIRED</span>
                   )}
                 </FileReferenceTrigger>
               </li>
@@ -598,7 +635,7 @@ function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId:
           </ul>
         </section>
       ) : (
-        <div className="font-mono text-[10px] text-on-surface-variant p-4">
+        <div className="font-mono text-[11px] text-on-surface-variant p-4">
           No startup files declared
         </div>
       )}
@@ -609,7 +646,7 @@ function StartupContent({ rigId: _rigId, logicalId: _logicalId, data }: { rigId:
 function TranscriptContent({ data }: { data: NodeDetailData }) {
   if (!data.transcript.enabled) {
     return (
-      <div data-testid="live-transcript-section" className="font-mono text-[10px] text-on-surface-variant p-4">
+      <div data-testid="live-transcript-section" className="font-mono text-[11px] text-on-surface-variant p-4">
         Transcript capture not enabled
       </div>
     );
@@ -619,12 +656,12 @@ function TranscriptContent({ data }: { data: NodeDetailData }) {
     <div data-testid="live-transcript-section" className="space-y-4">
       <section data-testid="detail-transcript" className={SECTION_CLASS}>
         <div className="font-mono text-xs font-bold mb-2">Transcript</div>
-        <div className="font-mono text-[10px] text-on-surface">{data.transcript.path ?? "enabled"}</div>
+        <div className="font-mono text-[11px] text-on-surface">{data.transcript.path ?? "enabled"}</div>
         {data.transcript.tailCommand && (
           <button
             type="button"
             onClick={() => copyText(data.transcript.tailCommand!)}
-            className="mt-2 w-full border border-outline-variant bg-surface-lowest/40 px-2 py-1 text-left font-mono text-[8px] uppercase text-on-surface hover:bg-surface-low"
+            className="mt-2 w-full border border-outline-variant bg-surface-lowest/40 px-2 py-1 text-left text-[11px] text-on-surface hover:bg-surface-low"
           >
             Copy tail command
           </button>
@@ -652,13 +689,13 @@ function TabNav({
           aria-selected={activeTab === tab}
           data-testid={`live-tab-${tab}`}
           onClick={() => onSelect(tab)}
-          className={`min-h-11 px-3 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+          className={`min-h-11 px-3 py-2 text-sm transition-colors ${
             activeTab === tab
-              ? "border-b-2 border-on-surface text-on-surface font-bold -mb-px"
+              ? "border-b-2 border-on-surface text-on-surface font-medium -mb-px"
               : "text-on-surface-variant hover:text-on-surface"
           }`}
         >
-          {tab.replace("-", " ")}
+          {tab.charAt(0).toUpperCase() + tab.slice(1).replace("-", " ")}
         </button>
       ))}
     </div>
@@ -697,37 +734,57 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
   // Analogous to slice 12's project-scope default-tab flip
   // (story → overview).
   const [activeTab, setActiveTab] = useState<Tab>("overview");
+  const [isPropertiesOpen, setIsPropertiesOpen] = useState(false);
   const isAgent = data ? data.nodeKind !== "infrastructure" : true;
   const tabs: Tab[] = ["overview", "details"];
 
+  useEffect(() => {
+    if (!isPropertiesOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setIsPropertiesOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isPropertiesOpen]);
+
   return (
     <WorkspacePage>
-      <div data-testid="live-node-details" className="space-y-4">
-        <WorkflowHeader
-          eyebrow="Live Node Details"
-          title={data?.canonicalSessionName ?? logicalId}
-          description={`${data?.rigName ?? rigId} / ${data?.podNamespace ?? inferPodName(logicalId) ?? displayPodName(data?.podId ?? null)} / ${logicalId}`}
-          actions={data ? (
-            <RuntimeBadge
-              runtime={data.runtime}
-              model={data.model}
-              size="sm"
-              compact
-              className="bg-surface-lowest/40 backdrop-blur-sm"
-            />
-          ) : null}
-        />
+      <div className="flex gap-0">
+        <div data-testid="live-node-details" className="min-w-0 flex-1 space-y-4">
+          <PageHeader
+            title={displayAgentName(logicalId)}
+            meta={
+              <>
+                {data?.canonicalSessionName ? (
+                  <span className="font-mono text-xs text-on-surface-variant">{data.canonicalSessionName}</span>
+                ) : null}
+                <span className="text-xs text-on-surface-variant">
+                  {data?.rigName ?? rigId} / {data?.podNamespace ?? inferPodName(logicalId) ?? displayPodName(data?.podId ?? null)}
+                </span>
+              </>
+            }
+            actions={data ? (
+              <RuntimeBadge runtime={data.runtime} model={data.model} size="sm" compact />
+            ) : undefined}
+          />
 
-        {isLoading && <div className="font-mono text-[10px] text-on-surface-variant">Loading...</div>}
+        {isLoading && <div className="text-sm text-on-surface-variant">Loading…</div>}
         {error && (
-          <div className="p-3 bg-red-50 border border-red-200 font-mono text-[10px] text-red-700">
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
             {(error as Error).message}
           </div>
         )}
 
         {data && (
           <>
-            <ActionButtonsRow rigId={rigId} logicalId={logicalId} data={data} />
+            <ActionButtonsRow
+              rigId={rigId}
+              logicalId={logicalId}
+              data={data}
+              onOpenProperties={() => setIsPropertiesOpen(true)}
+            />
             <TabNav tabs={tabs} activeTab={activeTab} onSelect={setActiveTab} />
             <div data-testid="live-node-tab-body" className="space-y-4">
               {activeTab === "overview" && <OverviewTab data={data} activityVisual={activityVisual} />}
@@ -737,7 +794,40 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
             </div>
           </>
         )}
+        </div>
+        <div className="hidden lg:block">
+          <AgentPropertiesPanel rigId={rigId} logicalId={logicalId} />
+        </div>
       </div>
+
+      {isPropertiesOpen && (
+        <div
+          data-testid="agent-properties-drawer"
+          className="fixed inset-0 z-50 lg:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Properties"
+        >
+          <button
+            type="button"
+            data-testid="agent-properties-drawer-backdrop"
+            aria-label="Close properties drawer"
+            className="absolute inset-0 bg-stone-950/40 backdrop-blur-xs cursor-default"
+            onClick={() => setIsPropertiesOpen(false)}
+          />
+          <div
+            data-testid="agent-properties-drawer-panel"
+            className="absolute top-0 right-0 bottom-0 w-full max-w-sm bg-surface-lowest shadow-2xl flex flex-col pb-16 z-10 border-l border-outline-variant"
+          >
+            <AgentPropertiesPanel
+              rigId={rigId}
+              logicalId={logicalId}
+              className="w-full border-l-0 p-4 h-full"
+              onClose={() => setIsPropertiesOpen(false)}
+            />
+          </div>
+        </div>
+      )}
     </WorkspacePage>
   );
 }

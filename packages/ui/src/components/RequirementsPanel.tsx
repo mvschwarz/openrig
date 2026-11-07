@@ -1,4 +1,4 @@
-import { cn } from "@/lib/utils";
+import { StatusDot } from "@/components/ui/status-badge.js";
 
 export interface RequirementResult {
   name: string;
@@ -8,23 +8,24 @@ export interface RequirementResult {
   detectedPath: string | null;
 }
 
-function statusDot(status: string): string {
+/** C14e: map installer requirement status to the shared status vocabulary. */
+function statusKey(status: string): string {
   switch (status) {
-    case "installed": return "bg-success";
-    case "missing": return "bg-destructive";
-    case "unsupported": return "bg-warning";
-    case "unknown": return "bg-warning";
-    default: return "bg-foreground-muted";
+    case "installed": return "ready";
+    case "missing": return "failed";
+    case "unsupported":
+    case "unknown": return "attention_required";
+    default: return status;
   }
 }
 
 function statusLabel(status: string): string {
   switch (status) {
-    case "installed": return "OK";
-    case "missing": return "MISSING";
-    case "unsupported": return "MANUAL";
-    case "unknown": return "UNKNOWN";
-    default: return status.toUpperCase();
+    case "installed": return "Ok";
+    case "missing": return "Missing";
+    case "unsupported": return "Manual";
+    case "unknown": return "Unknown";
+    default: return status.replace(/[_-]+/g, " ").replace(/^\w/, (c) => c.toUpperCase());
   }
 }
 
@@ -43,22 +44,19 @@ export function RequirementsPanel({ results }: { results: RequirementResult[] })
         <div
           key={`${r.kind}:${r.name}`}
           data-testid="requirement-row"
-          className="flex items-center gap-spacing-3 py-spacing-1 text-label-sm font-mono"
+          className="flex items-center gap-spacing-3 py-spacing-1 text-sm"
         >
-          <span
-            data-testid="requirement-dot"
-            className={cn("w-2 h-2 shrink-0", statusDot(r.status))}
-          />
+          <StatusDot status={statusKey(r.status)} className="shrink-0" />
           <span
             data-testid="requirement-status"
-            className="w-16 uppercase"
+            className="w-16 text-xs text-on-surface-variant"
           >
             {statusLabel(r.status)}
           </span>
-          <span className="text-foreground-muted w-24">{r.kind}</span>
+          <span className="text-on-surface-variant w-24">{r.kind}</span>
           <span>{r.name}</span>
           {r.detectedPath && (
-            <span className="text-foreground-muted ml-auto truncate max-w-[200px]">
+            <span className="text-on-surface-variant ml-auto truncate max-w-[200px] font-mono text-xs">
               {r.detectedPath}
             </span>
           )}

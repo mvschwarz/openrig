@@ -63,7 +63,7 @@ function ExpandedCard({
   return (
     <div data-testid={`needs-you-expanded-${item.identity}`} className="space-y-2 border-t border-outline-variant/50 p-2">
       {item.derived ? (
-        <p data-testid="derived-evidence" className="font-mono text-[10px] text-amber-800">
+        <p data-testid="derived-evidence" className="font-mono text-[11px] text-amber-800">
           ▲ {item.derived.evidence} · threshold: {item.derived.threshold}
         </p>
       ) : null}
@@ -78,19 +78,19 @@ function ExpandedCard({
           params={{ instanceId: item.workflow.instanceId }}
           search={item.workflow.stepId ? { step: item.workflow.stepId } : {}}
           data-testid={`needs-you-workflow-link-${item.identity}`}
-          className="inline-block border border-outline px-3 py-1 font-mono text-[11px] uppercase hover:bg-surface-variant"
+          className="inline-block border border-outline px-3 py-1 text-[11px] hover:bg-surface-variant"
         >
           View Instance →
         </Link>
       ) : null}
       {item.evidenceRef ? (
         <div>
-          <span className="font-mono text-[10px] uppercase text-on-surface-variant">evidence: </span>
+          <span className="text-[11px] text-on-surface-variant">evidence: </span>
           <EvidenceOpener evidenceRef={item.evidenceRef} ctx={ctx} testId={`needs-you-evidence-${item.identity}`} />
         </div>
       ) : null}
       {item.unblocks ? (
-        <p className="font-mono text-[10px] text-on-surface-variant">unblocks: {item.unblocks}</p>
+        <p className="font-mono text-[11px] text-on-surface-variant">unblocks: {item.unblocks}</p>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
         {showApprove ? (
@@ -98,7 +98,7 @@ function ExpandedCard({
             type="button"
             data-testid="needs-you-approve"
             onClick={() => void onApprove()}
-            className="border border-outline px-3 py-1 font-mono text-[11px] uppercase hover:bg-surface-variant"
+            className="border border-outline px-3 py-1 text-[11px] hover:bg-surface-variant"
           >
             Approve
           </button>
@@ -109,12 +109,12 @@ function ExpandedCard({
           disabled={!chatSession}
           title={chatSession ? `Talk to ${chatSession} in the terminal` : "No owning agent session resolved for this item"}
           onClick={() => setChatOpen((v) => !v)}
-          className="border border-outline px-3 py-1 font-mono text-[11px] uppercase hover:bg-surface-variant disabled:cursor-not-allowed disabled:opacity-50"
+          className="border border-outline px-3 py-1 text-[11px] hover:bg-surface-variant disabled:cursor-not-allowed disabled:opacity-50"
         >
           Chat
         </button>
         {outcome ? (
-          <span data-testid="action-outcome" className={`font-mono text-[10px] ${outcome.ok ? "text-emerald-800" : "text-red-700"}`}>
+          <span data-testid="action-outcome" className={`font-mono text-[11px] ${outcome.ok ? "text-emerald-800" : "text-red-700"}`}>
             {outcome.message}
           </span>
         ) : null}
@@ -161,7 +161,7 @@ export function NeedsYouAccordion({
 
   return (
     <section data-testid="needs-you-band" className={cn(VELLUM_CARD, "space-y-1 p-2")}>
-      <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">NEEDS YOU</h3>
+      <h3 className="text-[11px] text-on-surface-variant">NEEDS YOU</h3>
       {band.items.length === 0 ? (
         <p data-testid="needs-you-empty" className="font-mono text-[11px] text-on-surface-variant">
           {band.provenance}
@@ -180,10 +180,10 @@ export function NeedsYouAccordion({
                   {item.source === "derived" ? "▲" : "●"}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-[12px]">{item.summary}</span>
-                <span className="hidden font-mono text-[10px] text-on-surface-variant sm:inline">{item.leg}</span>
-                <span className="hidden font-mono text-[10px] text-on-surface-variant md:inline truncate max-w-32">{item.where}</span>
-                <span className="font-mono text-[10px] text-on-surface-variant">{ageLabel(item.ageIso)}</span>
-                {item.priority ? <span className="font-mono text-[10px] uppercase">{item.priority}</span> : null}
+                <span className="hidden font-mono text-[11px] text-on-surface-variant sm:inline">{item.leg}</span>
+                <span className="hidden font-mono text-[11px] text-on-surface-variant md:inline truncate max-w-32">{item.where}</span>
+                <span className="font-mono text-[11px] text-on-surface-variant">{ageLabel(item.ageIso)}</span>
+                {item.priority ? <span className="text-[11px]">{item.priority}</span> : null}
               </button>
               {expanded === item.identity ? (
                 <ExpandedCard item={item} slice={slice} missionId={missionId} actorSession={actorSession} ctx={ctx} showApprove={showApprove} />
@@ -193,7 +193,7 @@ export function NeedsYouAccordion({
         </ul>
       )}
       {band.items.length > 0 ? (
-        <p className="font-mono text-[10px] text-on-surface-variant">{band.provenance}</p>
+        <p className="font-mono text-[11px] text-on-surface-variant">{band.provenance}</p>
       ) : null}
     </section>
   );

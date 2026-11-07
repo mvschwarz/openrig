@@ -47,4 +47,12 @@ describe("UndoToast", () => {
     expect(onUndo).toHaveBeenCalledTimes(1);
     expect(onExpire).not.toHaveBeenCalled();
   });
+
+  it("anchors at bottom-20 on mobile viewports (<1024px) to clear MobileBottomNav and lg:bottom-6 on desktop", () => {
+    render(<UndoToast label="Action undone" onUndo={() => {}} onExpire={() => {}} durationMs={5000} />);
+    const toast = screen.getByTestId("undo-toast");
+    expect(toast.className).toContain("bottom-20");
+    expect(toast.className).toContain("lg:bottom-6");
+    expect(toast.className).toContain("z-50");
+  });
 });

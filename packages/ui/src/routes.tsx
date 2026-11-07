@@ -151,21 +151,19 @@ const projectSliceRoute = createRoute({
   component: SliceScopePage,
 });
 
-// OPR.0.4.4.22 — the AGENTS altitude (rig-scope standalone panel). The
-// route exists for ADDRESSING, not nav chrome: reached by ZOOM only
+// OPR.0.4.4.22 — the AGENTS altitude (rig-scope standalone panel). Now in
+// the sidebar (ui-redesign C06: "Agents"); still addressable by zoom
 // (board/host agent-count chips, slice-region anchored zoom, breadcrumb
-// up) — deliberately NOT added to any nav rail (arch ruling, drift-killer
-// 4). Anchored/filter state rides query params (?slice=, ?group=).
+// up). Anchored/filter state rides query params (?slice=, ?group=).
 const rigAgentsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agents",
   component: RigAgentsPage,
 });
 
-// OPR.0.4.6.MH5 (C3) — the FLEET attention altitude ABOVE host (placement
-// option A of the founder LOCK = BOTH; the band is option B on the per-host
-// surfaces). Zoom-addressed like /agents (ADDRESSING, not nav chrome);
-// reached from the FLEET band's OPEN FLEET →. Expanded-exception state
+// OPR.0.4.6.MH5 (C3) — the FLEET attention altitude ABOVE host. Now in the
+// sidebar (ui-redesign C06: "Hosts"); still zoom-addressed like /agents
+// (reached from the FLEET band's OPEN FLEET →). Expanded-exception state
 // rides ?open=<fleetKey> (read window-side per this family's idiom) so
 // every state is deep-link addressable.
 const fleetRoute = createRoute({
@@ -174,10 +172,10 @@ const fleetRoute = createRoute({
   component: FleetPage,
 });
 
-// OPR.0.4.6.WF4 (C4) — the workflow surfaces. BOTH are zoom-addressed like
-// /agents above (routes exist for ADDRESSING, not nav chrome): reached from
-// NEEDS-YOU workflow rows, Library instance bands, and instance deep-links;
-// deliberately NOT added to any nav rail (pm/founder confirmed v1).
+// OPR.0.4.6.WF4 (C4) — the workflow surfaces. Now in the sidebar
+// (ui-redesign C06: "Workflows"); still zoom-addressed like /agents above
+// (reached from NEEDS-YOU workflow rows, Library instance bands, and
+// instance deep-links).
 const workflowsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/workflows",

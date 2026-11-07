@@ -89,11 +89,11 @@ describe("R1 C4c — mission PROGRESS remote-gate (req-5, v1.2 known-remote-only
     expect(screen.queryByTestId("mission-progress-remote-gated")).toBeNull();
   });
 
-  it("LOCAL + genuinely-absent PROGRESS.md → NO PROGRESS YET, never the gated notice", async () => {
+  it("LOCAL + genuinely-absent PROGRESS.md → No progress yet, never the gated notice", async () => {
     install("local");
     await openProgressTab();
     const el = await screen.findByTestId("mission-progress-empty");
-    expect(el.textContent).toContain("NO PROGRESS YET");
+    expect(el.textContent).toContain("No progress yet");
     expect(screen.queryByTestId("mission-progress-remote-gated")).toBeNull();
   });
 });

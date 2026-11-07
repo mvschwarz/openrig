@@ -10,10 +10,11 @@ const mutateAsync = vi.fn(async () => ({}));
 
 let settingsData: Record<string, { value: unknown }> = {};
 let hostsData: { ownName: string; selected: string; hosts: unknown[] } = { ownName: "localhost", selected: "local", hosts: [] };
+let setSettingPending = false;
 
 vi.mock("../src/hooks/useSettings.js", () => ({
   useSettings: () => ({ data: { settings: settingsData } }),
-  useSetSetting: () => ({ mutateAsync }),
+  useSetSetting: () => ({ mutateAsync, isPending: setSettingPending }),
 }));
 
 vi.mock("../src/hooks/useHosts.js", () => ({
@@ -25,6 +26,7 @@ vi.mock("../src/hooks/useHosts.js", () => ({
 describe("HostConfigCard (OPR.0.4.6.MH1 FR-5)", () => {
   beforeEach(() => {
     mutateAsync.mockClear();
+    setSettingPending = false;
     settingsData = {};
     hostsData = { ownName: "localhost", selected: "local", hosts: [] };
   });
@@ -84,5 +86,30 @@ describe("HostConfigCard (OPR.0.4.6.MH1 FR-5)", () => {
     fireEvent.change(input, { target: { value: "Studio M4" } });
     fireEvent.submit(input.closest("form")!);
     expect(mutateAsync).toHaveBeenCalledWith({ key: "host.name", value: "Studio M4" });
+  });
+
+  it("disables select and rename buttons during pending mutation to prevent double clicks", () => {
+    setSettingPending = true;
+    hostsData = {
+      ownName: "localhost",
+      selected: "vps-a",
+      hosts: [
+        { id: "vps-a", transport: "http", url: "http://vps-a:7433", selected: true, status: "reachable" },
+        { id: "vm-b", transport: "ssh", target: "vm-b.local", selected: false, status: "unreachable" },
+      ],
+    };
+    render(<HostConfigCard />);
+
+    const localSelectBtn = screen.getByTestId("host-select-local") as HTMLButtonElement;
+    const remoteSelectBtn = screen.getByTestId("host-select-vm-b") as HTMLButtonElement;
+    const renameBtn = screen.getByTestId("host-rename-button") as HTMLButtonElement;
+
+    expect(localSelectBtn.disabled).toBe(true);
+    expect(remoteSelectBtn.disabled).toBe(true);
+    expect(renameBtn.disabled).toBe(true);
+
+    fireEvent.click(localSelectBtn);
+    fireEvent.click(remoteSelectBtn);
+    expect(mutateAsync).not.toHaveBeenCalled();
   });
 });

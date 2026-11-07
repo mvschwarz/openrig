@@ -36,8 +36,8 @@ describe("BundleInspector", () => {
     });
   });
 
-  // T2: Integrity status (green/red)
-  it("shows integrity status as PASS or FAIL", async () => {
+  // T2: Integrity status (StatusBadge, sentence case per C14e sweep)
+  it("shows integrity status as pass", async () => {
     fetchMock.mockResolvedValueOnce({ ok: true, json: async () => INSPECT_RESPONSE });
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(<QueryClientProvider client={qc}><BundleInspector /></QueryClientProvider>);
@@ -46,7 +46,7 @@ describe("BundleInspector", () => {
     act(() => { fireEvent.click(screen.getByTestId("inspect-btn")); });
 
     await waitFor(() => {
-      expect(screen.getByTestId("integrity-status").textContent).toContain("PASS");
+      expect(screen.getByTestId("integrity-status").textContent).toContain("Integrity pass");
     });
   });
 

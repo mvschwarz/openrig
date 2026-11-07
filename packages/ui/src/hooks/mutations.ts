@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { notifyError, notifySuccess } from "../lib/notify.js";
 
 export class ImportError extends Error {
   errors: string[];
@@ -40,6 +41,10 @@ export function useCreateSnapshot(rigId: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["rig", rigId, "snapshots"] });
       queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
+      notifySuccess("Snapshot saved");
+    },
+    onError: (error) => {
+      notifyError("Couldn't save snapshot", error);
     },
   });
 }
@@ -58,6 +63,10 @@ export function useRestoreSnapshot(rigId: string) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["rig", rigId] });
+      notifySuccess("Snapshot restored");
+    },
+    onError: (error) => {
+      notifyError("Couldn't restore snapshot", error);
     },
   });
 }
@@ -89,6 +98,10 @@ export function useTeardownRig(rigId: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
       queryClient.invalidateQueries({ queryKey: ["ps"] });
+      notifySuccess("Rig stopped");
+    },
+    onError: (error) => {
+      notifyError("Couldn't stop rig", error);
     },
   });
 }
@@ -109,6 +122,10 @@ export function useStartRig(rigId: string) {
       queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
       queryClient.invalidateQueries({ queryKey: ["ps"] });
       queryClient.invalidateQueries({ queryKey: ["rig", rigId] });
+      notifySuccess("Rig started");
+    },
+    onError: (error) => {
+      notifyError("Couldn't start rig", error);
     },
   });
 }
@@ -144,6 +161,10 @@ export function useLaunchRig(rigId: string) {
       queryClient.invalidateQueries({ queryKey: ["ps"] });
       queryClient.invalidateQueries({ queryKey: ["rig", rigId] });
       queryClient.invalidateQueries({ queryKey: ["kernel", "status"] });
+      notifySuccess("Rig launched");
+    },
+    onError: (error) => {
+      notifyError("Couldn't launch rig", error);
     },
   });
 }
@@ -171,6 +192,10 @@ export function useImportRig() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
+      notifySuccess("Rig imported");
+    },
+    onError: (error) => {
+      notifyError("Couldn't import rig", error);
     },
   });
 }
@@ -207,6 +232,10 @@ export function useExpandRig() {
       queryClient.invalidateQueries({ queryKey: ["ps"] });
       queryClient.invalidateQueries({ queryKey: ["rig", variables.rigId, "nodes"] });
       queryClient.invalidateQueries({ queryKey: ["rig", variables.rigId, "graph"] });
+      notifySuccess("Rig expanded");
+    },
+    onError: (error) => {
+      notifyError("Couldn't expand rig", error);
     },
   });
 }
@@ -224,6 +253,10 @@ export function useRemoveLibrarySpec() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["spec-library"] });
+      notifySuccess("Spec removed");
+    },
+    onError: (error) => {
+      notifyError("Couldn't remove spec", error);
     },
   });
 }
@@ -245,6 +278,10 @@ export function useRenameLibrarySpec() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["spec-library"] });
+      notifySuccess("Spec renamed");
+    },
+    onError: (error) => {
+      notifyError("Couldn't rename spec", error);
     },
   });
 }

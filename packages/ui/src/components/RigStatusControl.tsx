@@ -31,7 +31,7 @@ export function RigStatusControl({ rigId, rigName }: { rigId: string; rigName: s
     return (
       <div
         data-testid={`rig-status-control-${rigId}`}
-        className="inline-flex items-center border border-stone-300 bg-white/60 px-3 py-1.5 font-mono text-[9px] text-secondary"
+        className="inline-flex items-center rounded-md border border-outline-variant bg-surface-lowest/60 px-3 py-1.5 font-mono text-[11px] text-on-surface-variant"
       >
         Loading rig status…
       </div>
@@ -49,20 +49,20 @@ export function RigStatusControl({ rigId, rigName }: { rigId: string; rigName: s
     <div
       data-testid={`rig-status-control-${rigId}`}
       data-status={status.status}
-      className="inline-flex items-center gap-2 border border-stone-900 bg-white hard-shadow px-2 py-1.5"
+      className="inline-flex items-center gap-2 rounded-md border border-outline-variant bg-surface-lowest hard-shadow px-2 py-1.5"
     >
       <span
         data-testid={`rig-status-badge-${rigId}`}
         title={statusHelp[status.status]}
         className={cn(
-          "px-2 py-0.5 border font-mono text-[9px] uppercase tracking-wide inline-flex items-center gap-1.5",
+          "px-2 py-0.5 border text-[11px] inline-flex items-center gap-1.5",
           statusBadgeTone[status.status],
         )}
       >
         <StatusPip status={statusToPip[status.status]} />
         {status.status}
       </span>
-      <span data-testid={`seats-${rigId}`} className="font-mono text-[9px] text-secondary">
+      <span data-testid={`seats-${rigId}`} className="font-mono text-[11px] text-secondary">
         {status.seatsRunning}/{status.seatsTotal}
       </span>
       <Button
@@ -70,7 +70,7 @@ export function RigStatusControl({ rigId, rigName }: { rigId: string; rigName: s
         size="sm"
         onClick={() => setModalOpen(true)}
         data-testid={`rig-primary-action-${rigId}`}
-        className="font-mono text-[10px] tracking-widest"
+        className="font-mono text-[11px]"
       >
         {primaryLabel}
       </Button>

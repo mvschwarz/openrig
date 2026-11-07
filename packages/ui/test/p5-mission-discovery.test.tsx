@@ -293,7 +293,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
 
     expect(await findByTestId("project-discovery-degraded")).toBeTruthy();
     expect((await findByTestId("project-mission-section-current")).textContent).toContain(
-      "Current Work · 1",
+      "Current work · 1",
     );
     expect((await findByTestId("project-mission-section-archive")).textContent).toContain(
       "Archive · 1",
@@ -439,7 +439,7 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     });
 
     expect((await findByTestId("project-mission-section-current")).textContent).toContain(
-      "Current Work · 2",
+      "Current work · 2",
     );
     expect((await findByTestId("project-mission-section-archive")).textContent).toContain(
       "Archive · 1",

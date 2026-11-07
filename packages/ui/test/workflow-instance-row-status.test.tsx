@@ -58,13 +58,14 @@ async function renderRow(instance: WorkflowInstanceWithDeadline) {
 describe("WorkflowInstanceRow status chip", () => {
   it("an aborted instance reads ABORTED, not COMPLETED", async () => {
     const text = await renderRow(inst({ status: "aborted", completedAt: "2026-07-07T01:00:00.000Z" }));
-    expect(text).toContain("ABORTED");
-    expect(text).not.toContain("COMPLETED");
+    // C14c: sentence-case labels (recipe 2); StatusBadge carries the tone.
+    expect(text).toContain("Aborted");
+    expect(text).not.toContain("Completed");
   });
 
   it("a completed instance still reads COMPLETED", async () => {
     const text = await renderRow(inst({ status: "completed", completedAt: "2026-07-07T01:00:00.000Z" }));
-    expect(text).toContain("COMPLETED");
+    expect(text).toContain("Completed");
     expect(text).toContain("closed");
   });
 

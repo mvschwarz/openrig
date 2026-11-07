@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { EmptyState } from "../ui/empty-state.js";
-import { SectionHeader } from "../ui/section-header.js";
+import { PageHeader } from "../ui/page-header.js";
 import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
 import { SyntaxHighlight } from "../markdown/SyntaxHighlight.js";
 import { usePlugin, usePluginUsedBy } from "../../hooks/usePlugins.js";
@@ -70,9 +70,10 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
 
   if (detailLoading) {
     return (
-      <div className="h-full bg-paper-grid px-6 py-5 lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]">
+      <div className="h-full px-6 py-5 lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]">
         <EmptyState
-          label="LOADING PLUGIN"
+          label="Loading plugin"
+          title="Loading plugin"
           description="Loading plugin manifest from discovery service."
           variant="card"
           testId="plugin-detail-loading"
@@ -83,9 +84,10 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
 
   if (detailError || !detail) {
     return (
-      <div className="h-full bg-paper-grid px-6 py-5 lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]">
+      <div className="h-full px-6 py-5 lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]">
         <EmptyState
-          label="PLUGIN NOT FOUND"
+          label="Plugin not found"
+          title="Plugin not found"
           description="The selected plugin is not visible through any configured discovery source."
           variant="card"
           testId="plugin-detail-not-found"
@@ -101,55 +103,52 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
   return (
     <div
       data-testid="plugin-detail-page"
-      className="h-full overflow-hidden bg-paper-grid px-6 py-5 lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
+      className="flex h-full flex-col overflow-hidden px-6 py-5 text-sm lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
     >
-      <header className="mb-4">
-        <SectionHeader tone="muted">Plugin</SectionHeader>
-        <div className="mt-1 flex flex-wrap items-baseline gap-3">
-          <h1 className="font-headline text-2xl font-bold tracking-tight text-on-surface">
-            {entry.name}
-          </h1>
-          <span className="font-mono text-sm text-on-surface-variant">v{entry.version}</span>
-          {entry.runtimes.map((rt) => (
+      <PageHeader
+        title={entry.name}
+        description={entry.description ?? "Browse this plugin's files and skills."}
+        meta={
+          <>
+            <span className="font-mono text-xs text-on-surface-variant">v{entry.version}</span>
+            {entry.runtimes.map((rt) => (
+              <span
+                key={rt}
+                data-testid={`plugin-detail-runtime-${rt}`}
+                className="inline-block border border-outline-variant bg-surface-lowest/30 px-2 py-0.5 text-xs text-on-surface"
+              >
+                {rt}
+              </span>
+            ))}
             <span
-              key={rt}
-              data-testid={`plugin-detail-runtime-${rt}`}
-              className="inline-block border border-outline-variant bg-surface-lowest/30 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface"
+              className="text-xs text-on-surface-variant"
+              title={entry.path}
             >
-              {rt}
+              {entry.sourceLabel}
             </span>
-          ))}
-          <span
-            className="font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
-            title={entry.path}
-          >
-            {entry.sourceLabel}
-          </span>
-          <span
-            data-testid="plugin-detail-skill-count"
-            className="font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
-          >
-            {skillCount} {skillCount === 1 ? "skill" : "skills"}
-          </span>
-          <span
-            data-testid="plugin-detail-used-by-count"
-            className="font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
-          >
-            used by {usedByCount} {usedByCount === 1 ? "agent" : "agents"}
-          </span>
-        </div>
-        {entry.description && (
-          <p className="mt-2 max-w-3xl text-sm text-on-surface-variant">{entry.description}</p>
-        )}
-      </header>
+            <span
+              data-testid="plugin-detail-skill-count"
+              className="text-xs text-on-surface-variant"
+            >
+              {skillCount} {skillCount === 1 ? "skill" : "skills"}
+            </span>
+            <span
+              data-testid="plugin-detail-used-by-count"
+              className="text-xs text-on-surface-variant"
+            >
+              used by {usedByCount} {usedByCount === 1 ? "agent" : "agents"}
+            </span>
+          </>
+        }
+      />
 
       <div
         data-testid="plugin-detail-docs-browser"
-        className="flex h-[calc(100%-7rem)] flex-col border border-outline-variant bg-surface-lowest/25 hard-shadow sm:flex-row"
+        className="flex min-h-0 flex-1 flex-col rounded-lg border bg-surface-lowest shadow-sm sm:flex-row"
       >
-        <aside
+        <div
           data-testid="plugin-detail-tree"
-          className="w-full max-h-64 shrink-0 overflow-y-auto border-b border-outline-variant bg-surface-lowest/30 sm:w-72 sm:max-h-none sm:border-b-0 sm:border-r"
+          className="max-h-64 w-full shrink-0 overflow-y-auto border-b border-outline-variant bg-surface-lowest/30 sm:max-h-none sm:w-72 sm:border-b-0 sm:border-r"
         >
           <Breadcrumbs
             testId="plugin-detail-breadcrumbs"
@@ -158,15 +157,15 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
             onNavigate={(rel) => { setCurrentPath(rel); setSelectedFile(null); }}
           />
           {list.isLoading ? (
-            <div data-testid="plugin-detail-tree-loading" className="p-3 font-mono text-[10px] text-on-surface-variant">
+            <div data-testid="plugin-detail-tree-loading" className="p-3 text-xs text-on-surface-variant">
               Loading…
             </div>
           ) : list.isError ? (
-            <div data-testid="plugin-detail-tree-error" className="p-3 font-mono text-[10px] text-red-600">
+            <div data-testid="plugin-detail-tree-error" className="p-3 text-xs text-red-600">
               {(list.error as Error)?.message ?? "Error loading directory."}
             </div>
           ) : !list.data || list.data.entries.length === 0 ? (
-            <div data-testid="plugin-detail-tree-empty" className="p-3 font-mono text-[10px] text-on-surface-variant">
+            <div data-testid="plugin-detail-tree-empty" className="p-3 text-xs text-on-surface-variant">
               Empty directory.
             </div>
           ) : (
@@ -177,7 +176,7 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
                     type="button"
                     data-testid="plugin-detail-tree-up"
                     onClick={() => { setCurrentPath(parentPath(currentPath)); setSelectedFile(null); }}
-                    className="block w-full px-2 py-1 text-left font-mono text-[10px] text-on-surface-variant hover:bg-surface-low"
+                    className="block w-full px-2 py-1 text-left font-mono text-xs text-on-surface-variant hover:bg-surface-low"
                   >
                     ..
                   </button>
@@ -199,7 +198,7 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
                         else if (fileEntry.type === "dir") { setCurrentPath(rel); setSelectedFile(null); }
                       }}
                       disabled={fileEntry.type === "other"}
-                      className={`block w-full px-2 py-1 text-left font-mono text-[10px] ${
+                      className={`block w-full px-2 py-1 text-left font-mono text-xs ${
                         fileEntry.type === "other"
                           ? "text-on-surface-variant"
                           : `hover:bg-surface-low ${isSelected ? "bg-surface-high/80 text-on-surface" : "text-on-surface"}`
@@ -212,11 +211,11 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
               })}
             </ul>
           )}
-        </aside>
+        </div>
 
-        <main data-testid="plugin-detail-viewer" className="flex-1 min-w-0 overflow-y-auto bg-surface-lowest">
+        <main data-testid="plugin-detail-viewer" className="min-w-0 flex-1 overflow-y-auto bg-surface-lowest">
           {!selectedFile ? (
-            <div data-testid="plugin-detail-viewer-no-selection" className="p-4 font-mono text-[10px] text-on-surface-variant">
+            <div data-testid="plugin-detail-viewer-no-selection" className="p-4 text-xs text-on-surface-variant">
               Select a file from the tree.
             </div>
           ) : (
@@ -241,7 +240,7 @@ function Breadcrumbs({
 }) {
   const segments = path ? path.split("/") : [];
   return (
-    <nav data-testid={testId} className="flex flex-wrap items-baseline gap-1 border-b border-outline-variant px-2 py-1 font-mono text-[10px] text-on-surface">
+    <nav data-testid={testId} className="flex flex-wrap items-baseline gap-1 border-b border-outline-variant px-2 py-1 font-mono text-xs text-on-surface">
       <button type="button" onClick={() => onNavigate("")} className="font-bold hover:underline">
         {pluginName}
       </button>
@@ -266,14 +265,14 @@ function PluginFileContent({ pluginId, path }: { pluginId: string; path: string 
 
   if (read.isLoading) {
     return (
-      <div data-testid="plugin-detail-viewer-loading" className="p-4 font-mono text-[10px] text-on-surface-variant">
+      <div data-testid="plugin-detail-viewer-loading" className="p-4 text-xs text-on-surface-variant">
         Loading…
       </div>
     );
   }
   if (read.isError) {
     return (
-      <div data-testid="plugin-detail-viewer-error" className="p-4 font-mono text-[10px] text-red-600">
+      <div data-testid="plugin-detail-viewer-error" className="p-4 text-xs text-red-600">
         {(read.error as Error)?.message ?? "Error loading file."}
       </div>
     );
@@ -282,7 +281,7 @@ function PluginFileContent({ pluginId, path }: { pluginId: string; path: string 
 
   return (
     <div data-testid="plugin-detail-viewer-content" className="flex h-full flex-col">
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-surface-lowest/30 px-3 py-2 font-mono text-[10px]">
+      <header className="flex items-baseline justify-between border-b border-outline-variant bg-surface-lowest/30 px-3 py-2 font-mono text-xs">
         <div data-testid="plugin-detail-viewer-path" className="text-on-surface">{path}</div>
         <div className="flex items-baseline gap-3 text-on-surface-variant">
           <span>{read.data.size}b</span>
@@ -293,7 +292,7 @@ function PluginFileContent({ pluginId, path }: { pluginId: string; path: string 
         {read.data.truncated && (
           <div
             data-testid="plugin-detail-viewer-truncated"
-            className="mb-3 mx-4 mt-4 border border-amber-400 bg-amber-50 px-3 py-2 font-mono text-[10px] text-amber-900"
+            className="mb-3 mx-4 mt-4 border border-amber-400 bg-amber-50 px-3 py-2 font-mono text-xs text-amber-900"
           >
             ⚠ Truncated at {Math.round((read.data.truncatedAtBytes ?? 0) / 1024)} KB — file is{" "}
             {Math.round((read.data.totalBytes ?? read.data.size) / 1024)} KB total.
@@ -308,7 +307,7 @@ function PluginFileContent({ pluginId, path }: { pluginId: string; path: string 
             <SyntaxHighlight code={read.data.content} language={ext.slice(1)} />
           </div>
         ) : (
-          <pre data-testid="plugin-detail-viewer-text-fallback" className="p-4 whitespace-pre-wrap break-words font-mono text-[10px] text-on-surface">
+          <pre data-testid="plugin-detail-viewer-text-fallback" className="p-4 whitespace-pre-wrap break-words font-mono text-xs text-on-surface">
             {read.data.content}
           </pre>
         )}

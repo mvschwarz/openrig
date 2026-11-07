@@ -48,29 +48,30 @@ describe("shadcn components", () => {
     expect(container.children.length).toBeGreaterThan(0);
   });
 
-  // Test 2: Button tactical variant has uppercase text + bracket decoration
-  it("Button tactical variant renders brackets and uppercase", async () => {
+  // Test 2: Button tactical variant is a small neutral outlined button (Clean theme, C03)
+  it("Button tactical variant renders a small neutral outlined button", async () => {
     const { Button } = await import("../src/components/ui/button.js");
 
-    render(<Button variant="tactical" data-testid="tac">SNAPSHOT</Button>);
+    render(<Button variant="tactical" data-testid="tac">Snapshot</Button>);
 
     const btn = screen.getByTestId("tac");
-    expect(btn.textContent).toContain("SNAPSHOT");
-    // Should have uppercase + tracking + border classes (tech button style)
-    expect(btn.className).toContain("uppercase");
-    expect(btn.className).toContain("text-[10px]");
+    expect(btn.textContent).toContain("Snapshot");
+    // Clean theme: sentence case, small text, neutral outline border.
+    expect(btn.className).toContain("text-xs");
+    expect(btn.className).toContain("text-on-surface-variant");
     expect(btn.className).toContain("border");
+    expect(btn.className).not.toContain("uppercase");
   });
 
-  // Test 3: Button default variant has correct classes (vellum theme)
-  it("Button default variant has bg-stone-900 text-white", async () => {
+  // Test 3: Button default variant uses primary (Clean theme, C03)
+  it("Button default variant has bg-primary text-primary-foreground", async () => {
     const { Button } = await import("../src/components/ui/button.js");
 
     render(<Button variant="default" data-testid="pri">Go</Button>);
 
     const btn = screen.getByTestId("pri");
-    expect(btn.className).toContain("bg-inverse-surface");
-    expect(btn.className).toContain("text-background");
+    expect(btn.className).toContain("bg-primary");
+    expect(btn.className).toContain("text-primary-foreground");
   });
 
   // Test 4: Input and textarea use framed field styling
@@ -88,8 +89,10 @@ describe("shadcn components", () => {
     const inp = screen.getByTestId("inp");
     const ta = screen.getByTestId("ta");
     expect(inp.className).toContain("border");
+    expect(inp.className).toContain("rounded-md");
     expect(inp.className).not.toContain("border-b");
     expect(ta.className).toContain("border");
+    expect(ta.className).toContain("rounded-md");
     expect(ta.className).not.toContain("border-b");
   });
 
@@ -116,13 +119,75 @@ describe("shadcn components", () => {
     expect(src).toContain("bg-black/20");
   });
 
-  // Test 7: Separator uses ghost-border
-  it("Separator uses bg-ghost-border", async () => {
+  // Test 7: Separator uses outline-variant
+  it("Separator uses bg-outline-variant", async () => {
     const { Separator } = await import("../src/components/ui/separator.js");
 
     render(<Separator data-testid="sep" />);
 
     const sep = screen.getByTestId("sep");
-    expect(sep.className).toContain("bg-ghost-border");
+    expect(sep.className).toContain("bg-outline-variant");
+  });
+
+  // Test 8: TabsList and TabsTrigger have proper radii and active tokens
+  it("TabsList and TabsTrigger use rounded radii and semantic active tokens", async () => {
+    const { Tabs, TabsList, TabsTrigger } = await import("../src/components/ui/tabs.js");
+
+    render(
+      <Tabs defaultValue="tab1">
+        <TabsList data-testid="tabs-list">
+          <TabsTrigger value="tab1" data-testid="tab-trigger">
+            Tab 1
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>
+    );
+
+    const list = screen.getByTestId("tabs-list");
+    expect(list.className).toContain("rounded-md");
+
+    const trigger = screen.getByTestId("tab-trigger");
+    expect(trigger.className).toContain("rounded-sm");
+    expect(trigger.className).toContain("data-[state=active]:bg-surface-mid");
+    expect(trigger.className).toContain("data-[state=active]:text-on-surface");
+  });
+
+  // Test 9: TooltipContent uses rounded-md and border-outline-variant
+  it("TooltipContent uses rounded-md and border-outline-variant", async () => {
+    const { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } = await import("../src/components/ui/tooltip.js");
+
+    render(
+      <TooltipProvider>
+        <Tooltip open>
+          <TooltipTrigger>Trigger</TooltipTrigger>
+          <TooltipContent data-testid="tooltip-content">Helpful tip</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+
+    const content = screen.getByTestId("tooltip-content");
+    expect(content.className).toContain("rounded-md");
+    expect(content.className).toContain("border-outline-variant");
+    expect(content.className).toContain("shadow-md");
+  });
+
+  // Test 10: Badge uses rounded-full and secondary variant uses semantic tokens
+  it("Badge uses rounded-full and secondary variant uses semantic tokens", async () => {
+    const { Badge } = await import("../src/components/ui/badge.js");
+
+    render(
+      <div>
+        <Badge data-testid="badge-default">Default</Badge>
+        <Badge variant="secondary" data-testid="badge-secondary">Secondary</Badge>
+      </div>
+    );
+
+    const defaultBadge = screen.getByTestId("badge-default");
+    expect(defaultBadge.className).toContain("rounded-full");
+
+    const secondaryBadge = screen.getByTestId("badge-secondary");
+    expect(secondaryBadge.className).toContain("rounded-full");
+    expect(secondaryBadge.className).toContain("bg-surface-mid");
+    expect(secondaryBadge.className).toContain("text-on-surface-variant");
   });
 });

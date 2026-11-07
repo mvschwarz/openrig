@@ -6,8 +6,7 @@
 // from original SystemPanel L52–L131 missed the cmux query + section).
 
 import { useQuery } from "@tanstack/react-query";
-import { SectionHeader } from "../ui/section-header.js";
-import { StatusPip } from "../ui/status-pip.js";
+import { StatusBadge } from "../ui/status-badge.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { usePsEntries } from "../../hooks/usePsEntries.js";
 
@@ -45,77 +44,69 @@ export function SettingsSystemStatusPanel() {
   const totalRigs = rigs?.length ?? 0;
   const runningRigs = psEntries?.filter((p) => p.runningCount > 0).length ?? 0;
 
-  const daemonStatus: React.ComponentProps<typeof StatusPip>["status"] =
-    daemonConnected
-      ? "active"
-      : healthQuery.isError
+  const daemonStatus = daemonConnected
+    ? "ready"
+    : healthQuery.isError
       ? "error"
+      : "unknown";
+  const daemonLabel = daemonConnected
+    ? "Connected"
+    : healthQuery.isError
+      ? "Unreachable"
       : healthQuery.isLoading
-      ? "info"
-      : "stopped";
+        ? "Checking"
+        : "Disconnected";
 
-  const cmuxStatus: React.ComponentProps<typeof StatusPip>["status"] =
-    cmuxAvailable === true
-      ? "active"
-      : cmuxAvailable === false
-      ? "warning"
-      : "info";
+  const cmuxStatus =
+    cmuxAvailable === true ? "ready" : cmuxAvailable === false ? "degraded" : "unknown";
+  const cmuxLabel =
+    cmuxAvailable === true ? "Available" : cmuxAvailable === false ? "Unavailable" : "Unknown";
 
   return (
-    <div data-testid="settings-status-panel" className="space-y-4">
-      <section>
-        <SectionHeader tone="muted">Daemon</SectionHeader>
-        <div className="mt-2 flex items-center justify-between font-mono text-xs">
-          <span className="text-on-surface-variant">Reachable</span>
-          <StatusPip
+    <div data-testid="settings-status-panel" className="space-y-4 text-sm">
+      <section className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
+        <h2 className="text-sm font-semibold text-on-surface">Daemon</h2>
+        <div className="mt-2 flex items-center justify-between text-sm">
+          <span className="text-xs text-on-surface-variant">Reachable</span>
+          <StatusBadge
             status={daemonStatus}
-            label={
-              daemonConnected
-                ? "OK"
-                : healthQuery.isError
-                ? "ERROR"
-                : healthQuery.isLoading
-                ? "LOADING"
-                : "DISCONNECTED"
-            }
-            variant="pill"
+            label={daemonLabel}
             testId="status-daemon"
           />
         </div>
       </section>
       {/* A4 bounce-fix: cmux control row restored. */}
-      <section>
-        <SectionHeader tone="muted">Cmux control</SectionHeader>
-        <div className="mt-2 flex items-center justify-between font-mono text-xs">
-          <span className="text-on-surface-variant">Adapter</span>
-          <StatusPip
+      <section className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
+        <h2 className="text-sm font-semibold text-on-surface">Cmux control</h2>
+        <div className="mt-2 flex items-center justify-between text-sm">
+          <span className="text-xs text-on-surface-variant">Adapter</span>
+          <StatusBadge
             status={cmuxStatus}
-            label={
-              cmuxAvailable === true
-                ? "AVAILABLE"
-                : cmuxAvailable === false
-                ? "UNAVAILABLE"
-                : "UNKNOWN"
-            }
-            variant="pill"
+            label={cmuxLabel}
             testId="status-cmux"
           />
         </div>
-        <div className="mt-1 font-mono text-[10px] text-on-surface-variant">
+        <div className="mt-1 text-xs text-on-surface-variant">
           OpenRig can control cmux surfaces for node open-or-focus.
         </div>
       </section>
-      <section>
-        <SectionHeader tone="muted">Rigs</SectionHeader>
-        <div className="mt-2 space-y-1.5 font-mono text-xs">
+      <section className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
+        <h2 className="text-sm font-semibold text-on-surface">Rigs</h2>
+        <div className="mt-2 space-y-1.5 text-sm">
           <div className="flex justify-between">
-            <span className="text-on-surface-variant">Total</span>
-            <span className="text-on-surface font-bold" data-testid="status-rigs-total">{totalRigs}</span>
+            <span className="text-xs text-on-surface-variant">Total</span>
+            <span className="text-on-surface font-medium" data-testid="status-rigs-total">{totalRigs}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-on-surface-variant">Running</span>
-            <span className="text-on-surface font-bold" data-testid="status-rigs-running">{runningRigs}</span>
+            <span className="text-xs text-on-surface-variant">Running</span>
+            <span className="text-on-surface font-medium" data-testid="status-rigs-running">{runningRigs}</span>
           </div>
+          {rigsLoading && (
+            <div className="text-xs text-on-surface-variant">Loading rig counts…</div>
+          )}
+          {rigsError && (
+            <div className="text-xs text-on-surface-variant">Rig counts unavailable.</div>
+          )}
         </div>
       </section>
     </div>

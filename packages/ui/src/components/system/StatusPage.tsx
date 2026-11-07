@@ -9,7 +9,11 @@ import { SettingsSystemStatusPanel } from "./SettingsSystemStatusPanel.js";
 
 export function StatusPage() {
   return (
-    <SettingsPageShell testId="settings-page-status" title="Status">
+    <SettingsPageShell
+      testId="settings-page-status"
+      title="Status"
+      description="Daemon reachability, adapter availability, and rig counts at a glance."
+    >
       <SettingsSystemStatusPanel />
     </SettingsPageShell>
   );

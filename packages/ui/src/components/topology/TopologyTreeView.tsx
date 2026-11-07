@@ -121,7 +121,7 @@ function PodBranch({ rigId, podName, seats, activeRigId, activePodName, activeLo
         >
           {displayPodName(podName)}
         </Link>
-        <span className="font-mono text-[9px] text-on-surface-variant">{seats.length}</span>
+        <span className="font-mono text-[11px] text-on-surface-variant">{seats.length}</span>
       </button>
       {open ? (
         <ul className="ml-4 border-l border-outline-variant">
@@ -183,7 +183,7 @@ function RigBranch({ rigId, rigName, activeRigId, activePodName, activeLogicalId
           to="/topology/rig/$rigId"
           params={{ rigId }}
           onClick={(e) => e.stopPropagation()}
-          className="font-mono text-[11px] uppercase text-on-surface flex-1 truncate hover:underline"
+          className="text-[11px] text-on-surface flex-1 truncate hover:underline"
         >
           {rigName}
         </Link>
@@ -191,7 +191,7 @@ function RigBranch({ rigId, rigName, activeRigId, activePodName, activeLogicalId
       {open ? (
         <ul className="ml-4 border-l border-outline-variant">
           {pods.length === 0 ? (
-            <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
+            <li className="px-2 py-1 font-mono text-[11px] text-on-surface-variant italic">
               Loading…
             </li>
           ) : (
@@ -236,13 +236,13 @@ function ArchiveSection({ activeRigId, activePodName, activeLogicalId }: {
       >
         {open ? <ChevronDown className="h-3 w-3 text-on-surface-variant" /> : <ChevronRight className="h-3 w-3 text-on-surface-variant" />}
         <Archive className="h-3 w-3 text-on-surface-variant" />
-        <span className="font-mono text-[11px] uppercase text-on-surface-variant flex-1">Archive</span>
-        {open ? <span className="font-mono text-[9px] text-on-surface-variant">{count}</span> : null}
+        <span className="text-[11px] text-on-surface-variant flex-1">Archive</span>
+        {open ? <span className="font-mono text-[11px] text-on-surface-variant">{count}</span> : null}
       </button>
       {open ? (
         <ul className="ml-5">
           {count === 0 ? (
-            <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
+            <li className="px-2 py-1 font-mono text-[11px] text-on-surface-variant italic">
               No archived rigs.
             </li>
           ) : (
@@ -298,18 +298,18 @@ function HostBranch({ hostId, label, chip, isSelected, isLocal, onSelect, rigs, 
           <Link
             to="/topology"
             onClick={(e) => e.stopPropagation()}
-            className="font-mono text-[11px] uppercase text-on-surface flex-1 truncate hover:underline"
+            className="text-[11px] text-on-surface flex-1 truncate hover:underline"
           >
             {label}
           </Link>
         ) : (
-          <span className="font-mono text-[11px] uppercase text-on-surface flex-1 truncate">{label}</span>
+          <span className="text-[11px] text-on-surface flex-1 truncate">{label}</span>
         )}
         {chip ? (
           <span
             data-testid={`topology-host-chip-${hostId}`}
             className={cn(
-              "font-mono text-[9px] uppercase tracking-[0.12em]",
+              "text-[11px] ",
               chip === "viewing" ? "bg-inverse-surface px-1 text-background" : "text-on-surface-variant",
             )}
           >
@@ -317,7 +317,7 @@ function HostBranch({ hostId, label, chip, isSelected, isLocal, onSelect, rigs, 
           </span>
         ) : null}
         {isSelected ? (
-          <span className="font-mono text-[9px] text-on-surface-variant">{rigs?.length ?? 0}</span>
+          <span className="font-mono text-[11px] text-on-surface-variant">{rigs?.length ?? 0}</span>
         ) : null}
       </button>
       {isSelected ? (
@@ -327,12 +327,12 @@ function HostBranch({ hostId, label, chip, isSelected, isLocal, onSelect, rigs, 
             // tree leg): what happened + where the retry lives.
             <li
               data-testid={`topology-host-error-${hostId}`}
-              className="px-2 py-1 font-mono text-[10px] text-error"
+              className="px-2 py-1 font-mono text-[11px] text-error"
             >
               Host unreachable — its rigs can&apos;t be listed. See the page for retry.
             </li>
           ) : rigsLoading && (rigs === undefined || rigs.length === 0) ? (
-            <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
+            <li className="px-2 py-1 font-mono text-[11px] text-on-surface-variant italic">
               Pulling {label}&apos;s workspace…
             </li>
           ) : (
@@ -376,7 +376,7 @@ export function TopologyTreeView() {
           />
         ))
       ) : (
-        <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
+        <li className="px-2 py-1 font-mono text-[11px] text-on-surface-variant italic">
           No rigs.
         </li>
       )}

@@ -18,9 +18,11 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "../ui/page-header.js";
+import { EmptyState } from "../ui/empty-state.js";
+import { StatusBadge } from "../ui/status-badge.js";
 import { cn } from "../../lib/utils.js";
 import { WorkspacePage } from "../WorkspacePage.js";
-import { WorkflowHeader, WorkflowSummaryCard, WorkflowSummaryGrid } from "../WorkflowScaffold.js";
 import { useLibraryReview, type LibraryWorkflowReview } from "../../hooks/useSpecLibrary.js";
 import {
   useWorkflowTrace,
@@ -66,6 +68,13 @@ function takenFromTrail(
   return { visited: trail.map((t) => t.stepId), edgeKeys };
 }
 
+function ExceptionTone(instance: WorkflowInstanceWithDeadline): { card: string; text: string } {
+  const failed = instance.status === "failed";
+  const overdue = instance.deadline.state !== "healthy" && instance.deadline.evidence;
+  if (failed || overdue) return { card: "border-destructive/60 bg-destructive/5", text: "text-destructive" };
+  return { card: "border-amber-700/60 bg-amber-700/5", text: "text-amber-800" };
+}
+
 export function ExceptionBanner({
   instance,
   onResume,
@@ -82,37 +91,38 @@ export function ExceptionBanner({
   const failed = instance.status === "failed";
   if (!gated && !overdue && !failed) return null;
 
-  const tone = failed || overdue ? "border-red-700/60 bg-red-700/5" : "border-amber-700/60 bg-amber-700/5";
+  const tone = ExceptionTone(instance);
   return (
-    <div data-testid="workflow-exception-banner" className={cn("space-y-2 border px-3 py-2", tone)}>
+    <div data-testid="workflow-exception-banner" className={cn("space-y-2 rounded-lg border px-3 py-2 text-sm", tone.card)}>
       {failed ? (
-        <p className="font-mono text-[11px] text-red-700">
-          ▲ FAILED — no remediation branch mapped for the failing exit
+        <p className={cn("text-sm", tone.text)}>
+          <StatusBadge status={instance.status} /> No remediation branch mapped for the failing exit
           {instance.resumeCount > 0 ? ` · resumed ${instance.resumeCount}× already` : ""}
         </p>
       ) : null}
       {overdue ? (
-        <p className="font-mono text-[11px] text-red-700">
-          ▲ {instance.deadline.state.toUpperCase()} — step {instance.deadline.evidence!.stepId ?? "(unbound)"} packet{" "}
-          {instance.deadline.evidence!.packetId} held by {instance.deadline.evidence!.ownerSession},{" "}
+        <p className={cn("text-sm", tone.text)}>
+          <StatusBadge status={instance.deadline.state} /> step {instance.deadline.evidence!.stepId ?? "(unbound)"} packet{" "}
+          <span className="font-mono text-xs">{instance.deadline.evidence!.packetId}</span> held by{" "}
+          <span className="font-mono text-xs">{instance.deadline.evidence!.ownerSession}</span>,{" "}
           {Math.floor(instance.deadline.evidence!.overdueBySeconds / 60)}m past its{" "}
           {instance.deadline.evidence!.anchor} anchor
         </p>
       ) : null}
       {gated && !overdue && !failed ? (
-        <p className="font-mono text-[11px] text-amber-800">
-          ◐ WAITING at {instance.currentStepId} — the gate packet is parked pending sign-off; resolving the
+        <p className={cn("text-sm", tone.text)}>
+          Waiting at <span className="font-mono text-xs">{instance.currentStepId}</span> — the gate packet is parked pending sign-off; resolving the
           NEEDS-YOU item resumes the deterministic flow
         </p>
       ) : null}
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-on-surface-variant">
         {failed ? (
           <button
             type="button"
             data-testid="workflow-resume"
             disabled={resuming}
             onClick={onResume}
-            className="border border-outline px-3 py-1 font-mono text-[11px] uppercase hover:bg-surface-variant disabled:cursor-not-allowed disabled:opacity-50"
+            className="border border-outline px-3 py-1 text-xs hover:bg-surface-variant disabled:cursor-not-allowed disabled:opacity-50"
             title={`POST /api/workflow/${instance.instanceId}/resume — redrive from the failed step (WF-5 FR-4)`}
           >
             {resuming ? "Resuming…" : "Resume"}
@@ -121,11 +131,11 @@ export function ExceptionBanner({
         {/* ROUTE-FROM-WEB DEFERRED (pm ruling) — the twin's RE-ROUTE affordance
             is intentionally OMITTED in v1; the disclosed twin-vs-build delta. */}
         {resumeError ? (
-          <span data-testid="workflow-resume-error" className="font-mono text-[10px] text-red-700">
+          <span data-testid="workflow-resume-error" className="font-mono text-xs text-red-700">
             {resumeError}
           </span>
         ) : null}
-        <span className="font-mono text-[10px] text-on-surface-variant">
+        <span className="font-mono text-xs">
           CLI: rig workflow trace {instance.instanceId}
         </span>
       </div>
@@ -161,17 +171,16 @@ export function WorkflowInstancePage({
   if (isLoading) {
     return (
       <WorkspacePage>
-        <div className="font-mono text-[10px] text-on-surface-variant">Loading workflow instance…</div>
+        <div className="text-xs text-on-surface-variant">Loading workflow instance…</div>
       </WorkspacePage>
     );
   }
   if (error || !trace) {
     return (
       <WorkspacePage>
-        <div data-testid="workflow-instance-error" className="space-y-4">
-          <WorkflowHeader
-            eyebrow="Workflow — Instance"
-            title="Instance Not Found"
+        <div data-testid="workflow-instance-error" className="space-y-4 text-sm">
+          <PageHeader
+            title="Instance not found"
             description={(error as Error)?.message ?? `No workflow instance ${instanceId}.`}
           />
           <Button variant="outline" size="sm" onClick={() => navigate({ to: "/workflows" })}>
@@ -192,10 +201,9 @@ export function WorkflowInstancePage({
 
   return (
     <WorkspacePage>
-      <div data-testid="workflow-instance-page" className="space-y-6">
-        <WorkflowHeader
-          eyebrow={`Workflow — Instance · ${instance.workflowName} v${instance.workflowVersion}`}
-          title={instance.instanceId}
+      <div data-testid="workflow-instance-page" className="space-y-6 text-sm">
+        <PageHeader
+          title={`Workflow run ${instance.instanceId}`}
           description={
             instance.currentStepId
               ? `${instance.status} at ${instance.currentStepId} · hop ${instance.hopCount}`
@@ -220,18 +228,21 @@ export function WorkflowInstancePage({
           }
         />
 
-        <WorkflowSummaryGrid>
-          <WorkflowSummaryCard label="Status" value={statusLabel} testId="wf-inst-status" />
-          <WorkflowSummaryCard
+        <div className="grid gap-3 rounded-lg border bg-surface-lowest p-4 shadow-sm sm:grid-cols-2 xl:grid-cols-4">
+          <WorkflowSummaryCell label="Status" testId="wf-inst-status">
+            <StatusBadge status={statusLabel} />
+          </WorkflowSummaryCell>
+          <WorkflowSummaryCell
             label="Position"
-            value={instance.currentStepId ?? (instance.status === "completed" ? "closed" : "felled")}
             testId="wf-inst-position"
+            mono
+            value={instance.currentStepId ?? (instance.status === "completed" ? "closed" : "felled")}
           />
-          <WorkflowSummaryCard label="Hops" value={instance.hopCount} testId="wf-inst-hops" />
-          <WorkflowSummaryCard label="Resumes" value={instance.resumeCount} testId="wf-inst-resumes" />
-        </WorkflowSummaryGrid>
+          <WorkflowSummaryCell label="Hops" testId="wf-inst-hops" mono value={instance.hopCount} />
+          <WorkflowSummaryCell label="Resumes" testId="wf-inst-resumes" mono value={instance.resumeCount} />
+        </div>
 
-        <p data-testid="wf-inst-provenance" className="font-mono text-[10px] text-on-surface-variant">
+        <p data-testid="wf-inst-provenance" className="font-mono text-xs text-on-surface-variant">
           created by {instance.createdBySession} · {fmtTime(instance.createdAt)}
           {instance.completedAt ? ` · completed ${fmtTime(instance.completedAt)}` : ""}
         </p>
@@ -247,13 +258,40 @@ export function WorkflowInstancePage({
             takenEdgeKeys={edgeKeys}
           />
         ) : (
-          <p className="font-mono text-[10px] text-on-surface-variant">
-            (workflow shape unavailable — the spec is not in the library cache)
-          </p>
+          <EmptyState
+            title="Shape unavailable"
+            label="Shape unavailable"
+            description="The workflow shape is not in the library cache."
+            variant="card"
+            testId="workflow-instance-shape-empty"
+          />
         )}
 
         <InstanceTrailTimeline trail={trail} instance={instance} anchorStepId={anchorStepId} />
       </div>
     </WorkspacePage>
+  );
+}
+
+function WorkflowSummaryCell({
+  label,
+  value,
+  testId,
+  mono,
+  children,
+}: {
+  label: string;
+  value?: React.ReactNode;
+  testId: string;
+  mono?: boolean;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div>
+      <div className="text-xs text-on-surface-variant">{label}</div>
+      <div data-testid={testId} className={mono ? "mt-2 font-mono text-xs text-on-surface" : "mt-2 text-sm text-on-surface"}>
+        {children ?? value}
+      </div>
+    </div>
   );
 }

@@ -19,20 +19,19 @@ function readAllTsx(dir: string): string[] {
 }
 
 describe("Design System Compliance", () => {
-  // Test 1: No rounded corners — no rounded-* classes except rounded-md (which is 0px)
-  it("no non-zero border-radius in any component", () => {
+  // Test 1: border radius comes only from the --radius token scale — no non-zero
+  // hardcoded radius in config, no inline borderRadius in source files
+  it("border radius comes only from the --radius token scale", () => {
     const config = readFileSync(resolve(__dirname, "../tailwind.config.ts"), "utf-8");
     const radiusMatch = config.match(/borderRadius:\s*\{([^}]+)\}/);
     expect(radiusMatch).not.toBeNull();
 
-    // All radius values are 0px (except `full: "9999px"` for stamp circles)
-    const pairs = [...radiusMatch![1]!.matchAll(/(\w+):\s*"([^"]+)"/g)];
+    // All radius values derive from --radius (except `none: "0px"` and `full: "9999px"`)
+    const pairs = [...radiusMatch![1]!.matchAll(/"?(\w+)"?:\s*"([^"]+)"/g)];
     for (const [, key, value] of pairs) {
-      if (key === "full") {
-        expect(value).toBe("9999px");
-      } else {
-        expect(value).toBe("0px");
-      }
+      if (key === "full") expect(value).toBe("9999px");
+      else if (key === "none") expect(value).toBe("0px");
+      else expect(value).toContain("var(--radius)");
     }
 
     // No inline borderRadius in source files
@@ -79,5 +78,51 @@ describe("Design System Compliance", () => {
 
     const importFlow = readFileSync(resolve(SRC_DIR, "components/ImportFlow.tsx"), "utf-8");
     expect(importFlow).toContain("font-mono");
+  });
+
+  // Test 4: Clean theme tokens meet WCAG AA contrast ratio (>= 4.5:1) on white ground
+  it("Clean theme tokens meet WCAG AA contrast ratio (>= 4.5:1) on white ground", () => {
+    function parseHsl(hslStr: string): [number, number, number] {
+      const parts = hslStr.trim().split(/\s+/).map((p) => parseFloat(p));
+      return [parts[0], parts[1], parts[2]];
+    }
+    function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+      s /= 100;
+      l /= 100;
+      const k = (n: number) => (n + h / 30) % 12;
+      const a = s * Math.min(l, 1 - l);
+      const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+      return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+    }
+    function lum([r, g, b]: [number, number, number]): number {
+      const a = [r, g, b].map((v) => {
+        v /= 255;
+        return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2];
+    }
+    function contrast(rgb1: [number, number, number], rgb2: [number, number, number]): number {
+      const l1 = lum(rgb1);
+      const l2 = lum(rgb2);
+      return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+    }
+
+    const globalsCss = readFileSync(resolve(__dirname, "../src/globals.css"), "utf-8");
+    const rootMatches = [...globalsCss.matchAll(/:root\s*\{([\s\S]*?)\}/g)];
+    expect(rootMatches.length).toBeGreaterThan(0);
+    const cleanThemeRoot = rootMatches[rootMatches.length - 1][1];
+
+    const successMatch = cleanThemeRoot.match(/--success:\s*([^;]+);/);
+    const warningMatch = cleanThemeRoot.match(/--warning:\s*([^;]+);/);
+
+    expect(successMatch).not.toBeNull();
+    expect(warningMatch).not.toBeNull();
+
+    const successRgb = hslToRgb(...parseHsl(successMatch![1]));
+    const warningRgb = hslToRgb(...parseHsl(warningMatch![1]));
+    const white: [number, number, number] = [255, 255, 255];
+
+    expect(contrast(successRgb, white)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(warningRgb, white)).toBeGreaterThanOrEqual(4.5);
   });
 });

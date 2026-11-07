@@ -214,13 +214,13 @@ export function VerbActions({
       {!bare ? (
       <div className="flex flex-wrap items-start justify-between gap-2 border border-outline-variant bg-surface-lowest/40 px-2 py-1.5 backdrop-blur-sm">
         <div>
-          <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface">Choose response</div>
-          <div className="mt-0.5 font-mono text-[10px] leading-relaxed text-on-surface-variant">
+          <div className="text-[11px] text-on-surface">Choose response</div>
+          <div className="mt-0.5 font-mono text-[11px] leading-relaxed text-on-surface-variant">
             Pick the next move for this queue item.
           </div>
         </div>
         {activeVerb ? (
-          <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
+          <div className="text-[11px] text-on-surface-variant">
             Selected: <span className="text-on-surface">{ACTION_VERB_META[activeVerb].label}</span>
           </div>
         ) : null}
@@ -251,11 +251,11 @@ export function VerbActions({
               disabled={mutation.isPending}
               title={oneClick ? `${meta.description} (records immediately)` : meta.description}
               className={cn(
-                "inline-flex min-h-[44px] items-center gap-1 border px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors disabled:opacity-50",
+                "inline-flex min-h-[44px] items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-50 lg:min-h-8",
                 activeVerb === verb ? verbToneClass[verb].active : verbToneClass[verb].idle,
               )}
             >
-              <Icon className="h-3 w-3" strokeWidth={1.7} />
+              <Icon className="h-3.5 w-3.5" strokeWidth={1.75} />
               {meta.label}
             </button>
           );
@@ -263,7 +263,7 @@ export function VerbActions({
       </div>
       {activeVerb && (
         <div className="space-y-1 border border-outline-variant bg-background p-2">
-          <div data-testid="mc-verb-guidance" className="font-mono text-[10px] leading-relaxed text-on-surface-variant">
+          <div data-testid="mc-verb-guidance" className="font-mono text-[11px] leading-relaxed text-on-surface-variant">
             {ACTION_VERB_META[activeVerb].description}
           </div>
           {needsDestination && (
@@ -307,7 +307,7 @@ export function VerbActions({
                 />
               ) : null}
               {destinationsQuery.isError ? (
-                <div className="font-mono text-[10px] text-amber-700">destination list unavailable</div>
+                <div className="font-mono text-[11px] text-amber-700">destination list unavailable</div>
               ) : null}
             </div>
           )}
@@ -336,7 +336,7 @@ export function VerbActions({
               type="button"
               onClick={reset}
               data-testid="mc-verb-cancel"
-              className="border border-outline-variant px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant"
+              className="border border-outline-variant px-2 py-0.5 text-[11px] text-on-surface-variant"
             >
               Cancel
             </button>
@@ -350,7 +350,7 @@ export function VerbActions({
                 (needsAnnotation && !annotation) ||
                 (needsReason && !reason)
               }
-              className="border border-on-surface bg-inverse-surface px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-background disabled:opacity-50"
+              className="border border-on-surface bg-inverse-surface px-2 py-0.5 text-[11px] text-background disabled:opacity-50"
             >
               {mutation.isPending ? "..." : `Confirm ${ACTION_VERB_META[activeVerb].label}`}
             </button>
@@ -361,7 +361,7 @@ export function VerbActions({
         <div
           data-testid="mc-verb-error"
           role="alert"
-          className="truncate border border-tertiary bg-background/40 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-tertiary"
+          className="truncate border border-tertiary bg-background/40 px-3 py-2 text-[11px] text-tertiary"
           title={errorMessage}
         >
           {errorMessage}

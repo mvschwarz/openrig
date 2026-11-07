@@ -6,11 +6,11 @@ import { ClaudeCompactionPolicyForm } from "./ClaudeCompactionPolicyForm.js";
 
 export function PoliciesPage() {
   return (
-    <SettingsPageShell testId="settings-page-policies" title="Policies">
-      <p className="mb-6 text-sm text-on-surface-variant max-w-prose">
-        Opt-in policies that affect agent runtime behavior. Each policy ships
-        disabled by default and can be turned on independently.
-      </p>
+    <SettingsPageShell
+      testId="settings-page-policies"
+      title="Policies"
+      description="Opt-in runtime policies for your agents. Each policy is off by default and can be turned on independently."
+    >
       <div className="flex flex-col gap-6">
         <ClaudeCompactionPolicyForm />
       </div>

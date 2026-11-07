@@ -55,7 +55,7 @@ function ContextMetric({ seat }: { seat: NodeInventoryEntry }) {
   return (
     <span
       data-testid={`terminal-card-context-${seat.rigId}-${seat.logicalId}`}
-      className={`font-mono text-[8px] font-bold uppercase tracking-wide ${contextUsageTextClass(usage?.usedPercentage, usage?.fresh, usage?.availability)}`}
+      className={`text-[11px] font-bold ${contextUsageTextClass(usage?.usedPercentage, usage?.fresh, usage?.availability)}`}
       title={
         known
           ? usage?.fresh === false
@@ -77,7 +77,7 @@ function TokenMetric({ seat }: { seat: NodeInventoryEntry }) {
   return (
     <span
       data-testid={`terminal-card-tokens-${seat.rigId}-${seat.logicalId}`}
-      className={`font-mono text-[8px] font-bold uppercase tracking-wide ${label ? "text-on-surface-variant" : "text-on-surface-variant"}`}
+      className={`text-[11px] font-bold ${label ? "text-on-surface-variant" : "text-on-surface-variant"}`}
       title={title ?? "Token sample unavailable"}
     >
       {label ?? "--"}
@@ -118,7 +118,7 @@ function SeatTerminalCard({ seat }: { seat: NodeInventoryEntry }) {
       )}
     >
       <header className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[8px] font-semibold uppercase tracking-[0.10em] text-on-surface-variant truncate">
+        <span className="text-[11px] font-semibold text-on-surface-variant truncate">
           {memberName}
         </span>
         <span className="inline-flex shrink-0 items-center gap-1">
@@ -168,7 +168,7 @@ function TerminalGrid({
 
   return (
     <div data-testid="topology-terminal-grid" className="space-y-3">
-      <div className="font-mono text-[9px] text-on-surface-variant flex items-center justify-between">
+      <div className="font-mono text-[11px] text-on-surface-variant flex items-center justify-between">
         <span data-testid="topology-terminal-count">
           showing {visible.length} of {seats.length} terminal{seats.length === 1 ? "" : "s"}
         </span>
@@ -177,7 +177,7 @@ function TerminalGrid({
             type="button"
             data-testid="topology-terminal-show-toggle"
             onClick={() => setShowAll((s) => !s)}
-            className="px-2 py-0.5 border border-outline-variant font-mono text-[9px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
+            className="px-2 py-0.5 border border-outline-variant text-[11px] text-on-surface hover:bg-surface-low/60"
           >
             {showAll ? `show first ${SAFE_N}` : `show all ${seats.length}`}
           </button>
@@ -242,14 +242,14 @@ function HostRigPicker({
             className="flex items-center justify-between gap-2 border border-outline-variant bg-surface/70 px-3 py-2 text-left hover:bg-surface-low/70"
           >
             <span className="min-w-0">
-              <span className="block truncate font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-on-surface">
+              <span className="block truncate text-[11px] font-semibold text-on-surface">
                 {rig.name}
               </span>
-              <span className="block font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant">
+              <span className="block text-[11px] text-on-surface-variant">
                 {rig.nodeCount} node{rig.nodeCount === 1 ? "" : "s"}
               </span>
             </span>
-            <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
+            <span className="shrink-0 text-[11px] text-on-surface-variant">
               Open
             </span>
           </button>
@@ -306,7 +306,7 @@ export function TopologyTerminalView({ scope, rigId, podName }: TopologyTerminal
             type="button"
             data-testid="topology-terminal-host-back"
             onClick={() => setSelectedHostRigId(null)}
-            className="font-mono text-[9px] uppercase tracking-[0.14em] text-on-surface-variant hover:text-on-surface"
+            className="text-[11px] text-on-surface-variant hover:text-on-surface"
           >
             Back to rigs
           </button>

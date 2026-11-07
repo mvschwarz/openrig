@@ -63,7 +63,7 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, sh
             key={tab}
             data-testid={`${prefix}tab-${tab}`}
             onClick={() => setActiveTab(tab)}
-            className={`px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+            className={`px-3 py-1.5 text-[11px] transition-colors ${
               activeTab === tab
                 ? "border-b-2 border-on-surface text-on-surface font-bold"
                 : "text-on-surface-variant hover:text-on-surface"
@@ -84,7 +84,7 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, sh
           {review.format === "pod_aware" && reviewPods.map((pod) => (
             <div key={pod.id} className="border border-outline-variant p-3">
               <div className="font-mono text-xs font-bold mb-2">{pod.label ?? pod.id}</div>
-              <table className="w-full font-mono text-[10px]">
+              <table className="w-full font-mono text-[11px]">
                 <thead>
                   <tr className="border-b border-outline-variant text-on-surface-variant">
                     <th className="text-left py-1">Member</th>
@@ -104,7 +104,7 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, sh
                               variant="outline"
                               size="sm"
                               data-testid={`${prefix}member-open-agent-${pod.id}-${m.id}`}
-                              className="h-6 px-2 font-mono text-[9px] uppercase tracking-[0.12em]"
+                              className="h-6 px-2 text-[11px] "
                               onClick={() => onMemberClick(pod.id, m)}
                             >
                               Agent Spec
@@ -144,7 +144,7 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, sh
           {review.format === "legacy" && reviewNodes.length > 0 && (
             <div className="border border-outline-variant p-3">
               <div className="font-mono text-xs font-bold mb-2">Nodes</div>
-              <table className="w-full font-mono text-[10px]">
+              <table className="w-full font-mono text-[11px]">
                 <thead>
                   <tr className="border-b border-outline-variant text-on-surface-variant">
                     <th className="text-left py-1">ID</th>
@@ -172,7 +172,7 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, sh
               <div className="font-mono text-xs font-bold mb-2">
                 {review.format === "pod_aware" ? "Cross-Pod Edges" : "Edges"}
               </div>
-              <table className="w-full font-mono text-[10px]">
+              <table className="w-full font-mono text-[11px]">
                 <thead>
                   <tr className="border-b border-outline-variant text-on-surface-variant">
                     <th className="text-left py-1">From</th>
@@ -198,20 +198,20 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, sh
       {activeTab === "environment" && showEnv && review?.services && (
         <div className="space-y-4" data-testid={`${prefix}env-details`}>
           <div className="space-y-2">
-            <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">Services</div>
+            <div className="text-[11px] text-on-surface-variant">Services</div>
             {review.services.composePreview?.services.map((svc) => (
               <div key={svc.name} className="flex items-center justify-between border border-outline-variant px-3 py-2">
                 <span className="font-mono text-[11px] text-on-surface">{svc.name}</span>
-                {svc.image && <span className="font-mono text-[9px] text-on-surface-variant">{svc.image}</span>}
+                {svc.image && <span className="font-mono text-[11px] text-on-surface-variant">{svc.image}</span>}
               </div>
             ))}
           </div>
 
           {review.services.waitFor.length > 0 && (
             <div className="space-y-2">
-              <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">Health Gates</div>
+              <div className="text-[11px] text-on-surface-variant">Health Gates</div>
               {review.services.waitFor.map((w, i) => (
-                <div key={i} className="font-mono text-[10px] text-on-surface-variant border border-outline-variant px-3 py-2">
+                <div key={i} className="font-mono text-[11px] text-on-surface-variant border border-outline-variant px-3 py-2">
                   {w.url && <span>{w.url}</span>}
                   {w.tcp && <span>tcp: {w.tcp}</span>}
                   {w.service && <span>service: {w.service}{w.condition ? ` (${w.condition})` : ""}</span>}
@@ -222,17 +222,17 @@ export function RigSpecDisplay({ review, yaml, testIdPrefix = "", yamlTestId, sh
 
           {review.services.surfaces && (
             <div className="space-y-2">
-              <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">Surfaces</div>
+              <div className="text-[11px] text-on-surface-variant">Surfaces</div>
               {review.services.surfaces.urls?.map((u) => (
                 <div key={u.name} className="flex items-center justify-between border border-outline-variant px-3 py-2">
                   <span className="text-[11px] text-on-surface">{u.name}</span>
-                  <span className="font-mono text-[9px] text-on-surface-variant">{u.url}</span>
+                  <span className="font-mono text-[11px] text-on-surface-variant">{u.url}</span>
                 </div>
               ))}
               {review.services.surfaces.commands?.map((cmd) => (
                 <div key={cmd.name} className="flex items-center justify-between border border-outline-variant px-3 py-2">
                   <span className="text-[11px] text-on-surface">{cmd.name}</span>
-                  <span className="font-mono text-[9px] text-on-surface-variant">{cmd.command}</span>
+                  <span className="font-mono text-[11px] text-on-surface-variant">{cmd.command}</span>
                 </div>
               ))}
             </div>

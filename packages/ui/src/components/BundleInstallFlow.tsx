@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { useBundleInstall, type BundleInstallResult } from "../hooks/useBundles.js";
+import { PageHeader } from "@/components/ui/page-header.js";
+import { StatusBadge } from "@/components/ui/status-badge.js";
 import { WorkspacePage } from "./WorkspacePage.js";
 
 type Step = "enter" | "planning" | "planned" | "applying" | "done" | "error";
@@ -51,66 +53,82 @@ export function BundleInstallFlow() {
   return (
     <WorkspacePage>
     <div data-testid="bundle-install-flow">
-      <h2 className="text-headline-lg uppercase mb-spacing-4">INSTALL BUNDLE</h2>
+      <PageHeader
+        title="Install bundle"
+        description="Plan a bundle install, review the stage plan, then apply it to the target root."
+      />
 
       {step === "enter" && (
         <div data-testid="step-enter">
-          <label className="text-label-md uppercase block mb-spacing-2">BUNDLE PATH</label>
+          <label className="text-xs text-on-surface-variant block mb-spacing-2">Bundle path</label>
           <input data-testid="bundle-input" type="text" value={bundlePath}
             onChange={(e) => setBundlePath(e.target.value)}
             placeholder="/path/to/my-rig.rigbundle"
-            className="w-full bg-transparent border-b border-foreground/20 py-spacing-2 text-body-md font-mono focus:outline-none focus:border-primary mb-spacing-4" />
-          <label className="text-label-md uppercase block mb-spacing-2">TARGET ROOT</label>
+            className="w-full bg-transparent border-b border-foreground/20 py-spacing-2 text-sm font-mono focus:outline-none focus:border-primary mb-spacing-4" />
+          <label className="text-xs text-on-surface-variant block mb-spacing-2">Target root</label>
           <input data-testid="target-input" type="text" value={targetRoot}
             onChange={(e) => setTargetRoot(e.target.value)}
             placeholder="/path/to/target/project"
-            className="w-full bg-transparent border-b border-foreground/20 py-spacing-2 text-body-md font-mono focus:outline-none focus:border-primary mb-spacing-4" />
-          <Button variant="tactical" onClick={handlePlan} disabled={!bundlePath.trim()} data-testid="plan-btn">PLAN</Button>
+            className="w-full bg-transparent border-b border-foreground/20 py-spacing-2 text-sm font-mono focus:outline-none focus:border-primary mb-spacing-4" />
+          <div className="flex items-center justify-between gap-2">
+            <span />
+            <Button variant="default" onClick={handlePlan} disabled={!bundlePath.trim()} data-testid="plan-btn">Preview plan</Button>
+          </div>
         </div>
       )}
 
-      {step === "planning" && <div data-testid="step-planning" className="text-foreground-muted">Planning...</div>}
+      {step === "planning" && <div data-testid="step-planning" className="text-sm text-on-surface-variant">Planning...</div>}
 
       {step === "planned" && planResult && (
         <div data-testid="step-planned">
-          <h3 className="text-headline-md uppercase mb-spacing-3">PLAN</h3>
+          <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">Plan</h3>
           <div className="space-y-spacing-1 mb-spacing-4">
             {planResult.stages.map((s) => (
-              <div key={s.stage} className="text-label-sm font-mono">
-                <span className={s.status === "ok" ? "text-success" : "text-foreground-muted"}>{s.status.toUpperCase()}</span> {s.stage}
+              <div key={s.stage} className="flex items-center gap-2 text-xs">
+                <StatusBadge status={s.status === "ok" ? "done" : s.status} label={s.status === "ok" ? "Ok" : undefined} />
+                <span className="font-mono">{s.stage}</span>
               </div>
             ))}
           </div>
-          <Button variant="tactical" onClick={handleApply} disabled={!targetRoot.trim()} data-testid="apply-btn">APPLY</Button>
+          <div className="flex items-center justify-between gap-2">
+            <Button variant="ghost" onClick={() => setStep("enter")} data-testid="back-btn">Back</Button>
+            <Button variant="default" onClick={handleApply} disabled={!targetRoot.trim()} data-testid="apply-btn">Install bundle</Button>
+          </div>
         </div>
       )}
 
-      {step === "applying" && <div data-testid="step-applying" className="text-foreground-muted">Installing...</div>}
+      {step === "applying" && <div data-testid="step-applying" className="text-sm text-on-surface-variant">Installing...</div>}
 
       {step === "done" && planResult && (
         <div data-testid="step-done">
-          <h3 className="text-headline-md uppercase mb-spacing-3">COMPLETE</h3>
-          <div className="text-label-sm font-mono">
-            Status: <span className="text-success">{planResult.status.toUpperCase()}</span>
+          <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">{planResult.status === "partial" ? "Partially installed" : "Complete"}</h3>
+          <div className="text-xs space-y-1">
+            <div>Status: <StatusBadge status={planResult.status === "completed" ? "done" : planResult.status} label={planResult.status === "completed" ? "Completed" : planResult.status === "partial" ? "Partially installed" : undefined} /></div>
             {planResult.stages.some((s) => s.detail?.source === "pod_bundle") ? (
               <span className="ml-spacing-2 text-primary" data-testid="bundle-type-label">Pod-aware bundle</span>
             ) : (
-              <span className="ml-spacing-2 text-foreground-muted" data-testid="bundle-type-label">Legacy bundle</span>
+              <span className="ml-spacing-2 text-on-surface-variant" data-testid="bundle-type-label">Legacy bundle</span>
             )}
           </div>
           {planResult.rigId && (
-            <div className="text-label-sm font-mono" data-testid="result-rig-id">Rig: {planResult.rigId}</div>
+            <div className="text-xs" data-testid="result-rig-id">Rig: <span className="font-mono">{planResult.rigId}</span></div>
           )}
           {planResult.rigId && (
-            <Button variant="tactical" className="mt-spacing-3" onClick={() => navigate({ to: "/rigs/$rigId", params: { rigId: planResult.rigId! } })}>VIEW RIG</Button>
+            <div className="flex items-center justify-between gap-2">
+              <span />
+              <Button variant="default" className="mt-spacing-3" onClick={() => navigate({ to: "/rigs/$rigId", params: { rigId: planResult.rigId! } })}>View rig</Button>
+            </div>
           )}
         </div>
       )}
 
       {step === "error" && (
         <div data-testid="step-error">
-          <p className="text-destructive text-body-md mb-spacing-4">{errorMessage}</p>
-          <Button variant="tactical" onClick={() => { setStep("enter"); setErrorMessage(null); installMutation.reset(); }} data-testid="try-again-btn">TRY AGAIN</Button>
+          <p className="text-destructive text-sm mb-spacing-4">{errorMessage}</p>
+          <div className="flex items-center justify-between gap-2">
+            <span />
+            <Button variant="default" onClick={() => { setStep("enter"); setErrorMessage(null); installMutation.reset(); }} data-testid="try-again-btn">Try again</Button>
+          </div>
         </div>
       )}
     </div>

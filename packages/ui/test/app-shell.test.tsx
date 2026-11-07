@@ -17,45 +17,14 @@
 //   peer to Topology / Project / Library / For-You). Only Dashboard
 //   remains surface=none (no Explorer).
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, cleanup, waitFor, fireEvent } from "@testing-library/react";
+import { describe, it, expect } from "vitest";
+import { fireEvent } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
-import { createAppTestRouter } from "./helpers/test-router.js";
+import { setupAppShellTestEnv, renderAppShellAt } from "./helpers/app-shell-env.js";
 import { AppShell } from "../src/components/AppShell.js";
 
-const mockFetch = vi.fn();
-globalThis.fetch = mockFetch;
-
-let OriginalEventSource: typeof EventSource | undefined;
-
-beforeEach(async () => {
-  mockFetch.mockReset();
-  // Default rig/ps mocks return empty so chrome can render.
-  mockFetch.mockImplementation(async (url: string) => {
-    if (url.includes("/api/rigs/summary")) return new Response(JSON.stringify([]));
-    if (url.includes("/api/rigs/ps")) return new Response(JSON.stringify([]));
-    if (url.includes("/api/inventory")) return new Response(JSON.stringify([]));
-    return new Response("[]");
-  });
-  OriginalEventSource = globalThis.EventSource;
-  globalThis.EventSource = createMockEventSourceClass() as unknown as typeof EventSource;
-  const { queryClient } = await import("../src/lib/query-client.js");
-  queryClient.clear();
-});
-
-afterEach(() => {
-  if (OriginalEventSource) globalThis.EventSource = OriginalEventSource;
-  window.localStorage.clear();
-  cleanup();
-  Object.defineProperty(window, "innerWidth", {
-    configurable: true,
-    value: 1024,
-    writable: true,
-  });
-  window.dispatchEvent(new Event("resize"));
-});
+setupAppShellTestEnv();
 
 // Slice 52 (UI wall-clock hardening): the timed fixture no longer imports
 // ../src/routes.js. Mounting the whole route tree (all lazy page modules) was
@@ -65,22 +34,8 @@ afterEach(() => {
 // PATHNAME (surfaceForPath), not by the route tree — so a minimal router with
 // AppShell as the root and a catch-all stub renders IDENTICAL chrome with no
 // heavy import and no clock to race.
-async function renderAt(initialPath: string, opts: { innerWidth?: number } = {}) {
-  Object.defineProperty(window, "innerWidth", { configurable: true, value: opts.innerWidth ?? 1440, writable: true });
-  window.dispatchEvent(new Event("resize"));
-  const result = render(
-    createAppTestRouter({
-      routes: [{ path: "$", component: () => null }],
-      rootComponent: ({ children }) => <AppShell>{children}</AppShell>,
-      initialPath,
-    }),
-  );
-  // TanStack Router resolves route component async; wait for chrome to land.
-  await waitFor(() => {
-    expect(result.container.querySelector("[data-testid='app-rail']")).toBeTruthy();
-  }, { timeout: 5000 });
-  return result;
-}
+const renderAt = (initialPath: string, opts: { innerWidth?: number } = {}) =>
+  renderAppShellAt(AppShell, initialPath, opts);
 
 describe("AppShell — Phase 2 chrome", () => {
   it("places the dismissible notice before the header inside the shell", async () => {
@@ -242,8 +197,9 @@ describe("AppShell — Phase 2 chrome", () => {
       const topbar = container.querySelector("[data-testid='app-topbar']") as HTMLElement;
       expect(topbar).toBeTruthy();
       // Single source of truth — top bar is universal, NOT lg:hidden.
+      // C07 redesign: height is h-12.
       expect(topbar.className).not.toContain("lg:hidden");
-      expect(topbar.className).toContain("h-14");
+      expect(topbar.className).toContain("h-12");
     });
 
     it("brand link visible at desktop and links to / (Dashboard)", async () => {
@@ -251,7 +207,8 @@ describe("AppShell — Phase 2 chrome", () => {
       const brand = container.querySelector("[data-testid='brand-home-link']") as HTMLAnchorElement;
       expect(brand).toBeTruthy();
       expect(brand.getAttribute("href")).toBe("/");
-      expect(brand.textContent).toContain("OPENRIG");
+      // C07 redesign: sentence-case "OpenRig" wordmark in the sidebar header.
+      expect(brand.textContent).toContain("OpenRig");
     });
 
     it("right-slot carries the MH-2 host indicator (quiet local register, defaults to 'localhost')", async () => {
@@ -312,24 +269,98 @@ describe("AppShell — Phase 2 chrome", () => {
       expect(rail.className).not.toMatch(/\boverflow-x-auto\b/);
     });
 
-    // Slice 20 mobile: rail icon tap targets meet iOS HIG minimum
-    // (44px) on mobile, AND restore the prior 40px hitbox at lg: width
-    // so desktop hover precision is preserved. The className carries
-    // both shapes: `h-11 w-11` (mobile default) + `lg:h-10 lg:w-10`
-    // (desktop override). Tailwind's mobile-first cascade ensures the
-    // larger square only paints at < lg: viewports.
-    it("slice 20: rail icon tap targets are ≥44px on mobile + restored to 40px at lg:", async () => {
+    // The mobile tray's sidebar must fill the tray. A fixed desktop width
+    // (var(--sidebar-width)) left an empty strip beside it that read as a
+    // second, older sidebar underneath.
+    it("mobile tray sidebar fills the tray (no fixed desktop width)", async () => {
+      const { container } = await renderAt("/", { innerWidth: 375 });
+      const tray = container.querySelector("[data-testid='mobile-rail-tray']") as HTMLElement;
+      const rail = tray.querySelector("[data-testid='app-rail']") as HTMLElement;
+      expect(rail.style.width).toBe("");
+      expect(rail.className).toMatch(/\bw-full\b/);
+      expect(tray.className).toContain("top-0");
+      // The rail must be allowed to shrink so its link list scrolls
+      // inside the tray instead of running under the bottom nav.
+      expect(rail.className).toMatch(/\bmin-h-0\b/);
+      expect(rail.className).not.toMatch(/\bshrink-0\b/);
+    });
+
+    // The hamburger opens only the nav tray. The Explorer panel (Inbox
+    // filters etc.) has its own top-bar button, so the two never stack.
+    it("mobile hamburger and Explorer toggle open separate drawers", async () => {
+      const { container } = await renderAt("/for-you", { innerWidth: 375 });
+      const tray = () => container.querySelector("[data-testid='mobile-rail-tray']") as HTMLElement;
+      const explorer = () => container.querySelector("[data-testid='explorer']") as HTMLElement;
+      const { fireEvent } = await import("@testing-library/react");
+      fireEvent.click(container.querySelector("[data-testid='mobile-menu-toggle']") as HTMLElement);
+      expect(tray().className).toContain("translate-x-0");
+      expect(tray().className).not.toContain("-translate-x-full");
+      expect(explorer().className).toContain("-translate-x-full");
+      const panelToggle = container.querySelector("[data-testid='mobile-explorer-toggle']") as HTMLElement;
+      expect(panelToggle.getAttribute("aria-label")).toBe("Show inbox filters");
+      fireEvent.click(panelToggle);
+      expect(tray().className).toContain("-translate-x-full");
+      expect(explorer().className).not.toContain("-translate-x-full");
+      expect(panelToggle.getAttribute("aria-label")).toBe("Hide inbox filters");
+      // A closed tray leaves the tab order.
+      expect(tray().hasAttribute("inert")).toBe(true);
+    });
+
+    // C06 sidebar: nav items keep a >=44px tap target on mobile
+    // (`h-11`) and a compact 36px row at lg: (`lg:h-9`). The icon is
+    // centered when the sidebar is collapsed, so no width assertion.
+    it("nav items keep a ≥44px tap target on mobile", async () => {
       const { container } = await renderAt("/");
       const dashIcon = container.querySelector(
         "[data-testid='rail-dashboard']",
       ) as HTMLElement;
       expect(dashIcon, "rail dashboard icon link").toBeTruthy();
-      // Mobile default: 44px square.
+      // Mobile default: 44px tall row.
       expect(dashIcon.className).toMatch(/\bh-11\b/);
-      expect(dashIcon.className).toMatch(/\bw-11\b/);
-      // Desktop override: lg: prefix restores the 40px hitbox.
-      expect(dashIcon.className).toMatch(/\blg:h-10\b/);
-      expect(dashIcon.className).toMatch(/\blg:w-10\b/);
+      // Desktop override: lg: prefix restores the compact 36px row.
+      expect(dashIcon.className).toMatch(/\blg:h-9\b/);
+    });
+
+    // F16 (#2417): on narrow Topology the "More" bottom-nav entry is hidden —
+    // it would flip explorerOpen and reproduce the Topology render spin.
+    it("hides bottom-nav More on narrow Topology (no spin trigger)", async () => {
+      const topo = await renderAt("/topology", { innerWidth: 375 });
+      expect(topo.queryByTestId("mobile-nav-more")).toBeNull();
+      const home = await renderAt("/", { innerWidth: 375 });
+      expect(home.queryByTestId("mobile-nav-more")).toBeTruthy();
+    });
+
+    // F14 (#2417): the mobile Explorer toggle works regardless of the
+    // desktop collapse state.
+    it("mobile Explorer toggle ignores desktop collapse state", async () => {
+      const { container } = await renderAt("/for-you", { innerWidth: 375 });
+      const { fireEvent } = await import("@testing-library/react");
+      // Collapse the DESKTOP explorer via the desktop-only toggle is not
+      // possible at 375px; simulate by asserting the mobile toggle opens
+      // the full panel even when desktopExplorerOpen defaults interact.
+      const panelToggle = container.querySelector(
+        "[data-testid='mobile-explorer-toggle']",
+      ) as HTMLElement;
+      fireEvent.click(panelToggle);
+      expect(panelToggle.getAttribute("aria-expanded")).toBe("true");
+      const explorer = container.querySelector("[data-testid='explorer']") as HTMLElement;
+      expect(explorer.getAttribute("data-explorer-collapsed")).toBe("false");
+    });
+
+    // D (#2417 follow-up): mobile controls are queryable by role + name.
+    it("mobile menu and Explorer toggles expose accessible names", async () => {
+      const view = await renderAt("/for-you", { innerWidth: 375 });
+      expect(view.getByRole("button", { name: "Toggle navigation" })).toBeTruthy();
+      expect(view.getByRole("button", { name: "Show inbox filters" })).toBeTruthy();
+    });
+
+    // F15 (#2417): opening the mobile Explorer moves focus into it.
+    it("opening the mobile Explorer moves focus into the panel", async () => {
+      const view = await renderAt("/for-you", { innerWidth: 375 });
+      const { fireEvent } = await import("@testing-library/react");
+      fireEvent.click(view.getByRole("button", { name: "Show inbox filters" }));
+      const explorer = view.container.querySelector("[data-testid='explorer']") as HTMLElement;
+      expect(explorer.contains(document.activeElement)).toBe(true);
     });
   });
 

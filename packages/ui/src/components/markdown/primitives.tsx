@@ -40,7 +40,7 @@ export function TLDRSlate({ children, testId = "primitive-tldr-slate" }: { child
       data-testid={testId}
       className="my-4 border border-on-surface bg-inverse-surface px-4 py-3 text-[12px] leading-relaxed text-background hard-shadow"
     >
-      <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.18em] text-on-surface-variant">TL;DR</div>
+      <div className="mb-1 text-[11px] text-on-surface-variant">TL;DR</div>
       <div>{children}</div>
     </div>
   );
@@ -68,8 +68,8 @@ export function DotTimeline({ entries, testId = "primitive-dot-timeline" }: { en
               aria-hidden="true"
             />
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0">
-              <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant">{e.time}</span>
-              <span className={`font-mono text-[8px] uppercase tracking-[0.12em] ${tokens.ink}`}>{tokens.label}</span>
+              <span className="text-[11px] text-on-surface-variant">{e.time}</span>
+              <span className={`text-[11px] ${tokens.ink}`}>{tokens.label}</span>
             </div>
             <div className="mt-1 text-[12px] font-semibold text-on-surface">{e.title}</div>
             {e.body && <div className="mt-1 text-[11px] leading-relaxed text-on-surface">{e.body}</div>}
@@ -97,11 +97,11 @@ export function StatCardBand({ entries, testId = "primitive-stat-card-band" }: {
           data-testid={`primitive-stat-card-${i}`}
           className="border border-outline-variant bg-surface-lowest/45 px-3 py-2 hard-shadow"
         >
-          <div className="font-mono text-[8px] uppercase tracking-[0.18em] text-on-surface-variant">{e.label}</div>
+          <div className="text-[11px] text-on-surface-variant">{e.label}</div>
           <div className="mt-1 flex items-baseline gap-2">
             <span className="text-[18px] font-bold text-on-surface">{e.value}</span>
             {e.trend && (
-              <span className={`font-mono text-[10px] ${TREND_INK[e.trend]}`} data-trend={e.trend}>
+              <span className={`font-mono text-[11px] ${TREND_INK[e.trend]}`} data-trend={e.trend}>
                 {TREND_GLYPH[e.trend]}
               </span>
             )}
@@ -123,10 +123,10 @@ export function RiskTableGrid({ entries, testId = "primitive-risk-table-grid" }:
       <table className="w-full border-collapse border border-outline-variant text-[11px]">
         <thead>
           <tr className="bg-background">
-            <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">Risk</th>
-            <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">Prob</th>
-            <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">Impact</th>
-            <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">Mitigation</th>
+            <th className="border border-outline-variant px-2 py-1 text-left text-[11px] text-on-surface-variant">Risk</th>
+            <th className="border border-outline-variant px-2 py-1 text-left text-[11px] text-on-surface-variant">Prob</th>
+            <th className="border border-outline-variant px-2 py-1 text-left text-[11px] text-on-surface-variant">Impact</th>
+            <th className="border border-outline-variant px-2 py-1 text-left text-[11px] text-on-surface-variant">Mitigation</th>
           </tr>
         </thead>
         <tbody>
@@ -136,8 +136,8 @@ export function RiskTableGrid({ entries, testId = "primitive-risk-table-grid" }:
             return (
               <tr key={i} data-testid={`primitive-risk-row-${i}`}>
                 <td className="border border-outline-variant px-2 py-1 text-on-surface">{e.risk}</td>
-                <td className={`border border-outline-variant px-2 py-1 font-mono text-[9px] uppercase tracking-[0.12em] ${prob.ink}`}>{prob.label}</td>
-                <td className={`border border-outline-variant px-2 py-1 font-mono text-[9px] uppercase tracking-[0.12em] ${imp.ink}`}>{imp.label}</td>
+                <td className={`border border-outline-variant px-2 py-1 text-[11px] ${prob.ink}`}>{prob.label}</td>
+                <td className={`border border-outline-variant px-2 py-1 text-[11px] ${imp.ink}`}>{imp.label}</td>
                 <td className="border border-outline-variant px-2 py-1 text-on-surface">{e.mitigation}</td>
               </tr>
             );
@@ -159,16 +159,16 @@ export function CompareTable({ columns, rows, testId = "primitive-compare-table"
       <table className="w-full border-collapse border border-outline-variant text-[11px]">
         <thead>
           <tr className="bg-background">
-            <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant"></th>
+            <th className="border border-outline-variant px-2 py-1 text-left text-[11px] text-on-surface-variant"></th>
             {columns.map((c, i) => (
-              <th key={i} className="border border-outline-variant px-2 py-1 text-left font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">{c}</th>
+              <th key={i} className="border border-outline-variant px-2 py-1 text-left text-[11px] text-on-surface-variant">{c}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {rows.map((row, i) => (
             <tr key={i} data-testid={`primitive-compare-row-${i}`}>
-              <td className="border border-outline-variant px-2 py-1 font-mono text-[10px] font-semibold text-on-surface">{row.label}</td>
+              <td className="border border-outline-variant px-2 py-1 font-mono text-[11px] font-semibold text-on-surface">{row.label}</td>
               {columns.map((_c, j) => (
                 <td key={j} className="border border-outline-variant px-2 py-1 text-on-surface">{row.values[j] ?? ""}</td>
               ))}
@@ -217,7 +217,7 @@ export function SummaryStrip({
 }: { label: string; body: string; testId?: string }) {
   return (
     <div data-testid={testId} className="my-3 border-l-4 border-emerald-600 bg-emerald-50/60 px-3 py-2">
-      <div className="font-mono text-[8px] uppercase tracking-[0.18em] text-emerald-800">{label}</div>
+      <div className="text-[11px] text-emerald-800">{label}</div>
       <div className="mt-1 text-[12px] text-on-surface">{body}</div>
     </div>
   );

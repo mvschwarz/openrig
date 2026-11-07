@@ -52,8 +52,8 @@ function BoardRowExpansion({ slot }: { slot: BoardSlot }) {
   const [chatOpen, setChatOpen] = useState(false);
   const invalidate = useInvalidateReview();
 
-  if (detail.isLoading) return <p className="p-2 font-mono text-[10px] text-on-surface-variant">composing…</p>;
-  if (detail.isError || !detail.data) return <p className="p-2 font-mono text-[10px] text-red-700">expansion unavailable</p>;
+  if (detail.isLoading) return <p className="p-2 font-mono text-[11px] text-on-surface-variant">composing…</p>;
+  if (detail.isError || !detail.data) return <p className="p-2 font-mono text-[11px] text-red-700">expansion unavailable</p>;
   const d = detail.data;
   const chatSession = d.agents.rows[0]?.sessionName ?? null;
 
@@ -76,11 +76,11 @@ function BoardRowExpansion({ slot }: { slot: BoardSlot }) {
   return (
     <div data-testid={`board-expansion-${slot.slice}`} className="space-y-2 border-t border-outline-variant/60 bg-surface p-2">
       <div className="min-w-0 border border-outline-variant p-2">
-        <h5 className="font-mono text-[10px] uppercase text-on-surface-variant">INTENT</h5>
+        <h5 className="text-[11px] text-on-surface-variant">INTENT</h5>
         <MarkdownViewer content={d.intent.text ?? d.intent.degrade ?? ""} hideFrontmatter hideRawToggle />
       </div>
       <div className="min-w-0 border border-outline-variant p-2">
-        <h5 className="font-mono text-[10px] uppercase text-on-surface-variant">DELIVERED</h5>
+        <h5 className="text-[11px] text-on-surface-variant">DELIVERED</h5>
         {d.delivered.items.length === 0 ? (
           <p className="font-mono text-[11px] text-on-surface-variant">— no proof contract declared in the plan yet</p>
         ) : (
@@ -92,10 +92,10 @@ function BoardRowExpansion({ slot }: { slot: BoardSlot }) {
                   <span
                     className={
                       it.verified === "verified"
-                        ? "font-mono text-[10px] uppercase text-emerald-700 dark:text-emerald-400"
+                        ? "text-[11px] text-emerald-700 dark:text-emerald-400"
                         : it.verified === "missing"
-                          ? "font-mono text-[10px] font-bold uppercase text-red-700 dark:text-red-400"
-                          : "font-mono text-[10px] uppercase text-amber-700 dark:text-amber-400"
+                          ? "text-[11px] font-bold text-red-700 dark:text-red-400"
+                          : "text-[11px] text-amber-700 dark:text-amber-400"
                     }
                   >
                     {it.verified === "verified" ? (d.readiness?.configured ? "✓ accepted" : "✓ legacy QA-verified") : it.verified === "missing" ? "✗ missing" : "◇ unverified"}
@@ -103,7 +103,7 @@ function BoardRowExpansion({ slot }: { slot: BoardSlot }) {
                 </li>
               ))}
             </ul>
-            <p className="mt-1 font-mono text-[10px] text-on-surface-variant">
+            <p className="mt-1 font-mono text-[11px] text-on-surface-variant">
               {verifiedCounts["verified"] ?? 0}/{d.delivered.items.length} {d.readiness?.configured ? "accepted" : "legacy QA-verified"} · full pairing on the slice page
             </p>
           </>
@@ -115,7 +115,7 @@ function BoardRowExpansion({ slot }: { slot: BoardSlot }) {
           type="button"
           data-testid={`board-approve-${slot.slice}`}
           onClick={() => void onApprove()}
-          className="border border-outline px-3 py-1 font-mono text-[11px] uppercase hover:bg-surface-variant"
+          className="border border-outline px-3 py-1 text-[11px] hover:bg-surface-variant"
         >
           Approve
         </button>
@@ -125,19 +125,19 @@ function BoardRowExpansion({ slot }: { slot: BoardSlot }) {
           disabled={!chatSession}
           title={chatSession ? `Send back via ${chatSession}` : "No owning agent resolved"}
           onClick={() => setChatOpen((v) => !v)}
-          className="border border-outline px-3 py-1 font-mono text-[11px] uppercase hover:bg-surface-variant disabled:opacity-50"
+          className="border border-outline px-3 py-1 text-[11px] hover:bg-surface-variant disabled:opacity-50"
         >
           Send back (chat)
         </button>
         <Link
           to="/project/slice/$sliceId"
           params={{ sliceId: slot.slice }}
-          className="font-mono text-[10px] underline text-on-surface-variant"
+          className="font-mono text-[11px] underline text-on-surface-variant"
         >
           full slice →
         </Link>
         {outcome ? (
-          <span className={`font-mono text-[10px] ${outcome.ok ? "text-emerald-800" : "text-red-700"}`}>{outcome.message}</span>
+          <span className={`font-mono text-[11px] ${outcome.ok ? "text-emerald-800" : "text-red-700"}`}>{outcome.message}</span>
         ) : null}
       </div>
       {chatOpen && chatSession ? (
@@ -162,15 +162,15 @@ function Board({ review }: { review: ComposedMissionReview }) {
 
   return (
     <section data-testid="mission-board" className="space-y-3">
-      <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">SLICES</h3>
+      <h3 className="text-[11px] text-on-surface-variant">SLICES</h3>
       {review.board.length === 0 ? (
         <p data-testid="board-empty" className="font-mono text-[11px] text-on-surface-variant">
-          no slices yet
+          No slices yet
         </p>
       ) : (
         <>
           {emptyLanes.length > 0 ? (
-            <p data-testid="board-empty-lanes" className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant">
+            <p data-testid="board-empty-lanes" className="text-[11px] text-on-surface-variant">
               {emptyLanes.map((lane) => `${lane} 0`).join(" · ")}
             </p>
           ) : null}
@@ -180,10 +180,10 @@ function Board({ review }: { review: ComposedMissionReview }) {
           return (
             <section key={lane} data-testid={`board-lane-card-${lane}`} className={cn(VELLUM_CARD, "overflow-hidden")}>
               <div data-testid={`board-lane-header-${lane}`} className="flex items-center gap-2 px-2 py-1.5">
-                <span className="font-mono text-[10px] font-semibold uppercase tracking-wide text-on-surface">{lane}</span>
-                <span className="rounded-full border border-outline-variant px-1.5 font-mono text-[9px] text-on-surface-variant">{slots.length}</span>
+                <span className="text-[11px] font-semibold text-on-surface">{lane}</span>
+                <span className="rounded-full border border-outline-variant px-1.5 font-mono text-[11px] text-on-surface-variant">{slots.length}</span>
                 {collapse && hidden > 0 ? (
-                  <span className="font-mono text-[9px] text-on-surface-variant">({hidden} collapsed)</span>
+                  <span className="font-mono text-[11px] text-on-surface-variant">({hidden} collapsed)</span>
                 ) : null}
               </div>
               <ul className="divide-y divide-outline-variant/40 border-t border-outline-variant">
@@ -199,9 +199,9 @@ function Board({ review }: { review: ComposedMissionReview }) {
                         <span className="min-w-0 flex-1 truncate text-[12px]">{slot.title}</span>
                         {slot.attentionWorthy ? <span className="text-amber-700">▲</span> : null}
                         {slot.changedSinceStamp ? (
-                          <span className="font-mono text-[9px] uppercase text-amber-800">changed</span>
+                          <span className="text-[11px] text-amber-800">Changed</span>
                         ) : null}
-                        <span className="font-mono text-[10px] text-on-surface-variant">{slot.stageCell}</span>
+                        <span className="font-mono text-[11px] text-on-surface-variant">{slot.stageCell}</span>
                       </button>
                       {/* OPR.0.4.4.22 FR-5: the board agent-count chip is a
                           front door — zooms to the AGENTS altitude at rig
@@ -210,7 +210,7 @@ function Board({ review }: { review: ComposedMissionReview }) {
                       <a
                         href="/agents"
                         data-testid={`board-agents-zoom-${slot.slice}`}
-                        className="font-mono text-[10px] text-on-surface-variant underline-offset-2 hover:underline"
+                        className="font-mono text-[11px] text-on-surface-variant underline-offset-2 hover:underline"
                         title="Zoom to the AGENTS altitude (rig scope)"
                       >
                         agents {slot.agentsCount}
@@ -230,7 +230,7 @@ function Board({ review }: { review: ComposedMissionReview }) {
           type="button"
           data-testid="board-show-all"
           onClick={() => setShowAll((v) => !v)}
-          className="font-mono text-[10px] underline text-on-surface-variant"
+          className="font-mono text-[11px] underline text-on-surface-variant"
         >
           {showAll ? "collapse to attention-worthy" : `show all ${review.board.length} slices`}
         </button>
@@ -244,12 +244,12 @@ function Ledger({ review }: { review: ComposedMissionReview }) {
     <section data-testid="mission-ledger" className={cn(VELLUM_CARD, "overflow-hidden")}>
       <div data-testid="ledger-header" className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-variant px-3 py-2">
         <div>
-          <h3 className="font-mono text-[10px] font-semibold uppercase tracking-wide text-on-surface">SETTLED</h3>
-          <p className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant">completion ledger</p>
+          <h3 className="text-[11px] font-semibold text-on-surface">SETTLED</h3>
+          <p className="text-[11px] text-on-surface-variant">Completion ledger</p>
         </div>
         <p
           data-testid="cut-complete"
-          className={`border px-2 py-1 font-mono text-[10px] ${review.cutComplete ? "border-emerald-300 bg-emerald-50 text-emerald-900" : "border-outline-variant text-on-surface-variant"}`}
+          className={`border px-2 py-1 font-mono text-[11px] ${review.cutComplete ? "border-emerald-300 bg-emerald-50 text-emerald-900" : "border-outline-variant text-on-surface-variant"}`}
         >
           cut-gating {review.cutComplete ? "COMPLETE" : "incomplete"} — {review.cutCompleteBasis}
         </p>
@@ -257,11 +257,11 @@ function Ledger({ review }: { review: ComposedMissionReview }) {
       <div className="overflow-x-auto px-3 pb-3">
         <table className="w-full border-collapse text-[11px]">
           <thead>
-            <tr className="border-b border-outline-variant font-mono text-[10px] uppercase text-on-surface-variant">
-              <th className="py-1 pr-2 text-left">slice</th>
-              <th className="py-1 pr-2 text-left">candidate</th>
-              <th className="py-1 pr-2 text-left">gates</th>
-              <th className="py-1 pr-2 text-left">merged</th>
+            <tr className="border-b border-outline-variant text-[11px] text-on-surface-variant">
+              <th className="py-1 pr-2 text-left">Slice</th>
+              <th className="py-1 pr-2 text-left">Candidate</th>
+              <th className="py-1 pr-2 text-left">Gates</th>
+              <th className="py-1 pr-2 text-left">Merged</th>
               <th className="py-1 text-left">needs-human</th>
             </tr>
           </thead>
@@ -273,7 +273,7 @@ function Ledger({ review }: { review: ComposedMissionReview }) {
                 <td className="py-1 pr-2">
                   <span className="flex flex-wrap gap-1">
                     {row.gateCells.map((c) => (
-                      <span key={c.role} className={`border px-1 font-mono text-[9px] ${TONE_CLASS[c.tone]}`}>
+                      <span key={c.role} className={`border px-1 font-mono text-[11px] ${TONE_CLASS[c.tone]}`}>
                         {c.role}:{c.recordedToken ?? "missing"}
                       </span>
                     ))}
@@ -314,7 +314,7 @@ export function MissionReviewTab({ missionId }: { missionId: string }) {
       {/* FR-8: the brief's What & why — the founder's words, verbatim, never edited. */}
       {data.intent ? (
         <section data-testid="mission-intent" className="border border-outline-variant p-3">
-          <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">WHAT &amp; WHY</h3>
+          <h3 className="text-[11px] text-on-surface-variant">WHAT &amp; WHY</h3>
           <MarkdownViewer content={data.intent} hideFrontmatter hideRawToggle />
         </section>
       ) : null}
@@ -323,7 +323,7 @@ export function MissionReviewTab({ missionId }: { missionId: string }) {
           (never full cards at this altitude); each row deep-links into the
           slice Review tab anchored at the item. */}
       <section data-testid="mission-needs-you" className="space-y-1">
-        <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">NEEDS YOU</h3>
+        <h3 className="text-[11px] text-on-surface-variant">NEEDS YOU</h3>
         {data.needsYou.items.length === 0 ? (
           <p className="font-mono text-[11px] text-on-surface-variant">{data.needsYou.provenance}</p>
         ) : (
@@ -334,11 +334,11 @@ export function MissionReviewTab({ missionId }: { missionId: string }) {
                 <span className="flex w-full items-center gap-2 px-2 py-1.5">
                   <span className={item.source === "derived" ? "text-amber-700" : "text-on-surface"}>{item.source === "derived" ? "▲" : "●"}</span>
                   {sliceName ? (
-                    <span className="shrink-0 font-mono text-[10px] text-on-surface-variant">{sliceName}</span>
+                    <span className="shrink-0 font-mono text-[11px] text-on-surface-variant">{sliceName}</span>
                   ) : null}
                   <span className="min-w-0 flex-1 truncate text-[12px]">{item.summary}</span>
-                  <span className="hidden font-mono text-[10px] text-on-surface-variant sm:inline">{item.leg}</span>
-                  {item.priority ? <span className="font-mono text-[10px] uppercase">{item.priority}</span> : null}
+                  <span className="hidden font-mono text-[11px] text-on-surface-variant sm:inline">{item.leg}</span>
+                  {item.priority ? <span className="text-[11px]">{item.priority}</span> : null}
                 </span>
               );
               return (

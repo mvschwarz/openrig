@@ -143,7 +143,7 @@ function FileViewerBody({
         </div>
         <h3 className="mt-1 font-mono text-xs text-on-surface break-all">{path}</h3>
         {target && (
-          <div data-testid="file-viewer-root-path" className="mt-1 font-mono text-[9px] text-on-surface-variant break-all">
+          <div data-testid="file-viewer-root-path" className="mt-1 font-mono text-[11px] text-on-surface-variant break-all">
             {target.root}/{target.path}
           </div>
         )}

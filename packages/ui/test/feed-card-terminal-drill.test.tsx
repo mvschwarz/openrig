@@ -99,14 +99,14 @@ describe("FeedCardTerminalDrill (AC-4)", () => {
     expect(previewCalls).toHaveLength(0);
   });
 
-  it("the drill label says live terminal (converged from captured preview)", () => {
+  it("the drill label says Live terminal (converged from captured preview)", () => {
     const { getByTestId } = withQueryClient(
       <FeedCardTerminalDrill cardId="card-4" sessionName="dev-impl@my-rig" />,
     );
 
     const drill = getByTestId("feed-card-drill-card-4") as HTMLButtonElement;
-    expect(drill.textContent).toContain("live terminal");
-    expect(drill.title).toContain("live terminal");
+    expect(drill.textContent).toContain("Live terminal");
+    expect(drill.title.toLowerCase()).toContain("live terminal");
     expect(drill.textContent).not.toContain("captured");
     expect(drill.textContent).not.toContain("preview");
     expect(drill.title).not.toContain("captured");

@@ -64,7 +64,7 @@ export function MissionStatusBadge({
       role="status"
       aria-label={label ?? status}
       className={cn(
-        "inline-flex items-center gap-1 px-1.5 py-0.5 border font-mono text-[9px] uppercase tracking-wide",
+        "inline-flex items-center gap-1 px-1.5 py-0.5 border text-[11px] ",
         toneClass[status],
         className,
       )}

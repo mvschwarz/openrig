@@ -15,7 +15,7 @@ export function Lightbox({ src, alt, onClose }: { src: string | null; alt: strin
     >
       <div className="max-h-full max-w-[92vw] border border-white/20 bg-stone-950/70 p-2" onClick={(e) => e.stopPropagation()}>
         <img src={src} alt={alt} data-testid="proof-lightbox-image" className="max-h-[80vh] max-w-full object-contain" />
-        <div className="mt-2 flex items-center justify-between gap-3 font-mono text-[10px] text-stone-50">
+        <div className="mt-2 flex items-center justify-between gap-3 font-mono text-[11px] text-stone-50">
           <span className="truncate">{alt}</span>
           <button
             type="button"

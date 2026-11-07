@@ -149,6 +149,20 @@ describe("SkillDetailPage — slice 28 HG-7 + HG-8 docs-browser (daemon skill-li
     expect(screen.getByTestId("skill-detail-viewer")).toBeTruthy();
   });
 
+  // F10 (#2417): the browser takes the remaining space via flex instead of
+  // a fixed calc() height that clips under the real header height.
+  it("docs-browser uses flex remainder sizing (no fixed calc height)", async () => {
+    mockOneSkill({
+      rootFiles: [{ name: "SKILL.md", type: "file" }],
+      fileContent: { "SKILL.md": "# OpenRig User Skill body" },
+    });
+    renderSkillDetail(librarySkillToken(skillId));
+    const browser = await screen.findByTestId("skill-detail-docs-browser");
+    expect(browser.className).toContain("flex-1");
+    expect(browser.className).toContain("min-h-0");
+    expect(browser.className).not.toContain("calc(");
+  });
+
   it("tree lists each skill file/dir entry (HG-7 surface — ALL files, not just markdown)", async () => {
     mockOneSkill({
       rootFiles: [
@@ -357,6 +371,23 @@ describe("PluginDetailPage — slice 28 HG-6 + HG-8 docs-browser (real file tree
     });
     expect(screen.getByTestId("plugin-detail-tree")).toBeTruthy();
     expect(screen.getByTestId("plugin-detail-viewer")).toBeTruthy();
+  });
+
+  // F10 (#2417): same flex-remainder sizing on the plugin page.
+  it("plugin docs-browser uses flex remainder sizing (no fixed calc height)", async () => {
+    mockPluginDetail({
+      pluginId: "openrig-core",
+      name: "openrig-core",
+      version: "0.1.0",
+      runtimes: ["claude"],
+      rootFiles: [{ name: "README.md", type: "file" }],
+      fileContent: { "README.md": "# body" },
+    });
+    renderPluginDetail("openrig-core");
+    const browser = await screen.findByTestId("plugin-detail-docs-browser");
+    expect(browser.className).toContain("flex-1");
+    expect(browser.className).toContain("min-h-0");
+    expect(browser.className).not.toContain("calc(");
   });
 
   it("header strip preserves plugin metadata (name + version + runtimes + skill-count + used-by-count + source)", async () => {

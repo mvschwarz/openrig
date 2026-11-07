@@ -115,7 +115,7 @@ function CopyActionButton({
       aria-label={label}
       onClick={() => { void handleClick(); }}
       className={cn(
-        "inline-flex items-center gap-1 px-1.5 py-0.5 border font-mono text-[7px] uppercase transition-colors",
+        "inline-flex items-center gap-1 px-1.5 py-0.5 border text-[11px] transition-colors",
         active
           ? "bg-inverse-surface text-background border-on-surface"
           : "bg-surface-lowest text-on-surface border-outline-variant hover:bg-surface-low",
@@ -230,7 +230,7 @@ export function DiscoveryPanel({
 
       <div className="border-b border-outline-variant/35 px-4 py-3 shrink-0 space-y-2">
         <div className="flex items-center justify-between gap-3">
-          <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">Inventory</div>
+          <div className="text-[11px] text-on-surface-variant">Inventory</div>
           <Button
             variant="ghost"
             size="sm"
@@ -245,7 +245,7 @@ export function DiscoveryPanel({
           to="/discovery/inventory"
           data-testid="discovery-open-inventory"
           onClick={onClose}
-          className="inline-flex items-center border border-outline-variant bg-surface-lowest px-1.5 py-0.5 font-mono text-[7px] uppercase tracking-[0.12em] text-on-surface transition-colors hover:bg-surface-low hover:text-on-surface"
+          className="inline-flex items-center border border-outline-variant bg-surface-lowest px-1.5 py-0.5 text-[11px] text-on-surface transition-colors hover:bg-surface-low hover:text-on-surface"
         >
           Legacy Inventory Page
         </Link>
@@ -253,7 +253,7 @@ export function DiscoveryPanel({
 
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
         {sessions.length === 0 ? (
-          <div data-testid="discovery-empty" className="font-mono text-[10px] text-on-surface-variant">
+          <div data-testid="discovery-empty" className="font-mono text-[11px] text-on-surface-variant">
             No running Claude or Codex sessions are currently visible.
           </div>
         ) : (
@@ -272,12 +272,12 @@ export function DiscoveryPanel({
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <RuntimeBadge runtime={session.runtimeHint} size="xs" compact className="bg-surface-lowest/45" />
-                      <div className="font-mono text-[10px] text-on-surface truncate" title={session.tmuxSession}>
+                      <div className="font-mono text-[11px] text-on-surface truncate" title={session.tmuxSession}>
                         {session.tmuxSession}
                       </div>
                     </div>
                     {session.cwd ? (
-                      <div className="mt-1 font-mono text-[9px] text-on-surface-variant truncate" title={session.cwd}>
+                      <div className="mt-1 font-mono text-[11px] text-on-surface-variant truncate" title={session.cwd}>
                         {session.cwd}
                       </div>
                     ) : null}
@@ -313,7 +313,7 @@ export function DiscoveryPanel({
                     {selectedCardStatus ? (
                       <div
                         data-testid="discovery-selected-session-status"
-                        className="border border-emerald-300/80 bg-surface-lowest/70 px-2.5 py-2 font-mono text-[10px] leading-5 text-on-surface"
+                        className="border border-emerald-300/80 bg-surface-lowest/70 px-2.5 py-2 font-mono text-[11px] leading-5 text-on-surface"
                       >
                         {selectedCardStatus}
                       </div>
@@ -323,7 +323,7 @@ export function DiscoveryPanel({
                       <div
                         data-testid="discovery-remote-readonly"
                         data-remote-readonly="true"
-                        className="border border-outline-variant bg-surface-lowest/70 px-2.5 py-2 font-mono text-[9px] uppercase tracking-wide text-on-surface-variant"
+                        className="border border-outline-variant bg-surface-lowest/70 px-2.5 py-2 text-[11px] text-on-surface-variant"
                       >
                         adopt is a local action — read-only while viewing a remote host
                       </div>
@@ -332,7 +332,7 @@ export function DiscoveryPanel({
                     {placementTarget && !panelIsRemote && !placementTarget.eligible ? (
                       <div
                         data-testid="discovery-target-error"
-                        className="border border-red-200 bg-red-50/80 px-2.5 py-2 font-mono text-[9px] text-red-700"
+                        className="border border-red-200 bg-red-50/80 px-2.5 py-2 font-mono text-[11px] text-red-700"
                       >
                         {placementTarget.reason ?? "That destination is not available."}
                       </div>
@@ -340,15 +340,15 @@ export function DiscoveryPanel({
 
                     {placementTarget?.eligible && !panelIsRemote ? (
                       <div className="space-y-2 border border-emerald-300/80 bg-surface-lowest/70 px-3 py-2" data-testid="discovery-target-card">
-                        <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-emerald-800">Target</div>
-                        <div data-testid="discovery-target-summary" className="font-mono text-[10px] text-on-surface">
+                        <div className="text-[11px] text-emerald-800">Target</div>
+                        <div data-testid="discovery-target-summary" className="font-mono text-[11px] text-on-surface">
                           {placementTarget.kind === "node"
                             ? `${targetNodeLabel(placementTarget.logicalId)} selected`
                             : `${targetPodLabel(placementTarget)} pod selected`}
                         </div>
                         {placementTarget.kind === "pod" ? (
                           <div className="space-y-1">
-                            <label className="font-mono text-[8px] uppercase tracking-[0.16em] text-emerald-800" htmlFor="discovery-member-name">
+                            <label className="text-[11px] text-emerald-800" htmlFor="discovery-member-name">
                               Member name
                             </label>
                             <input
@@ -356,12 +356,12 @@ export function DiscoveryPanel({
                               data-testid="discovery-member-name-input"
                               value={memberName}
                               onChange={(event) => setMemberName(event.target.value)}
-                              className="w-full bg-transparent border-b border-emerald-300 py-1 font-mono text-[10px] text-on-surface focus:outline-none focus:border-emerald-700"
+                              className="w-full bg-transparent border-b border-emerald-300 py-1 font-mono text-[11px] text-on-surface focus:outline-none focus:border-emerald-700"
                             />
                           </div>
                         ) : null}
                         {adoptMutation.isError ? (
-                          <div data-testid="discovery-adopt-error" className="font-mono text-[9px] text-red-600">
+                          <div data-testid="discovery-adopt-error" className="font-mono text-[11px] text-red-600">
                             {adoptMutation.error.message}
                           </div>
                         ) : null}

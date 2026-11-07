@@ -43,7 +43,7 @@ export function KindFrame({ kind, frontmatter, children }: KindFrameProps): Reac
       <header className="mb-3 border-b border-outline-variant pb-2">
         <div
           data-testid={`kind-badge-${kind}`}
-          className={`inline-block border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.18em] ${accent.pill} ${accent.ink}`}
+          className={`inline-block border px-2 py-0.5 text-[11px] ${accent.pill} ${accent.ink}`}
         >
           {accent.label}
         </div>
@@ -53,7 +53,7 @@ export function KindFrame({ kind, frontmatter, children }: KindFrameProps): Reac
           </h1>
         )}
         {(status || author || date) && (
-          <div data-testid="kind-frame-meta" className="mt-1 flex flex-wrap items-center gap-3 font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant">
+          <div data-testid="kind-frame-meta" className="mt-1 flex flex-wrap items-center gap-3 text-[11px] text-on-surface-variant">
             {status && <span data-testid="kind-frame-meta-status">status: {status}</span>}
             {author && <span data-testid="kind-frame-meta-author">{author}</span>}
             {date && <span data-testid="kind-frame-meta-date">{date}</span>}

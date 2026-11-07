@@ -82,11 +82,11 @@ function ResolvedChip({ entry }: { entry: PluginEntry }) {
       <span className="flex min-w-0 items-center gap-2">
         <ToolMark tool="skill" title={`${entry.name} plugin`} size="xs" decorative />
         <span className="truncate text-xs font-bold text-on-surface">{entry.name}</span>
-        <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-on-surface-variant">
+        <span className="shrink-0 text-[11px] text-on-surface-variant">
           {`v${entry.version}`}
         </span>
       </span>
-      <span className="flex shrink-0 items-center gap-2 text-[9px] uppercase tracking-[0.08em] text-on-surface-variant">
+      <span className="flex shrink-0 items-center gap-2 text-[11px] text-on-surface-variant">
         {entry.runtimes.map((rt) => (
           <span
             key={rt}
@@ -115,9 +115,9 @@ function UnresolvedChip({ pluginId }: { pluginId: string }) {
       </span>
       <span
         data-testid={`agent-plugin-unresolved-${pluginId}`}
-        className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-on-surface-variant"
+        className="shrink-0 text-[11px] text-on-surface-variant"
       >
-        not discovered
+        Not discovered
       </span>
     </Link>
   );

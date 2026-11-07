@@ -71,7 +71,7 @@ export function HostConfigCard() {
 
   return (
     <section data-testid="dashboard-host-config" className="df-hosts">
-      <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-secondary mb-2">
+      <div className="text-[11px] text-secondary mb-2">
         Hosts
       </div>
 
@@ -82,6 +82,7 @@ export function HostConfigCard() {
             className="df-hosts-rename"
             onSubmit={(e) => {
               e.preventDefault();
+              if (setSetting.isPending) return;
               const v = nameDraft.trim();
               if (v) void setSetting.mutateAsync({ key: "host.name" as never, value: v });
               setRenaming(false);
@@ -94,7 +95,7 @@ export function HostConfigCard() {
               onChange={(e) => setNameDraft(e.target.value)}
               autoFocus
             />
-            <button type="submit" className="df-hosts-btn">Save</button>
+            <button type="submit" className="df-hosts-btn" disabled={setSetting.isPending}>Save</button>
             <button type="button" className="df-hosts-btn" onClick={() => setRenaming(false)}>Cancel</button>
           </form>
         ) : (
@@ -108,7 +109,11 @@ export function HostConfigCard() {
                 type="button"
                 className="df-hosts-btn"
                 data-testid="host-select-local"
-                onClick={() => void setSetting.mutateAsync({ key: "host.selected" as never, value: "local" })}
+                disabled={setSetting.isPending}
+                onClick={() => {
+                  if (setSetting.isPending) return;
+                  void setSetting.mutateAsync({ key: "host.selected" as never, value: "local" });
+                }}
               >
                 Select
               </button>
@@ -117,6 +122,7 @@ export function HostConfigCard() {
               type="button"
               className="df-hosts-btn"
               data-testid="host-rename-button"
+              disabled={setSetting.isPending}
               onClick={() => { setNameDraft(ownName); setRenaming(true); }}
             >
               Rename
@@ -148,7 +154,11 @@ export function HostConfigCard() {
                   type="button"
                   className="df-hosts-btn"
                   data-testid={`host-select-${h.id}`}
-                  onClick={() => void setSetting.mutateAsync({ key: "host.selected" as never, value: h.id })}
+                  disabled={setSetting.isPending}
+                  onClick={() => {
+                    if (setSetting.isPending) return;
+                    void setSetting.mutateAsync({ key: "host.selected" as never, value: h.id });
+                  }}
                 >
                   Select
                 </button>

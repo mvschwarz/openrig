@@ -39,25 +39,25 @@ const ROWS: ToggleRow[] = [
   {
     toggleKey: "approvals",
     label: "Approvals",
-    description: "Closeout-pending-ratify items",
+    description: "Closeout items waiting for a decision",
     testId: "subscription-toggle-approvals",
   },
   {
     toggleKey: "shipped",
-    label: "Feature ships",
-    description: "Slice / mission deliveries + git tag landings",
+    label: "Shipped",
+    description: "Deliveries with proof packets",
     testId: "subscription-toggle-shipped",
   },
   {
     toggleKey: "progress",
-    label: "Slice progress",
-    description: "Compact progress rollups",
+    label: "Progress",
+    description: "Compact progress updates",
     testId: "subscription-toggle-progress",
   },
   {
     toggleKey: "auditLog",
     label: "Audit log",
-    description: "Verbose stream + watchdog observations",
+    description: "Verbose stream and observations",
     testId: "subscription-toggle-audit-log",
   },
 ];
@@ -75,8 +75,8 @@ export function SubscriptionToggleList() {
   ).sort();
 
   return (
-    <div data-testid="subscription-toggle-list" className="font-mono text-xs">
-      <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant mb-2">
+    <div data-testid="subscription-toggle-list" className="text-xs">
+      <div className="mb-2 text-xs text-on-surface-variant">
         Subscriptions
       </div>
       <ul className="space-y-1">
@@ -95,14 +95,14 @@ export function SubscriptionToggleList() {
               className="flex items-center justify-between gap-2"
             >
               <div className="min-w-0">
-                <div className="text-on-surface truncate">{row.label}</div>
-                <div className="font-mono text-[9px] text-on-surface-variant truncate">
+                <div className="truncate text-on-surface">{row.label}</div>
+                <div className="truncate text-[11px] text-on-surface-variant">
                   {row.description}
                 </div>
               </div>
               {row.forced ? (
-                <span className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant shrink-0">
-                  forced ON
+                <span className="shrink-0 text-[11px] text-on-surface-variant">
+                  Forced on
                 </span>
               ) : (
                 <button
@@ -113,7 +113,7 @@ export function SubscriptionToggleList() {
                   data-testid={`${row.testId}-button`}
                   onClick={() => row.toggleKey && toggle(row.toggleKey)}
                   className={
-                    "shrink-0 px-2 py-0.5 border font-mono text-[9px] uppercase tracking-wide " +
+                    "shrink-0 rounded border px-2 py-0.5 text-xs " +
                     (value
                       ? "border-success text-success"
                       : "border-outline-variant text-on-surface-variant") +
@@ -122,7 +122,7 @@ export function SubscriptionToggleList() {
                       : " opacity-60 cursor-not-allowed")
                   }
                 >
-                  {value ? "on" : "off"}
+                  {value ? "On" : "Off"}
                 </button>
               )}
             </li>
@@ -131,7 +131,7 @@ export function SubscriptionToggleList() {
       </ul>
       {hostIds.length > 0 ? (
         <div data-testid="subscription-host-toggle-list" className="mt-4">
-          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant mb-2">
+          <div className="mb-2 text-xs text-on-surface-variant">
             Hosts
           </div>
           <ul className="space-y-1">
@@ -141,13 +141,13 @@ export function SubscriptionToggleList() {
               className="flex items-center justify-between gap-2"
             >
               <div className="min-w-0">
-                <div className="text-on-surface truncate">This host</div>
-                <div className="font-mono text-[9px] text-on-surface-variant truncate">
+                <div className="truncate text-on-surface">This host</div>
+                <div className="truncate text-[11px] text-on-surface-variant">
                   Local items always show
                 </div>
               </div>
-              <span className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant shrink-0">
-                forced ON
+              <span className="shrink-0 text-[11px] text-on-surface-variant">
+                Forced on
               </span>
             </li>
             {hostIds.map((hostId) => {
@@ -161,8 +161,8 @@ export function SubscriptionToggleList() {
                   className="flex items-center justify-between gap-2"
                 >
                   <div className="min-w-0">
-                    <div className="text-on-surface truncate">{hostId}</div>
-                    <div className="font-mono text-[9px] text-on-surface-variant truncate">
+                    <div className="truncate text-on-surface">{hostId}</div>
+                    <div className="truncate text-[11px] text-on-surface-variant">
                       {enabled ? "Feeding the consolidated view" : "Hidden from the feed"}
                     </div>
                   </div>
@@ -174,7 +174,7 @@ export function SubscriptionToggleList() {
                     data-testid={`subscription-host-toggle-${hostId}-button`}
                     onClick={() => setHostSubscription(hostId, !enabled)}
                     className={
-                      "shrink-0 px-2 py-0.5 border font-mono text-[9px] uppercase tracking-wide " +
+                      "shrink-0 rounded border px-2 py-0.5 text-xs " +
                       (enabled
                         ? "border-success text-success"
                         : "border-outline-variant text-on-surface-variant") +
@@ -183,7 +183,7 @@ export function SubscriptionToggleList() {
                         : " opacity-60 cursor-not-allowed")
                     }
                   >
-                    {enabled ? "on" : "off"}
+                    {enabled ? "On" : "Off"}
                   </button>
                 </li>
               );
@@ -194,7 +194,7 @@ export function SubscriptionToggleList() {
       {unavailable ? (
         <p
           data-testid="subscription-toggle-unavailable"
-          className="mt-3 font-mono text-[9px] text-on-surface-variant italic"
+          className="mt-3 text-[11px] italic text-on-surface-variant"
         >
           Settings endpoint unreachable (legacy daemon &lt; v0.3.0). Toggles render the
           canonical defaults; configure via CLI:

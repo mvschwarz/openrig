@@ -5,27 +5,28 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap text-sm font-medium transition-colors duration-150 ease-tactical focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
-        default: "bg-inverse-surface text-background font-headline font-bold uppercase tracking-widest hover:bg-inverse-surface",
+        default: "bg-primary text-primary-foreground hover:bg-primary/90",
         destructive:
-          "bg-tertiary text-white font-bold hover:bg-tertiary/90",
+          "bg-destructive text-destructive-foreground hover:bg-destructive/90",
         outline:
-          "border border-outline bg-transparent hover:bg-surface-low text-on-surface",
+          "border border-outline-variant bg-background hover:bg-surface-low text-on-surface",
         secondary:
-          "border border-on-surface bg-transparent text-on-surface font-mono text-[10px] uppercase hover:bg-inverse-surface hover:text-background",
-        ghost: "text-on-surface-variant hover:bg-surface-low hover:text-on-surface",
-        link: "text-secondary underline-offset-4 hover:underline",
+          "bg-surface-mid text-on-surface hover:bg-surface-high",
+        ghost:
+          "text-on-surface-variant hover:bg-surface-low hover:text-on-surface",
+        link: "text-brand underline-offset-4 hover:underline",
         tactical:
-          "border border-outline font-mono text-[10px] text-secondary uppercase tracking-widest hover:border-on-surface hover:text-on-surface",
+          "border border-outline-variant bg-background text-xs text-on-surface-variant hover:bg-surface-low hover:text-on-surface",
       },
       size: {
-        default: "h-10 px-4 py-2",
-        sm: "h-9 px-3",
-        lg: "h-11 px-8",
-        icon: "h-10 w-10",
+        default: "h-9 px-4",
+        sm: "h-8 px-3 text-xs",
+        lg: "h-10 px-6",
+        icon: "h-9 w-9",
       },
     },
     defaultVariants: {

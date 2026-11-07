@@ -29,6 +29,10 @@ import { SyntaxHighlight } from "../markdown/SyntaxHighlight.js";
 import { useSpecReview } from "../../hooks/useSteering.js";
 import { useWorkspace } from "../../hooks/useWorkspace.js";
 import { WorkspaceKindBadge, resolveKindForPath } from "../WorkspaceKindBadge.js";
+import { PageHeader } from "../ui/page-header.js";
+import { EmptyState } from "../ui/empty-state.js";
+import { StatusBadge } from "../ui/status-badge.js";
+import { Button } from "../ui/button.js";
 
 const TEXT_LIKE_EXTENSIONS = new Set([".md", ".txt", ".log", ".yaml", ".yml", ".json", ".js", ".jsx", ".ts", ".tsx", ".py", ".sh", ".bash", ".sql", ".css", ".html"]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]);
@@ -63,10 +67,12 @@ export function FilesWorkspace() {
 
   return (
     <div data-testid="files-workspace" className="flex h-full flex-col lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]">
-      <header className="border-b border-outline-variant bg-background px-4 py-3">
-        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant">Workspace</div>
-        <h1 className="font-headline text-xl font-bold tracking-tight text-on-surface">Files</h1>
-      </header>
+      <div className="border-b border-outline-variant bg-background px-4 py-3">
+        <PageHeader
+          title="Files"
+          description="Browse allowlisted workspace files, preview their contents, and edit text files in place."
+        />
+      </div>
       {/* Slice 20 mobile: at narrow viewports the two-pane
           shape stacks vertically so the document panel claims full width
           on a phone. Tree pane caps at max-h-48 on mobile so the user
@@ -90,13 +96,20 @@ export function FilesWorkspace() {
         </aside>
         <main data-testid="files-content-pane" className="flex-1 min-w-0 overflow-y-auto bg-surface-lowest">
           {!selectedRoot && (
-            <div className="m-auto p-4 font-mono text-[10px] text-on-surface-variant">
-              Select an allowlist root to browse.
-            </div>
+            <EmptyState
+              label="No root selected"
+              title="Select a root to browse"
+              description="Pick an allowlist root from the tree to browse its files."
+              testId="files-no-root"
+            />
           )}
           {selectedRoot && !selectedFile && (
-            <div className="p-4 font-mono text-[10px] text-on-surface-variant" data-testid="files-no-selection">
-              Select a file from the tree.
+            <div className="p-4" data-testid="files-no-selection">
+              <EmptyState
+                label="No file selected"
+                title="Select a file"
+                description="Choose a file from the tree to preview its contents."
+              />
             </div>
           )}
           {selectedRoot && selectedFile && (
@@ -126,27 +139,29 @@ function RootSelector({
   onSelect: (name: string) => void;
   workspace: import("../../hooks/useWorkspace.js").WhoamiWorkspaceUI | null;
 }) {
-  if (isLoading) return <div className="p-3 font-mono text-[10px] text-on-surface-variant">Loading roots…</div>;
+  if (isLoading) return <div className="p-3 text-xs text-on-surface-variant">Loading roots…</div>;
   if (!roots) return null;
   if (isUnavailable(roots)) {
     return (
-      <div data-testid="files-roots-unavailable" className="p-3 font-mono text-[10px] text-on-surface-variant">
+      <div data-testid="files-roots-unavailable" className="p-3 text-xs text-on-surface-variant">
         <div>Files routes unavailable.</div>
-        {roots.hint && <div className="mt-1 text-on-surface-variant">{roots.hint}</div>}
+        {roots.hint && <div className="mt-1 text-xs text-on-surface-variant">{roots.hint}</div>}
       </div>
     );
   }
   if (roots.roots.length === 0) {
     return (
-      <div data-testid="files-roots-empty" className="p-3 font-mono text-[10px] text-on-surface-variant">
-        <div>No allowlist roots configured.</div>
-        {roots.hint && <div className="mt-1 text-on-surface-variant">{roots.hint}</div>}
-      </div>
+      <EmptyState
+        label="No allowlist roots"
+        title="No allowlist roots configured"
+        description="Ask the operator to configure allowlisted workspace roots before browsing files."
+        testId="files-roots-empty"
+      />
     );
   }
   return (
     <div data-testid="files-root-selector" className="border-b border-outline-variant p-2">
-      <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.18em] text-on-surface-variant">Roots</div>
+      <div className="mb-1 text-xs text-on-surface-variant">Roots</div>
       <ul>
         {roots.roots.map((r: AllowlistRoot) => {
           const kind = resolveKindForPath(r.path, workspace);
@@ -157,8 +172,8 @@ function RootSelector({
                 data-testid={`files-root-${r.name}`}
                 data-active={selectedRoot === r.name}
                 onClick={() => onSelect(r.name)}
-                className={`flex w-full items-center justify-between gap-2 px-2 py-1 text-left font-mono text-[10px] hover:bg-surface-low ${
-                  selectedRoot === r.name ? "bg-surface-high/80 text-on-surface" : "text-on-surface"
+                className={`flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-xs ${
+                  selectedRoot === r.name ? "bg-surface-mid text-on-surface" : "text-on-surface hover:bg-surface-low"
                 }`}
                 title={r.path}
               >
@@ -176,14 +191,14 @@ function RootSelector({
 function Breadcrumbs({ root, path, onNavigate }: { root: string; path: string; onNavigate: (path: string) => void }) {
   const segments = path ? path.split("/") : [];
   return (
-    <nav data-testid="files-breadcrumbs" className="flex flex-wrap items-baseline gap-1 border-b border-outline-variant px-2 py-1 font-mono text-[10px] text-on-surface">
-      <button type="button" onClick={() => onNavigate("")} className="font-bold hover:underline">{root}</button>
+    <nav data-testid="files-breadcrumbs" aria-label="File path" className="flex flex-wrap items-baseline gap-1 border-b border-outline-variant px-2 py-1 text-xs text-on-surface">
+      <button type="button" onClick={() => onNavigate("")} className="font-medium hover:underline"><span className="font-mono">{root}</span></button>
       {segments.map((seg, idx) => {
         const accumulated = segments.slice(0, idx + 1).join("/");
         return (
           <span key={accumulated}>
             <span className="mx-0.5 text-on-surface-variant">/</span>
-            <button type="button" onClick={() => onNavigate(accumulated)} className="hover:underline">
+            <button type="button" onClick={() => onNavigate(accumulated)} className="hover:underline font-mono">
               {seg}
             </button>
           </span>
@@ -207,10 +222,16 @@ function DirectoryTree({
   selectedFile: string | null;
 }) {
   const list = useFilesList(root, path);
-  if (list.isLoading) return <div className="p-3 font-mono text-[10px] text-on-surface-variant">Loading…</div>;
-  if (list.isError) return <div data-testid="files-list-error" className="p-3 font-mono text-[10px] text-red-600">{(list.error as Error)?.message ?? "Error loading directory."}</div>;
+  if (list.isLoading) return <div className="p-3 text-xs text-on-surface-variant">Loading…</div>;
+  if (list.isError) return <div data-testid="files-list-error" className="p-3 text-xs text-destructive">{(list.error as Error)?.message ?? "Error loading directory."}</div>;
   if (!list.data || list.data.entries.length === 0) {
-    return <div className="p-3 font-mono text-[10px] text-on-surface-variant">Empty directory.</div>;
+    return (
+      <EmptyState
+        label="Empty directory"
+        title="This folder is empty"
+        description="This directory has no files or subfolders yet."
+      />
+    );
   }
   return (
     <ul data-testid="files-directory-tree" className="p-1">
@@ -220,7 +241,7 @@ function DirectoryTree({
             type="button"
             data-testid="files-up"
             onClick={() => onEnterDir(parentPath(path))}
-            className="block w-full px-2 py-1 text-left font-mono text-[10px] text-on-surface-variant hover:bg-surface-low"
+            className="block w-full px-2 py-1 text-left text-xs text-on-surface-variant hover:bg-surface-low"
           >
             ..
           </button>
@@ -238,10 +259,10 @@ function DirectoryTree({
               data-type={entry.type}
               onClick={() => isFile ? onSelectFile(rel) : entry.type === "dir" ? onEnterDir(rel) : undefined}
               disabled={entry.type === "other"}
-              className={`block w-full px-2 py-1 text-left font-mono text-[10px] ${
+              className={`block w-full px-2 py-1 text-left text-xs font-mono ${
                 entry.type === "other"
                   ? "text-on-surface-variant"
-                  : `hover:bg-surface-low ${isSelected ? "bg-surface-high/80 text-on-surface" : "text-on-surface"}`
+                  : `hover:bg-surface-low ${isSelected ? "bg-surface-mid text-on-surface" : "text-on-surface"}`
               }`}
             >
               {entry.type === "dir" ? `▸ ${entry.name}` : entry.name}
@@ -267,13 +288,13 @@ function FileContentPanel({
   const read = useFilesRead(root, path);
   return (
     <div data-testid="files-content-panel" className="flex h-full flex-col">
-      <header className="flex items-center justify-between border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px]">
-        <div className="text-on-surface" data-testid="files-content-path">{root}/{path}</div>
-        <div className="flex items-center gap-3 text-on-surface-variant">
+      <header className="flex items-center justify-between border-b border-outline-variant bg-background px-3 py-2">
+        <div className="text-on-surface text-xs" data-testid="files-content-path"><span className="font-mono">{root}/{path}</span></div>
+        <div className="flex items-center gap-3 text-on-surface-variant text-xs">
           {read.data && (
             <>
-              <span data-testid="files-content-size">{read.data.size}b</span>
-              <span data-testid="files-content-mtime">{read.data.mtime}</span>
+              <span className="font-mono" data-testid="files-content-size">{read.data.size}b</span>
+              <span className="font-mono" data-testid="files-content-mtime">{read.data.mtime}</span>
             </>
           )}
           <button
@@ -281,19 +302,19 @@ function FileContentPanel({
             data-testid="files-edit-toggle"
             data-active={editMode}
             onClick={onToggleEditMode}
-            className={`border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] ${
+            className={`rounded-md border px-2 py-0.5 text-xs ${
               editMode
                 ? "border-amber-400 bg-amber-50 text-amber-900"
                 : "border-outline-variant text-on-surface hover:bg-surface-low"
             }`}
           >
-            {editMode ? "editing" : "edit"}
+            {editMode ? "Editing" : "Edit"}
           </button>
         </div>
       </header>
       <div className="flex-1 min-h-0 overflow-y-auto">
-        {read.isLoading && <div className="p-4 font-mono text-[10px] text-on-surface-variant">Loading…</div>}
-        {read.isError && <div data-testid="files-read-error" className="p-4 font-mono text-[10px] text-red-600">{(read.error as Error)?.message ?? "Error loading file."}</div>}
+        {read.isLoading && <div className="p-4 text-xs text-on-surface-variant">Loading…</div>}
+        {read.isError && <div data-testid="files-read-error" className="p-4 text-xs text-destructive">{(read.error as Error)?.message ?? "Error loading file."}</div>}
         {read.data && (
           editMode
             ? <FileEditor root={root} path={path} read={read.data} />
@@ -335,9 +356,9 @@ function FileViewer({ root, path, read }: { root: string; path: string; read: Fi
   }
   if (DOWNLOAD_ONLY_EXTENSIONS.has(ext)) {
     return (
-      <div data-testid="files-download-only" className="p-4 font-mono text-[10px] text-on-surface">
-        <a href={fileAssetUrl(root, path)} download className="text-blue-700 underline">
-          Download {path}
+      <div data-testid="files-download-only" className="p-4 text-xs text-on-surface">
+        <a href={fileAssetUrl(root, path)} download className="text-brand underline">
+          Download <span className="font-mono">{path}</span>
         </a>
       </div>
     );
@@ -345,7 +366,7 @@ function FileViewer({ root, path, read }: { root: string; path: string; read: Fi
   return (
     <div data-testid="files-text-fallback" className="p-4">
       <TruncationMarker read={read} />
-      <pre className="whitespace-pre-wrap break-words font-mono text-[10px] text-on-surface">{read.content}</pre>
+      <pre className="whitespace-pre-wrap break-words font-mono text-xs text-on-surface">{read.content}</pre>
     </div>
   );
 }
@@ -362,10 +383,10 @@ function TruncationMarker({ read }: { read: FilesReadResponse }) {
       data-testid="files-truncation-marker"
       data-truncated-at-bytes={read.truncatedAtBytes ?? ""}
       data-total-bytes={read.totalBytes ?? ""}
-      className="mb-3 border border-amber-400 bg-amber-50 px-3 py-2 font-mono text-[10px] text-amber-900"
+      className="mb-3 rounded-lg border border-outline-variant bg-surface-low px-3 py-2 text-xs text-on-surface"
     >
-      ⚠ Truncated by file viewer at {Math.round((read.truncatedAtBytes ?? 0) / 1024)} KB —
-      file is {totalKb} KB total. Use an external editor for full content.
+      Truncated by file viewer at <span className="font-mono">{Math.round((read.truncatedAtBytes ?? 0) / 1024)} KB</span> —
+      file is <span className="font-mono">{totalKb} KB</span> total. Use an external editor for full content.
     </div>
   );
 }
@@ -391,14 +412,14 @@ function SpecValidationPanel({ kind, yaml }: { kind: "rig" | "agent"; yaml: stri
   const review = useSpecReview(kind, yaml);
   if (review.isLoading) {
     return (
-      <div data-testid="files-spec-validation-loading" className="mb-3 border border-outline-variant bg-background px-3 py-2 font-mono text-[10px] text-on-surface-variant">
-        Validating {kind}.yaml…
+      <div data-testid="files-spec-validation-loading" className="mb-3 rounded-lg border border-outline-variant bg-surface-low px-3 py-2 text-xs text-on-surface-variant">
+        Validating <span className="font-mono">{kind}.yaml</span>…
       </div>
     );
   }
   if (review.isError) {
     return (
-      <div data-testid="files-spec-validation-error" className="mb-3 border border-red-400 bg-red-50 px-3 py-2 font-mono text-[10px] text-red-900">
+      <div data-testid="files-spec-validation-error" className="mb-3 rounded-lg border border-outline-variant bg-surface-low px-3 py-2 text-xs text-destructive">
         Validation failed to run: {(review.error as Error)?.message ?? "unknown error"}
       </div>
     );
@@ -411,24 +432,22 @@ function SpecValidationPanel({ kind, yaml }: { kind: "rig" | "agent"; yaml: stri
       data-testid="files-spec-validation-panel"
       data-spec-kind={kind}
       data-valid={isValid}
-      className={`mb-3 border px-3 py-2 font-mono text-[10px] ${
-        isValid
-          ? "border-emerald-400 bg-emerald-50 text-emerald-900"
-          : "border-red-400 bg-red-50 text-red-900"
-      }`}
+      className="mb-3 rounded-lg border bg-surface-lowest px-3 py-2"
     >
-      <div className="mb-1 font-bold uppercase tracking-[0.10em]">
-        {isValid ? `✓ Valid ${kind === "rig" ? "RigSpec" : "AgentSpec"}` : `✗ ${kind === "rig" ? "RigSpec" : "AgentSpec"} validation errors`}
+      <div className="mb-1">
+        {isValid
+          ? <StatusBadge status="done" label={`Valid ${kind === "rig" ? "rig spec" : "agent spec"}`} />
+          : <StatusBadge status="failed" label={`${kind === "rig" ? "Rig spec" : "Agent spec"} validation errors`} />}
       </div>
       {errors.length > 0 && (
-        <ul className="space-y-1">
+        <ul className="space-y-1 text-xs">
           {errors.map((err, idx) => (
             <li
               key={idx}
               data-testid={`files-spec-validation-error-${idx}`}
-              className="text-[10px]"
+              className="text-xs"
             >
-              {err.field && <span className="font-bold">{err.field}: </span>}
+              {err.field && <span className="font-semibold">{err.field}: </span>}
               {err.message}
             </li>
           ))}
@@ -460,68 +479,71 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
 
   return (
     <div data-testid="files-editor" className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-outline-variant bg-amber-50 px-3 py-1.5 font-mono text-[9px]">
-        <span className="font-bold text-amber-900" data-testid="files-editor-status">
-          {dirty ? "draft (unsaved)" : "no changes"}
+      <div className="flex items-center gap-2 border-b border-outline-variant bg-surface-low px-3 py-1.5 text-xs">
+        <span className="font-semibold text-on-surface" data-testid="files-editor-status">
+          {dirty ? "Draft (unsaved)" : "No changes"}
         </span>
-        <button
-          type="button"
-          data-testid="files-editor-save"
-          disabled={!dirty || write.isPending}
-          onClick={() => {
-            setSaveError(null);
-            setConflict(null);
-            setSavedIndicator(false);
-            write.mutate(
-              {
-                root,
-                path,
-                content: draft,
-                expectedMtime: base.mtime,
-                expectedContentHash: base.contentHash,
-                actor: "ui-files-edit-mode",
-              },
-              {
-                onSuccess: (result: FileWriteResult) => {
-                  if ("conflict" in result) {
-                    setConflict({ currentMtime: result.currentMtime, currentContentHash: result.currentContentHash });
-                  } else {
-                    setEditor((current) => ({ ...current, base: {
-                      ...base, content: draft, mtime: result.newMtime, contentHash: result.newContentHash,
-                    } }));
-                    setSavedIndicator(true);
-                    setTimeout(() => setSavedIndicator(false), 2000);
-                  }
+        <div className="flex items-center justify-between gap-2 flex-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            data-testid="files-editor-cancel"
+            onClick={() => { setEditor({ draft: read.content, base: read }); setSaveError(null); setConflict(null); }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="default"
+            size="sm"
+            data-testid="files-editor-save"
+            disabled={!dirty || write.isPending}
+            onClick={() => {
+              setSaveError(null);
+              setConflict(null);
+              setSavedIndicator(false);
+              write.mutate(
+                {
+                  root,
+                  path,
+                  content: draft,
+                  expectedMtime: base.mtime,
+                  expectedContentHash: base.contentHash,
+                  actor: "ui-files-edit-mode",
                 },
-                onError: (err) => {
-                  setSaveError(err instanceof Error ? err.message : String(err));
+                {
+                  onSuccess: (result: FileWriteResult) => {
+                    if ("conflict" in result) {
+                      setConflict({ currentMtime: result.currentMtime, currentContentHash: result.currentContentHash });
+                    } else {
+                      setEditor((current) => ({ ...current, base: {
+                        ...base, content: draft, mtime: result.newMtime, contentHash: result.newContentHash,
+                      } }));
+                      setSavedIndicator(true);
+                      setTimeout(() => setSavedIndicator(false), 2000);
+                    }
+                  },
+                  onError: (err) => {
+                    setSaveError(err instanceof Error ? err.message : String(err));
+                  },
                 },
-              },
-            );
-          }}
-          className="border border-emerald-500 bg-emerald-50 px-2 py-0.5 uppercase tracking-[0.10em] text-emerald-900 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          save
-        </button>
-        <button
-          type="button"
-          data-testid="files-editor-cancel"
-          onClick={() => { setEditor({ draft: read.content, base: read }); setSaveError(null); setConflict(null); }}
-          className="border border-outline bg-surface-lowest px-2 py-0.5 uppercase tracking-[0.10em] text-on-surface"
-        >
-          cancel
-        </button>
+              );
+            }}
+          >
+            Save
+          </Button>
+        </div>
         {savedIndicator && (
-          <span data-testid="files-editor-saved" className="ml-auto text-emerald-700">saved</span>
+          <span data-testid="files-editor-saved" className="ml-auto text-xs text-on-surface-variant">Saved</span>
         )}
       </div>
       {conflict && (
-        <div data-testid="files-editor-conflict" className="flex items-center gap-2 border-b border-red-200 bg-red-50 px-3 py-2 font-mono text-[10px] text-red-900">
+        <div data-testid="files-editor-conflict" className="flex items-center gap-2 border-b border-outline-variant bg-surface-low px-3 py-2 text-xs text-on-surface">
           <span className="flex-1">
-            File changed externally. Local mtime <code>{base.mtime}</code> ≠ server <code>{conflict.currentMtime}</code>. Click Refresh to re-read the file (your draft will be replaced with the new server content; copy it elsewhere first if you need to re-apply).
+            File changed externally. Local mtime <code className="font-mono">{base.mtime}</code> ≠ server <code className="font-mono">{conflict.currentMtime}</code>. Click Refresh to re-read the file (your draft will be replaced with the new server content; copy it elsewhere first if you need to re-apply).
           </span>
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="sm"
             data-testid="files-editor-refresh"
             onClick={async () => {
               const queryKey = ["files", "read", root, path];
@@ -537,14 +559,13 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
                 setSaveError(err instanceof Error ? err.message : String(err));
               }
             }}
-            className="border border-red-500 bg-surface-lowest px-2 py-0.5 uppercase tracking-[0.10em] text-red-900"
           >
-            refresh
-          </button>
+            Refresh
+          </Button>
         </div>
       )}
       {saveError && (
-        <div data-testid="files-editor-error" className="border-b border-red-200 bg-red-50 px-3 py-2 font-mono text-[10px] text-red-900">
+        <div data-testid="files-editor-error" className="border-b border-outline-variant bg-surface-low px-3 py-2 text-xs text-destructive">
           Save failed: {saveError}
         </div>
       )}
@@ -552,7 +573,7 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
         data-testid="files-editor-textarea"
         value={draft}
         onChange={(e) => { const value = e.target.value; setEditor((current) => ({ ...current, draft: value })); }}
-        className="flex-1 min-h-0 resize-none border-0 bg-background p-3 font-mono text-[11px] leading-relaxed text-on-surface outline-none"
+        className="flex-1 min-h-0 resize-none border-0 bg-background p-3 font-mono text-xs leading-relaxed text-on-surface outline-none"
         spellCheck={false}
       />
     </div>

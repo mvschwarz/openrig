@@ -13,8 +13,10 @@
 
 import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "../ui/page-header.js";
+import { EmptyState } from "../ui/empty-state.js";
+import { StatusBadge } from "../ui/status-badge.js";
 import { WorkspacePage } from "../WorkspacePage.js";
-import { WorkflowHeader } from "../WorkflowScaffold.js";
 import {
   useWorkflowInstances,
   useWorkflowSpecs,
@@ -58,10 +60,9 @@ export function WorkflowsPage() {
 
   return (
     <WorkspacePage>
-      <div data-testid="workflows-page" className="space-y-6">
-        <WorkflowHeader
-          eyebrow="Workflows"
-          title="Deterministic Runs"
+      <div data-testid="workflows-page" className="space-y-6 text-sm">
+        <PageHeader
+          title="Workflows"
           description={
             isLoading
               ? "Loading instances…"
@@ -75,18 +76,22 @@ export function WorkflowsPage() {
         />
 
         {rows.length === 0 && !isLoading ? (
-          <p data-testid="workflows-empty" className="font-mono text-[11px] text-on-surface-variant">
-            0 instances — instantiate one from a library spec (rig workflow instantiate) and it appears here
-            with its live position.
-          </p>
+          <EmptyState
+            title="No workflow instances"
+            label="No workflow instances"
+            description="Instantiate one from a library spec (rig workflow instantiate) and it appears here with its live position."
+            action={{ label: "Open workflow library", href: "/specs" }}
+            variant="card"
+            testId="workflows-empty"
+          />
         ) : null}
 
         {groups.map((g) => {
           const gAttention = g.rows.filter((r) => instanceAttentionRank(r) <= 1).length;
           const gLive = g.rows.filter((r) => r.status === "active" || r.status === "waiting").length;
           return (
-            <section key={g.key} data-testid={`workflows-group-${g.name}`} className="space-y-2">
-              <div className="flex items-center gap-2">
+            <section key={g.key} data-testid={`workflows-group-${g.name}`} className="space-y-2 rounded-lg border bg-surface-lowest shadow-sm">
+              <div className="flex flex-wrap items-center gap-2 border-b border-outline-variant px-3 py-2">
                 <button
                   type="button"
                   data-testid={`workflows-group-spec-${g.name}`}
@@ -96,16 +101,17 @@ export function WorkflowsPage() {
                       params: { entryId: `workflow:${g.name}:${g.version}` },
                     })
                   }
-                  className="font-mono text-[11px] font-bold text-on-surface underline-offset-2 hover:underline"
+                  className="font-mono text-xs font-medium text-on-surface underline-offset-2 hover:underline"
+                  title={`workflow:${g.name}:${g.version}`}
                 >
                   {g.name} v{g.version}
                 </button>
-                <span className="font-mono text-[10px] text-on-surface-variant">
+                <span className="text-xs text-on-surface-variant">
                   {g.rows.length} instance{g.rows.length === 1 ? "" : "s"} · {gLive} live
-                  {gAttention > 0 ? ` · ▲ ${gAttention}` : ""}
                 </span>
+                {gAttention > 0 ? <StatusBadge status="attention_required" label={`${gAttention} need attention`} /> : null}
               </div>
-              <ul className="divide-y divide-outline-variant/50 border border-outline-variant">
+              <ul className="divide-y divide-outline-variant/50">
                 {g.rows.map((i) => (
                   <WorkflowInstanceRow key={i.instanceId} instance={i} />
                 ))}
@@ -115,11 +121,11 @@ export function WorkflowsPage() {
         })}
 
         {idleSpecs.length > 0 ? (
-          <section data-testid="workflows-idle-specs" className="space-y-2">
-            <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">
-              Cached Specs — No Instances
+          <section data-testid="workflows-idle-specs" className="space-y-2 rounded-lg border bg-surface-lowest">
+            <div className="border-b border-outline-variant px-3 py-2 text-xs text-on-surface-variant">
+              Cached specs — no instances
             </div>
-            <ul className="divide-y divide-outline-variant/50 border border-outline-variant">
+            <ul className="divide-y divide-outline-variant/50">
               {idleSpecs.map((s) => (
                 <li key={`${s.name}:${s.version}`}>
                   <button
@@ -131,18 +137,19 @@ export function WorkflowsPage() {
                         params: { entryId: `workflow:${s.name}:${s.version}` },
                       })
                     }
-                    className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-surface-variant/50"
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-surface-variant/50"
+                    title={`workflow:${s.name}:${s.version}`}
                   >
-                    <span className="font-mono text-[11px] text-on-surface-variant" aria-hidden>
+                    <span className="font-mono text-xs text-on-surface-variant" aria-hidden>
                       ◌
                     </span>
-                    <span className="font-mono text-[11px] text-on-surface">
+                    <span className="font-mono text-xs text-on-surface">
                       {s.name} v{s.version}
                     </span>
-                    <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-on-surface-variant">
+                    <span className="min-w-0 flex-1 truncate text-xs text-on-surface-variant">
                       {s.purpose ?? ""}
                     </span>
-                    <span className="font-mono text-[10px] text-on-surface-variant">
+                    <span className="shrink-0 text-xs text-on-surface-variant">
                       {s.isBuiltIn ? "built-in" : "user file"} · 0 instances
                     </span>
                   </button>

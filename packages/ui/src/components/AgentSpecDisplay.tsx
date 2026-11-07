@@ -65,7 +65,7 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
           <div className="font-mono text-xs font-bold mb-2">Profiles</div>
           <div className="space-y-1">
             {profiles.map((p) => (
-              <div key={p.name} className="font-mono text-[10px] flex justify-between">
+              <div key={p.name} className="font-mono text-[11px] flex justify-between">
                 <span className="font-bold">{p.name}</span>
                 {p.description && <span className="text-on-surface-variant">{p.description}</span>}
               </div>
@@ -77,7 +77,7 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
       {/* Resources */}
       <div data-testid={`${testIdPrefix}-resources-section`} className="border border-outline-variant p-3">
         <div className="font-mono text-xs font-bold mb-2">Resources</div>
-        <div className="space-y-2 font-mono text-[10px]">
+        <div className="space-y-2 font-mono text-[11px]">
           {resources.skills.length > 0 && (
             <div>
               <span className="text-on-surface-variant">Skills:</span>{" "}
@@ -127,9 +127,9 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
           <div className="font-mono text-xs font-bold mb-2">Startup</div>
           {startup.files.length > 0 && (
             <div className="mb-2">
-              <div className="font-mono text-[9px] text-on-surface-variant uppercase mb-1">Files</div>
+              <div className="text-[11px] text-on-surface-variant mb-1">Files</div>
               {startup.files.map((f, i) => (
-                <div key={i} className="font-mono text-[10px]">
+                <div key={i} className="font-mono text-[11px]">
                   <FileChip
                     label={f.path}
                     sourcePath={sourcePath}
@@ -140,16 +140,16 @@ export function AgentSpecDisplay({ review, yaml, testIdPrefix = "agent", sourceP
                       {f.path}
                     </span>
                   </FileChip>{" "}
-                  {f.required && <span className="text-red-500 text-[8px]">REQUIRED</span>}
+                  {f.required && <span className="text-red-500 text-[11px]">REQUIRED</span>}
                 </div>
               ))}
             </div>
           )}
           {startup.actions.length > 0 && (
             <div>
-              <div className="font-mono text-[9px] text-on-surface-variant uppercase mb-1">Actions</div>
+              <div className="text-[11px] text-on-surface-variant mb-1">Actions</div>
               {startup.actions.map((a, i) => (
-                <div key={i} className="font-mono text-[10px]">
+                <div key={i} className="font-mono text-[11px]">
                   <span className="inline-flex items-center gap-1 text-on-surface-variant">
                     <ToolMark tool={a.type.includes("command") ? "terminal" : a.type} size="xs" decorative />
                     {a.type}:

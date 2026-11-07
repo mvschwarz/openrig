@@ -79,7 +79,7 @@ describe("PackageList", () => {
     renderPackageList();
 
     await waitFor(() => {
-      expect(screen.getByText("LEGACY PACKAGE TOOLS")).toBeTruthy();
+      expect(screen.getByText("Legacy package tools")).toBeTruthy();
     });
   });
 
@@ -126,8 +126,10 @@ describe("PackageList", () => {
     });
 
     const statuses = screen.getAllByTestId("install-status");
-    expect(statuses[0]!.textContent).toBe("ROLLED BACK");
-    expect(statuses[1]!.textContent).toBe("APPLIED");
+    expect(statuses[0]!.textContent).toBe("Rolled back");
+    expect(statuses[1]!.textContent).toBe("Applied");
+    expect(statuses[0]!.getAttribute("data-tone")).toBe("warning");
+    expect(statuses[1]!.getAttribute("data-tone")).toBe("success");
   });
 
   it("empty state exposes import and bootstrap entry points without install-package CTA", async () => {
@@ -140,8 +142,8 @@ describe("PackageList", () => {
 
     const importBtn = screen.getByTestId("empty-import-btn");
     const bootstrapBtn = screen.getByTestId("empty-bootstrap-btn");
-    expect(importBtn.textContent).toContain("IMPORT RIGSPEC");
-    expect(bootstrapBtn.textContent).toContain("BOOTSTRAP");
+    expect(importBtn.textContent).toContain("Import rigspec");
+    expect(bootstrapBtn.textContent).toContain("Bootstrap");
     expect(screen.queryByTestId("empty-install-btn")).toBeNull();
 
     act(() => { fireEvent.click(importBtn); });
