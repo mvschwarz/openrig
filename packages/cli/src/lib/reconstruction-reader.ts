@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, openSync, closeSync, fstatSync, lstatSync, readSync } from "node:fs";
+import { constants, openSync, closeSync, fstatSync, lstatSync, readSync, existsSync } from "node:fs";
 import { isAbsolute, join, normalize } from "node:path";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -124,7 +124,7 @@ export function canonicalV0(value: Json): string {
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 
 /** Regular-file, no-follow, bounded read; no source commands are executed. */
-function readRegular(file: string, limit: number): Buffer {
+function readRegular(file: string, limit: number, onRead?: (bytes: number) => void): Buffer {
   const initial = lstatSync(file);
   requireValue(initial.isFile() && !initial.isSymbolicLink(), `not a regular file: ${file}`);
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -132,10 +132,10 @@ function readRegular(file: string, limit: number): Buffer {
     const before = fstatSync(fd);
     requireValue(before.isFile() && before.dev === initial.dev && before.ino === initial.ino && before.size <= limit, `file identity or byte bound failed: ${file}`);
     const chunks: Buffer[] = []; let bytes = 0;
-    while (bytes <= limit) {
-      const buffer = Buffer.alloc(Math.min(65536, limit + 1 - bytes));
+    while (bytes < limit) {
+      const buffer = Buffer.alloc(Math.min(65536, limit - bytes));
       const count = readSync(fd, buffer); if (!count) break;
-      bytes += count; requireValue(bytes <= limit, `file exceeds byte bound: ${file}`); chunks.push(buffer.subarray(0, count));
+      bytes += count; onRead?.(count); chunks.push(buffer.subarray(0, count));
     }
     const after = fstatSync(fd), current = lstatSync(file);
     requireValue(before.size === after.size && before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs
@@ -143,8 +143,8 @@ function readRegular(file: string, limit: number): Buffer {
     return Buffer.concat(chunks);
   } finally { closeSync(fd); }
 }
-function jsonFile(file: string, remainingBytes = MAX_DOCUMENT): { value: Json; bytes: number } {
-  const bytes = readRegular(file, Math.min(MAX_DOCUMENT, remainingBytes));
+function jsonFile(file: string, remainingBytes = MAX_DOCUMENT, onRead?: (bytes: number) => void): { value: Json; bytes: number } {
+  const bytes = readRegular(file, Math.min(MAX_DOCUMENT, remainingBytes), onRead);
   return { value: parseReconstructionJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)), bytes: bytes.length };
 }
 
@@ -250,13 +250,10 @@ export function readReconstruction(options: ReconstructionOptions) {
       }
       requireValue(!stack.includes(key), "reconstruction reference cycle");
       const mapping = mappings.get(sourceStore);
-      if (!mapping && sourceStore !== rootStore) throw new ReconstructionError("unmapped_external_store", `external store ${sourceStore} requires an explicit store mapping; no implicit remote read`);
+      if (!mapping && sourceStore !== rootStore && !existsSync(sourceStore)) throw new ReconstructionError("unmapped_external_store", `store ${sourceStore} is not available here; supply an explicit store mapping`);
       const localStore = mapping?.localStore ?? sourceStore;
-      const file = jsonFile(join(localStore, `${revision(id)}.json`), MAX_CLOSURE - totalBytes); totalBytes += file.bytes;
-      if (totalBytes > MAX_CLOSURE) {
-        exhausted = true;
-        throw new ReconstructionError("closure_limit", "reconstruction closure exceeds 32 MiB");
-      }
+      // Charge positive reads even when decoding, parsing or a late identity check fails.
+      const file = jsonFile(join(localStore, `${revision(id)}.json`), MAX_CLOSURE - totalBytes, count => { totalBytes += count; });
       const doc = object(file.value, "revision"); requireValue(doc.id === id, "stored ID does not match requested revision");
       const { id: ignored, ...body } = doc; void ignored;
       requireValue(hash(canonicalV0(body)) === id, "revision content hash mismatch"); validate(doc);
@@ -324,7 +321,7 @@ export function readReconstruction(options: ReconstructionOptions) {
     if (source.path === undefined) return { ...base, status: "unchecked", reason: "opaque/nonlocal route; not fetched" };
     try {
       requireValue(++sourceCount <= 128 && sourceBytes < 64 * 1024 * 1024, "source checking budget exhausted (128 files / 64 MiB total)");
-      const bytes = readRegular(String(source.path), 64 * 1024 * 1024 - sourceBytes); sourceBytes += bytes.length;
+      const bytes = readRegular(String(source.path), 64 * 1024 * 1024 - sourceBytes, count => { sourceBytes += count; });
       const actual = hash(bytes);
       return { ...base, sha256: actual, status: source.sha256 ? (actual === source.sha256 ? "unchanged" : "changed") : "unchecked", reason: "byte comparison only; observation dates and semantic freshness are not refreshed" };
     } catch (error) { return { ...base, status: "unavailable", reason: (error as Error).message }; }

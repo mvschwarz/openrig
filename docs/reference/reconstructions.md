@@ -71,8 +71,8 @@ rig context reconstruction inspect <full-sha256> --store /local/import/reconstru
 The mapping is read-time location information, not an identity registry or a
 remote fetch permission. It preserves source-host provenance. Since v0 pointers
 do not contain a host discriminator, duplicate mappings for the same source
-store are ambiguous and rejected. All external store pointers require a mapping,
-even if that absolute path happens to exist on the current host.
+store are ambiguous and rejected. A store path that exists on this host can be
+read directly; a path that has moved needs a mapping to its local location.
 
 ## Bounds and byte checks
 
