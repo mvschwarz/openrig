@@ -66,7 +66,7 @@ export function findQueueRecovery(db: Database.Database, qitemId: string, exclud
   let row: { qitem_id: string; state: string; ts_updated: string } | undefined;
   if (scope?.db === db) {
     const byTag = scope.byTag ??= buildRecoveryIndex(db);
-    row = (byTag.get(tag) ?? []).find((r) => !excludeTag || !r.values.has(excludeTag));
+    row = pickFromIndex(byTag, qitemId, excludeTag);
   } else {
     row = db.prepare(`SELECT qitem_id, state, ts_updated FROM queue_items
     WHERE ${RECOVERY_TAG_ROWS} AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
@@ -74,6 +74,13 @@ export function findQueueRecovery(db: Database.Database, qitemId: string, exclud
     ${RECOVERY_ORDER}`)
       .get(...(excludeTag ? [tag, excludeTag] : [tag])) as { qitem_id: string; state: string; ts_updated: string } | undefined;
   }
+  return settleRecovery(db, qitemId, row);
+}
+function pickFromIndex(byTag: Map<string, RecoveryRow[]>, qitemId: string, excludeTag?: string): RecoveryRow | undefined {
+  return (byTag.get(recoveryTag(qitemId)) ?? []).find((r) => !excludeTag || !r.values.has(excludeTag));
+}
+/** The chosen recovery row still owns custody unless it is closed and the original obligation moved after it. */
+function settleRecovery(db: Database.Database, qitemId: string, row: { qitem_id: string; state: string; ts_updated: string } | undefined): { qitemId: string; state: string } | null {
   if (!row) return null;
   if (!["pending", "in-progress", "blocked"].includes(row.state)) {
     const changed = lastMeaningfulTransition(db, qitemId);
@@ -81,4 +88,27 @@ export function findQueueRecovery(db: Database.Database, qitemId: string, exclud
     if ((changed && disposition && changed.id > disposition.id) || (changed && Date.parse(changed.at) > Date.parse(row.ts_updated)) || Date.parse(failedAttempt(db, qitemId) ?? "") > Date.parse(row.ts_updated)) return null;
   }
   return { qitemId: row.qitem_id, state: row.state };
+}
+/** The same recovery index as withRecoveryIndex, held by its caller instead of the module scope, for a pass that awaits
+ * or yields between lookups (the stuck sweep): an await never exposes it to other callers. It is a snapshot from its
+ * first lookup until invalidate(); the caller invalidates it whenever other code could have run (after an await or a
+ * yield) or it wrote recovery tags, state or ts_updated itself, and the next lookup rebuilds it. run(fn) lends it, for
+ * the synchronous fn only, to the findQueueRecovery calls made deep inside fn (a getById's waiting view), as
+ * withRecoveryIndex does. The final custody check (settleRecovery) always reads live, as findQueueRecovery's does. */
+export function createRecoveryLookup(db: Database.Database): {
+  find: (qitemId: string, excludeTag?: string) => { qitemId: string; state: string } | null;
+  run: <T>(fn: () => T) => T;
+  invalidate: () => void;
+} {
+  const own: RecoveryScope = { db, byTag: null };
+  return {
+    find: (qitemId, excludeTag) => settleRecovery(db, qitemId, pickFromIndex(own.byTag ??= buildRecoveryIndex(db), qitemId, excludeTag)),
+    run: (fn) => {
+      if (scope?.db === db) return fn();
+      const previous = scope;
+      scope = own;
+      try { return fn(); } finally { scope = previous; }
+    },
+    invalidate: () => { own.byTag = null; },
+  };
 }

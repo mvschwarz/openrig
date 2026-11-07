@@ -87,6 +87,7 @@ These ship in the OpenRig repo and reach a seat when its profile selects them. T
 - **watchdog** — monitoring or recovering a seat (health, restore, stuck state).
 - **session-source-fork** — forking a session's source/context.
 - **context-engineering** — designing context systems. Provisional and non-normative: current OpenRig skills, explicit rulings, and measured practice outrank it on any conflict.
+- **working-with-an-openrig-team** — a person's own agent in an app (Claude Code, Codex, Cursor, VS Code) works with their team through `rig mcp serve`: hand work over, follow it, answer the team's questions, read results. The `openrig` app plugin loads it; a seat helping someone connect an app can open it with `rig context get skills/core/working-with-an-openrig-team/SKILL.md`.
 
 Pod handbooks (load when you're in that pod):
 - **orchestration-team** — you're orchestrating a rig: dispatching, monitoring, keeping the loop moving.

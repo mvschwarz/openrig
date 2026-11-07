@@ -65,14 +65,17 @@ or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; t
 
 A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
 and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
-The `GET /api/terminal/<name>` routes, the websocket included, answer `{ "error": "unauthorized", "hint" }`. A token
-doesn't get past the browser boundary's 403 refusals, which [Browser access](browser-access.md) describes.
+The `GET /api/terminal/<name>` routes, the websocket included, answer `{ "error": "unauthorized", "hint" }`. A valid configured bearer token in the Authorization header can pass the browser boundary's target-name check
+for a well-formed but unaccepted Host. It cannot pass a malformed Host or a refused Origin; see
+[Browser access](browser-access.md).
 
 ## Event streams
 
-All three are server-sent events (`text/event-stream`):
+All of them are server-sent events (`text/event-stream`):
 
-- **`GET /api/events`**: the daemon's event log. `?rigId=` limits it to one rig. Each event carries `id: <seq>`.
+- **`GET /api/events`**: the daemon's event log, stored events only. `?rigId=` limits it to one rig. Each event
+  carries `id: <seq>`. `view.changed` is not stored, so it does not appear here, live or replayed; `view.changed`
+  rows stored by older versions still replay until an events retention (a separate change) removes them.
   Without `Last-Event-ID`, `?replay=<n>` first sends the newest `n` stored events (`0`: none, live events only);
   `?replay=all`, no `replay`, or any other value sends the whole log first. A `Last-Event-ID` header (what
   `EventSource` sends when it reconnects) sends the events after that id instead, whatever `replay` says.
@@ -80,6 +83,9 @@ All three are server-sent events (`text/event-stream`):
 - **`GET /api/activity/events`**: live only, no replay or ids. Each message is named after its event type:
   `seat.activity_changed`, `seat.rung_health`, `proof.judged` or `proof.sources_changed`. It tells a view to read
   again; it carries no derived state.
+- **`GET /api/views/sse`** (alias `/api/views/watch`) and **`GET /api/views/<viewName>/sse`**: `view.changed`, live
+  only. Its `id:` is the `seq` of the stored event that caused it, so it can repeat across views and is not a replay
+  cursor.
 - **`GET /api/queue/sse`** (alias `/api/queue/watch`): live only, with `id: <seq>`, for `queue.created`,
   `queue.handed_off`, `queue.claimed`, `queue.unclaimed`, `qitem.fallback_routed`, `qitem.closure_overdue`,
   `inbox.absorbed` and `inbox.denied`.

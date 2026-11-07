@@ -116,7 +116,8 @@ export function startPeriodicSnapshotScheduler(deps: {
 
 /** OPR.0.4.6.FS-1 W2 — start the queue-retention maintenance sweep (arch D3): a
  *  boot sweep + a daily tick that archives aged terminal `queue_transitions`
- *  (never-delete) and prunes `watchdog_history`, both in bounded batches with
+ *  (never-delete) and prunes `watchdog_history`, `usage_samples`, stream items and
+ *  the history-only event types of `events`, all in bounded batches with
  *  event-loop yields. Reads the `retention.*` settings (baked defaults via
  *  RETENTION_DEFAULTS). Fire-and-forget with error logging — a sweep failure must
  *  never crash the daemon. Returns the daily interval handle (cleared on
@@ -143,6 +144,7 @@ export function startQueueRetentionScheduler(deps: {
       streamRetentionDays: num("retention.stream_days", RETENTION_DEFAULTS.streamRetentionDays),
       streamMaxItems: num("retention.stream_max_items", RETENTION_DEFAULTS.streamMaxItems),
       batchSize: num("retention.batch_size", RETENTION_DEFAULTS.batchSize),
+      eventsRetentionDays: num("retention.events_days", RETENTION_DEFAULTS.eventsRetentionDays),
     }).catch((err: unknown) => {
       console.error(`[queue-retention] sweep error: ${err instanceof Error ? err.message : String(err)}`);
     });
@@ -170,12 +172,26 @@ export function startStuckSweepScheduler(deps: {
   const status = createStuckSweepStatus();
   deps.stuckSweepStatus = status; // healthz reads this snapshot
   const db = deps.rigRepo.db;
+  // A pass yields the event loop, so a tick could start a second pass over the first one (a pass longer than the
+  // interval): one pass at a time, and a tick that finds one still running is skipped.
+  let runningSince: string | null = null;
+  let skipped = 0;
   const runOnce = (): void => {
+    if (runningSince) {
+      // Never silent: a pass that hangs (an awaited send that never settles) shows up here on every tick.
+      skipped++;
+      status.pass({ runningSince, skippedTicks: skipped });
+      console.error(`[stuck-sweep] tick skipped: the pass started at ${runningSince} is still running (${skipped} tick(s) skipped)`);
+      return;
+    }
+    runningSince = new Date().toISOString();
+    skipped = 0;
+    status.pass({ runningSince, skippedTicks: 0 });
     // runStuckSweep never throws (failure is recorded loudly on the status surface);
     // the catch is the never-crash-the-daemon belt for the promise chain itself.
     void runStuckSweep({ db, queueRepo, status }).catch((err: unknown) => {
       console.error(`[stuck-sweep] scheduler error: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    }).finally(() => { runningSince = null; status.pass({ runningSince: null, skippedTicks: skipped }); });
   };
   runOnce(); // boot sweep (fire-and-forget)
   return setInterval(runOnce, resolveStuckSweepIntervalSeconds() * 1000);

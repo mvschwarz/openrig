@@ -28,25 +28,68 @@ import { missionControlRoutes } from "../src/routes/mission-control.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
-import type { AttentionRead } from "../src/attention-surface.js";
+import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 
 const HUMAN = "human-founder";
 /** The people, with their Slack subscription's preset (absent = the default). */
-const registryWith = (preset?: "every-ask" | "urgent-only") => ({
-  ok: true as const,
-  entities: [{
-    entityId: HUMAN, class: "human" as const, displayName: "Founder", address: `${HUMAN}@external`,
-    connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFOUNDER" }],
-    prefs: { deliveryClass: "B" as const, availability: "available" as const },
-    ...(preset ? { subscriptions: [{ destination: { connector: "slack" as const }, filter: { preset } }] } : {}),
-  }, {
-    // A registered person addressed as a kernel alias, which no human-* name pattern matches.
-    entityId: "operator-admin", class: "human" as const, displayName: "Operator", address: "operator-admin@external",
-    connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UOPERATOR" }],
-    prefs: { deliveryClass: "B" as const, availability: "available" as const },
-    ...(preset ? { subscriptions: [{ destination: { connector: "slack" as const }, filter: { preset } }] } : {}),
-  }],
-});
+const registryWith = (
+  preset?: "every-ask" | "urgent-only",
+  options?: { primaryKind?: "slack" | "relay"; secondaryKind?: "slack" | "relay" },
+) => {
+  const primaryKind = options?.primaryKind ?? "slack";
+  const bindings: any[] = [];
+  if (primaryKind === "relay") {
+    bindings.push({
+      kind: "relay" as const,
+      connectorRef: "relay-main",
+      secretsRef: "file:/tmp/relay.env",
+      role: "primary" as const,
+      handle: "founder-relay",
+    });
+  } else {
+    bindings.push({
+      kind: "slack" as const,
+      connectorRef: "primary",
+      secretsRef: "env:SLACK_BOT_TOKEN",
+      role: "primary" as const,
+      handle: "UFOUNDER",
+    });
+  }
+
+  if (options?.secondaryKind === "relay") {
+    bindings.push({
+      kind: "relay" as const,
+      connectorRef: "relay-sec",
+      secretsRef: "file:/tmp/relay.env",
+      role: "secondary" as const,
+      handle: "founder-relay-sec",
+    });
+  } else if (options?.secondaryKind === "slack") {
+    bindings.push({
+      kind: "slack" as const,
+      connectorRef: "slack-sec",
+      secretsRef: "env:SLACK_BOT_TOKEN",
+      role: "secondary" as const,
+      handle: "UFOUNDER_SEC",
+    });
+  }
+
+  return {
+    ok: true as const,
+    entities: [{
+      entityId: HUMAN, class: "human" as const, displayName: "Founder", address: `${HUMAN}@external`,
+      connectorBindings: bindings,
+      prefs: { deliveryClass: "B" as const, availability: "available" as const },
+      ...(preset ? { subscriptions: [{ destination: { connector: "slack" as const }, filter: { preset } }] } : {}),
+    }, {
+      // A registered person addressed as a kernel alias, which no human-* name pattern matches.
+      entityId: "operator-admin", class: "human" as const, displayName: "Operator", address: "operator-admin@external",
+      connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UOPERATOR" }],
+      prefs: { deliveryClass: "B" as const, availability: "available" as const },
+      ...(preset ? { subscriptions: [{ destination: { connector: "slack" as const }, filter: { preset } }] } : {}),
+    }],
+  };
+};
 // Most cases here are a person whose Slack subscription is urgent-only (plain asks wait on Steering); the default cases reset it.
 let registry = registryWith("urgent-only");
 const QUESTION = [{ id: "q1", question: "A or B?", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] }];
@@ -544,5 +587,40 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     const post = posts.find((p) => JSON.stringify(p).includes("handed on, not urgent"));
     expect(post).toBeDefined();
     expect(JSON.stringify(post)).not.toContain("<@UOPERATOR>");
+  });
+
+  it("proves relay primary uses every-ask default independently of authored Slack urgent-only subscription", async () => {
+    // 1. Relay primary with authored Slack urgent-only: plain ask must classify as ALERT and be eligible through real queue ports
+    registry = registryWith("urgent-only", { primaryKind: "relay", secondaryKind: "slack" });
+    const relayPlain = await ask();
+    expect(owner(relayPlain)).toMatchObject({
+      ownerNotificationKind: "human-required",
+      ownerNotificationLevel: "ALERT",
+    });
+    const relayPorts = makeQueuePorts(repo, { loadHumanRegistry: () => registry });
+    const relayAlerts = await relayPorts.listHumanAlerts({});
+    expect(relayAlerts.some((item) => item.qitemId === relayPlain.qitemId)).toBe(true);
+
+    // 2. Slack primary with authored Slack urgent-only: plain ask stays RECORD
+    registry = registryWith("urgent-only", { primaryKind: "slack" });
+    const slackPlain = await ask();
+    expect(owner(slackPlain)).toMatchObject({
+      ownerNotificationKind: "human-required",
+      ownerNotificationLevel: "RECORD",
+    });
+    const slackPorts = makeQueuePorts(repo, { loadHumanRegistry: () => registry });
+    const slackAlerts = await slackPorts.listHumanAlerts({});
+    expect(slackAlerts.some((item) => item.qitemId === slackPlain.qitemId)).toBe(false);
+
+    // 3. Slack primary with secondary Relay: does not change primary routing, retains Slack urgent-only behavior
+    registry = registryWith("urgent-only", { primaryKind: "slack", secondaryKind: "relay" });
+    const slackSecRelayPlain = await ask();
+    expect(owner(slackSecRelayPlain)).toMatchObject({
+      ownerNotificationKind: "human-required",
+      ownerNotificationLevel: "RECORD",
+    });
+    const slackSecRelayPorts = makeQueuePorts(repo, { loadHumanRegistry: () => registry });
+    const slackSecAlerts = await slackSecRelayPorts.listHumanAlerts({});
+    expect(slackSecAlerts.some((item) => item.qitemId === slackSecRelayPlain.qitemId)).toBe(false);
   });
 });

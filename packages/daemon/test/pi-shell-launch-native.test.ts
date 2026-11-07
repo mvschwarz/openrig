@@ -30,7 +30,7 @@ describe.skipIf(!hasTmux || process.platform === "win32")("Pi launch through nat
     const launchMode = mode.split("-")[0];
     const longTmp = mode.endsWith("long-tmpdir");
     const routing = mode.includes("-routing");
-    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-shell-"));
+    const temp = fs.realpathSync(fs.mkdtempSync(path.join(process.env.TMUX_TMPDIR ?? (process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "pi-shell-")));
     const socket = path.join(temp, "tmux.sock");
     const session = "pi-fixture";
     const long = Array.from({ length: 14 }, () => "nested-directory-" + "x".repeat(35)).join(path.sep);
@@ -181,7 +181,7 @@ setInterval(() => {}, 1000);
 
   it.each(["fresh", "fork", "resume", "staged-long", "long-tmpdir-retry"] as const)("executes launch_wrapper in native tmux for Pi %s with real host runner and wrapped Pi child over pipe stdio", async mode => {
     const launchMode = mode === "staged-long" || mode === "long-tmpdir-retry" ? "fresh" : mode;
-    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wrapper-native-"));
+    const temp = fs.realpathSync(fs.mkdtempSync(path.join(process.env.TMUX_TMPDIR ?? (process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "pi-w-")));
     const socket = path.join(temp, "tmux.sock");
     const session = "pi-wrapped";
     const cwd = path.join(temp, "work dir with 'quotes'");
@@ -305,7 +305,7 @@ await main();
     const wrapper = ["generic-wrapper", "arg with spaces", "quote's", "$UNEXPANDED;false", "", "--"];
     const model =
       mode === "staged-long" ? "provider/model-" + "m".repeat(1200)
-      : mode === "long-tmpdir-retry" ? "provider/model-" + "m".repeat(300)
+      : mode === "long-tmpdir-retry" ? "provider/model-" + "m".repeat(100)
       : "provider/model-short";
 
     try {
@@ -414,7 +414,7 @@ await main();
   }, 15_000);
 
   it.each(["missing-wrapper", "failing-wrapper-exit-7", "non-exec-zero-exit", "long-tmpdir-too-long"] as const)("fails closed in native tmux on %s without starting bare Pi", async failure => {
-    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wrapper-fail-"));
+    const temp = fs.realpathSync(fs.mkdtempSync(path.join(process.env.TMUX_TMPDIR ?? (process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "pi-f-")));
     const socket = path.join(temp, "tmux.sock");
     const session = "pi-fail";
     const cwd = path.join(temp, "work");
@@ -535,7 +535,7 @@ await main();
   }, 15_000);
 
   it.each(["fresh", "fork", "resume"] as const)("executes launch_wrapper in native tmux for Codex %s with resolved interpreter+entry, intact pid, cwd, tty, env and exit code", async mode => {
-    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-wrapper-native-"));
+    const temp = fs.realpathSync(fs.mkdtempSync(path.join(process.env.TMUX_TMPDIR ?? (process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "cx-w-")));
     const socket = path.join(temp, "tmux.sock");
     const session = "codex-wrapped";
     const cwd = path.join(temp, "codex work 'quotes'");

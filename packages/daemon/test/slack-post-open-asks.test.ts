@@ -19,6 +19,7 @@ import { OUTBOUND_OP, toPayload } from "../src/domain/gateway/slack/outbound-dri
 import { DispatchBuffer, dispatchBufferPath } from "../src/domain/gateway/dispatch-buffer.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import { resolveSlackHandle, addHumanFragment } from "../src/domain/gateway/human-registry.js";
+import { setSharedChannel } from "../src/domain/gateway/participants.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { HumanQuietStore } from "../src/domain/gateway/human-quiet-windows.js";
 import { QUIET_RELEASE_POLICY, runQuietRelease } from "../src/domain/policies/quiet-release.js";
@@ -330,6 +331,146 @@ describe("rig slack post-open-asks through the gateway", () => {
     expect(posts).toHaveLength(0);
     expect(notes(superseded)).toContain(`slack-re-present-disposition notification_key=${items.get(superseded.qitemId)!.notificationKey} reason=superseded`);
     expect(notes(closed)).toContain(`slack-re-present-disposition notification_key=${items.get(closed.qitemId)!.notificationKey} reason=row-not-active`);
+  });
+
+  it("ignores Relay-primary asks even if seen state marks them seeded, while re-presenting Slack-primary and shared-channel asks", async () => {
+    expect(
+      addHumanFragment(
+        {
+          entityId: HUMAN,
+          class: "human",
+          displayName: "Alex",
+          address: `${HUMAN}@external`,
+          connectorBindings: [
+            {
+              kind: "slack",
+              connectorRef: "primary",
+              secretsRef: "env:SLACK_BOT_TOKEN",
+              role: "primary",
+              handle: "UALEX",
+            },
+          ],
+          prefs: { deliveryClass: "B", availability: "available" },
+        },
+        home,
+      ).ok,
+    ).toBe(true);
+    expect(
+      addHumanFragment(
+        {
+          entityId: "human-sam",
+          class: "human",
+          displayName: "Sam",
+          address: "human-sam@external",
+          connectorBindings: [
+            {
+              kind: "relay",
+              connectorRef: "wa-main",
+              secretsRef: `file:${join(home, "relay.env")}`,
+              role: "primary",
+              handle: "sam_wa",
+            },
+          ],
+          prefs: { deliveryClass: "B", availability: "available" },
+        },
+        home,
+      ).ok,
+    ).toBe(true);
+    expect(
+      setSharedChannel(
+        "ops-room",
+        {
+          displayName: "Ops Room",
+          channel: {
+            connector: "slack",
+            connectorRef: "primary",
+            secretsRef: "env:SLACK_BOT_TOKEN",
+            channelId: "C-SHARED",
+          },
+        },
+        {},
+        home,
+      ).ok,
+    ).toBe(true);
+
+    registry = {
+      ok: true as const,
+      entities: [
+        {
+          entityId: HUMAN,
+          class: "human" as const,
+          displayName: "Alex",
+          address: `${HUMAN}@external`,
+          connectorBindings: [
+            {
+              kind: "slack" as const,
+              connectorRef: "primary",
+              secretsRef: "env:SLACK_BOT_TOKEN",
+              role: "primary" as const,
+              handle: "UALEX",
+            },
+          ],
+          prefs: { deliveryClass: "B", availability: "available" },
+        },
+        {
+          entityId: "human-sam",
+          class: "human" as const,
+          displayName: "Sam",
+          address: "human-sam@external",
+          connectorBindings: [
+            {
+              kind: "relay" as const,
+              connectorRef: "wa-main",
+              secretsRef: `file:${join(home, "relay.env")}`,
+              role: "primary" as const,
+              handle: "sam_wa",
+            },
+          ],
+          prefs: { deliveryClass: "B", availability: "available" },
+        },
+      ],
+    };
+
+    const slackAsk = await park();
+    const channelAsk = await repo.create({
+      sourceSession: "dev-qa@r",
+      destinationSession: "ops-room@external",
+      summary: "Shared channel ask",
+      body: "shared channel body",
+      evidenceRef: "/proof/shared.md",
+      nudge: false,
+    });
+    db.prepare(
+      `INSERT INTO queue_transitions(qitem_id,ts,state,actor_session,owner_notification_level,owner_notification_kind)
+       VALUES (?, '2026-01-01', 'pending', 'dev-qa@r', 'ALERT', 'human-required')`,
+    ).run(channelAsk.qitemId);
+    const relayAsk = await repo.create({
+      sourceSession: "dev-qa@r",
+      destinationSession: "orch-lead@r",
+      body: "relay decision body",
+      nudge: false,
+    });
+    repo.update({
+      qitemId: relayAsk.qitemId,
+      actorSession: "orch-lead@r",
+      state: "blocked",
+      blockedOn: "human-sam@kernel",
+      summary: "Relay choice",
+      evidenceRef: "/proof/relay.md",
+      transitionNote: "parked on relay human",
+    });
+
+    // Even if all three episodes (including the Relay ask) are marked seeded-at-enable in seen store
+    new SeenStore(seenPath()).seed([keyOf(slackAsk), keyOf(channelAsk), keyOf(relayAsk)], "seeded-at-enable");
+
+    const w = wire();
+    const result = await run(w);
+    expect(result.asks.map((a) => a.qitemId).sort()).toEqual([channelAsk.qitemId, slackAsk.qitemId].sort());
+    expect(resultFor(result, relayAsk)).toBeUndefined();
+    expect(resultFor(result, slackAsk)).toMatchObject({ outcome: "posted", reshown: true, recipient: `${HUMAN}@external` });
+    expect(resultFor(result, channelAsk)).toMatchObject({ outcome: "posted", reshown: true, recipient: "ops-room@external" });
+    expect(posts).toHaveLength(2);
+    expect(notes(relayAsk).some((n) => n.includes("slack-re-present-"))).toBe(false);
   });
 });
 

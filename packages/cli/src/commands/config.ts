@@ -103,6 +103,10 @@ Keys:
                            an unreadable registry does not suppress eligibility; delivery still needs a ready route)
   retention.*            enabled, transitions_days, watchdog_days,
                          watchdog_keep_per_job, batch_size
+  retention.events_days  delete the history-only event types (views, snapshots, watchdog firings, queue events) older
+                         than N days; 0 keeps them (default). Removed events no longer replay from /api/events, leave
+                         the telemetry export, the log and the feed, and can't be brought back. Read at the next sweep
+                         (daily and at daemon start)
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
   launch.codex_login_shell  defer to Codex's own login-shell setting in managed Codex seats (default off)
                          Off adds allow_login_shell=false: tool commands inherit the seat's environment, so plain rig
@@ -130,10 +134,13 @@ Keys:
   usage.pi_openrouter_charge  with usage.pi_cost_facts on, Pi seats look up OpenRouter's actual charge for their requests, shown beside the estimate (default off; changes take effect when a Pi seat next launches or resumes; earlier outcomes stay visible)
   transport.verify_input_box  with --verify, a send to a Claude Code or Codex seat (also queue wakes) reads verified only when the seat was proven idle before the paste and its input box showed the exact text before Enter and was empty after it, on the same pane process; a busy or unknown seat, and anything else, reads unconfirmed, not failed. Reporting only (default off)
   transport.local_user_guard  on a Mac, the CLI refuses a local daemon whose reported user, checked with ps, isn't yours; an explicit OPENRIG_URL skips the check. A mitigation for reaching the wrong daemon, not authentication (default off)
+  transport.draft_delivery  deliver (default): a rig send or work notice to a seat whose prompt holds a person's draft goes through: the message is pasted at the current cursor into the draft (normally its end), then Enter is sent to submit the combined input, and the send's result says whether that was confirmed. OpenRig can't read every prompt layout: where it doesn't detect the draft, the result doesn't mention it, and refuse doesn't stop the send. refuse: such a send is refused, and a work notice retried once the prompt is clear, where OpenRig detects the draft. A draft found only by reading the input box may leave that retry waiting for the seat's next activity change or the stuck sweep, rather than the moment the draft clears. Either way, menus and permission prompts are refused, a per-seat typing guard still holds, managed compaction waits for an empty prompt, and a send with --wait-for-idle still waits
   decisions.enabled      typed decisions (OpenRouter + Jev) for the consumers in decisions.consumers, with OPENROUTER_API_KEY from the
                          rig process that runs them; off makes no provider calls (default off). rig project decisions status shows the state
   decisions.consumers    comma-separated consumers that may call (supported: stream; default none). An unknown name makes no calls
   decisions.template_dir absolute folder of <name>.yaml templates that replace the shipped ones (default empty: shipped templates only)
+  acp.to                 the seat (member@rig) that receives tasks from rig acp serve when it isn't given --to, as when an ACP app
+                         starts it from the ACP registry (default empty: none, so nothing is sent until one is set)
 
 Precedence: CLI flag > environment variable > config file > default`)
     .action((opts: { json?: boolean; withSource?: boolean }) => {
@@ -200,10 +207,17 @@ Precedence: CLI flag > environment variable > config file > default`)
     .action(async (key: string, value: string) => {
       try {
         store.set(key, value);
-        console.log(`${key} = ${store.get(key)}`);
+        const resolved = store.resolveWithSource(key);
+        console.log(resolved.source === "env"
+          ? `${key} = ${resolved.value} (source: env; file override saved but masked)`
+          : resolved.source === "default"
+            ? `${key} file override saved; effective value ${resolved.value} (source: default)`
+            : `${key} = ${resolved.value}`);
         // SWEEP-c: boot-only key + running daemon = stale-until-restart; say so loudly.
         if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
-          console.error(`note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`);
+          console.error(resolved.source === "env"
+            ? `note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; the saved value remains masked after restart while the environment override is set.`
+            : `note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`);
           if (key === "terminal.tmux_server") console.error("note: surviving sessions keep their previous server until deliberately stopped; rig terminal status shows the effective selection and any pending migration.");
         }
       } catch (err) {
@@ -219,9 +233,22 @@ Precedence: CLI flag > environment variable > config file > default`)
       try {
         store.reset(key);
         if (key) {
-          console.log(`${key} reset to default (${store.get(key)}).`);
+          const resolved = store.resolveWithSource(key);
+          console.log(resolved.source === "env"
+            ? `${key} file override cleared; effective value ${resolved.value} (source: env; default: ${resolved.defaultValue}).`
+            : `${key} reset to default (${resolved.value}).`);
         } else {
-          console.log("Config reset to defaults.");
+          let envKeys: string[] = [];
+          try {
+            envKeys = Object.entries(store.resolveAllWithSource())
+              .filter(([, resolved]) => resolved.source === "env")
+              .map(([name]) => name);
+          } catch (err) {
+            console.error(`note: could not read effective configuration after reset: ${(err as Error).message}`);
+          }
+          console.log(envKeys.length
+            ? `Config reset to defaults, except where the environment overrides them: ${envKeys.join(", ")}.`
+            : "Config reset to defaults.");
         }
       } catch (err) {
         console.error((err as Error).message);

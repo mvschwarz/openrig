@@ -84,12 +84,13 @@ describe("ControlReplies", () => {
 
 /** The line the exec writes to ask whether only control sessions are left on the server. */
 const ALONE_CHECK = "'list-sessions' '-F' '#{@openrig-control}'";
+const HOOKS_CHECK = "'list-sessions' '-F' '#{after-load-buffer}#{after-set-buffer}'";
 
 /** A control client that records the command lines written to it and answers only when told to. It attaches at once
  *  unless told to wait. The checks for control sessions alone are answered from `checks` in turn (by default, one
  *  answer: a session of no daemon's is left), then recorded as any other line. Its input closed, it exits, as tmux's
  *  client detaches. */
-function fakeClient(options: { attach?: boolean; checks?: string[][] } = {}) {
+function fakeClient(options: { attach?: boolean; checks?: string[][]; hooks?: string[] | null } = {}) {
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
     exitCode: null as number | null, signalCode: null as string | null, unref: () => {},
@@ -97,12 +98,19 @@ function fakeClient(options: { attach?: boolean; checks?: string[][] } = {}) {
   });
   const checks = [...(options.checks ?? [[""]])];
   const written: string[] = [];
+  const hookChecks: string[] = [];
   let n = 1;
   const answer = (...lines: string[]) => { n++; child.stdout.write(`%begin 1 ${n} 1\n${lines.map((l) => `${l}\n`).join("")}%end 1 ${n} 1\n`); };
   child.stdin.setEncoding("utf8");
   child.stdin.on("data", (chunk: string) => {
     for (const line of chunk.split("\n").filter(Boolean)) {
       if (line === ALONE_CHECK && checks.length > 0) answer(...checks.shift()!);
+      // The buffer-hook check, answered with no hook unless the test says otherwise; recorded in `hookChecks`.
+      else if (line === HOOKS_CHECK) {
+        hookChecks.push(line);
+        if (options.hooks === null) { n++; child.stdout.write(`%begin 1 ${n} 1\nfailed\n%error 1 ${n} 1\n`); }
+        else answer(...(options.hooks ?? [""]));
+      }
       else written.push(line);
     }
   });
@@ -115,7 +123,7 @@ function fakeClient(options: { attach?: boolean; checks?: string[][] } = {}) {
     child.signalCode = "SIGTERM";
     child.emit("exit", null, "SIGTERM");
   }
-  return { child: child as unknown as ChildProcessWithoutNullStreams, kill: child.kill, written, answer, attach, exit, ended: () => ended };
+  return { child: child as unknown as ChildProcessWithoutNullStreams, kill: child.kill, written, hookChecks, answer, attach, exit, ended: () => ended };
 }
 
 /** The tag a listing's own rows were marked with: the line is `before`, the owner d4e5's mark, then `after`. */
@@ -312,6 +320,89 @@ describe("tmuxControlExec", () => {
     }
   });
 
+  it("#161 says once per server version that control mode is off, why, and what to do", async () => {
+    let server = "3.4|\n";
+    let clock = 0;
+    const logged: string[] = [];
+    const exec = tmuxControlExec(async (argv) => (argv[1] === "list-sessions" ? server : ""), {
+      spawnClient: () => { throw new Error("no client expected"); }, now: () => clock, log: (message) => logged.push(message),
+    });
+    try {
+      expect(exec.status()).toEqual({ state: "undecided" });
+      for (const at of [0, 1_000, 10_000, 60_000]) {
+        clock = at;
+        await exec(["tmux", "has-session", "-t", "=seat@rig"]);
+      }
+      expect(exec.status()).toEqual({ state: "off", serverVersion: "3.4" });
+      expect(logged).toHaveLength(1);
+      expect(logged[0]).toMatch(/^\[tmux\] OPENRIG_TMUX_CONTROL=1 is set, but this daemon's tmux server runs tmux 3\.4/);
+      expect(logged[0]).toContain("3.7c or later");
+      expect(logged[0]).toContain("spawned client");
+      expect(logged[0]).toContain("tmux-servers.md");
+
+      // A server started again at another version is read again: one more line, for it.
+      server = "next-3.8|\n";
+      clock = 200_000;
+      await exec(["tmux", "has-session", "-t", "=seat@rig"]);
+      expect(exec.status()).toEqual({ state: "off", serverVersion: "next-3.8" });
+      expect(logged).toHaveLength(2);
+      expect(logged[1]).toContain("tmux next-3.8, which isn't a tmux release known to be 3.7c or later");
+
+      // No server, or none read yet: what was last read stands, and nothing more is said.
+      server = "";
+      clock = 400_000;
+      await exec(["tmux", "has-session", "-t", "=seat@rig"]);
+      expect(exec.status()).toEqual({ state: "off", serverVersion: "next-3.8" });
+      expect(logged).toHaveLength(2);
+    } finally {
+      await exec.close();
+    }
+  });
+
+  it("#161 says once that control mode is on when its server is a fixed release", async () => {
+    const client = fakeClient();
+    const { fallback } = fakeSpawned();
+    const logged: string[] = [];
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, replyTimeoutMs: 1000, log: (message) => logged.push(message) });
+    try {
+      for (const n of [1, 2]) {
+        const read = exec(["tmux", "display-message", "-p", "-t", "=seat@rig:", `r${n}`]);
+        await vi.waitFor(() => expect(client.written).toHaveLength(n));
+        client.answer(`r${n}`);
+        expect(await read).toBe(`r${n}\n`);
+      }
+      expect(exec.status()).toEqual({ state: "on", serverVersion: "3.8" });
+      expect(logged).toEqual(["[tmux] Control mode is on: this daemon's tmux server runs tmux 3.8."]);
+
+      // Its client gone, it is on only once another attaches: until then commands are spawned.
+      client.exit();
+      await vi.waitFor(() => expect(exec.status()).toEqual({ state: "allowed", serverVersion: "3.8" }));
+      expect(logged).toHaveLength(1);
+    } finally {
+      await exec.close();
+    }
+  });
+
+  it("#2707 a server that allows control mode doesn't read on while its client can't start or attach", async () => {
+    for (const failure of ["spawn", "attach"] as const) {
+      const client = fakeClient({ attach: false });
+      const { spawned, fallback } = fakeSpawned(() => "spawned\n");
+      const logged: string[] = [];
+      const exec = tmuxControlExec(fallback, {
+        spawnClient: failure === "spawn" ? () => { throw new Error("spawn failed"); } : () => client.child,
+        replyTimeoutMs: 50, log: (message) => logged.push(message),
+      });
+      try {
+        expect(await exec(["tmux", "display-message", "-p", "-t", "=seat@rig:", "x"]), failure).toBe("spawned\n");
+        expect(spawned, failure).toHaveLength(1);
+        expect(exec.status(), failure).toEqual({ state: "allowed", serverVersion: "3.8" });
+        expect(logged, failure).toEqual([]);
+      } finally {
+        await exec.close();
+      }
+    }
+  });
+
   it("keeps a client whose line moves: each reply restarts the wait of the command behind it", async () => {
     const client = fakeClient();
     const { spawned, fallback } = fakeSpawned();
@@ -394,6 +485,158 @@ describe("tmuxControlExec", () => {
     await exec(["tmux", "load-buffer", "-b", "b1", "/tmp/fifo", ";", "paste-buffer", "-b", "b1", "-t", "=seat@rig:"]);
     expect(spawned.map((argv) => argv[1])).toEqual(["load-buffer", "load-buffer"]);
     expect(client.written).toHaveLength(1);
+    await exec.close();
+  });
+
+  it("sets a short one-line text file's buffer through its client (set-buffer, the file read here): no spawn", async () => {
+    const client = fakeClient();
+    const { spawned, fallback } = fakeSpawned();
+    const reads: Array<[string, number]> = [];
+    const readBufferFile = async (path: string, maxBytes: number) => { reads.push([path, maxBytes]); return Buffer.from("-t it's é ; #{x} \\ ~"); };
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, now: () => 0, readBufferFile });
+    const load = exec(["tmux", "load-buffer", "-b", "b1", "/tmp/t1"]);
+    await vi.waitFor(() => expect(client.written).toEqual(["'set-buffer' '-b' 'b1' '--' '-t it'\\''s é ; #{x} \\ ~'"]));
+    client.answer();
+    expect(await load).toBe("");
+    expect(reads).toEqual([["/tmp/t1", 4096]]);
+    expect(spawned).toEqual([]);
+    await exec.close();
+  });
+
+  it.each([
+    ["a global or a session's after-load-buffer", ["x", ""]],
+    ["an after-set-buffer", ["", "y"]],
+  ])("keeps the spawned load-buffer, unread, while %s hook is set, and asks once per client", async (_what, hooks) => {
+    const client = fakeClient({ hooks });
+    const { spawned, fallback } = fakeSpawned();
+    const readBufferFile = vi.fn(async () => Buffer.from("short"));
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, now: () => 0, readBufferFile });
+    const argv = ["tmux", "load-buffer", "-b", "b1", "/tmp/t1"];
+    await exec([...argv]);
+    await exec([...argv]);
+    expect(spawned).toEqual([argv, argv]);
+    expect(client.written).toEqual([]);
+    expect(client.hookChecks).toHaveLength(1);
+    expect(readBufferFile).not.toHaveBeenCalled();
+    await exec.close();
+  });
+
+  it("keeps the spawned load-buffer when the buffer-hook check fails", async () => {
+    const client = fakeClient({ hooks: null });
+    const { spawned, fallback } = fakeSpawned();
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, now: () => 0, readBufferFile: async () => Buffer.from("short") });
+    const argv = ["tmux", "load-buffer", "-b", "b1", "/tmp/t1"];
+    await exec([...argv]);
+    expect(spawned).toEqual([argv]);
+    await exec.close();
+  });
+
+  it.each([
+    ["no regular file, or one past the bound", null],
+    ["a newline", Buffer.from("a\nb")],
+    ["a carriage return", Buffer.from("\r")],
+    ["a control character", Buffer.from("a\tb")],
+    ["a trailing ; (an argument's command end)", Buffer.from("abc;")],
+    ["bytes that are not UTF-8", Buffer.from([0x61, 0xff])],
+    ["nothing", Buffer.alloc(0)],
+    ["a failed read", new Error("EACCES")],
+  ])("keeps the spawned load-buffer for a file with %s", async (_what, content) => {
+    const client = fakeClient();
+    const { spawned, fallback } = fakeSpawned();
+    const readBufferFile = async () => { if (content instanceof Error) throw content; return content; };
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, now: () => 0, readBufferFile });
+    const argv = ["tmux", "load-buffer", "-b", "b1", "/tmp/t1"];
+    await exec([...argv]);
+    expect(spawned).toEqual([argv]);
+    expect(client.written).toEqual([]);
+    await exec.close();
+  });
+
+  it("reads no file for a load-buffer of another shape: stdin, another server, a chain, other flags", async () => {
+    const serverArgs = ["-L", "rig"];
+    const { spawned, fallback } = fakeSpawned(() => "", serverArgs);
+    const readBufferFile = vi.fn(async () => Buffer.from("x"));
+    const exec = tmuxControlExec(fallback, { spawnClient: () => { throw new Error("No control client expected"); }, serverArgs, readBufferFile });
+    const commands = [
+      ["tmux", ...serverArgs, "load-buffer", "-b", "b1", "-"],
+      ["tmux", "-L", "other", "load-buffer", "-b", "b1", "/tmp/t1"],
+      ["tmux", ...serverArgs, "load-buffer", "-b", "b1", "/tmp/t1", ";", "paste-buffer", "-b", "b1", "-t", "=s:"],
+      ["tmux", ...serverArgs, "load-buffer", "-w", "-b", "b1", "/tmp/t1"],
+      ["tmux", ...serverArgs, "load-buffer", "/tmp/t1"],
+    ];
+    for (const argv of commands) await exec(argv);
+    expect(spawned).toEqual(commands);
+    expect(readBufferFile).not.toHaveBeenCalled();
+    await exec.close();
+  });
+
+  it("routes only the set-buffer it made of a load-buffer: one a caller sends is spawned, alone or in a chain", async () => {
+    const client = fakeClient();
+    const { spawned, fallback } = fakeSpawned();
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, now: () => 0 });
+    const commands = [
+      ["tmux", "set-buffer", "-b", "b1", "--", "x"],
+      ["tmux", "set-buffer", "-b", "b1", "--", "x;", "send-keys", "-t", "=s:", "Enter"],
+    ];
+    for (const argv of commands) await exec(argv);
+    expect(spawned).toEqual(commands);
+    expect(client.written).toEqual([]);
+    await exec.close();
+  });
+
+  it("spawns the original load-buffer, never a set-buffer, when no client can run", async () => {
+    const { spawned, fallback } = fakeSpawned();
+    const readBufferFile = vi.fn(async () => Buffer.from("short"));
+    const exec = tmuxControlExec(fallback, { spawnClient: () => { throw new Error("no tmux"); }, readBufferFile });
+    const argv = ["tmux", "load-buffer", "-b", "b1", "/tmp/t1"];
+    await exec([...argv]);
+    expect(spawned).toEqual([argv]);
+    // the file is read only once a client is there to take the set-buffer
+    expect(readBufferFile).not.toHaveBeenCalled();
+    await exec.close();
+  });
+
+  it("routes a set-option that names an absolute target; one without (-g, -s), relative, or with -F, stays spawned", async () => {
+    const client = fakeClient();
+    const { spawned, fallback } = fakeSpawned();
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, now: () => 0 });
+    const routed = [
+      ["tmux", "set-option", "-w", "-t", "=seat@rig:1", "remain-on-exit", "on"],
+      ["tmux", "set-option", "-p", "-u", "-t", "%3", "@openrig-x"],
+      ["tmux", "set-option", "-t", "=seat@rig", "@openrig-node", "n1"],
+      ["tmux", "set-option", "-wt@4", "@openrig-y", "1"],
+      ["tmux", "set-option", "-t", "seat:2", "@openrig-z", "1"],
+    ];
+    for (const argv of routed) {
+      const call = exec(argv);
+      await vi.waitFor(() => expect(client.written).toHaveLength(routed.indexOf(argv) + 1));
+      client.answer();
+      await call;
+    }
+    expect(client.written).toEqual([
+      "'set-option' '-w' '-t' '=seat@rig:1' 'remain-on-exit' 'on'",
+      "'set-option' '-p' '-u' '-t' '%3' '@openrig-x'",
+      "'set-option' '-t' '=seat@rig' '@openrig-node' 'n1'",
+      "'set-option' '-wt@4' '@openrig-y' '1'",
+      "'set-option' '-t' 'seat:2' '@openrig-z' '1'",
+    ]);
+    const kept = [
+      ["tmux", "set-option", "-s", "escape-time", "0"],
+      ["tmux", "set-option", "-g", "@x", "-t"],
+      ["tmux", "set-option", "-F", "-t", "=seat@rig", "@x", "#{client_name}"],
+      ["tmux", "set-option", "--", "-t"],
+      ["tmux", "set-option", "-t", "=seat@rig", "-F", "@x", "#{client_name}"],
+      // relative targets resolve against the control client's own session: they stay spawned
+      ["tmux", "set-option", "-w", "-t", ":0", "remain-on-exit", "on"],
+      ["tmux", "set-option", "-w", "-t", "1", "remain-on-exit", "on"],
+      ["tmux", "set-option", "-w", "-t", "{last}", "remain-on-exit", "on"],
+      ["tmux", "set-option", "-t", "seat", "@x", "1"],
+      ["tmux", "set-option", "-wt:1", "@x", "1"],
+      ["tmux", "set-option", "-t", "=seat@rig", "-t", ":0", "@x", "1"],
+    ];
+    for (const argv of kept) await exec(argv);
+    expect(spawned).toEqual(kept);
+    expect(client.written).toHaveLength(5);
     await exec.close();
   });
 

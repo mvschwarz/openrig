@@ -34,7 +34,7 @@ import { AppliedLaunchObservationStore } from "./applied-launch-observation-stor
 import { findOtherSessionOwner } from "./session-owner.js";
 import { heldMessagesNotice } from "./outbox-handler.js";
 import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
-import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
+import { retireSeatCoreSkillCopiesForNode, seatSkillPluginDirForNode } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
 import { inspectStartupStagedText, startupNoInputLine, startupOwnCollapsedPaste, STARTUP_UNCONFIRMED_REASON } from "./startup-submission-evidence.js";
 
@@ -559,6 +559,9 @@ export class SeatHandoverService {
       ...guidancePutBack.notes.map((note) => `guidance_put_back: ${note}`),
     ];
     const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, undefined, this.pluginsDir);
+    // #2426: a seat that loads the vendored openrig-core itself drops OpenRig's earlier copies of its skills before its
+    // successor starts, as a launch does: once the predecessor has exited (never under a running occupant), before respawn.
+    const coreCopyNotes: string[] = [];
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
       // 0.5.2-07 model fidelity: carry the seat's SPEC-pinned model so the successor launch reads the
@@ -571,9 +574,10 @@ export class SeatHandoverService {
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
       // resolved id — it carries the incumbent context from its first byte.
       ...(forkSource ? { forkSource } : {}),
-      ...(predecessorGeneration
-        ? { onReplacementStarted: () => { this.appliedLaunchObservations.invalidateGeneration(predecessorGeneration); } }
-        : {}),
+      onReplacementStarted: () => {
+        if (predecessorGeneration) this.appliedLaunchObservations.invalidateGeneration(predecessorGeneration);
+        if (corePluginDir) coreCopyNotes.push(...retireSeatCoreSkillCopiesForNode(this.db, node.id, corePluginDir));
+      },
     });
     if (!launch.ok) {
       return {
@@ -743,6 +747,7 @@ export class SeatHandoverService {
       sourceOutcome,
       launchAdditionNotes,
       startedWithoutRequired,
+      launchWarnings: coreCopyNotes,
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
     });
   }
@@ -798,6 +803,8 @@ export class SeatHandoverService {
     sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
     launchAdditionNotes?: string[];
     startedWithoutRequired?: string[];
+    /** #2426: what the successor's preparation named, as a launch's warnings (what became of openrig-core's earlier copies). */
+    launchWarnings?: string[];
     cleanup: (() => Promise<void>) | null;
   }): Promise<SeatHandoverResult> {
     const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
@@ -935,6 +942,8 @@ export class SeatHandoverService {
       try { if (typed && (await this.tmuxAdapter.sendText(discovered.tmuxSession, held)).ok) { await this.sleep(200); await this.tmuxAdapter.sendKeys(discovered.tmuxSession, ["Enter"]); } }
       catch { /* the notice is best-effort */ }
     }
+    // #2426: the successor's preparation is named on the result, as a launch names it.
+    if (input.launchWarnings?.length && "result" in committed) committed.result.warnings = [...(committed.result.warnings ?? []), ...input.launchWarnings];
     return committed;
   }
 

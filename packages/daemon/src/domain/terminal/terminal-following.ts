@@ -60,10 +60,10 @@ export class TerminalFollowing {
   private async apply(selected: Selection, controls: FollowControls): Promise<OpenViewResult> {
     const result = await this.render(selected.selector, controls);
     const key = this.key(selected.selector);
-    // A complete empty task has finished. Keep its provider workspace, but
-    // retire automatic work and release the active-selector slot. Explicit
+    // A fixed snapshot or complete empty task stops automatic work. Keep the
+    // provider workspace and release the active-selector slot. Explicit
     // --follow can resume the same journaled workspace if work returns.
-    if (selected.selector.view.startsWith("qitem:") && result.ok && result.following?.state === "empty") {
+    if (result.following?.enabled === false || (selected.selector.view.startsWith("qitem:") && result.ok && result.following?.state === "empty")) {
       this.selections.delete(key); selected.enabled = false;
       result.following.enabled = false;
       this.save();

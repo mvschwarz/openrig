@@ -33,6 +33,9 @@ eventsRoute.get("/", (c) => {
 
     // 1. Subscribe to live bus BEFORE replay query (no gap)
     const unsubscribe = eventBus.subscribe((event) => {
+      // A transient event (view.changed) is never stored, so it is never replayed and its seq is its cause's: this
+      // stream carries stored events only, live and replayed alike.
+      if (event.transient) return;
       // Rig-scoped: filter by rigId. Global: accept all events.
       if (rigId) {
         const eventRigId = "rigId" in event ? (event as { rigId: string }).rigId : null;

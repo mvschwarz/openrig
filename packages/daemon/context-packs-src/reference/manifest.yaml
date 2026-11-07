@@ -17,6 +17,9 @@ files:
   - path: rig-spec.md
     role: reference
     summary: "The rig specification format."
+  - path: tmux-servers.md
+    role: reference
+    summary: "Choosing the daemon's tmux server, and moving an existing team onto tmux control mode (linked from rig doctor and the daemon's log)."
   - path: whats-new.md
     role: reference
     summary: "What changed in the installed version, for an agent on an upgraded install."

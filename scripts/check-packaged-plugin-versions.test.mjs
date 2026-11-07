@@ -50,6 +50,22 @@ test('changed packaged plugin content requires a strictly newer version', t => {
   assert.throws(() => checkPackagedPluginVersions(dir, baseline), /plugin missing/);
 });
 
+for (const manifest of ['plugin.json', '.cursor-plugin/plugin.json']) {
+  test(`a ${manifest} must carry the harness manifests' version`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'plugin-version-root-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const plugin = join(dir, 'daemon/assets/plugins/app');
+    for (const harness of ['.claude-plugin', '.codex-plugin', '.cursor-plugin']) mkdirSync(join(plugin, harness), { recursive: true });
+    for (const harness of ['.claude-plugin', '.codex-plugin']) {
+      writeFileSync(join(plugin, harness, 'plugin.json'), JSON.stringify({ name: 'app', version: '0.1.0' }));
+    }
+    writeFileSync(join(plugin, manifest), JSON.stringify({ name: 'app', version: '0.1.0' }));
+    assert.equal(snapshotPlugins(dir).app.version, '0.1.0');
+    writeFileSync(join(plugin, manifest), JSON.stringify({ name: 'app', version: '0.2.0' }));
+    assert.throws(() => snapshotPlugins(dir), /versions disagree/);
+  });
+}
+
 test('plugin roots and consumed manifests are not followed through links', t => {
   const dir = mkdtempSync(join(tmpdir(), 'plugin-link-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

@@ -8,6 +8,7 @@ import {
   addHumanFragment,
   projectHumans,
   resolveSlackHandle,
+  resolveRelayHandle,
   humansDir,
   type HumanFragment,
 } from "../src/domain/gateway/human-registry.js";
@@ -30,6 +31,9 @@ function frag(entityId: string, bindings: Record<string, unknown>[]): Record<str
 }
 const slack = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   kind: "slack", connectorRef: "slack-main", secretsRef: "vault://slack/x", role: "primary", ...over,
+});
+const relay = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  kind: "relay", connectorRef: "relay-main", secretsRef: "file:/etc/openrig/relay.env", role: "primary", ...over,
 });
 
 describe("A6 v3 handle schema", () => {
@@ -56,6 +60,21 @@ describe("A6 v3 handle schema", () => {
     ]));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toMatch(/duplicate .*handle|unique per kind/i);
+  });
+
+  it("relay handle within-fragment uniqueness is scoped to connectorRef", () => {
+    const dupSameRef = validateHumanFragment(frag("mike", [
+      relay({ connectorRef: "relay-a", handle: "alice", role: "primary" }),
+      relay({ connectorRef: "relay-a", handle: "alice", role: "secondary" }),
+    ]));
+    expect(dupSameRef.ok).toBe(false);
+    if (!dupSameRef.ok) expect(dupSameRef.error).toMatch(/duplicate .*handle/i);
+
+    const diffRefs = validateHumanFragment(frag("mike", [
+      relay({ connectorRef: "relay-a", handle: "alice", role: "primary" }),
+      relay({ connectorRef: "relay-b", handle: "alice", role: "secondary" }),
+    ]));
+    expect(diffRefs.ok).toBe(true);
   });
 });
 
@@ -88,6 +107,40 @@ describe("A6 v3 handle uniqueness across humans (pin-1 registry-level)", () => {
     const r = addHumanFragment(frag("mike", [slack({ handle: "U1", connectorRef: "slack-main" })]), home, { replace: true });
     expect(r.ok).toBe(true);
   });
+
+  it("relay handle uniqueness across humans is scoped by connectorRef (same ref collides, different ref allowed)", () => {
+    expect(addHumanFragment(frag("mike", [relay({ connectorRef: "relay-a", handle: "op" })]), home).ok).toBe(true);
+    const collision = addHumanFragment(frag("dana", [relay({ connectorRef: "relay-a", handle: "op" })]), home);
+    expect(collision.ok).toBe(false);
+    if (!collision.ok) expect(collision.error).toMatch(/already registered to human "mike"|registration conflict/i);
+
+    const differentRef = addHumanFragment(frag("dana", [relay({ connectorRef: "relay-b", handle: "op" })]), home);
+    expect(differentRef.ok).toBe(true);
+  });
+
+  it("handles relay connectorRef containing colons unambiguously without false collision", () => {
+    // If colon-concatenation were used ("relay:" + connectorRef + ":" + handle),
+    // ("net:east", "worker") and ("net", "east:worker") could collide if handles permitted colons.
+    // Even with handle restricted to HANDLE_PATTERN, distinct connectorRefs like "bridge:1" vs "bridge"
+    // with handles "2" and "1:2" would be ambiguous if handles had colons.
+    // With unambiguous JSON tuple [kind, connectorRef, handle], different connectorRefs with colons never falsely collide.
+    expect(addHumanFragment(frag("mike", [relay({ connectorRef: "region:us-east:primary", handle: "admin" })]), home).ok).toBe(true);
+    const otherRef = addHumanFragment(frag("dana", [relay({ connectorRef: "region:us-east:secondary", handle: "admin" })]), home);
+    expect(otherRef.ok).toBe(true);
+
+    const sameColonRefCollision = addHumanFragment(frag("alex", [relay({ connectorRef: "region:us-east:primary", handle: "admin" })]), home);
+    expect(sameColonRefCollision.ok).toBe(false);
+  });
+
+  it("projectHumans refuses two fragments colliding on the same relay connectorRef+handle", () => {
+    const dir = humansDir(home);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "mike.yaml"), stringifyYaml(frag("mike", [relay({ connectorRef: "relay-a", handle: "op" })])));
+    writeFileSync(join(dir, "dana.yaml"), stringifyYaml(frag("dana", [relay({ connectorRef: "relay-a", handle: "op" })])));
+    const p = projectHumans(home);
+    expect(p.ok).toBe(false);
+    if (!p.ok) expect(p.error).toMatch(/claimed by both|registration conflict/i);
+  });
 });
 
 describe("A6 v3 resolveSlackHandle (pins 2+3)", () => {
@@ -114,5 +167,49 @@ describe("A6 v3 resolveSlackHandle (pins 2+3)", () => {
     // dana has a binding with no handle; nothing about dana can be resolved inbound.
     const r = resolveSlackHandle("slack-2", [registered, outboundOnly]); // even matching connectorRef must not resolve
     expect(r.kind).toBe("unregistered");
+  });
+});
+
+describe("resolveRelayHandle (scoped to connectorRef + handle)", () => {
+  const mike = (validateHumanFragment(frag("mike", [relay({ connectorRef: "relay-a", handle: "founder" })])) as { ok: true; fragment: HumanFragment }).fragment;
+  const dana = (validateHumanFragment(frag("dana", [relay({ connectorRef: "relay-a", handle: "partner" })])) as { ok: true; fragment: HumanFragment }).fragment;
+  const otherRelay = (validateHumanFragment(frag("alex", [relay({ connectorRef: "relay-b", handle: "founder" })])) as { ok: true; fragment: HumanFragment }).fragment;
+  const outboundRelay = (validateHumanFragment(frag("outbound", [relay({ connectorRef: "relay-a" })])) as { ok: true; fragment: HumanFragment }).fragment;
+  const slackOnly = (validateHumanFragment(frag("slackperson", [slack({ connectorRef: "relay-a", handle: "slack-alias" })])) as { ok: true; fragment: HumanFragment }).fragment;
+  const all = [mike, dana, otherRelay, outboundRelay, slackOnly];
+
+  it("resolves a registered relay connectorRef+handle to the exact person on that relay", () => {
+    expect(resolveRelayHandle("relay-a", "founder", all)).toMatchObject({
+      kind: "registered",
+      entityId: "mike",
+      address: "mike@external",
+      connectorRef: "relay-a",
+      handle: "founder",
+    });
+    expect(resolveRelayHandle("relay-a", "partner", all)).toMatchObject({
+      kind: "registered",
+      entityId: "dana",
+      address: "dana@external",
+      connectorRef: "relay-a",
+      handle: "partner",
+    });
+    expect(resolveRelayHandle("relay-b", "founder", all)).toMatchObject({
+      kind: "registered",
+      entityId: "alex",
+      address: "alex@external",
+      connectorRef: "relay-b",
+      handle: "founder",
+    });
+  });
+
+  it("rejects cross-profile handle assertions, slack handles, and handle-less relay bindings", () => {
+    const wrongProfile = resolveRelayHandle("relay-b", "partner", all);
+    expect(wrongProfile.kind).toBe("unregistered");
+    if (wrongProfile.kind === "unregistered") {
+      expect(wrongProfile.error).toMatch(/not a registered human/i);
+      expect(wrongProfile.error).toMatch(/NOT landed as a fabricated human seat/i);
+    }
+    expect(resolveRelayHandle("relay-a", "slack-alias", all).kind).toBe("unregistered");
+    expect(resolveRelayHandle("relay-a", "relay-a", all).kind).toBe("unregistered");
   });
 });

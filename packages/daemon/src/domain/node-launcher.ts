@@ -17,7 +17,7 @@ import type { OccupantKind } from "./session-registry.js";
 import { mergeSeatEnv, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { withoutRuntimeHomes } from "./seat-runtime-home.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
-import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
+import { retireSeatCoreSkillCopiesForNode, seatSkillPluginDirForNode } from "./seat-skill-storage.js";
 import { seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
 import { terminatePaneInPlace, type PaneCutoverTiming } from "./pane-cutover.js";
 
@@ -200,6 +200,10 @@ export class NodeLauncher {
     // collision, never authority to kill an unmanaged same-name session.
     const specEnv = this.rigRepo.getEffectiveSeatEnv(node.id);
     const corePluginDir = seatCorePluginDir(node, this.db, opts?.pluginPaths, this.pluginsDir);
+    // #2426: a seat that loads the vendored plugin itself drops OpenRig's earlier copies of its skills before it starts.
+    // A kept pane's running occupant is stopped only inside takeOverPane, so there the copies wait until it has ended.
+    const retireCoreCopies = () => corePluginDir ? retireSeatCoreSkillCopiesForNode(this.db, node.id, corePluginDir) : [];
+    const coreCopyNotes: string[] = opts?.keepPane ? [] : retireCoreCopies();
     // OPR.0.7.0.13 — the seat's own skills, from storage keyed by its rig and logical seat (every launch path).
     const seatSkillDir = seatSkillPluginDirForNode(this.db, node.id);
     // OPR.0.7.0.9: the seat's own plugin folders (copies in its seat storage), after its generated plugin.
@@ -237,9 +241,11 @@ export class NodeLauncher {
     if (!selectedRegistrationAllowed()) {
       return { ok: false, code: "selection_changed_after_creation", message: "The selected node or history changed during terminal creation. The terminal outcome needs inspection." };
     }
+    // The kept pane's process has ended in place and a bare shell runs there; nothing has launched into it yet.
+    if (opts?.keepPane) coreCopyNotes.push(...retireCoreCopies());
 
     // The session's own non-fatal warnings (#771: the parent-session identity cleanup).
-    const launchWarnings: string[] = [...(tmuxResult.warnings ?? [])];
+    const launchWarnings: string[] = [...coreCopyNotes, ...(tmuxResult.warnings ?? [])];
 
     // A one-off `rig up --env` value is on the first pane's command line and, because that is how
     // `new-session -e` works, in the session environment, which a respawned pane (a handover

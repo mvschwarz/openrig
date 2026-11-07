@@ -5,7 +5,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { ensureSeatSkillPlugin, seatSkillLocation, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { reconcileSkillLoadout, resolvePluginSkills } from "../src/domain/skill-catalog.js";
 import { prepareSeatLaunchAdditions, systemPromptPendingNote } from "../src/domain/seat-launch-additions.js";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -1876,6 +1877,62 @@ describe("SeatHandoverService", () => {
       expect(systemPromptPendingNote(paths, "claude-successor-tok")).toBeUndefined();
     } finally {
       fs.rmSync(src, { recursive: true, force: true });
+    }
+  });
+
+  it("#2426: a Claude seat that loads openrig-core itself drops OpenRig's earlier copies of its skills once its predecessor has exited, before its successor starts, and names them", async () => {
+    const saved = process.env["OPENRIG_HOME"];
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "handover-core-copies-"));
+    process.env["OPENRIG_HOME"] = home;
+    try {
+      // The vendored core, which the seat's saved selection loads directly, and the copies a launch before #2433 left.
+      const core = path.join(home, "plugins", "openrig-core");
+      fs.mkdirSync(path.join(core, ".claude-plugin"), { recursive: true });
+      fs.writeFileSync(path.join(core, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "openrig-core", version: "0.7.9" }));
+      for (const id of ["alpha", "edited"]) {
+        fs.mkdirSync(path.join(core, "skills", id), { recursive: true });
+        fs.writeFileSync(path.join(core, "skills", id, "SKILL.md"), `---\nname: ${id}\ndescription: The ${id} skill.\n---\n\nUse it.\n`);
+      }
+      const { rig, node } = seedSeat({ runtime: "claude-code" });
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'claude-code')")
+        .run(node.id, JSON.stringify([{ category: "plugin", absolutePath: core }]));
+      const paths = seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "claude-code" });
+      ensureSeatSkillPlugin(paths);
+      const old = reconcileSkillLoadout({
+        loadout: { catalogRoot: home, catalogRevision: null, catalogDigest: null, projectSelectionDeclared: false, projectSelection: [],
+          entries: resolvePluginSkills({ pluginId: "openrig-core", pluginRoot: core, runtime: "claude-code" }).entries },
+        runtime: "claude-code", cwd: paths.root, apply: true, topologyOwner: "dev-impl@seat-rig", location: seatSkillLocation(paths),
+      });
+      expect(old.errors).toEqual([]);
+      fs.writeFileSync(path.join(paths.skillsRoot, "edited", "SKILL.md"), "My own notes.\n");
+      const alpha = path.join(paths.skillsRoot, "alpha");
+      // Nothing is removed under the running predecessor; the successor's harness starts without the copy.
+      const presentWhenSignalled: boolean[] = [];
+      signalPaneProcess.mockImplementation(async () => { presentWhenSignalled.push(fs.existsSync(alpha)); return { ok: true }; });
+      const presentAtLaunch: boolean[] = [];
+      launchHarness.mockImplementation(async () => { presentAtLaunch.push(fs.existsSync(alpha)); return { ok: true, resumeToken: "claude-successor-tok", resumeType: "claude_id" }; });
+      capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
+      const claude = new SeatHandoverService({
+        db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux(),
+        now: () => new Date("2026-04-24T18:30:00.000Z"), newSuccessorId: () => "01SUCCID0",
+        runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
+        contextUsageStore: { readSidecar } as never, resumeTokenCapturer: { captureCodexThreadId } as never,
+        claudeProcessStartedAt: async () => "2026-04-24T18:29:59.000Z",
+        occupantInvalidator: { invalidateRetiringOccupant }, activityOracle: { declareOccupantSwap },
+        predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 50, sleep: async () => {},
+      });
+      const result = await claude.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh", operator: "orch-lead@seat-rig" });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      expect(presentWhenSignalled[0]).toBe(true);
+      expect(presentAtLaunch).toEqual([false]);
+      expect("result" in result ? result.result.warnings : undefined).toEqual(expect.arrayContaining([
+        "Seat skills: removed OpenRig's copy of openrig-core's alpha, which this seat now loads from the plugin itself",
+        `Seat skills: kept ${path.join(paths.skillsRoot, "edited")}, though openrig-core also supplies edited: it was changed after OpenRig wrote it`,
+      ]));
+      expect(fs.readFileSync(path.join(paths.skillsRoot, "edited", "SKILL.md"), "utf8")).toBe("My own notes.\n");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 

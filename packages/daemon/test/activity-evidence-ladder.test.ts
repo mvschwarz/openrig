@@ -427,3 +427,53 @@ describe("AM-2 promotion counts agreements per relay route", () => {
     expect(s.trust()).toBe("authoritative");
   });
 });
+
+describe("#2661 (b) — a background shell is a fact beside activity, never an activity", () => {
+  let h: ReturnType<typeof makeHarness>;
+  beforeEach(() => {
+    h = makeHarness();
+    h.svc.declareRungInventory({ seatNodeId: SEAT, sessionName: SESSION }, CLAUDE_INVENTORY);
+  });
+
+  it("self-report shell sets backgroundWork on the arbitrated state, without moving seq or changedAt off a plain idle", () => {
+    h.svc.reportEvidence(ev(h.clock, "self-report", "claude:pid-json", "idle-at-prompt"));
+    const idle = h.svc.getSeatState(SEAT)!;
+    expect(idle.backgroundWork ?? null).toBeNull();
+    h.clock.now += 5_000;
+    h.svc.reportEvidence(ev(h.clock, "self-report", "claude:pid-json", "idle-at-prompt", { backgroundWork: true }));
+    const shell = h.svc.getSeatState(SEAT)!;
+    expect(shell.activity).toBe("idle-at-prompt");
+    expect(shell.backgroundWork).toEqual({ rung: "self-report", observedAt: new Date(h.clock.now).toISOString() });
+    expect(shell.seq).toBe(idle.seq);
+    expect(shell.changedAt).toBe(idle.changedAt);
+  });
+
+  it("consecutive shell reports keep the first observedAt: the anchor of a grace does not slide", () => {
+    h.svc.reportEvidence(ev(h.clock, "self-report", "claude:pid-json", "idle-at-prompt", { backgroundWork: true }));
+    const first = new Date(h.clock.now).toISOString();
+    h.clock.now += 60_000;
+    h.svc.reportEvidence(ev(h.clock, "self-report", "claude:pid-json", "idle-at-prompt", { backgroundWork: true }));
+    expect(h.svc.getSeatState(SEAT)!.backgroundWork?.observedAt).toBe(first);
+  });
+
+  it("a later busy, idle or dialog clears it", () => {
+    for (const next of [
+      ev(h.clock, "self-report", "claude:pid-json", "working"),
+      ev(h.clock, "self-report", "claude:pid-json", "idle-at-prompt"),
+      ev(h.clock, "self-report", "claude:pid-json", undefined, { needsInput: { count: 1, reason: "dialog owns input" } }),
+    ]) {
+      h.svc.reportEvidence(ev(h.clock, "self-report", "claude:pid-json", "idle-at-prompt", { backgroundWork: true }));
+      expect(h.svc.getSeatState(SEAT)!.backgroundWork).toBeTruthy();
+      h.svc.reportEvidence({ ...next, seq: ++seqCounter });
+      expect(h.svc.getSeatState(SEAT)!.backgroundWork ?? null).toBeNull();
+    }
+  });
+
+  it("a seat without the self-report rung never carries it", () => {
+    const other = "node-codex-1";
+    h.svc.declareRungInventory({ seatNodeId: other, sessionName: "codex@r" }, CODEX_INVENTORY);
+    h.svc.reportEvidence({ ...ev(h.clock, "self-report", "codex:pid-json", "idle-at-prompt", { backgroundWork: true }),
+      seatNodeId: other, sessionName: "codex@r" });
+    expect(h.svc.getSeatState(other)?.backgroundWork ?? null).toBeNull();
+  });
+});

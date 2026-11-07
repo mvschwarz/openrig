@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { Command, InvalidArgumentError } from "commander";
-import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError, type DaemonResponse } from "../client.js";
-import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError, remoteDaemonClient, type DaemonResponse } from "../client.js";
+import { getDaemonStatus, getDaemonUrl , daemonStatusGuard, resolveOriginSelfHostId } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { sessionRigOf, isHumanSeatSessionRef } from "../session-name.js";
 import { realDeps } from "./daemon.js";
@@ -10,11 +10,13 @@ import { enumArg, positiveIntArg } from "../cli-error.js";
 import type { StatusDeps } from "./status.js";
 import { resolveContextRef } from "../context-resolve.js";
 import { shellQuote } from "../cross-host-executor.js";
-import { loadHostRegistry, resolveHost, resolveRemoteBearer } from "../host-registry.js";
+import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer } from "../host-registry.js";
 import { loadHostBindings } from "../host-bindings.js";
+import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
+import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "../queue-artifact.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -36,6 +38,8 @@ export interface DeliveryVerifyDeps {
 
 export interface QueueDeps extends StatusDeps {
   deliveryVerify?: DeliveryVerifyDeps;
+  /** The host registry `--host` resolves against on the verbs that name an existing row; tests give their own. */
+  hostRegistryLoader?: () => ReturnType<typeof loadHostRegistry>;
 }
 
 interface DeliveryResultBase {
@@ -558,6 +562,45 @@ async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: st
   return { reader, options };
 }
 
+/** Where a verb that names an existing row (show, transitions, list, claim, update, block) sends its request with
+ *  `--host`: the remote daemon itself, called by this CLI with the host's bearer, as `send --host` does (#2637). The
+ *  selected daemon has no route that reads another host's queue, and a direct call lets the remote record the actor
+ *  as `<seat>@<rig>@<this host>`, the provenance `send --host` gives. Without `--host`, `local`, or a `--host` naming
+ *  the selected daemon's own host id, the selected daemon, unchanged. Explicit-only: never `rig host select`. */
+interface QueueHostTarget { client: DaemonClient; options: { headers?: Record<string, string>; timeoutMs?: number }; remote?: string }
+
+async function queueHostTarget(deps: QueueDeps, local: DaemonClient, hostId: string | undefined, write: boolean): Promise<QueueHostTarget | { error: string; message: string }> {
+  const remote = remoteHostOf(hostId);
+  if (!remote) return { client: local, options: {} };
+  // A --host naming the selected daemon's own id stays local, as create's does (the daemon's resolvesToLocalHost).
+  if (await daemonSelfHostId(local) === remote) return { client: local, options: {} };
+  const registry = (deps.hostRegistryLoader ?? loadHostRegistry)();
+  if (!registry.ok) return { error: "host_registry_unreadable", message: `--host ${remote}: this CLI's host registry can't be read (${registry.error}).` };
+  // The queue forwarder's rule for learned bindings (one policy): a self-id resolves only through a binding learned at
+  // its entry's current URL, with no recorded conflict, so a stale binding never sends a write to a replaced endpoint.
+  const learned = loadHostBindings();
+  const match = resolveHost(registry.registry, remote, eligibleQueueBindings(registry.registry, learned));
+  if (!match.ok) {
+    const unused = ineligibleBindingDetail(registry.registry, learned, remote);
+    return { error: "unknown_host", message: `--host ${remote}: no such host in this CLI's host registry (see rig host list).${unused ? ` ${unused}` : ""}` };
+  }
+  if (match.host.transport !== "http") return { error: "host_not_http", message: `--host ${remote}: its registry entry is SSH, not a daemon URL; queue verbs need an http host.` };
+  const bearer = resolveRemoteBearer(match.host);
+  if (!bearer.ok) return { error: "host_bearer_unavailable", message: `--host ${remote}: ${bearer.error}` };
+  const client = remoteDaemonClient(deps.clientFactory, match.host.url, await resolveOriginSelfHostId(deps.lifecycleDeps));
+  const headers = bearerAuthHeaders(bearer.token);
+  return {
+    client,
+    options: { ...(Object.keys(headers).length > 0 ? { headers } : {}), ...(write ? { timeoutMs: CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS } : {}) },
+    remote,
+  };
+}
+
+/** The ` --host <id>` a printed follow-up command needs to reach the same row again. */
+function hostFlag(target: QueueHostTarget): string {
+  return target.remote ? ` --host ${shellQuote(target.remote)}` : "";
+}
+
 /** A successful forward isn't a delivery receipt. Never accept a different remote row as this create's receipt. */
 function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Pick<DaemonClient, "get"> {
   if (!remoteHostOf(hostId)) return client;
@@ -604,8 +647,10 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
   }
 }
 
-async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null): Promise<void> {
-  const settled = receipt && status < 400 ? await settleReceiptHost(client, receipt) : null;
+async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null, hostUsed = false): Promise<void> {
+  // A direct --host write already settled its host when it chose the target: its receipt keeps the host it used.
+  // create and handoff, which the selected daemon forwards, are settled here as before.
+  const settled = receipt && status < 400 ? (hostUsed ? receipt : await settleReceiptHost(client, receipt)) : null;
   const projected = settled ? buildWriteReceipt(body, settled) : null;
   if (!projected) {
     printResult(json, body, status);
@@ -622,6 +667,7 @@ async function printQueueItemResult(
   body: unknown,
   status: number,
   receipt: ReceiptContext | null = null,
+  remoteHost?: string,
 ): Promise<void> {
   if (status >= 400 && body && typeof body === "object"
     && (body as { error?: unknown }).error === "qitem_not_found") {
@@ -636,10 +682,11 @@ async function printQueueItemResult(
     body = {
       ...body,
       hint: `Queue item ${JSON.stringify(qitemId)} was not found on ${daemon}.\n`
-        + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(qitemId)} --full --json`,
+        + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(qitemId)} --full --json`
+        + (remoteHost ? "" : `\nOr name that host: rig queue show ${shellQuote(qitemId)} --host <host-id> --full --json`),
     };
   }
-  await printWriteResult(client, json, body, status, receipt);
+  await printWriteResult(client, json, body, status, receipt && remoteHost ? { ...receipt, remoteHost } : receipt, remoteHost !== undefined);
 }
 
 // OPR.0.4.3.03 — `rig queue show` body preview.
@@ -921,6 +968,9 @@ function emitHostResolutionError(res: { error: string; message: string }, json: 
 
 const QUEUE_HOST_OPTION_HELP =
   "OPR.0.4.6.MH3: route this queue write to a REGISTERED remote host (see rig host ls). EXPLICIT-ONLY — queue verbs never follow the persisted 'rig host select' selection. Equivalent to the host-qualified destination form member@rig@<host>.";
+
+const QUEUE_HOST_ROW_OPTION_HELP =
+  "#2637: read or act on a row held by a REGISTERED remote host (see rig host ls). This CLI calls that host's daemon directly with its bearer, as send --host does; a write is recorded there as <seat>@<rig>@<this host>. EXPLICIT-ONLY — queue verbs never follow the persisted 'rig host select' selection. A blocker, watchdog or row id given with it must exist on that host.";
 
 export function queueCommand(depsOverride?: QueueDeps): Command {
   const cmd = new Command("queue").description("Coordination L3 — owned-work queue + inbox/outbox");
@@ -1206,6 +1256,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // no body claim. Verify the env (the header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!requireSeatSession("destination")) return;
       const deps = getDeps();
+      // No --host here (#2678 review): a row is claimed by its destination seat, on the host that holds it.
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "claim" }));
@@ -1246,8 +1297,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
     .option("--wake-after <duration>", "For state=blocked: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
     .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
-    .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done)")
+    .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
     .option("--note <text>", "Transition note for the audit log")
+    .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
@@ -1264,6 +1316,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       summary?: string;
       evidenceRef?: string;
       note?: string;
+      host?: string;
       json?: boolean;
       full?: boolean;
     }) => {
@@ -1287,8 +1340,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal). Matches `resolve`.
       if (!requireSeatSession("actor")) return;
       const deps = getDeps();
-      await withClient(deps, async (client) => {
-        const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
+      await withClient(deps, async (local) => {
+        const target = await queueHostTarget(deps, local, opts.host, true);
+        if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state: opts.state,
           reopen: opts.reopen,
           closureReason: opts.closureReason,
@@ -1301,9 +1356,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
-        });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }));
-      });
+        }, target.options);
+        await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }), target.remote);
+      }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
     });
 
   // OPR.0.4.4.19 FR-6 — the first-class park affordance (C5 leg 1). One verb,
@@ -1324,6 +1379,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--continuation <text>", "What resumes. Workspace deferred/not-imminent work belongs in a mission/slice")
     .option("--wake-watchdog <jobId>", "Attach an existing live watchdog id targeting the parked owner")
     .option("--wake-after <duration>", "Atomically arm a timer with the park (for example 90s, 15m, 2h)", wakeDurationSeconds)
+    .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
@@ -1345,6 +1401,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       continuation?: string;
       wakeWatchdog?: string;
       wakeAfter?: number;
+      host?: string;
       json?: boolean;
       full?: boolean;
     }) => {
@@ -1352,8 +1409,10 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       // ignored, no body actorSession. Verify the env, else the daemon returns 400 actor_required (no seat identity to record). Matches `resolve`.
       if (!requireSeatSession("actor")) return;
       const deps = getDeps();
-      await withClient(deps, async (client) => {
-        const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
+      await withClient(deps, async (local) => {
+        const target = await queueHostTarget(deps, local, opts.host, true);
+        if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state: "blocked",
           blockedOn: opts.on,
           summary: opts.summary,
@@ -1361,9 +1420,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           wakeWatchdogId: opts.wakeWatchdog,
           wakeAfterSeconds: opts.wakeAfter,
           transitionNote: opts.continuation ? `continuation: ${opts.continuation}` : (opts.note ?? `parked on ${opts.on}`),
-        });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "block" }));
-      });
+        }, target.options);
+        await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "block" }), target.remote);
+      }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
     });
 
   // OPR.0.4.4.19 FR-7 — the resolve verb's CLI wrapper: a THIN client of the
@@ -1658,10 +1717,14 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .description("Show one qitem and its derived waiting state (bounded preview; --full for complete body)")
     .option("--full", "Complete original record; may be large (use --full --json for lossless JSON)")
     .option("--json", "JSON preview with completeness, original byte size and exact full command")
-    .action(async (qitemId: string, opts: { full?: boolean; json?: boolean }) => {
+    .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
+    .action(async (qitemId: string, opts: { full?: boolean; json?: boolean; host?: string }) => {
       const deps = getDeps();
-      await withClient(deps, async (client) => {
-        const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}`);
+      await withClient(deps, async (local) => {
+        const target = await queueHostTarget(deps, local, opts.host, false);
+        if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        const client = target.client;
+        const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}`, target.options);
         const json = opts.json ?? false;
         const item = res.data;
         // --full is a pure passthrough of today's COMPLETE item shape (the
@@ -1669,7 +1732,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         // passthrough on error responses / non-object payloads, where there is
         // no string body to preview.
         if (opts.full || res.status >= 400 || !isRecordWithStringBody(item)) {
-          await printQueueItemResult(client, qitemId, json, item, res.status);
+          await printQueueItemResult(client, qitemId, json, item, res.status, null, target.remote);
           return;
         }
         // The closing transition is for --full; the bounded preview prints the record as it did before.
@@ -1677,7 +1740,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         const { preview, bodyBytes, bodyTruncated } = previewBody(item.body);
         // Append-only additions: keep `body` in place (now the preview) and add
         // the honest size + truncation flag. Object otherwise unchanged.
-        const fullCommand = `rig queue show ${shellQuote(qitemId)} --full --json`;
+        const fullCommand = `rig queue show ${shellQuote(qitemId)}${hostFlag(target)} --full --json`;
         // Everything held back from this preview is declared, so a reader that trusts readView runs --full.
         const omitted = [
           ...(bodyTruncated ? [omittedReadField("body (after preview)", item.body.slice(preview.length))] : []),
@@ -1696,6 +1759,47 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           console.error(`… (bounded preview — complete body is ${bodyBytes} bytes; full record ${view.fullJsonBytes} JSON bytes: ${fullCommand})`);
         }
         if (compact && compact.emptyOmitted.length > 0) console.error(showEmptyNotice(compact.emptyOmitted, fullCommand));
+      }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
+    });
+
+  cmd
+    .command("artifact <qitemId>")
+    .description("Read a qitem's evidenceRef through the daemon's shared roots; a code-result manifest also comes back parsed as codeResult")
+    .option("--root <name>", "The shared root a relative evidenceRef is under")
+    .option("--json", "JSON output for agents")
+    .action(async (qitemId: string, opts: { root?: string; json?: boolean }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const json = opts.json ?? false;
+        const item = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}`);
+        if (item.status >= 400) { await printQueueItemResult(client, qitemId, json, item.data, item.status); return; }
+        const ref = ((item.data ?? {}) as { evidenceRef?: unknown }).evidenceRef;
+        const rootsRes = await client.get<{ roots?: SharedRoot[] }>("/api/files/roots");
+        if (rootsRes.status >= 400) { printResult(json, rootsRes.data, rootsRes.status); return; }
+        const roots = rootsRes.data?.roots ?? [];
+        // The same rule as rig_artifact_read: only a file in a shared root is read, through the daemon.
+        const plan = planItemArtifact(ref, roots, opts.root);
+        if ("unavailable" in plan) {
+          if (json) console.log(JSON.stringify({ available: false, qitemId, reason: plan.unavailable, evidenceRef: typeof ref === "string" ? ref : null, roots: roots.map((entry) => entry.name) }));
+          else console.error(`${qitemId}: ${plan.unavailable}`);
+          process.exitCode = 1;
+          return;
+        }
+        const res = await client.get<FileRead>(`/api/files/read?${new URLSearchParams({ root: plan.read.root, path: plan.read.path }).toString()}`);
+        if (res.status >= 400) { printResult(json, res.data, res.status); return; }
+        const read = res.data ?? {};
+        const parsed = codeResultOf(read);
+        if (json) {
+          console.log(JSON.stringify({ available: true, qitemId, root: read.root, path: read.path, size: read.size, mtime: read.mtime, binary: read.binary === true,
+            ...(read.binary ? {} : { text: read.content ?? "" }), truncated: read.truncated === true, ...parsed }));
+          return;
+        }
+        if (read.binary) console.log(`A binary file (${read.root}:${read.path}): not shown as text.`);
+        else process.stdout.write(read.content ?? "");
+        // Notices go to stderr, so stdout stays the file.
+        if (parsed && "codeResult" in parsed) console.error(`code result: ${parsed.codeResult.repo} ${parsed.codeResult.base}..${parsed.codeResult.revision}${parsed.codeResult.paths.length ? ` (${parsed.codeResult.paths.length} paths)` : ""}`);
+        else if (parsed) console.error(parsed.codeResultIssue);
+        if (read.truncated) console.error(`… cut at ${read.truncatedAtBytes} of ${read.totalBytes} bytes, as the daemon reads it`);
       });
     });
 
@@ -1704,20 +1808,24 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .description("Show the append-only transition log for a qitem")
     .option("--json", "JSON output for agents")
     .option("--full", `The whole log, as today, even when output.compact is on (compact shows the latest transitions, ${TRANSITIONS_SHOWN} in all, always including the current disposition)`)
-    .action(async (qitemId: string, opts: { json?: boolean; full?: boolean }) => {
+    .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
+    .action(async (qitemId: string, opts: { json?: boolean; full?: boolean; host?: string }) => {
       const deps = getDeps();
-      await withClient(deps, async (client) => {
-        const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`);
+      await withClient(deps, async (local) => {
+        const target = await queueHostTarget(deps, local, opts.host, false);
+        if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        const client = target.client;
+        const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`, target.options);
         // Slice 15 P3: with output.compact on, the recent story; the notice goes to stderr so it stays
         // visible when the array is piped through jq.
         if (!opts.full && res.status < 400 && Array.isArray(res.data) && compactOutputEnabled()) {
           const { transitions, earlier } = compactTransitions(res.data as Record<string, unknown>[]);
           printResult(opts.json ?? false, transitions, res.status);
-          if (earlier > 0) console.error(transitionsNotice(earlier, res.data.length, `rig queue transitions ${shellQuote(qitemId)} --full${opts.json ? " --json" : ""}`));
+          if (earlier > 0) console.error(transitionsNotice(earlier, res.data.length, `rig queue transitions ${shellQuote(qitemId)}${hostFlag(target)} --full${opts.json ? " --json" : ""}`));
           return;
         }
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
-      });
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, null, target.remote);
+      }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
     });
 
   cmd
@@ -1735,6 +1843,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--target-repo <name>", "PL-007: filter qitems by target_repo (exact match)")
     .option("--limit <n>", "Result limit", positiveIntArg, 100)
     .option("--json", "JSON output (compact; use --full --json for complete fields)")
+    .option("--host <id>", `${QUEUE_HOST_ROW_OPTION_HELP} With --host, the rows of every rig on that host unless --destination or --source narrows them; --owned and --mine name this host's seat and are refused.`)
     .addHelpText("after", `
 Default: active items in your current rig, compact summary (like 'docker ps').
 Current rig is derived from OPENRIG_SESSION_NAME's @<rig> suffix.
@@ -1777,45 +1886,62 @@ Examples:
       targetRepo?: string;
       limit: string;
       json?: boolean;
+      host?: string;
     }) => {
       const deps = getDeps();
-      const params = new URLSearchParams();
-      const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
-      if (opts.owned && !sessionName) {
-        console.error("Cannot use --owned: checked OPENRIG_SESSION_NAME and RIGGED_SESSION_NAME, but neither caller seat identity is set. Set one to a canonical seat@rig address, or use --destination <session>.");
-        process.exitCode = 1;
-        return;
-      }
-      const hasExplicitScope = !!(opts.destination || opts.source || opts.owned);
-
-      if (opts.owned && sessionName) {
-        params.set("destinationSession", sessionName);
-      } else if (opts.mine && sessionName) {
-        params.set("as", sessionName);
-      } else if (!opts.allRigs && !hasExplicitScope) {
-        const rigName = sessionName ? extractRigName(sessionName) : undefined;
-        if (rigName) {
-          params.set("rig", rigName);
+      const remote = remoteHostOf(opts.host);
+      const useJson = opts.json || opts.o === "json";
+      // The seat env names a seat of THIS host. On another host's daemon (a --host that resolves remote) it scopes
+      // nothing that daemon holds: no rig is derived from it, and --owned/--mine are refused.
+      const seatScope = (onRemote: boolean): URLSearchParams | null => {
+        const params = new URLSearchParams();
+        const sessionName = onRemote ? undefined : readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+        if (onRemote && (opts.owned || opts.mine)) {
+          emitHostResolutionError({ error: "host_scope_unsupported", message: `--host ${remote} lists another host's rows: --${opts.owned ? "owned" : "mine"} names this host's seat. Use --destination or --source with the address as that host stores it.` }, useJson);
+          return null;
         }
-      }
+        if (opts.owned && !sessionName) {
+          console.error("Cannot use --owned: checked OPENRIG_SESSION_NAME and RIGGED_SESSION_NAME, but neither caller seat identity is set. Set one to a canonical seat@rig address, or use --destination <session>.");
+          process.exitCode = 1;
+          return null;
+        }
+        const hasExplicitScope = !!(opts.destination || opts.source || opts.owned);
 
-      if (!opts.all) {
-        params.set("activeOnly", "1");
-      }
-      if (!opts.full) {
-        params.set("compact", "1");
-      }
-      if (opts.destination) params.set("destinationSession", opts.destination);
-      if (opts.source) params.set("sourceSession", opts.source);
+        if (opts.owned && sessionName) {
+          params.set("destinationSession", sessionName);
+        } else if (opts.mine && sessionName) {
+          params.set("as", sessionName);
+        } else if (!opts.allRigs && !hasExplicitScope) {
+          const rigName = sessionName ? extractRigName(sessionName) : undefined;
+          if (rigName) {
+            params.set("rig", rigName);
+          }
+        }
+
+        if (!opts.all) {
+          params.set("activeOnly", "1");
+        }
+        if (!opts.full) {
+          params.set("compact", "1");
+        }
+        if (opts.destination) params.set("destinationSession", opts.destination);
+        if (opts.source) params.set("sourceSession", opts.source);
+        if (opts.state) params.set("state", opts.state);
+        if (opts.targetRepo) params.set("targetRepo", opts.targetRepo);
+        if (opts.limit) params.set("limit", String(opts.limit));
+        return params;
+      };
+      // Without --host, the scope is settled before the daemon is contacted, as before.
+      if (!remote && !seatScope(false)) return;
       warnIfUnknownStates(opts.state);
-      if (opts.state) params.set("state", opts.state);
-      if (opts.targetRepo) params.set("targetRepo", opts.targetRepo);
-      if (opts.limit) params.set("limit", String(opts.limit));
-      await withClient(deps, async (client) => {
-        const res = await client.get<unknown>(`/api/queue/list?${params.toString()}`);
-        const useJson = opts.json || opts.o === "json";
+      await withClient(deps, async (local) => {
+        const target = await queueHostTarget(deps, local, opts.host, false);
+        if ("error" in target) return emitHostResolutionError(target, useJson);
+        const params = seatScope(target.remote !== undefined);
+        if (!params) return;
+        const res = await target.client.get<unknown>(`/api/queue/list?${params.toString()}`, target.options);
         printResult(useJson, res.data, res.status);
-      });
+      }, remote !== undefined, remote);
     });
 
   cmd
