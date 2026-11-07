@@ -38,7 +38,8 @@ startup.
   using it; the CA repair is in that file, which the image carries.
 - **Codex tool commands use a non-login shell:** managed Codex seats now pass
   Codex `-c allow_login_shell=false`, so plain `rig` works however OpenRig was
-  installed. Setup that lives only in login or rc files, and shell functions and
+  installed, with a Codex that supports `allow_login_shell` (checked in Codex's
+  source at 0.162.1 and 0.166); not yet run with a live Codex seat. Setup that lives only in login or rc files, and shell functions and
   aliases, may be missing from tool commands, and a model request for
   `login: true` gets Codex's refusal, "login shell is disabled by config". To
   defer to Codex's own setting, run `rig config set launch.codex_login_shell

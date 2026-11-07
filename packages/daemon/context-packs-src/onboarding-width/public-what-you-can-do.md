@@ -811,9 +811,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   Managed Codex launches turn off Codex's startup update check, so no update notice stops them;
   updating Codex is the operator's job.
   Managed Codex seats run tool commands in a non-login shell, so plain `rig` works however OpenRig
-  was installed; setup that lives only in login or rc files, and shell functions and aliases, may
-  be missing there. `rig config set launch.codex_login_shell true` defers to Codex's own setting at
-  each seat's next launch.
+  was installed (with a Codex that supports `allow_login_shell`); setup that lives only in login or
+  rc files, and shell functions and aliases, may be missing there. `rig config set
+  launch.codex_login_shell true` defers to Codex's own setting at each seat's next launch.
 - **`rig seat set-model` / `stop` / `clean`** — persist the model for later managed resumes, stop
   exactly one live seat (ending its session and any work in progress), or clear a dead seat's
   stale binding. A stop is recorded, so the rig doesn't read `degraded` for that seat, and a rig

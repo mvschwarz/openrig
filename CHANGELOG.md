@@ -154,8 +154,9 @@ A verified export, a finished task and an exact restore haven't been shown.
   now has the agent point npm's prefix at a folder the person owns whose `bin` is
   on their login PATH, or use a version manager's Node, saying first what that
   changes, and install inside the project only if neither works. ([#2611](https://github.com/mvschwarz/openrig/pull/2611))
-- **Plain `rig` works in managed Codex seats however OpenRig was installed.**
-  OpenRig now passes Codex `-c allow_login_shell=false`, so tool commands run in
+- **Plain `rig` works in managed Codex seats however OpenRig was installed,**
+  with a Codex that supports `allow_login_shell` (checked in Codex's source at
+  0.162.1 and 0.166); not yet run with a live Codex seat. OpenRig now passes Codex `-c allow_login_shell=false`, so tool commands run in
   a non-login shell and inherit the environment their pane's shell set up,
   OpenRig's command folder included. To defer to Codex's own setting instead,
   run `rig config set launch.codex_login_shell true`; it applies at each seat's
