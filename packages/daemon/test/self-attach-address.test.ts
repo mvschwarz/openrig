@@ -17,6 +17,8 @@ import { SelfAttachService } from "../src/domain/self-attach-service.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
+import { RigLifecycleService } from "../src/domain/rig-lifecycle-service.js";
+import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { WhoamiService } from "../src/domain/whoami-service.js";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
@@ -49,6 +51,45 @@ describe("attached team address preserves physical custody", () => {
   });
   afterEach(() => { db.close(); rmSync(transcriptRoot, { recursive: true, force: true }); });
   const context = (tmuxSession: string) => ({ attachmentType: "tmux" as const, tmuxSession, tmuxWindow: "@12", tmuxPane: "%42" });
+
+  it("keeps a legacy bare name and its work history through unclaim and same-node re-attach", async () => {
+    const rig = rigs.createRig("team"), node = rigs.addNode(rig.id, "people.agent", { runtime: "terminal" });
+    // Persist the pre-fix external attachment format, then use the real release path.
+    sessions.updateBinding(node.id, { attachmentType: "external_cli", externalSessionName: "desk" });
+    const old = sessions.registerClaimedSession(node.id, "desk");
+    const queue = new QueueRepository(db, bus, {
+      validateRig: makeTopologyDestinationCheck({ findRigsByName: name => rigs.findRigsByName(name), loadHumanRegistry: () => { throw new Error("no human address in this fixture"); } }),
+      resolveSessionAddresses: name => sessions.sessionAddresses(name),
+    });
+    const sent = await queue.create({ sourceSession: "desk", destinationSession: "operator@team", body: "retained work", nudge: false });
+    const lifecycle = new RigLifecycleService({ db, rigRepo: rigs, sessionRegistry: sessions, eventBus: bus,
+      discoveryRepo: new DiscoveryRepository(db), queueRepo: queue });
+    expect(await lifecycle.unclaimSession(old.id)).toMatchObject({ ok: true, nodeId: node.id, sessionName: "desk" });
+    expect(sessions.getBindingForNode(node.id)).toBeNull();
+    const released = db.prepare("SELECT * FROM sessions WHERE id=?").get(old.id);
+    expect(released).toMatchObject({ session_name: "desk", status: "detached" });
+    const response = await app.request(`/api/rigs/${rig.id}/attach-self`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ logicalId: node.logicalId, attachmentType: "external_cli", displayName: "desk" }),
+    });
+    expect(response.status).toBe(201);
+    const result = await response.json() as { nodeId: string; sessionId: string; sessionName: string; senderAddress: string; env: { OPENRIG_SESSION_NAME: string } };
+    expect(result.nodeId).toBe(node.id);
+    expect(db.prepare("SELECT * FROM sessions WHERE id=?").get(old.id)).toEqual(released);
+    expect(queue.getById(sent.qitemId)?.sourceSession).toBe("desk");
+    expect(sessions.getBindingForNode(node.id)).toMatchObject({ attachmentType: "external_cli", externalSessionName: "desk" });
+    expect(result).toMatchObject({ sessionName: "desk", senderAddress: "desk", env: { OPENRIG_SESSION_NAME: "desk" } });
+    expect(db.prepare("SELECT session_name FROM sessions WHERE id=?").get(result.sessionId)).toEqual({ session_name: "desk" });
+    expect(queue.whoami(result.env.OPENRIG_SESSION_NAME).asSource.total).toBe(1);
+    // This preserves the legacy limitation, rather than claiming an implicit repair.
+    expect(queue.acceptsDestination(result.senderAddress)).toBe(false);
+  });
+
+  it("keeps the derived default byte-identical for a member containing @", async () => {
+    const rig = rigs.createRig("team"); pods.createPod(rig.id, "people", "People");
+    expect(await attach.attachToPod({ rigId: rig.id, podNamespace: "people", memberName: "a@b", runtime: "terminal" }))
+      .toMatchObject({ ok: true, sessionName: "people-a@b@team", senderAddress: "people-a@b@team" });
+  });
 
   it.each(["node", "pod"].flatMap(mode => [
     { mode, displayName: "desk", address: "desk@team" },
