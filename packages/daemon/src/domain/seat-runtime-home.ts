@@ -62,10 +62,10 @@ export function seatRuntimeHome(db: Database.Database, nodeId: string | null | u
 }
 
 /** The home a seat's launches and OpenRig's readers use: its own, else the daemon's explicit value. Undefined means the
- *  runtime's native default. */
+ *  runtime's native default, except Pi which keeps its managed seat login and never inherits the daemon home. */
 export function effectiveRuntimeHome(db: Database.Database, nodeId: string | null | undefined, runtime: HomeRuntime,
   daemonHome: string | undefined, ignoreAccountHome = false): string | undefined {
-  return seatRuntimeHome(db, nodeId, runtime, ignoreAccountHome).home ?? daemonHome;
+  return seatRuntimeHome(db, nodeId, runtime, ignoreAccountHome).home ?? (runtime === "pi" ? undefined : daemonHome);
 }
 
 /** Every distinct home seats declare for a runtime (absolute values only), for readers that find a record by an id that is

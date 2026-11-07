@@ -724,8 +724,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   const { SeatLaunchEnvironment } = await import("./domain/seat-launch-environment.js");
   const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome,
-    (nodeId, runtime, ignoreAccountHome) => ignoreAccountHome
-      ? effectiveRuntimeHome(db, nodeId, runtime as HomeRuntime, runtime === "codex" ? configuredCodexHome : runtime === "pi" ? process.env.PI_CODING_AGENT_DIR : configuredClaudeHome, true)
+    (nodeId, runtime, ignoreAccountHome) => runtime === "pi"
+      ? effectiveRuntimeHome(db, nodeId, "pi", undefined, ignoreAccountHome)
+      : ignoreAccountHome
+      ? effectiveRuntimeHome(db, nodeId, runtime as HomeRuntime, runtime === "codex" ? configuredCodexHome : configuredClaudeHome, true)
       : seatAccountHome(db, nodeId, runtime));
   const nodeLauncher = new NodeLauncher({
     db,

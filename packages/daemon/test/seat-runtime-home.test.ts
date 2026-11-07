@@ -101,3 +101,14 @@ describe("declaredRuntimeHomes", () => {
     expect(declaredRuntimeHomes(d, "claude-code")).toEqual(["/homes/claude"]);
   });
 });
+
+it("never selects an ambient daemon Pi home, including when clearing a stored selection", () => {
+  const d = db({ members: { own: { PI_CODING_AGENT_DIR: "/pi/member" }, plain: undefined } });
+  d.exec("ALTER TABLE nodes ADD COLUMN runtime TEXT; ALTER TABLE nodes ADD COLUMN account_home TEXT; UPDATE nodes SET runtime = 'pi', account_home = '/pi/selected';");
+  expect(effectiveRuntimeHome(d, "own", "pi", "/pi/ambient")).toBe("/pi/selected");
+  expect(effectiveRuntimeHome(d, "own", "pi", "/pi/ambient", true)).toBe("/pi/member");
+  expect(effectiveRuntimeHome(d, "plain", "pi", "/pi/ambient", true)).toBeUndefined();
+  d.exec("UPDATE nodes SET account_home = NULL;");
+  expect(effectiveRuntimeHome(d, "own", "pi", "/pi/ambient")).toBe("/pi/member");
+  expect(effectiveRuntimeHome(d, "plain", "pi", "/pi/ambient")).toBeUndefined();
+});

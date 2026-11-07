@@ -226,7 +226,7 @@ export class SeatLaunchEnvironment {
       if (target.launchShell !== undefined) throw new Error("launch_wrapper unavailable; no agent started.");
       return wrapped ? "printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false"
         : accountHome || clearing ? "printf '%s\\n' 'OpenRig: isolated account launch unavailable; no agent started.' >&2; false"
-        : fallback;
+        : target.runtime === "pi" ? `/usr/bin/env OPENRIG_PI_ACCOUNT_HOME= ${fallback}` : fallback;
     }
   }
 }

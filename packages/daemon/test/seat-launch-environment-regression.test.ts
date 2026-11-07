@@ -123,10 +123,10 @@ it("export helper resolves executable from cwd when PATH has empty segments", ()
 });
 
 
-it.each(["nu", "nu.exe", "fish", "csh", "", "unknown"])("Pi preserves its existing command on an unsupported pane: %s", async shell => {
+it.each(["nu", "nu.exe", "fish", "csh", "", "unknown"])("Pi clears ambient account selection on an unsupported pane: %s", async shell => {
   const f = fixture(); f.tmux.getPaneCommand.mockResolvedValue(shell);
   const command = "node '/runner.js' --session '/history.jsonl'";
-  expect(await f.launch.command("seat@rig", command, { runtime: "pi" })).toBe(command);
+  expect(await f.launch.command("seat@rig", command, { runtime: "pi" })).toBe(`/usr/bin/env OPENRIG_PI_ACCOUNT_HOME= ${command}`);
   expect(f.tmux.getSessionEnv).not.toHaveBeenCalled();
   expect(f.warn).toHaveBeenCalledTimes(1);
 });

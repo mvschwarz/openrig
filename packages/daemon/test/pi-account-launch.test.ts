@@ -150,3 +150,19 @@ it.each(["pi", "codex", "claude-code"])("scopes extra provider-key scrubbing to 
     expect(ambient).toContain("OPENRIG_PI_ACCOUNT_HOME=\n");
   } else expect(output).toContain("OPENROUTER_API_KEY=custom-provider-key\n");
 });
+
+it.each(["nu", "fish", "bash"])("clears ambient account selection on fallback (%s)", async shell => {
+  const { execFileSync } = await import("node:child_process");
+  const { SeatLaunchEnvironment } = await import("../src/domain/seat-launch-environment.js");
+  const tmux = {
+    getPaneCommand: async () => shell,
+    getSessionEnv: async () => undefined,
+  } as unknown as import("../src/adapters/tmux.js").TmuxAdapter;
+  const launch = new SeatLaunchEnvironment(tmux, {}, "/tmp");
+  const command = await launch.command("seat@rig", "/usr/bin/env", { runtime: "pi" });
+  expect(command).toBe("/usr/bin/env OPENRIG_PI_ACCOUNT_HOME= /usr/bin/env");
+  const output = execFileSync("/bin/sh", ["-c", command], { encoding: "utf8", env: { OPENRIG_PI_ACCOUNT_HOME: "/unselected" } });
+  expect(output).toContain("OPENRIG_PI_ACCOUNT_HOME=\n");
+  expect(output).not.toContain("/unselected");
+  expect(await launch.command("seat@rig", "/usr/bin/env", { runtime: "pi", accountHome: "/selected" })).toContain("no agent started");
+});

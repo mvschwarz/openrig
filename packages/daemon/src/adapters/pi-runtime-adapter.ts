@@ -345,13 +345,14 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
     const accountHome = binding.accountHome !== undefined ? binding.accountHome
       : binding.nodeId ? this.seatLaunchEnvironment?.accountHome(binding.nodeId, this.runtime) : undefined;
+    const fallback = this.runtime === "pi" ? `/usr/bin/env OPENRIG_PI_ACCOUNT_HOME= ${cmd}` : cmd;
     const command = this.runtime === "pi" && this.seatLaunchEnvironment
       ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, accountHome })
-      : cmd;
+      : fallback;
     // Stage long commands without leaving a shell above the live runner.
     let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
-    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd && accountHome === undefined) {
-      textResult = await this.tmux.sendShellCommand(sessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== fallback && accountHome === undefined) {
+      textResult = await this.tmux.sendShellCommand(sessionName, fallback, undefined, { stageIfLong: true, execInScript: true });
     }
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
