@@ -12,6 +12,9 @@ import { TYPED_REPLY_HINT, CHANNEL_REPLY_HINT, HUMAN_REQUIRED_REPLY_HINT, QUESTI
 const UPDATE = "chat.update";
 const EDITED = "slack-ask-settled";
 const RATE_LIMIT = "slack-ask-edit-rate-limit";
+/** The posted message itself is gone or can never be edited by us: recorded, so a restart doesn't ask Slack again. */
+const UNAVAILABLE = "slack-ask-settle-unavailable";
+const goneErrors = new Set(["message_not_found", "thread_not_found", "cant_update_message", "original message unavailable"]);
 const STATUS_BLOCK = "or-settled";
 const permanentErrors = new Set(["missing_scope", "not_in_channel", "channel_not_found", "is_archived",
   "cant_update_message", "invalid_blocks", "message_not_found", "thread_not_found", "original message unavailable"]);
@@ -133,7 +136,19 @@ export class SlackAskSettlement {
   private failed(id: string, key: string, method: string, result: WebApiResult): number {
     this.lastFailure = `${id}: ${method} not done (${result.error ?? result.status})`;
     this.opts.log(`slack ask settlement retained: ${this.lastFailure}`);
-    if (permanentErrors.has(result.error ?? "")) { this.unavailable.add(key); return 0; }
+    if (permanentErrors.has(result.error ?? "")) {
+      this.unavailable.add(key);
+      // Scope, membership or a rendering fault can be fixed, so those are asked again after a restart; a gone message can't.
+      if (goneErrors.has(result.error ?? "")) {
+        try {
+          this.opts.queue.update({ qitemId: id, actorSession: "daemon@kernel",
+            transitionNote: `${UNAVAILABLE}${key.slice(EDITED.length)} error=${(result.error ?? "").replace(/\s+/g, "_")}` });
+        } catch (error) {
+          this.opts.log(`slack ask settlement: couldn't record ${id} as unavailable (${(error as Error).message}); skipped until restart`);
+        }
+      }
+      return 0;
+    }
     const count = (this.failures.get(key) ?? 0) + 1;
     this.failures.set(key, count);
     const wait = Math.max(Math.min(30_000 * 2 ** Math.min(count - 1, 7), 3_600_000), (result.retryAfterSeconds ?? 0) * 1000);
@@ -150,7 +165,7 @@ export class SlackAskSettlement {
     const item = this.opts.queue.getById(id);
     if (!item) return undefined;
     const after = transitions.filter((t) => t.transitionId > episode.transitionId && ![
-      "slack-posted ", "slack-owner-notification-posted ", EDITED + " ", RATE_LIMIT + " ",
+      "slack-posted ", "slack-owner-notification-posted ", EDITED + " ", RATE_LIMIT + " ", UNAVAILABLE + " ",
     ].some((prefix) => (t.transitionNote ?? "").startsWith(prefix)));
     const make = (t: QueueTransition, label?: string) => {
       const status = statusLine(t, label);
@@ -204,6 +219,9 @@ export class SlackAskSettlement {
       if (!stamp) continue; // No authoritative channel/timestamp: never guess a replacement post.
       const edited = `${EDITED} notification_key=${key} channel=${stamp.channel} message_ts=${messageTs}`;
       if (this.unavailable.has(edited)) continue;
+      // Recorded as gone for this exact message; a new post of the episode has its own message_ts and is tried.
+      const gone = `${UNAVAILABLE} notification_key=${key} channel=${stamp.channel} message_ts=${messageTs} `;
+      if (transitions.some((t) => t.transitionNote?.startsWith(gone))) continue;
       const desired = this.desired(id, episode, stamp.human, transitions);
       if (!desired) continue;
       const lastAck = transitions.filter((t) => t.transitionNote === edited || t.transitionNote?.startsWith(edited + " ")).at(-1);

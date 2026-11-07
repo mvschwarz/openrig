@@ -377,6 +377,65 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(postCount).toBe(7);
   });
 
+  it("remembers a deleted original across restarts: asked once, not again after a restart", async () => {
+    const item = await postAsk();
+    apiHook = (method) => method === "conversations.history" ? response({ ok: true, messages: [] }) : undefined;
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    await vi.waitFor(() => expect(logs.join("\n")).toContain("original message unavailable"));
+    await new Promise((r) => setTimeout(r, 25));
+    const reads = () => methods.filter((m) => m === "conversations.history").length;
+    expect(reads()).toBe(1);
+    expect(repo.listTransitions(item.qitemId).filter((t) => t.transitionNote?.startsWith("slack-ask-settle-unavailable "))).toHaveLength(1);
+    expect(repo.getById(item.qitemId)?.state).toBe("done");
+
+    wire.stop(); start();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(reads()).toBe(1);
+    expect(methods).not.toContain("chat.update");
+    expect(repo.listTransitions(item.qitemId).filter((t) => t.transitionNote?.startsWith("slack-ask-settle-unavailable "))).toHaveLength(1);
+  });
+
+  it("still edits a later post of the same ask after its first post was recorded as gone", async () => {
+    const item = await repo.create({ sourceSession: "author@rig", destinationSession: "worker@rig",
+      summary: "Choose the next step", body: "Original work", nudge: false });
+    const park = () => repo.update({ qitemId: item.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: human,
+      summary: "May I continue?", transitionNote: "Need the person's answer." });
+    const send = async (ts: string) => {
+      const [alert] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({});
+      expect(wire.dispatcher.dispatch("post_message", human, alert)).toMatchObject({ ok: true });
+      await vi.waitFor(() => expect(repo.currentHumanRequiredEpisode(item.qitemId)?.receipt?.messageTs).toBe(ts));
+    };
+    const reads = (ts: string) => requests.filter((r) => new URL(r.url).searchParams.get("latest") === ts
+      || new URL(r.url).searchParams.get("oldest") === ts).length;
+    // The first post was deleted in Slack: reading it finds nothing.
+    apiHook = (method, params) => method === "conversations.history" && params.latest === "1.000001" ? response({ ok: true, messages: [] }) : undefined;
+    park(); await send("1.000001");
+    repo.update({ qitemId: item.qitemId, actorSession: "worker@rig", state: "in-progress", transitionNote: "Answered in the pane; continuing." });
+    await vi.waitFor(() => expect(repo.listTransitions(item.qitemId).some((t) => t.transitionNote?.startsWith("slack-ask-settle-unavailable ")
+      && t.transitionNote.includes("message_ts=1.000001 "))).toBe(true));
+
+    park(); await send("2.000001");
+    repo.update({ qitemId: item.qitemId, actorSession: "worker@rig", state: "in-progress", transitionNote: "Second answer received." });
+
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]!.ts).toBe("2.000001");
+    expect(reads("1.000001")).toBe(1);
+    wire.stop(); start();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(reads("1.000001")).toBe(1);
+    expect(updates).toHaveLength(1);
+  });
+
+  it("keeps retrying after a restart when the failure isn't about the message itself", async () => {
+    const item = await postAsk();
+    apiHook = (method) => method === "conversations.history" ? response({ ok: false, error: "not_in_channel" }) : undefined;
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    await vi.waitFor(() => expect(logs.join("\n")).toContain("not_in_channel"));
+    expect(repo.listTransitions(item.qitemId).some((t) => t.transitionNote?.startsWith("slack-ask-settle-unavailable "))).toBe(false);
+    wire.stop(); apiHook = undefined; start();
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+  });
+
   it("shows a later close's new reason after the same direct ask was reopened", async () => {
     const item = await postAsk();
     wire.stop(); vi.useFakeTimers();
