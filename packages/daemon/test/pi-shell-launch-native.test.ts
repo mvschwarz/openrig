@@ -335,17 +335,18 @@ await main();
           seatLaunchEnvironment, maxWaitMs: 6000, pollMs: 25, newLaunchId: () => "attempt",
         });
         const result = await adapter.resume(session, "pi_session_file", parent, cwd, model, "floor", "high", wrapper);
-        expect(result).toMatchObject({ ok: true });
+        expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
       } else {
         const adapter = new PiRuntimeAdapter({
           tmux, fsOps, stateRoot, runnerEntryPath: runner, seatLaunchEnvironment,
-          sleep: () => new Promise(resolve => setTimeout(resolve, 25)), newLaunchId: () => "attempt",
+          // Match the resume fixture's six-second readiness allowance for wrapper and child startup.
+          sleep: () => new Promise(resolve => setTimeout(resolve, 100)), newLaunchId: () => "attempt",
         });
         const result = await adapter.launchHarness(
           { tmuxSession: session, cwd, model, effort: "high", nodeId: "fixture-node", launchGeneration: "reserved-generation", launchWrapper: wrapper } as never,
           { name: session, ...(launchMode === "fork" ? { forkSource: { kind: "native_id" as const, value: parent } } : {}) },
         );
-        expect(result).toMatchObject({ ok: true });
+        expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
       }
 
       expect(fs.existsSync(bareVersionMarker)).toBe(false);
