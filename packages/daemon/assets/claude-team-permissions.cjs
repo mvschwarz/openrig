@@ -252,6 +252,7 @@ if (require.main === module) {
       const kind = process.argv[2];
       let policy;
       if (kind === "kernel" || kind === "team") {
+        // Each invocation reads the installed lists; native inline allowances remain as launched.
         const { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } = require("./claude-permission-policies.cjs");
         policy = kind === "kernel" ? { allow: KERNEL_CLAUDE_ALLOW, ask: [] }
           : { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK };
