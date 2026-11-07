@@ -164,3 +164,15 @@ whose version cannot be recognized as a fixed release, OpenRig uses spawned
 clients instead: starting a control client while another session is created can
 crash those servers (#2304). This avoids creating OpenRig's own control client;
 it cannot protect the server from other tools' control clients.
+
+On a large fleet, the daemon's two seat-activity pollers (the activity sampler and the
+structural pane cache) are a large share of its tmux traffic: each runs once a second.
+`OPENRIG_SEAT_POLL_INTERVAL_MS` slows both down, from the 1000 ms default up to 2000 ms;
+it is read once when the daemon starts. Other values are clamped to that range, and a
+value that is not a whole number of milliseconds keeps the default; both are logged.
+A slower cadence makes activity and idle changes show up later. Keep the default if a
+structural sweep of your tmux server can take more than about 2 s (about 3 s at the
+default): past that, a sweep that runs over skips the next tick, the Codex working-frame
+proof expires, and a working Codex seat can briefly read idle. The two
+settings compose: `OPENRIG_TMUX_CONTROL=1` makes each tmux command cheaper, and this
+variable makes there be fewer of them.

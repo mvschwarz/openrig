@@ -34,6 +34,7 @@ import {
 import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
 import type { ProviderService } from "./domain/provider/provider-service.js";
 import { SettingsStore } from "./domain/user-settings/settings-store.js";
+import { startSeatPollers } from "./domain/seat-activity-service.js";
 import {
   ensureOpenRigInstance,
   formatInstanceInitializationConflicts,
@@ -368,9 +369,12 @@ export async function startServer(port?: number) {
         // Polls every running tmux-bound seat's window_activity timestamp so
         // PsProjectionService + node-inventory enrichment serve
         // fresh data on each request.
-        deps.seatActivityService?.start(deps.rigRepo.db);
-        // 5b82324b — the structural pane-activity cache, on the same 1Hz cadence.
-        deps.seatStructuralActivityService?.start(deps.rigRepo.db);
+        // 5b82324b — the structural pane-activity cache runs on the same cadence.
+        // OPENRIG_SEAT_POLL_INTERVAL_MS slows both pollers down (default 1 s, unchanged).
+        startSeatPollers(
+          { activity: deps.seatActivityService, structural: deps.seatStructuralActivityService },
+          deps.rigRepo.db,
+        );
         // OPR.0.4.3.19 — start the liveness identity reconciler (5s default).
         // Persists the per-seat pane PID/command verdict so node-inventory
         // gates the running/active projection on verified process identity.

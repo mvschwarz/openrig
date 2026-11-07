@@ -19,8 +19,58 @@ import type { SeatStructuralActivityService } from "./seat-structural-activity-s
 import { DEFAULT_STRUCTURAL_STALE_MS } from "./seat-structural-activity-service.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
- *  1Hz polling gives at-most ~1s freshness lag on the cached observation. */
+ *  1Hz polling gives at-most ~1s freshness lag on the cached observation (a slower cadence from
+ *  OPENRIG_SEAT_POLL_INTERVAL_MS adds to that lag and to the idle debounce, which counts ticks). */
 export const DEFAULT_POLL_INTERVAL_MS = 1000;
+/** OPENRIG_SEAT_POLL_INTERVAL_MS only slows the pollers down: below the default it would cost more CPU, not less. */
+export const MIN_SEAT_POLL_INTERVAL_MS = DEFAULT_POLL_INTERVAL_MS;
+/** The ceiling of OPENRIG_SEAT_POLL_INTERVAL_MS. The structural observation and the proofs read from it (the Codex
+ *  working frame, node inventory, the idle-at-prompt fallback) expire after DEFAULT_STRUCTURAL_STALE_MS (5000 ms).
+ *  The sampler can hold a working-frame proof for about two intervals before the next one replaces it, so
+ *  2 x ceiling must stay below that expiry, with the rest as margin for event-loop lag. Separately, the single-flight
+ *  guard skips a tick that lands while a sweep runs, and the working-frame proof expires 5 s after the capture that
+ *  produced it, so a slower cadence leaves less room for slow tmux, not more: at 2000 ms a structural sweep slower
+ *  than about 2 s (about 3 s at the default) can let a working Codex seat briefly read idle. */
+export const MAX_SEAT_POLL_INTERVAL_MS = 2000;
+/** The cadence of the seat-activity and structural-activity pollers, from OPENRIG_SEAT_POLL_INTERVAL_MS. Each tick
+ *  both read tmux for the running seats (the sampler in one batch when it can, the structural poller by listing the
+ *  windows and capturing panes); on a large fleet those spawned tmux clients are a large share of the daemon's CPU,
+ *  and a slower cadence trades activity freshness for that load. Unset or empty keeps the default; a value that is not a
+ *  whole number of milliseconds keeps the default, and one outside MIN..MAX is clamped, both with a warning. */
+export function resolveSeatPollIntervalMs(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: (message: string) => void = (message) => console.warn(message),
+): number {
+  const raw = env.OPENRIG_SEAT_POLL_INTERVAL_MS?.trim();
+  if (!raw) return DEFAULT_POLL_INTERVAL_MS;
+  if (!/^\d+$/.test(raw)) {
+    warn(`[seat-activity] OPENRIG_SEAT_POLL_INTERVAL_MS=${JSON.stringify(raw)} is not a whole number of milliseconds;`
+      + ` using ${DEFAULT_POLL_INTERVAL_MS} ms`);
+    return DEFAULT_POLL_INTERVAL_MS;
+  }
+  const asked = Number(raw);
+  const ms = Math.min(MAX_SEAT_POLL_INTERVAL_MS, Math.max(MIN_SEAT_POLL_INTERVAL_MS, asked));
+  if (ms !== asked) {
+    warn(`[seat-activity] OPENRIG_SEAT_POLL_INTERVAL_MS=${asked} is outside ${MIN_SEAT_POLL_INTERVAL_MS}..`
+      + `${MAX_SEAT_POLL_INTERVAL_MS} ms; using ${ms} ms`);
+  }
+  return ms;
+}
+/** Starts both seat pollers on the cadence from OPENRIG_SEAT_POLL_INTERVAL_MS and returns it. */
+export function startSeatPollers(
+  pollers: {
+    activity?: { start(db: Database.Database, intervalMs?: number): void };
+    structural?: { start(db: Database.Database, intervalMs?: number): void };
+  },
+  db: Database.Database,
+  env: NodeJS.ProcessEnv = process.env,
+  warn?: (message: string) => void,
+): number {
+  const ms = resolveSeatPollIntervalMs(env, warn);
+  pollers.activity?.start(db, ms);
+  pollers.structural?.start(db, ms);
+  return ms;
+}
 /** Allow automatic review to settle before checking the visible human prompt. */
 export const PERMISSION_REQUEST_GRACE_MS = 3_000;
 
