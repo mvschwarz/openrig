@@ -881,6 +881,38 @@ describe("rig seat status", () => {
     expect(output).not.toContain("restore packet) was delivered");
   });
 
+  it("handover rebuild output names the unconfirmed priming packet and preserves the JSON receipt", async () => {
+    const reason = "the input box could not be observed";
+    const receipt = {
+      ...HANDOVER_RESULT_FRESH,
+      source: { mode: "rebuild", raw: "rebuild" },
+      sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [] },
+      restorePacket: { status: "unconfirmed", reason },
+      sideEffects: { ...HANDOVER_RESULT_FRESH.sideEffects, startupContextDelivered: false },
+    };
+    const paths: string[] = [];
+    const deps = makeDeps({ status: 200, data: receipt }, paths);
+    const json = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "rebuild", "--reason", "context-wall", "--json",
+    ]).then(() => undefined));
+    expect(json.exitCode).toBeUndefined();
+    expect(json.errors).toEqual([]);
+    expect(JSON.parse(json.logs.join(""))).toEqual(receipt);
+
+    const human = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "rebuild", "--reason", "context-wall",
+    ]).then(() => undefined));
+    const output = human.logs.join("\n");
+    console.info("PR8_REBUILD_CLI", JSON.stringify({ output, json: JSON.parse(json.logs.join("")), paths }));
+    expect(human.exitCode).toBeUndefined();
+    expect(human.errors).toEqual([]);
+    expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
+    expect(output).toContain(`The rebuild priming packet was sent to the successor, but its submission is unconfirmed: ${reason}.`);
+    expect(output).toContain("Check the successor's screen before sending the priming packet again; it may already be working on it.");
+    expect(output).toContain("No conversation continuity was carried: the successor started a fresh conversation.");
+    expect(output).not.toMatch(/captured startup context|restore packet|was delivered/);
+  });
+
   it("handover human output says the successor started without a required file, not a plain complete (#2456)", async () => {
     const missing = "/project/spec/culture.md";
     const deps = makeDeps({ status: 200, data: { ...HANDOVER_RESULT_FRESH, startedWithoutRequired: [missing] } }, []);
