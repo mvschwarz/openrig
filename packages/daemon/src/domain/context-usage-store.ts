@@ -204,7 +204,9 @@ export class ContextUsageStore {
 
     const cw = raw.context_window;
     if (!cw || typeof cw.used_percentage !== "number") {
-      return this.unknownUsage("parse_error");
+      // Still unknown, but the conversation the sidecar names is kept: the first sample after a /clear can carry no
+      // percentage yet, and a held compaction for the previous conversation must see that it changed (#2682).
+      return { ...this.unknownUsage("parse_error"), sessionId: typeof raw.session_id === "string" ? raw.session_id : null };
     }
 
     const sampledAt = raw.sampled_at ?? null;
