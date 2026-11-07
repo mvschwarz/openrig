@@ -63,14 +63,19 @@ codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --fr
 
 **VS Code, Copilot CLI and Cursor**
 
-Install the plugin from this folder with the app's own install-from-folder step. In VS Code that's **Chat: Install Plugin
-from Source**; in Cursor, copy the folder to `~/.cursor/plugins/local/openrig` and reload. The app loads the skill and starts
-`rig mcp serve --front-door` from the root `mcp.json`.
+Not yet verified in these apps: the steps below follow each app's documentation.
 
-- **No seat:** these apps can't set a seat for a plugin's server, so it starts with none, unless the app itself was
-  started from a shell where `OPENRIG_SESSION_NAME` is set. With no seat, your agent can look at the team's work, but OpenRig
-  refuses its writes (`actor_required`): it can't hand work over or answer the team's questions yet.
-  `rig_whoami` says so.
+Install the plugin from this folder with the app's own install-from-folder step. In VS Code that's **Chat: Install Plugin
+from Source**; in Cursor, copy the folder to `~/.cursor/plugins/local/openrig` and reload. The app should load the skill
+and start `rig mcp serve --front-door` from the root `mcp.json`.
+
+- **No seat:** these apps can't set a seat for a plugin's server, so it starts with none. The exception is an app started
+  from a shell where `OPENRIG_SESSION_NAME` (or the older `RIGGED_SESSION_NAME`) is set: its server acts as that seat.
+  - **What needs a seat:** with none, nothing your agent does is attributed to a seat. So queue operations that need an
+    author wait until one is set (OpenRig answers them with `actor_required`): handing work over and answering the team's
+    questions, for example.
+  - **What doesn't:** the missing seat doesn't restrict the server's other tools.
+  - `rig_whoami` says the server has no seat.
 - **In VS Code,** the OpenRig VS Code extension can provide the server with your seat. Use the extension's server or the
   plugin's, not both: both are named `openrig`.
 
@@ -79,4 +84,5 @@ from Source**; in Cursor, copy the folder to `~/.cursor/plugins/local/openrig` a
 - It adds no panel to the app, and nothing wakes your chat when the team finishes: ask your agent to check.
 - Everyone using the app on this machine acts as the seat it names.
 - It reaches a team on this machine.
-- **Outside Claude Code and Codex** it can't write to the team yet: see "No seat" above.
+- **Outside Claude Code and Codex,** it can't hand work over or answer the team's questions until a seat is set: see "No seat"
+  above.
