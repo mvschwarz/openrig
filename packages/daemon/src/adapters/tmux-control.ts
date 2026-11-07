@@ -1,5 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { spawnTmuxClient, TMUX_MAX_BUFFER } from "./tmux-exec.js";
 import type { ArgvExecFn } from "./tmux.js";
 
@@ -22,7 +24,8 @@ import type { ArgvExecFn } from "./tmux.js";
  * through a chain fails the rest at once, the outcome of the commands it sent unknown, and none is run again; and the
  * blocks tmux's hooks print on their own (an `after-list-panes` in a user's tmux.conf) are not taken for a command's
  * reply, where a spawned client prints a hook's output after its command's. Anything else (a launch,
- * which takes the spawning process's environment; `load-buffer`, see ROUTED; a command line that cannot be written on
+ * which takes the spawning process's environment; `load-buffer` of anything but a short one-line text file, see
+ * `bufferLoadAsSet`; a command line that cannot be written on
  * one line; a global flag other than this client's server selection; no server yet, or one before 3.2) goes to the
  * spawned client, as before. On servers older than tmux 3.7c, or whose version is unknown, all commands use spawned
  * clients: creating a control client can crash those servers when another session is created (#2304).
@@ -40,13 +43,15 @@ export function controlSessionName(owner: string): string {
  *  its rc files): a non-interactive sh that waits forever. */
 const KEEP_ALIVE = ["sh", "-c", "while :; do sleep 86400; done"];
 
-// Commands that only read the server or write into a pane, whose outcome does not depend on the client that sends
-// them as long as they name their target. A launch or an environment change stays spawned. So does `load-buffer`: it
+// Commands that only read the server, write into a pane, or set a named target's option or a named buffer, whose
+// outcome does not depend on the client that sends them as long as they name their target. A launch or an environment change stays spawned. So does `load-buffer`: it
 // would have the server open the file itself, in its own loop (a FIFO with no writer stops the whole server) and in its
-// own view of the filesystem, where a spawned client reads the file and hands the server its bytes.
+// own view of the filesystem, where a spawned client reads the file and hands the server its bytes. A short one-line
+// text file is read here instead, and its bytes set by `set-buffer` (`bufferLoadAsSet`): only that set-buffer is
+// routed, never one a caller sends.
 const ROUTED = new Set([
   "capture-pane", "display-message", "has-session", "list-sessions", "list-windows", "list-panes", "list-clients",
-  "show-environment", "paste-buffer", "delete-buffer", "send-keys",
+  "show-environment", "paste-buffer", "delete-buffer", "send-keys", "set-option",
 ]);
 
 const LISTINGS = new Set(["list-sessions", "list-windows", "list-panes", "list-clients"]);
@@ -59,11 +64,70 @@ const READS = new Set([...LISTINGS, "capture-pane", "display-message", "has-sess
  *  "current" one that a target-less command reads. */
 function namesItsTarget(args: string[]): boolean {
   const [command] = args;
+  if (command === "set-option") return optionTargeted(args);
   if (args.includes("-t")) return true;
   if (command === "list-sessions" || command === "list-clients" || command === "delete-buffer") return true;
   if (command === "list-windows" || command === "list-panes") return args.includes("-a");
   if (command === "show-environment") return args.includes("-g");
   return false;
+}
+
+/** Whether a `set-option` names its target among its flags (`-t`, alone or in a cluster such as `-wt`), and none of
+ *  them expands a format (`-F`: one may read the client that sends it). Without a target, the client's own session is
+ *  the one set. Every flag is read, up to the option's name: `-t`'s value is skipped, whatever it reads. */
+function optionTargeted(args: string[]): boolean {
+  let targeted = false;
+  for (let i = 1; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--" || arg === "-" || !arg.startsWith("-")) break;
+    if (arg.includes("F")) return false;
+    const t = arg.indexOf("t");
+    if (t < 0) continue;
+    targeted = true;
+    if (t === arg.length - 1) i++; // the target is the next argument; otherwise it is the rest of this one
+  }
+  return targeted;
+}
+
+/** The most bytes of a file a `load-buffer` is sent as `set-buffer` for. */
+export const SET_BUFFER_MAX_BYTES = 4096;
+
+/** Reads at most `maxBytes` of a regular file, or null for anything else (a FIFO, a device, a symlink, a longer file).
+ *  Opened without blocking, so a FIFO with no writer is never waited on. */
+export type ReadBufferFile = (path: string, maxBytes: number) => Promise<Buffer | null>;
+
+export const readShortRegularFile: ReadBufferFile = async (path, maxBytes) => {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > maxBytes) return null;
+    const buffer = Buffer.alloc(maxBytes + 1);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0);
+    return bytesRead > maxBytes ? null : buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+};
+
+/** A lone `load-buffer -b <name> <path>` of a short one-line text file as the `set-buffer` that sets the same buffer
+ *  to the same bytes, read here as a spawned client reads them; null keeps the load-buffer spawned. Kept spawned: any
+ *  other shape (stdin, other flags, a chain), a file that is not regular or is past the bound, one that cannot be
+ *  read, an empty one, bytes that are not UTF-8 or hold a control character (a newline among them), and a text ending
+ *  in `;`, which tmux's argument parsing takes for its command's end. */
+export async function bufferLoadAsSet(args: string[], read: ReadBufferFile): Promise<string[] | null> {
+  if (args.length !== 4 || args[0] !== "load-buffer" || args[1] !== "-b") return null;
+  const [, , name, path] = args as [string, string, string, string];
+  if (name.endsWith(";") || path === "-" || path.endsWith(";")) return null;
+  let bytes: Buffer | null;
+  try {
+    bytes = await read(path, SET_BUFFER_MAX_BYTES);
+  } catch {
+    return null;
+  }
+  if (!bytes || bytes.length === 0) return null;
+  const text = bytes.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(bytes) || /[\u0000-\u001f\u007f]/.test(text) || text.endsWith(";")) return null;
+  return ["set-buffer", "-b", name, "--", text];
 }
 
 /** The argv's commands, as a spawned tmux reads its arguments (cmd-parse.c): an argument ending in `;` ends its
@@ -293,6 +357,8 @@ export interface TmuxControlOptions {
   owner?: string;
   /** The most output a call may give, as a spawned client's stdout is bounded: TMUX_MAX_BUFFER by default. */
   maxBuffer?: number;
+  /** How a `load-buffer`'s file is read for `set-buffer` (`bufferLoadAsSet`); tests give their own. */
+  readBufferFile?: ReadBufferFile;
 }
 
 const RETRY_MS = [1_000, 5_000, 30_000];
@@ -326,6 +392,7 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
   const spawnClient = options.spawnClient ?? spawnTmuxClient;
   const replyTimeoutMs = options.replyTimeoutMs ?? 10_000;
   const maxBuffer = options.maxBuffer ?? TMUX_MAX_BUFFER;
+  const readBufferFile = options.readBufferFile ?? readShortRegularFile;
   const now = options.now ?? (() => Date.now());
   const serverArgs = [...(options.serverArgs ?? [])];
   let client: ControlClient | null = null;
@@ -545,12 +612,15 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
     // Only the leading global server pair is a selection: capture-pane's own -S is a scrollback bound.
     // A different server (or any other global flags) belongs to a spawned client, unchanged.
     const prefix = argsIn.length >= 2 && (argsIn[0] === "-S" || argsIn[0] === "-L") ? argsIn.slice(0, 2) : [];
-    const args = argsIn.slice(prefix.length);
     const sameServer = prefix.length === serverArgs.length && prefix.every((arg, i) => arg === serverArgs[i]);
+    // A short one-line text's load-buffer is sent as set-buffer; a spawned client, if one runs it, gets the load-buffer.
+    const asSet = bin === "tmux" && sameServer && !closed && argsIn[prefix.length] === "load-buffer"
+      ? await bufferLoadAsSet(argsIn.slice(prefix.length), readBufferFile) : null;
+    const args = asSet ?? argsIn.slice(prefix.length);
     const commandsIn = sameServer && !args[0]?.startsWith("-") ? commandsOf(args) : [];
     const routable = bin === "tmux" && commandsIn.length > 0
-      && commandsIn.every((c) => ROUTED.has(c[0]!) && namesItsTarget(c))
-      && argsIn.every((a) => !/[\n\r\0]/.test(a));
+      && (asSet !== null || commandsIn.every((c) => ROUTED.has(c[0]!) && namesItsTarget(c)))
+      && [...prefix, ...args].every((a) => !/[\n\r\0]/.test(a));
     // Every listing leaves this daemon's own rows out, from the first one on: its session may be made by the very call
     // that lists, or by another one under way. A row is marked only on this daemon's own mark, so before its session
     // exists the output is unchanged.

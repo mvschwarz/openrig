@@ -184,7 +184,7 @@ describe.skipIf(!supportsControlMode(version))("tmux control mode against a real
     expect(await control(["tmux", "list-sessions", "-F", `${own}#{session_name}`])).toBe(`${own}seat@rig\n`);
     expect(await control(["tmux", "list-sessions", "-F", "#{session_name}", ";", "display-message", "-p", "-t", "=seat@rig:", `${own}x`]))
       .toBe(`seat@rig\n${own}x\n`);
-    // A chain the spawned client runs (load-buffer is never routed) keeps them too.
+    // A chain the spawned client runs (load-buffer in a chain is never routed) keeps them too.
     writeFileSync(join(dir, "buffer.txt"), "b");
     expect(await control(["tmux", "load-buffer", "-b", "own", join(dir, "buffer.txt"), ";", "list-sessions", "-F", `${own}#{session_name}`]))
       .toBe(`${own}seat@rig\n`);
@@ -353,6 +353,8 @@ describe.skipIf(!supportsControlMode(version))("tmux control mode against a real
     await control(["tmux", "load-buffer", "-b", "b1", file]);
     await control(["tmux", "paste-buffer", "-t", "=typed@rig:", "-b", "b1", "-d", "-r"]);
     await control(["tmux", "send-keys", "-t", "=typed@rig:", "Enter"]);
+    // A short one-line text goes by set-buffer through the client: nothing is spawned for it.
+    expect(spawned.filter((argv) => argv[1] !== "list-sessions")).toEqual([]);
     // cat echoes each line it reads: the typed line, then cat's copy. Its copy is awaited before the next line is typed,
     // else the two can interleave on the screen.
     const lines = (count: number) => vi.waitFor(() => {
@@ -363,6 +365,19 @@ describe.skipIf(!supportsControlMode(version))("tmux control mode against a real
     await control(["tmux", "send-keys", "-t", "=typed@rig:", "-l", text]);
     await control(["tmux", "send-keys", "-t", "=typed@rig:", "Enter"]);
     await lines(4);
+  });
+
+  it("sets a targeted option through its client as a spawned client does, the seat's own and not its session's", async () => {
+    await control(["tmux", "set-option", "-w", "-t", "=seat@rig:", "@openrig-t", "w1"]);
+    await control(["tmux", "set-option", "-t", "=seat@rig:", "@openrig-s", "s1"]);
+    await control(["tmux", "set-option", "-p", "-t", "=seat@rig:", "remain-on-exit", "on"]);
+    expect(tmux("show-options", "-w", "-v", "-t", "=seat@rig:", "@openrig-t").trim()).toBe("w1");
+    expect(tmux("show-options", "-v", "-t", "=seat@rig:", "@openrig-s").trim()).toBe("s1");
+    expect(tmux("show-options", "-p", "-v", "-t", "=seat@rig:", "remain-on-exit").trim()).toBe("on");
+    expect(tmux("show-options", "-q", "-v", "-t", `=${controlSessionName(control.owner)}:`, "@openrig-s").trim()).toBe("");
+    expect(await outcome(control, ["tmux", "set-option", "-t", "=nope@rig:", "@openrig-s", "s1"]))
+      .toEqual(await outcome(execArgvCommand, ["tmux", "set-option", "-t", "=nope@rig:", "@openrig-s", "s1"]));
+    expect(spawned.filter((argv) => argv[1] === "set-option")).toEqual([]);
   });
 
   it("keeps working when its session is killed, and comes back", async () => {
