@@ -192,19 +192,27 @@ describe("live seat runtime switch", () => {
     expect(piAccountStateRoot(db, home, SEAT)).toBe(home);
   });
 
-  it("clears a Pi selection only after confirmation and leaves the source credentials intact", async () => {
+  it.each([true, false])("clears a Pi selection preserving source credentials and the original login (configured home: %s)", async configured => {
     const accountHome = path.join(home, "account"); fs.mkdirSync(accountHome); fs.writeFileSync(path.join(accountHome, "auth.json"), "selected-login");
     db.prepare("UPDATE nodes SET runtime = 'pi', account_home = ?, env_json = ? WHERE id = ?")
-      .run(accountHome, JSON.stringify({ PI_CODING_AGENT_DIR: "/accounts/configured" }), nodeId);
+      .run(accountHome, JSON.stringify(configured ? { PI_CODING_AGENT_DIR: "/accounts/configured" } : {}), nodeId);
+    const base = path.join(home, "state", "pi");
+    const original = piSeatPaths(base, SEAT).agentDir;
+    fs.mkdirSync(original, { recursive: true });
+    fs.writeFileSync(path.join(original, "auth.json"), "original-seat-login");
     const target = adapter("pi");
     vi.mocked(target.launchHarness).mockImplementation(async binding => {
       expect(binding.accountHome).toBeNull();
+      const stagedAuth = path.join(piSeatPaths(piAccountSwitchStateRoot(base, binding.launchGeneration!), SEAT).agentDir, "auth.json");
+      if (configured) expect(fs.existsSync(stagedAuth)).toBe(false);
+      else expect(fs.readFileSync(stagedAuth, "utf8")).toBe("original-seat-login");
+      expect(fs.readFileSync(path.join(original, "auth.json"), "utf8")).toBe("original-seat-login");
       expect(rigRepo.getEffectiveSeatEnv(nodeId).PI_CODING_AGENT_DIR).toBe(accountHome);
       return { ok: true };
     });
     const svc = service({ runtimeAdapters: { pi: target } }); successorConfirms(svc);
     expect(await svc.setRuntime({ seatRef: SEAT, runtime: "pi", clearAccountHome: true, reason: "Back to configured" })).toMatchObject({ ok: true, changed: true, accountHome: null });
-    expect(rigRepo.getEffectiveSeatEnv(nodeId).PI_CODING_AGENT_DIR).toBe("/accounts/configured");
+    expect(rigRepo.getEffectiveSeatEnv(nodeId).PI_CODING_AGENT_DIR).toBe(configured ? "/accounts/configured" : undefined);
     expect(fs.readFileSync(path.join(accountHome, "auth.json"), "utf8")).toBe("selected-login");
     expect(await svc.setRuntime({ seatRef: SEAT, runtime: "pi", clearAccountHome: true, reason: "Already cleared" })).toMatchObject({ ok: true, changed: false });
   });

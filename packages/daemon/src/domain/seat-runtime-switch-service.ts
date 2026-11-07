@@ -6,7 +6,7 @@ import { claudeSeatTokenRefProblem, claudeSeatTokenFileProblem, type ClaudeSeatT
 import { isolatedClaudeAccountProblem } from "./claude-credential-precedence.js";
 import nodePath from "node:path";
 import fs from "node:fs";
-import { RUNTIME_HOME_VAR } from "./seat-runtime-home.js";
+import { RUNTIME_HOME_VAR, seatRuntimeHome } from "./seat-runtime-home.js";
 import { ulid } from "ulid";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -444,7 +444,7 @@ export class SeatRuntimeSwitchService {
             filter: file => file !== nodePath.join(source, "auth.json") && file !== nodePath.join(source, ".openrig-account") });
           // Clearing without a configured home returns to the original seat-local login, if it had one.
           const baseline = piSeatPaths(base, sessionName).agentDir;
-          if (ctx.input.clearAccountHome && !fs.existsSync(nodePath.join(baseline, ".openrig-account")) && fs.existsSync(nodePath.join(baseline, "auth.json"))) {
+          if (ctx.input.clearAccountHome && !seatRuntimeHome(db, node.id, "pi", true).home && !fs.existsSync(nodePath.join(baseline, ".openrig-account")) && fs.existsSync(nodePath.join(baseline, "auth.json"))) {
             fs.mkdirSync(destination, { recursive: true });
             fs.copyFileSync(nodePath.join(baseline, "auth.json"), nodePath.join(destination, "auth.json"));
           }

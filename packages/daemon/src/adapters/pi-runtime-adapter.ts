@@ -104,6 +104,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     this.newLaunchId = deps.newLaunchId ?? (() => randomUUID());
   }
 
+  /** Resolve canonical identity and isolated state for a staged or committed occupant. */
   private runnerLocation(binding: NodeBinding): { sessionName: string; stateRoot: string } {
     const staged = this.runtime === "pi" && binding.runtimeSwitchFrom;
     const sessionName = staged ? staged.session : binding.tmuxSession!;
@@ -111,6 +112,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       ? piAccountSwitchStateRoot(this.stateRoot, binding.launchGeneration) : this.stateRootForSession(sessionName) };
   }
 
+  /** Resolve files in the occupant’s state directory rather than its temporary staging pane. */
   private bindingPaths(binding: NodeBinding) {
     const { sessionName, stateRoot } = this.runnerLocation(binding);
     return piSeatPaths(stateRoot, sessionName);

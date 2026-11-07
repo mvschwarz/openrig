@@ -47,11 +47,17 @@ export function preparePiAccount(agentDir: string, accountHome: string | undefin
     const source = nodePath.join(accountHome, "auth.json");
     // Validate before removing the previous selection, so a bad account leaves it intact.
     fs.accessSync(source, fs.constants.R_OK);
+    if (!fs.statSync(source).isFile()) throw new Error("Selected Pi auth must be a file");
+    const current = fs.lstatSync(auth, { throwIfNoEntry: false });
+    if (current && (!current.isSymbolicLink() || !fs.existsSync(marker))) {
+      throw new Error("Existing Pi login is not a managed account link; use a confirmed account switch");
+    }
     fs.rmSync(auth, { force: true });
     fs.symlinkSync(source, auth);
     fs.writeFileSync(marker, accountHome, { mode: 0o600 });
   } else if (!accountHome && fs.existsSync(marker)) {
-    fs.rmSync(auth, { force: true });
+    // A Pi login may have replaced the link since it was installed.
+    if (fs.lstatSync(auth, { throwIfNoEntry: false })?.isSymbolicLink()) fs.rmSync(auth);
     fs.rmSync(marker);
   }
 }
@@ -1248,7 +1254,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   fs.mkdirSync(paths.agentDir, { recursive: true });
   fs.mkdirSync(paths.sessionsDir, { recursive: true });
   if (runtime === "pi") {
-    try { preparePiAccount(paths.agentDir, process.env.PI_CODING_AGENT_DIR); }
+    try { preparePiAccount(paths.agentDir, process.env.OPENRIG_PI_ACCOUNT_HOME || undefined); }
     catch {
       console.error(`${PI_RUNNER_ERROR_MARKER} Pi account preparation failed; check the selected account.`);
       process.exitCode = 2;

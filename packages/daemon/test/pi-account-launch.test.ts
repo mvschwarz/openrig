@@ -98,7 +98,55 @@ it.each(["selected", "cleared"])("executes a %s Pi account environment without l
     PATH: "/usr/bin:/bin", PI_CODING_AGENT_DIR: "/pi/stale", MISTRAL_API_KEY: "fixture-mistral", GEMINI_API_KEY: "fixture-gemini", OPENROUTER_API_KEY: "fixture-openrouter", ZAI_API_KEY: "fixture-zai", KIMI_API_KEY: "fixture-kimi", MINIMAX_API_KEY: "fixture-minimax",
   } });
   expect(output).toContain(`PI_CODING_AGENT_DIR=/pi/${selection === "cleared" ? "configured" : "selected"}\n`);
-  if (selection === "selected") {
-    expect(output).not.toContain("fixture-");
-  }
+  expect(output).toContain(`OPENRIG_PI_ACCOUNT_HOME=/pi/${selection === "cleared" ? "configured" : "selected"}\n`);
+  expect(output).not.toContain("fixture-");
+});
+
+it("refuses to replace a seat login or unowned link, and preserves a login created after selection", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-account-owned-"));
+  roots.push(root);
+  const agent = path.join(root, "agent"), account = path.join(root, "account");
+  fs.mkdirSync(agent); fs.mkdirSync(account);
+  fs.writeFileSync(path.join(account, "auth.json"), "selected-auth");
+  const auth = path.join(agent, "auth.json"), marker = path.join(agent, ".openrig-account");
+  fs.writeFileSync(auth, "seat-login");
+  expect(() => preparePiAccount(agent, account)).toThrow("not a managed account link");
+  expect(fs.readFileSync(auth, "utf8")).toBe("seat-login");
+  expect(fs.existsSync(marker)).toBe(false);
+  fs.rmSync(auth); fs.symlinkSync(path.join(account, "auth.json"), auth);
+  expect(() => preparePiAccount(agent, account)).toThrow("not a managed account link");
+  expect(fs.lstatSync(auth).isSymbolicLink()).toBe(true);
+  fs.rmSync(auth);
+  preparePiAccount(agent, account);
+  preparePiAccount(agent, account);
+  expect(fs.readFileSync(auth, "utf8")).toBe("selected-auth");
+  fs.rmSync(auth); fs.writeFileSync(auth, "new-seat-login");
+  preparePiAccount(agent, undefined);
+  expect(fs.readFileSync(auth, "utf8")).toBe("new-seat-login");
+  expect(fs.existsSync(marker)).toBe(false);
+});
+
+it.each(["pi", "codex", "claude-code"])("scopes extra provider-key scrubbing to Pi and resets ambient selection (%s)", async runtime => {
+  const { execFileSync } = await import("node:child_process");
+  const { SeatLaunchEnvironment } = await import("../src/domain/seat-launch-environment.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-account-scope-"));
+  roots.push(root);
+  const cli = path.join(root, "rig");
+  fs.writeFileSync(cli, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  const tmux = {
+    getPaneCommand: async () => "bash",
+    getSessionEnv: async (_session: string, key: string) => key === "OPENRIG_NODE_ID" ? "node" : "seat@rig",
+  } as unknown as import("../src/adapters/tmux.js").TmuxAdapter;
+  const launch = new SeatLaunchEnvironment(tmux, { PATH: "/usr/bin:/bin", OPENRIG_HOME: root }, root, cli);
+  const inherited = { PATH: "/usr/bin:/bin", OPENROUTER_API_KEY: "custom-provider-key", OPENAI_API_KEY: "existing-scrub", PI_CODING_AGENT_DIR: "/ambient", OPENRIG_PI_ACCOUNT_HOME: "/stale" };
+  const command = await launch.command("seat@rig", "/usr/bin/env", { nodeId: "node", runtime, accountHome: "/selected" });
+  const output = execFileSync("/bin/sh", ["-c", command], { encoding: "utf8", env: inherited });
+  expect(output).not.toContain("existing-scrub");
+  if (runtime === "pi") {
+    expect(output).not.toContain("custom-provider-key");
+    expect(output).toContain("OPENRIG_PI_ACCOUNT_HOME=/selected\n");
+    const unselected = await launch.command("seat@rig", "/usr/bin/env", { nodeId: "node", runtime });
+    const ambient = execFileSync("/bin/sh", ["-c", unselected], { encoding: "utf8", env: inherited });
+    expect(ambient).toContain("OPENRIG_PI_ACCOUNT_HOME=\n");
+  } else expect(output).toContain("OPENROUTER_API_KEY=custom-provider-key\n");
 });
