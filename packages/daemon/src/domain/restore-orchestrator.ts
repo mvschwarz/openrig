@@ -8,7 +8,7 @@ import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { ensureSeatSkillPlugin, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
+import { ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
@@ -224,7 +224,7 @@ export interface NarrowLaunchResult {
   };
 }
 
-interface RestoreOrchestratorDeps {
+export interface RestoreOrchestratorDeps {
   db: Database.Database;
   rigRepo: RigRepository;
   sessionRegistry: SessionRegistry;
@@ -251,6 +251,9 @@ interface RestoreOrchestratorDeps {
   }>;
   /** Return whether a persisted fresh launch can be attempted without discarding the current pane. */
   freshLaunchAvailable?: (rigId: string, nodeId: string) => boolean;
+  /** A seat's skill selection as its spec says today (from its launch recipe), so skills that follow their source
+   *  (`on_restore: follow_source`) come back with today's bytes and today's selection. Absent: saved selection only. */
+  seatSkillSelection?: (rigId: string, nodeId: string) => Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }>;
   /** Where the person's seat-skills line answer is read (default: the OpenRig settings). */
   routerLineSettings?: Pick<SettingsStore, "resolveOne">;
   /** Read-only current authored selection for Claude activity hooks (the
@@ -279,6 +282,7 @@ export class RestoreOrchestrator {
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
   private freshLaunch: RestoreOrchestratorDeps["freshLaunch"];
   private freshLaunchAvailable: RestoreOrchestratorDeps["freshLaunchAvailable"];
+  private seatSkillSelection: RestoreOrchestratorDeps["seatSkillSelection"];
   private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
   private getDesiredClaudeActivityHooks: RestoreOrchestratorDeps["getDesiredClaudeActivityHooks"];
   private appliedLaunchStore: AppliedLaunchObservationStore;
@@ -323,6 +327,7 @@ export class RestoreOrchestrator {
     this.listProcesses = deps.listProcesses;
     this.freshLaunch = deps.freshLaunch;
     this.freshLaunchAvailable = deps.freshLaunchAvailable;
+    this.seatSkillSelection = deps.seatSkillSelection;
     this.getDesiredClaudeActivityHooks = deps.getDesiredClaudeActivityHooks;
     this.routerLineSettings = deps.routerLineSettings;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
@@ -1329,6 +1334,20 @@ export class RestoreOrchestrator {
       const seatSkills = seatSkillPaths({ rigId, logicalId: node.logicalId, runtime: node.runtime });
       if (hasSeatSkillRecords(seatSkills)) {
         if (node.runtime === "claude-code") warnings?.push(...ensureSeatSkillPlugin(seatSkills).map((w) => `Restore: ${w}`));
+        // Skills whose resource says `on_restore: follow_source` take today's bytes and today's selection, before the
+        // saved ones are put back; an edit is still kept. When today's selection can't be read, the saved one stands.
+        if (this.seatSkillSelection) {
+          const today = await this.seatSkillSelection(rigId, nodeId).catch((error: unknown) => ({ ok: false as const, reason: (error as Error).message }));
+          if (today.ok) {
+            const followed = followSeatSkills(seatSkills, today.selection);
+            const changes = [["refreshed", followed.refreshed], ["added", followed.added], ["removed", followed.removed]] as const;
+            const summary = changes.filter(([, ids]) => ids.length > 0).map(([what, ids]) => `${what} ${ids.join(", ")}`);
+            if (summary.length > 0) warnings?.push(`Restore: ${node.logicalId} follows its skills' sources (on_restore: follow_source): ${summary.join("; ")}`);
+            warnings?.push(...followed.warnings);
+          } else if (hasFollowingSeatSkills(seatSkills)) {
+            warnings?.push(`Restore: ${node.logicalId} keeps its saved skills: today's selection can't be read (${today.reason})`);
+          }
+        }
         const rehydrated = rehydrateSeatSkills(seatSkills);
         seatRehydration = rehydrated;
         if (rehydrated.restored.length > 0) warnings?.push(`Restore: put back ${rehydrated.restored.length} skill file(s) for ${node.logicalId} from their recorded sources`);

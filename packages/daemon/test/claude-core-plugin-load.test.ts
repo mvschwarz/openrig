@@ -20,7 +20,7 @@ import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
-import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
+import { RestoreOrchestrator, type RestoreOrchestratorDeps } from "../src/domain/restore-orchestrator.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
@@ -34,7 +34,7 @@ import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "../src/domain/claude-core-p
 import {
   persistedPluginPaths, seatCorePluginDir, vendoredCorePluginDir, withCorePlugin,
 } from "../src/domain/claude-core-plugin-env.js";
-import { ensureSeatSkillPlugin, recordSeatSkillWrite, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { ensureSeatSkillPlugin, recordSeatSkillFollowing, recordSeatSkillWrite, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { RigSpec } from "../src/domain/types.js";
@@ -375,7 +375,8 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     expect(created[3]!.env![PLUGIN_ENV]).toBe(OWN_LIST);
   });
 
-  function restoreHarness(entries: unknown[], memberEnv?: Record<string, string>, opts: { fresh?: boolean; files?: unknown[]; realFs?: boolean } = {}) {
+  function restoreHarness(entries: unknown[], memberEnv?: Record<string, string>, opts: { fresh?: boolean; files?: unknown[]; realFs?: boolean;
+    seatSkillSelection?: RestoreOrchestratorDeps["seatSkillSelection"] } = {}) {
     const { pluginsDir } = vendoredPlugins(root);
     const db = createFullTestDb(); dbs.push(db);
     const rigRepo = new RigRepository(db);
@@ -429,7 +430,7 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
         const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, sessionEnv: { OPENRIG_HOME: "/state" }, pluginsDir });
         const restore = new RestoreOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
           checkpointStore, nodeLauncher, tmuxAdapter: tmux, claudeResume: new ClaudeResumeAdapter(tmux),
-          codexResume: new CodexResumeAdapter(tmux), listProcesses });
+          codexResume: new CodexResumeAdapter(tmux), listProcesses, ...(opts.seatSkillSelection ? { seatSkillSelection: opts.seatSkillSelection } : {}) });
         const project = adapter.project.bind(adapter);
         adapter.project = async (plan, b) => { projected.push(...plan.entries.map((e) => e.effectiveId)); return project(plan, b); };
         return await restore.restore(down.snapshotId!, { adapters: { "claude-code": adapter }, ...(opts.fresh ? { freshLogicalIds: ["test.c"] } : {}),
@@ -478,6 +479,42 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     expect(existsSync(seat.pluginManifestPath)).toBe(true);
     expect(h.created[0]).toMatchObject({ [PLUGIN_ENV]: seat.pluginDir });
     expect(JSON.stringify(result)).toContain("put back 1 skill file(s) for test.c");
+  });
+
+  it("rig down then restore (native resume): a skill that follows its source comes back with today's bytes, before its session starts", async () => {
+    const src = join(root, "src", "infra-review");
+    let seen: string | undefined;
+    const h = restoreHarness([], undefined, { seatSkillSelection: async () => ({ ok: true, selection: { selected: new Set(["infra-review"]), following: [{ id: "infra-review", source: src }] } }) });
+    const seat = seatSkillPaths({ rigId: h.rigId, logicalId: "test.c", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    const file = join(seat.skillsRoot, "infra-review", "SKILL.md");
+    for (const path of [join(src, "SKILL.md"), file]) { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, "v1\n"); }
+    recordSeatSkillWrite(seat.skillsRoot, file, join(src, "SKILL.md"), "v1\n");
+    recordSeatSkillFollowing(seat.skillsRoot, "infra-review", src);
+    // axiom-maths/skills moved on while the seat was down.
+    writeFileSync(join(src, "SKILL.md"), "v2\n");
+    const created = h.created;
+    const push = created.push.bind(created);
+    created.push = (...envs) => { seen = existsSync(file) ? readFileSync(file, "utf8") : "missing"; return push(...envs); };
+    const result = await h.run();
+    expect(seen).toBe("v2\n");
+    expect(JSON.stringify(result)).toContain("Restore: test.c follows its skills' sources (on_restore: follow_source): refreshed infra-review");
+    expect(JSON.stringify(result)).not.toContain("not substituted");
+  });
+
+  it("restore (native resume): when today's selection can't be read, the seat keeps its saved skills and the restore says why", async () => {
+    const src = join(root, "src", "infra-review");
+    const h = restoreHarness([], undefined, { seatSkillSelection: async () => ({ ok: false, reason: "agent.yaml not found" }) });
+    const seat = seatSkillPaths({ rigId: h.rigId, logicalId: "test.c", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    const file = join(seat.skillsRoot, "infra-review", "SKILL.md");
+    for (const path of [join(src, "SKILL.md"), file]) { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, "v1\n"); }
+    recordSeatSkillWrite(seat.skillsRoot, file, join(src, "SKILL.md"), "v1\n");
+    recordSeatSkillFollowing(seat.skillsRoot, "infra-review", src);
+    const result = await h.run();
+    expect(readFileSync(file, "utf8")).toBe("v1\n");
+    expect(h.created).toHaveLength(1);
+    expect(JSON.stringify(result)).toContain("Restore: test.c keeps its saved skills: today's selection can't be read (agent.yaml not found)");
   });
 
   it("fresh restore, end to end: a startup-file skill the person edited is kept through the real startup install", async () => {

@@ -372,7 +372,7 @@ version.
 
 | Category | Fields | Description |
 |----------|--------|-------------|
-| `skills` | `id`, `path` | Skill directories containing a SKILL.md. Projected by the runtime adapter. Claude and Codex seats get them in the seat's own storage, `<OpenRig home>/state/seats/<rig id>/<logical seat>/<runtime>/`, outside the project: Claude to `plugin/skills/<id>` in the seat's generated plugin, where they show as `openrig:<id>`, and Codex to `skills/<id>` beside the seat's skill catalog. A Claude or Codex seat without that storage gets `<cwd>/.claude/skills/<id>` or `<cwd>/.agents/skills/<id>`. Pi and OMP project to the seat's own agent directory under OpenRig's state. |
+| `skills` | `id`, `path`, `on_restore`* | Skill directories containing a SKILL.md (see "Skill Resources"). Projected by the runtime adapter. Claude and Codex seats get them in the seat's own storage, `<OpenRig home>/state/seats/<rig id>/<logical seat>/<runtime>/`, outside the project: Claude to `plugin/skills/<id>` in the seat's generated plugin, where they show as `openrig:<id>`, and Codex to `skills/<id>` beside the seat's skill catalog. A Claude or Codex seat without that storage gets `<cwd>/.claude/skills/<id>` or `<cwd>/.agents/skills/<id>`. Pi and OMP project to the seat's own agent directory under OpenRig's state. |
 | `guidance` | `id`, `path`, `target`*, `merge`* | Guidance files, merged as a managed block (see "Guidance Resources"). |
 | `subagents` | `id`, `path` | Subagent definitions. Claude copies them to `<cwd>/.claude/agents/`, Codex to `<cwd>/.agents/`; Pi and OMP don't project them. |
 | `plugins` | `id`, `source`, `plugin_type`* | Local plugin directories; selected with `uses.plugins`. `source.kind` must be `local`. `plugin_type` is `claude`, `codex` or `auto` (default): Claude projects a plugin to `<cwd>/.claude/plugins/<id>` when it is `claude`, or `auto` with a `.claude-plugin/plugin.json`; Codex projects to `<cwd>/.codex/plugins/<id>` when it is `codex`, or `auto` with a `.codex-plugin/plugin.json`. Pi and OMP don't project plugins. Claude Code and Codex do not read skills from that projected plugin folder, so selected plugin skills are also projected into the seat's skill folder under their plain names: the seat's own storage (see `skills`), or `.claude/skills/<name>` or `.agents/skills/<name>` for a seat without it. The exception is the vendored `openrig-core` selected by a Claude seat: Claude loads that plugin directly, skills included, so its skills are not projected a second time. A folder already there with the same name, ignoring letter case, that OpenRig doesn't own is left alone; unless it already holds the same bytes, launch warns `plugin_skill_kept`. A skill the seat already selects by that name (from its profile, the System World or the project) keeps that source, an edited OpenRig-owned copy is kept with `plugin_skill_kept`, a retained plugin copy whose remembered source can no longer be projected is also kept with `plugin_skill_kept` (a seat selecting that plugin refreshes it at its next launch), and if the plugin skills can't be projected the seat launches without them and warns `plugin_skills_not_projected`. Hooks ship inside plugins. |
@@ -439,6 +439,40 @@ a legacy table it names the file to move the settings into.
 - Resource IDs must be unique within their category
 - Resource IDs are the identifiers used in `uses` references
 
+### Skill Resources
+
+```yaml
+skills:
+  - id: house-style
+    path: skills/house-style
+    on_restore: follow_source   # optional — keep_saved by default
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `id` | string | yes | — | Resource identifier, used in `uses.skills`. |
+| `path` | string | yes | — | Relative path to the skill's folder, which holds its `SKILL.md`. |
+| `on_restore` | string | no | `keep_saved` | What a restore (`rig up <rig>`) does with a Claude or Codex seat's copy of this skill in the seat's own storage: `keep_saved` or `follow_source`. |
+
+A restore keeps the skills a seat was launched with. With `keep_saved`, it puts back the saved copy and never takes
+today's bytes from the source. With `follow_source`, before the seat's session starts, the restore reads the seat's agent
+spec as it is now, from the rig spec and folder the seat was launched from, and:
+
+- replaces the seat's copy with the source folder as it is now, and records it, so `rig down` removes it and the next
+  restore puts it back as usual;
+- copies in a `follow_source` skill the profile now selects that the seat didn't have;
+- removes a skill that followed its source and that the profile no longer selects.
+
+A copy edited in the seat (a changed or added file), or a folder with the same id that OpenRig didn't write, is kept as
+it is and named in the restore's warnings. If the agent spec can't be read or resolved, the seat keeps its saved skills
+and the restore says why; a source folder without a `SKILL.md` keeps that skill's saved copy. A skill changed to
+`keep_saved` stops following at the next restore, and its copy stays.
+
+Only a restore does this; a running seat isn't changed, and neither is a Codex seat restarted in place. A Claude seat
+loads its seat plugin when its session starts, so it sees the new copies. A Codex seat reads each skill's `SKILL.md` at
+the path its skill catalog gives, so it sees a refreshed skill; its catalog is rebuilt on restore but sent to the seat
+only on a fresh start, so a resumed Codex seat isn't told about a skill copied in.
+
 ### Guidance Resources
 
 ```yaml
@@ -494,6 +528,7 @@ restore behavior, and the distinction between readiness and verified proof.
 9. All resource paths must be safe relative paths (a plugin's `source.path` excepted).
 10. Resource IDs must be unique within their category, and each `resources.<category>` must be an array.
 11. `runtime_resources` entries require `runtime` and `type` fields.
+11a. A skill's `on_restore` must be `keep_saved` or `follow_source` when given.
 12a. `resources.hooks` and `profiles.<name>.uses.hooks` are refused: "removed in plugin-primitive (Phase 3a)". Declare
    a plugin instead.
 12b. A plugin needs a unique non-empty `id`, a `source` object with `kind: local` and a non-empty `path`, and a

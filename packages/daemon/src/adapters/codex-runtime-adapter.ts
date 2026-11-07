@@ -70,7 +70,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 };
 
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
-import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "../domain/seat-skill-storage.js";
+import { recordSeatSkillFollowing, recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "../domain/seat-skill-storage.js";
 import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
 import { findTomlTable, opensTomlTable, parseTomlRoot, tomlArrayTableHeaderPath, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
 
@@ -1484,7 +1484,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     } finally {
       if (entry.category === "plugin") warnings.push(...excludeNewGeneratedFiles(cwd, createdFiles));
     }
-    return seatProjectionComplete(entry.effectiveId, notProjected, warnings);
+    const complete = seatProjectionComplete(entry.effectiveId, notProjected, warnings);
+    // A skill whose resource says `on_restore: follow_source` is recorded as following its source, so a restore that
+    // keeps the conversation brings it up to date (and removes it once no longer selected); any other is unmarked.
+    if (complete && seatSkillsRoot && entry.category === "skill") {
+      recordSeatSkillFollowing(seatSkillsRoot, entry.effectiveId, entry.onRestore === "follow_source" ? entry.absolutePath : undefined);
+    }
+    return complete;
   }
 
   /**

@@ -31,7 +31,7 @@ import { unresolvedClaudePermissionModes } from "../domain/native-permission-sel
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
 import { seatLaunchAdditionArgs, seatLaunchAdditionShellArgs } from "../domain/seat-launch-additions.js";
-import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
+import { recordSeatSkillFollowing, recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
 
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
@@ -922,7 +922,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       this.fs.writeFile(destFile, content);
       this.preserveMode(entry.absolutePath, destFile);
     }
-    return seatProjectionComplete(entry.effectiveId, notProjected, warnings);
+    const complete = seatProjectionComplete(entry.effectiveId, notProjected, warnings);
+    // A skill whose resource says `on_restore: follow_source` is recorded as following its source, so a restore that
+    // keeps the conversation brings it up to date (and removes it once no longer selected); any other is unmarked.
+    if (complete && seatSkillsRoot && entry.category === "skill") {
+      recordSeatSkillFollowing(seatSkillsRoot, entry.effectiveId, entry.onRestore === "follow_source" ? entry.absolutePath : undefined);
+    }
+    return complete;
   }
 
   /**

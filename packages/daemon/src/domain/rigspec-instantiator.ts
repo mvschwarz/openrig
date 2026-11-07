@@ -327,7 +327,7 @@ import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, f
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
-import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, StartupAction, StartupFile } from "./types.js";
+import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, SkillResource, StartupAction, StartupFile } from "./types.js";
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime-adapter.js";
 import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
@@ -338,7 +338,7 @@ import type {
   ContinuityPolicyMaterializer,
 } from "./continuity-policy-materializer.js";
 import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillLoadoutLocation, type SkillRuntime } from "./skill-catalog.js";
-import { claudeSeatSkillsNote, ensureSeatSkillPlugin, seatCatalogKeptNote, migrateLegacyProjectSkills, refusedSeatSkillsRootForNode, seatSkillLocation, seatSkillPaths, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, type SeatSkillPaths } from "./seat-skill-storage.js";
+import { claudeSeatSkillsNote, ensureSeatSkillPlugin, seatCatalogKeptNote, migrateLegacyProjectSkills, refusedSeatSkillsRootForNode, seatSkillLocation, seatSkillPaths, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, type SeatSkillPaths, type SeatSkillSelection } from "./seat-skill-storage.js";
 import { carrySeatLaunchAdditions, prepareSeatLaunchAdditions, type SeatLaunchAdditionsCarry } from "./seat-launch-additions.js";
 import type { SystemWorldResolution } from "./system-world.js";
 import type { SeatEnv } from "./seat-env.js";
@@ -2187,25 +2187,7 @@ export class PodRigInstantiator {
       };
     }
 
-    // The recipe supplies the authored source, while the retained node row is the
-    // latest operator choice. Keep those choices authoritative across a restart.
-    const member = {
-      ...context.member,
-      claudeMcp: node.runtime === "claude-code" ? node.claudeMcp ?? undefined : undefined,
-      launchWrapper: isLaunchWrapperRuntime(node.runtime) ? (node.launchWrapper ?? []) : undefined,
-      ...(node.model !== null ? { model: node.model } : {}),
-      ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),
-      ...(node.codexConfigProfile !== null && node.codexConfigProfile !== undefined
-        ? { codexConfigProfile: node.codexConfigProfile }
-        : {}),
-      ...(node.permissionPolicy !== null && node.permissionPolicy !== undefined
-        ? { permissionPolicy: node.permissionPolicy }
-        : {}),
-      ...(node.env !== null && node.env !== undefined ? { env: node.env } : {}),
-      ...(node.cwd !== null ? { cwd: node.cwd } : {}),
-      ...(node.restorePolicy !== null ? { restorePolicy: node.restorePolicy } : {}),
-      ...(node.sessionSource !== null && node.sessionSource !== undefined ? { sessionSource: node.sessionSource } : {}),
-    };
+    const member = this.persistedMember(node, context.member);
 
     // A fresh launch from the recipe runs no rig preflight, so the agent spec it resolves reports its own advisories.
     // The launch uses this same resolution rather than reading the spec again.
@@ -2225,6 +2207,58 @@ export class PodRigInstantiator {
     });
     const advisories = resolveResult?.ok ? agentSpecAdvisoryWarnings(node.logicalId, resolveResult) : [];
     return advisories.length ? { ...launched, warnings: [...advisories, ...(launched.warnings ?? [])] } : launched;
+  }
+
+  /** The recipe supplies the authored source, while the retained node row is the
+   *  latest operator choice. Keep those choices authoritative across a restart. */
+  private persistedMember(node: NonNullable<ReturnType<RigRepository["getRig"]>>["nodes"][number], recipeMember: RigSpecPodMember): RigSpecPodMember {
+    return {
+      ...recipeMember,
+      launchWrapper: isLaunchWrapperRuntime(node.runtime) ? (node.launchWrapper ?? []) : undefined,
+      claudeMcp: node.runtime === "claude-code" ? node.claudeMcp ?? undefined : undefined,
+      ...(node.model !== null ? { model: node.model } : {}),
+      ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),
+      ...(node.codexConfigProfile !== null && node.codexConfigProfile !== undefined
+        ? { codexConfigProfile: node.codexConfigProfile }
+        : {}),
+      ...(node.permissionPolicy !== null && node.permissionPolicy !== undefined
+        ? { permissionPolicy: node.permissionPolicy }
+        : {}),
+      ...(node.env !== null && node.env !== undefined ? { env: node.env } : {}),
+      ...(node.cwd !== null ? { cwd: node.cwd } : {}),
+      ...(node.restorePolicy !== null ? { restorePolicy: node.restorePolicy } : {}),
+      ...(node.sessionSource !== null && node.sessionSource !== undefined ? { sessionSource: node.sessionSource } : {}),
+    };
+  }
+
+  /**
+   * A seat's skill selection as its spec says today, for a restore that follows skills (`on_restore: follow_source`):
+   * resolved from its launch recipe the way a fresh launch of it would be, with the agent spec read from disk now.
+   * Every skill its profile selects, and those whose resource follows its source, with the source's full path. When it
+   * can't be resolved, says why; the restore then keeps the saved selection.
+   */
+  async seatSkillSelection(rigId: string, nodeId: string): Promise<{ ok: true; selection: SeatSkillSelection } | { ok: false; reason: string }> {
+    const node = this.deps.rigRepo.getRig(rigId)?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return { ok: false, reason: `node ${nodeId} not found` };
+    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
+    if (!recipe) return { ok: false, reason: `${node.logicalId} has no launch recipe` };
+    const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
+    if (!context) return { ok: false, reason: `${node.logicalId}'s launch recipe does not contain its member definition` };
+    const member = this.persistedMember(node, context.member);
+    const resolved = resolveAgentRef(member.agentRef, recipe.rigRoot, this.deps.fsOps);
+    if (!resolved.ok) return { ok: false, reason: resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error };
+    const config = await resolveNodeConfigAsync({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+      profileName: member.profile, specRoot: recipe.rigRoot, cwdOverride: node.cwd ?? undefined, member, pod: context.pod, rig: recipe.rigSpec,
+      skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
+    if (!config.ok) return { ok: false, reason: config.errors.join("; ") };
+    const skills = config.config.selectedResources.skills;
+    return { ok: true, selection: {
+      selected: new Set(skills.map((skill) => skill.effectiveId)),
+      following: skills.filter((skill) => (skill.resource as SkillResource).onRestore === "follow_source").map((skill) => ({
+        id: skill.effectiveId,
+        source: nodePath.resolve(skill.sourcePath, (skill.resource as SkillResource).path),
+      })),
+    } };
   }
 
   /** Whether a persisted recipe contains enough validated source to attempt a fresh launch. */

@@ -2,7 +2,7 @@ import { parse as parseYaml } from "yaml";
 import type {
   AgentSpec, ImportSpec, StartupBlock, StartupFile, StartupAction,
   LifecycleDefaults, AgentResources, ProfileSpec,
-  SkillResource, GuidanceResource, SubagentResource, RuntimeResource,
+  SkillResource, SkillOnRestore, GuidanceResource, SubagentResource, RuntimeResource,
   PluginResource, PluginSource,
   ValidationResult,
 } from "./types.js";
@@ -279,6 +279,15 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
             allLocalIds[category] = new Set(mappingEntries.map((e) => e["id"] as string).filter(Boolean));
           }
 
+          if (category === "skills") {
+            entries.forEach((entry, i) => {
+              const onRestore = entry && typeof entry === "object" ? entry["on_restore"] : undefined;
+              if (onRestore !== undefined && onRestore !== "keep_saved" && onRestore !== "follow_source") {
+                errors.push(`resources.skills[${i}].on_restore: must be "keep_saved" | "follow_source" (got "${String(onRestore)}")`);
+              }
+            });
+          }
+
           // runtime_resources must have runtime field
           if (category === "runtime_resources") {
             for (let i = 0; i < entries.length; i++) {
@@ -459,7 +468,8 @@ function normalizeResources(raw: unknown): AgentResources {
 
   return {
     skills: Array.isArray(obj["skills"])
-      ? (obj["skills"] as Record<string, unknown>[]).map((s) => ({ id: s["id"] as string, path: s["path"] as string }))
+      ? (obj["skills"] as Record<string, unknown>[]).map((s) => ({ id: s["id"] as string, path: s["path"] as string,
+          onRestore: (s["on_restore"] as SkillOnRestore | undefined) ?? "keep_saved" }))
       : [],
     guidance: Array.isArray(obj["guidance"])
       ? (obj["guidance"] as Record<string, unknown>[]).map((g) => ({

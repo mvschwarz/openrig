@@ -387,6 +387,8 @@ export interface PersistedProjectionEntry {
   resourceType?: string;
   mergeStrategy?: string;
   target?: string;
+  /** A skill whose resource says `on_restore: follow_source`, so a replay keeps it recorded as following. */
+  onRestore?: SkillOnRestore;
 }
 
 export interface NodeStartupSnapshot {
@@ -1050,7 +1052,10 @@ export interface LifecycleDefaults {
   restorePolicy?: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
 }
 
-export interface SkillResource { id: string; path: string; }
+/** What a restore that keeps a seat's conversation does with this skill's copy in the seat's storage: keep the saved
+ *  copy (the default), or follow the source, taking today's bytes and today's selection. */
+export type SkillOnRestore = "keep_saved" | "follow_source";
+export interface SkillResource { id: string; path: string; onRestore?: SkillOnRestore; }
 export interface GuidanceResource { id: string; path: string; target: string; merge: "managed_block" | "append"; }
 export interface SubagentResource { id: string; path: string; }
 export interface RuntimeResource { id: string; path: string; runtime: string; type: string; }
