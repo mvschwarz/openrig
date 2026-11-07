@@ -113,10 +113,11 @@ A verified export, a finished task and an exact restore haven't been shown.
   as the same attachment when only OpenRig's tile script changed, and moves to
   the current command, so the viewer stays confirmed and the follow view goes on
   adding and closing tiles. A kept viewer that's already running keeps its
-  earlier sizing until it's attached again; writable viewers opened after the
-  upgrade size their pane. A different session, tmux, server or read-only
-  setting still holds the view, as before. Checked against the scripts those
-  releases used, not yet with a live Herdr. It follows @natefaerber's approach in
+  earlier sizing for as long as it runs, its own re-attaches included; writable
+  viewers opened after the upgrade size their pane. A different session, tmux,
+  server or read-only setting still holds the view, as before. Checked against
+  the scripts those releases used, not yet with a live Herdr. It follows
+  @natefaerber's approach in
   [#2467](https://github.com/mvschwarz/openrig/pull/2467). ([#2634](https://github.com/mvschwarz/openrig/pull/2634))
 
 ### Coordination and status
