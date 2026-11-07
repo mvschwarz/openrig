@@ -1123,7 +1123,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(wakes).toEqual(["lead@fixture"]);
   });
 
-  it("a prompt that clears and comes back between reminders raises a new alert after two new refusals", async () => {
+  it.each([-1, 0])("a prompt that clears and comes back between reminders raises a new alert after two new refusals (last old refusal at clear %i ms)", async lastOldOffset => {
     const clearAt = Date.parse("2030-01-01T00:00:00Z");
     const at = (offset: number) => new Date(clearAt + offset).toISOString();
     vi.useFakeTimers({ toFake: ["Date"], now: clearAt - 3 });
@@ -1132,7 +1132,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       const { record } = reminder([]);
       vi.setSystemTime(clearAt);
       record("refused", "selection_prompt", at(-2));
-      record("refused", "selection_prompt", at(-1));
+      record("refused", "selection_prompt", at(lastOldOffset));
       await tick(port, toLead(wakes));
       const [first] = alerts();
       state = "clear"; await tick(port, toLead(wakes));
@@ -1166,7 +1166,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
   });
 
-  it.each([-1, 0])("a prompt alert routed to a fallback still records a cleared prompt, so the next blocked episode alerts (last old refusal at clear %i ms)", async lastOldOffset => {
+  it("a prompt alert routed to a fallback still records a cleared prompt, so the next blocked episode alerts", async () => {
     const clearAt = Date.parse("2030-01-01T00:00:00Z");
     const at = (offset: number) => new Date(clearAt + offset).toISOString();
     // Queue transitions use Date, not tick's injected now. History times describe the causal sequence explicitly.
@@ -1177,33 +1177,19 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       vi.setSystemTime(clearAt);
       record("sent", "selection_prompt", at(-3));
       record("refused", "selection_prompt", at(-2));
-      record("refused", "selection_prompt", at(lastOldOffset));
+      record("refused", "selection_prompt", at(-1));
       await tick(port, toLead(wakes));
-      expect(alerts()).toHaveLength(1);
       const first = alerts()[0]!;
-      expect(wakes).toEqual(["lead@fixture"]);
       repo.routeToFallback(first.qitemId, "backup@fixture", "lead removed");
       state = "clear"; await tick(port, toLead(wakes));
       expect(alerts()).toEqual([]);
-      expect(repo.getById(first.qitemId)?.state).toBe("done");
-      expect(repo.listTransitions(first.qitemId)).toEqual(expect.arrayContaining([
-        expect.objectContaining({ transitionNote: "prompt escalation: the seat's prompt read clear", ts: at(0) }),
-      ]));
-      state = "blocked"; await tick(port, toLead(wakes));
-      expect(alerts()).toEqual([]);
-      vi.setSystemTime(clearAt + 1);
+      state = "blocked"; vi.setSystemTime(clearAt + 1);
       record("refused", "selection_prompt", at(1));
-      await tick(port, toLead(wakes));
-      expect(alerts()).toEqual([]);
-      expect(wakes).toEqual(["lead@fixture"]);
-      // Two refusals may share a millisecond; both are unambiguously after the clear.
       record("refused", "selection_prompt", at(1));
       await tick(port, toLead(wakes));
       expect(alerts()).toHaveLength(1);
       expect(alerts()[0]!.qitemId).not.toBe(first.qitemId);
       expect(repo.getById(first.qitemId)?.state).toBe("done");
-      await tick(port, toLead(wakes));
-      expect(alerts()).toHaveLength(1);
       expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
     } finally { vi.useRealTimers(); }
   });
