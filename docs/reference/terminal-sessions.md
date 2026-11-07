@@ -297,9 +297,15 @@ not grant authority based on task membership or accept a caller terminal ID.
 
 On a supported Linux or macOS Herdr protocol-22 endpoint, it creates one viewer
 or reuses an owned, verified `{workspaceId,paneId,terminalId,readOnly}` mapping.
-A repeated/concurrent request does not create another viewer. A lost create
-reply is reconciled before starting anything else; a lost run reply is checked
-against the actual foreground process, never blindly repeated. Unknown or
+A repeated/concurrent request does not create another viewer. Each viewer's
+private `attach.sh` is kept for provider restarts. `--no-follow` preserves the
+workspace and its scripts; stopping Herdr is not proof that its panes are gone.
+Core removes only an exact, unedited owned script after confirming its viewer
+is absent. Old views that are never reconciled again can therefore accumulate
+scripts; there is no cleanup based only on an unreachable provider.
+
+A lost create reply is reconciled before starting anything else; a lost run
+reply is checked against the actual foreground process, never blindly repeated. Unknown or
 changed terminal identity remains unconfirmed. The operation does not relayout,
 close departed viewers, take over control, focus existing panes or launch/stop
 agents. A first workspace on an otherwise empty Herdr server may become focused.

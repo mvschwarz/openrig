@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -14,7 +14,7 @@ import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
 import { tileAttachArgv078, tileAttachArgv079 } from "../src/domain/terminal/earlier-tile-attach.js";
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const socket = "/tmp/follow-provider.sock";
 export function task(seats: string[], complete = true): ComposedView {
   const composed = composeView("qitem:task", seats.map(seat => ({ seat, label: seat, host: null, alive: true,
@@ -31,7 +31,7 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
   const frames = new Map<string, ComposerSnapshot | null>();
   let transform = (view: ComposedView) => view;
   let reportedCwd: string | null | undefined;
-  let changedCreateCwd = false;
+  let changedCreateCwd = false, stripReadyAt = 0;
   let lateFocus: { seat: string; reads: number } | undefined;
   let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false, failedViewerRun = false, failedProcessRead = false;
   const run = async (args: string[]) => {
@@ -58,7 +58,10 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
       return JSON.stringify({ result: { pane: { ...selected, cwd: reportedCwd === null ? undefined : reportedCwd ?? selected.cwd } } });
     }
     if (command === "pane process-info" && failedProcessRead && panes.get(args[3]!)!.cwd.includes("/viewers/")) { failedProcessRead = false; throw new Error("first viewer inspection failed"); }
-    if (command === "pane process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: panes.get(args[3]!)!.argv }] } } });
+    if (command === "pane process-info") {
+      const argv = panes.get(args[3]!)!.argv;
+      return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: argv[0] === "/usr/bin/tail" && Date.now() < stripReadyAt ? ["/bin/zsh"] : argv }] } } });
+    }
     if (command === "pane run") {
       const selected = panes.get(args[2]!)!;
       if (args[3]!.startsWith("/usr/bin/tail")) {
@@ -105,6 +108,7 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
   return { follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
     reportCwd: (cwd: string | null) => { reportedCwd = cwd; },
     changeCreateCwd: () => { changedCreateCwd = true; },
+    delayStrip: (ms: number) => { stripReadyAt = Date.now() + ms; },
     failViewerRun: () => { failedViewerRun = true; },
     failProcessRead: () => { failedProcessRead = true; },
     confirmViewer: (seat: string) => { const entry = JSON.parse(readFileSync(journal(), "utf8")).entries[JSON.stringify(["self", seat])]; panes.get(entry.pane.pane_id)!.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`]; },
@@ -117,6 +121,29 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
 }
 
 describe("stable task-following workspace", () => {
+  it("confirms a slow first strip without repeating its run", async () => {
+    vi.useFakeTimers(); const f = fixture("darwin"); f.delayStrip(6000);
+    const opened = f.follow(["a"]); await vi.advanceTimersByTimeAsync(7000);
+    expect(await opened).toMatchObject({ ok: true, opened: ["a"] });
+    expect(f.calls.filter(args => args[1] === "run" && args[3]?.startsWith("/usr/bin/tail"))).toHaveLength(1);
+  });
+  it("bounds strip confirmation and reconciles a later start without another run", async () => {
+    vi.useFakeTimers(); const f = fixture("darwin"); f.delayStrip(20000);
+    const opened = f.follow(["a"]); await vi.advanceTimersByTimeAsync(11000);
+    expect(await opened).toMatchObject({ ok: false, code: "follow_unconfirmed" });
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });
+    expect(f.calls.filter(args => args[1] === "run" && args[3]?.startsWith("/usr/bin/tail"))).toHaveLength(1);
+  });
+  it("keeps a canvas that changes generation during strip confirmation unconfirmed", async () => {
+    vi.useFakeTimers(); const f = fixture("darwin"); f.delayStrip(6000);
+    const opened = f.follow(["a"]); await vi.advanceTimersByTimeAsync(1000);
+    const strip = [...f.panes.values()].find(p => p.argv[0] === "/usr/bin/tail")!; strip.terminal_id = "replacement";
+    await vi.advanceTimersByTimeAsync(7000);
+    expect(await opened).toMatchObject({ ok: false, code: "follow_unconfirmed" });
+    expect(f.calls.some(args => args[1] === "split")).toBe(false);
+  });
+
   it("keeps the received strip creation IDs even if its rc already changed cwd", async () => {
     const f = fixture(); f.changeCreateCwd();
     expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });

@@ -135,17 +135,22 @@ export class HerdrFollowView {
         await this.deps.run(["pane", "run", state.pane.pane_id, `/usr/bin/tail -n 30 -F ${quote(log)}`]);
       }
       let stripReady = false;
-      // Bounded process-start observation, not steady membership polling.
-      for (let attempt = 0; attempt < 6; attempt++) {
+      // A first login shell can take seconds. Observe its single dispatched run
+      // for a bounded startup window, never steady membership polling.
+      const stripDeadline = Date.now() + 10000;
+      while (true) {
         const strip = body(await this.deps.run(["pane", "process-info", "--pane", state.pane.pane_id]));
         const processes = (strip.process_info as { foreground_processes?: Array<{ argv?: string[] }> } | undefined)?.foreground_processes;
         stripReady = processes?.some(p => JSON.stringify(p.argv) === JSON.stringify(["/usr/bin/tail", "-n", "30", "-F", log])) ?? false;
         if (stripReady) break;
-        await new Promise(resolve => setTimeout(resolve, 50));
+        const remaining = stripDeadline - Date.now();
+        if (remaining <= 0) break;
+        await new Promise(resolve => setTimeout(resolve, Math.min(250, remaining)));
       }
       if (!stripReady) {
         throw new Error("The explanation strip process is unconfirmed; pane run was not repeated.");
       }
+      await currentPane(state.pane); // Reconfirm generation after a slow shell start.
       const members = view.task.members.map(m => ({ key: keyOf(m.key.hostId, m.key.nodeId), seat: m.seat }));
       for (const key of Object.keys(state.viewerFailures ?? {})) {
         if (!members.some(member => member.key === key) && !state.tiles.some(tile => tile.key === key)) delete state.viewerFailures![key];
