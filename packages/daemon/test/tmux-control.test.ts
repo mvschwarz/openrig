@@ -373,8 +373,33 @@ describe("tmuxControlExec", () => {
       }
       expect(exec.status()).toEqual({ state: "on", serverVersion: "3.8" });
       expect(logged).toEqual(["[tmux] Control mode is on: this daemon's tmux server runs tmux 3.8."]);
+
+      // Its client gone, it is on only once another attaches: until then commands are spawned.
+      client.exit();
+      await vi.waitFor(() => expect(exec.status()).toEqual({ state: "allowed", serverVersion: "3.8" }));
+      expect(logged).toHaveLength(1);
     } finally {
       await exec.close();
+    }
+  });
+
+  it("#2707 a server that allows control mode doesn't read on while its client can't start or attach", async () => {
+    for (const failure of ["spawn", "attach"] as const) {
+      const client = fakeClient({ attach: false });
+      const { spawned, fallback } = fakeSpawned(() => "spawned\n");
+      const logged: string[] = [];
+      const exec = tmuxControlExec(fallback, {
+        spawnClient: failure === "spawn" ? () => { throw new Error("spawn failed"); } : () => client.child,
+        replyTimeoutMs: 50, log: (message) => logged.push(message),
+      });
+      try {
+        expect(await exec(["tmux", "display-message", "-p", "-t", "=seat@rig:", "x"]), failure).toBe("spawned\n");
+        expect(spawned, failure).toHaveLength(1);
+        expect(exec.status(), failure).toEqual({ state: "allowed", serverVersion: "3.8" });
+        expect(logged, failure).toEqual([]);
+      } finally {
+        await exec.close();
+      }
     }
   });
 

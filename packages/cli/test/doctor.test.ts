@@ -936,6 +936,21 @@ describe("#161 tmux control mode", () => {
     expect(check).toMatchObject({ status: "pass", message: expect.stringContaining("tmux 3.8") });
   });
 
+  it("#2707 warns when the server allows it but no control client is connected: commands are spawned meanwhile", async () => {
+    const check = await controlCheck(daemonSays({ requested: true, state: "allowed", serverVersion: "3.8" }));
+    expect(check?.status).toBe("warn");
+    expect(check?.message).toContain("tmux 3.8 allows it");
+    expect(check?.message).toContain("no control client is connected right now");
+  });
+
+  it("#2707 names a version it doesn't recognize as unrecognized, and a missing client wrapper by its causes", async () => {
+    const unknown = await controlCheck(daemonSays({ requested: true, state: "off", serverVersion: "next-3.8" }));
+    expect(unknown?.message).toContain("tmux next-3.8, which isn't a tmux release known to be 3.7c or later");
+    const wrapperless = await controlCheck(daemonSays({ requested: true, state: "off" }));
+    expect(wrapperless?.message).toContain("Windows");
+    expect(wrapperless?.message).toContain("OPENRIG_TMUX_SHELL=1");
+  });
+
   it("says it isn't decided while the daemon hasn't read its server's version yet", async () => {
     const check = await controlCheck(daemonSays({ requested: true, state: "undecided" }));
     expect(check).toMatchObject({ status: "skipped", message: expect.stringContaining("hasn't read its tmux server's version yet") });

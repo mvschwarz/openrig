@@ -381,7 +381,7 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
   return { checks, portCheck, asyncChecks };
 }
 
-type TmuxControlReport = { requested?: boolean; state?: "on" | "off" | "undecided"; serverVersion?: string };
+type TmuxControlReport = { requested?: boolean; state?: "on" | "allowed" | "off" | "undecided"; serverVersion?: string };
 
 /**
  * #161 — does the daemon drive tmux through one control-mode client (OPENRIG_TMUX_CONTROL=1)? Asked for on a server
@@ -420,12 +420,22 @@ async function buildTmuxControlModeCheck(deps: DoctorDeps, daemonBase: string): 
   if (control.state === "undecided") {
     return { name, status: "skipped", message: "tmux control mode is asked for, and the daemon hasn't read its tmux server's version yet. It does at its first tmux command while a session runs." };
   }
-  if (!version) {
-    return { name, status: "warn", message: "tmux control mode is asked for but off: it isn't available to this daemon on this platform." };
+  if (control.state === "allowed") {
+    return {
+      name, status: "warn",
+      message: `tmux control mode is asked for and the server's tmux ${version} allows it, but no control client is connected right now, so tmux commands use a spawned client.`,
+      reason: "The daemon starts a control client at a tmux command while another session runs on the server. One that can't start or attach is tried again after a while, and commands are spawned meanwhile.",
+    };
   }
+  if (!version) {
+    return { name, status: "warn", message: "tmux control mode is asked for but this daemon doesn't use a control client: it runs on Windows (psmux) or with OPENRIG_TMUX_SHELL=1." };
+  }
+  const known = /^\d+\.\d+[a-z]?$/.test(version);
   return {
     name, status: "warn",
-    message: `tmux control mode is asked for but off: the daemon's tmux server runs tmux ${version}, and control mode needs tmux 3.7c or later.`,
+    message: known
+      ? `tmux control mode is asked for but off: the daemon's tmux server runs tmux ${version}, and control mode needs tmux 3.7c or later.`
+      : `tmux control mode is asked for but off: the daemon's tmux server runs tmux ${version}, which isn't a tmux release known to be 3.7c or later.`,
     reason: "Starting a control client can crash a tmux server older than 3.7c, so the daemon spawns a tmux client for every command instead. The running server's version decides this, not the tmux binary on PATH.",
     fix: "Run the daemon's sessions on a tmux 3.7c or later server: rig context get reference/tmux-servers.md#moving-an-existing-team-onto-tmux-control-mode",
   };
