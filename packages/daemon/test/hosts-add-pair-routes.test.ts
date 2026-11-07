@@ -471,6 +471,34 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(item.state).toBe("pending");
   });
 
+  it("a request stays open as long as its requester waits, and its approval says how long and until when", async () => {
+    const originalNow = Date.now;
+    const t0 = Date.parse("2026-11-07T15:00:00.000Z");
+    const request = async (body: Record<string, unknown>) => (await (await app.request("/api/hosts/pair-request", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    })).json()) as { pairId: string; approvalQitemId: string };
+    const poll = async (pairId: string) => (await app.request(`/api/hosts/pair-request/${pairId}`)).json();
+    try {
+      Date.now = () => t0;
+      // rig host pair --timeout 3600 sends its wait; a requester that doesn't say gets the default 10 minutes.
+      const hour = await request({ requester: "long-wait@laptop", timeoutMs: 3_600_000 });
+      const plain = await request({ requester: "older-cli@laptop" });
+      expect(repo.getById(hour.approvalQitemId)!.body).toContain("This request expires 60 minutes after creation, at 2026-11-07 16:00 UTC; expiry persists nothing.");
+      expect(repo.getById(plain.approvalQitemId)!.body).toContain("This request expires 10 minutes after creation, at 2026-11-07 15:10 UTC; expiry persists nothing.");
+
+      Date.now = () => t0 + 30 * 60 * 1000;
+      expect(await poll(hour.pairId)).toMatchObject({ status: "pending" });
+      expect(await poll(plain.pairId)).toEqual({ status: "expired" });
+
+      // Past its hour, a new request's prune still keeps it, so its waiting requester reads "expired", not "unknown".
+      Date.now = () => t0 + 61 * 60 * 1000;
+      await request({ requester: "another@laptop" });
+      expect(await poll(hour.pairId)).toEqual({ status: "expired" });
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   it("approve (close done) → approved + the bearer token, SINGLE-SHOT; the pairing then dies", async () => {
     const { pairId, approvalQitemId } = await issue();
 

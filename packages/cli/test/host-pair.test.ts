@@ -42,9 +42,10 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
   function fakeDeps(opts: {
     post?: { status: number; body: unknown };
     poll: Array<{ status: number; body: unknown }>;
-  }): DoctorDeps & { postCalls: () => number } {
+  }): DoctorDeps & { postCalls: () => number; posted: unknown[] } {
     let polls = 0;
     let posts = 0;
+    const posted: unknown[] = [];
     return {
       run: async () => ({ ok: true, stdout: "", stderr: "", exitCode: 0 }) as never,
       httpGet: async () => {
@@ -52,13 +53,15 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
         polls += 1;
         return { status: r.status, body: JSON.stringify(r.body) };
       },
-      httpPost: async () => {
+      httpPost: async (_url, body) => {
         posts += 1;
+        posted.push(body);
         const r = opts.post ?? { status: 200, body: { pairId: "p-1", code: "424242", approvalQitemId: "qitem-1" } };
         return { status: r.status, body: JSON.stringify(r.body) };
       },
       tcpProbe: async () => "open" as const,
       postCalls: () => posts,
+      posted,
     };
   }
 
@@ -91,6 +94,12 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
     expect(yaml).toContain("id: vps-a");
     expect(yaml).toContain(`bearer_file: ${tokenPath}`);
     expect(yaml).not.toContain("issued-bearer");
+  }, 15_000);
+
+  it("--timeout reaches the target, which keeps the request open that long", async () => {
+    const deps = fakeDeps({ poll: [{ status: 200, body: { status: "denied" } }] });
+    await capture(() => run(deps, ["pair", "http://vps-a:7433", "--timeout", "3600"]));
+    expect(deps.posted).toEqual([expect.objectContaining({ timeoutMs: 3_600_000 })]);
   }, 15_000);
 
   it("denied: loud error, exit 1, NOTHING persists", async () => {
