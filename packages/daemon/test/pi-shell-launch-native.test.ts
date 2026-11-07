@@ -33,9 +33,12 @@ describe.skipIf(!hasTmux || process.platform === "win32")("Pi launch through nat
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-shell-"));
     const socket = path.join(temp, "tmux.sock");
     const session = "pi-fixture";
-    const long = Array.from({ length: mode === "fresh-linux-long" ? 36 : 14 }, () => "nested-directory-" + "x".repeat(35)).join(path.sep);
+    const long = Array.from({ length: 14 }, () => "nested-directory-" + "x".repeat(35)).join(path.sep);
     const stateRoot = path.join(temp, longTmp ? "short" : long, "state");
-    const cwd = path.join(temp, longTmp ? "short" : long, "project with 'quotes'");
+    // Keep session tokens below 1024 characters; Linux's oversized command comes from cwd instead.
+    const projectPath = mode === "fresh-linux-long"
+      ? Array.from({ length: 64 }, () => "nested-directory-" + "x".repeat(35)).join(path.sep) : long;
+    const cwd = path.join(temp, longTmp ? "short" : projectPath, "project with 'quotes'");
     fs.mkdirSync(cwd, { recursive: true });
     const routeServer = routing ? createServer((req, res) => {
       res.end(JSON.stringify({ instance: "intended", node: req.headers["x-node"] }));
