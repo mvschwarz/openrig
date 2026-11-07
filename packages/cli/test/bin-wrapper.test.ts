@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
+import ts from "typescript";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,7 +27,11 @@ describe("bin-wrapper", () => {
     fs.mkdirSync(dist);
     fs.writeFileSync(path.join(tempDir, "package.json"), '{ "type": "module" }');
     const wrapper = path.join(dist, "bin-wrapper.js");
-    fs.copyFileSync(new URL("../dist/bin-wrapper.js", import.meta.url), wrapper);
+    const source = fs.readFileSync(new URL("../src/bin-wrapper.ts", import.meta.url), "utf8");
+    const { outputText } = ts.transpileModule(source, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+    });
+    fs.writeFileSync(wrapper, outputText);
     const report = `import { getCompileCacheDir } from "node:module";
 export async function runProgram() { console.log(JSON.stringify({ enabled: !!getCompileCacheDir() })); }
 `;
