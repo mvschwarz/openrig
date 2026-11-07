@@ -24,7 +24,7 @@ const quote = (s: string) => "'" + s.replace(/'/g, "'\"'\"'") + "'";
 // The runner entry is deliberately offline: this exercises the real adapter,
 // tmux, canonical macOS tty and shell, without starting Pi or touching provider settings.
 describe.skipIf(!hasTmux || process.platform === "win32")("Pi launch through native tty", () => {
-  it.each([...["fresh", "fork", "resume", "short-long-tmpdir", "fresh-long-tmpdir", "fork-long-tmpdir", "resume-long-tmpdir"].flatMap(mode => [
+  it.each([...(process.platform === "linux" ? [{ mode: "fresh-linux-long", canonical: true }] : []), ...["fresh", "fork", "resume", "short-long-tmpdir", "fresh-long-tmpdir", "fork-long-tmpdir", "resume-long-tmpdir"].flatMap(mode => [
     { mode, canonical: true }, { mode, canonical: false },
   ]), ...["fresh-routing", "fork-routing", "resume-routing", "fork-routing-long-tmpdir", "resume-routing-long-tmpdir"].map(mode => ({ mode, canonical: false }))])("preserves $mode runner arguments (canonical reader: $canonical)", async ({ mode, canonical }) => {
     const launchMode = mode.split("-")[0];
@@ -33,7 +33,7 @@ describe.skipIf(!hasTmux || process.platform === "win32")("Pi launch through nat
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-shell-"));
     const socket = path.join(temp, "tmux.sock");
     const session = "pi-fixture";
-    const long = Array.from({ length: 14 }, () => "nested-directory-" + "x".repeat(35)).join(path.sep);
+    const long = Array.from({ length: mode === "fresh-linux-long" ? 36 : 14 }, () => "nested-directory-" + "x".repeat(35)).join(path.sep);
     const stateRoot = path.join(temp, longTmp ? "short" : long, "state");
     const cwd = path.join(temp, longTmp ? "short" : long, "project with 'quotes'");
     fs.mkdirSync(cwd, { recursive: true });
@@ -84,7 +84,7 @@ setInterval(() => {}, 1000);
     else if (longTmp) {
       expect(Buffer.byteLength(expected)).toBeGreaterThan(512);
       expect(Buffer.byteLength(expected)).toBeLessThan(1024);
-    } else expect(Buffer.byteLength(expected)).toBeGreaterThan(2000);
+    } else expect(Buffer.byteLength(expected)).toBeGreaterThan(mode === "fresh-linux-long" ? 4096 : 2000);
     const fsOps = { readFile: (p: string) => fs.readFileSync(p, "utf8"),
       writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
       exists: fs.existsSync, mkdirp: (p: string) => { fs.mkdirSync(p, { recursive: true }); } };
