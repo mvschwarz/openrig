@@ -117,12 +117,15 @@ OPENRIG_RELAY_INBOUND_TOKEN=sec_inbound_token_value
 #### Inbound Statuses & Responses
 - **200 OK**: Request accepted (`{ ok: true, deduplicated: false, reconciled: false, qitemId, verb, actorSession, actionId }`). Exact duplicate submissions of the same `eventId` return `ok: true` with `deduplicated: true`.
 - **400 Bad Request**: Malformed JSON, non-object payload, or invalid required field syntax/bounds (`eventId`, `sender.handle`, `replyRef`, `text`, or `ordering`). Harmless extra fields are ignored.
-- **401 Unauthorized**: Missing, malformed, unrecognized, unready, or cross-profile ambiguous inbound Bearer token.
+- **401 Unauthorized**: Missing, malformed, unrecognized, unready, or cross-profile ambiguous inbound Bearer token, or no humans configured (`noHumans`).
 - **403 Forbidden**: Non-loopback TCP socket peer, browser cross-origin request, connector mismatch (`replyRef` emitted by another connector), or unregistered `sender.handle`. (`Via` and `X-Forwarded-*` headers are ignored).
 - **404 Not Found**: Queue item referenced in `replyRef` does not exist.
-- **409 Conflict**: Stale `decisionRevision` (question cancelled, answered, or re-asked), attempt to answer an informational update, or conflicting payload submitted under an existing `eventId`.
+- **409 Conflict**: Stale `decisionRevision` (question cancelled, answered, or re-asked), attempt to answer an informational update, unrecognized `replyRef` when both durable receipts and the pending dispatch buffer are readable, or conflicting payload submitted under an existing `eventId`.
 - **413 Payload Too Large**: Request body exceeds 64 KiB (65,536 bytes).
-- **503 Service Unavailable**: Local seen-ledger (`relay-inbound-seen.jsonl`) is unreadable, contains unparseable JSONL or unkeyable records (missing `id`), or has a corrupt/unvouched record for the requested `eventId`'s key. Keyed suspect records (`missing/invalid status` or conflicting recorded fingerprints for the same key; diagnostic `ts` or extra metadata fields are ignored) scope refusal to that `eventId` key only so unrelated `eventId`s continue to operate normally, while never treating unparseable or suspect history as unseen.
+- **503 Service Unavailable**:
+  - `human_registry_unavailable`: Local human registry (`gateway/humans/*.yaml`) failed to load due to a broken fragment or filesystem read error (normal `noHumans` returns `401`).
+  - `dispatch_buffer_unavailable`: An un-receipted `replyRef` required fallback verification against `<openrig-home>/gateway/dispatch-buffer.json`, and reading the buffer failed (`pendingStrict()`), returning `503` with zero seen-store reservation or Mission Control action side effects. (`replyRef`s already vouched for by durable accepted receipts in `queue_transitions` are verified before consulting the buffer and still succeed.)
+  - `seen_store_unavailable` (response includes `seenPath`): Local seen-ledger (`state/relay-inbound-seen.jsonl`) is unreadable, contains unparseable JSONL or unkeyable records (missing `id`), failed a reservation/processed mark, or has a corrupt/unvouched record for the requested `eventId`'s key. Keyed suspect records (`missing/invalid status` or conflicting recorded fingerprints for the same key; diagnostic `ts` or extra metadata fields are ignored) scope refusal to that `eventId` key only so unrelated `eventId`s continue to operate normally, while never treating unparseable or suspect history as unseen.
 
 ---
 
@@ -222,6 +225,17 @@ rig gateway human remove alice
 | **Stale Question Reply** | HTTP 409 on inbound endpoint | Question was already answered, cancelled, or superseded by a newer revision. |
 | **Unregistered Handle** | HTTP 403 on inbound endpoint | The `sender.handle` is not bound to the authenticated `connectorRef`. |
 | **Non-Loopback Inbound** | HTTP 403 on inbound endpoint | Connection originated from a non-loopback TCP socket peer or included a cross-origin browser header. (`Via` and `X-Forwarded-*` headers are ignored). |
-| **Seen-Ledger Corrupt / Suspect** | HTTP 503 on inbound endpoint (`seen_store_unavailable`) | Unreadable/unparseable/unkeyable `relay-inbound-seen.jsonl` refuses all inbound requests; a keyed suspect entry refuses only that specific `eventId`. |
+| **Registry or Buffer Read Failure** | HTTP 503 on inbound endpoint (`human_registry_unavailable` or `dispatch_buffer_unavailable`) | Inspect local `gateway/humans/*.yaml` fragments or `<openrig-home>/gateway/dispatch-buffer.json` for syntax/permission corruption before retrying the bridge event. |
+| **Seen-Ledger Corrupt / Suspect** | HTTP 503 on inbound endpoint (`seen_store_unavailable`, includes `seenPath`) | Unreadable/unparseable/unkeyable `relay-inbound-seen.jsonl` refuses all inbound requests; a keyed suspect entry refuses only that specific `eventId`. Follow the conservative recovery procedure below. |
+
+### Conservative Seen-Ledger Recovery (`seen_store_unavailable`)
+
+When `POST /api/gateway/relay/inbound` returns `503` with `error: "seen_store_unavailable"`, the response body and message include the resolved `seenPath` (`<openrig-home>/state/relay-inbound-seen.jsonl`):
+
+1. **Quiesce writers first**: Pause the loopback bridge and stop the daemon (`rig daemon stop`) so no concurrent inbound request or retry appends to the ledger during inspection.
+2. **Preserve a full backup**: Copy `<seenPath>` to a timestamped backup outside `state/` before making any edit.
+3. **Correlate against durable evidence**: Each ledger entry keys `id` by `eventKey = SHA256(JSON.stringify([connectorRef, eventId]))` (64-character lowercase hex digest) and stores `status` as `received:<fingerprint>` or `processed:<fingerprint>`. Because `eventKey` is a one-way hash, correlate any damaged line or keyed suspect `id` against `mission_control_actions.audit_notes_json` (which records `operationId: "relay:<eventKey>:<fingerprint>"`, `connectorRef`, and `eventId`) and bridge delivery logs by computing `SHA256(JSON.stringify([connectorRef, eventId]))` for candidate events—never by guessing or assuming the hash is reversible.
+4. **Apply only evidence-verified, history-preserving repair**: Repair a damaged record only when its exact `id` (`<eventKey>`) and `status` (`received:<fingerprint>` or `processed:<fingerprint>`) are verified from `mission_control_actions.audit_notes_json` or bridge evidence, or restore only from a backup that preserves every subsequently acknowledged event. Do **not** delete, truncate, or skip unknown/unparseable records, and do **not** restore an older backup that omits acknowledged events; if an entry cannot be verified without losing history, leave the ledger in place (continuing to fail closed with `503`) and retain the backup.
+5. **Resume and retry**: After a verified, history-preserving repair is saved at `<seenPath>`, start the daemon (`rig daemon start`), resume the loopback bridge, and retry the original inbound delivery with the same `eventId`.
 
 For automated loopback bridge test reference, see `packages/daemon/test/fixtures/recording-relay.ts`.

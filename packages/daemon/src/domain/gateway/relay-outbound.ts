@@ -812,6 +812,15 @@ export async function postRelayEnvelope(input: PostRelayEnvelopeInput): Promise<
     };
   }
 
+  if (input.stopSignal?.aborted) {
+    return {
+      ok: false,
+      status: 0,
+      class: "stopped",
+      detail: "relay transport stopped",
+    };
+  }
+
   const timeoutMs = input.timeoutMs ?? RELAY_DEFAULT_TIMEOUT_MS;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs);
@@ -848,9 +857,17 @@ export async function postRelayEnvelope(input: PostRelayEnvelopeInput): Promise<
     }
     return { ok: true, status: res.status };
   } catch (error) {
+    if (input.stopSignal?.aborted) {
+      return {
+        ok: false,
+        status: 0,
+        class: "stopped",
+        detail: "relay transport stopped",
+      };
+    }
     const rawMsg = (error as Error)?.message || "";
     const isRedirect = /redirect/i.test(rawMsg);
-    const isTimeout = /timeout|abort/i.test(rawMsg);
+    const isTimeout = ctrl.signal.aborted || /timeout|abort/i.test(rawMsg);
     return {
       ok: false,
       status: 0,
@@ -1032,6 +1049,10 @@ export function createRelayOutboundTransport(opts: RelayOutboundTransportOpts): 
       return { ok: false, class: "relay-profile-unready", detail: profile.reason };
     }
 
+    if (opts.stopSignal?.aborted) {
+      return { ok: false, class: "stopped", detail: "relay transport stopped" };
+    }
+
     if (!attemptedMap.has(decision.decisionId)) {
       try {
         opts.attempted.mark(decision.decisionId, `attempted:${connectorRef}:${envelope.outcome}`);
@@ -1051,6 +1072,10 @@ export function createRelayOutboundTransport(opts: RelayOutboundTransportOpts): 
     for (const partEnvelope of partEnvelopes) {
       if (isMultiPart && deliveredMap.has(partEnvelope.deliveryId)) {
         continue;
+      }
+
+      if (opts.stopSignal?.aborted) {
+        return { ok: false, class: "stopped", detail: "relay transport stopped" };
       }
 
       if (isMultiPart && !attemptedMap.has(partEnvelope.deliveryId)) {
@@ -1077,11 +1102,13 @@ export function createRelayOutboundTransport(opts: RelayOutboundTransportOpts): 
       });
 
       if (!res.ok) {
-        try {
-          opts.onTransportFailed?.(p, res.class, res.detail);
-        } catch (e) {
-          log(`relay transport-failed receipt write FAILED for ${p.qitemId ?? decision.decisionId}: ${(e as Error).message}`);
-          return { ok: false, class: "receipt-failed", detail: (e as Error).message };
+        if (res.class !== "stopped") {
+          try {
+            opts.onTransportFailed?.(p, res.class, res.detail);
+          } catch (e) {
+            log(`relay transport-failed receipt write FAILED for ${p.qitemId ?? decision.decisionId}: ${(e as Error).message}`);
+            return { ok: false, class: "receipt-failed", detail: (e as Error).message };
+          }
         }
         return { ok: false, class: res.class, detail: res.detail };
       }

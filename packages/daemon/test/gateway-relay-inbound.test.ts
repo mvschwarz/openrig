@@ -1633,6 +1633,12 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
         }),
       });
       expect(suspectRes.status, `eventId=${badEventId}`).toBe(503);
+      const suspectJson = (await suspectRes.json()) as Record<string, unknown>;
+      expect(suspectJson).toMatchObject({
+        error: "seen_store_unavailable",
+        seenPath,
+      });
+      expect(String(suspectJson.message)).toContain(seenPath);
     }
     expect(f.daemon.queueRepo.getById(askSuspect.qitemId)?.state).toBe("pending");
 
@@ -1657,6 +1663,10 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
       }),
     });
     expect(unkeyableRes.status).toBe(503);
+    expect(await unkeyableRes.json()).toMatchObject({
+      error: "seen_store_unavailable",
+      seenPath,
+    });
     expect(f.daemon.queueRepo.getById(askSuspect.qitemId)?.state).toBe("pending");
 
     writeFileSync(seenPath, "{corrupt-jsonl-line\n", "utf8");
@@ -1669,6 +1679,130 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
       body: JSON.stringify(bodyA),
     });
     expect(corruptRes.status).toBe(503);
+    expect(await corruptRes.json()).toMatchObject({
+      error: "seen_store_unavailable",
+      seenPath,
+    });
+  });
+
+  it("distinguishes normal noHumans (401) from broken or thrown registry reads (503) and preserves receipt-first verification when dispatch buffer is unreadable (503 for un-receipted refs)", async () => {
+    const f = await createRelayFixture();
+    const receiptedAsk = await createAskWithAcceptedRelayRef(f);
+    const unreceiptedAsk = await createAskWithAcceptedRelayRef(f, { recordViaPendingBufferOnly: true });
+
+    // 1. Normal noHumans (empty registry directory with zero fragments) -> 401 unauthorized (not 503 outage)
+    const emptyHome = mkdtempSync(join(tmpdir(), "relay-empty-humans-"));
+    try {
+      const emptyHandler = createRelayInboundHandler({
+        home: emptyHome,
+        queueRepo: f.daemon.queueRepo,
+        missionControlWriteContract: f.daemon.missionControlWriteContract,
+        missionControlActionLog: f.daemon.missionControlActionLog,
+      });
+      const noHumansRes = await emptyHandler.handle({
+        authorizationHeader: `Bearer ${f.inboundTokenMain}`,
+        rawBody: JSON.stringify({
+          eventId: "evt-no-humans-1",
+          sender: { handle: "founder-handle" },
+          replyRef: receiptedAsk.replyRef,
+          text: "No humans configured",
+        }),
+      });
+      expect(noHumansRes.status).toBe(401);
+      expect(noHumansRes.body.error).toBe("unauthorized");
+    } finally {
+      rmSync(emptyHome, { recursive: true, force: true });
+    }
+
+    // 2. Returned broken registry (ok: false without noHumans) -> 503 human_registry_unavailable
+    const brokenRegistryHandler = createRelayInboundHandler({
+      home: f.home,
+      queueRepo: f.daemon.queueRepo,
+      missionControlWriteContract: f.daemon.missionControlWriteContract,
+      missionControlActionLog: f.daemon.missionControlActionLog,
+      loadEntities: () => ({ ok: false, error: "corrupt human fragment YAML" }),
+    });
+    const brokenRegRes = await brokenRegistryHandler.handle({
+      authorizationHeader: `Bearer ${f.inboundTokenMain}`,
+      rawBody: JSON.stringify({
+        eventId: "evt-broken-reg-1",
+        sender: { handle: "founder-handle" },
+        replyRef: receiptedAsk.replyRef,
+        text: "Broken registry",
+      }),
+    });
+    expect(brokenRegRes.status).toBe(503);
+    expect(brokenRegRes.body.error).toBe("human_registry_unavailable");
+
+    // 3. Thrown registry read exception -> 503 human_registry_unavailable
+    const throwingRegistryHandler = createRelayInboundHandler({
+      home: f.home,
+      queueRepo: f.daemon.queueRepo,
+      missionControlWriteContract: f.daemon.missionControlWriteContract,
+      missionControlActionLog: f.daemon.missionControlActionLog,
+      loadEntities: () => {
+        throw new Error("EIO: disk read failure on human registry");
+      },
+    });
+    const thrownRegRes = await throwingRegistryHandler.handle({
+      authorizationHeader: `Bearer ${f.inboundTokenMain}`,
+      rawBody: JSON.stringify({
+        eventId: "evt-thrown-reg-1",
+        sender: { handle: "founder-handle" },
+        replyRef: receiptedAsk.replyRef,
+        text: "Thrown registry",
+      }),
+    });
+    expect(thrownRegRes.status).toBe(503);
+    expect(thrownRegRes.body.error).toBe("human_registry_unavailable");
+
+    // 4. Corrupt the local DispatchBuffer file:
+    //    - A replyRef already vouched for by a durable accepted receipt still succeeds (200 OK)
+    //    - An un-receipted replyRef that requires reading DispatchBuffer returns 503 dispatch_buffer_unavailable
+    //      with zero seen-store reservation and zero action side effects.
+    const bufferPath = join(f.home, "gateway", "dispatch-buffer.json");
+    writeFileSync(bufferPath, "{corrupt-dispatch-buffer-json\n", "utf8");
+
+    const receiptedRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "evt-receipt-wins-over-corrupt-buffer",
+        sender: { handle: "founder-handle" },
+        replyRef: receiptedAsk.replyRef,
+        text: "Durable receipt vouches for this replyRef despite corrupt buffer",
+        ordering: "after-question",
+      }),
+    });
+    expect(receiptedRes.status).toBe(200);
+    expect(f.daemon.queueRepo.getById(receiptedAsk.qitemId)?.state).toBe("done");
+
+    const unreceiptedEventId = "evt-unreceipted-corrupt-buffer";
+    const unreceiptedRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: unreceiptedEventId,
+        sender: { handle: "founder-handle" },
+        replyRef: unreceiptedAsk.replyRef,
+        text: "Should return 503 because buffer cannot be read to verify un-receipted ref",
+        ordering: "after-question",
+      }),
+    });
+    expect(unreceiptedRes.status).toBe(503);
+    expect(await unreceiptedRes.json()).toMatchObject({
+      error: "dispatch_buffer_unavailable",
+    });
+    const seen = new SeenStore(join(f.home, "state", RELAY_INBOUND_SEEN_FILE));
+    expect(seen.statuses().get(computeRelayEventKey("relay-main", unreceiptedEventId))).toBeUndefined();
+    expect(f.daemon.queueRepo.getById(unreceiptedAsk.qitemId)?.state).toBe("pending");
+    expect(f.daemon.missionControlActionLog.listForQitem(unreceiptedAsk.qitemId, 5)).toHaveLength(0);
   });
 
   it("exposes sanitized relay readiness on /api/gateway/human/:entityId/readiness and /api/gateway/connections without leaking secrets", async () => {

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   HANDLE_PATTERN,
   loadHumanRegistry,
+  registeredPeople,
   resolveRelayHandle,
   type HumanFragment,
 } from "./human-registry.js";
@@ -66,7 +67,7 @@ export interface RelayInboundHandlerDeps {
   stateFs?: StateFsOps;
   loadEntities?: () =>
     | { ok: true; entities: HumanFragment[] }
-    | { ok: false; error: string };
+    | { ok: false; error: string; noHumans?: true };
 }
 
 export interface RelayInboundHandler {
@@ -344,7 +345,12 @@ function verifyOfferedReplyRef(
       return { ok: true };
     }
   } catch {
-    // Unreadable dispatch buffer cannot prove an un-receipted ref; fall through to rejection
+    return {
+      ok: false,
+      code: "dispatch_buffer_unavailable",
+      message:
+        "Relay outbound dispatch buffer is unreadable; refusing to reject or reserve un-receipted replyRef",
+    };
   }
 
   return {
@@ -423,11 +429,7 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
 
   const loadEntities =
     deps.loadEntities ??
-    (() => {
-      const loaded = loadHumanRegistry(deps.home, { readOnly: true });
-      if (!loaded.ok) return { ok: false as const, error: loaded.error };
-      return { ok: true as const, entities: loaded.entities };
-    });
+    (() => loadHumanRegistry(deps.home, { readOnly: true }));
 
   const runSerialized = async (
     eventKey: string,
@@ -462,18 +464,23 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
         };
       }
 
-      const registry = loadEntities();
-      if (!registry.ok) {
+      let entities: HumanFragment[] | null;
+      try {
+        entities = registeredPeople(loadEntities());
+      } catch {
+        entities = null;
+      }
+      if (entities === null) {
         return {
-          status: 401,
+          status: 503,
           body: {
-            error: "unauthorized",
+            error: "human_registry_unavailable",
             message: "Relay inbound authentication is unavailable because human registry cannot be read",
           },
         };
       }
 
-      const profiles = loadRelayProfiles(deps.home, { entities: registry.entities });
+      const profiles = loadRelayProfiles(deps.home, { entities });
       const auth = authenticateRelayInboundToken(profiles, bearerToken);
       if (!auth.ok) {
         return {
@@ -527,7 +534,7 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
       const senderResolution = resolveRelayHandle(
         authenticatedConnectorRef,
         envelope.sender.handle,
-        registry.entities,
+        entities,
       );
       if (senderResolution.kind !== "registered") {
         return {
@@ -565,7 +572,8 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
             status: 503,
             body: {
               error: "seen_store_unavailable",
-              message: "Relay inbound seen-store is unreadable; refusing to process or acknowledge",
+              seenPath,
+              message: `Relay inbound seen-store is unreadable (${seenPath}); refusing to process or acknowledge`,
             },
           };
         }
@@ -582,7 +590,8 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
               status: 503,
               body: {
                 error: "seen_store_unavailable",
-                message: "Relay inbound seen-store record for this eventId is corrupt or unvouched; refusing to process or acknowledge",
+                seenPath,
+                message: `Relay inbound seen-store record for this eventId is corrupt or unvouched (${seenPath}); refusing to process or acknowledge`,
               },
             };
           }
@@ -619,8 +628,14 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
             ref,
           );
           if (!verified.ok) {
+            const status =
+              verified.code === "qitem_not_found"
+                ? 404
+                : verified.code === "dispatch_buffer_unavailable"
+                  ? 503
+                  : 409;
             return {
-              status: verified.code === "qitem_not_found" ? 404 : 409,
+              status,
               body: {
                 error: verified.code,
                 message: verified.message,
@@ -635,7 +650,8 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
               status: 503,
               body: {
                 error: "seen_store_unavailable",
-                message: "Failed to reserve relay inbound event in seen-store",
+                seenPath,
+                message: `Failed to reserve relay inbound event in seen-store (${seenPath})`,
               },
             };
           }
@@ -672,7 +688,8 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
               status: 503,
               body: {
                 error: "seen_store_unavailable",
-                message: "Action committed but seen-store processed mark failed; retry safely with same eventId",
+                seenPath,
+                message: `Action committed but seen-store processed mark failed (${seenPath}); retry safely with same eventId`,
               },
             };
           }
@@ -712,7 +729,8 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
                     status: 503,
                     body: {
                       error: "seen_store_unavailable",
-                      message: "Action reconciled but seen-store processed mark failed",
+                      seenPath,
+                      message: `Action reconciled but seen-store processed mark failed (${seenPath})`,
                     },
                   };
                 }

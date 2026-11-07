@@ -1274,5 +1274,226 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
       expect(ref1.ok && ref1.ref.qitemId).toBe("q-dig-1");
       expect(ref2.ok && ref2.ref.qitemId).toBe("q-dig-2");
     });
+
+    it("distinguishes stopSignal abort from genuine timeout: in-flight stop suppresses failure ledger, retains pending decision and part ACKs, replays stable IDs/bytes on restart, while genuine timeout still records failure", async () => {
+      const fsx = memFs();
+      const attempted = new SeenStore("/state/relay-attempted-decisions.jsonl", fsx);
+      const delivered = new SeenStore("/state/relay-delivered-decisions.jsonl", fsx);
+      const outboundSeen = new SeenStore("/state/slack-outbound-seen.jsonl", fsx);
+      const bridge = recordingBridgeFixture();
+      const receipts: RelayAcceptedReceiptInfo[] = [];
+      const failures: Array<{ failureClass: string; detail: string }> = [];
+
+      const longBody = "STOP-RESUME-BLOCK-".repeat(4500) + "\nSTOP-RESUME-TAIL";
+      const prepared = prepareRelayDecision(
+        {
+          kind: "outbound_decision",
+          decisionId: "dec-stop-mp-1",
+          op: OUTBOUND_OP,
+          entityBindingRef: "sam@external",
+          payload: {
+            qitemId: "q-stop-1",
+            notificationKey: "q-stop-1:1",
+            ownerNotificationKind: "human-required",
+            ownerNotificationLevel: "ALERT",
+            humanIntent: "decision",
+            destinationSession: "sam@external",
+            state: "blocked",
+            summary: "Stop during in-flight multi-part send",
+            body: longBody,
+          } satisfies OutboundPostPayload,
+        },
+        {
+          loadHumanRegistry: () => reg,
+          lookupQuestionState: () => ({
+            qitemId: "q-stop-1",
+            mode: "park",
+            episodeKey: "q-stop-1:1",
+            decisionRevision: "dr1-stop-1",
+            humanIntent: "decision",
+          }),
+        },
+      );
+
+      const expectedParts = (prepared.payload as RelayPayloadCarry).relayEnvelopes!;
+      expect(expectedParts.length).toBe(2);
+
+      const stopCtl1 = new AbortController();
+      let postCalls = 0;
+      const stopOnSecondPartFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+        postCalls += 1;
+        if (postCalls === 1) {
+          return bridge.fetchImpl(url, init);
+        }
+        return await new Promise<Response>((_resolve, reject) => {
+          const sig = init?.signal;
+          const onAbort = () => {
+            reject(sig?.reason ?? new DOMException("The operation was aborted", "AbortError"));
+          };
+          if (sig?.aborted) {
+            onAbort();
+            return;
+          }
+          sig?.addEventListener("abort", onAbort, { once: true });
+          // Simulate subsystem stop while Part 2 HTTP POST is in flight
+          queueMicrotask(() => stopCtl1.abort(new Error("subsystem stop requested")));
+        });
+      };
+
+      const transport1 = createRelayOutboundTransport({
+        attempted,
+        delivered,
+        outboundSeen,
+        fetchImpl: stopOnSecondPartFetch,
+        stopSignal: stopCtl1.signal,
+        resolveProfile: (connectorRef) => ({
+          ok: true,
+          connectorRef,
+          url: "http://127.0.0.1:43110/outbound",
+          outboundToken: "out-tok-valid-123456",
+        }),
+        onAccepted: (info) => receipts.push(info),
+        onTransportFailed: (_p, failureClass, detail) => failures.push({ failureClass, detail }),
+      });
+
+      const wire1 = buildInProcessWire({
+        home,
+        ops: [OUTBOUND_OP],
+        deliver: (d) => transport1.deliver(d),
+      });
+
+      wire1.dispatcher.dispatch(OUTBOUND_OP, "sam@external", prepared.payload, {
+        decisionId: "dec-stop-mp-1",
+      });
+      await tick();
+
+      // Part 1 succeeded and was recorded; Part 2 was aborted by stopSignal -> NO failure ledger entry, NO acceptance, decision retained
+      expect(bridge.custodyByDeliveryId.size).toBe(1);
+      expect(delivered.load().has("dec-stop-mp-1:part:1")).toBe(true);
+      expect(delivered.load().has("dec-stop-mp-1:part:2")).toBe(false);
+      expect(delivered.load().has("dec-stop-mp-1")).toBe(false);
+      expect(failures, "stopSignal abort must not record transport failure").toEqual([]);
+      expect(receipts, "stopSignal abort must not record false acceptance").toEqual([]);
+      expect(new DispatchBuffer(home).pending()).toHaveLength(1);
+
+      // Pre-aborted stopSignal also returns stopped without calling fetch or recording failure
+      const callsBeforePreAborted = postCalls;
+      const preAbortedOutcome = await transport1.deliver({
+        kind: "outbound_decision",
+        decisionId: "dec-stop-mp-1",
+        op: OUTBOUND_OP,
+        entityBindingRef: "sam@external",
+        payload: prepared.payload,
+      });
+      expect(preAbortedOutcome).toEqual({
+        ok: false,
+        class: "stopped",
+        detail: "relay transport stopped",
+      });
+      expect(postCalls).toBe(callsBeforePreAborted);
+      expect(failures).toEqual([]);
+
+      // Restart with a fresh transport/wire: Part 1 is skipped, Part 2 is sent with identical frozen ID/bytes, custody completes
+      const stopCtl2 = new AbortController();
+      const transport2 = createRelayOutboundTransport({
+        attempted,
+        delivered,
+        outboundSeen,
+        fetchImpl: bridge.fetchImpl,
+        stopSignal: stopCtl2.signal,
+        resolveProfile: (connectorRef) => ({
+          ok: true,
+          connectorRef,
+          url: "http://127.0.0.1:43110/outbound",
+          outboundToken: "out-tok-valid-123456",
+        }),
+        onAccepted: (info) => receipts.push(info),
+        onTransportFailed: (_p, failureClass, detail) => failures.push({ failureClass, detail }),
+      });
+
+      const wire2 = buildInProcessWire({
+        home,
+        ops: [OUTBOUND_OP],
+        deliver: (d) => transport2.deliver(d),
+      });
+      wire2.startServices?.();
+      await tick();
+
+      expect(bridge.callCount(), "Part 1 posted once before stop + Part 2 posted once on replay").toBe(2);
+      expect(bridge.custodyByDeliveryId.size).toBe(2);
+      expect(bridge.attempts[0]!.envelope.deliveryId).toBe("dec-stop-mp-1:part:1");
+      expect(bridge.attempts[1]!.envelope.deliveryId).toBe("dec-stop-mp-1:part:2");
+      expect(bridge.attempts[1]!.envelope).toEqual(expectedParts[1]);
+      expect(receipts).toHaveLength(1);
+      expect(failures).toEqual([]);
+      expect(delivered.load().has("dec-stop-mp-1")).toBe(true);
+      expect(new DispatchBuffer(home).pending()).toHaveLength(0);
+
+      // Genuine timeout (when stopSignal is NOT aborted) still reports class "timeout" and invokes onTransportFailed
+      const hangingFetch = async (_url: string, init?: RequestInit): Promise<Response> =>
+        await new Promise<Response>((_resolve, reject) => {
+          const sig = init?.signal;
+          sig?.addEventListener(
+            "abort",
+            () => reject(sig.reason ?? new DOMException("The operation was aborted", "AbortError")),
+            { once: true },
+          );
+        });
+
+      const timeoutTransport = createRelayOutboundTransport({
+        attempted,
+        delivered,
+        outboundSeen,
+        fetchImpl: hangingFetch,
+        timeoutMs: 20,
+        stopSignal: stopCtl2.signal,
+        resolveProfile: (connectorRef) => ({
+          ok: true,
+          connectorRef,
+          url: "http://127.0.0.1:43110/outbound",
+          outboundToken: "out-tok-valid-123456",
+        }),
+        onAccepted: (info) => receipts.push(info),
+        onTransportFailed: (_p, failureClass, detail) => failures.push({ failureClass, detail }),
+      });
+
+      const timeoutOutcome = await timeoutTransport.deliver({
+        kind: "outbound_decision",
+        decisionId: "dec-genuine-timeout-1",
+        op: OUTBOUND_OP,
+        entityBindingRef: "sam@external",
+        payload: {
+          qitemId: "q-timeout-1",
+          notificationKey: "q-timeout-1:1",
+          ownerNotificationKind: "human-required",
+          ownerNotificationLevel: "ALERT",
+          humanIntent: "decision",
+          destinationSession: "sam@external",
+          relayConnectorRef: "wa-main",
+          relayEnvelope: {
+            v: 1,
+            deliveryId: "dec-genuine-timeout-1",
+            recipient: { handle: "sam_wa" },
+            intent: "decision",
+            outcome: "interrupt",
+            summary: "Timeout test",
+            body: "Body",
+            replyRef: null,
+          },
+        },
+      });
+
+      expect(timeoutOutcome).toEqual({
+        ok: false,
+        class: "timeout",
+        detail: "relay request timed out after 20ms",
+      });
+      expect(failures).toEqual([
+        {
+          failureClass: "timeout",
+          detail: "relay request timed out after 20ms",
+        },
+      ]);
+    });
   });
 });

@@ -553,7 +553,7 @@ describe("Capability 3 — single-wire relay port isolation and attempted-replay
       expect(relayCalls[1]).toEqual(relayCalls[0]);
       expect(new DispatchBuffer(home).pending()).toHaveLength(0);
       const episode = repo.currentHumanRequiredEpisode(ask.qitemId)!;
-      expect(repo.hasRelayOwnerNotificationReceipt(ask.qitemId, episode.notificationKey)).toBe(true);
+      expect(repo.hasRelayOwnerNotificationReceipt(ask.qitemId, episode.key)).toBe(true);
     } finally {
       w3.stop();
       db.close();

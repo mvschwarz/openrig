@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Hono } from "hono";
@@ -226,6 +226,7 @@ describe("relay primary-binding readiness", () => {
         ].join("\n"),
         { mode: 0o644 },
       );
+      chmodSync(envFile, 0o644);
       const relayHuman: HumanFragment = {
         ...human,
         connectorBindings: [
