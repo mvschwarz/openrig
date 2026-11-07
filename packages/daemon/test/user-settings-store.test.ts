@@ -267,9 +267,9 @@ describe("SettingsStore (User Settings v0)", () => {
     }
   });
 
-  it("retention.events_days defaults to 14, resolves file then env, and accepts only an integer >= 1", () => {
+  it("retention.events_days defaults to 0 (keep), resolves file then env, accepts 0 and refuses negative or non-integer values", () => {
     const store = new SettingsStore(configPath);
-    expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 14, source: "default" });
+    expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 0, source: "default" });
     store.set("retention.events_days", "3");
     expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 3, source: "file" });
     expect(JSON.parse(readFileSync(configPath, "utf-8")).retention.eventsDays).toBe(3);
@@ -279,7 +279,9 @@ describe("SettingsStore (User Settings v0)", () => {
     } finally {
       delete process.env.OPENRIG_RETENTION_EVENTS_DAYS;
     }
-    for (const raw of ["0", "-3", "2.5", "3days"]) {
+    store.set("retention.events_days", "0");
+    expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 0, source: "file" });
+    for (const raw of ["-3", "2.5", "3days"]) {
       expect(() => store.set("retention.events_days", raw)).toThrow(/retention\.events_days/);
     }
   });

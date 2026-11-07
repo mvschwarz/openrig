@@ -6,7 +6,7 @@
 // With --seed it creates a fresh, fully migrated database at --db and fills it with seedHostShapedDaily. Without
 // --seed it measures the database already at --db (meant for a COPY of a real one, e.g. made with
 // `sqlite3 <db> ".backup <copy>"`; never point it at a running daemon's file). Options: --retention <days>
-// (default 14), --window <rows> and --pause <ms> (the RETENTION_DEFAULTS when absent), --now <ISO> (default now).
+// (default 14 here; the setting itself defaults to 0, which keeps every event), --window <rows> and --pause <ms> (the RETENTION_DEFAULTS when absent), --now <ISO> (default now).
 // It runs only the events pass (pruneEvents), the same call the boot sweep and the daily sweep make, so the other
 // retention tables of a copy are left as they are. It prints, as Markdown: the rows per day and per type before
 // and after; the event-loop delay (max and p99) and the time of each statement; the pass's total time, and a
@@ -28,7 +28,7 @@ const { values } = parseArgs({
     "seed-only": { type: "boolean", default: false },
     days: { type: "string", default: "30" },
     scale: { type: "string", default: "1" },
-    retention: { type: "string", default: String(RETENTION_DEFAULTS.eventsRetentionDays) },
+    retention: { type: "string", default: "14" }, // the setting defaults to 0 (keep); 14 is the documented example
     window: { type: "string", default: String(RETENTION_DEFAULTS.eventsWindow) },
     pause: { type: "string", default: String(RETENTION_DEFAULTS.eventsPauseMs) },
     now: { type: "string" },
@@ -94,13 +94,13 @@ async function sweep(label: string, at: string) {
   });
   const totalMs = performance.now() - t0;
   histogram.disable();
-  // The first statement's time also covers the cutoff search; report it apart.
+  // The first statement's time also covers reading the mark and the seq bounds; report it apart.
   const first = statementMs[0] ?? 0;
   const sorted = statementMs.slice(1).sort((a, b) => a - b);
   console.log(`\n### ${label} (now ${at}, ${retentionDays} days, window ${window}, pause ${pauseMs} ms)`);
   console.log(`- deleted ${summary.deletedRows} events in ${summary.batches} statements; low-water seq ${summary.lowWater}`);
   console.log(`- events pass time ${(totalMs / 1000).toFixed(2)} s (the time it adds to the boot sweep and to the daily one)`);
-  console.log(`- first statement (with the cutoff search): ${first.toFixed(1)} ms`);
+  console.log(`- first statement (with the mark and bounds reads): ${first.toFixed(1)} ms`);
   console.log(`- the other ${sorted.length} statements: max ${pct(sorted, 100).toFixed(1)} ms, p99 ${pct(sorted, 99).toFixed(1)} ms, p50 ${pct(sorted, 50).toFixed(1)} ms`);
   console.log(`- event-loop delay during the sweep: max ${(histogram.max / 1e6).toFixed(1)} ms, p99 ${(histogram.percentile(99) / 1e6).toFixed(1)} ms`);
   return summary;

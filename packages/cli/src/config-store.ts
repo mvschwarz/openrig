@@ -410,7 +410,7 @@ const DEFAULTS = {
     watchdogKeepPerJob: 50,
     streamDays: 30,
     streamMaxItems: 20000,
-    eventsDays: 14,
+    eventsDays: 0,
     batchSize: 500,
   },
   // S04 — pickup-receipt stall threshold default (twin of daemon getDefaultValue).
@@ -555,7 +555,7 @@ export const VALID_KEYS = [
   // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
   "retention.stream_days",
   "retention.stream_max_items",
-  // The history-only event types of `events` older than N days; lockstep with the daemon twin.
+  // The history-only event types of `events` older than N days, 0 (default) keeps them; lockstep with the daemon twin.
   "retention.events_days",
   "stream.intake",
   "retention.batch_size",
@@ -1153,9 +1153,10 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for stream.intake: must be "queue.worker", a canonical session (<seat>@<rig>), or "off", got "${raw}"`);
     }
   },
+  // 0 (the default) keeps these events; a positive day count turns their pruning on.
   "retention.events_days": (raw, coerced) => {
-    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
-      throw new Error(`Invalid value for retention.events_days: must be an integer >= 1, got "${raw}"`);
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
+      throw new Error(`Invalid value for retention.events_days: must be an integer >= 0 (0 keeps the events), got "${raw}"`);
     }
   },
   "retention.batch_size": (raw, coerced) => {

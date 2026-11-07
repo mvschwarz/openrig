@@ -103,6 +103,10 @@ Keys:
                            an unreadable registry does not suppress eligibility; delivery still needs a ready route)
   retention.*            enabled, transitions_days, watchdog_days,
                          watchdog_keep_per_job, batch_size
+  retention.events_days  delete the history-only event types (views, snapshots, watchdog firings, queue events) older
+                         than N days; 0 keeps them (default). Removed events no longer replay from /api/events, leave
+                         the telemetry export, the log and the feed, and can't be brought back. Read at the next sweep
+                         (daily and at daemon start)
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
   launch.codex_login_shell  defer to Codex's own login-shell setting in managed Codex seats (default off)
                          Off adds allow_login_shell=false: tool commands inherit the seat's environment, so plain rig

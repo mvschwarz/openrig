@@ -223,7 +223,7 @@ export const SETTINGS_VALID_KEYS = [
   "retention.transitions_days",
   "retention.watchdog_days",
   "retention.usage_samples_days",
-  // The history-only event types of `events` (queue-retention PRUNABLE_EVENT_TYPES) older than N days.
+  // The history-only event types of `events` (queue-retention PRUNABLE_EVENT_TYPES) older than N days; 0 (default) keeps them.
   "retention.events_days",
   "retention.watchdog_keep_per_job",
   // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
@@ -770,7 +770,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "retention.transitions_days": return 30;
     case "retention.watchdog_days": return 14;
     case "retention.usage_samples_days": return 14;
-    case "retention.events_days": return 14;
+    case "retention.events_days": return 0; // 0 = keep; pruning is opt-in
     case "retention.watchdog_keep_per_job": return 50;
     case "retention.stream_days": return 30;
     case "retention.stream_max_items": return 20000;
@@ -984,9 +984,10 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
       throw new Error(`Invalid value for retention.usage_samples_days: must be an integer >= 1, got "${raw}"`);
     }
   },
+  // 0 (the default) keeps these events; a positive day count turns their pruning on.
   "retention.events_days": (raw, coerced) => {
-    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
-      throw new Error(`Invalid value for retention.events_days: must be an integer >= 1, got "${raw}"`);
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
+      throw new Error(`Invalid value for retention.events_days: must be an integer >= 0 (0 keeps the events), got "${raw}"`);
     }
   },
   "retention.watchdog_keep_per_job": (raw, coerced) => {

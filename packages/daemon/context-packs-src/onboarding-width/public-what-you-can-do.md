@@ -96,9 +96,9 @@ one command away. Your memory of the fleet is a claim about the past.
   With no evidence that reads unknown, never idle.
 - **`rig telemetry events` / `transitions` / `tenures <node-id>`** — past events, queue
   transitions and a seat's occupants, one bounded page at a time with gaps reported. Reach for it
-  before querying the database yourself. The history-only event types (views, snapshots, watchdog
-  firings, queue events) are kept `retention.events_days` days (default 14), so an older window
-  reports them as a `retained_sequence_gap`.
+  before querying the database yourself. If `retention.events_days` is set (default `0` keeps
+  everything), the history-only event types (views, snapshots, watchdog firings, queue events) older
+  than that are pruned, and an older window reports them as a `retained_sequence_gap`.
 - **Check the exit code.** Many commands used to print nothing and exit 0 when a daemon read
   failed; now they exit 1 or 2. Empty output from a failed read is not empty state.
 

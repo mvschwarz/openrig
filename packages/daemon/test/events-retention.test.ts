@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { join, relative } from "node:path";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -9,7 +11,6 @@ import {
   PRUNABLE_EVENT_TYPES,
   RETENTION_DEFAULTS,
   eventsCutoffSql,
-  findEventsCutoffSeq,
   pruneEvents,
   runQueueRetentionSweep,
 } from "../src/domain/queue-retention.js";
@@ -67,7 +68,8 @@ const STATE_TYPES = [
   "watchdog.evaluation_skipped",
 ] as const;
 
-const noPause = { eventsYield: async () => {} };
+// Pruning is opt-in (0 = keep, the default): every case that expects pruning passes the days explicitly.
+const noPause = { eventsRetentionDays: 14, eventsYield: async () => {} };
 
 describe("events retention — what is deleted", () => {
   it("deletes only the old rows of the eight prunable types; old state rows and new rows stay, by type and seq", async () => {
@@ -126,7 +128,6 @@ describe("events retention — what is deleted", () => {
     insertAt(db, 3, "queue.created", ago(30));
     insertAt(db, 4, "queue.created", ago(20));
     insertAt(db, 5, "queue.created", ago(1));
-    expect(findEventsCutoffSeq(db, eventsCutoffSql(NOW, 14))).toBeGreaterThan(2);
 
     const first = await pruneEvents(db, { nowIso: NOW, ...noPause });
 
@@ -137,6 +138,30 @@ describe("events retention — what is deleted", () => {
     insertAt(db, 6, "node.held", ago(-20));
     await pruneEvents(db, { nowIso: later, ...noPause });
     expect(seqs(db)).toEqual([6]);
+  });
+
+  it("a row dated in the future does not hide older rows after it, on this sweep or the next", async () => {
+    const db = makeDb();
+    insertAt(db, 1, "node.startup_ready", ago(30)); // a kept type
+    for (const seq of [2, 3, 4]) insertAt(db, seq, "queue.created", ago(30));
+    insertAt(db, 5, "queue.created", ago(-365)); // dated a year ahead
+    for (const seq of [6, 7]) insertAt(db, seq, "queue.created", ago(30));
+    insertAt(db, 8, "node.held", ago(0)); // current
+
+    const first = await pruneEvents(db, { nowIso: NOW, ...noPause });
+    expect(seqs(db)).toEqual([1, 5, 8]);
+    expect(first.lowWater).toBe(4);
+
+    insertAt(db, 9, "queue.created", ago(30)); // an old row written later, after the future-dated one
+    insertAt(db, 10, "node.held", ago(0));
+    await pruneEvents(db, { nowIso: NOW, ...noPause });
+    expect(seqs(db)).toEqual([1, 5, 8, 10]);
+
+    // A year and a day later, the future-dated row has aged and goes too.
+    const yearLater = new Date(new Date(NOW).getTime() + 380 * 86_400_000).toISOString();
+    insertAt(db, 11, "node.held", ago(-380));
+    await pruneEvents(db, { nowIso: yearLater, ...noPause });
+    expect(seqs(db)).toEqual([1, 8, 10, 11]);
   });
 
   it("never deletes the newest event, however old it is", async () => {
@@ -171,7 +196,7 @@ describe("events retention — bounded work", () => {
     insert(db, "view.changed", ago(1));
     let yields = 0;
 
-    const result = await pruneEvents(db, { nowIso: NOW, eventsWindow: 2, eventsYield: async () => { yields++; } });
+    const result = await pruneEvents(db, { nowIso: NOW, eventsRetentionDays: 14, eventsWindow: 2, eventsYield: async () => { yields++; } });
 
     expect(result.deletedRows).toBe(6);
     expect(result.batches).toBeGreaterThanOrEqual(2);
@@ -188,6 +213,7 @@ describe("events retention — bounded work", () => {
 
     await pruneEvents(db, {
       nowIso: NOW,
+      eventsRetentionDays: 14,
       eventsWindow: 2,
       eventsPauseMs: 0,
       onEventsWindow: () => { if (ranBeforeEnd) sawItRunning = true; },
@@ -227,7 +253,6 @@ describe("events retention — bounded work", () => {
     for (let i = 0; i < 3; i++) insert(db, "agent.activity", ago(13, 43_200)); // 13.5 days: past the cutoff tomorrow
     for (let i = 0; i < 3; i++) insert(db, "agent.activity", ago(1));
     const n = 3 * window + 5;
-    const firstCutoff = findEventsCutoffSeq(db, eventsCutoffSql(NOW, 14));
     const windows: Array<{ lo: number; hi: number }> = [];
 
     const first = await pruneEvents(db, { nowIso: NOW, eventsWindow: window, ...noPause, onEventsWindow: (w) => windows.push(w) });
@@ -235,17 +260,19 @@ describe("events retention — bounded work", () => {
     expect(first.deletedRows).toBe(0);
     expect(first.batches).toBeGreaterThanOrEqual(Math.ceil(n / window));
     for (const w of windows) expect(w.hi - w.lo).toBeLessThanOrEqual(window);
-    expect(first.lowWater).toBe(firstCutoff - 1);
+    const newest = (db.prepare("SELECT MAX(seq) AS s FROM events").get() as { s: number }).s;
+    expect(first.lowWater).toBe(newest - 1);
     const mark = db.prepare("SELECT low_water_seq AS seq FROM events_retention_marks WHERE id = 1").get() as { seq: number };
     expect(mark.seq).toBe(first.lowWater);
 
-    // A day later: a few more rows age past the cutoff. The second sweep starts at the mark, not at the start.
+    // A day later, with a few new rows: the second sweep starts at the mark, not at the start.
     const later = new Date(new Date(NOW).getTime() + 86_400_000).toISOString();
+    for (let i = 0; i < 3; i++) insert(db, "agent.activity", ago(0));
     const second: Array<{ lo: number; hi: number }> = [];
     const again = await pruneEvents(db, { nowIso: later, eventsWindow: window, ...noPause, onEventsWindow: (w) => second.push(w) });
 
     expect(second.length).toBeGreaterThan(0);
-    expect(second[0]!.lo + 1).toBeGreaterThanOrEqual(firstCutoff);
+    expect(second[0]!.lo).toBe(first.lowWater);
     expect(again.batches).toBeLessThanOrEqual(1);
   });
 });
@@ -259,7 +286,7 @@ describe("events retention — the sweep and the scheduler", () => {
     insert(db, "node.held", ago(4));
     const before = countAll(db);
 
-    const summary = await runQueueRetentionSweep(db, { nowIso: NOW, eventsRetentionDays: 3, ...noPause });
+    const summary = await runQueueRetentionSweep(db, { nowIso: NOW, ...noPause, eventsRetentionDays: 3 });
 
     expect(db.prepare("SELECT 1 FROM events WHERE seq = ?").get(fourDays)).toBeUndefined();
     expect(db.prepare("SELECT 1 FROM events WHERE seq = ?").get(fiveDays)).toBeUndefined();
@@ -270,16 +297,50 @@ describe("events retention — the sweep and the scheduler", () => {
     expect(summary.eventsLowWater).toBe(twoDays - 1);
   });
 
-  it("uses the 14-day default when the sweep gets no events option", async () => {
-    expect(RETENTION_DEFAULTS.eventsRetentionDays).toBe(14);
+  it("the default keeps every event: pruning is opt-in", async () => {
+    expect(RETENTION_DEFAULTS.eventsRetentionDays).toBe(0);
     const db = makeDb();
-    const fourDays = insert(db, "queue.claimed", ago(4));
+    insert(db, "queue.claimed", ago(400));
     insert(db, "queue.claimed", ago(2));
 
-    const summary = await runQueueRetentionSweep(db, { nowIso: NOW, ...noPause });
+    const summary = await runQueueRetentionSweep(db, { nowIso: NOW, eventsYield: async () => {} });
 
     expect(summary.eventsDeleted).toBe(0);
-    expect(db.prepare("SELECT 1 FROM events WHERE seq = ?").get(fourDays)).toBeDefined();
+    expect(summary.eventsBatches).toBe(0);
+    expect(countAll(db)).toBe(2);
+  });
+
+  it("with the key missing, the default or an explicit 0, the scheduler deletes no event and leaves the mark, while the other retention jobs run", async () => {
+    const old = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 19).replace("T", " ");
+    for (const label of ["missing", "default", "explicit 0"]) {
+      const db = makeDb();
+      for (const type of PRUNABLE_EVENT_TYPES) insert(db, type, old(400));
+      insert(db, "node.held", old(400));
+      db.prepare("INSERT INTO events_retention_marks (id, low_water_seq, prunable_types, updated_at) VALUES (1, 1, ?, '2026-01-01T00:00:00.000Z')")
+        .run(PRUNABLE_EVENT_TYPES.join(","));
+      // another retention job of the same sweep: an old usage sample (14-day default) must still go
+      db.prepare("INSERT INTO usage_samples (lane, seat_session, captured_at) VALUES ('context', 's@r', ?)").run(new Date(Date.now() - 40 * 86_400_000).toISOString());
+      const byType = () => db.prepare("SELECT type, COUNT(*) AS c FROM events GROUP BY type ORDER BY type").all();
+      const before = byType();
+      const markBefore = db.prepare("SELECT * FROM events_retention_marks").all();
+      // missing: the store has no value for the key (the scheduler's own fallback applies); default: the real
+      // SettingsStore on an empty config; explicit 0: the key set to 0
+      const home = mkdtempSync(join(tmpdir(), "events-days-"));
+      const real = new SettingsStore(join(home, "config.json"));
+      const store = label === "default" ? real
+        : { resolveOne: (key: string) => ({ value: key === "retention.events_days" ? (label === "missing" ? undefined : 0) : real.resolveOne(key).value }) };
+
+      const handle = startQueueRetentionScheduler({ rigRepo: { db }, settingsStore: store });
+      try {
+        await expect.poll(() => (db.prepare("SELECT COUNT(*) AS c FROM usage_samples").get() as { c: number }).c, { timeout: 5000 }).toBe(0);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(byType(), label).toEqual(before);
+        expect(db.prepare("SELECT * FROM events_retention_marks").all(), label).toEqual(markBefore);
+      } finally {
+        if (handle) clearInterval(handle);
+        rmSync(home, { recursive: true, force: true });
+      }
+    }
   });
 
   it("the scheduler's boot sweep reads retention.events_days from the settings store", async () => {

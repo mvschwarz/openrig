@@ -527,15 +527,17 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     }
   });
 
-  it("retention.events_days: set 3 then get 3, default 14, and only an integer >= 1", () => {
+  it("retention.events_days: set 3 then get 3, default 0 (keep), 0 accepted, negative and non-integer refused", () => {
     const store = new ConfigStore(configPath);
-    expect(store.get("retention.events_days")).toBe(14);
-    expect(store.resolve().retention.eventsDays).toBe(14);
+    expect(store.get("retention.events_days")).toBe(0);
+    expect(store.resolve().retention.eventsDays).toBe(0);
     store.set("retention.events_days", "3");
     expect(store.get("retention.events_days")).toBe(3);
     expect(store.resolve().retention.eventsDays).toBe(3);
     expect(JSON.parse(readFileSync(configPath, "utf-8")).retention.eventsDays).toBe(3);
-    for (const raw of ["0", "-1", "1.5"]) {
+    store.set("retention.events_days", "0");
+    expect(store.get("retention.events_days")).toBe(0);
+    for (const raw of ["-1", "1.5"]) {
       expect(() => store.set("retention.events_days", raw)).toThrow();
     }
   });

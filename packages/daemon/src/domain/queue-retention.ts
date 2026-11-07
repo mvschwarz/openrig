@@ -87,8 +87,8 @@ export const RETENTION_DEFAULTS = {
   batchSize: 500,
   /** safety cap on batches per table per sweep (defense-in-depth vs a runaway loop) */
   maxBatchesPerTable: 10_000,
-  /** delete events of the prunable types (below) older than this */
-  eventsRetentionDays: 14,
+  /** delete events of the prunable types (below) older than this many days; 0 keeps them (pruning is opt-in) */
+  eventsRetentionDays: 0,
   /** primary-key rows (seq) one events statement may cover: the per-statement work bound */
   eventsWindow: 1_000,
   /** pause between two events windows, after the event-loop yield */
@@ -146,7 +146,7 @@ function cutoffIso(nowIso: string, days: number): string {
 
 /** The events cutoff in SQLite's own text format (`YYYY-MM-DD HH:MM:SS`, what `datetime('now')` writes into
  *  events.created_at). Comparing that column to an ISO `…T…Z` string would be wrong for up to a day, because
- *  ' ' sorts before 'T'. The ONE source of the cutoff for both the seq search and the age check. */
+ *  ' ' sorts before 'T'. */
 export function eventsCutoffSql(nowIso: string, days: number): string {
   return cutoffIso(nowIso, days).slice(0, 19).replace("T", " ");
 }
@@ -411,12 +411,6 @@ export interface EventsPruneResult {
   lowWater: number | null;
 }
 
-/**
- * The first seq whose created_at is at or after the cutoff (rows below it are candidates), found by a binary
- * search on the primary key: about 20 one-row reads, no index on created_at (one would cost every INSERT).
- * It only BOUNDS the range. created_at is not guaranteed to follow seq (a clock step back), so the delete
- * statement checks the age of each row again.
- */
 /** The lowest and highest seq, each read from one end of the primary key (a combined MIN/MAX would scan the log). */
 export function eventsSeqBounds(db: Database.Database): { lo: number; hi: number } | null {
   const lo = db.prepare("SELECT seq FROM events ORDER BY seq ASC LIMIT 1").get() as { seq: number } | undefined;
@@ -424,40 +418,31 @@ export function eventsSeqBounds(db: Database.Database): { lo: number; hi: number
   return lo && hi ? { lo: lo.seq, hi: hi.seq } : null;
 }
 
-export function findEventsCutoffSeq(db: Database.Database, cutoffSql: string, known?: { lo: number; hi: number } | null): number {
-  const bounds = known === undefined ? eventsSeqBounds(db) : known;
-  if (!bounds) return 0;
-  const firstAtOrAfter = db.prepare("SELECT seq, created_at AS createdAt FROM events WHERE seq >= ? ORDER BY seq LIMIT 1");
-  let lo = bounds.lo;
-  let hi = bounds.hi + 1;
-  while (lo < hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    const row = firstAtOrAfter.get(mid) as { seq: number; createdAt: string } | undefined;
-    if (!row || row.createdAt >= cutoffSql) hi = mid;
-    else lo = row.seq + 1;
-  }
-  return lo;
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
- * The events pass: delete the PRUNABLE_EVENT_TYPES rows older than `eventsRetentionDays`, one bounded seq
+ * The events pass, opt-in: with `eventsRetentionDays` > 0 (0, the default, keeps every event), delete the
+ * PRUNABLE_EVENT_TYPES rows older than that many days, one bounded seq
  * window per statement. Each statement reads at most `eventsWindow` primary-key rows, whether or not it finds
  * anything to delete, so a range of state rows that are kept forever never makes one statement long. Between
- * windows it yields to the event loop and pauses briefly; it ends with a PASSIVE WAL checkpoint.
+ * windows it yields to the event loop and pauses briefly. Every row's age is checked on its own: created_at is not
+ * assumed to rise with seq, so a row dated in the future (or one written after the clock stepped back) never hides
+ * older rows from the pass.
  *
  * The window cursor starts at a low-water mark (events_retention_marks, migration 152): every seq at or below it
- * has been checked, so a daily sweep in steady state reads only the last day's range. The mark records the
- * allowlist it was made with; a different allowlist starts again from the oldest row. It never passes a
- * prunable row that was kept for being too new (a clock that stepped back gives a low seq a new time), so that
- * row is checked again by later sweeps and goes once it ages. The newest row is never deleted, so the log's
- * highest seq never moves backwards. The file does not shrink: freed pages are reused; giving them back to the
- * disk is an offline VACUUM with the daemon stopped.
+ * has been checked, so a sweep starts where the previous one could not finish. The mark never passes a prunable
+ * row that was kept for being too new, so such a row is checked again and goes once it ages; in practice the mark
+ * sits where the retained history begins. It records the allowlist it was made with; a different allowlist starts
+ * again from the oldest row. The newest row is never deleted, so the log's highest seq never moves backwards. No
+ * checkpoint is forced: SQLite's automatic checkpoint runs as usual. The file does not shrink: freed pages are
+ * reused; giving them back to the disk is an offline VACUUM with the daemon stopped.
  */
 export async function pruneEvents(db: Database.Database, opts: RetentionOptions): Promise<EventsPruneResult> {
+  const days = opts.eventsRetentionDays ?? RETENTION_DEFAULTS.eventsRetentionDays;
+  // Opt-in: 0 (the default) keeps every event and leaves the mark alone.
+  if (!(days > 0)) return { deletedRows: 0, batches: 0, lowWater: null };
   const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('events', 'events_retention_marks')").all() as Array<{ name: string }>).map((r) => r.name));
   if (!tables.has("events")) return { deletedRows: 0, batches: 0, lowWater: null };
   const persistMark = tables.has("events_retention_marks");
@@ -476,16 +461,16 @@ export async function pruneEvents(db: Database.Database, opts: RetentionOptions)
   const bounds = eventsSeqBounds(db);
   if (!bounds) return { deletedRows: 0, batches: 0, lowWater: validMark };
 
-  const cutoffSql = eventsCutoffSql(opts.nowIso, opts.eventsRetentionDays ?? RETENTION_DEFAULTS.eventsRetentionDays);
-  // Never past the newest row: it stays, whatever its age.
-  const end = Math.min(findEventsCutoffSeq(db, cutoffSql, bounds), bounds.hi);
+  const cutoffSql = eventsCutoffSql(opts.nowIso, days);
+  // Up to the row before the newest: the newest stays, whatever its age.
+  const last = bounds.hi - 1;
   let lo = Math.max(validMark ?? 0, bounds.lo - 1);
   const placeholders = PRUNABLE_EVENT_TYPES.map(() => "?").join(", ");
   const deleteWindow = db.prepare(
     `DELETE FROM events
       WHERE seq IN (
         SELECT seq FROM events
-         WHERE seq > ? AND seq <= ? AND seq < ?
+         WHERE seq > ? AND seq <= ?
            AND type IN (${placeholders})
            AND created_at < ?
       )`,
@@ -504,9 +489,9 @@ export async function pruneEvents(db: Database.Database, opts: RetentionOptions)
   let batches = 0;
   let cap: number | null = null;
   let lowWater = validMark;
-  while (lo < end - 1 && batches < maxBatches) {
-    const hi = Math.min(lo + window, end - 1);
-    const deleted = deleteWindow.run(lo, hi, end, ...PRUNABLE_EVENT_TYPES, cutoffSql).changes;
+  while (lo < last && batches < maxBatches) {
+    const hi = Math.min(lo + window, last);
+    const deleted = deleteWindow.run(lo, hi, ...PRUNABLE_EVENT_TYPES, cutoffSql).changes;
     if (cap === null) {
       const young = (keptYoung.get(lo, hi, ...PRUNABLE_EVENT_TYPES) as { seq: number | null }).seq;
       if (young !== null) cap = young - 1;
@@ -519,7 +504,6 @@ export async function pruneEvents(db: Database.Database, opts: RetentionOptions)
     lo = hi;
     await pause();
   }
-  if (deletedRows > 0) db.pragma("wal_checkpoint(PASSIVE)");
   return { deletedRows, batches, lowWater: persistMark ? lowWater : null };
 }
 
