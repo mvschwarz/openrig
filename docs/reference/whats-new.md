@@ -89,6 +89,25 @@ after an upgrade it can still hold the previous version's note.
 
 ## Behaviour that changed
 
+- **Old history-only events can be pruned, if you choose to.** `retention.events_days` (default `0`, which keeps every
+  event) turns on a pass in the retention sweep (at daemon start and daily) that deletes `view.changed`,
+  `snapshot.created`, `watchdog.evaluation_fired` and the `queue.created`, `queue.updated`, `queue.claimed`,
+  `queue.unclaimed` and `queue.handed_off` events older than that many days; 14 is a reasonable value
+  (`rig config set retention.events_days 14`). Every other type is kept at any age, because restore, startup proof and
+  the seat readers fold from them, and the newest event is always kept. What you give up: pruned events no longer
+  replay from `/api/events` (an older cursor or a large `?replay`), no longer appear in `rig telemetry events` (which
+  reports the gap) or in older log and feed entries, and a later change of the setting can't bring them back. A new
+  value is read at the next sweep: the daily one, or the next daemon start. The first sweep after turning it on works
+  through the old history in short steps while the daemon keeps answering. `retention.enabled false` stops every
+  retention pass from the next daemon start.
+- **The database file does not shrink by itself.** Pruned rows free pages that new events reuse, which slows the file's
+  growth; other tables still grow. To give the space back to the disk: find the file with `rig config get db.path`, stop the daemon
+  (`rig daemon stop`), copy the file aside, run `sqlite3 <that file> "VACUUM;"` (it needs free disk about the size of
+  the file and can take a few minutes), then `rig daemon start`. Never vacuum the file of a running daemon.
+- **With pruning on, `rig telemetry events` reports the pruned ranges.** A page that spans pruned events inside the
+  retained window has a `retained_sequence_gap` for each missing seq range and `coverage.status` `partial` (it used to be
+  `retained_window`); events pruned from the start of the log show up as `before_retained_floor`.
+
 - **Team skills live in each seat's own storage** (`$OPENRIG_HOME/state/seats/<rig id>/<logical seat>/<runtime>/`), not
   in the project's `.claude/skills` or `.agents/skills`. Claude seats get them as a generated plugin (`openrig:<id>`),
   Codex seats as their own catalog. If a link sits in that path, the seat starts without them and the result names

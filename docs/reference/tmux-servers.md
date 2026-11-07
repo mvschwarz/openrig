@@ -87,6 +87,37 @@ server, start the upgraded daemon from that original server to establish its
 record, or stop those seats before changing servers. Earlier versions did not
 persist enough information to find an arbitrary old socket from a different shell.
 
+## Moving an existing team onto tmux control mode
+
+`OPENRIG_TMUX_CONTROL=1` in the daemon's environment sends its routine tmux commands
+through one long-lived control-mode client instead of a new tmux client each time,
+which saves a process start per command on a busy host. It takes effect only on a
+tmux server at 3.7c or later. The version of the server that is running decides,
+not the tmux binary on `PATH`, and a server keeps the version it started with until
+it exits. So installing a newer tmux changes nothing for a server that is already up.
+On an older server the daemon uses a spawned client for every command. It says so
+once in its log (`[tmux] OPENRIG_TMUX_CONTROL=1 is set, but this daemon's tmux server
+runs tmux 3.4 …`), and `rig doctor` reports it as `tmux_control_mode`.
+
+To move a team that runs on an older server:
+
+1. Install tmux 3.7c or later where the daemon finds it first on its `PATH`. For a
+   daemon run as a service, that's the service's environment.
+2. Choose the server the team will use. `isolated` gives this OpenRig home a server of
+   its own, started by the daemon with that tmux, and leaves your own tmux sessions
+   alone: `rig config set terminal.tmux_server isolated`. In `inherit` mode the team
+   shares your default server, which runs the new version only after every session
+   on it, yours included, has ended.
+3. Stop each rig deliberately with `rig down <rig>`. Its seats' sessions end, and a
+   turn in progress stops. Queue rows, rigs and seats stay as they are.
+4. Restart the daemon with `OPENRIG_TMUX_CONTROL=1` in its environment.
+   `rig terminal status --json` should show `migrationPending: false`. If it's still
+   `true`, `blockingSessions` names the sessions still on the old server.
+5. Bring each rig back with `rig up <rig> --existing`. Each seat resumes its
+   conversation where its harness allows, under the restoration rules above.
+6. Check: the daemon's log says `[tmux] Control mode is on`, and `rig doctor` passes
+   `tmux_control_mode`.
+
 ## Attachments, discovery and cleanup
 
 `rig capture`, managed launch/stop/recovery, terminal previews and desktop viewers

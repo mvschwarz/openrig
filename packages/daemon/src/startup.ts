@@ -42,7 +42,7 @@ import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
-import { setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
+import { setDaemonTmuxControl, setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
 import { selectTmuxServer, type TmuxServerMode } from "./domain/tmux-server-selection.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execArgvCommand, execCommand, execTmuxCommand } from "./adapters/tmux-exec.js";
@@ -554,8 +554,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     ?? (opts?.tmuxExec || (process.env.OPENRIG_TMUX_SHELL === "1" && process.platform !== "win32") ? undefined : execArgvCommand);
   // OPENRIG_TMUX_CONTROL=1 drives the real tmux through one control-mode client (tmux-control.ts); by default a client
   // is spawned per command. An injected exec is the test's own, and psmux has no control mode.
-  const argvExec = spawnedArgvExec === execArgvCommand && process.platform !== "win32" && process.env.OPENRIG_TMUX_CONTROL === "1"
-    ? tmuxControlExec(execArgvCommand, { serverArgs: tmuxSelection?.executionArgs }) : spawnedArgvExec;
+  const controlExec = spawnedArgvExec === execArgvCommand && process.platform !== "win32" && process.env.OPENRIG_TMUX_CONTROL === "1"
+    ? tmuxControlExec(execArgvCommand, { serverArgs: tmuxSelection?.executionArgs }) : undefined;
+  const argvExec = controlExec ?? spawnedArgvExec;
+  // What `rig doctor` reads of it (GET /api/adapters/tmux/control): asked for, and what the server allows.
+  setDaemonTmuxControl({ requested: process.env.OPENRIG_TMUX_CONTROL === "1", ...(controlExec ? { status: controlExec.status } : {}) });
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? (process.platform === "win32" ? execCommand : execTmuxCommand), undefined, argvExec, tmuxSelection?.executionArgs);
   // Inherit keeps the native execution environment; attachment metadata still names
   // its server for a new terminal. Isolated execution and attachment share a fixed socket.

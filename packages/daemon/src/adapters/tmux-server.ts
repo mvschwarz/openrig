@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { TmuxServerSelection } from "../domain/tmux-server-selection.js";
+import type { TmuxControlStatus } from "./tmux-control.js";
 
 function realpath(p: string): string {
   try {
@@ -57,6 +58,20 @@ export function daemonTmuxServerInfo(): TmuxServerSelection | undefined {
 /** The daemon's effective server flags; empty for legacy/injected compositions. */
 export function daemonTmuxServerArgs(): readonly string[] {
   return daemonServerArgs;
+}
+
+/** Whether OPENRIG_TMUX_CONTROL=1 asked for control mode, and the control client's own account of it: recorded once at
+ *  startup. With no client (psmux, an injected exec) a request reads off. */
+let daemonControl: { requested: boolean; status?: () => TmuxControlStatus } = { requested: false };
+
+export function setDaemonTmuxControl(control: { requested: boolean; status?: () => TmuxControlStatus }): void {
+  daemonControl = control;
+}
+
+/** What `GET /api/adapters/tmux/control` answers, and `rig doctor` reads. */
+export function daemonTmuxControlStatus(): { requested: boolean } & TmuxControlStatus {
+  if (!daemonControl.requested) return { requested: false, state: "off" };
+  return { requested: true, ...(daemonControl.status?.() ?? { state: "off" }) };
 }
 
 function shellWord(value: string): string {

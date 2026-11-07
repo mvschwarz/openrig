@@ -912,3 +912,59 @@ describe("doctor --spec topology HTTP deadlines", () => {
     }
   });
 });
+
+describe("#161 tmux control mode", () => {
+  const daemonSays = (body: unknown, env: NodeJS.ProcessEnv = {}) => makeDeps({
+    env,
+    fetch: async (url: string) => url.endsWith("/api/adapters/tmux/control")
+      ? ({ ok: true, json: async () => body } as Response) : ({ ok: false } as Response),
+  });
+  const controlCheck = async (deps: DoctorDeps) =>
+    (await Promise.all(runDoctorChecks(deps).asyncChecks)).find((c) => c.name === "tmux_control_mode");
+
+  it("warns when it was asked for and the daemon's tmux server is older than 3.7c: the version, why, and what to do", async () => {
+    const check = await controlCheck(daemonSays({ requested: true, state: "off", serverVersion: "3.4" }));
+    expect(check?.status).toBe("warn");
+    expect(check?.message).toContain("tmux 3.4");
+    expect(check?.message).toContain("3.7c or later");
+    expect(check?.reason).toContain("not the tmux binary");
+    expect(check?.fix).toContain("rig context get reference/tmux-servers.md#moving-an-existing-team-onto-tmux-control-mode");
+  });
+
+  it("passes when control mode is on, naming the server's version", async () => {
+    const check = await controlCheck(daemonSays({ requested: true, state: "on", serverVersion: "3.8" }));
+    expect(check).toMatchObject({ status: "pass", message: expect.stringContaining("tmux 3.8") });
+  });
+
+  it("#2707 warns when the server allows it but no control client is connected: commands are spawned meanwhile", async () => {
+    const check = await controlCheck(daemonSays({ requested: true, state: "allowed", serverVersion: "3.8" }));
+    expect(check?.status).toBe("warn");
+    expect(check?.message).toContain("tmux 3.8 allows it");
+    expect(check?.message).toContain("no control client is connected right now");
+  });
+
+  it("#2707 names a version it doesn't recognize as unrecognized, and a missing client wrapper by its causes", async () => {
+    const unknown = await controlCheck(daemonSays({ requested: true, state: "off", serverVersion: "next-3.8" }));
+    expect(unknown?.message).toContain("tmux next-3.8, which isn't a tmux release known to be 3.7c or later");
+    const wrapperless = await controlCheck(daemonSays({ requested: true, state: "off" }));
+    expect(wrapperless?.message).toContain("Windows");
+    expect(wrapperless?.message).toContain("OPENRIG_TMUX_SHELL=1");
+  });
+
+  it("says it isn't decided while the daemon hasn't read its server's version yet", async () => {
+    const check = await controlCheck(daemonSays({ requested: true, state: "undecided" }));
+    expect(check).toMatchObject({ status: "skipped", message: expect.stringContaining("hasn't read its tmux server's version yet") });
+  });
+
+  it("warns when this shell sets it but the daemon wasn't started with it", async () => {
+    const check = await controlCheck(daemonSays({ requested: false, state: "off" }, { OPENRIG_TMUX_CONTROL: "1" }));
+    expect(check).toMatchObject({ status: "warn", message: expect.stringContaining("wasn't started with it") });
+    expect(check?.fix).toContain("daemon's own environment");
+  });
+
+  it("skips when it isn't asked for, or when the daemon doesn't say", async () => {
+    expect(await controlCheck(daemonSays({ requested: false, state: "off" }))).toMatchObject({ status: "skipped" });
+    const older = makeDeps({ env: { OPENRIG_TMUX_CONTROL: "1" }, fetch: async () => ({ ok: false } as Response) });
+    expect(await controlCheck(older)).toMatchObject({ status: "skipped", message: expect.stringContaining("didn't say") });
+  });
+});
