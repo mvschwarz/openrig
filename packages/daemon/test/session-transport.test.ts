@@ -575,6 +575,7 @@ describe("SessionTransport", () => {
     now?: () => Date;
     eventBus?: EventBus;
     runtimeAdapters?: Record<string, TransportReadinessChecker>;
+    deliverOverDraft?: () => boolean;
   }) {
     return new SessionTransport({
       db,
@@ -669,6 +670,80 @@ describe("SessionTransport", () => {
     const result = await transport.send("dev-impl@my-rig", "hello");
     expect(result.ok).toBe(true);
     expect(callOrder).toEqual(["sendText", "sendKeys:Enter"]);
+  });
+
+  describe("transport.draft_delivery: a person's draft at the prompt", () => {
+    const DRAFT = ["❯ I am still typing a message", "  ⏵⏵ accept edits on (shift+tab to cycle)"].join("\n");
+    function draftPane(capture = DRAFT) {
+      const callOrder: string[] = [];
+      const tmux = mockTmux({
+        capturePaneContent: async () => capture,
+        sendText: async (_t, text) => { callOrder.push(`sendText:${text}`); return { ok: true }; },
+        sendKeys: async (_t, keys) => { callOrder.push(`sendKeys:${keys.join(",")}`); return { ok: true }; },
+      });
+      return { tmux, callOrder };
+    }
+
+    it("refuses as before when the setting is absent", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false, activity: { reason: "prompt_draft" } });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("delivers after the draft and submits both when the setting is deliver", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux, { deliverOverDraft: () => true }).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: true });
+      expect(callOrder).toEqual(["sendText:hello", "sendKeys:Enter"]);
+      expect(result.warning).toContain("transport.draft_delivery is deliver");
+    });
+
+    it("still refuses a numbered choice under deliver: a message never answers a menu", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane(["› 1. Yes, continue", "  2. Yes, allow all tools", "  3. No, cancel"].join("\n"));
+      const result = await createTransport(tmux, { deliverOverDraft: () => true }).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", activity: { state: "needs_input", reason: "selection_prompt" } });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("still refuses a hook-reported permission prompt under deliver, even over a draft-shaped pane", async () => {
+      seedCanonicalRig();
+      const eventBus = new EventBus(db);
+      const agentActivityStore = new AgentActivityStore({ db, eventBus });
+      agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Notification", subtype: "permission_prompt" });
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux, { agentActivityStore, deliverOverDraft: () => true }).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", activity: { state: "needs_input", evidenceSource: "runtime_hook" } });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("keeps refusing a send that must not join a draft (managed compaction's preserveInput)", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux, { deliverOverDraft: () => true }).send("dev-impl@my-rig", "/compact", { preserveInput: true });
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", activity: { reason: "prompt_draft" } });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("keeps waiting for idle when the caller asked to wait", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const transport = createTransport(tmux, { deliverOverDraft: () => true, sleep: async () => undefined, waitForIdlePollMs: 1 });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("treats an unreadable setting as refuse", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux, { deliverOverDraft: () => { throw new Error("settings unreadable"); } }).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input" });
+      expect(callOrder).toEqual([]);
+    });
   });
 
   describe("#331: pane in tmux copy mode", () => {

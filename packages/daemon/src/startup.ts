@@ -1576,6 +1576,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         verifyInputBox: () => {
           try { return new ContextPackSettingsStore().resolveOne("transport.verify_input_box").value === true; } catch { return false; }
         },
+        // transport.draft_delivery, read at each send that meets a person's draft (absent or unreadable = refuse).
+        deliverOverDraft: () => {
+          try { return new ContextPackSettingsStore().resolveOne("transport.draft_delivery").value === "deliver"; } catch { return false; }
+        },
       });
       // PL-004 Phase A revision (R1): wire QueueRepository's wake-path so
       // create / handoff / handoff-and-complete nudge by default.
