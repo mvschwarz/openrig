@@ -893,7 +893,7 @@ version, from checking the environment to a useful report to the OpenRig team.
   (`below_threshold_while_prepared`), once usage has risen 15 points since its request or two hours after its map was
   ready (`prepared_map_stale`), or when its map no longer reads ready (`preparation_incomplete`). After an attempt
   stops with its request delivered, the next automatic request for the same conversation waits for an idle seat, also
-  across a daemon restart. Manual expiry reads
+  across a daemon restart, for up to the restart-recovery window (6 hours by default) after that attempt stopped. Manual expiry reads
   `map_complete_seat_never_idle` when the map is finished; in either mode, `preparation_incomplete` when it is not.
   `rig seat status` shows an owed restore stage and its last
   delivery result, and repeated delivery failures open one queue item for the seat's orchestrator, or a

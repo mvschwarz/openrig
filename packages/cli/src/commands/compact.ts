@@ -63,7 +63,8 @@ attempt stops on a fresh sample below the threshold (below_threshold_while_prepa
 once usage has risen 15 points since its request or two hours after its map was ready
 (prepared_map_stale), or when its map no longer reads ready (preparation_incomplete).
 After an attempt stops with its request delivered, the next automatic request for the
-same conversation waits for an idle seat, across a daemon restart too. An unfinished
+same conversation waits for an idle seat, across a daemon restart too, for up to the
+restart-recovery window (6 hours by default) after that attempt stopped. An unfinished
 map reports preparation_incomplete. Manual requests still
 share one 180-second budget and stop as before; while an attempt is held, a manual
 request reads already_in_progress until --cancel.
