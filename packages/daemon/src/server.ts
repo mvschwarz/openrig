@@ -248,6 +248,8 @@ export interface AppDeps {
    *  Optional so test harnesses constructing AppDeps directly need not provide one; the health
    *  route reports honestly when absent. */
   gatewaySubsystem?: import("./domain/gateway/gateway-subsystem.js").GatewaySubsystem;
+  /** Concrete local relay inbound handler (`POST /api/gateway/relay/inbound`). */
+  relayInboundHandler?: import("./domain/gateway/relay-inbound.js").RelayInboundHandler;
   periodicSnapshotScheduler?: import("./domain/periodic-snapshot-scheduler.js").PeriodicSnapshotScheduler;
   workflowRuntime?: WorkflowRuntime;
   /**
@@ -577,6 +579,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("cmuxAdapter" as never, deps.cmuxAdapter);
     // S10 — the in-daemon gateway subsystem handle (health surface + dispatch seam).
     c.set("gatewaySubsystem" as never, deps.gatewaySubsystem);
+    c.set("relayInboundHandler" as never, deps.relayInboundHandler);
     // Slice 24 — per-rig CMUX workspace launcher wiring.
     c.set(
       "cmuxLayoutService" as never,
@@ -901,7 +904,13 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/health-diagnosis", healthDiagnosisRoutes());
   // S10 — gateway subsystem admin (slack enable/disable with the seeding rule preserved).
   // A shared Slack app's relay carries the token `rig host pair` issued: this daemon's auth bearer.
-  app.route("/api/gateway", gatewayRoutes({ relayBearerToken: deps.missionControlBearerToken ?? null }));
+  app.route(
+    "/api/gateway",
+    gatewayRoutes({
+      relayBearerToken: deps.missionControlBearerToken ?? null,
+      relayInboundHandler: deps.relayInboundHandler,
+    }),
+  );
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
   // Slice 09 (OPR.0.3.2.9) — rig-policy bindings (operator context mode).

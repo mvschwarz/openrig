@@ -507,6 +507,62 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX).some((r) => /dispatched-to-engine/.test(r))).toBe(true);
   });
 
+  it("OPERATOR RUNG RELAY RECEIPT: pending dispatch resolves on matching post-marker relay-owner-notification-accepted", async () => {
+    const baton = await exhaustToSelfSkip();
+    const notificationKey = "notif-key-123";
+    let dispatchCount = 0;
+    const pendingEngine = {
+      dispatchEscalation: async (row: QueueItem) => {
+        dispatchCount++;
+        return { decision: "post", resolved: false, dispatched: true, notificationKey };
+      },
+    };
+
+    // Pre-marker receipt in history (simulates receipt from a previous episode before dispatch):
+    // Must NOT resolve the upcoming dispatch.
+    repo.transitionLog.append({
+      qitemId: baton.qitemId,
+      state: "pending",
+      actorSession: "daemon@kernel",
+      transitionNote: `relay-owner-notification-accepted notification_key=${notificationKey} delivery_id=d-pre`,
+    });
+
+    // 1. Initial tick with pending deliveryEngine outcome (resolved: false).
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: pendingEngine });
+    expect(dispatchCount).toBe(1);
+    expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX).some((r) => /dispatched-to-engine.*notification_key=notif-key-123/.test(r))).toBe(true);
+    // Pre-marker matching receipt did not resolve it; ladder not exhausted yet, underlying baton remains pending.
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(0);
+    expect(repo.getById(baton.qitemId)!.state).toBe("pending");
+
+    // 2. Wrong key post-marker relay receipt -> no resolution.
+    repo.transitionLog.append({
+      qitemId: baton.qitemId,
+      state: "pending",
+      actorSession: "daemon@kernel",
+      transitionNote: "relay-owner-notification-accepted notification_key=wrong-key delivery_id=d-1",
+    });
+    ageMarkers(baton.qitemId, 30);
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: pendingEngine });
+    expect(dispatchCount).toBe(1); // No second dispatch/resume!
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(0);
+
+    // 3. Matching post-marker relay receipt -> exhausts operator rung without second dispatch and without closing pending work.
+    repo.transitionLog.append({
+      qitemId: baton.qitemId,
+      state: "pending",
+      actorSession: "daemon@kernel",
+      transitionNote: `relay-owner-notification-accepted notification_key=${notificationKey} delivery_id=d-2`,
+    });
+    ageMarkers(baton.qitemId, 30);
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: pendingEngine });
+    expect(dispatchCount).toBe(1); // Exactly-once dispatch preserved
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(1);
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)[0]).toContain("engine outcome resolved");
+    // Underlying blocked/pending work is NOT closed/cancelled
+    expect(repo.getById(baton.qitemId)!.state).toBe("pending");
+  });
+
   it("HUMAN RUNG EXPLICIT-ONLY: an agent-to-agent baton ends at the escalation row and nothing is posted to a person", async () => {
     const baton = await exhaustToSelfSkip();
     const posted: string[] = [];

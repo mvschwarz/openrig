@@ -42,7 +42,7 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
-import { isTypedGateBlocker, UNATTRIBUTED_ACTOR, type QueueRepository, type QueueItem } from "../queue-repository.js";
+import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, type QueueRepository, type QueueItem } from "../queue-repository.js";
 import type { PersistedEvent } from "../types.js";
 import {
   MissionControlActionLog,
@@ -178,7 +178,13 @@ export class MissionControlWriteContract {
         return { actionId: last.actionId, verb: input.verb, qitemId: input.qitemId, closedQitem: item, createdQitemId: null,
           notifyAttempted: false, notifyResult: null, auditedAt: last.actedAt, reconciled: true, decisionRevision: current! };
       }
-      throw this.revisionChanged(item, current!);
+      const withoutOwnReply =
+        operation && input.verb === "answer"
+          ? this.queueRepo.decisionRevision(item, { excludeOperationReply: operation })
+          : current;
+      if (withoutOwnReply !== input.expectedRevision) {
+        throw this.revisionChanged(item, current!);
+      }
     }
     const result = await this.actOn(operation ? { ...input, auditNotes: { ...input.auditNotes, operation } } : input);
     const saved = this.queueRepo.getById(input.qitemId);
@@ -650,13 +656,21 @@ export class MissionControlWriteContract {
     const answeredBy = !forAsked ? `Answered by ${input.actorSession}`
       : unattributed ? `Answered at the terminal by someone OpenRig can't name (${UNNAMED_PRIMARY_USER}), unattributed, on ${forAsked}'s ask`
       : `Answered by ${input.actorSession}, ${primaryUser ? "the primary user at the terminal" : "a registered person"}, on ${forAsked}'s ask`;
+    const operation =
+      typeof input.auditNotes?.operation === "string" && input.auditNotes.operation.length > 0
+        ? input.auditNotes.operation
+        : null;
     let returned: QueueItem;
     try {
       returned = await this.queueRepo.createHumanAnswer({
         sourceSession: input.actorSession, destinationSession: ask.sourceSession,
         body: `${reply}\n${answeredBy} in OpenRig.`,
         summary: `${forAsked && unattributed ? `Unattributed (${UNNAMED_PRIMARY_USER})` : input.actorSession} answered${forAsked ? ` ${forAsked}'s ask` : ""}: ${ask.summary ?? input.qitemId}`,
-        tags: ["human-answer", ...(ask.tags ?? []).filter((t) => /^(project|mission|slice):/.test(t))],
+        tags: [
+          "human-answer",
+          ...(ask.tags ?? []).filter((t) => /^(project|mission|slice):/.test(t)),
+          ...(operation ? [mcOperationTag(operation)] : []),
+        ],
         inboundReplyTo: input.qitemId, ...(input.notify === false ? { nudge: false } : {}),
       });
     } catch (error) {
