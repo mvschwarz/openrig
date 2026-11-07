@@ -1,3 +1,7 @@
+import { getOpenRigHome } from "../openrig-compat.js";
+import { piAccountStateRoot, piAccountSwitchStateRoot } from "./pi-account-state.js";
+import { piSeatPaths } from "../adapters/pi-runner-protocol.js";
+import { readSeatEffort } from "./seat-effort.js";
 import { claudeSeatTokenRefProblem, claudeSeatTokenFileProblem, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import { isolatedClaudeAccountProblem } from "./claude-credential-precedence.js";
 import nodePath from "node:path";
@@ -152,7 +156,7 @@ const COSTS = [
   "A second process runs on the target's account until cutover.",
   "Messages sent to the seat while it switches are held, not typed; rig send says the seat is switching and until when, and they need sending again afterwards.",
   "A failed switch can leave the target runtime's prepared files (its seat storage and projections).",
-  "Codex and Claude Code only, single-pane seats only.",
+  "Codex and Claude Code runtime switches, or Pi account-home changes; single-pane seats only.",
 ];
 
 export class SeatRuntimeSwitchService {
@@ -179,8 +183,8 @@ export class SeatRuntimeSwitchService {
   /** Validate and plan a successor-first runtime/account move, executing it under the seat's lifecycle guard unless dry-run. */
   async setRuntime(input: SetRuntimeInput): Promise<SetRuntimeResult> {
     const refuse = (code: string, message: string, guidance?: string): RuntimeSwitchRefusal => ({ ok: false, code, message, ...(guidance ? { guidance } : {}) });
-    if (input.runtime !== "codex" && input.runtime !== "claude-code") {
-      return refuse("invalid_runtime_settings", "Choose --runtime codex or --runtime claude-code.");
+    if (input.runtime !== "codex" && input.runtime !== "claude-code" && input.runtime !== "pi") {
+      return refuse("invalid_runtime_settings", "Choose --runtime codex or --runtime claude-code; Pi supports account-home changes on an existing Pi seat.");
     }
     const target: SwitchRuntime = input.runtime;
     if (input.clearAccountHome !== undefined && typeof input.clearAccountHome !== "boolean") return refuse("invalid_runtime_settings", "clearAccountHome must be true or false.");
@@ -235,8 +239,18 @@ export class SeatRuntimeSwitchService {
           : open.phase === "abandoned" ? "whose staged successor hasn't been retired" : "in progress"} (${open.from_runtime} → ${open.to_runtime}, switch ${open.id}).`,
         `Inspect it with rig seat status ${seatRef}; finish an interrupted one with rig seat set-runtime ${seatRef} --recover.`), switchId: open.id };
     }
-    if (node.runtime !== "codex" && node.runtime !== "claude-code") {
-      return refuse("runtime_switch_unsupported", `${seatRef} runs ${node.runtime ?? "an unknown runtime"}; only Codex and Claude Code seats can switch.`);
+    if (node.runtime !== "codex" && node.runtime !== "claude-code" && node.runtime !== "pi") {
+      return refuse("runtime_switch_unsupported", `${seatRef} runs ${node.runtime ?? "an unknown runtime"}; only Codex and Claude Code seats can change runtime; Pi supports account-home changes.`);
+    }
+    if ((target === "pi" || node.runtime === "pi") && target !== node.runtime) {
+      return refuse("runtime_switch_unsupported", "Pi supports account-home changes on an existing Pi seat; changing to or from Pi is not supported.");
+    }
+    if (target === "pi" && input.accountHome !== undefined) {
+      try {
+        const auth = nodePath.join(input.accountHome, "auth.json");
+        if (!fs.statSync(auth).isFile()) throw new Error();
+        fs.accessSync(auth, fs.constants.R_OK);
+      } catch { return refuse("invalid_runtime_settings", "The Pi account home needs a readable auth.json file; nothing changed."); }
     }
     const binding = sessionRegistry.getBindingForNode(node.id);
     const sessionName = binding?.tmuxSession ?? null;
@@ -251,6 +265,11 @@ export class SeatRuntimeSwitchService {
     if (input.accountHome !== undefined && target === "claude-code" && node.cwd) {
       const problem = isolatedClaudeAccountProblem(input.accountHome, node.cwd, !!input.accountToken, input.accountToken?.kind === "api-key");
       if (problem) return refuse("invalid_runtime_settings", problem);
+    }
+    // An account change keeps this Pi seat's current model and effort unless explicitly changed.
+    if (target === "pi") {
+      explicit.model ??= node.model ?? undefined;
+      explicit.effort ??= readSeatEffort(db, node.id)?.effective ?? node.effort ?? undefined;
     }
     const predecessorGeneration = sessionRegistry.currentOccupantTenure(node.id)?.generationUuid;
     const running = sessionRegistry.getSessionsForRig(node.rigId).filter((session) => session.nodeId === node.id && session.status === "running");
@@ -416,7 +435,22 @@ export class SeatRuntimeSwitchService {
         successorPane = pane;
         db.prepare("UPDATE seat_runtime_switches SET successor_pane = ?, updated_at = ? WHERE id = ?").run(pane, stamp(), id);
       },
-      staged: { prepare: (binding, adapter) => materials.prepare(binding, adapter),
+      staged: { prepare: (binding, adapter) => {
+        if (target === "pi") {
+          const base = nodePath.join(this.deps.openrigHome ?? getOpenRigHome(), "state", "pi");
+          const source = piSeatPaths(piAccountStateRoot(db, base, sessionName), sessionName).agentDir;
+          const destination = piSeatPaths(piAccountSwitchStateRoot(base, successorGeneration), sessionName).agentDir;
+          if (fs.existsSync(source)) fs.cpSync(source, destination, { recursive: true, verbatimSymlinks: true,
+            filter: file => file !== nodePath.join(source, "auth.json") && file !== nodePath.join(source, ".openrig-account") });
+          // Clearing without a configured home returns to the original seat-local login, if it had one.
+          const baseline = piSeatPaths(base, sessionName).agentDir;
+          if (ctx.input.clearAccountHome && !fs.existsSync(nodePath.join(baseline, ".openrig-account")) && fs.existsSync(nodePath.join(baseline, "auth.json"))) {
+            fs.mkdirSync(destination, { recursive: true });
+            fs.copyFileSync(nodePath.join(baseline, "auth.json"), nodePath.join(destination, "auth.json"));
+          }
+        }
+        return materials.prepare(binding, adapter);
+      },
         binding: { ...materials.bindingAdditions(), ...(ctx.input.accountHome !== undefined ? { accountHome: ctx.input.accountHome, accountToken: ctx.input.accountToken ?? null }
           : ctx.input.clearAccountHome || node.accountHome ? { accountHome: null, ...(node.accountHome ? { accountToken: null } : {}) } : {}), runtimeSwitchFrom: { runtime: node.runtime!, session: sessionName, pane: ctx.predecessorPane, generation: ctx.predecessorGeneration } } },
     });

@@ -36,18 +36,20 @@ it.each([undefined, ["wrapper", "arg with spaces", "--"]])("preserves the select
     getPaneCommand: async () => "bash",
     sendShellCommand: async (_session: string, command: string) => {
       launched = command;
-      fs.writeFileSync(path.join(root, "build@rig/runner-state.json"), JSON.stringify({ ready: true, launchId: "attempt", sessionFile, updatedAt: "now" }));
+      fs.writeFileSync(path.join(root, "account-switches", "committed-generation", "build@rig/runner-state.json"), JSON.stringify({ ready: true, launchId: "attempt", sessionFile, updatedAt: "now" }));
       return { ok: true as const };
     },
   } as unknown as import("../src/adapters/tmux.js").TmuxAdapter;
+  const resumedRoot = path.join(root, "account-switches", "committed-generation");
   const launch = new SeatLaunchEnvironment(tmux, { PATH: `${root}:/usr/bin`, OPENRIG_HOME: root }, root, cli, undefined,
     (node, runtime) => node === "pi-node" && runtime === "pi" ? account : undefined);
   const adapter = new PiResumeAdapter(tmux, {
     readFile: file => fs.readFileSync(file, "utf8"), writeFile: (file, text) => fs.writeFileSync(file, text),
     exists: fs.existsSync, mkdirp: file => fs.mkdirSync(file, { recursive: true }),
-  }, { stateRoot: root, runnerEntryPath: "/runner.js" }, { seatLaunchEnvironment: launch, newLaunchId: () => "attempt" });
+  }, { stateRoot: root, runnerEntryPath: "/runner.js" }, { stateRootForSession: () => resumedRoot, seatLaunchEnvironment: launch, newLaunchId: () => "attempt" });
   expect(await adapter.resume("build@rig", "pi_session_file", sessionFile, root, "mistral/devstral-latest", undefined, undefined, wrapper)).toMatchObject({ ok: true });
   expect(launched).toContain(`PI_CODING_AGENT_DIR=${account}`);
+  expect(launched).toContain(`--state-root '${resumedRoot}'`);
   if (wrapper) expect(launched).toContain(`--launch-wrapper-arg '${root}/wrapper' --launch-wrapper-arg 'arg with spaces' --launch-wrapper-arg '--'`);
   let attempts = 0;
   tmux.sendShellCommand = async () => { attempts++; return { ok: false, code: "launch_path_too_long", message: "fixture bound" }; };

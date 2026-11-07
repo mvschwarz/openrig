@@ -29,6 +29,7 @@ export interface PiResumeFsOps {
 }
 
 interface PiResumeOptions {
+  stateRootForSession?: (session: string) => string;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   pollMs?: number;
   maxWaitMs?: number;
@@ -93,7 +94,7 @@ export class PiResumeAdapter {
       }
     }
 
-    const seat = piSeatPaths(this.paths.stateRoot, tmuxSessionName);
+    const seat = piSeatPaths(this.options.stateRootForSession?.(tmuxSessionName) ?? this.paths.stateRoot, tmuxSessionName);
     this.fs.mkdirp(seat.agentDir);
     this.fs.mkdirp(seat.sessionsDir);
 
@@ -118,7 +119,7 @@ export class PiResumeAdapter {
       runtime: this.runtime,
       runnerEntryPath: this.paths.runnerEntryPath,
       sessionName: tmuxSessionName,
-      stateRoot: this.paths.stateRoot,
+      stateRoot: this.options.stateRootForSession?.(tmuxSessionName) ?? this.paths.stateRoot,
       cwd,
       // The model declaration must survive resume: the runner's provider-key
       // allowlist keys off the declared provider (VM leg finding).
@@ -168,7 +169,7 @@ export class PiResumeAdapter {
     const attempts = Math.max(1, Math.floor(maxWaitMs / Math.max(pollMs, 1)) + 1);
 
     for (let attempt = 0; attempt < attempts; attempt++) {
-      const { runnerStatePath } = piSeatPaths(this.paths.stateRoot, tmuxSessionName);
+      const { runnerStatePath } = piSeatPaths(this.options.stateRootForSession?.(tmuxSessionName) ?? this.paths.stateRoot, tmuxSessionName);
       const state = this.fs.exists(runnerStatePath) ? parsePiRunnerState(this.readSafe(runnerStatePath)) : null;
 
       if (state?.launchId === launchId) {

@@ -1,3 +1,4 @@
+import { piAccountSwitchStateRoot } from "../domain/pi-account-state.js";
 // OPR.0.4.6.PI1 — the Pi runtime adapter (RPC-first, runner-in-a-pane).
 //
 // The adapter launches the OpenRig-owned pi-runner inside the seat's normal
@@ -53,6 +54,7 @@ export interface PiRuntimeAdapterDeps {
   /** Root under which every Pi seat gets its isolated state dir (FR-7).
    *  Typically <OPENRIG_HOME>/state/pi. */
   stateRoot: string;
+  stateRootForSession?: (session: string) => string;
   /** Absolute path to the compiled pi-runner entry in the daemon dist. */
   runnerEntryPath: string;
   /** Trust posture for managed launches (BR-5 — always explicit; ambient
@@ -78,6 +80,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: PiAdapterFsOps;
   protected stateRoot: string;
+  private stateRootForSession: (session: string) => string;
   private runnerEntryPath: string;
   private trustPosture: "approve" | "no-approve";
   private sleep: (ms: number) => Promise<void>;
@@ -94,10 +97,23 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.stateRoot = deps.stateRoot;
+    this.stateRootForSession = deps.stateRootForSession ?? (() => this.stateRoot);
     this.runnerEntryPath = deps.runnerEntryPath;
     this.trustPosture = deps.trustPosture ?? "no-approve";
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.newLaunchId = deps.newLaunchId ?? (() => randomUUID());
+  }
+
+  private runnerLocation(binding: NodeBinding): { sessionName: string; stateRoot: string } {
+    const staged = this.runtime === "pi" && binding.runtimeSwitchFrom;
+    const sessionName = staged ? staged.session : binding.tmuxSession!;
+    return { sessionName, stateRoot: staged && binding.launchGeneration
+      ? piAccountSwitchStateRoot(this.stateRoot, binding.launchGeneration) : this.stateRootForSession(sessionName) };
+  }
+
+  private bindingPaths(binding: NodeBinding) {
+    const { sessionName, stateRoot } = this.runnerLocation(binding);
+    return piSeatPaths(stateRoot, sessionName);
   }
 
   /** The pi-runner sidecar reader shape resume-token-capture consumes
@@ -105,7 +121,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string } {
     const state = this.readRunnerState(sessionName);
     if (state === null) {
-      const { runnerStatePath } = piSeatPaths(this.stateRoot, sessionName);
+      const { runnerStatePath } = piSeatPaths(this.stateRootForSession(sessionName), sessionName);
       return this.fs.exists(runnerStatePath)
         ? { ok: false, reason: "parse_error" }
         : { ok: false, reason: "missing_sidecar" };
@@ -123,9 +139,9 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   readRunnerSidecar(sessionName: string): { state: PiRunnerState | null; sessionsDir: string; entryPath: string; stateRoot: string } {
     return {
       state: this.readRunnerState(sessionName),
-      sessionsDir: piSeatPaths(this.stateRoot, sessionName).sessionsDir,
+      sessionsDir: piSeatPaths(this.stateRootForSession(sessionName), sessionName).sessionsDir,
       entryPath: this.runnerEntryPath,
-      stateRoot: this.stateRoot,
+      stateRoot: this.stateRootForSession(sessionName),
     };
   }
 
@@ -133,7 +149,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     const results: InstalledResource[] = [];
     const sessionName = binding.tmuxSession;
     if (!sessionName) return results;
-    const { agentDir } = piSeatPaths(this.stateRoot, sessionName);
+    const { agentDir } = this.bindingPaths(binding);
     const skillsDir = nodePath.join(agentDir, "skills");
     if (this.fs.exists(skillsDir) && this.fs.listFiles) {
       for (const file of this.fs.listFiles(skillsDir)) {
@@ -146,7 +162,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   /** Conflict detection must inspect this seat's copy, not a Claude sibling. */
   skillTargetPath(tmuxSession: string | null, effectiveId: string): string | null {
     if (!tmuxSession) return null;
-    return nodePath.join(piSeatPaths(this.stateRoot, tmuxSession).agentDir, "skills", effectiveId, "SKILL.md");
+    return nodePath.join(piSeatPaths(this.stateRootForSession(tmuxSession), tmuxSession).agentDir, "skills", effectiveId, "SKILL.md");
   }
 
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
@@ -201,7 +217,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
           }
           case "skill_install": {
             if (!binding.tmuxSession) throw new Error("No tmux session bound — cannot resolve the Pi seat state dir");
-            const { agentDir } = piSeatPaths(this.stateRoot, binding.tmuxSession);
+            const { agentDir } = this.bindingPaths(binding);
             const targetDir = nodePath.join(agentDir, "skills", nodePath.basename(nodePath.dirname(file.absolutePath)));
             this.fs.mkdirp(targetDir);
             this.fs.writeFile(nodePath.join(targetDir, nodePath.basename(file.path)), content);
@@ -282,7 +298,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     }
 
     const sessionName = binding.tmuxSession;
-    const paths = piSeatPaths(this.stateRoot, sessionName);
+    const location = this.runnerLocation(binding);
+    const paths = this.bindingPaths(binding);
     this.fs.mkdirp(paths.agentDir);
     this.fs.mkdirp(paths.sessionsDir);
 
@@ -292,7 +309,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // The prior record is read FIRST so the durable catch-up cursor
     // (lastEntryId, FR-5) survives the reset.
     const launchId = this.newLaunchId();
-    const prior = this.readRunnerState(sessionName);
+    const prior = this.readRunnerState(location.sessionName, location.stateRoot);
     this.fs.writeFile(
       paths.runnerStatePath,
       JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
@@ -307,8 +324,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     const cmd = buildPiRunnerCommand({
       runtime: this.runtime,
       runnerEntryPath: this.runnerEntryPath,
-      sessionName,
-      stateRoot: this.stateRoot,
+      sessionName: location.sessionName,
+      stateRoot: location.stateRoot,
       cwd: binding.cwd,
       model: binding.model,
       // The seat's resolved effort, sent as Pi's --thinking; OMP unchanged.
@@ -340,7 +357,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
     // The runner writes the sidecar after its first successful get_state;
     // that sidecar (not pane content) is the token source of truth (FR-5).
-    const state = await this.waitForRunnerReady(sessionName, launchId);
+    const state = await this.waitForRunnerReady(location.sessionName, launchId, location.stateRoot);
     if (!state.ok) return state.failure;
 
     const sessionFile = state.value.sessionFile;
@@ -384,7 +401,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // make a stopped seat ready).
     const paneCommand = (await this.tmux.getPaneCommand(binding.tmuxSession)) ?? "";
     const atShell = SHELL_COMMANDS.has(paneCommand);
-    const state = this.readRunnerState(binding.tmuxSession);
+    const state = this.readRunnerState(this.runnerLocation(binding).sessionName, this.runnerLocation(binding).stateRoot);
     if (state?.exited) {
       return { ready: false, reason: `${this.runtime}-runner exited (code ${state.exited.code ?? "unknown"})`, code: "runner_exited" };
     }
@@ -415,8 +432,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   // ── internals ──────────────────────────────────────────────────────────────
 
-  private readRunnerState(sessionName: string): PiRunnerState | null {
-    const { runnerStatePath } = piSeatPaths(this.stateRoot, sessionName);
+  private readRunnerState(sessionName: string, stateRoot = this.stateRootForSession(sessionName)): PiRunnerState | null {
+    const { runnerStatePath } = piSeatPaths(stateRoot, sessionName);
     if (!this.fs.exists(runnerStatePath)) return null;
     try {
       return parsePiRunnerState(this.fs.readFile(runnerStatePath));
@@ -428,11 +445,12 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   private async waitForRunnerReady(
     sessionName: string,
     launchId: string,
+    stateRoot = this.stateRootForSession(sessionName),
   ): Promise<{ ok: true; value: PiRunnerState } | { ok: false; failure: HarnessLaunchResult }> {
     const pollMs = 250;
     const attempts = 60; // ~15s: runner boot + pi spawn + first get_state
     for (let attempt = 0; attempt < attempts; attempt++) {
-      const state = this.readRunnerState(sessionName);
+      const state = this.readRunnerState(sessionName, stateRoot);
       // Launch-attempt scoping: only THIS attempt's sidecar states count.
       // Stale ready/exited records from prior instances are ignored, and
       // stale pane markers in scrollback are never consulted here — the
@@ -471,7 +489,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
    *  (a person's own Pi home, a shared file) would read this rig's guidance. */
   guidanceFileFor(binding: NodeBinding): { file: string | null; note?: string } {
     if (!binding.tmuxSession) return { file: null };
-    const file = nodePath.join(piSeatPaths(this.stateRoot, binding.tmuxSession).agentDir, "AGENTS.md");
+    const file = nodePath.join(this.bindingPaths(binding).agentDir, "AGENTS.md");
     const linked = guidanceFileSharedByLink(file, (path) => this.fs.linkInfo?.(path) ?? null);
     return linked ? { file: null, note: `${this.runtime}: ${linked} is a link, so this seat's managed guidance stays in its repository AGENTS.md` } : { file };
   }
@@ -497,7 +515,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
     if (entry.category === "skill") {
       if (!binding.tmuxSession) return false;
-      const { agentDir } = piSeatPaths(this.stateRoot, binding.tmuxSession);
+      const { agentDir } = this.bindingPaths(binding);
       const targetDir = nodePath.join(agentDir, "skills", entry.effectiveId);
       this.fs.mkdirp(targetDir);
       let isDir = false;

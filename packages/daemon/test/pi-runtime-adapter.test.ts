@@ -1115,3 +1115,23 @@ it.each(["selected", "cleared"])("does not bypass a %s Pi account when a wrapped
   expect(command.mock.calls[0]).toEqual([SESSION, expect.stringContaining("--launch-wrapper-arg '/wrapper'"), expect.objectContaining({ accountHome })]);
   expect(sendShellCommand).toHaveBeenCalledTimes(1);
 });
+
+it("stages a Pi account successor with canonical identity and a separate state directory", async () => {
+  const fs = memFs();
+  const predecessorPath = piSeatPaths(STATE_ROOT, SESSION).runnerStatePath;
+  fs.files[predecessorPath] = readyState(SESSION_FILE, "old-launch");
+  const stagedRoot = `${STATE_ROOT}/account-switches/new-generation`;
+  const stagedPath = piSeatPaths(stagedRoot, SESSION).runnerStatePath;
+  const token = `${stagedRoot}/${SESSION}/sessions/new.jsonl`;
+  const sendShellCommand = vi.fn(async (target: string, text: string) => {
+    expect(target).toBe("staging-pane");
+    expect(text).toContain(`--session-name '${SESSION}' --state-root '${stagedRoot}'`);
+    fs.files[stagedPath] = readyState(token, launchIdFrom(text));
+    return { ok: true as const };
+  });
+  const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER });
+  const binding = { tmuxSession: "staging-pane", launchGeneration: "new-generation", cwd: "/work", runtimeSwitchFrom: { runtime: "pi", session: SESSION, pane: "%0", generation: "old-generation" } } as never;
+  expect(await adapter.launchHarness(binding, { name: SESSION })).toMatchObject({ ok: true, resumeToken: token });
+  expect(await adapter.checkReady(binding)).toMatchObject({ ready: true });
+  expect(fs.files[predecessorPath]).toBe(readyState(SESSION_FILE, "old-launch"));
+});
