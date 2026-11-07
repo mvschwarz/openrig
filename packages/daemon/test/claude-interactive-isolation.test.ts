@@ -8,7 +8,7 @@ import {describe,it,expect} from 'vitest';
 import {TmuxAdapter,type TmuxFileOps} from '../src/adapters/tmux.js';
 const run=promisify(execFile);
 const q=(v:string)=>"'"+v.replaceAll("'","'\"'\"'")+"'";
-async function until(f:()=>boolean){for(let i=0;i<240;i++){if(f())return;await new Promise(r=>setTimeout(r,25));}throw Error('private pane did not produce receipt');}
+async function until(f:()=>boolean|Promise<boolean>){for(let i=0;i<240;i++){if(await f())return;await new Promise(r=>setTimeout(r,25));}throw Error('private pane did not produce receipt');}
 let hasTmux=false;
 try{execFileSync('tmux',['-V'],{stdio:'ignore'});hasTmux=true;}catch{/* optional dependency */}
 describe.skipIf(!hasTmux || process.platform==='win32')('classic Claude pane-shell isolation',()=>{
@@ -49,6 +49,8 @@ it.each(['return','exit','errexit'])('keeps pane environment, lifetime and histo
   console.log('CLAUDE_HISTORY_CONTROL='+JSON.stringify({kind,ordinaryFlush,priorHistoryPreserved:true}));
   fs.unlinkSync(status);writes.length=0;
   const body='#'+ 'x'.repeat(4096)+String.fromCharCode(10)+`export FIXTURE_MUTATION=child OPENRIG_HOME=child-home; cd /; `+(kind==='exit'?'exit 7':kind==='errexit'?`set -e; false; printf unexpected > ${q(unreachable)}`:':');
+  // The receipt can appear before mv exits and Bash regains the foreground.
+  await until(async()=>await transport.getPaneCommand('pane')==='bash');
   expect(await transport.sendShellCommand('pane',body,undefined,{sourceInPane:true})).toEqual({ok:true});await until(()=>fs.existsSync(status));
   const exit=Number(fs.readFileSync(status,'utf8').trim());expect(exit).toBe(kind==='exit'?7:kind==='errexit'?1:0);expect(fs.existsSync(unreachable)).toBe(false);
   expect(writes).toHaveLength(2);const [script,payload]=writes;expect(Buffer.byteLength(script.content)).toBeGreaterThan(4096);expect(script.mode).toBe(0o600);expect(payload.mode).toBe(0o600);expect(script.uid).toBe(process.getuid!());expect(payload.uid).toBe(process.getuid!());
