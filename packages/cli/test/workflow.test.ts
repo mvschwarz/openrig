@@ -321,6 +321,75 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     expect(calls.find((c) => c.path === "/api/workflow/inst-1")).toBeDefined();
   });
 
+  it("unregister name@version POSTs /api/workflow/specs/unregister with the name and version (#2635)", async () => {
+    const { deps, calls } = makeDeps({
+      routes: { "POST /api/workflow/specs/unregister": { status: 200, data: { removed: [], kept: [] } } },
+    });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", "unregister", "pedido-do-board@1", "--json"]);
+    expect(calls).toEqual([{ method: "POST", path: "/api/workflow/specs/unregister", body: { name: "pedido-do-board", version: "1", pruneMissing: false } }]);
+  });
+
+  it("unregister --prune-missing POSTs pruneMissing without a name and prints what was removed and kept (#2635)", async () => {
+    const { deps, calls } = makeDeps({
+      routes: {
+        "POST /api/workflow/specs/unregister": {
+          status: 200,
+          data: {
+            removed: [{ name: "qa-probe", version: "1", sourcePath: "/tmp/probe.yaml" }],
+            kept: [{ name: "wf-keep", version: "2", sourcePath: "/tmp/keep.yaml", reason: "pinned" }],
+          },
+        },
+      },
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "unregister", "--prune-missing"]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(calls).toEqual([{ method: "POST", path: "/api/workflow/specs/unregister", body: { name: undefined, version: undefined, pruneMissing: true } }]);
+    expect(logs.join("\n")).toContain("removed  qa-probe@1  /tmp/probe.yaml");
+    expect(logs.join("\n")).toContain("kept     wf-keep@2  /tmp/keep.yaml  (unfinished work is pinned to this version)");
+  });
+
+  it("unregister name@ (an empty version) is a usage error and sends nothing (#2676 review)", async () => {
+    const { deps, calls } = makeDeps();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const before = process.exitCode;
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "unregister", "flow@"]);
+      expect(process.exitCode).toBe(1);
+      expect(err.mock.calls.join(" ")).toContain("The version after @ is empty");
+    } finally {
+      err.mockRestore();
+      process.exitCode = before;
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("unregister with neither a spec nor --prune-missing sends nothing and fails (#2635)", async () => {
+    const { deps, calls } = makeDeps();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const before = process.exitCode;
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "unregister"]);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      err.mockRestore();
+      process.exitCode = before;
+    }
+    expect(calls).toEqual([]);
+  });
+
   it("trace GETs /api/workflow/:instanceId/trace", async () => {
     const { deps, calls } = makeDeps({
       routes: { "GET /api/workflow/inst-1/trace": { status: 200, data: { instance: {}, trail: [] } } },
