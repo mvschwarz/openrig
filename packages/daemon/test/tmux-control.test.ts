@@ -84,12 +84,13 @@ describe("ControlReplies", () => {
 
 /** The line the exec writes to ask whether only control sessions are left on the server. */
 const ALONE_CHECK = "'list-sessions' '-F' '#{@openrig-control}'";
+const HOOKS_CHECK = "'list-sessions' '-F' '#{after-load-buffer}#{after-set-buffer}'";
 
 /** A control client that records the command lines written to it and answers only when told to. It attaches at once
  *  unless told to wait. The checks for control sessions alone are answered from `checks` in turn (by default, one
  *  answer: a session of no daemon's is left), then recorded as any other line. Its input closed, it exits, as tmux's
  *  client detaches. */
-function fakeClient(options: { attach?: boolean; checks?: string[][] } = {}) {
+function fakeClient(options: { attach?: boolean; checks?: string[][]; hooks?: string[] | null } = {}) {
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
     exitCode: null as number | null, signalCode: null as string | null, unref: () => {},
@@ -97,12 +98,19 @@ function fakeClient(options: { attach?: boolean; checks?: string[][] } = {}) {
   });
   const checks = [...(options.checks ?? [[""]])];
   const written: string[] = [];
+  const hookChecks: string[] = [];
   let n = 1;
   const answer = (...lines: string[]) => { n++; child.stdout.write(`%begin 1 ${n} 1\n${lines.map((l) => `${l}\n`).join("")}%end 1 ${n} 1\n`); };
   child.stdin.setEncoding("utf8");
   child.stdin.on("data", (chunk: string) => {
     for (const line of chunk.split("\n").filter(Boolean)) {
       if (line === ALONE_CHECK && checks.length > 0) answer(...checks.shift()!);
+      // The buffer-hook check, answered with no hook unless the test says otherwise; recorded in `hookChecks`.
+      else if (line === HOOKS_CHECK) {
+        hookChecks.push(line);
+        if (options.hooks === null) { n++; child.stdout.write(`%begin 1 ${n} 1\nfailed\n%error 1 ${n} 1\n`); }
+        else answer(...(options.hooks ?? [""]));
+      }
       else written.push(line);
     }
   });
@@ -115,7 +123,7 @@ function fakeClient(options: { attach?: boolean; checks?: string[][] } = {}) {
     child.signalCode = "SIGTERM";
     child.emit("exit", null, "SIGTERM");
   }
-  return { child: child as unknown as ChildProcessWithoutNullStreams, kill: child.kill, written, answer, attach, exit, ended: () => ended };
+  return { child: child as unknown as ChildProcessWithoutNullStreams, kill: child.kill, written, hookChecks, answer, attach, exit, ended: () => ended };
 }
 
 /** The tag a listing's own rows were marked with: the line is `before`, the owner d4e5's mark, then `after`. */
@@ -409,6 +417,34 @@ describe("tmuxControlExec", () => {
     expect(await load).toBe("");
     expect(reads).toEqual([["/tmp/t1", 4096]]);
     expect(spawned).toEqual([]);
+    await exec.close();
+  });
+
+  it.each([
+    ["a global or a session's after-load-buffer", ["x", ""]],
+    ["an after-set-buffer", ["", "y"]],
+  ])("keeps the spawned load-buffer, unread, while %s hook is set, and asks once per client", async (_what, hooks) => {
+    const client = fakeClient({ hooks });
+    const { spawned, fallback } = fakeSpawned();
+    const readBufferFile = vi.fn(async () => Buffer.from("short"));
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, now: () => 0, readBufferFile });
+    const argv = ["tmux", "load-buffer", "-b", "b1", "/tmp/t1"];
+    await exec([...argv]);
+    await exec([...argv]);
+    expect(spawned).toEqual([argv, argv]);
+    expect(client.written).toEqual([]);
+    expect(client.hookChecks).toHaveLength(1);
+    expect(readBufferFile).not.toHaveBeenCalled();
+    await exec.close();
+  });
+
+  it("keeps the spawned load-buffer when the buffer-hook check fails", async () => {
+    const client = fakeClient({ hooks: null });
+    const { spawned, fallback } = fakeSpawned();
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, now: () => 0, readBufferFile: async () => Buffer.from("short") });
+    const argv = ["tmux", "load-buffer", "-b", "b1", "/tmp/t1"];
+    await exec([...argv]);
+    expect(spawned).toEqual([argv]);
     await exec.close();
   });
 

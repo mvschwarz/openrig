@@ -25,7 +25,8 @@ import type { ArgvExecFn } from "./tmux.js";
  * blocks tmux's hooks print on their own (an `after-list-panes` in a user's tmux.conf) are not taken for a command's
  * reply, where a spawned client prints a hook's output after its command's. Anything else (a launch,
  * which takes the spawning process's environment; `load-buffer` of anything but a short one-line text file, see
- * `bufferLoadAsSet`; a command line that cannot be written on
+ * `bufferLoadAsSet`, and every `load-buffer` while an `after-load-buffer` or `after-set-buffer` hook is set, see
+ * `bufferHooked`; a command line that cannot be written on
  * one line; a global flag other than this client's server selection; no server yet, or one before 3.2) goes to the
  * spawned client, as before. On servers older than tmux 3.7c, or whose version is unknown, all commands use spawned
  * clients: creating a control client can crash those servers when another session is created (#2304).
@@ -395,7 +396,15 @@ interface ControlClient {
   users: number;
   /** Set once it takes no new call: it ends as soon as the calls running on it are done. */
   retiring: boolean;
+  /** Whether a buffer hook is set on its server (`bufferHooked`): asked once per client, at its first load. */
+  bufferHooks?: Promise<boolean>;
 }
+
+/** What a spawned `load-buffer` and its `set-buffer` stand-in tell apart: tmux runs the hook after each command named
+ *  after it (`CMD_AFTERHOOK`), so a load sent as set-buffer would run `after-set-buffer` where the user configured
+ *  `after-load-buffer`, and a hook may change the buffer before it is pasted. A session's hook option inherits the
+ *  global one, so one listing reads both scopes, for every session a spawned client's load may run in. */
+const BUFFER_HOOKS_FORMAT = "#{after-load-buffer}#{after-set-buffer}";
 
 /** How long the end of a client (its input closed) may take before it is killed. */
 const END_MS = 2_000;
@@ -609,6 +618,15 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
     }, () => { /* the client is gone already */ });
   };
 
+  /** Whether either buffer hook is set, globally or on any session: asked once per client, and kept for its life (a
+   *  hook set later is not seen until the next client). With one set, or when the client cannot tell, every load
+   *  stays a spawned load-buffer, with the hook the user configured. */
+  const bufferHooked = (c: ControlClient): Promise<boolean> =>
+    c.bufferHooks ??= send(c, ["list-sessions", "-F", BUFFER_HOOKS_FORMAT]).then(
+      (reply) => !reply.ok || reply.overflow || reply.lines.some((line) => line !== ""),
+      () => true,
+    );
+
   /** The error of a write whose client ended before its reply, with what a spawned client finds of its target now: a
    *  server or session gone reads as a spawned client's failure would (`no server running`, `can't find session`), so
    *  the adapter classifies it the same way. A client dropped for no reply is not asked about: the server is not
@@ -638,7 +656,11 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
     const loadArgs = argsIn.slice(prefix.length);
     const loadable = bin === "tmux" && sameServer && !closed && isLoneBufferLoad(loadArgs)
       && [...prefix, ...loadArgs].every((a) => !/[\n\r\0]/.test(a));
-    if (loadable && !(await connected())) return fallback(argvIn);
+    if (loadable) {
+      // With a buffer hook set, the load stays spawned: as set-buffer it would run the other hook (#2636 review).
+      const c = await connected();
+      if (!c || await bufferHooked(c)) return fallback(argvIn);
+    }
     const asSet = loadable ? await bufferLoadAsSet(loadArgs, readBufferFile) : null;
     const args = asSet ?? argsIn.slice(prefix.length);
     const commandsIn = sameServer && !args[0]?.startsWith("-") ? commandsOf(args) : [];
