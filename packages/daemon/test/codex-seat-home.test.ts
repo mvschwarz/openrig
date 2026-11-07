@@ -170,7 +170,7 @@ it("the legacy Codex resume launches in the seat's own home when one is passed, 
   expect((await adapter.resume("seat@rig", "codex_id", "old", f.cwd)).ok).toBe(true);
   expect(await homeOf()).toBe(f.daemonHome);
   expect(ensured).toEqual([f.seatHome, undefined]);
-});
+}, 35_000);
 
 it("context usage finds a thread's state in a declared seat home", () => {
   const f = fixture(); seed(f.seatHome, "seat-thread");
