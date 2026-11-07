@@ -639,17 +639,22 @@ exception routes only. Existing obligations keep their owners and evidence.
   cmd
     .command("trace <instanceId>")
     .description("Show one workflow instance + its append-only step trail (audit-only verdict)")
+    .option("--full", "Return the complete step trail instead of the 50 most recent closures (trailCompleteness: complete)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
+The default trail holds the 50 most recent closures; trailCompleteness says
+"recent" when older ones were left out. --full asks the daemon for all of them.
+
 Examples:
   $ rig workflow trace WF01ABC
   $ rig workflow trace WF01ABC --json | jq '.trail[] | {step, actor, exit}'
+  $ rig workflow trace WF01ABC --full --json | jq '.trailCompleteness, (.trail | length)'
 `)
-    .action(async (instanceId: string, opts: { json?: boolean }) => {
+    .action(async (instanceId: string, opts: { json?: boolean; full?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.get<{ instance?: unknown; reconciliation?: unknown; trail?: unknown[]; frontier?: unknown[]; failures?: unknown[]; boundaryObligations?: unknown[]; unknowns?: string[] }>(
-          `/api/workflow/${encodeURIComponent(instanceId)}/trace`,
+        const res = await client.get<{ instance?: unknown; reconciliation?: unknown; trail?: unknown[]; trailCompleteness?: string; frontier?: unknown[]; failures?: unknown[]; boundaryObligations?: unknown[]; unknowns?: string[] }>(
+          `/api/workflow/${encodeURIComponent(instanceId)}/trace${opts.full ? "?full=true" : ""}`,
         );
         // WF3 FR-2: human mode renders the per-step tree (mini-req 2's
         // one-screen bar); --json byte-identical (BR-2).
@@ -667,6 +672,9 @@ Examples:
         } as Parameters<typeof renderTraceTree>[0];
         const trail = (res.data.trail ?? []) as Parameters<typeof renderTraceTree>[1];
         for (const line of renderTraceTree(instance, trail)) console.log(line);
+        if (res.data.trailCompleteness === "recent") {
+          console.log(`  (the ${trail.length} most recent closures; older ones left out - all of them: rig workflow trace ${instanceId} --full)`);
+        }
       });
     });
 

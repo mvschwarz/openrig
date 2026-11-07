@@ -599,7 +599,7 @@ Herdr session per request, including session-bound previews and window reuse.
 | `rig workflow specs` | — | `--json` |
 | `rig workflow guidance <instanceId>` | — | `--packet <id>`<br>`--component <id>`<br>`--full`<br>`--json` |
 | `rig workflow show <instanceId>` | — | `--json` |
-| `rig workflow trace <instanceId>` | — | `--json` |
+| `rig workflow trace <instanceId>` | — | `--full`<br>`--json` |
 | `rig workflow continue <instanceId>` | — | `--json` |
 | `rig workflow run <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--tags <tags>`<br>`--json` |
 | `rig workflow watch <instanceId>` | — | `--json` |
