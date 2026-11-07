@@ -65,6 +65,18 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
     expect(rehydrateSeatSkills(paths)).toEqual({ restored: [], kept: [], missing: [], refused: [] });
   });
 
+  it("refreshes a copy whose source changed before rig down, whether rig down removed it or kept it", () => {
+    const { paths, sourceOf, put, launched, copy } = seat();
+    launched("infra-review", { "SKILL.md": "v1" });
+    put(join(sourceOf("infra-review"), "SKILL.md"), "v2");
+    cleanSeatSkills(paths);
+
+    expect(followSeatSkills(paths, { selected: new Set(["infra-review"]), following: [{ id: "infra-review", source: sourceOf("infra-review") }] }))
+      .toEqual({ refreshed: ["infra-review"], added: [], removed: [], warnings: [] });
+    expect(copy("infra-review", "SKILL.md")).toBe("v2");
+    expect(rehydrateSeatSkills(paths)).toEqual({ restored: [], kept: [], missing: [], refused: [] });
+  });
+
   it("leaves an unchanged skill whose source hasn't moved to the usual rehydration, and reports nothing", () => {
     const { paths, sourceOf, launched, copy } = seat();
     launched("infra-review", { "SKILL.md": "v1" });
