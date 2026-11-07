@@ -108,6 +108,16 @@ A verified export, a finished task and an exact restore haven't been shown.
   ([#2594](https://github.com/mvschwarz/openrig/pull/2594))
 - **A writable rig, pod or seat view sizes the pane it shows,** instead of
   keeping an older attached client's size. Read-only views are unchanged. ([#2614](https://github.com/mvschwarz/openrig/pull/2614))
+- **Herdr views kept across an upgrade keep working,** on Linux Herdr 0.9.5 /
+  protocol 22. A viewer or follow view kept from 0.7.5 through 0.7.9 now counts
+  as the same attachment when only OpenRig's tile script changed, and moves to
+  the current command, so the viewer stays confirmed and the follow view goes on
+  adding and closing tiles. A kept viewer that's already running keeps its
+  earlier sizing until it's attached again; writable viewers opened after the
+  upgrade size their pane. A different session, tmux, server or read-only
+  setting still holds the view, as before. Checked against the scripts those
+  releases used, not yet with a live Herdr. It follows @natefaerber's approach in
+  [#2467](https://github.com/mvschwarz/openrig/pull/2467). ([#2634](https://github.com/mvschwarz/openrig/pull/2634))
 
 ### Coordination and status
 
@@ -285,10 +295,6 @@ A verified export, a finished task and an exact restore haven't been shown.
   launched handover or managed launch records a new session, so until then
   `rig seat stop`, `restart` and `clean` refuse them; the refusal now says so.
   ([#2440](https://github.com/mvschwarz/openrig/pull/2440), [#2572](https://github.com/mvschwarz/openrig/pull/2572))
-- **Herdr views kept from before 0.7.9,** on Linux Herdr 0.9.5 / protocol 22:
-  after upgrading, a kept viewer can read unconfirmed, and a kept follow view can
-  stop adding tiles for new owners and closing tiles for departed ones. This
-  release doesn't fix it. ([#2467](https://github.com/mvschwarz/openrig/pull/2467))
 - **Codex hooks after an upgrade:** Codex sessions kept running across the
   upgrade to 0.7.9 showed "Hook failed — plugin contents changed; hook approval
   required" until relaunched; in that upgrade test, one seat restarted with
@@ -317,7 +323,8 @@ A verified export, a finished task and an exact restore haven't been shown.
 Thanks to @dajiaohuang, @Aummadour, @billbenetti, @smota, @Nikhila-Dhevi-R and
 @Vaishnavi220506 for merged contributions, and to @AlephCasara, whose work on a
 fork pointed us to the unpaged event notification drain
-([#2610](https://github.com/mvschwarz/openrig/pull/2610)). Thanks to
+([#2610](https://github.com/mvschwarz/openrig/pull/2610)), and to @natefaerber, whose
+approach in [#2467](https://github.com/mvschwarz/openrig/pull/2467) the Herdr view fix follows. Thanks to
 @billbenetti, @KM199, @ziadeh, @dajiaohuang, @jajabong, @george661 and
 @aanestesia for reports carried into this release, and to @smota for the
 OpenTelemetry discussion behind [#2589](https://github.com/mvschwarz/openrig/pull/2589).

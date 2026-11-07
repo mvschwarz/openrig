@@ -77,6 +77,16 @@ Claude Code or Codex.
 - **tmux modes:** a send or wake now leaves every tmux mode in a seat's pane,
   including a chooser, customize or clock mode a person has open. If a send is
   still refused for a tmux mode, the refusal names why leaving failed.
+- **Herdr views kept across an upgrade keep working,** on Linux Herdr 0.9.5 /
+  protocol 22. A viewer or follow view kept from 0.7.5 through 0.7.9 now counts
+  as the same attachment when only OpenRig's tile script changed, and moves to
+  the current command, so the viewer stays confirmed and the follow view goes on
+  adding and closing tiles. A kept viewer that's already running keeps its
+  earlier sizing until it's attached again; writable viewers opened after the
+  upgrade size their pane. A different session, tmux, server or read-only
+  setting still holds the view, as before. Checked against the scripts those
+  releases used, not yet with a live Herdr. It follows @natefaerber's approach in
+  [#2467](https://github.com/mvschwarz/openrig/pull/2467). ([#2634](https://github.com/mvschwarz/openrig/pull/2634))
 
 ## OpenShell workers
 
@@ -161,10 +171,6 @@ daemon's main API port (normally 7433)."
   `rig seat stop`, `clean` and in-place restart refuse them, and now say why.
   Don't use `rig unclaim` to get around it: that ends OpenRig's management of
   the seat.
-- **Herdr views kept from before 0.7.9,** on Linux Herdr 0.9.5 / protocol 22:
-  after upgrading, a kept viewer can read unconfirmed, and a kept follow view can
-  stop adding tiles for new owners and closing tiles for departed ones. This
-  release doesn't fix it. ([#2467](https://github.com/mvschwarz/openrig/pull/2467))
 - **Permission requests in seat status** show only the latest one, held in
   memory for five minutes and lost on a daemon restart.
 - **Agent spec advisories** don't show for a native resume that continues a
