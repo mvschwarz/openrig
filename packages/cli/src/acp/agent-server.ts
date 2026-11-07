@@ -157,6 +157,16 @@ function oneLine(text: string, max: number): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
+/** The person's own words in a prompt, for the row's summary and the session's title. An app that wraps them in its
+ *  own instructions marks them (T3 Code sends several blocks of harness text, then `<user_request>…</user_request>`);
+ *  the row's body keeps everything the app sent. Only a prompt with one opening and one closing mark is read this
+ *  way: with more, an example could be taken for the request, so the prompt stands as sent. */
+function personsWords(text: string): string {
+  if (text.split("<user_request>").length !== 2 || text.split("</user_request>").length !== 2) return text;
+  const marked = /<user_request>([\s\S]*?)<\/user_request>/.exec(text)?.[1];
+  return marked?.trim() ? marked : text;
+}
+
 const toolStatus = (state: string) =>
   state === "pending" ? "pending" : ACTIVE_STATES.has(state) ? "in_progress" : state === "done" || state === "handed-off" ? "completed" : "failed";
 
@@ -229,6 +239,10 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const log = options.log ?? (() => {});
   let clientName = "an ACP app";
+  /** The app asks forms (ACP `elicitation/create`, mode form), so a question's choices go to it as a form, each by its
+   *  label. A permission request shows them only in apps that list each option: T3 Code shows a fixed Approve, which
+   *  sends the first. */
+  let asksForms = false;
   let connection: TeamConnection | undefined;
   void options.closed?.then(() => { for (const session of sessions.values()) session.turn?.cancel(); });
 
@@ -249,8 +263,9 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
     (await team.queue.sent(team.caller)).filter((row) => row.tags.includes(`${SESSION_TAG}${sessionId}`))
       .sort((a, b) => a.tsCreated.localeCompare(b.tsCreated));
 
-  /** Put one ask's open questions to the person as permission requests, one at a time, and record each choice. A reply
-   *  that arrives after the turn ended answers nothing here: the question stays open in the TUI and Slack. */
+  /** Put one ask's open questions to the person, as a form where the app asks forms and otherwise as permission
+   *  requests, one at a time, and record each choice. A reply that arrives after the turn ended answers nothing here:
+   *  the question stays open in the TUI and Slack. */
   const askPerson = async (team: TeamConnection, sessionId: string, ask: TeamAsk, turn: TurnQuestions) => {
     const emit = (body: Update) => { if (!turn.finished) update(sessionId, body); };
     if (ask.questions.length === 0) {
@@ -261,15 +276,30 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       if (turn.finished || turn.cancelled) return;
       const toolCallId = `${ask.qitemId}#${q.id}`;
       emit({ sessionUpdate: "tool_call", toolCallId, kind: "other", status: "pending", title: `${ask.sourceSession} asks: ${q.question}`, content: textContent(ask.body) });
-      let outcome: { outcome?: string; optionId?: string } | undefined;
+      const label = (o: (typeof q.options)[number]) => (o.recommended ? `${o.label} (recommended)` : o.label);
+      let chosenId: string | undefined;
       turn.outstanding.add(toolCallId);
       try {
-        const result = (await peer.request("session/request_permission", {
-          sessionId,
-          toolCall: { toolCallId, title: `${ask.sourceSession} asks: ${q.question}`, kind: "other", status: "pending" },
-          options: q.options.map((o) => ({ optionId: o.id, name: o.recommended ? `${o.label} (recommended)` : o.label, kind: "allow_once" })),
-        })) as { outcome?: { outcome?: string; optionId?: string } } | undefined;
-        outcome = result?.outcome;
+        if (asksForms) {
+          // Each choice is offered as its label, the one form every app shows as choices: T3 Code 0.1.7 builds them only
+          // from `enum`, a value serving as both label and answer, and reads `oneOf` as free text. Labels that repeat
+          // carry their option's id, so a value names one choice; the answer is mapped back by that exact value.
+          const shown = q.options.map(label);
+          const values = new Set(shown).size === shown.length ? shown : q.options.map((o, i) => `${shown[i]} (${o.id})`);
+          const result = (await peer.request("elicitation/create", {
+            sessionId, toolCallId, mode: "form", message: `${ask.sourceSession} asks: ${q.question}`,
+            requestedSchema: { type: "object", required: [q.id], properties: { [q.id]: { type: "string", title: q.question, enum: values } } },
+          })) as { action?: string; content?: Record<string, unknown> | null } | undefined;
+          const value = result?.action === "accept" ? result.content?.[q.id] : undefined;
+          chosenId = typeof value === "string" ? q.options[values.indexOf(value)]?.id : undefined;
+        } else {
+          const result = (await peer.request("session/request_permission", {
+            sessionId,
+            toolCall: { toolCallId, title: `${ask.sourceSession} asks: ${q.question}`, kind: "other", status: "pending" },
+            options: q.options.map((o) => ({ optionId: o.id, name: label(o), kind: "allow_once" })),
+          })) as { outcome?: { outcome?: string; optionId?: string } } | undefined;
+          chosenId = result?.outcome?.outcome === "selected" ? result.outcome.optionId : undefined;
+        }
       } catch (error) {
         emit({ sessionUpdate: "tool_call_update", toolCallId, content: textContent(`This app couldn't show the question (${(error as Error).message}). It's still open: answer it in the OpenRig TUI or Slack.`) });
         return;
@@ -277,7 +307,8 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
         turn.outstanding.delete(toolCallId);
       }
       if (turn.finished) return;
-      const chosen = outcome?.outcome === "selected" ? q.options.find((o) => o.id === outcome?.optionId) : undefined;
+      // Only one of the question's own options is recorded: the app's reply is checked again here.
+      const chosen = q.options.find((o) => o.id === chosenId);
       if (!chosen) {
         emit({ sessionUpdate: "tool_call_update", toolCallId, content: textContent("Not answered here. The question is still open in the OpenRig TUI and Slack.") });
         return;
@@ -291,8 +322,10 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
   };
 
   peer.onRequest("initialize", async (params) => {
-    const p = (params ?? {}) as { clientInfo?: { name?: string; title?: string } };
+    const p = (params ?? {}) as { clientInfo?: { name?: string; title?: string }; clientCapabilities?: { elicitation?: { form?: unknown } | null } };
     clientName = p.clientInfo?.title ?? p.clientInfo?.name ?? clientName;
+    // ACP counts a mode as supported only when its field is present and not null.
+    asksForms = p.clientCapabilities?.elicitation?.form != null;
     return {
       protocolVersion: ACP_PROTOCOL_VERSION,
       agentCapabilities: {
@@ -336,7 +369,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       if (known) { if (row.tsUpdated > known.updatedAt) known.updatedAt = row.tsUpdated; continue; }
       byId.set(sessionId, {
         sessionId, cwd: row.tags.find((t) => t.startsWith(CWD_TAG))?.slice(CWD_TAG.length) ?? "",
-        title: oneLine(row.body.split(FOOTER)[0] ?? "", 100), updatedAt: row.tsUpdated,
+        title: oneLine(personsWords(row.body.split(FOOTER)[0] ?? ""), 100), updatedAt: row.tsUpdated,
       });
     }
     const listed = [...byId.values()].filter((s) => typeof cwd !== "string" || s.cwd === cwd).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -422,7 +455,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       const qitemId = newQitemId();
       try {
         await team.queue.create({
-          qitemId, destination: team.receiver, body, summary: `ACP: ${oneLine(text, 100)}`,
+          qitemId, destination: team.receiver, body, summary: `ACP: ${oneLine(personsWords(text), 100)}`,
           tags: ["acp-serve", `${SESSION_TAG}${session.id}`, ...(session.cwd ? [`${CWD_TAG}${session.cwd}`] : [])],
         });
       } catch (error) {

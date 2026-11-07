@@ -262,7 +262,7 @@ Guide: rig context get reference/acp-agents.md`)
 
   cmd
     .command("serve")
-    .description("Serve OpenRig as an ACP agent on stdio, for an ACP app (Zed, JetBrains and others) to launch: its prompts go to your team as queue rows")
+    .description("Serve OpenRig as an ACP agent on stdio, for an ACP app (Zed and others) to launch: its prompts go to your team as queue rows")
     .option("--to <member@rig>", "The seat that receives your tasks: your team's entry point (default: rig config get acp.to)")
     .option("--as <address>", "Who the tasks come from (default: OPENRIG_SESSION_NAME, else this machine's default person)")
     .option("--poll-seconds <n>", "How often to read the work's progress while a turn is open", "2")
@@ -280,7 +280,8 @@ starts the agent from the ACP registry, with no arguments, reaches your team.
 
 It uses the OpenRig daemon on this computer, started with rig daemon start. The app's sign-in step ("OpenRig on this
 machine") checks that the daemon answers and that you resolve to an address: --as, OPENRIG_SESSION_NAME, or the
-default person (rig gateway default <id>).
+default person: the only one registered (rig gateway human add <id> ...), or with several, the one chosen with
+rig gateway default <id>.
 
 In Zed's settings.json:
   "agent_servers": { "OpenRig": { "type": "custom", "command": "rig", "args": ["acp", "serve", "--to", "lead@my-team"] } }
@@ -300,7 +301,7 @@ Guide: rig context get reference/acp-agents.md#openrig-as-an-agent-in-acp-apps`)
         let caller = opts.as?.trim() || self()?.trim();
         if (!caller) {
           const person = await defaultPersonAddress();
-          if ("reason" in person) return { error: `OpenRig doesn't know who you are on this machine (${person.reason}). Choose the default person with rig gateway default <id>, or add --as <address> to the agent's command.` };
+          if ("reason" in person) return { error: `OpenRig doesn't know who you are on this machine (${person.reason}). Register yourself with rig gateway human add <id> --display-name "<your name>" --delivery-class <A|B|C|D> (the only registered person is the default; with several, choose one with rig gateway default <id>), or add --as <address> to the agent's command.` };
           caller = person.address;
         }
         const target = acpReceiver(opts.to);
