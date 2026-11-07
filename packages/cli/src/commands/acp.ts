@@ -9,7 +9,7 @@ import { processIdentity } from "../local-daemon-owner.js";
 import { getOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
 import { answerCommand, runAcpAssignment, type AcpQueue } from "../acp/connector.js";
 import { findRunProcesses } from "../acp/run-processes.js";
-import { serveAcpAgent, type TeamAsk, type TeamConnection, type TeamQueue } from "../acp/agent-server.js";
+import { serveAcpAgent, TeamRefused, type TeamAsk, type TeamConnection, type TeamQueue } from "../acp/agent-server.js";
 import { StreamJsonRpcPeer } from "../acp/json-rpc-stdio.js";
 import { CLI_VERSION } from "../version.js";
 import { ConfigStore } from "../config-store.js";
@@ -69,7 +69,10 @@ export function daemonTeamQueue(client: DaemonClient): TeamQueue {
   };
   return {
     async create(row) {
-      ok(await client.post("/api/queue/create", { qitemId: row.qitemId, destinationSession: row.destination, body: row.body, summary: row.summary, tags: row.tags }), `queue create for ${row.destination}`);
+      const response = await client.post("/api/queue/create", { qitemId: row.qitemId, destinationSession: row.destination, body: row.body, summary: row.summary, tags: row.tags });
+      // A 4xx is the daemon's answered refusal, with nothing written; a 5xx leaves the write unknown, like no answer.
+      if (response.status >= 400 && response.status < 500) throw new TeamRefused(`HTTP ${response.status}: ${JSON.stringify(response.data)}`);
+      ok(response, `queue create for ${row.destination}`);
     },
     async show(qitemId) {
       return face(ok(await client.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`), `queue show ${qitemId}`));

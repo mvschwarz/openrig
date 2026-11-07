@@ -38,7 +38,7 @@ beforeAll(async () => {
   // The caller is a registered person, so the team's asks reach them and their answers record as theirs.
   const registry = { ok: true as const, entities: [{ entityId: "human-ada", class: "human" as const, displayName: "Ada", address: CALLER, connectorBindings: [],
     prefs: { deliveryClass: "B" as const, availability: "available" as const } }] };
-  const repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => registry as never });
+  const repo = new QueueRepository(db, bus, { validateRig: (session) => !session.endsWith("@gone-rig"), loadHumanRegistry: () => registry as never });
   const writeContract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -217,7 +217,7 @@ describe("rig acp serve", () => {
     const error = await client.request("session/prompt", prompt(sessionId, "Archive March")).then(() => undefined, (e: unknown) => e);
     const first = rowsTo("unsure@team")[0]!;
     expect((error as JsonRpcRequestError).error).toMatchObject({ code: -32603, message: `Couldn't confirm ${first.qitem_id}: socket hang up` });
-    expect(messages(updates).at(-1)).toBe(`Sending ${first.qitem_id} to unsure@team wasn't confirmed (socket hang up), and it couldn't be read back: it may or may not have reached the team. Its state is unknown from here; a new prompt in this session names it, and \`rig queue show ${first.qitem_id}\` shows it if it exists.`);
+    expect(messages(updates).at(-1)).toBe(`Sending ${first.qitem_id} to unsure@team got no answer (socket hang up), and it couldn't be read back: delivery is unconfirmed, so it may still reach the team. A new prompt in this session names it, and \`rig queue show ${first.qitem_id}\` shows it if it landed.`);
 
     const second = client.request("session/prompt", prompt(sessionId, "Archive March, please"));
     const followUp = await until(() => rowsTo("unsure@team")[1], "the follow-up row");
@@ -225,6 +225,41 @@ describe("rig acp serve", () => {
     expect(messages(updates)).toContain(`${first.qitem_id} is still pending with unsure@team. Sending this as a follow-up.\n\n`);
     client.notify("session/cancel", { sessionId });
     expect(await second).toEqual({ stopReason: "cancelled" });
+  });
+
+  it("an unanswered create that isn't found on the immediate readback stays unconfirmed, and is named when it lands late", async () => {
+    // The request is still in flight when the agent reads back: it lands only after the readback found nothing.
+    let late: (() => Promise<void>) | undefined;
+    const slow = (q: TeamQueue): TeamQueue => ({ ...q, create: async (row) => {
+      if (late) return q.create(row);
+      late = () => q.create(row);
+      throw new Error("socket hang up");
+    } });
+    const { client, updates } = connect({}, "late@team", slow);
+    const sessionId = await open(client);
+    const error = await client.request("session/prompt", prompt(sessionId, "Tag the release")).then(() => undefined, (e: unknown) => e);
+    expect(rowsTo("late@team")).toHaveLength(0);
+    const id = /Couldn't confirm (qitem-\S+):/.exec((error as JsonRpcRequestError).error.message)![1]!;
+    expect(messages(updates).at(-1)).toBe(`Sending ${id} to late@team got no answer (socket hang up), and it wasn't found on the immediate readback: delivery is unconfirmed, so it may still reach the team. A new prompt in this session names it, and \`rig queue show ${id}\` shows it if it landed.`);
+
+    await late!();
+    expect(rowsTo("late@team")[0]!.qitem_id).toBe(id);
+    const second = client.request("session/prompt", prompt(sessionId, "Tag the release, please"));
+    const followUp = await until(() => rowsTo("late@team")[1], "the follow-up row");
+    expect(followUp.body).toContain(`Follows up on ${id} (pending).`);
+    client.notify("session/cancel", { sessionId });
+    expect(await second).toEqual({ stopReason: "cancelled" });
+  });
+
+  it("a create the daemon answers with a refusal is said plainly, and nothing is kept as sent", async () => {
+    // A seat whose rig has left the topology can't be sent work: the queue answers with a refusal.
+    const { client, updates } = connect({}, "lead@gone-rig");
+    const sessionId = await open(client);
+    const error = await client.request("session/prompt", prompt(sessionId, "Anything")).then(() => undefined, (e: unknown) => e);
+    expect((error as JsonRpcRequestError).error.code).toBe(-32603);
+    expect((error as JsonRpcRequestError).error.message).toMatch(/^The team's queue refused the task: HTTP 4\d\d: /);
+    expect(rowsTo("lead@gone-rig")).toHaveLength(0);
+    expect(messages(updates)).toEqual([]);
   });
 
   it("cancel stops waiting, never the work; the next prompt is a follow-up that names the open item", async () => {
