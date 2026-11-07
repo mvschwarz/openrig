@@ -45,6 +45,7 @@ describe("passive CONFIG read view", () => {
     store.set("feed.subscriptions.fixture-host.enabled", "true");
     expect(entry("feed.subscriptions.fixture-host.enabled")).toMatchObject({ value: true, defaultValue: false, source: "file" });
     expect(entry("retention.usage_samples_days")).toMatchObject({ value: 14, source: "default" });
+    expect(entry("retention.events_days")).toMatchObject({ value: 0, source: "default" });
     expect(entry("ui.terminal.max_live_terminals")).toMatchObject({ value: "", scope: "Legacy web client" });
     // The preparation's CLI/daemon parity failure is retained, not "fixed" here.
     expect(entry("workflow.exception_routing")).toMatchObject({ value: "", defaultValue: "", source: "default" });
