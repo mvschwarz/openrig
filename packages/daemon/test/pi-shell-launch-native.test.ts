@@ -130,7 +130,8 @@ setInterval(() => {}, 1000);
         expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
       } else {
         const adapter = new PiRuntimeAdapter({ tmux, fsOps, stateRoot, runnerEntryPath: runner, seatLaunchEnvironment,
-          sleep: () => new Promise(resolve => setTimeout(resolve, 25)), newLaunchId: () => "attempt" });
+          // The adapter polls 60 times for readiness; 100 ms each gives a loaded runner ~6 s, like the resume path's 4 s.
+          sleep: () => new Promise(resolve => setTimeout(resolve, 100)), newLaunchId: () => "attempt" });
         const result = await adapter.launchHarness({ tmuxSession: session, cwd, model, nodeId: "fixture-node", launchGeneration: "reserved-generation" } as never,
           { name: session, ...(launchMode === "fork" ? { forkSource: { kind: "native_id" as const, value: parent } } : {}) });
         expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
