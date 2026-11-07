@@ -44,6 +44,25 @@ describe("Claude kernel inspection permissions", () => {
     } });
   });
 
+  it.each(["kernel", "team"])("passes only the %s policy name and preserves legacy decisions", kind => {
+    const settings = JSON.parse(operationalLaunchArgs("claude-code", kind === "kernel"
+      ? { kernelAuthority: true } : { teamPermissionDefault: true })[1]);
+    const hook = settings.hooks.PreToolUse[0].hooks[0];
+    expect(hook.command).toBe([process.execPath, asset, kind].map(shellQuote).join(" "));
+    const legacy = Buffer.from(JSON.stringify(kind === "kernel"
+      ? { allow: ["Bash(rig:*)"], ask: [] } : { allow: ["Bash(rig:*)"], ask: ["Bash(rig down:*)"] })).toString("base64");
+    for (const [command, expected] of [["rig down demo", kind === "kernel" ? "allow" : "ask"],
+      ["rig down --help", "allow"], ["unknown-command", undefined]]) {
+      for (const argument of [kind, legacy]) {
+        const result = spawnSync(process.execPath, [asset, argument], {
+          input: JSON.stringify({ tool_name: "Bash", tool_input: { command } }), encoding: "utf8",
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout ? JSON.parse(result.stdout).hookSpecificOutput.permissionDecision : undefined).toBe(expected);
+      }
+    }
+  });
+
   it("keeps kernel lifecycle authority distinct from team asks, with no blanket shell grant", () => {
     const kernel = { allow: KERNEL_CLAUDE_ALLOW, ask: [] };
     expect(decide("rig down demo", kernel)).toBe("allow");
@@ -178,12 +197,13 @@ describe("Claude team command permissions", () => {
     }
   });
 
-  it("is self-contained under an install path with spaces and quotes", () => {
+  it.each(["kernel", "team", "legacy"])("loads %s policy under an install path with spaces and quotes", kind => {
     const dir = mkdtempSync(join(tmpdir(), "claude-hook 'path "));
     try {
       const copy = join(dir, "hook.cjs"); copyFileSync(asset, copy);
-      const encoded = Buffer.from(JSON.stringify(policy)).toString("base64");
-      const result = spawnSync("/bin/sh", ["-c", [process.execPath, copy, encoded].map(shellQuote).join(" ")], {
+      if (kind !== "legacy") copyFileSync(new URL("../assets/claude-permission-policies.cjs", import.meta.url), join(dir, "claude-permission-policies.cjs"));
+      const argument = kind === "legacy" ? Buffer.from(JSON.stringify({ allow: ["Bash(rig:*)"], ask: ["Bash(rig down:*)"] })).toString("base64") : kind;
+      const result = spawnSync("/bin/sh", ["-c", [process.execPath, copy, argument].map(shellQuote).join(" ")], {
         input: JSON.stringify({ tool_name: "Bash", tool_input: { command: "rig down --help" } }), encoding: "utf8",
       });
       expect(result.status, result.stderr).toBe(0);

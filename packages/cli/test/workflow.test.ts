@@ -321,6 +321,75 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     expect(calls.find((c) => c.path === "/api/workflow/inst-1")).toBeDefined();
   });
 
+  it("unregister name@version POSTs /api/workflow/specs/unregister with the name and version (#2635)", async () => {
+    const { deps, calls } = makeDeps({
+      routes: { "POST /api/workflow/specs/unregister": { status: 200, data: { removed: [], kept: [] } } },
+    });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", "unregister", "pedido-do-board@1", "--json"]);
+    expect(calls).toEqual([{ method: "POST", path: "/api/workflow/specs/unregister", body: { name: "pedido-do-board", version: "1", pruneMissing: false } }]);
+  });
+
+  it("unregister --prune-missing POSTs pruneMissing without a name and prints what was removed and kept (#2635)", async () => {
+    const { deps, calls } = makeDeps({
+      routes: {
+        "POST /api/workflow/specs/unregister": {
+          status: 200,
+          data: {
+            removed: [{ name: "qa-probe", version: "1", sourcePath: "/tmp/probe.yaml" }],
+            kept: [{ name: "wf-keep", version: "2", sourcePath: "/tmp/keep.yaml", reason: "pinned" }],
+          },
+        },
+      },
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "unregister", "--prune-missing"]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(calls).toEqual([{ method: "POST", path: "/api/workflow/specs/unregister", body: { name: undefined, version: undefined, pruneMissing: true } }]);
+    expect(logs.join("\n")).toContain("removed  qa-probe@1  /tmp/probe.yaml");
+    expect(logs.join("\n")).toContain("kept     wf-keep@2  /tmp/keep.yaml  (unfinished work is pinned to this version)");
+  });
+
+  it("unregister name@ (an empty version) is a usage error and sends nothing (#2676 review)", async () => {
+    const { deps, calls } = makeDeps();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const before = process.exitCode;
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "unregister", "flow@"]);
+      expect(process.exitCode).toBe(1);
+      expect(err.mock.calls.join(" ")).toContain("The version after @ is empty");
+    } finally {
+      err.mockRestore();
+      process.exitCode = before;
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("unregister with neither a spec nor --prune-missing sends nothing and fails (#2635)", async () => {
+    const { deps, calls } = makeDeps();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const before = process.exitCode;
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "unregister"]);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      err.mockRestore();
+      process.exitCode = before;
+    }
+    expect(calls).toEqual([]);
+  });
+
   it("trace GETs /api/workflow/:instanceId/trace", async () => {
     const { deps, calls } = makeDeps({
       routes: { "GET /api/workflow/inst-1/trace": { status: 200, data: { instance: {}, trail: [] } } },
@@ -329,6 +398,57 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     program.exitOverride();
     await program.parseAsync(["node", "rig", "workflow", "trace", "inst-1", "--json"]);
     expect(calls.find((c) => c.path === "/api/workflow/inst-1/trace")).toBeDefined();
+  });
+
+  it("trace without --full keeps the daemon's default (no ?full=true)", async () => {
+    const { deps, calls } = makeDeps({
+      routes: { "GET /api/workflow/inst-1/trace": { status: 200, data: { instance: {}, trail: [], trailCompleteness: "recent" } } },
+    });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", "trace", "inst-1", "--json"]);
+    expect(calls.map((c) => c.path)).toEqual(["/api/workflow/inst-1/trace"]);
+  });
+
+  it("trace --full passes ?full=true through and prints the complete trail", async () => {
+    const trail = Array.from({ length: 52 }, (_, i) => ({ stepId: `s${i}`, actorSession: "a@r", closureReason: "done" }));
+    const { deps, calls } = makeDeps({
+      routes: { "GET /api/workflow/inst-1/trace?full=true": { status: 200, data: { instance: {}, trail, trailCompleteness: "complete" } } },
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "trace", "inst-1", "--full", "--json"]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(calls.map((c) => c.path)).toEqual(["/api/workflow/inst-1/trace?full=true"]);
+    const out = JSON.parse(logs.join("\n")) as { trail: unknown[]; trailCompleteness: string };
+    expect(out.trailCompleteness).toBe("complete");
+    expect(out.trail).toHaveLength(52);
+  });
+
+  it("trace in human mode says when the trail was cut and how to get all of it", async () => {
+    const { deps } = makeDeps({
+      routes: {
+        "GET /api/workflow/inst-1/trace": {
+          status: 200,
+          data: { instance: { instanceId: "inst-1", status: "active" }, trail: [], trailCompleteness: "recent" },
+        },
+      },
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "trace", "inst-1"]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(logs.join("\n")).toContain("rig workflow trace inst-1 --full");
   });
 
   it("continue POSTs /api/workflow/:instanceId/continue", async () => {

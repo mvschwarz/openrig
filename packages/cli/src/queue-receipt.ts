@@ -67,8 +67,9 @@ const str = (v: unknown): string | null => (typeof v === "string" && v !== "" ? 
 const isRow = (v: unknown): v is Row => typeof v === "object" && v !== null && !Array.isArray(v);
 
 function showCommand(id: string, remoteHost?: string): string {
-  const show = `rig queue show ${shellQuote(id)} --full --json`;
-  return remoteHost ? `OPENRIG_URL='<daemon-url of host ${remoteHost}>' ${show}` : show;
+  return remoteHost
+    ? `rig queue show ${shellQuote(id)} --host ${shellQuote(remoteHost)} --full --json`
+    : `rig queue show ${shellQuote(id)} --full --json`;
 }
 
 interface WakeEvidence {
@@ -95,7 +96,7 @@ function wakeEvidence(row: Row, ctx: ReceiptContext): WakeEvidence {
   }
   const maybeExisting = ctx.idGiven
     ? "; if --id named an existing row, it was returned with no new wake"
-    : ctx.remoteHost && ctx.verb !== "create"
+    : ctx.remoteHost && (ctx.verb === "handoff" || ctx.verb === "handoff-and-complete")
       ? "; a re-driven cross-host handoff returns the existing successor with no new wake"
       : "";
   const earlier = maybeExisting ? { maybeEarlier: true as const } : {};

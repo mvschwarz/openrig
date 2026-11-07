@@ -87,6 +87,10 @@
       "types": "./dist/local-reading-surface.d.ts",
       "import": "./dist/local-reading-surface.js"
     },
+    "./learned-host-bindings": {
+      "types": "./dist/learned-host-bindings-surface.d.ts",
+      "import": "./dist/learned-host-bindings-surface.js"
+    },
     "./codex-auth": {
       "types": "./dist/codex-auth-surface.d.ts",
       "import": "./dist/codex-auth-surface.js"
@@ -115,6 +119,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "@types/tar": "^6.1.13",
+    "proper-lockfile": "^4.1.2",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

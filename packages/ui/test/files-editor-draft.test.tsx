@@ -5,7 +5,7 @@ import { FilesWorkspace } from "../src/components/files/FilesWorkspace.js";
 
 vi.mock("../src/hooks/useWorkspace.js", () => ({ useWorkspace: () => ({ data: null }) }));
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 const read = (content: string, revision: string) => ({
   root: "ws", path: "notes.txt", absolutePath: "/workspace/notes.txt",
@@ -42,6 +42,23 @@ async function openEditor() {
 }
 
 describe("file editor draft", () => {
+  it("cancels the saved indicator timer when the editor closes", async () => {
+    const { textarea, setWriter, update } = await openEditor();
+    const scheduled = vi.spyOn(globalThis, "setTimeout");
+    const cancelled = vi.spyOn(globalThis, "clearTimeout");
+    update("saved draft", "v2");
+    setWriter(async () => Response.json({ newMtime: "v2", newContentHash: "v2", byteCountDelta: 3 }));
+    fireEvent.change(textarea, { target: { value: "saved draft" } });
+    fireEvent.click(screen.getByTestId("files-editor-save"));
+    await screen.findByTestId("files-editor-saved");
+    const index = scheduled.mock.calls.findIndex(([, delay]) => delay === 2000);
+    expect(index).toBeGreaterThanOrEqual(0);
+    const timer = scheduled.mock.results[index]!.value;
+    fireEvent.click(screen.getByTestId("files-edit-toggle"));
+    expect(screen.queryByTestId("files-editor")).toBeNull();
+    expect(cancelled).toHaveBeenCalledWith(timer);
+  });
+
   it.each([true, false])("keeps a successful save while its follow-up read is pending, then succeeds=%s", async (success) => {
     const { textarea, setWriter, setReader } = await openEditor();
     let finishRead!: (response: Response) => void;

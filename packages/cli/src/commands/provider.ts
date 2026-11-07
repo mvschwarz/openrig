@@ -603,6 +603,9 @@ API-key approval before the first turn. OpenRig does not enforce API budgets or 
 Codex can select a saved API-key auth profile with --to-account just like a subscription profile. Its shared-home effects
 and native credential-store requirements are unchanged. No fresh account home or conversation is created.
 Do not combine --api-key-file with --account-home or --clear-account-home; select a home and switch credentials separately.
+Pi seats support --account-home with an existing readable auth.json, or --clear-account-home, through a fresh successor
+with a handover. Their current model and effort are retained unless overridden. Pi account changes work with or without
+a launch_wrapper; changing a seat between Pi and another runtime is not supported.
 --clear-account-home returns to the configured member/rig/daemon/native home through a fresh successor with a handover.
 Use it without --to-account, --stored-login, --account-home or --token-file. It removes an account-home token reference
 only after confirmation; it does not restore historical login bytes. Anthropic active/default profiles live outside
@@ -638,7 +641,7 @@ CLAUDE_CONFIG_DIR and are not isolated by an account home; check them before rel
         try {
           const status = await client.get<{ runtime?: string }>(`/api/seat/status/${encodeURIComponent(opts.seat)}`);
           const runtime = status.data.runtime;
-          if (status.status >= 400 || (runtime !== "codex" && runtime !== "claude-code")) {
+          if (status.status >= 400 || (runtime !== "codex" && runtime !== "claude-code" && runtime !== "pi")) {
             const refusal = { ok: false, code: "account_home_preflight_failed", message: "The seat runtime could not be read; no switch was requested." };
             if (opts.json) console.log(JSON.stringify(refusal)); else console.error(refusal.message);
             process.exitCode = 1; return;

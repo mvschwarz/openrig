@@ -1237,6 +1237,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // unconfirmed send, a fresh post window, or a larger unclaimed age) do not
       // prove resolution either: delivery/pickup findings need source evidence.
       if (suppressedTags.has(dedupTag)) continue;
+      // #2661: a claim working only on a grace (a background shell, a pending managed restore) is not resolved: the
+      // grace stops new detection, and an open stall recovery stays open, so the ceiling's expiry stays actionable.
+      if (kind === "stalled-after-claim" && stuckId && deps.queueRepo.getById(stuckId)?.pickup?.grace) continue;
       let resolution = "no longer detected";
       if (stuckId && (kind === "undelivered-wake" || kind === "undelivered-human-notice" || kind === "unclaimed-obligation")) {
         const evidence = deliveryResolutionEvidence(deps, kind, stuckId, now);

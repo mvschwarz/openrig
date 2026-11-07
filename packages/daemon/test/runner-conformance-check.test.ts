@@ -72,7 +72,8 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
   }, 60_000);
 
   // Each break, the case that must catch it, and the check in that case that names it.
-  it.concurrent.each([
+  // Each mutation launches many tmux sessions; overlap can fail startup before reaching the intended break.
+  it.each([
     ["record-early", "1", "no launch record while session/new is still unanswered"],
     ["record-on-failure", "1b", "no conversation in a launch record"],
     ["split-lines", "2", "one pasted block is exactly one session/prompt"],

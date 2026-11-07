@@ -279,6 +279,15 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
             allLocalIds[category] = new Set(mappingEntries.map((e) => e["id"] as string).filter(Boolean));
           }
 
+          if (category === "skills") {
+            entries.forEach((entry, i) => {
+              const onRestore = entry && typeof entry === "object" ? entry["on_restore"] : undefined;
+              if (onRestore !== undefined && onRestore !== "keep_saved" && onRestore !== "follow_source") {
+                advisories.push(`resources.skills[${i}].on_restore: unknown value "${String(onRestore)}"; expected "keep_saved" | "follow_source"; using "keep_saved"`);
+              }
+            });
+          }
+
           // runtime_resources must have runtime field
           if (category === "runtime_resources") {
             for (let i = 0; i < entries.length; i++) {
@@ -451,6 +460,7 @@ function normalizeLifecycle(raw: Record<string, unknown>): LifecycleDefaults {
   };
 }
 
+/** Normalize validated resource declarations, retaining each skill's optional restore policy. */
 function normalizeResources(raw: unknown): AgentResources {
   if (!raw || typeof raw !== "object") {
     return { skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: [] };
@@ -459,7 +469,8 @@ function normalizeResources(raw: unknown): AgentResources {
 
   return {
     skills: Array.isArray(obj["skills"])
-      ? (obj["skills"] as Record<string, unknown>[]).map((s) => ({ id: s["id"] as string, path: s["path"] as string }))
+      ? (obj["skills"] as Record<string, unknown>[]).map((s) => ({ id: s["id"] as string, path: s["path"] as string,
+          onRestore: s["on_restore"] === "follow_source" ? "follow_source" : "keep_saved" }))
       : [],
     guidance: Array.isArray(obj["guidance"])
       ? (obj["guidance"] as Record<string, unknown>[]).map((g) => ({

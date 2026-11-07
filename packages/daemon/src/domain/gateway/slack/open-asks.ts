@@ -19,6 +19,7 @@ import type { QueueRepository } from "../../queue-repository.js";
 import type { DispatchResult } from "../dispatcher.js";
 import { DispatchBuffer } from "../dispatch-buffer.js";
 import type { LoadResult } from "../human-registry.js";
+import { sharedChannelAddresses } from "../participants.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SeenStore } from "./state-store.js";
 import { OUTBOUND_OP, toPayload, type OutboundPostPayload } from "./outbound-driver.js";
@@ -120,7 +121,20 @@ export interface PostOpenAsksInput {
 /** Show the open asks again: reconcile each, offer the ones enable seeded, then report every ask's outcome. */
 export async function postOpenAsks(input: PostOpenAsksInput): Promise<PostOpenAsksResult> {
   const { queueRepo } = input;
-  const ports = makeQueuePorts(queueRepo, { loadHumanRegistry: input.loadHumanRegistry });
+  const loadSlackHumanRegistry = (): LoadResult => {
+    const loaded = input.loadHumanRegistry();
+    if (!loaded.ok) return loaded;
+    return {
+      ...loaded,
+      entities: loaded.entities.filter((entity) =>
+        entity.connectorBindings.some((b) => b.role === "primary" && b.kind === "slack"),
+      ),
+    };
+  };
+  const ports = makeQueuePorts(queueRepo, {
+    loadHumanRegistry: loadSlackHumanRegistry,
+    sharedChannels: () => sharedChannelAddresses(input.home),
+  });
   const episodes = await ports.listOpenAsks({ minimumLevel: input.minimumLevelThatPosts });
   const seen = new SeenStore(input.seenPath ?? path.join(input.home, "state", "slack-outbound-seen.jsonl"));
   const attempted = new SeenStore(path.join(input.home, "state", "slack-attempted-decisions.jsonl"));

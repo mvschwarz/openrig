@@ -158,6 +158,23 @@ describe("transport render: blocked is not down", () => {
 });
 
 describe("status probe keeps the cause; the precheck guard agrees with the transport render", () => {
+  it.each([
+    ["http://remote.example:7433", true],
+    ["http://127.0.0.1:7433", false],
+    ["http://localhost:7433", false],
+    ["http://[::1]:7433", false],
+  ])("marks blocked explicit remote targets for %s", async (url, remote) => {
+    vi.stubEnv("OPENRIG_URL", url);
+    try {
+      const status = await getDaemonStatus(lifecycleDeps({ fetch: probeFailing("EPERM") }));
+      expect(status.state).toBe("unverified");
+      expect(status.probeErrorCode).toBe("EPERM");
+      expect(status.explicitRemote === true).toBe(remote);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("records EPERM on every probe path, and never calls a blocked probe 'stopped'", async () => {
     process.env.OPENRIG_URL = URL;
     try {
@@ -260,7 +277,7 @@ describe("sandboxed liveness: EPERM on kill(pid, 0) is not a dead daemon", () =>
     expect(live("sent", "Z")).toBe("dead");
     expect(live("sent", null)).toBe("unknown");
     expect(live("missing", "S")).toBe("dead");
-    expect(live("not-permitted", "S")).toBe("alive");
+    expect(live("not-permitted", "S")).toBe("unknown");
     expect(live("not-permitted", "Z")).toBe("dead");
     expect(live("not-permitted", null)).toBe("unknown");
   });

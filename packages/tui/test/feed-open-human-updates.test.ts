@@ -133,3 +133,45 @@ it("leaves health episodes ordered by date when hydrating queue updates and deli
   expect(merged.items.filter(i => i.id.startsWith("health:")).map(i => i.id)).toEqual(["health:new-active", "health:old-cleared"]);
   expect(merged.items.filter(i => i.id.startsWith("queue-update:")).map(i => i.id)).toEqual(["queue-update:critical", "queue-update:urgent"]);
 });
+
+it("labels relay bridge acceptance as accepted by the bridge rather than Delivered while preserving Slack delivery wording", () => {
+  const bridgeUpdates: DeliveredHumanUpdates = {
+    limit: 20,
+    truncated: false,
+    items: [
+      {
+        qitemId: "bridge-fyi",
+        summary: "Bridge FYI ready",
+        body: "Bridge accepted this update.",
+        humanDetail: "Bridge detail",
+        destinationSession: "human@kernel",
+        sourceSession: "author@fixture",
+        tags: ["project:relay"],
+        evidenceRef: "/relay/proof.md",
+        deliveredAt: "2026-10-08T14:00:00Z",
+        deliveryReceipt: "relay-owner-notification-accepted notification_key=bridge-fyi:1 delivery_id=d-1 connector_ref=wa-main level=NOTICE kind=human-update",
+        deliveryOutcome: "accepted",
+      },
+    ],
+  };
+  const openedBridge = composeHumanUpdates(read([]), bridgeUpdates, "human-update:bridge-fyi")!;
+  const bridgeDetailLines = openedBridge.detail?.lines.join("\n") ?? "";
+  expect(bridgeDetailLines).toContain("Accepted by bridge: 2026-10-08T14:00:00Z");
+  expect(bridgeDetailLines).not.toContain("Delivered:");
+  expect(openedBridge.sources.find(s => s.source === "delivered updates")?.detail).toContain("accepted by the bridge");
+  expect(openedBridge.sources.find(s => s.source === "delivered updates")?.detail).not.toContain("confirmed delivered updates");
+
+  const listState = { ...createViewState({ instanceId: "owned-fixture" }).get(), section: "needs" as const };
+  const groupedText = attentionLines(listState, { ...emptySnapshot(), attentionRead: openedBridge }, 140).map(l => l.text).join("\n");
+  expect(groupedText).toContain("accepted by bridge");
+  expect(groupedText).not.toContain("confirmed delivered updates");
+
+  // Slack delivered wording remains unchanged
+  const openedSlack = composeHumanUpdates(read([]), delivered("slack-fyi"), "human-update:slack-fyi")!;
+  const slackDetailLines = openedSlack.detail?.lines.join("\n") ?? "";
+  expect(slackDetailLines).toContain("Delivered: 2026-10-08T12:00:00Z");
+  expect(slackDetailLines).not.toContain("Accepted by bridge:");
+  expect(openedSlack.sources.find(s => s.source === "delivered updates")?.detail).toBe(
+    "Latest 20 confirmed delivered updates; retained receipt window.",
+  );
+});

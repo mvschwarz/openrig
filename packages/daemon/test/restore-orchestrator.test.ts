@@ -1,3 +1,5 @@
+import { seatSkillPaths, recordSeatSkillWrite, recordSeatSkillFollowing, cleanSeatSkills } from "../src/domain/seat-skill-storage.js";
+import type { RestoreOrchestratorDeps } from "../src/domain/restore-orchestrator.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { TerminalAdapter } from "../src/adapters/terminal-adapter.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -122,6 +124,7 @@ describe("RestoreOrchestrator", () => {
   });
 
   function createOrchestrator(opts?: {
+    seatSkillSelection?: RestoreOrchestratorDeps["seatSkillSelection"];
     tmux?: TmuxAdapter;
     claude?: ClaudeResumeAdapter;
     codex?: CodexResumeAdapter;
@@ -145,8 +148,81 @@ describe("RestoreOrchestrator", () => {
       ompResume: opts?.omp,
       listProcesses: opts?.listProcesses,
       freshLaunch: opts?.freshLaunch,
+      seatSkillSelection: opts?.seatSkillSelection,
     });
   }
+
+  it.each(["follow", "saved", "removed", "edited-catalog", "unavailable-spec", "delivery-failure"] as const)(
+    "Codex restore delivers the current catalog only for following seats: %s", async (mode) => {
+      const rig = rigRepo.createRig("follow-codex");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-follow", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.owner", { runtime: "codex", podId: "pod-follow" });
+      const token = "00000000-0000-4000-8000-000000000086";
+      const session = sessionRegistry.registerSession(node.id, "dev-owner@follow-codex");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateResumeToken(session.id, "codex_id", token);
+      const savedFiles = JSON.stringify([{ path: "old-role.md", absolutePath: "/old-role.md", ownerRoot: "/",
+        deliveryHint: "send_text", required: false, appliesOn: ["restore"] }]);
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', ?, '[]', 'codex')")
+        .run(node.id, savedFiles);
+      const paths = seatSkillPaths({ rigId: rig.id, logicalId: node.logicalId, runtime: "codex" });
+      const source = path.join(paths.root, "source");
+      const oldSource = path.join(paths.root, "old-source");
+      const oldFile = path.join(paths.skillsRoot, "old", "SKILL.md");
+      const oldText = "---\nname: old\ndescription: old trigger\n---\nold body";
+      for (const dir of [source, oldSource, path.dirname(oldFile)]) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(oldSource, "SKILL.md"), oldText);
+      fs.writeFileSync(oldFile, oldText);
+      recordSeatSkillWrite(paths.skillsRoot, oldFile, path.join(oldSource, "SKILL.md"), oldText);
+      if (mode !== "saved") recordSeatSkillFollowing(paths.skillsRoot, "old", oldSource);
+      cleanSeatSkills(paths);
+      fs.writeFileSync(path.join(source, "SKILL.md"), "---\nname: new-review\ndescription: review new changes\n---\nread the new instructions");
+      if (mode === "edited-catalog") fs.writeFileSync(paths.catalogPath, "personal catalog edit");
+      const snapshot = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      const delivered: string[] = [];
+      const order: string[] = [];
+      const adapter: RuntimeAdapter = {
+        runtime: "codex", listInstalled: async () => [], project: async () => ({ projected: [], skipped: [], failed: [] }),
+        launchHarness: vi.fn(async (_binding, opts) => {
+          expect(opts.resumeToken).toBe(token); order.push("resume");
+          return { ok: true, resumeToken: token, resumeType: "codex_id" };
+        }),
+        checkReady: async () => { order.push("ready"); return { ready: true }; },
+        deliverStartup: async (files) => {
+          for (const file of files) { delivered.push(fs.readFileSync(file.absolutePath, "utf8")); order.push("catalog"); }
+          return { delivered: files.length, failed: mode === "delivery-failure" && files.length > 0 ? [{ path: "catalog", error: "send failed" }] : [] };
+        },
+      };
+      const tmux = mockTmux();
+      tmux.getPaneCommand = vi.fn(async () => "codex");
+      const startedAt = "Sat Jan  1 12:00:00 2000";
+      const processes = [
+        { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, executableName: "bash", command: "-bash", startedAt },
+        { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, executableName: "codex", command: `/opt/native/codex resume ${token}`, argv: ["/opt/native/codex", "resume", token], startedAt },
+      ];
+      const result = await createOrchestrator({ tmux, listProcesses: async () => processes,
+        seatSkillSelection: async () => mode === "unavailable-spec" ? { ok: false, reason: "spec unavailable" } : {
+          ok: true, selection: mode === "saved" ? { selected: new Set(["old"]), following: [] }
+            : { selected: new Set(mode === "removed" ? [] : ["new-review"]), following: mode === "removed" ? [] : [{ id: "new-review", source }] },
+        },
+      }).restore(snapshot.id, { adapters: { codex: adapter } });
+      expect(result.ok).toBe(true);
+      if (mode === "saved" || mode === "edited-catalog") expect(delivered).toEqual([]);
+      else {
+        expect(delivered, JSON.stringify({ result, order })).toHaveLength(1);
+        expect(delivered[0]).toContain("replaces any earlier OpenRig skill list");
+        expect(order.indexOf("catalog")).toBeGreaterThan(order.indexOf("ready"));
+        if (mode === "removed") expect(delivered[0]).toContain("No OpenRig skills");
+        else if (mode === "unavailable-spec") expect(delivered[0]).toContain("old trigger");
+        else { expect(delivered[0]).toContain("new-review"); expect(delivered[0]).not.toContain("old trigger"); }
+      }
+      if (mode === "edited-catalog" && result.ok) expect(result.result.warnings.join("\n")).toContain("the updated catalog was not sent");
+      if (mode === "delivery-failure" && result.ok) expect(result.result.nodes[0]?.status).not.toBe("resumed");
+      expect(db.prepare("SELECT resolved_files_json FROM node_startup_context WHERE node_id = ?").get(node.id))
+        .toEqual({ resolved_files_json: savedFiles });
+      fs.rmSync(paths.root, { recursive: true, force: true });
+    });
 
   function seedRigAndSnapshot(opts?: {
     edges?: { sourceLogical: string; targetLogical: string; kind: string }[];

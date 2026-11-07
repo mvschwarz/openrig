@@ -1,3 +1,5 @@
+import { tileAttachArgv078, tileAttachArgv079 } from "./earlier-tile-attach.js";
+
 // A tile owns its attach process; no daemon watcher or steady-state polling.
 // Session names survive fresh launch, handover and restart. The node identity
 // must survive too: never follow a same-name session belonging to another seat.
@@ -43,4 +45,16 @@ export function tileAttachArgv(
     'done',
   ].join(" ");
   return ["/bin/sh", "-c", script, "openrig-tile", session, tmux, ...server];
+}
+
+/** Whether a kept tile is the one an earlier release generated for the same seat: exactly the command 0.7.9's, or
+ * 0.7.5-0.7.8's, script makes for the current tile's session, tmux, server and read-only intent. An upgrade changes
+ * only OpenRig's own script; any other difference, an edited script included, is a different attachment. */
+export function earlierTileAttachment(kept: readonly string[], current: readonly string[], readOnly: boolean): boolean {
+  if (current.length < 6) return false;
+  const [session, tmux, ...server] = current.slice(4) as [string, string, ...string[]];
+  return [tileAttachArgv079, tileAttachArgv078].some((make) => {
+    const earlier = make(tmux, server, session, readOnly);
+    return earlier.length === kept.length && earlier.every((word, i) => word === kept[i]);
+  });
 }
