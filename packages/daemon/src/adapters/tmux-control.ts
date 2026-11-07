@@ -106,7 +106,8 @@ function absoluteTarget(target: string): boolean {
 export const SET_BUFFER_MAX_BYTES = 4096;
 
 /** Reads at most `maxBytes` of a regular file, or null for anything else (a FIFO, a device, a symlink, a longer file).
- *  Opened without blocking, so a FIFO with no writer is never waited on. */
+ *  Opened without blocking, so a FIFO with no writer is never waited on. The read must return exactly the size the
+ *  stat saw: a short read, or a file written meanwhile, is null (the load-buffer stays spawned). */
 export type ReadBufferFile = (path: string, maxBytes: number) => Promise<Buffer | null>;
 
 export const readShortRegularFile: ReadBufferFile = async (path, maxBytes) => {
@@ -116,7 +117,7 @@ export const readShortRegularFile: ReadBufferFile = async (path, maxBytes) => {
     if (!stat.isFile() || stat.size > maxBytes) return null;
     const buffer = Buffer.alloc(maxBytes + 1);
     const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0);
-    return bytesRead > maxBytes ? null : buffer.subarray(0, bytesRead);
+    return bytesRead !== stat.size ? null : buffer.subarray(0, bytesRead);
   } finally {
     await handle.close();
   }
