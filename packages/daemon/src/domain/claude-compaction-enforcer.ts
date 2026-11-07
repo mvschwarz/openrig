@@ -1802,7 +1802,9 @@ export class ClaudeCompactionEnforcer {
       const endedAt = record.endedAt;
       if (endedAt !== undefined && !record.uncertainCompact && !record.compactSending
         && record.mode === "automatic" && (record.delivery === "delivered" || record.delivery === "uncertain")
-        && record.occupantGeneration !== null && live === record.occupantGeneration
+        // An occupant that reads unknown at this first look keeps the record, inert: the gate compares the generation once
+        // it can be read, and a different occupant then discards it.
+        && record.occupantGeneration !== null && (live === null || live === record.occupantGeneration)
         && this.now() - endedAt < this.restartRecoveryWindowMs) this.lastEnded.set(session, { endedAt, occupantGeneration: record.occupantGeneration, sessionId: record.sessionId ?? null });
       return;
     }
