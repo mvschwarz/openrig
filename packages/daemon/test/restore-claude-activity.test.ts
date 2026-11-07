@@ -961,16 +961,21 @@ profiles:
       { placement: "added", selects, startupFiles: true, recipe: "invalid-root", specExists: true },
     ]),
     { placement: "added", selects: true, startupFiles: true, recipe: "valid", specExists: false },
+    { placement: "retained-development", selects: false, startupFiles: true, recipe: "valid", specExists: true },
   ].map(row => ({ ...row, expectedOutcome: row.recipe === "valid" && row.specExists
     ? row.selects ? "known-selected" : "known-unselected" : "unknown/no projection" })))
     ("a $placement local:. seat expects $expectedOutcome (recipe=$recipe, selection=$selects, files=$startupFiles, spec=$specExists)",
     async ({ placement, selects, startupFiles, recipe, specExists }) => {
     const originalRoot = path.join(root, "original-rig");
-    const actualRoot = placement === "ordinary" ? originalRoot : path.join(root, "added-agent");
+    const development = placement === "retained-development";
+    const specName = development ? "implementer" : "impl";
+    const currentProfile = development ? "default" : "current";
+    const actualRoot = development ? path.join(root, "checkout/packages/daemon/specs/agents/development/implementer")
+      : placement === "ordinary" ? originalRoot : path.join(root, "added-agent");
     const writeAgent = (dir: string, selected: boolean, defaultSelected = selected) => {
       fs.mkdirSync(path.join(dir, "runtime"), { recursive: true });
       fs.writeFileSync(path.join(dir, "runtime/activity.json"), "{}\n");
-      fs.writeFileSync(path.join(dir, "agent.yaml"), `name: impl
+      fs.writeFileSync(path.join(dir, "agent.yaml"), `name: ${specName}
 version: "1.0.0"
 resources:
   runtime_resources:
@@ -988,8 +993,8 @@ profiles:
 `);
     };
     writeAgent(originalRoot, !selects);
-    // Start without hooks, then change the current profile after its real launch
-    // was saved, as for an upgraded seat whose saved selection predates hooks.
+    // Start without hooks. Ordinary/added rows later switch profiles; the retained
+    // development row keeps its default profile opposite to the running source.
     writeAgent(actualRoot, false);
     fs.writeFileSync(path.join(originalRoot, "CULTURE.md"), "Original rig culture.\n");
     const nodeLauncher = new NodeLauncher({ db, rigRepo: rigs, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux });
@@ -1023,7 +1028,7 @@ pods:
         expect.objectContaining({ logicalId: "p.seat", status: "launched" }),
       ]);
     }
-    if (placement === "added") {
+    if (placement !== "ordinary") {
       const added = await instantiator.addMemberToPod(rigId, "p", {
         id: "seat", runtime: "claude-code", agent_ref: "local:.", profile: "default", cwd,
       }, actualRoot);
@@ -1032,7 +1037,7 @@ pods:
       expect(added.result.node.status, JSON.stringify(added)).not.toBe("failed");
     }
     const node = rigs.getRig(rigId)!.nodes.find(n => n.logicalId === "p.seat")!;
-    expect(node).toMatchObject({ agentRef: "local:.", resolvedSpecName: "impl" });
+    expect(node).toMatchObject({ agentRef: "local:.", resolvedSpecName: specName });
     const recordedRecipe = rigs.getNodeLaunchRecipe(node.id);
     expect(recordedRecipe).toMatchObject({ version: 1, rigRoot: actualRoot });
     const persisted = db.prepare("SELECT resolved_files_json FROM node_startup_context WHERE node_id=?").get(node.id);
@@ -1047,12 +1052,12 @@ pods:
     if (startupFiles) {
       expect(files).toContainEqual(expect.objectContaining({ ownerRoot: originalRoot, absolutePath: path.join(originalRoot, "CULTURE.md") }));
     } else expect(files).toEqual([]);
-    if (placement === "added") expect(files.some(file => file.ownerRoot === actualRoot)).toBe(false);
+    if (placement !== "ordinary") expect(files.some(file => file.ownerRoot === actualRoot)).toBe(false);
     expect(JSON.parse(saved.projection_entries_json).some((entry: ProjectionEntry) => entry.resourceType === "claude_activity_hooks")).toBe(false);
     expect(owned()).toEqual([]);
     // The saved recipe names the launch profile; the live node's profile and current file decide recovery.
-    writeAgent(actualRoot, selects, !selects);
-    db.prepare("UPDATE nodes SET profile = ? WHERE id = ?").run("current", node.id);
+    writeAgent(actualRoot, selects, development ? selects : !selects);
+    db.prepare("UPDATE nodes SET profile = ? WHERE id = ?").run(currentProfile, node.id);
     if (recipe !== "valid") {
       const damaged = recipe === "missing" ? null : recipe === "malformed" ? "{unreadable recipe"
         : JSON.stringify({ ...recordedRecipe, rigRoot: 42 });
@@ -1061,8 +1066,14 @@ pods:
     }
     if (!specExists) fs.rmSync(path.join(actualRoot, "agent.yaml"));
     const readerFs = { exists: fs.existsSync, readFile: (p: string) => fs.readFileSync(p, "utf8") };
-    if (specExists) expect(resolveDesiredClaudeActivityHooks(`path:${actualRoot}`, "current", readerFs)).toEqual({ status: "known", selected: selects });
-    if (placement === "added") expect(resolveDesiredClaudeActivityHooks(`path:${originalRoot}`, "current", readerFs)).toEqual({ status: "known", selected: !selects });
+    if (specExists) expect(resolveDesiredClaudeActivityHooks(`path:${actualRoot}`, currentProfile, readerFs)).toEqual({ status: "known", selected: selects });
+    if (placement !== "ordinary") expect(resolveDesiredClaudeActivityHooks(`path:${originalRoot}`, currentProfile, readerFs)).toEqual({ status: "known", selected: !selects });
+    if (development) {
+      expect(fs.existsSync(path.join(actualRoot, "agent.yaml"))).toBe(true);
+      expect(fs.existsSync(path.join(actualRoot, "rig.yaml"))).toBe(false);
+      const runningAgent = path.resolve(import.meta.dirname, "../specs/agents/development/implementer");
+      expect(resolveDesiredClaudeActivityHooks(`path:${runningAgent}`, currentProfile, readerFs)).toEqual({ status: "known", selected: !selects });
+    }
     const read = createDesiredClaudeActivityHooksReader(db, readerFs);
     const desired = read(node.id);
     const known = recipe === "valid" && specExists;
@@ -1112,6 +1123,7 @@ pods:
     expect(settings().env).toEqual(originalSettings.env);
     expect(tmux.sendText).toHaveBeenCalledTimes(sentAtRestore);
     console.info("PR2617_RECIPE", { placement, recipe, specExists, startupFiles, legacyEmptyFiles: !startupFiles, actualSelection: selects, oldRootSelection: !selects,
+      recordedRigRoot: recordedRecipe?.rigRoot, actualRoot, currentProfile,
       savedOwnerRoots: files.map(file => file.ownerRoot), desired, hookCheck,
       projectedHookCount: owned().length, warnings: result.result.warnings, savedContextUnchanged: true });
   });
