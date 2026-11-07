@@ -5,7 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
-import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, buildCodexResumeCore, codexNonLoginShellArg } from "../domain/native-resume-probe.js";
 import { verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { shellQuote } from "./shell-quote.js";
@@ -38,6 +38,8 @@ interface CodexResumeOptions {
   detectDaemonSupport?: CodexDaemonSupportDetector;
   /** #275: Codex's own answer on the plain floor's network default; absent keeps the existing invocation. */
   readNetworkDefault?: CodexNetworkDefaultReader;
+  /** launch.codex_login_shell: true keeps Codex's own login shells for tool commands. Absent: off. */
+  codexLoginShell?: () => boolean;
   /** Ensure the managed Codex config (hooks, trust) just before a resume, as a runtime-adapter launch does, in the
    *  seat's own home when it has one. */
   ensureManagedConfig?: (codexHome?: string) => Promise<void>;
@@ -143,7 +145,7 @@ export class CodexResumeAdapter {
       workspaceArg.trim() || undefined,
       resolvedPosture,
       model,
-      `${postureArg}${networkArg}`,
+      `${postureArg}${networkArg}${this.options.codexLoginShell?.() ? "" : codexNonLoginShellArg}`,
       daemonSupport?.kind === "supported",
       effort,
     ) + ownRoots.filter((root): root is string => !!root).map((root) => ` --add-dir ${shellQuote(root)}`).join("");

@@ -65,6 +65,12 @@ export function buildNativeResumeCommand(
   return null;
 }
 
+/** Managed Codex seats run tool commands in a non-login shell, so they keep the seat's own environment, including the
+ *  OpenRig command folder at the front of PATH. Codex otherwise gives each command the user's login-shell environment
+ *  and puts back only its own directories, so a login file that sets PATH outright drops that folder. */
+export const CODEX_NON_LOGIN_SHELL_OVERRIDE = "allow_login_shell=false";
+export const codexNonLoginShellArg = ` -c ${shellQuote(CODEX_NON_LOGIN_SHELL_OVERRIDE)}`;
+
 export function buildCodexResumeCore(
   resumeToken: string,
   codexConfigProfile?: string | null,

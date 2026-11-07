@@ -33,7 +33,7 @@ import {
   readCodexThreadIdFromCandidateHomes,
   type ResolveHomeDirByPid,
 } from "../domain/codex-thread-id.js";
-import { assessNativeResumeProbe, buildCodexResumeCore, hasCodexUpdateHeader, type NativeResumeProbeResult } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, buildCodexResumeCore, codexNonLoginShellArg, hasCodexUpdateHeader, type NativeResumeProbeResult } from "../domain/native-resume-probe.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE, codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 import { resolveCodexGitAddDirs, type CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
@@ -95,6 +95,8 @@ type CodexProcess = NativeProcessRow;
 export interface RunningCodexLaunch {
   networkOverride: boolean;
   daemonOptOut: boolean;
+  /** Whether it was launched with tool commands in a non-login shell (`allow_login_shell=false`). */
+  nonLoginShell: boolean;
   addDirs: string[];
 }
 
@@ -115,6 +117,8 @@ interface PreparedCodexLaunch {
   daemonOptOut: boolean;
   daemonArg: string;
   networkArg: string;
+  /** Keeps OpenRig's command folder on the PATH of the seat's tool commands; see codexNonLoginShellArg. */
+  loginShellArg: string;
 }
 
 export interface CodexAdapterFsOps {
@@ -176,6 +180,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // #275: Codex's own answer on whether the plain floor may get network access. Startup wires the
   // real reader; absent keeps every invocation unchanged.
   private readNetworkDefault?: CodexNetworkDefaultReader;
+  // launch.codex_login_shell: true keeps Codex's own login shells for tool commands. Absent: off.
+  private codexLoginShell?: () => boolean;
   // Issue #121: git metadata dirs for the `--add-dir`s of fresh, resume and fork (a linked worktree's `.git` is a file).
   // Default = the real resolver; tests may inject a controlled one.
   private resolveGitAddDirs: CodexGitAddDirResolver;
@@ -230,6 +236,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     profileFingerprint?: (path: string) => Promise<ProfileFingerprint>;
     detectDaemonSupport?: CodexDaemonSupportDetector;
     readNetworkDefault?: CodexNetworkDefaultReader;
+    codexLoginShell?: () => boolean;
     resolveGitAddDirs?: CodexGitAddDirResolver;
     /** The seat's own topology folder, ready to write (its LEARNED.md and recap). Absent: no seat folder is added. */
     prepareSeatFolder?: PrepareCodexSeatFolder;
@@ -267,6 +274,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.launchPath = deps.launchPath;
     this.detectDaemonSupport = deps.detectDaemonSupport;
     this.readNetworkDefault = deps.readNetworkDefault;
+    this.codexLoginShell = deps.codexLoginShell;
     this.resolveGitAddDirs = deps.resolveGitAddDirs ?? resolveCodexGitAddDirs;
     this.activityRelayPath = deps.activityRelayPath;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
@@ -906,7 +914,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Only a launch that starts a conversation may install the core plugin; a resume never does.
     const prepared = await this.prepareLaunch(binding, opts.name, undefined, { installCorePlugin: !opts.resumeToken });
     if (!prepared.ok) return prepared;
-    const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonArg, networkArg } = prepared;
+    const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonArg, networkArg, loginShellArg } = prepared;
 
     // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
     // post-fork. Parent thread id is NOT persisted onto the new seat record
@@ -928,7 +936,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
       // The git dirs and the seat folder follow the parent id: ps flattens argv, so a path with a space placed before the
       // id would be read as the id when the fork is verified.
-      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}${seatFolderArg}`;
+      const cmd = `codex${daemonArg}${postureArg}${networkArg}${loginShellArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}${seatFolderArg}`;
       const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -965,7 +973,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
       ? this.resumeCore(prepared, opts.resumeToken, binding)
-      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}${queueStateDirArg}${modelArg}${effortArg}${binding.guidanceLaunchInstructions ? this.developerInstructionsArg(binding.tmuxSession) : ""}`;
+      : `codex${daemonArg}${postureArg}${networkArg}${loginShellArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}${queueStateDirArg}${modelArg}${effortArg}${binding.guidanceLaunchInstructions ? this.developerInstructionsArg(binding.tmuxSession) : ""}`;
 
     const staged = await this.seatCommand(binding, cmd);
     if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Codex launch preparation; no native command was sent.", recovery: "attention_required" };
@@ -1103,7 +1111,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         gitDirArg: running.addDirs.map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
         seatFolderArg: "",
         daemonOptOut: running.daemonOptOut, daemonArg: running.daemonOptOut ? " --no-daemon" : "",
-        networkArg: running.networkOverride ? ` -c ${shellQuote(CODEX_NETWORK_DEFAULT_OVERRIDE)}` : "" };
+        networkArg: running.networkOverride ? ` -c ${shellQuote(CODEX_NETWORK_DEFAULT_OVERRIDE)}` : "",
+        loginShellArg: running.nonLoginShell ? codexNonLoginShellArg : "" };
     }
 
     // OPR.0.3.4.7 — profile-LOAD probe before launch/resume. A legacy
@@ -1150,14 +1159,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut } : appliedLaunch;
-    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonOptOut, daemonArg, networkArg };
+    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonOptOut, daemonArg, networkArg,
+      loginShellArg: this.codexLoginShell?.() ? "" : codexNonLoginShellArg };
   }
 
   private resumeCore(prepared: PreparedCodexLaunch, resumeToken: string, binding: NodeBinding): string {
-    const { profile, queueStateDirArg, gitDirArg, seatFolderArg, model, postureArg, networkArg, daemonOptOut, effort } = prepared;
+    const { profile, queueStateDirArg, gitDirArg, seatFolderArg, model, postureArg, networkArg, loginShellArg, daemonOptOut, effort } = prepared;
     // The git dirs and the seat folder follow the conversation id, as on a fork, so the resume proof reads the id even
     // from a path with a space.
-    return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort)
+    return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}${loginShellArg}`, daemonOptOut, effort)
       + gitDirArg + seatFolderArg;
   }
 
