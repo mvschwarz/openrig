@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
+import { codexNonLoginShellArg } from "../src/domain/native-resume-probe.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -2896,7 +2897,7 @@ describe("a fresh Codex seat's managed guidance as launch developer instructions
 });
 
 describe("CodexRuntimeAdapter launch_wrapper", () => {
-  it.each(["fresh", "fork", "resume", "recovery"] as const)("passes launchWrapper through seatCommand for %s and keeps unconfigured byte-identical", async kind => {
+  it.each((["fresh", "fork", "resume", "recovery"] as const).flatMap((kind) => [[kind, false], [kind, true]] as const))("passes launchWrapper through seatCommand for %s (login shell kept: %s) and keeps unconfigured byte-identical", async (kind, loginShell) => {
     const tmux = mockTmux();
     const commandCalls: Array<{ session: string; cmd: string; target: unknown }> = [];
     const seatLaunchEnvironment = {
@@ -2913,6 +2914,7 @@ describe("CodexRuntimeAdapter launch_wrapper", () => {
       resolveGitAddDirs: async () => [],
       listProcesses: () => [],
       sleep: async () => {},
+      ...(loginShell ? { codexLoginShell: () => true } : {}),
     });
     vi.spyOn(adapter as any, "dismissSkippableCodexUpdatePrompt").mockResolvedValue(undefined);
     vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
@@ -2940,6 +2942,9 @@ describe("CodexRuntimeAdapter launch_wrapper", () => {
     }
 
     expect(commandCalls).toHaveLength(1);
+    // The wrapped command carries the non-login setting exactly once, or none when the login shell is kept.
+    expect(commandCalls[0]!.cmd.split(codexNonLoginShellArg).length - 1).toBe(loginShell ? 0 : 1);
+    expect(commandCalls[0]!.cmd).not.toContain(loginShell ? "allow_login_shell" : "allow_login_shell=true");
     expect(commandCalls[0]!.target).toEqual({
       codexCwd: "/project",
       nodeId: "n1",

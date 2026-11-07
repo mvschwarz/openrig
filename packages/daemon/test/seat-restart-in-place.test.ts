@@ -1620,7 +1620,7 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
       });
       expect(w.builds).toEqual([
         {
-          running: { networkOverride: false, daemonOptOut: true, addDirs: ["/shared/one"] },
+          running: { networkOverride: false, daemonOptOut: true, nonLoginShell: false, addDirs: ["/shared/one"] },
           launchWrapper: wrapper,
           launchShell: configuredShell,
         },
@@ -1636,7 +1636,7 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
       });
       expect(w.builds).toHaveLength(2);
       expect(w.builds[1]).toEqual({
-        running: { networkOverride: false, daemonOptOut: true, addDirs: ["/shared/one"] },
+        running: { networkOverride: false, daemonOptOut: true, nonLoginShell: false, addDirs: ["/shared/one"] },
         launchWrapper: wrapper,
         launchShell: configuredShell,
       });
@@ -1648,6 +1648,8 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
       expect(launchedCommand).toContain(expectedPrefix);
       expect(launchedCommand).toContain("--no-daemon -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.5' -c 'model_reasoning_effort=\"high\"' resume");
       expect(launchedCommand).toContain(`'${TOKEN}' --add-dir '/shared/one'`);
+      // The running Codex kept its login shell, so the relaunch does too.
+      expect(launchedCommand).not.toContain("allow_login_shell");
       if (shape === "shell_backed") {
         expect(w.calls).toEqual(["signalPid 200 TERM"]);
         expect(w.launches).toEqual([{ command: launchedCommand, resumeToken: TOKEN }]);
@@ -1671,11 +1673,29 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
     },
   );
 
+  it("a wrapped restart of a running non-login Codex keeps the non-login setting exactly once after the wrapper", async () => {
+    const wrapper = ["mtn", "sandbox", "--"];
+    const rollout = JSON.stringify({ timestamp: "2099-01-01T00:00:00Z", type: "response_item", payload: { type: "function_call_output" } });
+    // The same running Codex as the cells above, launched with the non-login setting.
+    const w = world({
+      shape: "shell_backed", paneCommandBefore: "codex", rootShell: "bash", launchWrapper: wrapper, realResumeBuilder: "env",
+      savedEffort: { authored: "medium", choice: "high" },
+      runningArgs: `--no-daemon -m gpt-5.5 -c model_reasoning_effort="medium" -s workspace-write -c check_for_update_on_startup=false -c allow_login_shell=false resume --add-dir /shared/one ${TOKEN}`,
+      screenBefore: "  Account:  old@example.com (Pro)",
+      rollout,
+    });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "wrapped non-login restart" })).toMatchObject({ ok: true });
+    expect(w.builds.at(-1)).toMatchObject({ running: { nonLoginShell: true }, launchWrapper: wrapper, launchShell: "bash" });
+    const launchedCommand = w.launches[0]!.command;
+    expect(launchedCommand).toContain(`'${path.join(w.wrapperBinDir!, "mtn")}' 'sandbox' '--' '${path.join(w.wrapperBinDir!, "codex")}'`);
+    expect(launchedCommand.split("allow_login_shell=false").length - 1).toBe(1);
+  });
+
   it("leaves unconfigured NodeBinding and produced commands unchanged when no launch_wrapper is selected", async () => {
     const w = world({ realResumeBuilder: "env" });
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "unwrapped restart" });
     expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
-    expect(w.builds).toEqual([{ running: { networkOverride: false, daemonOptOut: false, addDirs: [] } }]);
+    expect(w.builds).toEqual([{ running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: [] } }]);
     expect("launchWrapper" in w.builds[0]!).toBe(false);
     expect("launchShell" in w.builds[0]!).toBe(false);
     expect(w.launches[0]!.command).toContain(`'${path.join(w.wrapperBinDir!, "codex")}' -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.5' resume '${TOKEN}'`);
@@ -1698,8 +1718,8 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
       message: expect.stringContaining("launch_wrapper support unavailable; no agent started."),
     });
     expect(w.builds).toEqual([
-      { running: { networkOverride: false, daemonOptOut: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
-      { running: { networkOverride: false, daemonOptOut: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
+      { running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
+      { running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
     ]);
     expect(w.calls).toEqual([]);
     expect(w.launches).toEqual([]);
@@ -1762,8 +1782,8 @@ describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () =
       message: expect.stringContaining("launch_wrapper unavailable; no agent started."),
     });
     expect(w.builds).toEqual([
-      { running: { networkOverride: false, daemonOptOut: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
-      { running: { networkOverride: false, daemonOptOut: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
+      { running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
+      { running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
     ]);
     expect(w.calls).toEqual([]);
     expect(w.launches).toEqual([]);

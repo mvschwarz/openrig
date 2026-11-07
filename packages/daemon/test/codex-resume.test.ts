@@ -504,7 +504,7 @@ describe("CodexResumeAdapter launch_wrapper", () => {
     expect(beforeNativeDispatch).toHaveBeenCalled();
     expect(commandCalls).toEqual([{
       session: "r99-demo1-impl",
-      cmd: "codex -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' resume 'uuid-123'",
+      cmd: "codex -s workspace-write '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false' -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' resume 'uuid-123'",
       target: {
         codexCwd: "/repo",
         runtime: "codex",
@@ -513,7 +513,7 @@ describe("CodexResumeAdapter launch_wrapper", () => {
       },
     }]);
     expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toBe(
-      "/usr/bin/env 'codex-wrapper' '--flag' '--' codex -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' resume 'uuid-123'",
+      "/usr/bin/env 'codex-wrapper' '--flag' '--' codex -s workspace-write '-c' 'check_for_update_on_startup=false' -c 'allow_login_shell=false' -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' resume 'uuid-123'",
     );
   });
 
