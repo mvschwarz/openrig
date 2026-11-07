@@ -66,7 +66,8 @@ for (const json of [false, true]) {
       expect(body.error).toBe("qitem_not_found");
       expect(body.message).toBe("original detail");
       expect(body.hint).toBe(`Queue item "${id}" was not found on daemon "selected-host".\n`
-        + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(id)} --full --json`);
+        + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(id)} --full --json\n`
+        + `Or name that host: rig queue show ${shellQuote(id)} --host <host-id> --full --json`);
       expect(calls).toHaveLength(2);
       expect(calls[1]).toEqual({ path: "/healthz", options: { timeoutMs: 1_000 } });
       expect(calls.some(c => c.path.includes("/hosts"))).toBe(false);
