@@ -61,7 +61,8 @@ function fixture() {
   async function execute(command: string, managed = false) {
     expect(command).not.toContain(env.OPENRIG_ACTIVITY_HOOK_TOKEN);
     expect(command).not.toContain(env.ANTHROPIC_API_KEY);
-    const { stdout } = await exec("/bin/bash", ["--noprofile", "--rcfile", rc, "-ic", command], { env, cwd: binding.cwd, timeout: 5000 });
+    // This starts a shell, a Node fixture and its CLI child before the local HTTP check.
+    const { stdout } = await exec("/bin/bash", ["--noprofile", "--rcfile", rc, "-ic", command], { env, cwd: binding.cwd, timeout: 15_000 });
     const observed = JSON.parse(stdout);
     expect(observed).toMatchObject({ body: { node: "node-current" }, home: env.OPENRIG_HOME, node: "node-current", OPENRIG_DB: env.OPENRIG_DB, TMUX_TMPDIR: env.TMUX_TMPDIR });
     if (!managed) expect(observed).toMatchObject({ generation: "successor-generation", HOME: "/user/home", CODEX_HOME: "/user/codex", CLAUDE_CONFIG_DIR: "/user/claude", USER_VALUE: "keep" });
