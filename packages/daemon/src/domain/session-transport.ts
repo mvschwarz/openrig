@@ -3321,7 +3321,7 @@ export class SessionTransport {
       }
       if (readiness.state === "needs_input") {
         if (!promptOverride && this.deliversOverDraft(readiness, opts)) {
-          sendAdvisory = [sendAdvisory, `'${sessionName}' had a draft at its prompt and transport.draft_delivery is deliver: this message was added after the draft, and Enter submits both.`].filter(Boolean).join(" ");
+          sendAdvisory = [sendAdvisory, `'${sessionName}' had a draft at its prompt and transport.draft_delivery is deliver: this message was pasted at the current cursor into that draft (normally its end), then Enter was sent to submit the combined input. The delivery result says whether that was confirmed.`].filter(Boolean).join(" ");
         } else if (!promptOverride) {
           return {
             ok: false,

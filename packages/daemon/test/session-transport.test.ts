@@ -692,7 +692,7 @@ describe("SessionTransport", () => {
       expect(callOrder).toEqual([]);
     });
 
-    it("delivers after the draft and submits both when the setting is deliver", async () => {
+    it("pastes into the draft at the cursor and sends Enter for the combined input when the setting is deliver", async () => {
       seedCanonicalRig();
       const { tmux, callOrder } = draftPane();
       const result = await createTransport(tmux, { deliverOverDraft: () => true }).send("dev-impl@my-rig", "hello");
