@@ -79,8 +79,13 @@ describe("cursor-safe seed helpers", () => {
     expect(out).toContain("\x1b[2;1Hr5");
   });
 
+  it("preserves dim, bold and colour while resetting every painted row", () => {
+    const out = screenSnapshotEscape("\x1b[2msuggestion\n\x1b[1;31mwarning\nplain", null);
+    expect(out).toBe("\x1b[2J\x1b[0m\x1b[1;1H\x1b[2msuggestion\x1b[0m\x1b[2;1H\x1b[1;31mwarning\x1b[0m\x1b[3;1Hplain\x1b[0m\x1b[H");
+  });
+
   it("normalizes CRLF and drops exactly one trailing newline; null cursor homes", () => {
-    expect(screenSnapshotEscape("a\r\nb\r\n", null)).toBe("\x1b[2J\x1b[1;1Ha\x1b[2;1Hb\x1b[H");
+    expect(screenSnapshotEscape("a\r\nb\r\n", null)).toBe("\x1b[2J\x1b[0m\x1b[1;1Ha\x1b[0m\x1b[2;1Hb\x1b[0m\x1b[H");
   });
 });
 
@@ -284,7 +289,7 @@ describe("TerminalSessionBroker", () => {
     const a = makeSub();
     await broker.attach(a);
 
-    expect(capturePaneScreen).toHaveBeenCalledWith("dev@rig");
+    expect(capturePaneScreen).toHaveBeenCalledWith("dev@rig", { escapeSequences: true });
     const seed = a.received[0]!;
     expect(seed).toContain("\x1b[1;1Hr1");
     expect(seed).toContain("\x1b[3;1Hr3");
@@ -653,6 +658,50 @@ describe("TerminalSessionBroker - teardown during seed (honest close)", () => {
   });
 });
 
+// The adapter models capture-pane: it returns SGR only when the caller asks for -e.
+describe("terminal snapshot styling (#2598)", () => {
+  const styled = "\x1b[2msuggestion\x1b[0m\nplain";
+  const captureScreen = async (_name: string, opts?: { escapeSequences?: boolean }) =>
+    opts?.escapeSequences ? styled : "suggestion\nplain";
+
+  it("keeps a dim suggestion on every attach", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneScreen: captureScreen,
+    })));
+    for (const sub of [makeSub(), makeSub()]) {
+      await broker.attach(sub);
+      expect(sub.received[0]).toContain("\x1b[2msuggestion\x1b[0m");
+    }
+  });
+
+  it("keeps dim text in the selected scroll-back window", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneContent: async (_name: string, _lines: number, opts?: { escapeSequences?: boolean }) =>
+        opts?.escapeSequences ? "\x1b[2mhistory\x1b[0m\nplain\nlive" : "history\nplain\nlive",
+    }), { rows: 2 }));
+    const sub = makeSub();
+    await broker.attach(sub);
+    await broker.scroll(sub, 1);
+    expect(sub.received.at(-1)).toContain("\x1b[1;1H\x1b[2mhistory\x1b[0m");
+    expect(sub.received.at(-1)).toContain("\x1b[2;1Hplain");
+    expect(sub.received.at(-1)).not.toContain("live");
+  });
+
+  it("keeps a dim suggestion when returning from scroll-back to live", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneScreen: captureScreen,
+      capturePaneContent: async () => "history\nplain\nlive",
+    }), { rows: 2 }));
+    const sub = makeSub();
+    await broker.attach(sub);
+    await broker.scroll(sub, 1);
+    const beforeReturn = sub.received.length;
+    await broker.scroll(sub, 0);
+    expect(sub.received.length).toBe(beforeReturn + 1);
+    expect(sub.received.at(-1)).toContain("\x1b[2msuggestion\x1b[0m");
+  });
+});
+
 // ---- OPR.0.4.0.39 per-subscriber scroll-back (tmux capture-pane window) ------
 // The live xterm screen is only the current `rows`; scrolling UP must show tmux
 // SCROLLBACK. Because the broker fans ONE pipe out to many viewers, scroll-back is
@@ -684,7 +733,7 @@ describe("TerminalSessionBroker - per-subscriber scroll-back (OPR.0.4.0.39)", ()
     // Captures (offset + rows) = 3 + 3 = 6 lines back; the painted window is `rows` (3)
     // lines ending `offset` (3) ABOVE the live bottom: bottom row = L200 - 3 = L197,
     // so the window is L195..L197 (NOT the older top of the capture, NOT the live tail).
-    expect(capturePaneContent).toHaveBeenCalledWith("dev@rig", 6);
+    expect(capturePaneContent).toHaveBeenCalledWith("dev@rig", 6, { escapeSequences: true });
     expect(a.received.length).toBe(aBefore + 1);
     const painted = a.received[a.received.length - 1]!;
     expect(painted.startsWith("\x1b[2J")).toBe(true);
@@ -734,7 +783,7 @@ describe("TerminalSessionBroker - per-subscriber scroll-back (OPR.0.4.0.39)", ()
 
     await broker.scroll(a, 0); // back to the live bottom
 
-    expect(capturePaneScreen).toHaveBeenCalledWith("dev@rig");
+    expect(capturePaneScreen).toHaveBeenCalledWith("dev@rig", { escapeSequences: true });
     expect(a.received.length).toBe(beforeReturn + 1);
     expect(a.received[a.received.length - 1]!).toContain("LIVE SCREEN");
 

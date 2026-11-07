@@ -71,11 +71,11 @@ export interface BrokerTmux {
   stopPipePane(name: string): Promise<TmuxResult>;
   sendKeys(name: string, keys: string[]): Promise<TmuxResult>;
   sendText(name: string, text: string): Promise<TmuxResult>;
-  capturePaneScreen(name: string): Promise<string | null>;
+  capturePaneScreen(name: string, opts?: { escapeSequences?: boolean }): Promise<string | null>;
   getPaneCursorPosition(name: string): Promise<TmuxCursorPosition | null>;
   /** Capture the last `lines` lines INCLUDING scrollback history (tmux
    *  capture-pane -S -lines). Used for the per-subscriber scroll-back window. */
-  capturePaneContent(name: string, lines: number): Promise<string | null>;
+  capturePaneContent(name: string, lines: number, opts?: { escapeSequences?: boolean }): Promise<string | null>;
 }
 
 export interface BrokerOptions {
@@ -109,7 +109,7 @@ export function cursorPositionEscape(x: number, y: number): string {
  * exact same rows tmux has it - never a relative append that drifts as content
  * scrolls. Normalizes CRLF, drops one trailing print newline, and (when a pane
  * height is known and the capture is taller) keeps only the last `height` rows.
- * Lifted from the FR-4 seed work.
+ * Captured SGR stays intact; reset before painting and after each row so it cannot leak.
  */
 export function screenSnapshotEscape(
   snapshot: string,
@@ -125,10 +125,10 @@ export function screenSnapshotEscape(
     : rows;
 
   const paintedRows = visibleRows
-    .map((row, index) => `\x1b[${index + 1};1H${row}`)
+    .map((row, index) => `\x1b[${index + 1};1H${row}\x1b[0m`)
     .join("");
 
-  return `\x1b[2J${paintedRows}${cursor ? cursorPositionEscape(cursor.x, cursor.y) : "\x1b[H"}`;
+  return `\x1b[2J\x1b[0m${paintedRows}${cursor ? cursorPositionEscape(cursor.x, cursor.y) : "\x1b[H"}`;
 }
 
 /**
@@ -340,7 +340,7 @@ export class TerminalSessionBroker {
     // the TOP `rows` would jump a whole extra screen up on the first wheel notch.
     let content: string | null = null;
     try {
-      content = await this.tmux.capturePaneContent(this.sessionName, clamped + this.rows);
+      content = await this.tmux.capturePaneContent(this.sessionName, clamped + this.rows, { escapeSequences: true });
     } catch {
       content = null;
     }
@@ -362,7 +362,7 @@ export class TerminalSessionBroker {
   private async repaintScreen(sub: TerminalSubscriber): Promise<void> {
     let snapshot: string | null = null;
     let cursor: TmuxCursorPosition | null = null;
-    try { snapshot = await this.tmux.capturePaneScreen(this.sessionName); } catch { snapshot = null; }
+    try { snapshot = await this.tmux.capturePaneScreen(this.sessionName, { escapeSequences: true }); } catch { snapshot = null; }
     try { cursor = await this.tmux.getPaneCursorPosition(this.sessionName); } catch { cursor = null; }
     if (snapshot !== null) {
       try { sub.send(screenSnapshotEscape(snapshot, cursor)); } catch { /* dead */ }
@@ -475,7 +475,7 @@ export class TerminalSessionBroker {
     let snapshot: string | null = null;
     let cursor: TmuxCursorPosition | null = null;
     try {
-      snapshot = await this.tmux.capturePaneScreen(this.sessionName);
+      snapshot = await this.tmux.capturePaneScreen(this.sessionName, { escapeSequences: true });
     } catch {
       snapshot = null;
     }
