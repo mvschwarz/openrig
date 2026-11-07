@@ -80,8 +80,8 @@ function connect(overrides: Partial<AcpAgentOptions> = {}, receiver: string | nu
   return { client, updates, out, inbound };
 }
 
-async function open(client: StreamJsonRpcPeer): Promise<string> {
-  await client.request("initialize", { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "zed", title: "Zed" } });
+async function open(client: StreamJsonRpcPeer, clientCapabilities: Record<string, unknown> = {}): Promise<string> {
+  await client.request("initialize", { protocolVersion: 1, clientCapabilities, clientInfo: { name: "zed", title: "Zed" } });
   await client.request("authenticate", { methodId: AUTH_METHOD_ID });
   return ((await client.request("session/new", { cwd: "/tmp", mcpServers: [] })) as { sessionId: string }).sessionId;
 }
@@ -346,6 +346,64 @@ describe("rig acp serve", () => {
     expect(task.body).toContain(`--tags acp-session:${sessionId}`);
   });
 
+  it("an app that asks forms gets a question's choices as a form, each by its label, and the choice is recorded", async () => {
+    const { client, updates } = connect({}, "former@team");
+    const asked: Array<Record<string, any>> = [];
+    client.onRequest("elicitation/create", async (params) => { asked.push(params as Record<string, any>); return { action: "accept", content: { q1: "b" } }; });
+    client.onRequest("session/request_permission", async () => { throw new Error("no permission request was expected"); });
+    const sessionId = await open(client, { elicitation: { form: {} } });
+    const turn = client.request("session/prompt", prompt(sessionId, "Pick a store for the cache"));
+    const task = await until(() => rowsTo("former@team")[0], "the work row");
+    await move("former@team", `/api/queue/${task.qitem_id}/claim`, {});
+    await move("former@team", "/api/queue/create", { qitemId: "qitem-form-db", destinationSession: CALLER, body: "Redis is faster; SQLite is already here.", summary: "Which store?", nudge: false,
+      tags: [`acp-session:${sessionId}`], humanQuestions: [{ id: "q1", question: "Which store?", options: [{ id: "a", label: "Redis" }, { id: "b", label: "SQLite", recommended: true }] }] });
+    const answered = await until(() => {
+      const row = db.prepare("SELECT human_answers FROM queue_items WHERE qitem_id = 'qitem-form-db'").get() as { human_answers: string | null };
+      return row.human_answers ? JSON.parse(row.human_answers) : undefined;
+    }, "the recorded answer");
+    expect(JSON.stringify(answered)).toContain("b");
+    await move("former@team", `/api/queue/${task.qitem_id}/update`, { state: "done", closureReason: "no-follow-on", resolution: "SQLite." });
+    expect(await turn).toEqual({ stopReason: "end_turn" });
+    expect(asked).toEqual([{
+      sessionId, toolCallId: "qitem-form-db#q1", mode: "form", message: "former@team asks: Which store?",
+      requestedSchema: { type: "object", required: ["q1"], properties: { q1: { type: "string", title: "Which store?",
+        oneOf: [{ const: "a", title: "Redis" }, { const: "b", title: "SQLite (recommended)" }] } } },
+    }]);
+    const result = updates.filter((u) => u.toolCallId === "qitem-form-db#q1").at(-1)!;
+    expect((result.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe("You answered: SQLite. former@team gets it as your answer.");
+  });
+
+  it("a form declined, cancelled, or answered with no option of the question's records nothing; form: null gets a permission request", async () => {
+    for (const [i, reply] of [{ action: "decline" }, { action: "cancel" }, { action: "accept", content: { q1: "zzz" } }].entries()) {
+      const { client, updates } = connect({}, `former${i}@team`);
+      client.onRequest("elicitation/create", async () => reply);
+      const sessionId = await open(client, { elicitation: { form: {} } });
+      const turn = client.request("session/prompt", prompt(sessionId, "Pick one"));
+      const task = await until(() => rowsTo(`former${i}@team`)[0], "the work row");
+      await move(`former${i}@team`, `/api/queue/${task.qitem_id}/claim`, {});
+      await move(`former${i}@team`, "/api/queue/create", { qitemId: `qitem-form-${i}`, destinationSession: CALLER, body: "Two ways", summary: "Way?", nudge: false,
+        tags: [`acp-session:${sessionId}`], humanQuestions: [{ id: "q1", question: "Which way?", options: [{ id: "a", label: "Left" }, { id: "b", label: "Right" }] }] });
+      const said = await until(() => updates.find((u) => u.toolCallId === `qitem-form-${i}#q1` && u.sessionUpdate === "tool_call_update"), "the outcome");
+      expect((said.content as Array<{ content: { text: string } }>)[0]!.content.text, JSON.stringify(reply)).toBe("Not answered here. The question is still open in the OpenRig TUI and Slack.");
+      expect(db.prepare(`SELECT human_answers FROM queue_items WHERE qitem_id = 'qitem-form-${i}'`).get()).toEqual({ human_answers: null });
+      client.notify("session/cancel", { sessionId });
+      expect(await turn).toEqual({ stopReason: "cancelled" });
+    }
+    const { client } = connect({}, "nullform@team");
+    let permissionAsked = false;
+    client.onRequest("elicitation/create", async () => { throw new Error("form: null advertises no form mode"); });
+    client.onRequest("session/request_permission", async () => { permissionAsked = true; return { outcome: { outcome: "cancelled" } }; });
+    const sessionId = await open(client, { elicitation: { form: null } });
+    const turn = client.request("session/prompt", prompt(sessionId, "Pick one"));
+    const task = await until(() => rowsTo("nullform@team")[0], "the work row");
+    await move("nullform@team", `/api/queue/${task.qitem_id}/claim`, {});
+    await move("nullform@team", "/api/queue/create", { qitemId: "qitem-form-null", destinationSession: CALLER, body: "Two ways", summary: "Way?", nudge: false,
+      tags: [`acp-session:${sessionId}`], humanQuestions: [{ id: "q1", question: "Which way?", options: [{ id: "a", label: "Left" }, { id: "b", label: "Right" }] }] });
+    await until(() => (permissionAsked ? true : undefined), "the permission request");
+    client.notify("session/cancel", { sessionId });
+    expect(await turn).toEqual({ stopReason: "cancelled" });
+  });
+
   it("a question tagged for one chat is asked in that chat only, though another chat's work reached the same seat", async () => {
     const chatA = connect({}, "shared@team");
     const chatB = connect({}, "shared@team");
@@ -514,6 +572,21 @@ describe("rig acp serve", () => {
     expect(await followUp).toEqual({ stopReason: "cancelled" });
     const missing = await second.client.request("session/load", { sessionId: "acps-nope", cwd: "/tmp", mcpServers: [] }).then(() => undefined, (e: unknown) => e);
     expect((missing as JsonRpcRequestError).error.code).toBe(-32602);
+  });
+
+  it("an app that wraps the person's words in its own instructions: they're the row's summary and the session's title", async () => {
+    const { client } = connect({}, "wrapped@team");
+    const sessionId = await open(client);
+    const sent = "<t3_code_instructions>\nUse the preview_* tools.\n</t3_code_instructions>\n<runtime_info>\nmacOS\n</runtime_info>\n"
+      + "<user_request>\nFix the flaky login test\n</user_request>";
+    const turn = client.request("session/prompt", prompt(sessionId, sent));
+    const task = await until(() => rowsTo("wrapped@team")[0], "the row");
+    expect(db.prepare("SELECT summary FROM queue_items WHERE qitem_id = ?").get(task.qitem_id)).toEqual({ summary: "ACP: Fix the flaky login test" });
+    expect(task.body.startsWith(sent)).toBe(true);
+    const listed = (await client.request("session/list", {})) as { sessions: Array<Record<string, unknown>> };
+    expect(listed.sessions.find((s) => s.sessionId === sessionId)).toMatchObject({ title: "Fix the flaky login test" });
+    client.notify("session/cancel", { sessionId });
+    expect(await turn).toEqual({ stopReason: "cancelled" });
   });
 
   it("a reopened session replays the questions asked during it with what's recorded, and asks nothing again", async () => {

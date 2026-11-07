@@ -203,8 +203,10 @@ app that starts the agent from the ACP registry passes no arguments, so that's h
   turn ending says only that the turn ended: read the reply for how the work ended.
 - **A follow-up** in the same session goes to `--to` as a new row whose body names the earlier rows and their states,
   and the app first shows any earlier row that's still open.
-- **A question the team asks you** while a turn is open comes to the app as a permission request, with the ask's own
-  choices, when its row is tagged for that chat (`acp-session:<id>`; the task's row tells the team how). An untagged
+- **A question the team asks you** while a turn is open comes to the app with the ask's own choices, when its row is
+  tagged for that chat (`acp-session:<id>`; the task's row tells the team how). An app that takes forms (it
+  advertises ACP elicitation's form mode, as T3 Code does) gets a one-choice form with each choice by its label; any
+  other app gets a permission request with one option per choice, as Zed shows them. An untagged
   question from a seat the work reached is named in the chat with where to answer it, because it could be another
   chat's. Your choice is recorded as your answer, as a click in Slack would be, and the seat that asked gets it.
   Dismissing it, or cancelling the turn, records nothing: the question stays open in the TUI and Slack, and no further
@@ -216,8 +218,9 @@ app that starts the agent from the ACP registry passes no arguments, so that's h
 - **Cancel** stops `rig acp serve` waiting. The team's work carries on, and the reply says so.
 - **Work handed to a seat on another machine** can't be followed from here; the reply says where it went.
 
-**Who you are:** `--as <address>`, else `OPENRIG_SESSION_NAME`, else this machine's default person
-(`rig gateway default <id>`; the address is `<id>@external`). The app's sign-in step, "OpenRig on this machine", checks
+**Who you are:** `--as <address>`, else `OPENRIG_SESSION_NAME`, else this machine's default person: the only
+registered person, or the one chosen with `rig gateway default <id>` when there are several (the address is
+`<id>@external`). The app's sign-in step, "OpenRig on this machine", checks
 that the daemon answers and that you resolve to an address; until then, signing in and new sessions fail with the
 reason and the fix. The agent talks only to the daemon on this computer, so start it first (`rig daemon start`).
 The team's questions reach you only as a registered person: an `<id>@external` address needs
@@ -237,6 +240,8 @@ Other apps take the same command and arguments wherever they configure a custom 
 **Limits:**
 - One receiver per agent command (or the `acp.to` setting); the app has no team picker.
 - Questions show only while a turn is open; one asked while no turn is open waits in your usual places (the TUI, Slack).
+- An app that shows a permission request's options only as fixed buttons, such as Approve and Decline, and doesn't
+  take forms, can't show the choices: answer those questions in the TUI or Slack.
 - Prompts are text. Links and embedded text files are passed on as written; images and audio aren't accepted.
 - Progress is read every 2 seconds while a turn is open (`--poll-seconds`).
 - Sessions are found among the 2,000 newest rows you've sent, and a reopened session's questions among the 2,000 newest
