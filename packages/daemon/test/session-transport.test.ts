@@ -2928,21 +2928,25 @@ describe("SessionTransport", () => {
 
   it("#1084: a pre-waited send re-checks readiness just before typing and refuses a new prompt", async () => {
     seedCanonicalRig();
-    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
-    // The wait sees busy then idle (resolves); the in-lease re-check sees a
-    // freshly posted picker and must refuse with the existing reason.
-    const tmux = mockTmux({
-      capturePaneContent: scriptedPanes([BUSY_PANE, IDLE_PANE, MENU_PANE]),
-      sendText: sendTextSpy,
-    });
-    const transport = transportWithGuard(tmux);
-    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+    // Exercise the readiness transition without spending the budget on host scheduling.
+    const clock = steppedClock();
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      // The wait sees busy then idle (resolves); the in-lease re-check sees a
+      // freshly posted picker and must refuse with the existing reason.
+      const tmux = mockTmux({
+        capturePaneContent: scriptedPanes([BUSY_PANE, IDLE_PANE, MENU_PANE]),
+        sendText: sendTextSpy,
+      });
+      const transport = transportWithGuard(tmux, { sleep: clock.sleep });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
 
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("target_needs_input");
-    expect(result.sent).toBe(false);
-    expect(result.activity?.state).toBe("needs_input");
-    expect(sendTextSpy).not.toHaveBeenCalled();
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("target_needs_input");
+      expect(result.sent).toBe(false);
+      expect(result.activity?.state).toBe("needs_input");
+      expect(sendTextSpy).not.toHaveBeenCalled();
+    } finally { clock.restore(); }
   });
 
   it("#1084: a wait-mode send with the typing guard enabled retains immediately without waiting", async () => {
