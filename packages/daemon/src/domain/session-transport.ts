@@ -1047,6 +1047,21 @@ function safeRecord(sink: CaptureObserverSink, input: ObservationInput): void {
   try { sink.record(input); } catch { /* observer failure never reaches the caller */ }
 }
 
+/** transport.draft_delivery as the daemon reads it. deliver is the product default, so only a readable `refuse` opts out:
+ *  an unset, unreadable or invalid value follows the default, as other settings fall back to theirs. */
+export function draftDeliveryAllows(read: () => unknown): boolean {
+  try { return read() !== "refuse"; } catch { return true; }
+}
+
+/** The setting's value, taking a valid OPENRIG_TRANSPORT_DRAFT_DELIVERY first: the environment outranks the file, and the
+ *  settings store reads the file before its environment override, so an unreadable config.json would otherwise turn an
+ *  explicit environment refuse into the default. Valid means exactly what the store accepts (no trimming); anything else
+ *  comes from the store, which drops an invalid environment value for the file's. */
+export function readDraftDeliverySetting(resolve: () => unknown, env: NodeJS.ProcessEnv = process.env): unknown {
+  const fromEnv = env.OPENRIG_TRANSPORT_DRAFT_DELIVERY;
+  return fromEnv === "refuse" || fromEnv === "deliver" ? fromEnv : resolve();
+}
+
 export function mapPaneState(state: PaneActivityClassification["state"]): AgentActivity["state"] {
   if (state === "agent_active") return "running";
   if (state === "attention") return "needs_input";
@@ -2069,6 +2084,9 @@ interface SessionTransportDeps {
   runtimeAdapters?: Record<string, TransportReadinessChecker>;
   /** transport.verify_input_box, read per verified Claude Code or Codex send. Absent means off. */
   verifyInputBox?: () => boolean;
+  /** Whether transport.draft_delivery lets this send through a person's draft, read per send that meets one. The daemon
+   *  wires draftDeliveryAllows (deliver by default); a transport built without it keeps refusing. */
+  deliverOverDraft?: () => boolean;
 }
 
 interface SessionRow { node_id: string; session_name: string; }
@@ -2122,6 +2140,7 @@ export class SessionTransport {
   private runtimeAdapters: Record<string, TransportReadinessChecker>;
   private inFlightReconciliations = new Map<string, Promise<boolean>>();
   private verifyInputBox?: () => boolean;
+  private deliverOverDraft?: () => boolean;
 
   constructor(deps: SessionTransportDeps) {
     this.contextUsageStore = deps.contextUsageStore;
@@ -2141,6 +2160,7 @@ export class SessionTransport {
     this.listProcesses = deps.listProcesses;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.verifyInputBox = deps.verifyInputBox;
+    this.deliverOverDraft = deps.deliverOverDraft;
     const guard = this.tmuxAdapter.deliveryGuard;
     if (guard && (this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>).some(c => c.name === "guard_delivery")) this.guardedDelivery = new DraftAwareDelivery(this.db, guard,
       (session, text, opts) => this.sendUnguarded(session, text, opts));
@@ -3319,7 +3339,9 @@ export class SessionTransport {
         if (!audit.ok) sendAdvisory = "prompt-override: audit unavailable (" + audit.reason + "); input sent anyway.";
       }
       if (readiness.state === "needs_input") {
-        if (!promptOverride) {
+        if (!promptOverride && this.deliversOverDraft(readiness, opts)) {
+          sendAdvisory = [sendAdvisory, `'${sessionName}' had a draft at its prompt and transport.draft_delivery is deliver: this message was pasted at the current cursor into that draft (normally its end), then Enter was sent to submit the combined input. The delivery result says whether that was confirmed.`].filter(Boolean).join(" ");
+        } else if (!promptOverride) {
           return {
             ok: false,
             sessionName,
@@ -3804,6 +3826,15 @@ export class SessionTransport {
       if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
     }
     return paneCommand.replace(/^-/, "");
+  }
+
+  /** transport.draft_delivery = deliver (the default): a person's draft at the prompt is the one needs_input an ordinary send or work
+   *  notice goes through. Menus, permission prompts and hook-reported requests still refuse, and so does a send that must
+   *  not join a draft (preserveInput: managed compaction). A send that waits for idle keeps waiting. */
+  private deliversOverDraft(readiness: AgentActivity, opts?: SendOpts): boolean {
+    if (readiness.state !== "needs_input" || readiness.reason !== "prompt_draft" || readiness.evidenceSource !== "pane_heuristic") return false;
+    if (opts?.preserveInput) return false;
+    try { return this.deliverOverDraft?.() === true; } catch { return false; }
   }
 
   private async classifySendReadiness(input: {

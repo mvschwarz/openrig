@@ -206,6 +206,8 @@ export const SETTINGS_VALID_KEYS = [
   // A verified Claude Code or Codex send reports on input-box evidence; daemon-read, twin of the CLI key.
   "transport.verify_input_box",
   "transport.local_user_guard",
+  // Whether an ordinary send or work notice reaches a seat whose prompt holds a person's draft; daemon-read, twin of the CLI key.
+  "transport.draft_delivery",
   // Slice 22 (OPR.0.7.2.22) — typed decisions (OpenRouter + Jev), off by default; read by the invoking
   // rig process, never by the daemon. Twin of the CLI keys.
   "decisions.enabled",
@@ -335,6 +337,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "usage.pi_openrouter_charge": { primary: "OPENRIG_USAGE_PI_OPENROUTER_CHARGE" },
   "transport.local_user_guard": { primary: "OPENRIG_TRANSPORT_LOCAL_USER_GUARD" },
   "transport.verify_input_box": { primary: "OPENRIG_TRANSPORT_VERIFY_INPUT_BOX" },
+  "transport.draft_delivery": { primary: "OPENRIG_TRANSPORT_DRAFT_DELIVERY" },
   "decisions.enabled": { primary: "OPENRIG_DECISIONS_ENABLED" },
   "decisions.consumers": { primary: "OPENRIG_DECISIONS_CONSUMERS" },
   "decisions.template_dir": { primary: "OPENRIG_DECISIONS_TEMPLATE_DIR" },
@@ -436,6 +439,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "usage.pi_openrouter_charge": ["usage", "piOpenRouterCharge"],
   "transport.local_user_guard": ["transport", "localUserGuard"],
   "transport.verify_input_box": ["transport", "verifyInputBox"],
+  "transport.draft_delivery": ["transport", "draftDelivery"],
   "decisions.enabled": ["decisions", "enabled"],
   "decisions.consumers": ["decisions", "consumers"],
   "decisions.template_dir": ["decisions", "templateDir"],
@@ -749,6 +753,8 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // Input-box evidence for verified Claude Code and Codex sends; off until the switch is on.
     case "transport.local_user_guard": return false;
     case "transport.verify_input_box": return false;
+    // Ordinary sends reach a seat with a draft at its prompt unless the setting says refuse.
+    case "transport.draft_delivery": return "deliver";
     // Slice 22 — typed decisions off, no consumers, shipped templates only.
     case "decisions.enabled": return false;
     case "decisions.consumers": return "";
@@ -830,6 +836,9 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   },
   "daemon.db_conflict": (raw) => {
     if (raw !== "warn" && raw !== "stop") throw new Error("daemon.db_conflict must be warn or stop");
+  },
+  "transport.draft_delivery": (raw) => {
+    if (raw !== "refuse" && raw !== "deliver") throw new Error(`Invalid value for transport.draft_delivery: must be "refuse" or "deliver", got "${raw}"`);
   },
   "transcripts.lines": (raw, value) => {
     if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
