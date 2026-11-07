@@ -79,7 +79,7 @@ jobs:
 
   linux-seat-environment:
     if: ${{ github.event_name != 'push' }}
-    # This integration test reads /proc/<pid>/environ and is skipped on macOS.
+    # Cover /proc seat environments and Linux canonical-input limits that macOS cannot exercise.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -108,7 +108,7 @@ jobs:
           ip link set lo up
           exec runuser -u "$1" -- env -i HOME="$2/home" PATH="$3" TMPDIR="$2" TMUX_TMPDIR="$2" \
             CI=true TERM=xterm-256color \
-            npm run test -w packages/daemon -- test/seat-env-parent-session.integration.test.ts --maxWorkers=1 --reporter=verbose
+            npm run test -w packages/daemon -- test/seat-env-parent-session.integration.test.ts test/pi-shell-launch-native.test.ts --maxWorkers=1 --reporter=verbose
           SUITE
 
   package-tests:
