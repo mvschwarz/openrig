@@ -111,7 +111,7 @@ describe("local v0 reconstruction reader", () => {
     const rootBytes = Buffer.byteLength(JSON.stringify(doc)); save(doc);
     // Three near-limit members, then exactly the remaining budget; later members
     // must not be opened. Neither corrupt JSON nor unsupported numbers are free IO.
-    const nearLimit = perFile - 1024;
+    const nearLimit = perFile - 1;
     for (let n = 0; n < ids.length; n++) {
       const size = n === 3 ? budget - rootBytes - 3 * nearLimit : nearLimit;
       expect(size).toBeLessThanOrEqual(perFile);
