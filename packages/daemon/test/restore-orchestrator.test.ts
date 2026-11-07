@@ -217,6 +217,7 @@ describe("RestoreOrchestrator", () => {
         else if (mode === "unavailable-spec") expect(delivered[0]).toContain("old trigger");
         else { expect(delivered[0]).toContain("new-review"); expect(delivered[0]).not.toContain("old trigger"); }
       }
+      if (mode === "edited-catalog" && result.ok) expect(result.result.warnings.join("\n")).toContain("the updated catalog was not sent");
       if (mode === "delivery-failure" && result.ok) expect(result.result.nodes[0]?.status).not.toBe("resumed");
       expect(db.prepare("SELECT resolved_files_json FROM node_startup_context WHERE node_id = ?").get(node.id))
         .toEqual({ resolved_files_json: savedFiles });

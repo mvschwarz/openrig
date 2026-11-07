@@ -1,7 +1,7 @@
 // A skill whose resource says `on_restore: follow_source` takes today's bytes and today's selection when a restore
 // brings its seat back with its conversation; a seat's edit is still never overwritten.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmodSync, statSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs, { chmodSync, statSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -100,7 +100,7 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
     expect(copy("infra-review", "SKILL.md")).toBe("v1");
   });
 
-  it("takes an executable-mode change even when a script's bytes are identical", () => {
+  it.skipIf(process.platform === "win32")("takes an executable-mode change even when a script's bytes are identical", () => {
     const { paths, sourceOf, launched } = seat();
     launched("infra-review", { "SKILL.md": "v1", "scripts/check.sh": "exit 0" });
     chmodSync(join(sourceOf("infra-review"), "scripts/check.sh"), 0o755);
@@ -109,7 +109,7 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
     expect(statSync(join(paths.skillsRoot, "infra-review", "scripts/check.sh")).mode & 0o777).toBe(0o755);
   });
 
-  it.each(["claude-code", "codex"])("keeps a seat-local chmod through down, refresh and deselection for %s", (runtime) => {
+  it.skipIf(process.platform === "win32").each(["claude-code", "codex"])("keeps a seat-local chmod through down, refresh and deselection for %s", (runtime) => {
     const { paths, sourceOf, put, launched, copy } = seat(runtime);
     launched("infra-review", { "SKILL.md": "v1", "scripts/check.sh": "exit 0" });
     const script = join(paths.skillsRoot, "infra-review", "scripts/check.sh");
@@ -127,7 +127,7 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
     expect(statSync(script).mode & 0o777).toBe(editedMode);
   });
 
-  it("takes source mode changes after down and records the refreshed mode", () => {
+  it.skipIf(process.platform === "win32")("takes source mode changes after down and records the refreshed mode", () => {
     const { paths, sourceOf, launched } = seat();
     launched("infra-review", { "SKILL.md": "v1", "scripts/check.sh": "exit 0" });
     const script = join(paths.skillsRoot, "infra-review", "scripts/check.sh");
@@ -143,7 +143,7 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
     expect(cleanSeatSkills(paths).kept).toContain(script);
   });
 
-  it.each([false, true])("rehydrates keep_saved with compatible permission records (legacy=%s)", (legacy) => {
+  it.skipIf(process.platform === "win32").each([false, true])("rehydrates keep_saved with compatible permission records (legacy=%s)", (legacy) => {
     const { paths, sourceOf, launched } = seat();
     launched("infra-review", { "SKILL.md": "v1" }, false);
     const file = join(paths.skillsRoot, "infra-review", "SKILL.md");
@@ -159,7 +159,7 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
     expect(statSync(file).mode & 0o777).toBe(legacy ? 0o755 : savedMode);
   });
 
-  it("keeps the whole saved skill when a source subdirectory cannot be read", () => {
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("keeps the whole saved skill when a source subdirectory cannot be read", () => {
     const { paths, sourceOf, put, launched, copy } = seat();
     launched("infra-review", { "SKILL.md": "v1", "references/aws.md": "saved reference" });
     put(join(sourceOf("infra-review"), "SKILL.md"), "v2");
@@ -173,6 +173,39 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
       expect(copy("infra-review", "SKILL.md")).toBe("v1");
       expect(copy("infra-review", "references/aws.md")).toBe("saved reference");
     } finally { chmodSync(references, 0o755); }
+  });
+
+  it("records a partial refresh so a later restore can finish it", () => {
+    const { paths, sourceOf, launched, put, copy } = seat();
+    launched("infra-review", { "SKILL.md": "v1", "old.txt": "old" });
+    put(join(sourceOf("infra-review"), "SKILL.md"), "v2");
+    put(join(sourceOf("infra-review"), "new.txt"), "new");
+    rmSync(join(sourceOf("infra-review"), "old.txt"));
+    const selection = { selected: new Set(["infra-review"]), following: [{ id: "infra-review", source: sourceOf("infra-review") }] };
+    const write = fs.writeFileSync;
+    const failure = new Error("fixture disk write failed");
+    const spy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, ...args) => {
+      if (String(file).startsWith(join(paths.skillsRoot, "infra-review", "new.txt.openrig-"))) throw failure;
+      return write(file, ...args);
+    });
+    try { expect(() => followSeatSkills(paths, selection)).toThrow(failure); }
+    finally { spy.mockRestore(); }
+    expect(Object.keys(JSON.parse(readFileSync(paths.projectionsPath, "utf8")).files))
+      .toEqual([join(paths.skillsRoot, "infra-review", "SKILL.md")]);
+    expect(followSeatSkills(paths, selection).warnings).toEqual([]);
+    expect(copy("infra-review", "SKILL.md")).toBe("v2");
+    expect(copy("infra-review", "new.txt")).toBe("new");
+  });
+
+  it("names a missing following skill when rehydration cannot recover it", () => {
+    const { paths, sourceOf, launched } = seat();
+    launched("infra-review", { "SKILL.md": "v1" });
+    cleanSeatSkills(paths);
+    rmSync(sourceOf("infra-review"), { recursive: true });
+    const replay = seatSkillReplay({ paths, rehydration: rehydrateSeatSkills(paths), files: [],
+      entries: [{ category: "skill", effectiveId: "infra-review", absolutePath: sourceOf("infra-review") }] });
+    expect(replay.skipEntryIds.has("infra-review")).toBe(true);
+    expect(replay.warnings).toEqual(["Restore: infra-review not projected again: its following copy is missing and could not be restored"]);
   });
 
   it("keeps a copy the seat edited, or added a file to, and names it", () => {
@@ -314,7 +347,7 @@ describe("a launch records which of a seat's skills follow their source", () => 
       expect((await launch([{ id: "infra-review", onRestore: "follow_source" }, { id: "tdd" }])).failed).toEqual([]);
       expect(following()).toEqual({ "infra-review": { source: join(home, "skills", "infra-review") } });
       const projected = join(paths.skillsRoot, "infra-review", "SKILL.md");
-      expect(JSON.parse(readFileSync(paths.projectionsPath, "utf8")).files[projected].mode).toBe(0o640);
+      if (process.platform !== "win32") expect(JSON.parse(readFileSync(paths.projectionsPath, "utf8")).files[projected].mode).toBe(0o640);
 
       await launch([{ id: "infra-review" }, { id: "tdd" }]);
       expect(following()).toBeUndefined();

@@ -253,6 +253,7 @@ export interface SeatSkillRehydration {
 
 const sha256 = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
 
+/** Compare bytes and, when recorded, permissions before treating a seat file as unchanged. */
 function matchesRecordedFile(file: string, entry: { sha256: string; mode?: number }): boolean {
   return sha256(fs.readFileSync(file)) === entry.sha256
     && (entry.mode === undefined || (fs.statSync(file).mode & 0o777) === entry.mode);
@@ -429,6 +430,7 @@ export function seatSkillReplay(input: {
     // must not recreate it, even if today's spec becomes unavailable on a later restore.
     if (following[entry.effectiveId] && !lexists(target)) {
       skipEntryIds.add(entry.effectiveId);
+      if (blocked(target)) warnings.push(`Restore: ${entry.effectiveId} not projected again: its following copy is missing and could not be restored`);
       continue;
     }
     if (blocked(target)) {
@@ -571,7 +573,7 @@ export function followSeatSkills(paths: SeatSkillPaths, today: SeatSkillSelectio
   const following = { ...(record.following ?? {}) };
   const folderOf = (id: string) => nodePath.resolve(paths.skillsRoot, id);
   const recordedBelow = (dir: string) => Object.keys(files).filter((file) => file.startsWith(dir + nodePath.sep));
-  // Why the seat's copy is not OpenRig's to replace, or undefined when every file there is one OpenRig wrote, unchanged.
+  /** Why the copy cannot be replaced, or undefined when every present file is unchanged and owned. */
   const notOurs = (dir: string): string | undefined => {
     if (!insideSeatStorageFolder(paths.root, dir)) return "it is not inside this seat's storage (a link on the way)";
     for (const file of recordedBelow(dir)) {
@@ -586,7 +588,7 @@ export function followSeatSkills(paths: SeatSkillPaths, today: SeatSkillSelectio
   };
   const kept = (dir: string, why: string) =>
     out.warnings.push(`Restore: kept ${dir}: ${why}; it follows its source (on_restore: follow_source), but an edit is never overwritten`);
-  // Remove what OpenRig wrote below `dir` (already checked unchanged) and its records.
+  /** Remove the already-verified files below `dir` and their ownership records. */
   const clear = (dir: string) => {
     for (const file of recordedBelow(dir)) {
       if (lexists(file)) removeInsideSeatStorage(paths.root, file);
@@ -595,57 +597,61 @@ export function followSeatSkills(paths: SeatSkillPaths, today: SeatSkillSelectio
     removeEmptyFolders(paths.root, dir);
   };
 
-  for (const { id, source } of today.following) {
-    const dir = folderOf(id);
-    const sourceDir = nodePath.resolve(source);
-    let tree: Array<{ rel: string; bytes: Buffer; mode: number }>;
-    try {
-      const sourceFiles = filesBelow(sourceDir);
-      if (!sourceFiles.includes("SKILL.md")) throw new Error("no SKILL.md");
-      tree = sourceFiles.map((rel) => {
-        const file = nodePath.join(sourceDir, rel);
-        return { rel, bytes: fs.readFileSync(file), mode: fs.statSync(file).mode & 0o777 };
-      });
-    } catch {
-      out.warnings.push(`Restore: ${id} follows its source, but ${sourceDir} can't be read as a skill; its saved copy is kept`);
+  try {
+    for (const { id, source } of today.following) {
+      const dir = folderOf(id);
+      const sourceDir = nodePath.resolve(source);
+      let tree: Array<{ rel: string; bytes: Buffer; mode: number }>;
+      try {
+        const sourceFiles = filesBelow(sourceDir);
+        if (!sourceFiles.includes("SKILL.md")) throw new Error("no SKILL.md");
+        tree = sourceFiles.map((rel) => {
+          const file = nodePath.join(sourceDir, rel);
+          return { rel, bytes: fs.readFileSync(file), mode: fs.statSync(file).mode & 0o777 };
+        });
+      } catch {
+        out.warnings.push(`Restore: ${id} follows its source, but ${sourceDir} can't be read as a skill; its saved copy is kept`);
+        following[id] = { source: sourceDir };
+        continue;
+      }
+      const why = notOurs(dir);
+      if (why) { kept(dir, why); continue; }
+      const before = recordedBelow(dir);
       following[id] = { source: sourceDir };
-      continue;
-    }
-    const why = notOurs(dir);
-    if (why) { kept(dir, why); continue; }
-    const before = recordedBelow(dir);
-    following[id] = { source: sourceDir };
-    const same = before.length === tree.length
-      && tree.every(({ rel, bytes, mode }) => {
+      const same = before.length === tree.length
+        && tree.every(({ rel, bytes, mode }) => {
+          const file = nodePath.join(dir, rel);
+          return files[file]?.sha256 === sha256(bytes)
+            && files[file]?.source === nodePath.join(sourceDir, rel)
+            && (files[file]?.mode === undefined || files[file]?.mode === mode)
+            && (!lexists(file) || (fs.statSync(file).mode & 0o777) === mode);
+        });
+      if (same) continue; // the saved copy is today's; the usual rehydration puts back whatever rig down removed
+      clear(dir);
+      for (const { rel, bytes, mode } of tree) {
         const file = nodePath.join(dir, rel);
-        return files[file]?.sha256 === sha256(bytes)
-          && files[file]?.source === nodePath.join(sourceDir, rel)
-          && (files[file]?.mode === undefined || files[file]?.mode === mode)
-          && (!lexists(file) || (fs.statSync(file).mode & 0o777) === mode);
-      });
-    if (same) continue; // the saved copy is today's; the usual rehydration puts back whatever rig down removed
-    clear(dir);
-    for (const { rel, bytes, mode } of tree) {
-      const file = nodePath.join(dir, rel);
-      writeInsideSeatStorage(paths.root, file, bytes, mode);
-      files[file] = { sha256: sha256(bytes), source: nodePath.join(sourceDir, rel), mode };
+        writeInsideSeatStorage(paths.root, file, bytes, mode);
+        files[file] = { sha256: sha256(bytes), source: nodePath.join(sourceDir, rel), mode };
+      }
+      (before.length > 0 ? out.refreshed : out.added).push(id);
     }
-    (before.length > 0 ? out.refreshed : out.added).push(id);
-  }
 
-  const followingToday = new Set(today.following.map((skill) => skill.id));
-  for (const id of Object.keys(following).sort()) {
-    if (followingToday.has(id)) continue;
-    if (today.selected.has(id)) { delete following[id]; continue; } // selected, now keeping its saved copy
-    const dir = folderOf(id);
-    const why = notOurs(dir);
-    if (why) { kept(dir, `${why}, and it is no longer selected`); continue; }
-    // Keep the following policy after removal: an older saved startup plan must not replay this skill later.
-    clear(dir);
-    out.removed.push(id);
-  }
+    const followingToday = new Set(today.following.map((skill) => skill.id));
+    for (const id of Object.keys(following).sort()) {
+      if (followingToday.has(id)) continue;
+      if (today.selected.has(id)) { delete following[id]; continue; } // selected, now keeping its saved copy
+      const dir = folderOf(id);
+      const why = notOurs(dir);
+      if (why) { kept(dir, `${why}, and it is no longer selected`); continue; }
+      // Keep the following policy after removal: an older saved startup plan must not replay this skill later.
+      clear(dir);
+      out.removed.push(id);
+    }
 
-  writeProjections(paths.root, { ...record, files, following });
+  } finally {
+    // A partial refresh must remain owned so a later restore can finish it.
+    writeProjections(paths.root, { ...record, files, following });
+  }
   return out;
 }
 
