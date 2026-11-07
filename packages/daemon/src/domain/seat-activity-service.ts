@@ -530,6 +530,7 @@ export class SeatActivityService {
       activity: "unknown",
       needsInput: { count: 0, reason: null },
       needsInputEvidence: null,
+      backgroundWork: null, // a new occupant never inherits the old one's shell
       decidedBy: null,
       seq: seat.arbitrated.seq + 1, // the swap IS a visible event
       changedAt: at,
@@ -616,6 +617,7 @@ export class SeatActivityService {
           activity: "unknown",
           needsInput: { count: 0, reason: null },
           needsInputEvidence: null,
+          backgroundWork: null,
           decidedBy: null,
           seq: 0,
           changedAt: this.now().toISOString(),
@@ -872,6 +874,13 @@ export class SeatActivityService {
       this.permissionPromptChanged?.(seat.sessionName, Boolean(confirmedCount), seat.inventory!.runtime);
     }
     const needsInputEvidence = permissionTracked ? seat.permissionEvidence : decider ? { rung: decider.rung, observedAt: decider.observedAt } : null;
+    // #2661 (b): the latest self-report says a background shell outlives the turn. Kept beside activity (never an
+    // ActivityValue), anchored at the first observation of this shell so a consumer's grace cannot slide, and left
+    // out of `changed`: it moves no seq, wakes no waiter and restarts no waiting grace.
+    const backgroundWork = nextActivity === "idle-at-prompt" && selfEv?.backgroundWork
+      && this.rungTrust(seat, "self-report") === "authoritative"
+      ? { rung: selfEv.rung, observedAt: seat.arbitrated.backgroundWork?.observedAt ?? selfEv.observedAt }
+      : null;
 
     // Which rung answers is part of the answer: default zero → observed zero changes what
     // consumers may conclude, so it advances seq and pushes like a count change.
@@ -884,6 +893,7 @@ export class SeatActivityService {
       activity: nextActivity,
       needsInput,
       needsInputEvidence,
+      backgroundWork,
       decidedBy,
       seq: changed ? seat.arbitrated.seq + 1 : seat.arbitrated.seq,
       changedAt: changed ? this.now().toISOString() : seat.arbitrated.changedAt,

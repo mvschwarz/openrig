@@ -1016,6 +1016,14 @@ export class WorkflowSpecCache {
     this.db.prepare(`UPDATE workflow_specs SET status = '${RETAINED_STATUS}' WHERE spec_id = ?`).run(specId);
   }
 
+  /** #2635 — every cached row's id, source path and status (retained and diagnostic rows too). */
+  listRowRefs(): Array<{ specId: string; sourcePath: string; status: string | null }> {
+    const status = this.hasDiagnosticColumns ? "status" : "NULL AS status";
+    return (this.db.prepare(`SELECT spec_id, source_path, ${status} FROM workflow_specs ORDER BY source_path, spec_id`).all() as
+      Array<{ spec_id: string; source_path: string; status: string | null }>)
+      .map((row) => ({ specId: row.spec_id, sourcePath: row.source_path, status: row.status }));
+  }
+
   removeBySpecId(specId: string): number {
     return this.db.prepare(`DELETE FROM workflow_specs WHERE spec_id = ?`).run(specId).changes;
   }
