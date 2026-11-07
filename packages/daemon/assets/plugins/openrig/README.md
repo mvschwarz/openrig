@@ -3,14 +3,18 @@
 Work with your OpenRig team from the coding agent you already use. Your agent can hand the team work, follow that work,
 bring you the team's questions and read what it returns, through OpenRig's MCP server.
 
-This plugin is for a person's own agent in an app such as Claude Code or Codex. The agents on an OpenRig team load
-`openrig-core` instead.
+This plugin is for a person's own agent in an app such as Claude Code, Codex, VS Code, Copilot CLI or Cursor. The agents
+on an OpenRig team load `openrig-core` instead.
 
 ## What it ships
 
-- **The MCP server entry**, in the Claude Code manifest only: `rig mcp serve --front-door`, acting as the seat you set in
-  the plugin's settings. Claude Code substitutes that seat into the server's environment. Codex doesn't, so the plugin
-  ships no shared MCP file, and Codex gets the server from one command (below).
+- **The MCP server entry, in two forms:**
+  - **In the Claude Code manifest:** `rig mcp serve --front-door`, acting as the seat you set in the plugin's settings.
+    Claude Code substitutes that seat into the server's environment.
+  - **In the root `plugin.json` and `mcp.json`** (the Agent Plugins 1.0 format, which VS Code, Copilot CLI and Cursor
+    read): the same command with no seat. That format allows no per-person values, so it can't carry one. Claude Code
+    ignores these root files and runs only its own entry.
+  - Codex gets the server from one command (below).
 - **`--front-door`** tells your agent the team's questions to its seat are yours to answer: it shows them to you and
   records only what you say, instead of working them itself as a team member would.
 - **One skill,** `working-with-an-openrig-team`: the loop around the tools. It covers handing work to the team's lead,
@@ -57,8 +61,22 @@ codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --fr
 - **Approvals:** Codex may ask you to approve tools according to its approval settings. Create, claim and update change
   team state; tools that only read are marked read-only.
 
+**VS Code, Copilot CLI and Cursor**
+
+Install the plugin from this folder with the app's own install-from-folder step. In VS Code that's **Chat: Install Plugin
+from Source**; in Cursor, copy the folder to `~/.cursor/plugins/local/openrig` and reload. The app loads the skill and starts
+`rig mcp serve --front-door` from the root `mcp.json`.
+
+- **No seat:** these apps can't set a seat for a plugin's server, so it starts with none, unless the app itself was
+  started from a shell where `OPENRIG_SESSION_NAME` is set. With no seat, your agent can look at the team's work, but OpenRig
+  refuses its writes (`actor_required`): it can't hand work over or answer the team's questions yet.
+  `rig_whoami` says so.
+- **In VS Code,** the OpenRig VS Code extension can provide the server with your seat. Use the extension's server or the
+  plugin's, not both: both are named `openrig`.
+
 ## What it doesn't do
 
 - It adds no panel to the app, and nothing wakes your chat when the team finishes: ask your agent to check.
 - Everyone using the app on this machine acts as the seat it names.
 - It reaches a team on this machine.
+- **Outside Claude Code and Codex** it can't write to the team yet: see "No seat" above.
