@@ -127,7 +127,7 @@ type ClaudeRestorePacketObservation =
 type RestorePacketDelivery =
   | { ok: true; confirmation: "confirmed" }
   | { ok: true; confirmation: "unconfirmed"; reason: string }
-  | { ok: false; message: string };
+  | { ok: false; message: string; kind?: "staged" };
 
 interface NodeRow {
   id: string;
@@ -1052,7 +1052,11 @@ export class SeatHandoverService {
     if (!submit.ok) {
       return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
     }
-    return this.confirmPacketSubmission(successorSession, packet, info.runtime);
+    const delivered = await this.confirmPacketSubmission(successorSession, packet, info.runtime);
+    if (!delivered.ok && delivered.kind === "staged") {
+      return { ok: true, confirmation: "unconfirmed", reason: delivered.message };
+    }
+    return delivered;
   }
 
   /** Deliver the captured restore packet to a fresh successor via the shipped
@@ -1121,7 +1125,7 @@ export class SeatHandoverService {
       if (afterRetry.state === "clear") return { ok: true, confirmation: "confirmed" };
       if (afterRetry.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: afterRetry.reason === "unobservable"
         ? STARTUP_UNCONFIRMED_REASON.unobservable : STARTUP_UNCONFIRMED_REASON.unclear };
-      return { ok: false, message: STARTUP_UNCONFIRMED_REASON.staged };
+      return { ok: false, kind: "staged", message: STARTUP_UNCONFIRMED_REASON.staged };
     }
     return { ok: true, confirmation: "confirmed" };
   }

@@ -888,6 +888,7 @@ describe("rig seat status", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const receipt = {
       ...HANDOVER_RESULT_FRESH,
+      ...(staged ? { seat: { ...HANDOVER_RESULT_FRESH.seat, runtime: "claude-code" } } : {}),
       source: { mode: "rebuild", raw: "rebuild" },
       sourceOutcome: { mode: "rebuild", primedArtifacts: staged ? [{ address: "/fixture-seat/RECAP.md", label: "authored recap" }] : [], gaps: [] },
       restorePacket: { status: "unconfirmed", reason },
@@ -913,8 +914,8 @@ describe("rig seat status", () => {
     expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
     expect(output).toContain(`The rebuild priming packet was sent to the successor, but its submission is unconfirmed: ${reason}.`);
     if (staged) {
-      expect.soft(output).toMatch(/successor.*running/i);
-      expect.soft(output).toMatch(/inspect.*screen/i);
+      expect.soft(output).toMatch(/successor.*(?:runs|running)/i);
+      expect.soft(output).toMatch(/(?:inspect|check).*screen/i);
       expect.soft(output).toMatch(/(?:exact|same).*packet.*still.*staged/i);
       expect.soft(output).toMatch(/(?:submit|press Enter).*existing packet.*once/i);
       expect.soft(output).toMatch(/do not.*(?:resend|send).*blindly/i);
