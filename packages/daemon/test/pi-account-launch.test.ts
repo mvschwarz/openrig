@@ -205,3 +205,20 @@ it.each([false, true])("resume tolerates unavailable tmux identity only without 
   expect(await adapter.resume("seat@rig", "pi_session_file", sessionFile, root)).toMatchObject({ ok: !chosen });
   expect(dispatched).toBe(!chosen);
 });
+
+it("reports a missing prepared auth file in the seat's own home without an uncaught lstat error", async () => {
+  const { main } = await import("../src/adapters/pi-runner.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-own-account-")); roots.push(root);
+  const agent = path.join(root, "seat", "agent");
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  const exitCode = process.exitCode;
+  try {
+    await expect(main(["--session-name", "seat", "--state-root", root, "--cwd", root,
+      "--launch-id", "attempt", "--no-approve", "--account-home", agent])).resolves.toBeUndefined();
+    expect(process.exitCode).toBe(2);
+    expect(error.mock.calls.flat().join("\n")).toContain(path.join(agent, "auth.json"));
+    expect(error.mock.calls.flat().join("\n")).toContain("Pi account preparation failed");
+    expect(fs.existsSync(path.join(agent, ".openrig-account"))).toBe(false);
+    expect(() => preparePiAccount(agent, undefined)).not.toThrow();
+  } finally { process.exitCode = exitCode; error.mockRestore(); }
+});

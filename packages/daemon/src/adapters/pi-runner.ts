@@ -43,11 +43,14 @@ export function preparePiAccount(agentDir: string, accountHome: string | undefin
   fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
   const marker = nodePath.join(agentDir, ".openrig-account");
   const auth = nodePath.join(agentDir, "auth.json");
-  if (accountHome && fs.realpathSync(accountHome) !== fs.realpathSync(agentDir)) {
+  // Validate every explicit home, including the seat's own directory, before changing any link.
+  if (accountHome) {
     const source = nodePath.join(accountHome, "auth.json");
-    // Validate before removing the previous selection, so a bad account leaves it intact.
     fs.accessSync(source, fs.constants.R_OK);
     if (!fs.statSync(source).isFile()) throw new Error("Selected Pi auth must be a file");
+  }
+  if (accountHome && fs.realpathSync(accountHome) !== fs.realpathSync(agentDir)) {
+    const source = nodePath.join(accountHome, "auth.json");
     const current = fs.lstatSync(auth, { throwIfNoEntry: false });
     if (current && (!current.isSymbolicLink() || !fs.existsSync(marker))) {
       throw new Error("Existing Pi login is not a managed account link; use a confirmed account switch");
@@ -1291,7 +1294,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     openrigHome: process.env.OPENRIG_HOME,
     openrigUrl: endpoint?.baseUrl ?? process.env.OPENRIG_URL,
   });
-  if (runtime === "pi" && args.accountHome && fs.lstatSync(nodePath.join(paths.agentDir, "auth.json")).isSymbolicLink()) {
+  if (runtime === "pi" && args.accountHome && fs.lstatSync(nodePath.join(paths.agentDir, "auth.json"), { throwIfNoEntry: false })?.isSymbolicLink()) {
     // Only selected accounts load the Node compatibility shim; unrelated launches are unchanged.
     childEnv.NODE_OPTIONS = `--require=${JSON.stringify(nodePath.resolve(import.meta.dirname, "../../assets/pi-account-lock.cjs"))}`;
   }

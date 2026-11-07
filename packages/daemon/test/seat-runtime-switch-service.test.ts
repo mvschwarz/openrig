@@ -217,6 +217,21 @@ describe("live seat runtime switch", () => {
     expect(await svc.setRuntime({ seatRef: SEAT, runtime: "pi", clearAccountHome: true, reason: "Already cleared" })).toMatchObject({ ok: true, changed: false });
   });
 
+  it("previews Pi account costs without claiming a runtime change or lost model and effort", async () => {
+    db.prepare("UPDATE nodes SET runtime = 'pi', model = 'mistral/devstral', effort_choice = 'max' WHERE id = ?").run(nodeId);
+    const accountHome = path.join(home, "account"); fs.mkdirSync(accountHome);
+    fs.writeFileSync(path.join(accountHome, "auth.json"), "synthetic-auth");
+    const result = await service({ runtimeAdapters: { pi: adapter("pi") } }).setRuntime({
+      seatRef: SEAT, runtime: "pi", accountHome, reason: "Change account", dryRun: true,
+    });
+    expect(result).toMatchObject({ ok: true, dryRun: true, from: "pi", to: "pi" });
+    if (!result.ok || !result.dryRun) throw new Error("Expected switch preview");
+    expect(result.costs.join("\n")).toContain("keeps its model and saved effort choice");
+    expect(result.costs.join("\n")).not.toMatch(/change_runtime|settings are cleared/);
+    expect(result.settings.model.value).toBe("mistral/devstral");
+    expect(result.settings.effort.value).toBe("max");
+  });
+
   it("refuses Pi homes without credentials before staging, and keeps cross-runtime Pi switches out of scope", async () => {
     db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(nodeId);
     expect(await service().setRuntime({ seatRef: SEAT, runtime: "pi", accountHome: home, reason: "No auth", dryRun: true })).toMatchObject({ ok: false, code: "invalid_runtime_settings" });

@@ -7,6 +7,7 @@ const auth = path.join(process.env.PI_CODING_AGENT_DIR, 'auth.json');
 if (!fs.lstatSync(auth).isSymbolicLink()) throw new Error('Managed Pi account auth link is missing');
 const localLock = path.resolve(auth + '.lock');
 const sharedLock = fs.realpathSync(auth) + '.lock';
+/** Map only the managed auth lock to the shared target; leave all other filesystem paths unchanged. */
 function lockPath(value) {
   return typeof value === 'string' && path.resolve(value) === localLock ? sharedLock : value;
 }

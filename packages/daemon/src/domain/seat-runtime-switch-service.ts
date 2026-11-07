@@ -159,6 +159,16 @@ const COSTS = [
   "Codex and Claude Code runtime switches, or Pi account-home changes; single-pane seats only.",
 ];
 
+const PI_ACCOUNT_COSTS = [
+  "A new conversation: only the handover carries over; the previous conversation stays with the predecessor.",
+  "Same address, different terminal: the seat's session and address stay, its pane and scrollback change.",
+  "The runtime stays Pi. The seat keeps its model and saved effort choice unless explicitly changed; its launch wrapper is retained.",
+  "A second process runs on the selected account until cutover.",
+  "Messages sent to the seat while it switches are held, not typed; they need sending again afterwards.",
+  "A failed switch can leave the successor's prepared state directory under account-switches.",
+  "Pi account-home changes; single-pane seats only.",
+];
+
 export class SeatRuntimeSwitchService {
   private readonly now: () => Date;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -329,7 +339,7 @@ export class SeatRuntimeSwitchService {
       settings: materials.settings,
       permission: selection ? { mode: selection.mode, source: "explicit" } : { mode: "inherit", source: "member_or_rig_policy" },
       dropped,
-      costs: COSTS,
+      costs: target === "pi" ? PI_ACCOUNT_COSTS : COSTS,
       notRun: materials.notRun.map((command) => `startup slash command not run by a switch: ${command}`),
       warnings: materials.warnings,
     };
