@@ -461,8 +461,12 @@ export class SeatRuntimeSwitchService {
           }
         }
         // #2426: a Claude successor that loads the vendored openrig-core itself starts without OpenRig's earlier copies of
-        // its skills, as a launch does. The predecessor runs the other runtime, from that runtime's own storage.
-        const coreCopyNotes = corePluginDir ? retireSeatCoreSkillCopies(materials.seatSkills, corePluginDir) : [];
+        // its skills, as a launch does, when the runtime changes: the predecessor then runs the other runtime, from that
+        // runtime's own storage. A same-runtime account move shares this storage with the live predecessor, so its copies
+        // wait for the next ordinary launch. The kept copies go unnamed here: the switch's own reconciliation below decides
+        // what becomes of them, as it did before, and names a plugin copy it keeps.
+        const coreCopyNotes = corePluginDir && node.runtime !== target
+          ? retireSeatCoreSkillCopies(materials.seatSkills, corePluginDir, { namesKept: false }) : [];
         return materials.prepare(binding, adapter).then((notes) => [...coreCopyNotes, ...notes]);
       },
         binding: { ...materials.bindingAdditions(), ...(ctx.input.accountHome !== undefined ? { accountHome: ctx.input.accountHome, accountToken: ctx.input.accountToken ?? null }

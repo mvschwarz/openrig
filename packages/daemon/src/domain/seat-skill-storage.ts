@@ -521,9 +521,10 @@ export function recordSeatSkillFollowing(skillsRoot: string, id: string, source:
  * skills its storage still holds from launches before #2433, so the seat loads each skill once. Only OpenRig's own
  * unchanged copies go, with their loadout records, and only when no projection record here also names them (a restore
  * replays those records, so such a copy isn't the loadout's alone). Everything else stays and is named. Never refuses a
- * launch: a failure is named and the seat starts as it is.
+ * launch: a failure is named and the seat starts as it is. `namesKept: false` leaves the kept copies unnamed, for a caller
+ * whose own reconciliation decides what becomes of them next and names what it keeps.
  */
-export function retireSeatCoreSkillCopies(paths: SeatSkillPaths, coreDir: string): string[] {
+export function retireSeatCoreSkillCopies(paths: SeatSkillPaths, coreDir: string, opts: { namesKept?: boolean } = {}): string[] {
   let result: ReturnType<typeof retireDirectPluginCopies>;
   try {
     result = retireDirectPluginCopies({ runtime: "claude-code", location: seatSkillLocation(paths), pluginRoot: coreDir,
@@ -535,7 +536,9 @@ export function retireSeatCoreSkillCopies(paths: SeatSkillPaths, coreDir: string
   if (result.removed.length > 0) {
     notes.push(`Seat skills: removed ${result.removed.length === 1 ? "OpenRig's copy" : `${result.removed.length} OpenRig copies`} of openrig-core's ${result.removed.join(", ")}, which this seat now loads from the plugin itself`);
   }
-  for (const copy of result.kept) notes.push(`Seat skills: kept ${copy.target}, though openrig-core also supplies ${copy.id}: ${copy.reason}`);
+  if (opts.namesKept !== false) {
+    for (const copy of result.kept) notes.push(`Seat skills: kept ${copy.target}, though openrig-core also supplies ${copy.id}: ${copy.reason}`);
+  }
   for (const error of result.errors) notes.push(`Seat skills: openrig-core's copies were left as they are: ${error.message}`);
   return notes;
 }

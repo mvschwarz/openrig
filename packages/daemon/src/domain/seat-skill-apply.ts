@@ -7,11 +7,10 @@ import {
   inspectSkillDirectory, reconcileSkillLoadout, resolveSkillLoadout,
   type CatalogSkill, type ReconcileSkillLoadoutResult, type SkillRuntime,
 } from "./skill-catalog.js";
-import { seatCorePluginDir } from "./claude-core-plugin-env.js";
 import { parseSkillFrontmatter } from "./skill-discovery.js";
 import { readFootprintAnswer, type FootprintAnswer } from "./footprint-choice.js";
 import type { SettingsStore } from "./user-settings/settings-store.js";
-import { retireSeatCoreSkillCopies, seatSkillLocation, seatSkillPaths, writeSeatSkillCatalog, type SeatSkillPaths, SEAT_SKILL_ROUTER_ID, resolveSeatSkillRouter, writeSeatSkillRouter, type SeatSkillRouter } from "./seat-skill-storage.js";
+import { seatSkillLocation, seatSkillPaths, writeSeatSkillCatalog, type SeatSkillPaths, SEAT_SKILL_ROUTER_ID, resolveSeatSkillRouter, writeSeatSkillRouter, type SeatSkillRouter } from "./seat-skill-storage.js";
 import { seatLaunchAdditionsReport, type SeatLaunchAdditionsReport } from "./seat-launch-additions.js";
 
 // OPR.0.7.0.13 (B) — the seat mode of `rig skill loadout`: inspect a seat's stored selection, or apply it and tell the
@@ -159,9 +158,8 @@ export function inspectSeatSkills(seat: SeatRef, occupant: string | null, db?: D
 export interface SeatSkillApplyResult {
   inspection: SeatSkillInspection;
   /** The on-disk reconciliation of the seat's stored selection: `none` when the seat has no stored selection, and
-   *  `unreadable` (never ok) when its record exists but can't be read or parsed. `notes` (#2426) says what became of
-   *  OpenRig's earlier copies of openrig-core's skills on a seat that loads the plugin itself, as its launch says. */
-  disk: { ok: boolean; selection: "reconciled" | "none" | "unreadable"; receipts: ReconcileSkillLoadoutResult["receipts"]; removed: string[]; errors: string[]; notes?: string[] };
+   *  `unreadable` (never ok) when its record exists but can't be read or parsed. */
+  disk: { ok: boolean; selection: "reconciled" | "none" | "unreadable"; receipts: ReconcileSkillLoadoutResult["receipts"]; removed: string[]; errors: string[] };
   /** What the running seat was told, by the transport's own evidence. */
   delivery:
     | { state: "sent"; record: SeatDeliveryRecord; transportOutcome: string; detail?: string }
@@ -195,13 +193,7 @@ export async function applySeatSkills(input: {
 }): Promise<SeatSkillApplyResult> {
   const { seat, db } = input;
   const paths = pathsOf(seat);
-  // #2426: a Claude seat that loads the vendored openrig-core itself loses OpenRig's earlier copies of its skills first, by
-  // the same retirement its launch runs (every topology owner's record included), so the reconcile never projects them
-  // again. A copy it can't show is OpenRig's own unchanged one stays, and is named.
-  const directCore = seatCorePluginDir({ id: seat.nodeId, runtime: seat.runtime }, db);
-  const coreCopyNotes = directCore ? retireSeatCoreSkillCopies(paths, directCore) : [];
-  const reconciled = reconcileStoredSelection(seat, paths, input.catalogRoot);
-  const disk = coreCopyNotes.length > 0 ? { ...reconciled, notes: coreCopyNotes } : reconciled;
+  const disk = reconcileStoredSelection(seat, paths, input.catalogRoot);
   // The seat's generated router follows what is now in its storage, for either runtime. A router that isn't written
   // is reported (kept or refused) in the inspection; it never stops the apply.
   if (disk.ok && fs.existsSync(paths.root)) {

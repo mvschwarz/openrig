@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -117,18 +117,22 @@ describe("a Claude seat that loads openrig-core itself, launched with OpenRig's 
     expect(readFileSync(s.paths.manifestPath, "utf8")).toBe(before);
   });
 
-  it("an apply before the next launch removes them too, rather than projecting them again, and says so", async () => {
+  it("an apply before the next launch leaves them to that launch: it neither removes them under the running seat nor projects them again", async () => {
     const core = plugin(join(home, "plugins", "openrig-core"), ["alpha"]);
     const s = claudeSeat(core);
     oldLoadout(s.paths, pluginCopies(core));
     const applied = await applySeatSkills({ db: s.db, seat: s.seat, occupant: null, catalogRoot: scratch("core-copies-cat-") });
-    expect(applied.disk).toMatchObject({ ok: true, removed: [],
-      notes: ["Seat skills: removed OpenRig's copy of openrig-core's alpha, which this seat now loads from the plugin itself"] });
-    expect(existsSync(join(s.paths.skillsRoot, "alpha"))).toBe(false);
-    expect(manifest(s.paths).skills).toEqual([]);
+    expect(applied.disk).toMatchObject({ ok: true, removed: [], errors: [] });
+    expect(folders(s.paths)).toEqual(["alpha"]);
+    expect(manifest(s.paths).skills.map((skill) => skill.id)).toEqual(["alpha"]);
+
+    // The next ordinary launch removes it, and an apply after that doesn't bring it back.
+    expect(s.relaunch()).toEqual(["Seat skills: removed OpenRig's copy of openrig-core's alpha, which this seat now loads from the plugin itself"]);
+    await applySeatSkills({ db: s.db, seat: s.seat, occupant: null, catalogRoot: scratch("core-copies-cat-") });
+    expect(folders(s.paths)).toEqual([]);
   });
 
-  it("an apply removes them from every owner's selection, not only the first owner's", async () => {
+  it("a launch removes them from every owner's selection, not only the current one's, so an apply after it can't bring them back", async () => {
     const core = plugin(join(home, "plugins", "openrig-core"), ["alpha"]);
     const other = plugin(scratch("core-copies-other-"), ["delta"]);
     const s = claudeSeat(core);
@@ -138,14 +142,14 @@ describe("a Claude seat that loads openrig-core itself, launched with OpenRig's 
     record.topologySelections = { "dev-seat@core-copies": ["delta"], "earlier@core-copies": ["alpha"] };
     writeFileSync(s.paths.manifestPath, `${JSON.stringify(record, null, 2)}\n`);
 
-    const applied = await applySeatSkills({ db: s.db, seat: s.seat, occupant: null, catalogRoot: scratch("core-copies-cat-") });
-    expect(applied.disk).toMatchObject({ ok: true,
-      notes: ["Seat skills: removed OpenRig's copy of openrig-core's alpha, which this seat now loads from the plugin itself"] });
-    expect(folders(s.paths)).toEqual(["delta"]);
+    expect(s.relaunch()).toEqual(["Seat skills: removed OpenRig's copy of openrig-core's alpha, which this seat now loads from the plugin itself"]);
     expect(manifest(s.paths).topologySelections).toEqual({ "dev-seat@core-copies": ["delta"] });
+    const applied = await applySeatSkills({ db: s.db, seat: s.seat, occupant: null, catalogRoot: scratch("core-copies-cat-") });
+    expect(applied.disk).toMatchObject({ ok: true, removed: [], errors: [] });
+    expect(folders(s.paths)).toEqual(["delta"]);
   });
 
-  it("keeps a copy another record could put back, so an apply first and then a restore leave it as it was", async () => {
+  it("keeps a copy another record could put back, so a restore and an apply after the launch leave it recorded", async () => {
     const core = plugin(join(home, "plugins", "openrig-core"), ["alpha", "beta", "delta", "gamma"]);
     const s = claudeSeat(core);
     oldLoadout(s.paths, pluginCopies(core));
@@ -160,14 +164,15 @@ describe("a Claude seat that loads openrig-core itself, launched with OpenRig's 
     const kept = (id: string, why: string) => `Seat skills: kept ${join(s.paths.skillsRoot, id)}, though openrig-core also supplies ${id}: it's also recorded as ${why} in ${s.paths.projectionsPath}`;
     const keptNotes = [kept("alpha", "a projection"), kept("beta", "following its source"), kept("delta", "a projection")];
 
-    const applied = await applySeatSkills({ db: s.db, seat: s.seat, occupant: null, catalogRoot: scratch("core-copies-cat-") });
-    expect(applied.disk.notes).toEqual(["Seat skills: removed OpenRig's copy of openrig-core's gamma, which this seat now loads from the plugin itself", ...keptNotes]);
-    // The kept copies stay selected, so the apply projects delta again as it would any selected copy that went missing.
-    expect(folders(s.paths)).toEqual(["alpha", "beta", "delta"]);
+    expect(s.relaunch()).toEqual(["Seat skills: removed OpenRig's copy of openrig-core's gamma, which this seat now loads from the plugin itself", ...keptNotes]);
+    expect(folders(s.paths)).toEqual(["alpha", "beta"]);
 
-    // A restore has nothing to put back, and the next launch still knows each copy as a recorded one, not an unrecorded folder.
-    expect(rehydrateSeatSkills(s.paths).restored).toEqual([]);
+    // The loadout still owns delta, so a restore that puts its recorded file back leaves a recorded copy, not an
+    // unrecorded folder: the next launch names the same three, and an apply changes nothing.
+    expect(rehydrateSeatSkills(s.paths).restored).toEqual([join(s.paths.skillsRoot, "delta", "SKILL.md")]);
     expect(s.relaunch()).toEqual(keptNotes);
+    const applied = await applySeatSkills({ db: s.db, seat: s.seat, occupant: null, catalogRoot: scratch("core-copies-cat-") });
+    expect(applied.disk).toMatchObject({ ok: true, removed: [], errors: [] });
     expect(folders(s.paths)).toEqual(["alpha", "beta", "delta"]);
     expect(manifest(s.paths).skills.map((skill) => skill.id)).toEqual(["alpha", "beta", "delta"]);
   });
