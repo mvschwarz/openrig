@@ -382,3 +382,103 @@ it('#2682: a fresh below-threshold sample ends a held attempt; a restart does no
  expect(prepPrompts(f)).toHaveLength(2);expect(compacts(f)).toHaveLength(0);
  expect(restarted.getPreparationState(seat)!.attemptId).not.toBe(held.attemptId);
 });
+
+// #2682: a context drop while the daemon was down. The monitor's drain for a stale sample passes the seat's last known
+// usage and conversation; a held map whose context has since dropped, or whose conversation changed, never compacts.
+const hs={...high,sessionId:'conversation-one'};
+/** An automatic attempt held with its map complete on a busy seat, as the first daemon left it. */
+async function heldBy(f:F){
+ const e=f.daemon();await e.maybeAutoCompact(hs);completeMap(e);
+ f.hooks.busy=true;f.advance(AUTO_PREP_WAIT_MS_DEFAULT+11*60_000);e.reconcilePreparations();
+ const held=e.getPreparationState(seat)!;
+ expect(held).toMatchObject({status:'waiting',prepared:true});
+ return held;
+}
+const staleDrain=(e:ClaudeCompactionEnforcer,lastUsedPercentage:number,sessionId='conversation-one')=>
+ e.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code',lastUsedPercentage,sessionId});
+
+it('#2682 S1a: a restart between a fresh dip and the deadline: the stale drain sends no /compact, and the attempt is never held',async()=>{
+ const f=fixture();const e=f.daemon();await e.maybeAutoCompact(hs);const a=completeMap(e);
+ expect(await e.maybeAutoCompact({...hs,usedPercentage:30})).toEqual({triggered:false,reason:'below_threshold'});
+ expect(JSON.parse(readFileSync(recordFile(e),'utf8')).belowSince).toEqual(expect.any(Number));
+ f.advance(11*60_000);
+ const restarted=f.daemon();
+ // The seat is idle with an empty box; its newest sample (30%) is no longer fresh.
+ expect(await staleDrain(restarted,30)).toMatchObject({triggered:false});
+ expect(compacts(f)).toHaveLength(0);
+ f.hooks.busy=true;f.advance(AUTO_PREP_WAIT_MS_DEFAULT+AUTO_RETRY_AFTER_STOP_MS_DEFAULT);restarted.reconcilePreparations();
+ const state=restarted.getPreparationState(seat)!;
+ expect(state).toMatchObject({attemptId:a.attemptId,status:'stopped',reason:'map_complete_seat_never_idle'});
+ expect(state.prepared).toBeUndefined();
+ f.hooks.busy=false;await staleDrain(restarted,30);
+ expect(compacts(f)).toHaveLength(0);
+});
+
+it('#2682 S1b: a held attempt, a restart, and a stale sample below the threshold at the drain: it stops, with no /compact',async()=>{
+ const f=fixture();const held=await heldBy(f);
+ f.hooks.busy=false;f.advance(11*60_000);
+ const restarted=f.daemon();
+ expect(await staleDrain(restarted,20)).toMatchObject({triggered:false});
+ expect(restarted.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,status:'stopped',reason:'below_threshold_while_prepared'});
+ expect(compacts(f)).toHaveLength(0);
+ expect(JSON.parse(readFileSync(join(dirname(held.mapPath),'COMPACTION-STATE.json'),'utf8'))).toMatchObject({phase:'ended',reason:'below_threshold_while_prepared'});
+});
+
+it('#2682 S1c: a held attempt, a restart, and another conversation at the drain: it stops, with no /compact',async()=>{
+ const f=fixture();const held=await heldBy(f);
+ f.hooks.busy=false;f.advance(11*60_000);
+ const restarted=f.daemon();
+ expect(await staleDrain(restarted,90,'conversation-two')).toMatchObject({triggered:false});
+ expect(restarted.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,status:'stopped',reason:'below_threshold_while_prepared'});
+ expect(compacts(f)).toHaveLength(0);
+});
+
+it('#2682 S1d: a held attempt, a restart, and a stale sample still above with the same conversation: the /compact goes at the window',async()=>{
+ const f=fixture();const held=await heldBy(f);
+ f.hooks.busy=false;f.advance(11*60_000);
+ const restarted=f.daemon();
+ expect(await staleDrain(restarted,90)).toEqual({triggered:true});
+ expect(compacts(f)).toHaveLength(1);
+ expect(restarted.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,status:'compact-sent'});
+});
+
+/** An automatic attempt whose request was delivered and which ended with no map at its deadline, past the retry cooldown. */
+async function endedPastCooldown(f:F,e:ClaudeCompactionEnforcer){
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:true});
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);e.reconcilePreparations();
+ expect(e.getPreparationState(seat)).toMatchObject({status:'stopped',reason:'preparation_incomplete',delivery:'delivered'});
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);
+}
+
+it('#2682 S2: the ended-attempt idle gate reads a busy seat once and returns at once, without waiting inside the poll',async()=>{
+ const f=fixture();const e=f.daemon();await endedPastCooldown(f,e);
+ const wait=vi.spyOn(f.transport,'waitUntilIdle');
+ f.hooks.busy=true;const before=f.now();
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(f.now()-before).toBeLessThan(1000);
+ expect(wait).toHaveBeenCalledTimes(1);
+ expect(prepPrompts(f)).toHaveLength(1);
+ f.hooks.busy=false;
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:true});
+ expect(prepPrompts(f)).toHaveLength(2);
+});
+
+it('#2682 n2: a momentarily unknown occupant generation does not erase the ended attempt: the busy seat is still held off after',async()=>{
+ const f=fixture();const e=f.daemon();
+ await endedPastCooldown(f,e);
+ // Neither the occupant resolver nor the binding names the occupant for one poll.
+ f.hooks.busy=true;f.generation(null as unknown as string);
+ expect(await e.maybeAutoCompact(hs)).toMatchObject({triggered:false});
+ f.generation('generation-one');
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(f)).toHaveLength(1);
+});
+
+it('#2682 n3: a cancel after a submitted /compact leaves an ended record, and a restart does not hold a busy seat off for it',async()=>{
+ const f=fixture();const e=await compactedBy(f);e.cancelPreparation(seat);
+ expect(JSON.parse(readFileSync(recordFile(e),'utf8'))).toMatchObject({phase:'ended',delivery:'delivered'});
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);
+ const restarted=f.daemon();f.hooks.busy=true;
+ expect(await restarted.maybeAutoCompact(hs)).toEqual({triggered:true});
+ expect(prepPrompts(f)).toHaveLength(2);
+});

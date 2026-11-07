@@ -3672,11 +3672,13 @@ export class SessionTransport {
       : fn();
   }
 
-  /** Wait on the existing classifier without occupying the input/lifecycle lease. */
-  async waitUntilIdle(sessionName: string, timeoutMs: number, signal?: AbortSignal) {
+  /** Wait on the existing classifier without occupying the input/lifecycle lease. With `singleObservation`, one
+   *  observation within `timeoutMs` and no wait after it: a busy reading returns at once. */
+  async waitUntilIdle(sessionName: string, timeoutMs: number, signal?: AbortSignal, opts?: { singleObservation?: boolean }) {
     const meta = this.getSessionMeta(sessionName);
     return this.waitForIdle({ sessionName, runtime: meta.runtime, attachmentType: meta.attachmentType, timeoutMs, signal,
-      binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane } });
+      binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane },
+      ...(opts?.singleObservation ? { singleObservation: true } : {}) });
   }
 
   private async waitForIdle(input: {
@@ -3691,6 +3693,8 @@ export class SessionTransport {
     binding?: ObservedBinding;
     readinessFromPaneOnly?: boolean;
     postCompactTurnBoundary?: boolean;
+    /** One observation only: a reading that isn't idle ends the wait at once. */
+    singleObservation?: boolean;
     // Optional display value for timeout messages. The deadline always comes
     // from timeoutMs; when set, expiry reports this value instead, so a
     // re-wait running on a leftover budget still names the configured wait.
@@ -3774,7 +3778,7 @@ export class SessionTransport {
       }
 
       const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) return expire();
+      if (remainingMs <= 0 || input.singleObservation) return expire();
       await this.sleep(Math.min(this.waitForIdlePollMs, remainingMs));
     }
   }
