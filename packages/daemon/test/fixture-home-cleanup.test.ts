@@ -48,6 +48,18 @@ describe("fixture homes are removed when the worker exits", () => {
     expect(leftovers(tmp)).toEqual([]);
   });
 
+  it.skipIf(process.platform !== "darwin").each([false, true])("handles an explicit macOS per-user TMPDIR (keep=%s)", keep => {
+    const systemTmp = spawnSync("getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8" });
+    expect(systemTmp.status, systemTmp.stderr).toBe(0);
+    const supplied = fs.mkdtempSync(path.join(fs.realpathSync(systemTmp.stdout.trim()), "fixture-override-"));
+    roots.push(supplied);
+    const { openrigHome, tmpdir, scratch } = runSetup({ TMPDIR: supplied, OPENRIG_TEST_KEEP_TMPDIR: keep ? "1" : undefined });
+    expect(path.dirname(openrigHome)).toBe(keep ? supplied : fs.realpathSync("/tmp"));
+    expect(keep ? tmpdir : path.dirname(tmpdir)).toBe(keep ? supplied : fs.realpathSync("/tmp"));
+    expect(fs.existsSync(openrigHome)).toBe(false);
+    expect(leftovers(supplied)).toEqual(keep ? [path.basename(scratch)] : []);
+  }, 65_000);
+
   it("removes the fixture home and the user home", () => {
     const { tmp, openrigHome, home } = runSetup();
     expect(path.dirname(openrigHome)).toBe(tmp);

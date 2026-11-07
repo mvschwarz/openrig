@@ -75,7 +75,8 @@ if (process.env["TERM_PROGRAM"] === "rex") delete process.env["TERM_PROGRAM"];
 // test builds and the same path the product resolves are spelled alike. macOS's default is a per-user folder under
 // /var/folders, ~57 characters once resolved, which leaves too little of the 104-byte Unix socket cap for the tmux
 // and daemon sockets under it; in its place the base is /tmp, resolved (/private/tmp), as the CI job gets by running
-// with a short resolved TMPDIR. A TMPDIR set anywhere else is kept. mkdtemp makes each folder 0700.
+// with a short resolved TMPDIR. This includes explicit overrides under /private/var/folders; set
+// OPENRIG_TEST_KEEP_TMPDIR=1 to preserve those exactly. Other roots are kept. mkdtemp makes each folder 0700.
 // A package that keeps its TMPDIR (OPENRIG_TEST_KEEP_TMPDIR=1) keeps it here too, unresolved.
 const keepTmpdir = process.env["OPENRIG_TEST_KEEP_TMPDIR"] === "1";
 const givenTmp = fs.realpathSync(os.tmpdir());
