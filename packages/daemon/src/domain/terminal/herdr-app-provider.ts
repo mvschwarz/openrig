@@ -23,6 +23,16 @@ import type { ComposedPane, ComposedView, OpenViewResult, ProviderLiveness, Prov
 
 export const HERDR_APP_PROVIDER = "herdr-app";
 
+/** How long a viewer start with an unknown `hc run` outcome is polled before OpenRig stops tracking it. */
+export const UNKNOWN_START_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * `hc` error kinds that mean `terminal.run` rejected the request before allocating or spawning a terminal
+ * (`ref/herdr-core` `rpc.rs`, `cli.rs`, `terminals.rs`). Every other kind (including `internal`, `unavailable`,
+ * `spawn_failed`, or a missing/unknown kind) is treated as an uncertain start and tracked by its nonce.
+ */
+const DEFINITE_HC_ERROR_KINDS = new Set(["invalid_params", "not_found", "conflict", "name_taken", "usage"]);
+
 /** Waits after the attach ends, so the terminal never ends on its own; OpenRig rewrites the cell, then ends it. */
 const VIEWER_WRAPPER = 'shift; "$@"; status=$?; printf "\\r\\n%s\\r\\n" "The seat session ended here (exit $status). OpenRig will update this view; nothing else runs in this cell."; exec tail -f /dev/null';
 
@@ -52,7 +62,7 @@ export interface HerdrAppProviderDeps {
   now?(): Date;
 }
 
-type Removal = { terminal: string; cellId: string; nonce: string; argv: string[] };
+type Removal = { terminal: string | null; seat?: string; cellId: string; nonce: string; argv: string[]; since: string };
 
 /** What core says about a terminal. Only a definite answer counts as gone: `not_found`, or a record that is no longer
  *  live. A timeout or an unreachable core is `unknown`, and the viewer stays tracked. */
@@ -100,6 +110,14 @@ export class HerdrAppProvider implements TerminalProvider {
       session: process.env.HC_SESSION || "default",
       ...(process.env.HC_SOCKET ? { socket: process.env.HC_SOCKET } : {}),
     };
+    let pendingStarts: number | "unknown";
+    try {
+      const state = await this.deps.files.load();
+      pendingStarts = state.pendingEnds.filter((p) => p.terminal === null).length
+        + state.views.flatMap((v) => v.viewers).filter((v) => v.state === "planned" || v.state === "start-unknown").length;
+    } catch {
+      pendingStarts = "unknown";
+    }
     return {
       provider: HERDR_APP_PROVIDER,
       available: reply.kind === "ok",
@@ -112,6 +130,7 @@ export class HerdrAppProvider implements TerminalProvider {
       launch: { socketPath: `${this.deps.files.appHome}/herdr-app.sock`, ...(core.session !== "default" ? { session: core.session } : process.env.HC_SESSION ? { session: process.env.HC_SESSION } : {}) },
       core,
       assumption: "viewers are started with hc in this core; herdr-app must be a client of it",
+      pendingStarts,
     };
   }
 
@@ -151,8 +170,24 @@ export class HerdrAppProvider implements TerminalProvider {
   private async reconcileState(state: ClientState): Promise<string[]> {
     const notes: string[] = [];
     let changed = false;
+    let journalChanged = false;
     for (const view of state.views) {
+      const keptViewers: ViewerRecord[] = [];
       for (const viewer of view.viewers) {
+        if (viewer.state === "planned" || viewer.state === "start-unknown") {
+          state.pendingEnds.push({
+            terminal: null,
+            seat: viewer.seat,
+            cellId: viewer.cellId,
+            nonce: viewer.nonce,
+            argv: viewer.argv,
+            since: view.createdAt || this.now(),
+            revision: "unwritten",
+          });
+          journalChanged = true;
+          continue;
+        }
+        keptViewers.push(viewer);
         if (viewer.state !== "live" || !viewer.terminal) continue;
         const seen = await terminalState(this.deps.hc, viewer.terminal);
         if (seen.state === "unknown") {
@@ -164,10 +199,17 @@ export class HerdrAppProvider implements TerminalProvider {
           notes.push(`${viewer.label}: its viewer ended outside OpenRig; its cell now says so.`);
         }
       }
+      if (keptViewers.length !== view.viewers.length && keptViewers.length > 0 && state.writtenSha) changed = true;
+      view.viewers = keptViewers;
     }
+    const beforeViews = state.views.length;
+    state.views = state.views.filter((view) => view.viewers.length > 0);
+    if (state.views.length !== beforeViews) journalChanged = true;
     if (changed) {
       const written = await this.write(state);
       if (!written.ok) notes.push(written.error);
+    } else if (journalChanged) {
+      await this.deps.files.save(state);
     }
     if (state.pendingEnds.length) notes.push(...await this.endPending(state));
     return notes;
@@ -219,7 +261,11 @@ export class HerdrAppProvider implements TerminalProvider {
     for (const record of created) for (const viewer of record.viewers) {
       const started = await this.startViewer(record, viewer);
       if ("address" in started) { viewer.terminal = started.address; viewer.state = "live"; }
-      else { failed.push(viewer.seat); firstReason ??= started.reason; }
+      else {
+        if (started.unknown) viewer.state = "start-unknown";
+        failed.push(viewer.seat);
+        firstReason ??= started.reason;
+      }
     }
     await files.save(state);
     if (failed.length) {
@@ -248,7 +294,7 @@ export class HerdrAppProvider implements TerminalProvider {
     };
   }
 
-  private async startViewer(view: ViewRecord, viewer: ViewerRecord): Promise<{ address: string } | { reason: string }> {
+  private async startViewer(view: ViewRecord, viewer: ViewerRecord): Promise<{ address: string } | { reason: string; unknown: boolean }> {
     const labels = [
       `openrig.daemon=${this.deps.daemonInstance}`, "openrig.role=viewer", `openrig.view=${view.id}`,
       `openrig.op=${viewer.nonce}`, `openrig.seat=${viewer.seat}`, `openrig.cell=${viewer.cellId}`,
@@ -256,12 +302,17 @@ export class HerdrAppProvider implements TerminalProvider {
     const run = await this.deps.hc(["run", "--bg", "--no-parent", "--no-notify", "--json", "--cwd", this.deps.viewerCwd, ...labels, "--", ...viewer.argv]);
     const address = (run.json as { address?: unknown } | null)?.address;
     if (run.exit === 0 && typeof address === "string") return { address };
+    const reason = run.error?.message || `hc exited ${run.exit}`;
+    const kind = run.error?.kind;
+    if (run.exit > 0 && typeof kind === "string" && DEFINITE_HC_ERROR_KINDS.has(kind)) {
+      return { reason, unknown: false };
+    }
     // An uncertain start: look for it by its nonce rather than start another.
     const found = await this.deps.hc(["ls", "--json", "--label", `openrig.op=${viewer.nonce}`]);
     const terminals = (found.json as { terminals?: { address?: unknown }[] } | null)?.terminals ?? [];
     const hit = terminals.find((t) => typeof t.address === "string");
     if (hit) return { address: hit.address as string };
-    return { reason: run.error?.message || `hc exited ${run.exit}` };
+    return { reason, unknown: true };
   }
 
   /** Derive and write the Rig layout from the journal; every write lists live viewer terminals only. */
@@ -359,8 +410,13 @@ export class HerdrAppProvider implements TerminalProvider {
    */
   private async remove(state: ClientState, viewIds: readonly string[], cells: readonly string[], opts: { neverWritten?: boolean } = {}): Promise<string[]> {
     const removals: Removal[] = [];
+    const since = this.now();
     const take = (viewer: ViewerRecord) => {
-      if (viewer.terminal && viewer.state === "live") removals.push({ terminal: viewer.terminal, cellId: viewer.cellId, nonce: viewer.nonce, argv: viewer.argv });
+      if (viewer.terminal && viewer.state === "live") {
+        removals.push({ terminal: viewer.terminal, seat: viewer.seat, cellId: viewer.cellId, nonce: viewer.nonce, argv: viewer.argv, since });
+      } else if (viewer.state === "start-unknown" || (viewer.state === "planned" && !opts.neverWritten)) {
+        removals.push({ terminal: null, seat: viewer.seat, cellId: viewer.cellId, nonce: viewer.nonce, argv: viewer.argv, since });
+      }
     };
     for (const view of state.views) {
       if (viewIds.includes(view.id)) view.viewers.forEach(take);
@@ -398,19 +454,23 @@ export class HerdrAppProvider implements TerminalProvider {
   private async endPending(state: ClientState): Promise<string[]> {
     if (!state.pendingEnds.length) return [];
     const notes: string[] = [];
-    const status = await this.deps.app.status(1_000);
     const pending = state.pendingEnds;
     const latest = state.revision;
-    let safe: PendingEnd[] = [];
-    if (status.kind !== "ok") {
-      notes.push(`${pending.length} viewer(s) in ${describeCore(this.deps.hc)} left running: herdr-app's state is uncertain (${describe(status)}).`);
-    } else if ((status.value as { layout?: unknown }).layout !== RIG_LAYOUT) {
-      // Not shown: the app reads the current file whenever the Rig layout is shown next, so no block refers to them.
-      safe = pending.filter((p) => p.revision !== "unwritten");
-    } else if (latest && await awaitApplied(this.deps.files, latest, pending.map((p) => p.terminal), { timeoutMs: this.deps.ackTimeoutMs ?? 8_000 })) {
-      safe = pending.filter((p) => p.revision !== "unwritten");
-    } else {
-      notes.push(`${pending.length} viewer(s) in ${describeCore(this.deps.hc)} left running: herdr-app has not confirmed the layout without them yet.`);
+    const unknownStarts = pending.filter((p) => p.terminal === null);
+    const knownTerminals = pending.filter((p): p is PendingEnd & { terminal: string } => p.terminal !== null);
+    const safe: PendingEnd[] = [...unknownStarts];
+    if (knownTerminals.length) {
+      const status = await this.deps.app.status(1_000);
+      if (status.kind !== "ok") {
+        notes.push(`${knownTerminals.length} viewer(s) in ${describeCore(this.deps.hc)} left running: herdr-app's state is uncertain (${describe(status)}).`);
+      } else if ((status.value as { layout?: unknown }).layout !== RIG_LAYOUT) {
+        // Not shown: the app reads the current file whenever the Rig layout is shown next, so no block refers to them.
+        safe.push(...knownTerminals.filter((p) => p.revision !== "unwritten"));
+      } else if (latest && await awaitApplied(this.deps.files, latest, knownTerminals.map((p) => p.terminal), { timeoutMs: this.deps.ackTimeoutMs ?? 8_000 })) {
+        safe.push(...knownTerminals.filter((p) => p.revision !== "unwritten"));
+      } else {
+        notes.push(`${knownTerminals.length} viewer(s) in ${describeCore(this.deps.hc)} left running: herdr-app has not confirmed the layout without them yet.`);
+      }
     }
     const kept: PendingEnd[] = pending.filter((p) => !safe.includes(p));
     for (const end of safe) {
@@ -423,20 +483,38 @@ export class HerdrAppProvider implements TerminalProvider {
     return notes;
   }
 
-  /** Ends a viewer only when the journal, its labels and its exact argv all say it is this OpenRig's. */
   /** Ends a viewer only when the journal, its labels and its exact argv all say it is this OpenRig's. `kept`: still
    *  pending (core couldn't be asked, or the kill failed), to be tried again. */
   private async endVerified(end: Removal): Promise<{ kept: boolean; note?: string }> {
-    const seen = await terminalState(this.deps.hc, end.terminal);
+    let terminal = end.terminal;
+    if (terminal === null) {
+      const found = await this.deps.hc(["ls", "--json", "--label", `openrig.op=${end.nonce}`]);
+      if (found.exit !== 0) {
+        return { kept: true, note: `${end.seat ?? end.cellId}: its viewer in ${describeCore(this.deps.hc)} could not be checked (${found.error?.message ?? `hc exited ${found.exit}`}).` };
+      }
+      const list = (found.json as { terminals?: Array<{ address?: unknown; labels?: Record<string, unknown> }> } | null)?.terminals ?? [];
+      const hit = list.find((t) => typeof t.address === "string" && t.labels?.["openrig.daemon"] === this.deps.daemonInstance && t.labels?.["openrig.role"] === "viewer")
+        ?? list.find((t) => typeof t.address === "string");
+      if (!hit) {
+        const nowMs = (this.deps.now?.() ?? new Date()).getTime();
+        const sinceMs = Date.parse(end.since);
+        if (Number.isFinite(sinceMs) && nowMs - sinceMs > UNKNOWN_START_TTL_MS) {
+          return { kept: false, note: `${end.seat ?? end.cellId}: its viewer never appeared in ${describeCore(this.deps.hc)}; no longer tracked.` };
+        }
+        return { kept: true };
+      }
+      terminal = hit.address as string;
+    }
+    const seen = await terminalState(this.deps.hc, terminal);
     if (seen.state === "gone") return { kept: false };
-    if (seen.state === "unknown") return { kept: true, note: `Viewer ${end.terminal} was left running for now: core could not be asked (${seen.reason}).` };
+    if (seen.state === "unknown") return { kept: true, note: `Viewer ${terminal} was left running for now: core could not be asked (${seen.reason}).` };
     const t = seen.record;
     const ours = t.labels?.["openrig.role"] === "viewer" && t.labels?.["openrig.op"] === end.nonce
       && t.labels?.["openrig.daemon"] === this.deps.daemonInstance
       && JSON.stringify(t.argv) === JSON.stringify(end.argv);
-    if (!ours) return { kept: false, note: `Viewer ${end.terminal} was left in place: it can't be verified as this OpenRig's.` };
-    const killed = await this.deps.hc(["kill", end.terminal]);
-    return killed.exit === 0 ? { kept: false } : { kept: true, note: `Viewer ${end.terminal} could not be ended yet: ${killed.error?.message ?? `hc exited ${killed.exit}`}.` };
+    if (!ours) return { kept: false, note: `Viewer ${terminal} was left in place: it can't be verified as this OpenRig's.` };
+    const killed = await this.deps.hc(["kill", terminal]);
+    return killed.exit === 0 ? { kept: false } : { kept: true, note: `Viewer ${terminal} could not be ended yet: ${killed.error?.message ?? `hc exited ${killed.exit}`}.` };
   }
 }
 

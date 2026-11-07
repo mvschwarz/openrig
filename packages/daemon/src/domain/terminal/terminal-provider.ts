@@ -98,6 +98,8 @@ export interface ProviderStatus {
   core?: { session: string; socket?: string };
   /** herdr-app: explicit statement of the shared herdr-core assumption between daemon and app window. */
   assumption?: string;
+  /** herdr-app: count of viewer starts whose hc run outcome was unknown and are still being tracked for cleanup, or "unknown" when the journal could not be read. */
+  pendingStarts?: number | "unknown";
   /** The provider server's identity, so a caller can tell whether it talks to the same server (Rex). */
   server?: { instanceId: string };
 }

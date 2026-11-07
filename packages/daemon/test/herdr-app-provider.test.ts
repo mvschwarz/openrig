@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HerdrAppProvider } from "../src/domain/terminal/herdr-app-provider.js";
+import { HerdrAppProvider, UNKNOWN_START_TTL_MS } from "../src/domain/terminal/herdr-app-provider.js";
 import { HerdrAppClientFiles } from "../src/domain/terminal/herdr-app-state.js";
 import { referencedTerminals, type LayoutNode } from "../src/domain/terminal/herdr-app-layout.js";
 import type { AppReply, HcResult, HcRunner } from "../src/domain/terminal/herdr-app-transport.js";
@@ -32,7 +32,11 @@ class World {
   terminals = new Map<string, { state: string; argv: string[]; labels: Record<string, string> }>();
   next = 10;
   failRun = new Set<number>();
+  failRunKind = "invalid_params";
+  timeoutRun = new Set<number>();
+  lateQueue: Array<(labelOverrides?: Record<string, string>) => string> = [];
   runs = 0;
+  clock = new Date("2026-11-07T00:00:00.000Z");
   ack: { revision: string; terminals: string[] } | null = null;
   tmuxCalls: string[][] = [];
   /** The process tree: the tmux client 4242 runs beneath the viewer's process 4000. */
@@ -74,11 +78,25 @@ class World {
     const [verb] = args;
     if (verb === "run") {
       this.runs++;
-      if (this.failRun.has(this.runs)) { this.log.push("run:failed"); return { exit: 1, json: null, stdout: "", error: { message: "spawn failed" } }; }
-      const address = `t${this.next++}`;
+      if (this.failRun.has(this.runs)) {
+        this.log.push("run:failed");
+        return { exit: 1, json: null, stdout: "", error: { kind: this.failRunKind, message: "spawn failed" } };
+      }
       const sep = args.indexOf("--");
+      const argv = args.slice(sep + 1);
       const labels = Object.fromEntries(args.flatMap((a, i) => a === "--label" ? [args[i + 1]!.split("=") as [string, string]] : []));
-      this.terminals.set(address, { state: "live", argv: args.slice(sep + 1), labels });
+      if (this.timeoutRun.has(this.runs)) {
+        this.log.push("run:timeout");
+        this.lateQueue.push((overrides = {}) => {
+          const address = `t${this.next++}`;
+          this.terminals.set(address, { state: "live", argv, labels: { ...labels, ...overrides } });
+          this.log.push(`run:late:${address}`);
+          return address;
+        });
+        return { exit: -1, json: null, stdout: "", error: { message: "hc timed out" } };
+      }
+      const address = `t${this.next++}`;
+      this.terminals.set(address, { state: "live", argv, labels });
       this.log.push(`run:${address}`);
       this.onRun?.();
       return { exit: 0, json: { address, state: "live" }, stdout: "" };
@@ -90,7 +108,14 @@ class World {
       return { exit: 0, json: { address: args[2], ...t, pid: 4000, foreground: { pid: 4000 } }, stdout: "" };
     }
     if (verb === "kill") { this.terminals.get(args[1]!)!.state = "finished"; this.log.push(`kill:${args[1]}`); return { exit: 0, json: null, stdout: "" }; }
-    if (verb === "ls") return { exit: 0, json: { terminals: [] }, stdout: "" };
+    if (verb === "ls") {
+      if (this.coreDown) return { exit: -1, json: null, stdout: "", error: { message: "timed out" } };
+      const wanted = args.flatMap((a, i) => a === "--label" ? [args[i + 1]!.split("=") as [string, string]] : []);
+      const terminals = [...this.terminals.entries()]
+        .filter(([, t]) => t.state === "live" && wanted.every(([k, v]) => t.labels[k] === v))
+        .map(([address, t]) => ({ address, ...t }));
+      return { exit: 0, json: { terminals }, stdout: "" };
+    }
     return { exit: 2, json: null, stdout: "" };
   };
 }
@@ -118,7 +143,7 @@ function makeProvider(opts: { ackTimeoutMs?: number; core?: { session: string; s
   const hc: HcRunner = Object.assign((args: string[]) => world.hc(args), opts.core ? { core: opts.core } : {});
   provider = new HerdrAppProvider({
     files, app: world.app(files) as never, hc, daemonInstance: "inst1", viewerCwd: join(home, "viewers"),
-    ensureMods: async () => ({ ok: true }), ackTimeoutMs: opts.ackTimeoutMs ?? 300, nonce: () => `n${++n}`,
+    ensureMods: async () => ({ ok: true }), ackTimeoutMs: opts.ackTimeoutMs ?? 300, nonce: () => `n${++n}`, now: () => world.clock,
     runTmux: async (argv) => {
       world.tmuxCalls.push(argv);
       world.log.push(`tmux:${argv.slice(3).join(" ")}`);
@@ -335,6 +360,12 @@ describe("HerdrAppProvider.status and core diagnostics", () => {
     const noAck = await provider.openView(composed([pane("dev.build@demo")]));
     expect(noAck.ok).toBe(true);
     expect(noAck.notes?.join(" ")).toContain('herdr-core session "herdr-app-sb" (socket /srv/core.sock)');
+
+    // 4. status() survives a corrupt journal and reports pendingStarts: "unknown"
+    writeFileSync(files.journalPath, "{corrupt json");
+    const corruptStatus = await provider.status();
+    expect(corruptStatus.available).toBe(true);
+    expect(corruptStatus.pendingStarts).toBe("unknown");
   });
 });
 
@@ -393,5 +424,111 @@ describe("HerdrAppProvider: every viewer it starts is ended or still tracked", (
     await provider.reconcile();
     expect(world.terminals.get("t10")!.state).toBe("finished");
     expect(await pending()).toEqual([]);
+  });
+
+  it("tracks a viewer start whose hc run outcome is unknown, and resolves or expires it safely", async () => {
+    // (a) run times out + ls empty -> viewer_start_failed, pendingEnds holds a terminal:null entry with the nonce
+    world.timeoutRun.add(1);
+    const failed = await provider.openView(composed([pane("dev.build@demo")]));
+    expect(failed.code).toBe("viewer_start_failed");
+    const stateA = await files.load();
+    expect(stateA.pendingEnds).toHaveLength(1);
+    expect(stateA.pendingEnds[0]).toMatchObject({ terminal: null, nonce: "n2", seat: "dev.build@demo" });
+    expect((await provider.status()).pendingStarts).toBe(1);
+
+    // (e) hc ls failing keeps the entry with a note
+    world.coreDown = true;
+    const downNotes = await provider.reconcile();
+    expect(downNotes.join(" ")).toContain("could not be checked");
+    expect((await files.load()).pendingEnds).toHaveLength(1);
+    world.coreDown = false;
+
+    // (b) the terminal appears later with matching labels+argv -> reconcile() kills it, pendingEnds empty
+    const lateAddr = world.lateQueue.shift()!();
+    expect(world.terminals.get(lateAddr)!.state).toBe("live");
+    await provider.reconcile();
+    expect(world.terminals.get(lateAddr)!.state).toBe("finished");
+    expect((await files.load()).pendingEnds).toEqual([]);
+    expect((await provider.status()).pendingStarts).toBe(0);
+
+    // (c) appears with another openrig.daemon label -> left running, note "can't be verified as this OpenRig's"
+    world.timeoutRun.add(world.runs + 1);
+    await provider.openView(composed([pane("dev.build@demo")]));
+    const foreignAddr = world.lateQueue.shift()!({ "openrig.daemon": "other-daemon" });
+    const foreignNotes = await provider.reconcile();
+    expect(world.terminals.get(foreignAddr)!.state).toBe("live");
+    expect(foreignNotes.join(" ")).toContain("can't be verified as this OpenRig's");
+    expect((await files.load()).pendingEnds).toEqual([]);
+
+    // (d) never appears, clock past UNKNOWN_START_TTL_MS -> entry dropped with note
+    world.timeoutRun.add(world.runs + 1);
+    await provider.openView(composed([pane("dev.build@demo")]));
+    world.lateQueue.shift(); // never spawns in core
+    world.clock = new Date(world.clock.getTime() + UNKNOWN_START_TTL_MS + 1_000);
+    const expiredNotes = await provider.reconcile();
+    expect(expiredNotes.join(" ")).toContain("dev.build@demo: its viewer never appeared in the daemon's herdr-core; no longer tracked.");
+    expect((await files.load()).pendingEnds).toEqual([]);
+
+    // (f) a definite pre-spawn hc run error (invalid_params / not_found / conflict) tracks nothing
+    for (const definiteKind of ["invalid_params", "not_found", "conflict"]) {
+      world.failRunKind = definiteKind;
+      world.failRun.add(world.runs + 1);
+      const definite = await provider.openView(composed([pane("dev.build@demo")]));
+      expect(definite.code).toBe("viewer_start_failed");
+      expect((await files.load()).pendingEnds).toEqual([]);
+    }
+
+    // (g) herdr-core's default 'internal' error kind (or any unknown kind) is treated as uncertain and tracked
+    world.failRunKind = "internal";
+    world.failRun.add(world.runs + 1);
+    const internalFail = await provider.openView(composed([pane("dev.build@demo")]));
+    expect(internalFail.code).toBe("viewer_start_failed");
+    const stateG = await files.load();
+    expect(stateG.pendingEnds).toHaveLength(1);
+    expect(stateG.pendingEnds[0]).toMatchObject({ terminal: null, seat: "dev.build@demo" });
+    world.clock = new Date(world.clock.getTime() + UNKNOWN_START_TTL_MS + 1_000);
+    await provider.reconcile();
+    expect((await files.load()).pendingEnds).toEqual([]);
+
+    // (h) a 'planned' viewer row left behind by a daemon crash mid-open is swept into pendingEnds on reconcile/open
+    // rather than rendered as a phantom rig-ended cell
+    const crashedState = await files.load();
+    crashedState.views.push({
+      id: "rv-crashed",
+      name: "crashed",
+      source: { view: "rig:demo", page: 0 },
+      createdAt: world.clock.toISOString(),
+      viewers: [{
+        cellId: "rv-crashed:dev.build@demo:n-crash",
+        seat: "dev.build@demo",
+        label: "dev.build · s1",
+        nonce: "n-crash",
+        argv: ["sh", "-c", "exec tmux attach -r -t =dev.build@demo", "openrig-tile", "dev.build@demo", "tmux"],
+        readOnly: false,
+        attach: "local",
+        terminal: null,
+        state: "planned",
+      }],
+    });
+    await files.save(crashedState);
+    world.terminals.set("t99", {
+      state: "live",
+      pid: 999,
+      argv: ["sh", "-c", "exec tmux attach -r -t =dev.build@demo", "openrig-tile", "dev.build@demo", "tmux"],
+      labels: {
+        "openrig.daemon": "inst1",
+        "openrig.role": "viewer",
+        "openrig.view": "rv-crashed",
+        "openrig.op": "n-crash",
+        "openrig.seat": "dev.build@demo",
+        "openrig.cell": "rv-crashed:dev.build@demo:n-crash",
+      },
+    });
+    expect((await provider.status()).pendingStarts).toBe(1);
+    await provider.reconcile();
+    expect(world.terminals.get("t99")!.state).toBe("finished");
+    const afterCrashReconcile = await files.load();
+    expect(afterCrashReconcile.views).toEqual([]);
+    expect(afterCrashReconcile.pendingEnds).toEqual([]);
   });
 });

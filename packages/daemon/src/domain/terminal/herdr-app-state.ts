@@ -25,8 +25,8 @@ export interface ViewerRecord {
   /** Interactive panes become writable at an explicit reveal; read-only panes never do. */
   readOnly: boolean;
   terminal: string | null;
-  /** planned: journalled, not confirmed started; live: its terminal is known; ended: written as an ended cell. */
-  state: "planned" | "live" | "ended";
+  /** planned: journalled, not confirmed started; start-unknown: hc run outcome unknown; live: its terminal is known; ended: written as an ended cell. */
+  state: "planned" | "start-unknown" | "live" | "ended";
 }
 
 export interface ViewRecord {
@@ -39,8 +39,16 @@ export interface ViewRecord {
   viewers: ViewerRecord[];
 }
 
-/** A viewer whose cell is gone from the file but whose end waits for the app's acknowledgement. */
-export interface PendingEnd { terminal: string; cellId: string; nonce: string; argv: string[]; revision: string }
+/** A viewer whose cell is gone from the file (or whose start was uncertain) waiting to be verified and ended. */
+export interface PendingEnd {
+  terminal: string | null;
+  seat?: string;
+  cellId: string;
+  nonce: string;
+  argv: string[];
+  revision: string;
+  since: string;
+}
 
 export interface ClientState {
   appHome: string;
@@ -80,7 +88,9 @@ export class HerdrAppClientFiles {
     const empty: ClientState = { appHome: path.resolve(this.appHome), base: null, views: [], revision: null, writtenSha: null, pendingEnds: [] };
     if (!text) return empty;
     const parsed = JSON.parse(text) as Partial<ClientState>;
-    return { ...empty, ...parsed, views: parsed.views ?? [], pendingEnds: parsed.pendingEnds ?? [] };
+    const now = new Date().toISOString();
+    const pendingEnds = (parsed.pendingEnds ?? []).map((p) => ({ ...p, since: p.since ?? now }));
+    return { ...empty, ...parsed, views: parsed.views ?? [], pendingEnds };
   }
 
   async save(state: ClientState): Promise<void> {
