@@ -94,6 +94,39 @@ describe("local v0 reconstruction reader", () => {
     expect(missing.issues[0]!.revision).toBe(fixture.base.id);
   });
 
+  it("reads a same-host cross-store composition without a relocation mapping", () => {
+    const otherStore = join(root, "slice-store"); mkdirSync(otherStore);
+    writeFileSync(join(otherStore, `${fixture.other.id}.json`), JSON.stringify(fixture.other));
+    const doc = seal({ ...fixture.composition, members: [{ store: otherStore, revision: fixture.other.id }] });
+    const result = read(save(doc), { mappings: [] });
+    expect(result.complete).toBe(true);
+    expect(result.nodes.map(node => node.subject)).toEqual(["group:example", "seat:helper"]);
+    expect(result.records[1]).toMatchObject({ sourceStore: otherStore, localStore: otherStore, revision: fixture.other.id });
+  });
+
+  it.each(["{", "1e2"])("charges malformed member reads before parsing %s and stops at the closure budget", input => {
+    const budget = 32 * 1024 * 1024, perFile = 8 * 1024 * 1024;
+    const ids = Array.from({ length: 6 }, (_, n) => sha(`invalid-member-${n}`));
+    const doc = seal({ ...fixture.composition, members: ids.map(revision => ({ store, revision })) });
+    const rootBytes = Buffer.byteLength(JSON.stringify(doc)); save(doc);
+    // Three near-limit members, then exactly the remaining budget; later members
+    // must not be opened. Neither corrupt JSON nor unsupported numbers are free IO.
+    const nearLimit = perFile - 1024;
+    for (let n = 0; n < ids.length; n++) {
+      const size = n === 3 ? budget - rootBytes - 3 * nearLimit : nearLimit;
+      expect(size).toBeLessThanOrEqual(perFile);
+      const bytes = Buffer.alloc(size, 32); bytes.write(input);
+      writeFileSync(join(store, `${ids[n]}.json`), bytes);
+    }
+    const result = read(doc.id);
+    expect(result.complete).toBe(false);
+    expect(result.closureBytesRead).toBe(budget);
+    expect(result.records.map(record => record.revision)).toEqual([doc.id]);
+    expect(result.issues.slice(0, 4).map(issue => issue.revision)).toEqual(ids.slice(0, 4));
+    expect(result.issues[4]).toMatchObject({ code: "closure_limit", revision: ids[4] });
+    expect(result.issues).toHaveLength(5);
+  });
+
   it("requires unambiguous explicit local mapping and preserves its provenance", () => {
     const file = join(root, "map.json"); writeFileSync(file, JSON.stringify(mappings()));
     expect(readStoreMappings(file)).toEqual(mappings());
