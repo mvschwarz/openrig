@@ -129,6 +129,7 @@ describe("SeatStatusService", () => {
       own: rigRepo.addNode(rig.id, "dev.own", { runtime: "codex" }),
       rel: rigRepo.addNode(rig.id, "dev.rel", { runtime: "codex" }),
       plain: rigRepo.addNode(rig.id, "dev.plain", { runtime: "claude-code" }),
+      pi: rigRepo.addNode(rig.id, "dev.pi", { runtime: "pi" }),
       term: rigRepo.addNode(rig.id, "dev.term", { runtime: "terminal" }),
     };
     for (const [name, node] of Object.entries(nodes)) sessionRegistry.registerSession(node.id, `dev-${name}@home-rig`);
@@ -144,6 +145,7 @@ describe("SeatStatusService", () => {
     expect(status("dev-rel@home-rig").runtime_home).toEqual({ variable: "CODEX_HOME", home: "/daemon/codex", source: "daemon",
       ignored: { source: "member", value: "rel/codex" } });
     expect(status("dev-plain@home-rig").runtime_home).toEqual({ variable: "CLAUDE_CONFIG_DIR", home: "/users/op/.claude", source: "native_default" });
+    expect(status("dev-pi@home-rig").runtime_home).toEqual({ variable: "PI_CODING_AGENT_DIR", home: null, source: "native_default" });
     expect(status("dev-term@home-rig")).not.toHaveProperty("runtime_home");
   });
 

@@ -100,6 +100,11 @@ export class SeatLaunchEnvironment {
     return resolveLaunchWrapperArgv(wrapper, this.sessionEnv.PATH ?? "", this.daemonCwd);
   }
 
+  /** The persisted account selection, also used to decide whether a bare launch fallback is safe. */
+  accountHome(nodeId: string, runtime: string): string | undefined {
+    return this.selectedAccountHome?.(nodeId, runtime);
+  }
+
   private rigBin(): string {
     const cli = realpathSync(this.cliPath ?? pairedCli());
     accessSync(cli, constants.X_OK);
@@ -126,7 +131,7 @@ export class SeatLaunchEnvironment {
     /** A Claude seat's own token step (claude-seat-token.ts), run before Claude in the staged subshell. A POSIX pane only:
      *  a caller whose command comes back without it knows the token wasn't applied. */
     claudeTokenStep?: string } = {}): Promise<string> {
-    const accountHome = target.accountHome !== undefined ? target.accountHome : (target.nodeId && target.runtime ? this.selectedAccountHome?.(target.nodeId, target.runtime) : undefined);
+    const accountHome = target.accountHome !== undefined ? target.accountHome : (target.nodeId && target.runtime ? this.accountHome(target.nodeId, target.runtime) : undefined);
     const clearing = target.accountHome === null;
     const wrapped = target.launchWrapper?.length ? target.launchWrapper : undefined;
     const configuredHome = clearing && target.nodeId && target.runtime ? this.selectedAccountHome?.(target.nodeId, target.runtime, true) : undefined;
@@ -178,6 +183,7 @@ export class SeatLaunchEnvironment {
       const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });
       if (target.codexCwd !== undefined && codexHome) env.CODEX_HOME = codexHome;
       if (accountHome && target.runtime === "claude-code") env.CLAUDE_CONFIG_DIR = accountHome;
+      if (accountHome && target.runtime === "pi") env.PI_CODING_AGENT_DIR = accountHome;
       // Classic Claude may be an rc alias or function, not a PATH executable.
       // Its caller sources the staged command in a pane-shell subshell. Leading
       // assignments preserve shell lookup; /usr/bin/env would bypass it.

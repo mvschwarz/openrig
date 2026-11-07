@@ -83,6 +83,16 @@ describe("withoutRuntimeHomes and claudeConfigRootFor", () => {
   });
 });
 
+it("resolves Pi member homes and clears a stored selection back to the configured home", () => {
+  const d = db({ rig: { PI_CODING_AGENT_DIR: "/pi/rig" }, members: { a: { PI_CODING_AGENT_DIR: "/pi/member" }, b: undefined } });
+  d.exec("ALTER TABLE nodes ADD COLUMN account_home TEXT; ALTER TABLE nodes ADD COLUMN runtime TEXT");
+  d.prepare("UPDATE nodes SET account_home = ?, runtime = 'pi' WHERE id = 'a'").run("/pi/account");
+  expect(effectiveRuntimeHome(d, "a", "pi", "/pi/daemon")).toBe("/pi/account");
+  expect(effectiveRuntimeHome(d, "a", "pi", "/pi/daemon", true)).toBe("/pi/member");
+  expect(seatRuntimeHome(d, "b", "pi")).toEqual({ home: "/pi/rig", source: "rig" });
+  expect(withoutRuntimeHomes({ PI_CODING_AGENT_DIR: "/pi/account", DEBUG: "1" })).toEqual({ DEBUG: "1" });
+});
+
 describe("declaredRuntimeHomes", () => {
   it("lists each distinct absolute home declared on members and rigs, once", () => {
     const d = db({ rig: { CODEX_HOME: "/homes/shared" },

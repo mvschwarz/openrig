@@ -5,12 +5,12 @@ import type Database from "better-sqlite3";
 import { parseStoredSeatEnv, type SeatEnv } from "./seat-env.js";
 
 /** The native variable that selects each runtime's home, and with it the account that home is logged in to. */
-export const RUNTIME_HOME_VAR = { "claude-code": "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME" } as const;
+export const RUNTIME_HOME_VAR = { "claude-code": "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME", pi: "PI_CODING_AGENT_DIR" } as const;
 export type HomeRuntime = keyof typeof RUNTIME_HOME_VAR;
 
 /** Provider environment excluded by an explicit isolated account-home selection. */
 export const ACCOUNT_HOME_PROVIDER_ENV = [...OUTRANKING_TOKEN_ENV, ...ANTHROPIC_PROFILE_ENV, "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
-  "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT", "OPENAI_PROJECT_ID", "AWS_BEARER_TOKEN_BEDROCK"] as const;
+  "OPENROUTER_API_KEY", "ZAI_API_KEY", "KIMI_API_KEY", "MINIMAX_API_KEY", "MISTRAL_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT", "OPENAI_PROJECT_ID", "AWS_BEARER_TOKEN_BEDROCK"] as const;
 
 export interface SeatRuntimeHome {
   /** The seat's own home: an absolute path its member, else its rig, declares in `env:`. */

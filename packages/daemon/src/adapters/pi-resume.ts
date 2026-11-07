@@ -134,13 +134,19 @@ export class PiResumeAdapter {
       ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
     });
 
+    let nodeId: string | undefined;
+    if (this.runtime === "pi" && this.options.seatLaunchEnvironment) {
+      try { nodeId = await this.tmux.getSessionEnv(tmuxSessionName, "OPENRIG_NODE_ID") ?? undefined; }
+      catch { return { ok: false, code: "resume_failed", message: "Pi resume could not read the seat identity; no account was selected." }; }
+      if (!nodeId) return { ok: false, code: "resume_failed", message: "Pi resume requires the seat's node identity to select its account." };
+    }
+    const accountHome = nodeId ? this.options.seatLaunchEnvironment?.accountHome(nodeId, this.runtime) : undefined;
     const command = this.runtime === "pi" && this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime })
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime, nodeId, accountHome })
       : cmd;
     // Short commands retain the direct path; long commands exec from a private script.
     let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
-    // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
-    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd) {
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd && accountHome === undefined) {
       textResult = await this.tmux.sendShellCommand(tmuxSessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
     }
     if (!textResult.ok) {

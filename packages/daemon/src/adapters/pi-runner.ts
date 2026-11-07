@@ -38,6 +38,24 @@ import {
   type PiRunnerState, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
 
+/** Bind the selected account's credentials while retaining the seat's own Pi resources. */
+export function preparePiAccount(agentDir: string, accountHome: string | undefined): void {
+  fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+  const marker = nodePath.join(agentDir, ".openrig-account");
+  const auth = nodePath.join(agentDir, "auth.json");
+  if (accountHome && fs.realpathSync(accountHome) !== fs.realpathSync(agentDir)) {
+    const source = nodePath.join(accountHome, "auth.json");
+    // Validate before removing the previous selection, so a bad account leaves it intact.
+    fs.accessSync(source, fs.constants.R_OK);
+    fs.rmSync(auth, { force: true });
+    fs.symlinkSync(source, auth);
+    fs.writeFileSync(marker, accountHome, { mode: 0o600 });
+  } else if (!accountHome && fs.existsSync(marker)) {
+    fs.rmSync(auth, { force: true });
+    fs.rmSync(marker);
+  }
+}
+
 // ── Submitted input boundaries ─────────────────────────────────────────────
 // Canonical TTY buffers can overflow before Node sees even the paste terminator.
 // Use Node's line editor in raw mode, with only paste framing handled here.
@@ -1229,6 +1247,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const paths = piSeatPaths(args.stateRoot, args.sessionName);
   fs.mkdirSync(paths.agentDir, { recursive: true });
   fs.mkdirSync(paths.sessionsDir, { recursive: true });
+  if (runtime === "pi") {
+    try { preparePiAccount(paths.agentDir, process.env.PI_CODING_AGENT_DIR); }
+    catch {
+      console.error(`${PI_RUNNER_ERROR_MARKER} Pi account preparation failed; check the selected account.`);
+      process.exitCode = 2;
+      return;
+    }
+  }
 
   const { catchUpSince } = prepareRunnerSidecar(
     {
