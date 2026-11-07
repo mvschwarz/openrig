@@ -71,11 +71,9 @@ and start `rig mcp serve --front-door` from the root `mcp.json`.
 
 - **No seat:** these apps can't set a seat for a plugin's server, so it starts with none. The exception is an app started
   from a shell where `OPENRIG_SESSION_NAME` (or the older `RIGGED_SESSION_NAME`) is set: its server acts as that seat.
-  - **What needs a seat:** with none, nothing your agent does is attributed to a seat. So queue operations that need an
-    author wait until one is set (OpenRig answers them with `actor_required`): handing work over and answering the team's
-    questions, for example.
-  - **What doesn't:** the missing seat doesn't restrict the server's other tools.
-  - `rig_whoami` says the server has no seat.
+  - **What needs a seat:** with none, OpenRig answers `actor_required` to the queue tools that change a task (create,
+    claim, update, hand off, unclaim and decide, which covers handing work over and answering the team's questions), to
+    chatroom send and to environment export. `rig_send` still sends, unsigned. `rig_whoami` says the server has no seat.
 - **One `openrig` server:** if something else in the app already provides an MCP server named `openrig` with your seat,
   use that one or the plugin's, not both.
 
