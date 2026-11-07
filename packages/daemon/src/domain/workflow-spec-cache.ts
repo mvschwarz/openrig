@@ -15,7 +15,7 @@ import { existsSync, readFileSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import { parse as parseYaml } from "yaml";
-import type { WorkflowSpec, WorkflowSpecRow } from "./workflow-types.js";
+import type { StartedWorkflowSpec, WorkflowSpec, WorkflowSpecRow } from "./workflow-types.js";
 import { WORKFLOW_AGENT_HARNESSES, WORKFLOW_EXIT_KINDS } from "./workflow-types.js";
 import { bindSpecToRig } from "./workflow-rig-placeholder.js";
 
@@ -797,11 +797,23 @@ export class WorkflowSpecCache {
     return row ? rowToWorkflowSpec(row) : null;
   }
 
-  /** The cached spec as one INSTANCE sees it: `member@{rig}` targets are
-   *  resolved against the instance's bound rig. Use this wherever a running
-   *  instance reads its roles; `getByNameVersion` keeps the literal `{rig}`. */
-  getForInstance(instance: { workflowName: string; workflowVersion: string; boundRig: string | null }): WorkflowSpecRow | null {
+  /** The spec as one INSTANCE sees it, with `member@{rig}` targets resolved against the instance's bound rig. Use this
+   *  wherever a running instance reads its roles; `getByNameVersion` keeps the literal `{rig}`.
+   *  The cache row is the instance's spec while it still comes from the file the instance started from, so an edit to
+   *  that file reaches the run (a resume re-resolves its owner from it). Once another file with the same id and version
+   *  has replaced the row, the instance runs the spec it started with instead (#2607). */
+  getForInstance(instance: { workflowName: string; workflowVersion: string; boundRig: string | null; startedSpec?: StartedWorkflowSpec | null }): WorkflowSpecRow | null {
     const row = this.getByNameVersion(instance.workflowName, instance.workflowVersion);
+    const started = instance.startedSpec;
+    if (started && (!row || row.sourcePath !== started.sourcePath)) {
+      const spec = started.spec;
+      return bindRowToRig({
+        specId: row?.specId ?? "", name: instance.workflowName, version: instance.workflowVersion,
+        purpose: spec.objective ?? null, targetRig: spec.target?.rig ?? null, spec,
+        coordinationTerminalTurnRule: spec.coordination_terminal_turn_rule ?? "hot_potato",
+        sourcePath: started.sourcePath, sourceHash: "", cachedAt: "",
+      }, instance.boundRig);
+    }
     return row ? bindRowToRig(row, instance.boundRig) : null;
   }
 

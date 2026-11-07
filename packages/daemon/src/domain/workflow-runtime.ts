@@ -740,6 +740,8 @@ export class WorkflowRuntime {
       const instance = this.instanceStore.create({
         workflowName: specRow.name,
         workflowVersion: specRow.version,
+        // #2607: the run keeps the spec it starts with and its file; another file with this id and version can't move it.
+        startedSpec: { sourcePath: specRow.sourcePath, spec: specRow.spec },
         createdBySession: input.createdBySession,
         initialFrontier: [],
         // R2 fix: set durable current_step_id at instantiate so the
