@@ -559,6 +559,29 @@ function removeEmptyFolders(root: string, dir: string): void {
   try { if (fs.readdirSync(dir).length === 0 && insideSeatStorageFolder(root, dir)) fs.rmdirSync(dir); } catch {}
 }
 
+/** Transfer overlapping loadout ownership before following can replace or remove those files.
+ * Persist the complete projection record first, so an interrupted transfer never loses ownership. */
+function adoptFollowingLoadoutFiles(paths: SeatSkillPaths, ids: string[], record: ProjectionRecord): ProjectionRecord {
+  let manifest: Record<string, unknown> & { skills: Array<Record<string, unknown>> };
+  try {
+    manifest = JSON.parse(fs.readFileSync(paths.manifestPath, "utf8"));
+    if (!manifest || !Array.isArray(manifest.skills)) return record;
+  } catch { return record; }
+  const targets = new Set(ids.map((id) => nodePath.resolve(paths.skillsRoot, id)));
+  const adopted = manifest.skills.filter((skill) => typeof skill?.target === "string" && targets.has(nodePath.resolve(skill.target)));
+  if (adopted.length === 0) return record;
+  const roots = adopted.map((skill) => nodePath.resolve(skill.target as string) + nodePath.sep);
+  const files = { ...record.files };
+  for (const [file, entry] of recordedSeatSkillFiles(paths)) {
+    if (roots.some((root) => file.startsWith(root))) files[file] = entry;
+  }
+  const transferred = { ...record, files };
+  writeProjections(paths.root, transferred);
+  writeInsideSeatStorage(paths.root, paths.manifestPath,
+    `${JSON.stringify({ ...manifest, skills: manifest.skills.filter((skill) => !adopted.includes(skill)) }, null, 2)}\n`);
+  return transferred;
+}
+
 /**
  * For a restore that keeps a seat's conversation, before its saved skills are put back: bring each following skill
  * (`on_restore: follow_source`) up to today's selection. A selected one is copied from its source as it is now; one newly
@@ -569,8 +592,9 @@ function removeEmptyFolders(root: string, dir: string): void {
  */
 export function followSeatSkills(paths: SeatSkillPaths, today: SeatSkillSelection): SeatSkillFollow {
   const out: SeatSkillFollow = { refreshed: [], added: [], removed: [], warnings: [] };
-  const record = readProjections(paths.projectionsPath);
+  let record = readProjections(paths.projectionsPath);
   if (today.following.length === 0 && Object.keys(record.following ?? {}).length === 0) return out; // nothing follows
+  record = adoptFollowingLoadoutFiles(paths, [...Object.keys(record.following ?? {}), ...today.following.map(({ id }) => id)], record);
   const files = { ...record.files };
   const following = { ...(record.following ?? {}) };
   const folderOf = (id: string) => nodePath.resolve(paths.skillsRoot, id);

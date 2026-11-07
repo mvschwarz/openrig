@@ -2,6 +2,7 @@
 // brings its seat back with its conversation; a seat's edit is still never overwritten.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs, { chmodSync, statSync, symlinkSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -226,6 +227,37 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
       entries: [{ category: "skill", effectiveId: "infra-review", absolutePath: sourceOf("infra-review") }] });
     expect(replay.skipEntryIds.has("infra-review")).toBe(true);
     expect(replay.warnings).toEqual(["Restore: infra-review not projected again: its following copy is missing and could not be restored"]);
+  });
+
+  it.each(["loadout", "both"])("reconciles %s ownership through an unchanged restore, source move, file removal and deselection", ownership => {
+    const { paths, sourceOf, launched, put, copy } = seat();
+    launched("review", { "SKILL.md": "v1", "removed.txt": "old reference" });
+    const original = sourceOf("review");
+    const untouched = { id: "other", sourceDir: sourceOf("other"), target: join(paths.skillsRoot, "other"), files: {} };
+    writeFileSync(paths.manifestPath, JSON.stringify({ topologySelections: { team: ["review"] }, skills: [untouched, {
+      id: "review", sourceDir: original, target: join(paths.skillsRoot, "review"),
+      files: Object.fromEntries([['SKILL.md', 'v1'], ['removed.txt', 'old reference']].map(([name, bytes]) =>
+        [name, createHash("sha256").update(bytes!).digest("hex")])),
+    }] }));
+    if (ownership === "loadout") writeFileSync(paths.projectionsPath, JSON.stringify({ files: {}, following: { review: { source: original } } }));
+    const selected = new Set(["review"]);
+    expect(followSeatSkills(paths, { selected, following: [{ id: "review", source: original }] }))
+      .toEqual({ refreshed: [], added: [], removed: [], warnings: [] });
+    expect(JSON.parse(readFileSync(paths.manifestPath, "utf8")))
+      .toEqual({ topologySelections: { team: ["review"] }, skills: [untouched] });
+    const moved = join(home, "moved-review");
+    put(join(moved, "SKILL.md"), "v2");
+    put(join(moved, "new.txt"), "new reference");
+    expect(followSeatSkills(paths, { selected, following: [{ id: "review", source: moved }] }).refreshed).toEqual(["review"]);
+    cleanSeatSkills(paths);
+    expect(rehydrateSeatSkills(paths).missing).toEqual([]);
+    expect(copy("review", "SKILL.md")).toBe("v2");
+    expect(copy("review", "new.txt")).toBe("new reference");
+    expect(existsSync(join(paths.skillsRoot, "review", "removed.txt"))).toBe(false);
+    expect(followSeatSkills(paths, { selected: new Set(), following: [] }).removed).toEqual(["review"]);
+    expect(rehydrateSeatSkills(paths).restored).toEqual([]);
+    expect(existsSync(join(paths.skillsRoot, "review"))).toBe(false);
+    expect(readFileSync(join(original, "removed.txt"), "utf8")).toBe("old reference");
   });
 
   it("keeps a copy the seat edited, or added a file to, and names it", () => {
