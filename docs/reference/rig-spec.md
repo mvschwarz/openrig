@@ -404,6 +404,22 @@ ask rules; help can prompt in that fallback. A helper that disappears or times o
 after launch cannot supply a decision, leaving Claude's remaining native rules
 in effect. The hook is a convenience policy, not a containment boundary.
 
+Claude sessions launched with a named `team` or `kernel` hook policy read the
+installed built-in lists on each Bash hook call. Replacing those files at the
+same path changes the hook's lists on its next call; native inline allowances
+remain as launched. Sessions launched with an encoded policy keep their launch
+lists. A session retaining a versioned runtime path continues to use the files
+at that path, so installing another version elsewhere does not change its hook.
+This does not reload all permission settings in a running session.
+
+An in-place rollback to a hook from before named policies has a different effect:
+that helper cannot read `team` or `kernel` and returns no hook decision. Lifecycle
+asks can then disappear under the native `Bash(rig:*)` allowance. Relaunch affected
+Claude sessions before relying on those asks after such a rollback. Native
+personal, project and managed restrictions are not removed. This applies when
+the rollback replaces the hook at the path a running named-policy session uses;
+it does not describe every rollback or sessions using a retained versioned path.
+
 Codex keeps `workspace-write` with its existing approval policy and receives the
 configured OpenRig workspace root plus its pod's shared state directory as
 additional writable directories. The team workspace preparer creates missing
