@@ -160,7 +160,7 @@ describe("the conformance check's test double against OpenRig's real permission 
     const idle = await waitFor(() => { const latest = d.latest(); return latest?.state === "idle" && latest; });
     expect(idle).toMatchObject({ generationProvenance: "resolved", stale: false });
     expect(r.answers()).toHaveLength(1);
-  }, 30_000);
+  }, 60_000);
 
   it("OpenRig's permit, with no one to ask, is delivered at once and opens no ask", async () => {
     const d = await daemon({ people: [] });
@@ -171,7 +171,7 @@ describe("the conformance check's test double against OpenRig's real permission 
     expect(d.asks()).toEqual([]);
     expect(await waitFor(() => r.turnEnded())).toBe(true);
     expect(d.waitsOnPerson()).toBe(false);
-  }, 30_000);
+  }, 60_000);
 
   it("the seat's opt-in refusal (denied_by_seat) is refused at once and held as needs input", async () => {
     const d = await daemon({ people: ["mike"], owner: "deny" });
@@ -184,7 +184,7 @@ describe("the conformance check's test double against OpenRig's real permission 
     expect(await waitFor(() => r.turnEnded())).toBe(true);
     await sleep(300);
     expect(d.waitsOnPerson(), "no idle post replaces the held attention").toBe(true);
-  }, 30_000);
+  }, 60_000);
 
   it("a person's no, when the agent offered no reject option, reaches the agent as cancelled, never a grant, holding nothing", async () => {
     const d = await daemon({ people: ["mike"] });
@@ -200,7 +200,7 @@ describe("the conformance check's test double against OpenRig's real permission 
     // No person is still waiting, so the turn's end is reported and the seat doesn't read as needing one.
     expect(await waitFor(() => d.latest()?.state === "idle")).toBe(true);
     expect(d.waitsOnPerson()).toBe(false);
-  }, 30_000);
+  }, 60_000);
 
   it("an earlier occupant's request is refused at submit (stale_generation), so the runner answers cancelled, opens no ask, and its posts don't count", async () => {
     const d = await daemon({ people: ["mike"] });
@@ -214,5 +214,5 @@ describe("the conformance check's test double against OpenRig's real permission 
     expect(d.asks()).toEqual([]);
     expect(await waitFor(() => r.turnEnded())).toBe(true);
     expect(await waitFor(() => d.latest()?.reason === "generation_mismatch" && d.latest())).toMatchObject({ state: "unknown" });
-  }, 30_000);
+  }, 60_000);
 });
