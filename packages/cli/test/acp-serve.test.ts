@@ -12,7 +12,7 @@ import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
 import { queueRoutes } from "../../daemon/src/routes/queue.js";
 import { DaemonClient } from "../src/client.js";
 import { daemonTeamQueue } from "../src/commands/acp.js";
-import { AUTH_METHOD_ID, serveAcpAgent, type AcpAgentOptions, type TeamConnection } from "../src/acp/agent-server.js";
+import { AUTH_METHOD_ID, serveAcpAgent, type AcpAgentOptions, type TeamConnection, type TeamQueue } from "../src/acp/agent-server.js";
 import { JsonRpcRequestError, StreamJsonRpcPeer } from "../src/acp/json-rpc-stdio.js";
 
 const CALLER = "human-ada@external";
@@ -46,13 +46,13 @@ const ends: PassThrough[] = [];
 afterEach(() => { for (const end of ends.splice(0)) end.end(); });
 
 /** A scripted ACP client wired to an in-process rig acp serve. */
-function connect(overrides: Partial<AcpAgentOptions> = {}, receiver: string | null = LEAD) {
+function connect(overrides: Partial<AcpAgentOptions> = {}, receiver: string | null = LEAD, wrap: (queue: TeamQueue) => TeamQueue = (q) => q) {
   const toAgent = new PassThrough();
   const fromAgent = new PassThrough();
   ends.push(toAgent);
   const out: string[] = [];
   fromAgent.on("data", (chunk: Buffer) => out.push(chunk.toString()));
-  const team: TeamConnection = { queue: daemonTeamQueue(new DaemonClient(url(), { sessionName: CALLER })), caller: CALLER, receiver: receiver ?? undefined };
+  const team: TeamConnection = { queue: wrap(daemonTeamQueue(new DaemonClient(url(), { sessionName: CALLER }))), caller: CALLER, receiver: receiver ?? undefined };
   const agent = new StreamJsonRpcPeer(toAgent, fromAgent);
   serveAcpAgent(agent, { connect: async () => team, version: "9.9.9-test", pollMs: 10, closed: agent.closed, ...overrides });
   const client = new StreamJsonRpcPeer(fromAgent, toAgent);
@@ -143,6 +143,73 @@ describe("rig acp serve", () => {
     expect(leadLines).toMatch(/Z lead@team · in-progress: reproduced on Safari 19/);
     expect(lastOf(next.qitem_id).status).toBe("completed");
     expect(messages(updates).at(-1)).toBe(`${IMPL} closed ${next.qitem_id} done.\n\nFixed in PR 123: the cookie lacked SameSite=None.`);
+  });
+
+  it("a handoff-and-complete passes the work on: the reply is the successor's result, not the first row's done", async () => {
+    const { client, updates } = connect({}, "front@team");
+    const sessionId = await open(client);
+    const turn = client.request("session/prompt", prompt(sessionId, "Upgrade the parser"));
+    const task = await until(() => rowsTo("front@team")[0], "the front row");
+    await move("front@team", `/api/queue/${task.qitem_id}/claim`, {});
+    await move("front@team", `/api/queue/${task.qitem_id}/handoff-and-complete`, { toSession: "back@team", transitionNote: "back owns the parser", nudge: false });
+    expect(db.prepare("SELECT state, closure_reason FROM queue_items WHERE qitem_id = ?").get(task.qitem_id)).toEqual({ state: "done", closure_reason: "handed_off_to" });
+    const next = await until(() => rowsTo("back@team")[0], "the back row");
+    await move("back@team", `/api/queue/${next.qitem_id}/claim`, {});
+    await move("back@team", `/api/queue/${next.qitem_id}/update`, { state: "done", closureReason: "no-follow-on", resolution: "Parser upgraded to 3.2." });
+    expect(await turn).toEqual({ stopReason: "end_turn" });
+    expect(updates.filter((u) => u.sessionUpdate === "tool_call").map((u) => u.toolCallId)).toEqual([task.qitem_id, next.qitem_id]);
+    expect(messages(updates).at(-1)).toBe(`back@team closed ${next.qitem_id} done.\n\nParser upgraded to 3.2.`);
+  });
+
+  it("the reply names the seat that closed the row: not its owner by default, nor one that wrote a note after the close", async () => {
+    // A slow poll, so the close and the later note both land before the agent reads the row again.
+    const { client, updates } = connect({ pollMs: 500 }, "closer@team");
+    const sessionId = await open(client);
+    const turn = client.request("session/prompt", prompt(sessionId, "Ship the hotfix"));
+    const task = await until(() => rowsTo("closer@team")[0], "the row");
+    // The lead closes its report's row: the closer is neither the row's owner nor the newest writer.
+    await move("closer@team", `/api/queue/${task.qitem_id}/claim`, {});
+    await move("lead@team", `/api/queue/${task.qitem_id}/update`, { state: "done", closureReason: "no-follow-on", resolution: "Hotfix shipped." });
+    await move("watcher@team", `/api/queue/${task.qitem_id}/update`, { transitionNote: "seen, thanks" });
+    const notes = db.prepare("SELECT actor_session FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid").all(task.qitem_id) as Array<{ actor_session: string }>;
+    expect(notes.at(-1)!.actor_session).toBe("watcher@team");
+    expect(await turn).toEqual({ stopReason: "end_turn" });
+    expect(messages(updates).at(-1)).toBe(`lead@team closed ${task.qitem_id} done.\n\nHotfix shipped.`);
+  });
+
+  it("a create whose answer is lost but whose row landed carries on with that row", async () => {
+    const lostAck = (q: TeamQueue): TeamQueue => ({ ...q, create: async (row) => { await q.create(row); throw new Error("socket hang up"); } });
+    const { client, updates } = connect({}, "acked@team", lostAck);
+    const sessionId = await open(client);
+    const turn = client.request("session/prompt", prompt(sessionId, "Rotate the logs"));
+    const task = await until(() => rowsTo("acked@team")[0], "the row");
+    await move("acked@team", `/api/queue/${task.qitem_id}/claim`, {});
+    await move("acked@team", `/api/queue/${task.qitem_id}/update`, { state: "done", closureReason: "no-follow-on", resolution: "Rotated." });
+    expect(await turn).toEqual({ stopReason: "end_turn" });
+    expect(rowsTo("acked@team")).toHaveLength(1);
+    expect(messages(updates).at(-1)).toBe(`acked@team closed ${task.qitem_id} done.\n\nRotated.`);
+  });
+
+  it("a create that can't be confirmed either way is named as unknown, and the next prompt names it", async () => {
+    let readbacks = 0;
+    const blind = (q: TeamQueue): TeamQueue => ({
+      ...q,
+      create: async (row) => { await q.create(row); throw new Error("socket hang up"); },
+      find: async (id) => { readbacks += 1; if (readbacks === 1) throw new Error("connect ECONNREFUSED"); return q.find(id); },
+    });
+    const { client, updates } = connect({}, "unsure@team", blind);
+    const sessionId = await open(client);
+    const error = await client.request("session/prompt", prompt(sessionId, "Archive March")).then(() => undefined, (e: unknown) => e);
+    const first = rowsTo("unsure@team")[0]!;
+    expect((error as JsonRpcRequestError).error).toMatchObject({ code: -32603, message: `Couldn't confirm ${first.qitem_id}: socket hang up` });
+    expect(messages(updates).at(-1)).toBe(`Sending ${first.qitem_id} to unsure@team wasn't confirmed (socket hang up), and it couldn't be read back: it may or may not have reached the team. Its state is unknown from here; a new prompt in this session names it, and \`rig queue show ${first.qitem_id}\` shows it if it exists.`);
+
+    const second = client.request("session/prompt", prompt(sessionId, "Archive March, please"));
+    const followUp = await until(() => rowsTo("unsure@team")[1], "the follow-up row");
+    expect(followUp.body).toContain(`Follows up on ${first.qitem_id} (pending).`);
+    expect(messages(updates)).toContain(`${first.qitem_id} is still pending with unsure@team. Sending this as a follow-up.\n\n`);
+    client.notify("session/cancel", { sessionId });
+    expect(await second).toEqual({ stopReason: "cancelled" });
   });
 
   it("cancel stops waiting, never the work; the next prompt is a follow-up that names the open item", async () => {
