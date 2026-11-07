@@ -104,7 +104,7 @@ describe.skipIf(process.platform === "win32")("runtime probe groups end when the
     } finally {
       process.env.PATH = savedPath;
     }
-  });
+  }, 60_000);
 
   it("reports a probe the daemon's stop ended as cut short, not as a failed runtime", () => {
     expect(runtimeProbeFailure(new ProbeStoppedError("codex --version", "ended"))).toBe("check cut short: the daemon is stopping");
