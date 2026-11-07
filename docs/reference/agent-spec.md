@@ -456,7 +456,7 @@ skills:
 
 A restore keeps the skills a seat was launched with. With `keep_saved`, it puts back the saved copy and never takes
 today's bytes from the source. With `follow_source`, before the seat's session starts, the restore reads the seat's agent
-spec as it is now, from the rig spec and folder the seat was launched from, and:
+spec as it is now, using the saved launch recipe and rig folder, and:
 
 - replaces the seat's copy with the source folder as it is now, and records it, so `rig down` removes it and the next
   restore puts it back as usual;

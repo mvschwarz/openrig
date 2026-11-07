@@ -415,10 +415,17 @@ export function seatSkillReplay(input: {
   const blocked = (target: string) => notPutBack.some((f) => f === target || f.startsWith(target + nodePath.sep));
   const kept = seatSkillsToKeep(input.entries, paths);
   const skipEntryIds = new Set(kept.keep);
+  const following = readProjections(paths.projectionsPath).following ?? {};
   const warnings = [...kept.warnings];
   for (const entry of input.entries) {
     if (entry.category !== "skill" || skipEntryIds.has(entry.effectiveId)) continue;
     const target = nodePath.resolve(paths.skillsRoot, entry.effectiveId);
+    // Reconciliation already decided a following skill's contents, including its absence. An older startup plan
+    // must not recreate it, even if today's spec becomes unavailable on a later restore.
+    if (following[entry.effectiveId] && !lexists(target)) {
+      skipEntryIds.add(entry.effectiveId);
+      continue;
+    }
     if (blocked(target)) {
       skipEntryIds.add(entry.effectiveId);
       warnings.push(`Restore: ${target} not projected again: its recorded source is gone or has changed`);
@@ -624,8 +631,8 @@ export function followSeatSkills(paths: SeatSkillPaths, today: SeatSkillSelectio
     const dir = folderOf(id);
     const why = notOurs(dir);
     if (why) { kept(dir, `${why}, and it is no longer selected`); continue; }
+    // Keep the following policy after removal: an older saved startup plan must not replay this skill later.
     clear(dir);
-    delete following[id];
     out.removed.push(id);
   }
 

@@ -517,6 +517,25 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     expect(JSON.stringify(result)).toContain("Restore: test.c keeps its saved skills: today's selection can't be read (agent.yaml not found)");
   });
 
+  it("fresh restore does not replay a following skill that today's selection removed", async () => {
+    const src = join(root, "src", "infra-review");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, "SKILL.md"), "old skill\n");
+    const h = restoreHarness([{ category: "skill", effectiveId: "infra-review", absolutePath: src, onRestore: "follow_source" }], undefined,
+      { fresh: true, realFs: true, seatSkillSelection: async () => ({ ok: true, selection: { selected: new Set(), following: [] } }) });
+    const seat = seatSkillPaths({ rigId: h.rigId, logicalId: "test.c", runtime: "claude-code" });
+    ensureSeatSkillPlugin(seat);
+    const file = join(seat.skillsRoot, "infra-review", "SKILL.md");
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, "old skill\n");
+    recordSeatSkillWrite(seat.skillsRoot, file, join(src, "SKILL.md"), "old skill\n");
+    recordSeatSkillFollowing(seat.skillsRoot, "infra-review", src);
+    const result = await h.run();
+    expect(result).toMatchObject({ ok: true, result: { nodes: [{ status: "fresh-primed" }] } });
+    expect(h.projected).not.toContain("infra-review");
+    expect(existsSync(file)).toBe(false);
+  });
+
   it("fresh restore, end to end: a startup-file skill the person edited is kept through the real startup install", async () => {
     const src = join(root, "src-fresh", "orient", "SKILL.md");
     mkdirSync(join(src, ".."), { recursive: true });

@@ -5,7 +5,7 @@ import { chmodSync, statSync, existsSync, mkdirSync, mkdtempSync, readFileSync, 
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  cleanSeatSkills, ensureSeatSkillPlugin, followSeatSkills, recordSeatSkillFollowing, recordSeatSkillWrite, rehydrateSeatSkills, seatSkillPaths,
+  cleanSeatSkills, ensureSeatSkillPlugin, followSeatSkills, recordSeatSkillFollowing, recordSeatSkillWrite, rehydrateSeatSkills, seatSkillPaths, seatSkillReplay,
 } from "../src/domain/seat-skill-storage.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
@@ -165,7 +165,7 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
   });
 
   it("removes a following skill the profile no longer selects while unchanged; an edited one is kept", () => {
-    const { paths, put, launched } = seat();
+    const { paths, sourceOf, put, launched } = seat();
     launched("aws-cdk", { "SKILL.md": "cdk", "scripts/synth.sh": "synth" });
     launched("github-oidc-aws", { "SKILL.md": "oidc" });
     put(join(paths.skillsRoot, "github-oidc-aws", "SKILL.md"), "the seat's edit");
@@ -179,6 +179,11 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
     // Nothing of the removed skill is left for a later restore to put back.
     cleanSeatSkills(paths);
     expect(rehydrateSeatSkills(paths).restored).toEqual([]);
+    // No spec resolution is needed to keep a previously removed skill out of an older startup plan.
+    expect(seatSkillReplay({ paths, entries: [{ category: "skill", effectiveId: "aws-cdk", absolutePath: sourceOf("aws-cdk") }],
+      files: [], rehydration: { missing: [], refused: [] } }).skipEntryIds).toContain("aws-cdk");
+    // A later fresh restore may still carry the old startup plan; keep suppressing its removed entry.
+    expect(followSeatSkills(paths, { selected: new Set(), following: [] }).removed).toEqual(["aws-cdk"]);
   });
 
   it("leaves skills that keep their saved copy alone, selected or not, and stops following one switched to keep_saved", () => {
