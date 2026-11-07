@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import ts from "typescript";
 import fs from "node:fs";
 import os from "node:os";
+import module from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveBinEntry, resolveNodeReexecBinary, run } from "../src/bin-wrapper.js";
@@ -17,7 +18,7 @@ describe("bin-wrapper", () => {
     }
   });
 
-  it.each([
+  it.skipIf(!module.getCompileCacheDir || !module.enableCompileCache).each([
     { args: [], explicitCache: false, expected: false },
     { args: ["--version"], explicitCache: false, expected: true },
     { args: [], explicitCache: true, expected: true },
