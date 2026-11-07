@@ -19,7 +19,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { DaemonClient } from "./client.js";
-import { createMcpServer, type McpAccess } from "./mcp-server.js";
+import { createMcpServer, mintUnknownSender, type McpAccess, type UnfilledSeat } from "./mcp-server.js";
 import { getOpenRigHome } from "./openrig-compat.js";
 import { MCP_PRESENCE_FILE, presenceRecorder } from "./mcp-presence.js";
 import { resolveRigHandle } from "./rig-handle.js";
@@ -314,6 +314,8 @@ export type McpHttpOptions = {
   taskDestination?: string;
   /** rig mcp serve --front-door: a caller that isn't external gets the front-door instructions, not the member workflow. */
   frontDoor?: boolean;
+  /** The seat value rig mcp serve dropped as empty or unfilled, which rig_whoami names to a caller with no seat. */
+  unfilledSeat?: UnfilledSeat;
   /** With grantService: OAuth discovery for clients that sign in with OAuth. The public resource this server is reached
    *  as and the authorization server that issues its keys, both served exactly as given. */
   oauth?: { resource: string; issuer: string };
@@ -387,13 +389,16 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   };
   // One handler for both protocol revisions: a request carrying 2026-07-28's per-request envelope is served as that
   // revision, anything else (initialize and the rest of 2025) statelessly as before. Each request gets a fresh server for
-  // the caller decided below, handed over as the request's authInfo.
+  // the caller decided below, handed over as the request's authInfo. A caller with no seat writes as this process's one
+  // unknown sender, so its later requests carry the label rig_whoami named and a same-id create retry matches.
+  const unknownSender = mintUnknownSender();
   const mcpHandler = createMcpHandler(({ authInfo }) => {
     const caller = (authInfo?.extra as { caller?: RequestCaller } | undefined)?.caller;
     // Never a default seat: a request reaches the handler only with its caller decided.
     if (!caller) throw new Error("a request reached the MCP handler without its caller");
     return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access,
-      taskDestination: opts.taskDestination, presenceFile: () => presenceFile, frontDoor: opts.frontDoor === true });
+      taskDestination: opts.taskDestination, presenceFile: () => presenceFile, frontDoor: opts.frontDoor === true,
+      unknownSender, ...(opts.unfilledSeat ? { unfilledSeat: opts.unfilledSeat } : {}) });
   });
   const serveMcp = toNodeHandler(mcpHandler);
   const bearer = (req: http.IncomingMessage): string | undefined => /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? "")?.[1];

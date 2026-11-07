@@ -10,7 +10,9 @@ on an OpenRig team load `openrig-core` instead.
 
 - **The MCP server entry, in two forms:**
   - **In the Claude Code manifest:** `rig mcp serve --front-door`, acting as the seat you set in the plugin's settings.
-    Claude Code substitutes that seat into the server's environment.
+    Claude Code substitutes that seat into the server's environment. An app that passes the seat on unfilled
+    (`${user_config.seat}`) or empty gets a server with no seat (see "No seat" below); it never acts as a seat named
+    after the placeholder.
   - **In the root `plugin.json` and `mcp.json`** (the Agent Plugins 1.0 format, which VS Code, Copilot CLI and Cursor
     read): the same command with no seat. That format allows no per-person values, so it can't carry one. Claude Code
     ignores these root files and runs only its own entry. Cursor reads them because `.cursor-plugin/plugin.json`, which
@@ -74,10 +76,14 @@ server, `rig mcp serve --front-door`, from the root `mcp.json`, and should load 
 
 - **No seat:** these apps can't set a seat for a plugin's server, so it starts with none. The exception is an app started
   from a shell where `OPENRIG_SESSION_NAME` (or the older `RIGGED_SESSION_NAME`) is set: its server acts as that seat.
-  - **What needs a seat:** with none, OpenRig answers `actor_required` to the queue tools that change a task (create,
-    claim, update, hand off, unclaim and decide, which covers handing work over and answering the team's questions) and
-    to chatroom send. Listing the questions sent to you (`rig_queue_list` with `owned` or `mine`) needs the seat too.
-    `rig_send` still sends, unsigned. `rig_whoami` says the server has no seat.
+  - **What goes through without one:** messages (`rig_send`), new tasks (`rig_queue_create`) and chat
+    (`rig_chatroom_send`) reach the team as an unknown sender, `unknown-mcp-` and eight hex digits, one per server. Each
+    opens with a note saying why there's no seat and what the app's MCP client says it is. There's no return address,
+    so your agent follows a task it created by its id (`rig_queue_show`). `rig_whoami` says why there's no seat and
+    names the unknown sender.
+  - **What needs a seat:** OpenRig answers `actor_required` to claim, update, hand off, unclaim and decide, which covers
+    recording an answer to the team's questions. Listing the questions sent to you (`rig_queue_list` with `owned` or
+    `mine`) needs the seat too. Set one to get the team's questions and replies.
   - Environment export needs an HTTP work grant, which a plugin's local server never has.
 - **One `openrig` server:** if something else in the app already provides an MCP server named `openrig` with your seat,
   use that one or the plugin's, not both.
@@ -87,5 +93,5 @@ server, `rig mcp serve --front-door`, from the root `mcp.json`, and should load 
 - It adds no panel to the app, and nothing wakes your chat when the team finishes: ask your agent to check.
 - Everyone using the app on this machine acts as the seat it names.
 - It reaches a team on this machine.
-- **Outside Claude Code and Codex,** it can't hand work over or answer the team's questions until a seat is set: see "No seat"
-  above.
+- **Outside Claude Code and Codex,** until a seat is set, it hands the team work only as an unknown sender with no return
+  address, and it can't record answers to the team's questions: see "No seat" above.
