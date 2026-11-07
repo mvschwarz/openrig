@@ -1,7 +1,7 @@
 // A skill whose resource says `on_restore: follow_source` takes today's bytes and today's selection when a restore
 // brings its seat back with its conversation; a seat's edit is still never overwritten.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, statSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -86,6 +86,27 @@ describe("a restore brings a following skill's copy up to its source, and keeps 
       .toEqual({ refreshed: [], added: [], removed: [], warnings: [] });
     expect(rehydrateSeatSkills(paths).restored).toEqual([join(paths.skillsRoot, "infra-review", "SKILL.md")]);
     expect(copy("infra-review", "SKILL.md")).toBe("v1");
+  });
+
+  it("records a moved source even when its bytes are identical, so down can rehydrate it", () => {
+    const { paths, sourceOf, put, launched, copy } = seat();
+    launched("infra-review", { "SKILL.md": "v1" });
+    const moved = join(home, "moved");
+    put(join(moved, "SKILL.md"), "v1");
+    followSeatSkills(paths, { selected: new Set(["infra-review"]), following: [{ id: "infra-review", source: moved }] });
+    rmSync(sourceOf("infra-review"), { recursive: true });
+    expect(cleanSeatSkills(paths).kept).toEqual([]);
+    expect(rehydrateSeatSkills(paths).missing).toEqual([]);
+    expect(copy("infra-review", "SKILL.md")).toBe("v1");
+  });
+
+  it("takes an executable-mode change even when a script's bytes are identical", () => {
+    const { paths, sourceOf, launched } = seat();
+    launched("infra-review", { "SKILL.md": "v1", "scripts/check.sh": "exit 0" });
+    chmodSync(join(sourceOf("infra-review"), "scripts/check.sh"), 0o755);
+    chmodSync(join(paths.skillsRoot, "infra-review", "scripts/check.sh"), 0o644);
+    followSeatSkills(paths, { selected: new Set(["infra-review"]), following: [{ id: "infra-review", source: sourceOf("infra-review") }] });
+    expect(statSync(join(paths.skillsRoot, "infra-review", "scripts/check.sh")).mode & 0o777).toBe(0o755);
   });
 
   it("keeps a copy the seat edited, or added a file to, and names it", () => {

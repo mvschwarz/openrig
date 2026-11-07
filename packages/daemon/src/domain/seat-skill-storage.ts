@@ -600,7 +600,12 @@ export function followSeatSkills(paths: SeatSkillPaths, today: SeatSkillSelectio
     const before = recordedBelow(dir);
     following[id] = { source: sourceDir };
     const same = before.length === tree.length
-      && tree.every(({ rel, bytes }) => files[nodePath.join(dir, rel)]?.sha256 === sha256(bytes));
+      && tree.every(({ rel, bytes, mode }) => {
+        const file = nodePath.join(dir, rel);
+        return files[file]?.sha256 === sha256(bytes)
+          && files[file]?.source === nodePath.join(sourceDir, rel)
+          && (!lexists(file) || (fs.statSync(file).mode & 0o777) === mode);
+      });
     if (same) continue; // the saved copy is today's; the usual rehydration puts back whatever rig down removed
     clear(dir);
     for (const { rel, bytes, mode } of tree) {
