@@ -363,6 +363,9 @@ export type RigEvent =
 export type PersistedEvent = RigEvent & {
   seq: number;
   createdAt: string;
+  /** Set on an event delivered only in memory (EventBus.publishTransient): never stored, never replayed. Its `seq` is
+   *  the seq of the stored event that caused it, not a seq of its own. */
+  transient?: true;
 };
 
 // -- Composite types --

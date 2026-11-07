@@ -441,13 +441,16 @@ export class ViewProjector {
    * Used by routes/views.ts to emit view.changed when underlying state
    * changes. Phase B does not auto-evaluate; callers (route SSE handlers)
    * subscribe to event-bus events and trigger this notify.
+   *
+   * view.changed is transient: delivered to the live subscribers (the view SSE streams) and never stored, so it costs
+   * no row in the events table. `causeSeq` is the seq of the stored event that caused it (the SSE id it goes out with).
    */
-  notifyViewChanged(viewName: string, cause: string): void {
-    this.eventBus.persistWithinTransaction({
+  notifyViewChanged(viewName: string, cause: string, causeSeq?: number): void {
+    this.eventBus.publishTransient({
       type: "view.changed",
       viewName,
       cause,
-    });
+    }, causeSeq);
   }
 
   private getCustomViewByIdOrThrow(viewId: string): CustomView {
