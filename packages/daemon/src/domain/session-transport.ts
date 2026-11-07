@@ -2904,7 +2904,10 @@ export class SessionTransport {
       let failure = "";
       const failed = (message: string) => { failure = ` Leaving it failed: ${message.trim().replace(/\s+/g, " ").replace(/\.$/, "")}.`; };
       try {
-        const left = typeof this.tmuxAdapter.cancelPaneMode === "function" ? await this.tmuxAdapter.cancelPaneMode(readTarget) : undefined;
+        // Leave through the seat's address, as the text and Enter writes do; the guard writes to its bound pane. A raw
+        // pane id can match a stale binding elsewhere (tmux reuses ids after a server restart), and the guard refuses an
+        // ambiguous target before writing anything, so the mode was never left.
+        const left = typeof this.tmuxAdapter.cancelPaneMode === "function" ? await this.tmuxAdapter.cancelPaneMode(sessionName) : undefined;
         if (left && !left.ok) failed(left.message);
       } catch (error) { failed(error instanceof Error ? error.message : String(error)); }
       if (await readPaneInMode() !== true) return null;

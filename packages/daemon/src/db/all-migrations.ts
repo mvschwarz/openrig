@@ -1,3 +1,4 @@
+import { piAccountSwitchesSchema } from "./migrations/151_pi_account_switches.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
@@ -303,4 +304,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   outboxDispatchedIndexSchema,
   streamIntakeCursorSchema,
   nodeLaunchWrapperSchema,
+  piAccountSwitchesSchema,
 ];
