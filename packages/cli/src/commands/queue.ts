@@ -15,6 +15,7 @@ import { loadHostBindings } from "../host-bindings.js";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
+import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "../queue-artifact.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -1246,7 +1247,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
     .option("--wake-after <duration>", "For state=blocked: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
     .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
-    .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done)")
+    .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
     .option("--note <text>", "Transition note for the audit log")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
@@ -1696,6 +1697,47 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           console.error(`… (bounded preview — complete body is ${bodyBytes} bytes; full record ${view.fullJsonBytes} JSON bytes: ${fullCommand})`);
         }
         if (compact && compact.emptyOmitted.length > 0) console.error(showEmptyNotice(compact.emptyOmitted, fullCommand));
+      });
+    });
+
+  cmd
+    .command("artifact <qitemId>")
+    .description("Read a qitem's evidenceRef through the daemon's shared roots; a code-result manifest also comes back parsed as codeResult")
+    .option("--root <name>", "The shared root a relative evidenceRef is under")
+    .option("--json", "JSON output for agents")
+    .action(async (qitemId: string, opts: { root?: string; json?: boolean }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const json = opts.json ?? false;
+        const item = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}`);
+        if (item.status >= 400) { await printQueueItemResult(client, qitemId, json, item.data, item.status); return; }
+        const ref = ((item.data ?? {}) as { evidenceRef?: unknown }).evidenceRef;
+        const rootsRes = await client.get<{ roots?: SharedRoot[] }>("/api/files/roots");
+        if (rootsRes.status >= 400) { printResult(json, rootsRes.data, rootsRes.status); return; }
+        const roots = rootsRes.data?.roots ?? [];
+        // The same rule as rig_artifact_read: only a file in a shared root is read, through the daemon.
+        const plan = planItemArtifact(ref, roots, opts.root);
+        if ("unavailable" in plan) {
+          if (json) console.log(JSON.stringify({ available: false, qitemId, reason: plan.unavailable, evidenceRef: typeof ref === "string" ? ref : null, roots: roots.map((entry) => entry.name) }));
+          else console.error(`${qitemId}: ${plan.unavailable}`);
+          process.exitCode = 1;
+          return;
+        }
+        const res = await client.get<FileRead>(`/api/files/read?${new URLSearchParams({ root: plan.read.root, path: plan.read.path }).toString()}`);
+        if (res.status >= 400) { printResult(json, res.data, res.status); return; }
+        const read = res.data ?? {};
+        const parsed = codeResultOf(read);
+        if (json) {
+          console.log(JSON.stringify({ available: true, qitemId, root: read.root, path: read.path, size: read.size, mtime: read.mtime, binary: read.binary === true,
+            ...(read.binary ? {} : { text: read.content ?? "" }), truncated: read.truncated === true, ...parsed }));
+          return;
+        }
+        if (read.binary) console.log(`A binary file (${read.root}:${read.path}): not shown as text.`);
+        else process.stdout.write(read.content ?? "");
+        // Notices go to stderr, so stdout stays the file.
+        if (parsed && "codeResult" in parsed) console.error(`code result: ${parsed.codeResult.repo} ${parsed.codeResult.base}..${parsed.codeResult.revision}${parsed.codeResult.paths.length ? ` (${parsed.codeResult.paths.length} paths)` : ""}`);
+        else if (parsed) console.error(parsed.codeResultIssue);
+        if (read.truncated) console.error(`… cut at ${read.truncatedAtBytes} of ${read.totalBytes} bytes, as the daemon reads it`);
       });
     });
 
