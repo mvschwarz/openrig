@@ -109,26 +109,25 @@ export function cursorPositionEscape(x: number, y: number): string {
  * exact same rows tmux has it - never a relative append that drifts as content
  * scrolls. Normalizes CRLF, drops one trailing print newline, and (when a pane
  * height is known and the capture is taller) keeps only the last `height` rows.
- * Captured SGR stays intact; reset before painting and after each row so it cannot leak.
+ * SGR carries across captured rows. Replay skipped rows' SGR, and reset only at the paint boundaries.
  */
 export function screenSnapshotEscape(
   snapshot: string,
   cursor: { x: number; y: number; height?: number } | null,
+  priorRows = "",
 ): string {
   const normalized = snapshot.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const withoutTrailingPrintNewline = normalized.endsWith("\n")
     ? normalized.slice(0, -1)
     : normalized;
   const rows = withoutTrailingPrintNewline.split("\n");
-  const visibleRows = cursor?.height && rows.length > cursor.height
-    ? rows.slice(rows.length - cursor.height)
-    : rows;
-
-  const paintedRows = visibleRows
-    .map((row, index) => `\x1b[${index + 1};1H${row}\x1b[0m`)
+  const firstRow = cursor?.height ? Math.max(0, rows.length - cursor.height) : 0;
+  const priorStyle = `${priorRows}\n${rows.slice(0, firstRow).join("\n")}`.match(/\x1b\[[0-9;:]*m/g)?.join("") ?? "";
+  const paintedRows = rows.slice(firstRow)
+    .map((row, index) => `\x1b[${index + 1};1H${row}`)
     .join("");
 
-  return `\x1b[2J\x1b[0m${paintedRows}${cursor ? cursorPositionEscape(cursor.x, cursor.y) : "\x1b[H"}`;
+  return `\x1b[0m\x1b[2J${priorStyle}${paintedRows}\x1b[0m${cursor ? cursorPositionEscape(cursor.x, cursor.y) : "\x1b[H"}`;
 }
 
 /**
@@ -350,11 +349,10 @@ export class TerminalSessionBroker {
     // element is the true live-bottom row and the offset stays honest.
     if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
     const bottom = lines.length - clamped; // exclusive end: the window sits `offset` up
-    const window = bottom <= this.rows
-      ? lines.slice(0, this.rows) // scrolled at/past the top of history: oldest screenful
-      : lines.slice(bottom - this.rows, bottom);
+    const firstRow = Math.max(0, bottom - this.rows);
+    const window = lines.slice(firstRow, firstRow + this.rows);
     try {
-      sub.send(screenSnapshotEscape(window.join("\n"), null));
+      sub.send(screenSnapshotEscape(window.join("\n"), null, lines.slice(0, firstRow).join("\n")));
     } catch { /* dead subscriber */ }
   }
 

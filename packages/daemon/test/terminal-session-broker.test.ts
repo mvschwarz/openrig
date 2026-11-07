@@ -64,7 +64,7 @@ describe("cursor-safe seed helpers", () => {
 
   it("screenSnapshotEscape paints each row with an ABSOLUTE move (no row drift)", () => {
     const out = screenSnapshotEscape("alpha\nbeta\ngamma", { x: 2, y: 1, height: 24 });
-    expect(out.startsWith("\x1b[2J")).toBe(true);
+    expect(out.startsWith("\x1b[0m\x1b[2J")).toBe(true);
     expect(out).toContain("\x1b[1;1Halpha");
     expect(out).toContain("\x1b[2;1Hbeta");
     expect(out).toContain("\x1b[3;1Hgamma");
@@ -79,13 +79,25 @@ describe("cursor-safe seed helpers", () => {
     expect(out).toContain("\x1b[2;1Hr5");
   });
 
-  it("preserves dim, bold and colour while resetting every painted row", () => {
+  it("preserves dim, bold and colour across rows and resets only at paint boundaries", () => {
     const out = screenSnapshotEscape("\x1b[2msuggestion\n\x1b[1;31mwarning\nplain", null);
-    expect(out).toBe("\x1b[2J\x1b[0m\x1b[1;1H\x1b[2msuggestion\x1b[0m\x1b[2;1H\x1b[1;31mwarning\x1b[0m\x1b[3;1Hplain\x1b[0m\x1b[H");
+    expect(out).toBe("\x1b[0m\x1b[2J\x1b[1;1H\x1b[2msuggestion\x1b[2;1H\x1b[1;31mwarning\x1b[3;1Hplain\x1b[0m\x1b[H");
+  });
+
+  it.each(["\x1b[2m", "\x1b[44m"])("carries %j across a row with no SGR of its own", (sgr) => {
+    expect(screenSnapshotEscape(`${sgr}first\nsecond\x1b[0m`, null))
+      .toBe(`\x1b[0m\x1b[2J\x1b[1;1H${sgr}first\x1b[2;1Hsecond\x1b[0m\x1b[0m\x1b[H`);
+  });
+
+  it("replays cumulative dim, bold and colour when height cropping drops their rows", () => {
+    const out = screenSnapshotEscape("\x1b[2mold\n\x1b[1;31mmiddle\n\x1b[32mvisible\nlast\x1b[0m", { x: 0, y: 1, height: 2 });
+    expect(out).toBe("\x1b[0m\x1b[2J\x1b[2m\x1b[1;31m\x1b[1;1H\x1b[32mvisible\x1b[2;1Hlast\x1b[0m\x1b[0m\x1b[2;1H");
+    expect(out).not.toContain("old");
+    expect(out).not.toContain("middle");
   });
 
   it("normalizes CRLF and drops exactly one trailing newline; null cursor homes", () => {
-    expect(screenSnapshotEscape("a\r\nb\r\n", null)).toBe("\x1b[2J\x1b[0m\x1b[1;1Ha\x1b[0m\x1b[2;1Hb\x1b[0m\x1b[H");
+    expect(screenSnapshotEscape("a\r\nb\r\n", null)).toBe("\x1b[0m\x1b[2J\x1b[1;1Ha\x1b[2;1Hb\x1b[0m\x1b[H");
   });
 });
 
@@ -266,7 +278,7 @@ describe("TerminalSessionBroker", () => {
     await broker.attach(a);
 
     expect(a.received[0]).toBe(screenSnapshotEscape("line one\nline two", { x: 3, y: 1, height: 40 }));
-    expect(a.received[0]!.startsWith("\x1b[2J")).toBe(true);
+    expect(a.received[0]!.startsWith("\x1b[0m\x1b[2J")).toBe(true);
   });
 
   it("test 8b: EACH subscriber gets its own seed (2nd subscriber seeded too, no shared pipe)", async () => {
@@ -687,6 +699,17 @@ describe("terminal snapshot styling (#2598)", () => {
     expect(sub.received.at(-1)).not.toContain("live");
   });
 
+  it("replays dim from above the first visible scroll-back row", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
+      capturePaneContent: async () => "\x1b[2molder\ncontinued\nlast\x1b[0m\nlive\nbottom",
+    }), { rows: 2 }));
+    const sub = makeSub();
+    await broker.attach(sub);
+    await broker.scroll(sub, 2);
+    expect(sub.received.at(-1)).toBe("\x1b[0m\x1b[2J\x1b[2m\x1b[1;1Hcontinued\x1b[2;1Hlast\x1b[0m\x1b[0m\x1b[H");
+    expect(sub.received.at(-1)).not.toContain("older");
+  });
+
   it("keeps a dim suggestion when returning from scroll-back to live", async () => {
     const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({
       capturePaneScreen: captureScreen,
@@ -736,7 +759,7 @@ describe("TerminalSessionBroker - per-subscriber scroll-back (OPR.0.4.0.39)", ()
     expect(capturePaneContent).toHaveBeenCalledWith("dev@rig", 6, { escapeSequences: true });
     expect(a.received.length).toBe(aBefore + 1);
     const painted = a.received[a.received.length - 1]!;
-    expect(painted.startsWith("\x1b[2J")).toBe(true);
+    expect(painted.startsWith("\x1b[0m\x1b[2J")).toBe(true);
     expect(painted).toContain("\x1b[1;1HL195");
     expect(painted).toContain("\x1b[2;1HL196");
     expect(painted).toContain("\x1b[3;1HL197");
