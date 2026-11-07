@@ -34,6 +34,8 @@ export class EventBus {
   private drainingNotifyRows = false;
   private notifyingSubscribers = false;
   private notifyEnvelopeRuns = 0;
+  /** Transient events published during a fan-out, delivered at its end (see publishTransient). */
+  private pendingTransient: PersistedEvent[] = [];
   private notifyDrainStatus: NotifyDrainStatus;
   readonly db: Database.Database;
 
@@ -139,8 +141,18 @@ export class EventBus {
       }
     });
 
-    const result = txn();
+    const queuedBefore = this.pendingTransient.length;
+    let result: T;
+    try {
+      result = txn();
+    } catch (err) {
+      // Drop only what this rolled-back transaction published; transients queued before it (by an enclosing fan-out)
+      // stay queued for that fan-out.
+      this.pendingTransient.length = queuedBefore;
+      throw err;
+    }
     this.drainNotifyRowsToQuiescence(this.notifyDrainStatus.watermark);
+    if (this.pendingTransient.length > 0 && !this.notifyingSubscribers) this.flushTransientOutsideFanout();
     return result;
   }
 
@@ -156,6 +168,67 @@ export class EventBus {
   assertNotifyEnvelopeExercised(): void {
     if (this.notifyEnvelopeRuns === 0) {
       throw new Error("zero notify envelope transactions examined");
+    }
+  }
+
+  /**
+   * Deliver an event to the in-memory subscribers WITHOUT storing it: no row, no seq of its own, no move of the notify
+   * watermark, never in a replay. For high-volume signals whose only readers are live (view.changed). The event carries
+   * `transient: true` and, as its `seq`, `causeSeq` (the stored event that caused it; the newest stored seq without one).
+   *
+   * Published during a fan-out (a subscriber reacting to a stored event, the usual case), it is queued and delivered
+   * at the end of that fan-out, before the rows that subscribers stored meanwhile are drained: every subscriber sees
+   * the cause, then its transients, then the next stored event. Published outside a fan-out, it is delivered before
+   * this call returns. Inside a notify envelope's transaction, it waits for the envelope's drain.
+   */
+  publishTransient(event: RigEvent, causeSeq?: number): PersistedEvent {
+    const transient = {
+      ...event,
+      seq: causeSeq ?? this.maxSeq(),
+      createdAt: new Date().toISOString().replace("T", " ").slice(0, 19),
+      transient: true,
+    } as PersistedEvent;
+    this.pendingTransient.push(transient);
+    if (!this.notifyingSubscribers && !this.activeEnvelope) this.flushTransientOutsideFanout();
+    return transient;
+  }
+
+  /** Deliver the queued transients outside any fan-out, holding the fan-out meanwhile, then drain the rows a
+   *  subscriber stored while receiving them (its own notify was held back by the re-entrancy guard). */
+  private flushTransientOutsideFanout(): void {
+    const nestedRowsStartAfter = this.maxSeq();
+    this.notifyingSubscribers = true;
+    try {
+      this.flushPendingTransient();
+    } finally {
+      this.notifyingSubscribers = false;
+    }
+    if (!this.drainingNotifyRows) this.drainNotifyRowsToQuiescence(nestedRowsStartAfter);
+  }
+
+  /**
+   * Fan out one transient event to in-memory subscribers, each subscriber's error isolated. Called by the bus while it
+   * holds the fan-out (a subscriber that stores an event meanwhile has it drained afterwards, in order).
+   */
+  notifyTransientSubscribers(event: PersistedEvent): void {
+    for (const subscriber of this.subscribers) {
+      try {
+        subscriber(event);
+      } catch (err) {
+        console.error("EventBus subscriber error:", err);
+      }
+    }
+  }
+
+  /** Deliver the queued transients, oldest first, including those published while delivering. Never swallows a
+   *  delivery failure; the queue is emptied either way. */
+  private flushPendingTransient(): void {
+    try {
+      while (this.pendingTransient.length > 0) {
+        this.notifyTransientSubscribers(this.pendingTransient.shift()!);
+      }
+    } finally {
+      this.pendingTransient.length = 0;
     }
   }
 
@@ -177,6 +250,9 @@ export class EventBus {
           console.error("EventBus subscriber error:", err);
         }
       }
+      // The transients this event caused, still inside the fan-out: a subscriber that stores an event while receiving
+      // one is drained below, after them, and is not dropped by the re-entrancy guard above.
+      this.flushPendingTransient();
     } finally {
       this.notifyingSubscribers = false;
     }
