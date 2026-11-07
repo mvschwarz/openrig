@@ -247,11 +247,14 @@ as held; one that is then delivered leaves the held messages as they are. A queu
 wake to a `draft-aware` seat counts its sender's held message there as room, by the
 same rule. At a full quota, a sender with nothing held there is still refused, and
 nothing from another sender is touched. A committed wake is never refused, and the
-sender's next message coalesces it like any other. Never coalesced: the other parts
-of the same send, a watchdog's reminders (one per job), and an unattributed sender.
+sender's next held message coalesces it like any other. A message that settles as
+held late, behind a newer held send, folds into that send's newest part and leaves
+its other parts held. An urgent message coalesced under a routine one passes its
+marking to the newest. Never coalesced: the other parts of the same send, a
+watchdog's reminders (one per job), and an unattributed sender.
 
-A backlog held before this change clears at that sender's next message to the seat,
-or at once with `rig seat retire-held-message`.
+A backlog held before this change clears at that sender's next held message to the
+seat, or at once with `rig seat retire-held-message`.
 
 ## Input evidence and outcomes
 

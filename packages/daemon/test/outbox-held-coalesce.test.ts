@@ -106,6 +106,43 @@ describe("one held message per sender at a seat (#2430)", () => {
     expect(outbox.getById("late-wake")).toMatchObject({ deliveryState: "retired", retirementReason: `coalesced into ${newer}` });
   });
 
+  it("an older message that settles as held late joins the newest without breaking up a newer multipart send", () => {
+    // A committed wake staged first; then the sender's next send is held as two parts; then the wake settles as held.
+    outbox.record({ outboxId: "late-wake", senderSession: "busy@other-host", destinationSession: "seat-a@rig", body: "staged first" });
+    const parts = ["part-1", "part-2"];
+    for (const id of parts) hold("busy@other-host", "seat-a", { sameSend: parts }, id);
+    outbox.claimForDelivery("late-wake");
+    outbox.retain({ outboxId: "late-wake", senderSession: "busy@other-host", destinationSession: "seat-a@rig", body: "staged first" }, binding("seat-a"), true);
+
+    expect(held().map((row) => row.id)).toEqual(parts);
+    expect(outbox.coalescedInto("part-2")).toEqual(["late-wake"]);
+    expect(outbox.getById("part-1")).toMatchObject({ deliveryState: "retained" });
+    expect(outbox.getById("late-wake")).toMatchObject({ deliveryState: "retired", retirementReason: "coalesced into part-2" });
+  });
+
+  it("a draft-aware attempt that settles as held late keeps a newer multipart send together too", () => {
+    // The attempt is staged and moves on to sending; the sender's next send is held as two parts; then the attempt
+    // settles as held (retained without coalescing, then coalesceSettled, as the draft-aware path does).
+    outbox.record({ outboxId: "attempt", senderSession: "busy@other-host", destinationSession: "seat-a@rig", body: "attempt" });
+    outbox.claimForDelivery("attempt");
+    const parts = ["part-1", "part-2"];
+    for (const id of parts) hold("busy@other-host", "seat-a", { sameSend: parts }, id);
+    outbox.retain({ outboxId: "attempt", senderSession: "busy@other-host", destinationSession: "seat-a@rig", body: "attempt" }, binding("seat-a"), false, { coalesce: false });
+    outbox.coalesceSettled("attempt", ["attempt"]);
+
+    expect(held().map((row) => row.id)).toEqual(parts);
+    expect(outbox.coalescedInto("part-2")).toEqual(["attempt"]);
+    expect(outbox.getById("part-1")).toMatchObject({ deliveryState: "retained" });
+  });
+
+  it("an urgent held message coalesced under a later routine one carries its marking to the newest", () => {
+    outbox.retain({ outboxId: "urgent", senderSession: "peer@rig", destinationSession: "seat-a@rig", body: "urgent", urgency: "urgent" }, binding("seat-a"));
+    const routine = hold("peer@rig");
+    expect(outbox.coalescedInto(routine)).toEqual(["urgent"]);
+    expect(outbox.getById(routine)).toMatchObject({ urgency: "urgent" });
+    expect(outbox.getById(hold("other@rig"))).toMatchObject({ urgency: "routine" });
+  });
+
   it("a hand retirement whose reason reads the same is neither listed as coalesced nor rewritten", () => {
     // Same sender, same seat, the reason a person typed reads exactly like the link to the next message.
     const handRetired = hold("peer@rig");

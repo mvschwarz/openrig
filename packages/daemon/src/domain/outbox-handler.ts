@@ -263,15 +263,18 @@ export class OutboxHandler {
 
   /** #2430: retire the sender's held messages at this seat into the newest one, oldest first by dispatch time, so a
    *  message that settles as held late (a delayed committed wake, a draft-aware attempt) never hides a newer one. The
-   *  parts of one send (`group`) stay together when that send is the newest. The ones already coalesced are repointed,
-   *  so the newest names every message it stands for. Links are keyed on the mechanism (retired by outbox@system, same
-   *  sender, same seat), so a hand retirement whose reason reads the same is never touched. */
+   *  parts of one send (`group`) stay together when that send is the newest. When `group` settles late, behind a newer
+   *  held message, only its own members fold into the newest: the newer send's other parts stay held, since nothing
+   *  replaced that send. The ones already coalesced are repointed, so the newest names every message it stands for.
+   *  An urgent message's marking carries forward to the newest. Links are keyed on the mechanism (retired by
+   *  outbox@system, same sender, same seat), so a hand retirement whose reason reads the same is never touched. */
   private coalesceSender(senderSession: string, nodeId: string, group: readonly string[]): void {
     const held = this.heldFrom(senderSession, nodeId);
     if (held.length < 2) return;
     const newestId = held[held.length - 1]!;
-    const keep = new Set(group.includes(newestId) ? group : [newestId]);
-    const older = held.filter(id => !keep.has(id));
+    const older = group.includes(newestId)
+      ? held.filter(id => !group.includes(id))
+      : held.filter(id => id !== newestId && group.includes(id));
     if (older.length === 0) return;
     const now = new Date().toISOString();
     const reason = `${COALESCED_INTO}${newestId}`;
@@ -279,10 +282,13 @@ export class OutboxHandler {
       WHERE outbox_id=? AND delivery_state='retained'`);
     const repoint = this.db.prepare(`UPDATE outbox_entries SET retirement_reason=?
       WHERE delivery_state='retired' AND retired_by=? AND sender_session=? AND json_extract(guard_binding,'$.nodeId')=? AND retirement_reason=?`);
+    const urgent = this.db.prepare(`SELECT 1 FROM outbox_entries WHERE urgency='urgent' AND outbox_id IN (${older.map(() => "?").join(",")})`)
+      .get(...older) !== undefined;
     for (const id of older) {
       retire.run(now, COALESCE_ACTOR, reason, id);
       repoint.run(reason, COALESCE_ACTOR, senderSession, nodeId, `${COALESCED_INTO}${id}`);
     }
+    if (urgent) this.db.prepare(`UPDATE outbox_entries SET urgency='urgent' WHERE outbox_id=?`).run(newestId);
   }
 
   /** The sender's held messages at this seat, oldest first. */
