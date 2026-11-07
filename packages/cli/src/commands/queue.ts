@@ -12,6 +12,7 @@ import { resolveContextRef } from "../context-resolve.js";
 import { shellQuote } from "../cross-host-executor.js";
 import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer } from "../host-registry.js";
 import { loadHostBindings } from "../host-bindings.js";
+import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
@@ -570,20 +571,21 @@ interface QueueHostTarget { client: DaemonClient; options: { headers?: Record<st
 async function queueHostTarget(deps: QueueDeps, local: DaemonClient, hostId: string | undefined, write: boolean): Promise<QueueHostTarget | { error: string; message: string }> {
   const remote = remoteHostOf(hostId);
   if (!remote) return { client: local, options: {} };
-  // The registry is read first, so a refusal sends nothing. The selected daemon is asked for its own host id only
-  // to keep a --host naming it local: before a remote call, or when the id is in no registry entry.
+  // A --host naming the selected daemon's own id stays local, as create's does (the daemon's resolvesToLocalHost).
+  if (await daemonSelfHostId(local) === remote) return { client: local, options: {} };
   const registry = (deps.hostRegistryLoader ?? loadHostRegistry)();
-  const match = registry.ok ? resolveHost(registry.registry, remote, loadHostBindings().bindings) : undefined;
-  if (!match?.ok) {
-    if (await daemonSelfHostId(local) === remote) return { client: local, options: {} };
-    return registry.ok
-      ? { error: "unknown_host", message: `--host ${remote}: no such host in this CLI's host registry (see rig host list).` }
-      : { error: "host_registry_unreadable", message: `--host ${remote}: this CLI's host registry can't be read (${registry.error}).` };
+  if (!registry.ok) return { error: "host_registry_unreadable", message: `--host ${remote}: this CLI's host registry can't be read (${registry.error}).` };
+  // The queue forwarder's rule for learned bindings (one policy): a self-id resolves only through a binding learned at
+  // its entry's current URL, with no recorded conflict, so a stale binding never sends a write to a replaced endpoint.
+  const learned = loadHostBindings();
+  const match = resolveHost(registry.registry, remote, eligibleQueueBindings(registry.registry, learned));
+  if (!match.ok) {
+    const unused = ineligibleBindingDetail(registry.registry, learned, remote);
+    return { error: "unknown_host", message: `--host ${remote}: no such host in this CLI's host registry (see rig host list).${unused ? ` ${unused}` : ""}` };
   }
   if (match.host.transport !== "http") return { error: "host_not_http", message: `--host ${remote}: its registry entry is SSH, not a daemon URL; queue verbs need an http host.` };
   const bearer = resolveRemoteBearer(match.host);
   if (!bearer.ok) return { error: "host_bearer_unavailable", message: `--host ${remote}: ${bearer.error}` };
-  if (await daemonSelfHostId(local) === remote) return { client: local, options: {} };
   const client = remoteDaemonClient(deps.clientFactory, match.host.url, await resolveOriginSelfHostId(deps.lifecycleDeps));
   const headers = bearerAuthHeaders(bearer.token);
   return {
@@ -644,9 +646,10 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
   }
 }
 
-async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null, selected: DaemonClient = client): Promise<void> {
-  // The host is settled against the selected daemon: the one a --host naming its own id would have stayed on.
-  const settled = receipt && status < 400 ? await settleReceiptHost(selected, receipt) : null;
+async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null, hostUsed = false): Promise<void> {
+  // A direct --host write already settled its host when it chose the target: its receipt keeps the host it used.
+  // create and handoff, which the selected daemon forwards, are settled here as before.
+  const settled = receipt && status < 400 ? (hostUsed ? receipt : await settleReceiptHost(client, receipt)) : null;
   const projected = settled ? buildWriteReceipt(body, settled) : null;
   if (!projected) {
     printResult(json, body, status);
@@ -664,12 +667,7 @@ async function printQueueItemResult(
   status: number,
   receipt: ReceiptContext | null = null,
   remoteHost?: string,
-  selected: DaemonClient = client,
 ): Promise<void> {
-  if (status >= 400 && body && typeof body === "object"
-    && (body as { error?: unknown }).error === "claim_destination_mismatch" && remoteHost) {
-    body = { ...body, hint: `A row is claimed by its destination seat, on the host that holds it: run rig queue claim there. From here, --host ${remoteHost} can show, update or block it.` };
-  }
   if (status >= 400 && body && typeof body === "object"
     && (body as { error?: unknown }).error === "qitem_not_found") {
     let selfHostId: string | undefined;
@@ -687,7 +685,7 @@ async function printQueueItemResult(
         + (remoteHost ? "" : `\nOr name that host: rig queue show ${shellQuote(qitemId)} --host <host-id> --full --json`),
     };
   }
-  await printWriteResult(client, json, body, status, receipt && remoteHost ? { ...receipt, remoteHost } : receipt, selected);
+  await printWriteResult(client, json, body, status, receipt && remoteHost ? { ...receipt, remoteHost } : receipt, remoteHost !== undefined);
 }
 
 // OPR.0.4.3.03 — `rig queue show` body preview.
@@ -1250,20 +1248,18 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .command("claim <qitemId>")
     .description("Claim a qitem (pending → in-progress); computes closure_required_at from tier")
     .option("--destination <session>", "(deprecated, ignored) the claimant is derived from the seat env (X-OpenRig-Session); P21 I3 made the claim route derive it from the transport header")
-    .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { destination?: string; host?: string; json?: boolean; full?: boolean }) => {
+    .action(async (qitemId: string, opts: { destination?: string; json?: boolean; full?: boolean }) => {
       // P21 I3 reconcile: the claimant is DERIVED from the seat env — --destination deprecated + ignored,
       // no body claim. Verify the env (the header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!requireSeatSession("destination")) return;
       const deps = getDeps();
-      await withClient(deps, async (local) => {
-        const target = await queueHostTarget(deps, local, opts.host, true);
-        if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
-        const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {}, target.options);
-        await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "claim" }), target.remote, local);
-      }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
+      // No --host here (#2678 review): a row is claimed by its destination seat, on the host that holds it.
+      await withClient(deps, async (client) => {
+        const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "claim" }));
+      });
     });
 
   cmd
@@ -1360,7 +1356,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
         }, target.options);
-        await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }), target.remote, local);
+        await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }), target.remote);
       }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
     });
 
@@ -1424,7 +1420,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           wakeAfterSeconds: opts.wakeAfter,
           transitionNote: opts.continuation ? `continuation: ${opts.continuation}` : (opts.note ?? `parked on ${opts.on}`),
         }, target.options);
-        await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "block" }), target.remote, local);
+        await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "block" }), target.remote);
       }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
     });
 

@@ -78,10 +78,11 @@ have different flags: check their help instead of copying a flag from send.
 A local success message alone does not establish remote persistence or pickup.
 
 To follow up on a row another host holds, `queue show`, `list`, `transitions`,
-`update`, `claim` and `block` take the same explicit --host. The CLI calls that
-host's daemon directly with its bearer, so a write is recorded there as
+`update` and `block` take the same explicit --host. The CLI calls that host's
+daemon directly with its bearer, so a write is recorded there as
 `<seat>@<rig>@<this host>`. A blocker, watchdog or row id given with it must
-exist on that host, and a claim belongs to the destination seat on its own host.
+exist on that host. A claim is made by the destination seat, on the host that
+holds the row.
 
 ## Read failures at the layer that failed
 

@@ -6,7 +6,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DaemonClient } from "../src/client.js";
@@ -159,17 +159,10 @@ describe("queue verbs on an existing row with --host (#2637)", () => {
     expect(call!.headers["x-openrig-session"]).toBe("dev@fabrica@vm-a");
   });
 
-  it("claim --host gives the remote's refusal as it came, with where a claim is made", async () => {
-    remoteAnswer = (req) => req.path === "/healthz"
-      ? { status: 200, data: { selfHostId: "devbox-id" } }
-      : { status: 403, data: { error: "claim_destination_mismatch", message: "only the destination may claim" } };
-    await run("claim", "qitem-remote-1", "--host", "devbox", "--json");
-    expect(remoteQueueCalls().map((c) => c.path)).toEqual(["/api/queue/qitem-remote-1/claim"]);
-    expect(process.exitCode).toBe(1);
-    const body = JSON.parse(out.join("\n"));
-    expect(body.error).toBe("claim_destination_mismatch");
-    expect(body.message).toBe("only the destination may claim");
-    expect(body.hint).toContain("on the host that holds it");
+  it("claim takes no --host: a row is claimed by its destination seat, on the host that holds it", async () => {
+    await run("claim", "qitem-remote-1", "--host", "devbox", "--json").catch(() => undefined);
+    expect(remote.seen).toEqual([]);
+    expect(localQueueCalls()).toEqual([]);
   });
 
   it("a --host naming the selected daemon's own host id stays local", async () => {
@@ -200,12 +193,53 @@ describe("queue verbs on an existing row with --host (#2637)", () => {
   it.each([
     ["mac", "host_not_http"],
     ["nobearer", "host_bearer_unavailable"],
-  ])("--host %s fails with %s and sends nothing to either daemon", async (host, code) => {
+  ])("--host %s fails with %s and sends no queue request; only this daemon's own id is asked first", async (host, code) => {
     await run("update", "qitem-remote-1", "--host", host, "--state", "done", "--json");
     expect(process.exitCode).toBe(1);
     expect(JSON.parse(out.join("\n")).error).toBe(code);
     expect(remote.seen).toEqual([]);
-    expect(local.seen).toEqual([]);
+    expect(local.seen.map((s) => s.path)).toEqual(["/healthz"]);
+  });
+
+  // The learned bindings: a self-id names a registry entry only through a binding the queue forwarder would use.
+  const bind = (binding: Record<string, unknown>) => writeFileSync(join(home, "host-bindings.json"),
+    JSON.stringify({ version: 1, bindings: { devbox: { hostId: "devbox-self-id", firstObservedAt: "2026-11-01T00:00:00Z", lastObservedAt: "2026-11-07T00:00:00Z", ...binding } } }));
+
+  it("a self-id learned at the entry's current URL routes to that entry", async () => {
+    bind({ observedUrl: remote.url });
+    await run("update", "qitem-remote-1", "--host", "devbox-self-id", "--state", "done", "--json");
+    expect(remoteQueueCalls().map((c) => c.path)).toEqual(["/api/queue/qitem-remote-1/update"]);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it.each([
+    ["the entry's URL changed since it was learned", { observedUrl: "http://127.0.0.1:1" }, "but the entry now points at"],
+    ["it has no observed URL", {}, "learned before its URL was recorded"],
+    ["it records a conflict", { observedUrl: "PLACEHOLDER", conflict: { hostId: "other-id", observedAt: "2026-11-07T01:00:00Z" } }, "recorded conflict"],
+  ])("a self-id whose binding isn't eligible (%s) is not routed, and says why", async (_why, binding, reason) => {
+    bind(binding.observedUrl === "PLACEHOLDER" ? { ...binding, observedUrl: remote.url } : binding);
+    await run("update", "qitem-remote-1", "--host", "devbox-self-id", "--state", "done", "--json");
+    expect(process.exitCode).toBe(1);
+    const body = JSON.parse(out.join("\n"));
+    expect(body.error).toBe("unknown_host");
+    expect(body.message).toContain(reason);
+    expect(body.message).toContain("--host devbox");
+    expect(remoteQueueCalls()).toEqual([]);
+  });
+
+  it("a direct write's receipt keeps the host it used when this daemon's later health read fails", async () => {
+    vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "1");
+    let probes = 0;
+    local.close();
+    local = await serve((req) => req.path === "/healthz"
+      ? (++probes === 1 ? { status: 200, data: { selfHostId: "vm-a" } } : { status: 500, data: { error: "busy" } })
+      : { status: 500, data: { error: "the selected daemon must not be asked for the row" } });
+    localPort = Number(new URL(local.url).port);
+    await run("update", "qitem-remote-1", "--host", "devbox", "--state", "in-progress", "--json");
+    const receipt = JSON.parse(out.join("\n"));
+    expect(receipt.host).toBe("devbox");
+    expect(receipt.hostUnconfirmed).toBeUndefined();
+    expect(receipt.receipt.fullCommand).toBe("rig queue show 'qitem-remote-1' --host 'devbox' --full --json");
   });
 
   it("an unknown --host fails with unknown_host; only the selected daemon's own id is asked, to keep its own id local", async () => {
