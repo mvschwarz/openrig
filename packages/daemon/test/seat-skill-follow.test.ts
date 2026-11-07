@@ -313,6 +313,25 @@ profiles:
     } finally { db.close(); }
   });
 
+  it("resolves local:. against the saved launch directory, not a same-name spec in the seat's cwd", async () => {
+    const { db, setup, rigId, nodeId, rigRoot } = seatWithRecipe(undefined);
+    const spec = (id: string) => `name: impl\nversion: "1.0"\nresources:\n  skills:\n    - id: ${id}\n      path: skills/${id}\n      on_restore: follow_source\nprofiles:\n  default:\n    uses:\n      skills: [${id}]\n`;
+    const cwd = join(rigRoot, "other");
+    for (const [folder, id] of [[rigRoot, "correct"], [cwd, "wrong"]]) {
+      mkdirSync(join(folder!, "skills", id!), { recursive: true });
+      writeFileSync(join(folder!, "agent.yaml"), spec(id!));
+      writeFileSync(join(folder!, "skills", id!, "SKILL.md"), `---\nname: ${id}\ndescription: d\n---\n`);
+    }
+    const recipe = setup.rigRepo.getNodeLaunchRecipe(nodeId)!;
+    recipe.rigSpec.pods[0]!.members[0]!.agentRef = "local:.";
+    db.prepare("UPDATE nodes SET cwd = ?, launch_recipe_json = ? WHERE id = ?").run(cwd, JSON.stringify(recipe), nodeId);
+    try {
+      const result = await setup.podInstantiator.seatSkillSelection(rigId, nodeId);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.selection.following).toEqual([{ id: "correct", source: join(rigRoot, "skills", "correct") }]);
+    } finally { db.close(); }
+  });
+
   it("finds a following skill declared in an imported spec and selected by its qualified name", async () => {
     const { db, setup, rigId, nodeId, rigRoot } = seatWithRecipe(`name: impl
 version: "1.0"
