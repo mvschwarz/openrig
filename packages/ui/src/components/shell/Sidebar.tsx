@@ -75,18 +75,34 @@ export function Sidebar({
   const attentionQuery = useAttentionItems(50, subs.anyRemoteEnabled);
   const inboxBadge = attentionQuery.data?.items.length ?? 0;
 
-  const renderItem = (item: NavItem & { activeWhen: (p: string) => boolean }, badge = 0) => (
-    <div key={item.id}>
-      <SidebarNavItem
-        item={item}
-        pathname={pathname}
-        collapsed={effectiveCollapsed}
-        badge={badge}
-        onNavigate={onMobileClose}
-      />
-      {item.id === "rigs" ? <SidebarRigList collapsed={effectiveCollapsed} /> : null}
-    </div>
-  );
+  const isChatSeatActive = (p: string) => {
+    return NAV_CHAT.some((c) => {
+      const chatTo = resolveChatTo(readSettingString(settingsData, `agents.${c.role}_session`), c.role);
+      return (chatTo && p === chatTo) || c.activeWhen(p);
+    });
+  };
+
+  const renderItem = (item: NavItem & { activeWhen: (p: string) => boolean }, badge = 0) => {
+    const effectiveItem =
+      item.id === "rigs"
+        ? {
+            ...item,
+            activeWhen: (p: string) => item.activeWhen(p) && !isChatSeatActive(p),
+          }
+        : item;
+    return (
+      <div key={item.id}>
+        <SidebarNavItem
+          item={effectiveItem}
+          pathname={pathname}
+          collapsed={effectiveCollapsed}
+          badge={badge}
+          onNavigate={onMobileClose}
+        />
+        {item.id === "rigs" ? <SidebarRigList collapsed={effectiveCollapsed} /> : null}
+      </div>
+    );
+  };
 
   return (
     <nav
@@ -150,13 +166,14 @@ export function Sidebar({
 
         {/* Chat group */}
         <SidebarSection id="chat" label="Chat" collapsed={effectiveCollapsed}>
-          {NAV_CHAT.map((c) =>
-            renderItem({
+          {NAV_CHAT.map((c) => {
+            const chatTo = resolveChatTo(readSettingString(settingsData, `agents.${c.role}_session`), c.role);
+            return renderItem({
               ...c,
-              to: resolveChatTo(readSettingString(settingsData, `agents.${c.role}_session`), c.role),
-              activeWhen: () => false,
-            }),
-          )}
+              to: chatTo,
+              activeWhen: (p: string) => (chatTo && p === chatTo) || c.activeWhen(p),
+            });
+          })}
         </SidebarSection>
 
         {/* Footer */}

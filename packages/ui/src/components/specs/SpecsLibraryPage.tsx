@@ -22,10 +22,10 @@ import { usePlugins, type PluginEntry } from "../../hooks/usePlugins.js";
 /** C14b: the 5 toolbar buttons collapse to one primary "New rig" + a
  *  "More" dropdown. Destinations are unchanged from TOOLBAR_ACTIONS. */
 const MORE_ACTIONS = [
-  { label: "Add spec", to: "/specs/rig", testId: "specs-toolbar-add" },
+  { label: "New agent", to: "/specs/agent", testId: "specs-toolbar-add" },
+  { label: "Workflows", to: "/workflows", testId: "specs-toolbar-gen-workflow" },
   { label: "Import", to: "/import", testId: "specs-toolbar-import" },
   { label: "Discover", to: "/search", testId: "specs-toolbar-discover" },
-  { label: "Generate workflow", to: "/specs/agent", testId: "specs-toolbar-gen-workflow" },
 ] as const;
 
 interface LibraryRow {
@@ -268,8 +268,8 @@ function SkillsSection({
         <ul className="divide-y divide-outline-variant">
           {skills.map((skill) => (
             <li key={skill.id}>
-              <a
-                href={librarySkillHref(skill.id)}
+              <Link
+                to={librarySkillHref(skill.id)}
                 data-testid={`library-skill-${skill.name}`}
                 className="flex items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-surface-low/60 focus:outline-none focus:bg-surface-low/80"
               >
@@ -280,7 +280,7 @@ function SkillsSection({
                 <span className="shrink-0 text-xs text-on-surface-variant">
                   {skill.files.length} files
                 </span>
-              </a>
+              </Link>
             </li>
           ))}
         </ul>

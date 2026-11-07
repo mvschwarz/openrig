@@ -6,6 +6,7 @@ import { StatusBadge } from "./ui/status-badge.js";
 import { Skeleton } from "./ui/skeleton.js";
 import { EmptyState } from "./ui/empty-state.js";
 import { copyText } from "../lib/copy-text.js";
+import { cn } from "../lib/utils.js";
 
 const ROW_CLASS = "flex items-start gap-2 py-1";
 const LABEL_CLASS = "w-28 shrink-0 text-xs text-on-surface-variant";
@@ -37,20 +38,46 @@ function CopyButton({ text, testId }: { text: string; testId: string }) {
   );
 }
 
+export interface AgentPropertiesPanelProps {
+  rigId: string;
+  logicalId: string;
+  className?: string;
+  onClose?: () => void;
+}
+
 export function AgentPropertiesPanel({
   rigId,
   logicalId,
-}: {
-  rigId: string;
-  logicalId: string;
-}) {
+  className,
+  onClose,
+}: AgentPropertiesPanelProps) {
   const { data, isLoading, error } = useNodeDetail(rigId, logicalId);
   const { known: hostKnown, isLocal: hostIsLocal } = useHostSelection();
 
   if (isLoading) {
     return (
-      <section data-testid="agent-properties" aria-label="Properties" className="w-80 shrink-0 border-l bg-surface-lowest p-4">
-        <h2 className="mb-3 text-sm font-semibold text-on-surface">Properties</h2>
+      <section
+        data-testid="agent-properties"
+        aria-label="Properties"
+        className={cn(
+          "w-80 shrink-0 border-l border-outline-variant bg-surface-lowest p-4 overflow-y-auto",
+          className,
+        )}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-on-surface">Properties</h2>
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              data-testid="agent-properties-close"
+              aria-label="Close properties"
+              className="min-h-7 min-w-7 flex items-center justify-center border border-outline-variant bg-surface-lowest px-2 py-0.5 font-mono text-xs text-on-surface hover:bg-surface-low"
+            >
+              ×
+            </button>
+          )}
+        </div>
         <div className="space-y-2">
           {Array.from({ length: 6 }, (_, i) => (
             <Skeleton key={i} className="h-5 w-full" />
@@ -62,8 +89,28 @@ export function AgentPropertiesPanel({
 
   if (error || !data) {
     return (
-      <section data-testid="agent-properties" aria-label="Properties" className="w-80 shrink-0 border-l bg-surface-lowest p-4">
-        <h2 className="mb-3 text-sm font-semibold text-on-surface">Properties</h2>
+      <section
+        data-testid="agent-properties"
+        aria-label="Properties"
+        className={cn(
+          "w-80 shrink-0 border-l border-outline-variant bg-surface-lowest p-4 overflow-y-auto",
+          className,
+        )}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-on-surface">Properties</h2>
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              data-testid="agent-properties-close"
+              aria-label="Close properties"
+              className="min-h-7 min-w-7 flex items-center justify-center border border-outline-variant bg-surface-lowest px-2 py-0.5 font-mono text-xs text-on-surface hover:bg-surface-low"
+            >
+              ×
+            </button>
+          )}
+        </div>
         <EmptyState
           title="Couldn't load this agent"
           label="Couldn't load this agent"
@@ -78,8 +125,28 @@ export function AgentPropertiesPanel({
   const qitemCount = data.currentQitems?.length ?? 0;
 
   return (
-    <section data-testid="agent-properties" aria-label="Properties" className="w-80 shrink-0 border-l bg-surface-lowest p-4">
-      <h2 className="mb-3 text-sm font-semibold text-on-surface">Properties</h2>
+    <section
+      data-testid="agent-properties"
+      aria-label="Properties"
+      className={cn(
+        "w-80 shrink-0 border-l border-outline-variant bg-surface-lowest p-4 overflow-y-auto",
+        className,
+      )}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-on-surface">Properties</h2>
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            data-testid="agent-properties-close"
+            aria-label="Close properties"
+            className="min-h-7 min-w-7 flex items-center justify-center border border-outline-variant bg-surface-lowest px-2 py-0.5 font-mono text-xs text-on-surface hover:bg-surface-low"
+          >
+            ×
+          </button>
+        )}
+      </div>
       <dl>
         <div className={ROW_CLASS}>
           <dt className={LABEL_CLASS}>Status</dt>

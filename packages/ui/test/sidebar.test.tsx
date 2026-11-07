@@ -76,6 +76,24 @@ describe("Sidebar shell (C06)", () => {
     expect(link.getAttribute("aria-current")).toBe("page");
   });
 
+  it("rail-advisor has aria-current=page and rail-topology is inactive at /topology/seat/kernel/advisor-lead", async () => {
+    const { container } = await renderAt("/topology/seat/kernel/advisor-lead");
+    const advisorLink = container.querySelector("[data-testid='rail-advisor']") as HTMLElement;
+    const topologyLink = container.querySelector("[data-testid='rail-topology']") as HTMLElement;
+    expect(advisorLink.getAttribute("aria-current")).toBe("page");
+    expect(advisorLink.getAttribute("data-active")).toBe("true");
+    expect(topologyLink.getAttribute("data-active")).toBe("false");
+  });
+
+  it("rail-operator has aria-current=page and rail-topology is inactive at /topology/seat/kernel/operator", async () => {
+    const { container } = await renderAt("/topology/seat/kernel/operator");
+    const operatorLink = container.querySelector("[data-testid='rail-operator']") as HTMLElement;
+    const topologyLink = container.querySelector("[data-testid='rail-topology']") as HTMLElement;
+    expect(operatorLink.getAttribute("aria-current")).toBe("page");
+    expect(operatorLink.getAttribute("data-active")).toBe("true");
+    expect(topologyLink.getAttribute("data-active")).toBe("false");
+  });
+
   it("sidebar-search click dispatches openrig:open-palette", async () => {
     await renderAt("/");
     const spy = vi.fn();

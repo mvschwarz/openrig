@@ -76,4 +76,11 @@ describe("VellumSheet (Phase 1 primitive)", () => {
     expect(el.getAttribute("role")).toBe("dialog");
     expect(el.getAttribute("aria-modal")).toBe("false");
   });
+
+  it("incorporates pb-16 lg:pb-0 for mobile bottom navigation clearance", () => {
+    const { container } = render(<VellumSheet testId="vs-clearance">Content</VellumSheet>);
+    const sheet = container.querySelector("[data-testid='vs-clearance']") as HTMLElement;
+    expect(sheet.className).toContain("pb-16");
+    expect(sheet.className).toContain("lg:pb-0");
+  });
 });

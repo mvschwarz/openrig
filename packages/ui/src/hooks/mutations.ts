@@ -232,6 +232,10 @@ export function useExpandRig() {
       queryClient.invalidateQueries({ queryKey: ["ps"] });
       queryClient.invalidateQueries({ queryKey: ["rig", variables.rigId, "nodes"] });
       queryClient.invalidateQueries({ queryKey: ["rig", variables.rigId, "graph"] });
+      notifySuccess("Rig expanded");
+    },
+    onError: (error) => {
+      notifyError("Couldn't expand rig", error);
     },
   });
 }
@@ -249,6 +253,10 @@ export function useRemoveLibrarySpec() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["spec-library"] });
+      notifySuccess("Spec removed");
+    },
+    onError: (error) => {
+      notifyError("Couldn't remove spec", error);
     },
   });
 }
@@ -270,6 +278,10 @@ export function useRenameLibrarySpec() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["spec-library"] });
+      notifySuccess("Spec renamed");
+    },
+    onError: (error) => {
+      notifyError("Couldn't rename spec", error);
     },
   });
 }

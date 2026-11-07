@@ -15,6 +15,7 @@
 // ?group=agent|slice), so every state is deep-link addressable.
 
 import { useMemo, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { PageHeader } from "../ui/page-header.js";
 import { useRigAgents } from "../../hooks/useReview.js";
 import { NeedsYouAccordion } from "./NeedsYouAccordion.js";
@@ -117,9 +118,9 @@ export function RigAgentsPage() {
           anchoredSlice ? (
             <div className="flex items-center gap-2 text-xs text-on-surface-variant">
               <span data-testid="rig-agents-anchor">Anchored: {anchoredSlice}</span>
-              <a href="/agents" className="underline hover:no-underline" data-testid="rig-agents-unanchor">
+              <Link to="/agents" className="underline hover:no-underline" data-testid="rig-agents-unanchor">
                 Full rig
-              </a>
+              </Link>
             </div>
           ) : null
         }

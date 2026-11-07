@@ -15,7 +15,7 @@ import { NeedsYouAccordion } from "../src/components/review/NeedsYouAccordion.js
 import type { ComposedRigAgents, AgentsBand, NeedsYouBand } from "../src/hooks/useReview.js";
 
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ to, children }: { to: string; children: React.ReactNode }) => <a href={to}>{children}</a>,
+  Link: ({ to, children, ...props }: { to: string; children: React.ReactNode; [key: string]: unknown }) => <a href={to} {...props}>{children}</a>,
 }));
 
 vi.mock("../src/components/terminal/ProgressiveTerminal.js", () => ({

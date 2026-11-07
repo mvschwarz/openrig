@@ -515,7 +515,14 @@ function AppShellInner({ children }: AppShellProps) {
               <PreviewStack />
 
               {/* C09: toasts for rig actions (sonner). Mounted once here. */}
-              <Toaster position="bottom-right" richColors={false} closeButton theme={resolved} />
+              <Toaster
+                position="bottom-right"
+                richColors={false}
+                closeButton
+                theme={resolved}
+                mobileOffset={{ bottom: "5rem" }}
+                className="max-lg:!bottom-20"
+              />
 
               {/* C08: command palette + g-then-key shortcuts, mounted once here. */}
               <CommandPalette />

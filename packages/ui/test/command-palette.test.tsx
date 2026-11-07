@@ -180,4 +180,55 @@ describe("Command palette (C08)", () => {
     expect(screen.queryByTestId("page-for-you")).toBeNull();
     expect(screen.queryByPlaceholderText(SEARCH_PLACEHOLDER)).toBeNull();
   });
+
+  it("typing rig id (rig_alpha) filters and displays the rig item in Command Palette", async () => {
+    const { input } = await openPalette();
+    fireEvent.change(input, { target: { value: "rig_alpha" } });
+    const palette = screen.getByTestId("command-palette");
+    expect(within(palette).getByTestId("palette-rig-rig_alpha")).toBeTruthy();
+    expect(within(palette).getByText("acme-build")).toBeTruthy();
+  });
+
+  it("typing Advisor filters and displays Advisor under Go to group", async () => {
+    const { input } = await openPalette();
+    fireEvent.change(input, { target: { value: "Advisor" } });
+    const palette = screen.getByTestId("command-palette");
+    expect(within(palette).getByText("Go to")).toBeTruthy();
+    expect(within(palette).getByText("Advisor")).toBeTruthy();
+  });
+
+  it("keyboard shortcuts dialog renders styled list and Kbd elements", async () => {
+    await openPalette();
+    const actionsGroup = screen.getByText("Actions").closest("[cmdk-group]");
+    expect(actionsGroup).toBeTruthy();
+    const shortcutsItem = within(actionsGroup as HTMLElement).getByText("Keyboard shortcuts");
+    fireEvent.click(shortcutsItem);
+
+    const shortcutsModal = await screen.findByTestId("keyboard-shortcuts");
+    expect(shortcutsModal).toBeTruthy();
+    expect(within(shortcutsModal).getAllByText("Keyboard shortcuts").length).toBeGreaterThanOrEqual(1);
+    expect(within(shortcutsModal).getByText("Search")).toBeTruthy();
+    expect(within(shortcutsModal).getByText("Dashboard")).toBeTruthy();
+    expect(within(shortcutsModal).getByText("Inbox")).toBeTruthy();
+    expect(within(shortcutsModal).getByText("Rigs")).toBeTruthy();
+  });
+
+  it("g then i shortcut is suppressed when a modal dialog is mounted in the DOM", async () => {
+    const { container } = renderAt(
+      "/",
+      <div role="dialog" aria-modal="true" data-testid="test-dialog">
+        dialog content
+      </div>,
+    );
+    await waitFor(
+      () => {
+        if (!container.querySelector("[data-testid='app-rail']")) throw new Error("no app-rail yet");
+      },
+      { timeout: 5000 },
+    );
+    fireEvent.keyDown(window, { key: "g" });
+    fireEvent.keyDown(window, { key: "i" });
+    expect(screen.getByTestId("page-home")).toBeTruthy();
+    expect(screen.queryByTestId("page-for-you")).toBeNull();
+  });
 });

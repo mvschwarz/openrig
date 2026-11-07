@@ -1,4 +1,5 @@
 import * as React from "react";
+import { Link, useRouter } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
 import { Button } from "./button";
 
@@ -24,7 +25,25 @@ export interface EmptyStateProps {
 
 function ActionButton({ action, testId }: { action: EmptyStateAction; testId?: string }) {
   const actionTestId = testId ? `${testId}-action` : undefined;
+  const router = useRouter({ warn: false });
+
   if (action.href) {
+    const isExternal =
+      action.href.startsWith("http://") ||
+      action.href.startsWith("https://") ||
+      action.href.startsWith("//") ||
+      action.href.startsWith("mailto:");
+
+    if (router && !isExternal) {
+      return (
+        <Button asChild size="sm">
+          <Link to={action.href} data-testid={actionTestId}>
+            {action.label}
+          </Link>
+        </Button>
+      );
+    }
+
     return (
       <Button asChild size="sm">
         <a href={action.href} data-testid={actionTestId}>

@@ -73,6 +73,14 @@ export function breadcrumbsFor(pathname: string, names?: CrumbNames): Crumb[] {
         return [{ label: "Files" }];
       case "settings":
         return [{ label: "Settings" }];
+      case "bootstrap":
+        return [{ label: "Bootstrap" }];
+      case "import":
+        return [{ label: "Import" }];
+      case "packages":
+        return [{ label: "Packages" }];
+      case "search":
+        return [{ label: "Search" }];
       default:
         return [{ label: segs[0]! }];
     }
@@ -98,6 +106,10 @@ export function breadcrumbsFor(pathname: string, names?: CrumbNames): Crumb[] {
       const label = labels[at(1)];
       if (label) return linked([["Settings", "/settings"], [label]]);
     }
+    if (at(0) === "packages") {
+      const label = at(1) === "install" ? "Install" : at(1);
+      return linked([["Packages", "/packages"], [label]]);
+    }
     if (at(0) === "specs") return linked([["Library", "/specs"], [at(1)]]);
     return [{ label: at(1) }];
   }
@@ -122,29 +134,86 @@ export function breadcrumbsFor(pathname: string, names?: CrumbNames): Crumb[] {
         [`Slice ${at(2)}`],
       ]);
     }
-    // `/specs/skills/:t` -> `[Library, Skills→/specs/skills, :t]`
-    // (Library itself is NOT a link there, per the card table).
+    // `/specs/skills/:t` -> `[Library→/specs, Skills→/specs/skills, :t]`
     if (at(0) === "specs" && at(1) === "skills") {
-      return [{ label: "Library" }, { label: "Skills", to: "/specs/skills" }, { label: at(2) }];
+      return linked([
+        ["Library", "/specs"],
+        ["Skills", "/specs/skills"],
+        [at(2)],
+      ]);
     }
     if (at(0) === "specs") return linked([["Library", "/specs"], [at(2)]]);
     return [{ label: at(2) }];
   }
 
-  if (segs.length === 4) {
+  // Deep routes: 4 or more segments
+  if (segs.length >= 4) {
+    // Skill file detail: /specs/skills/:skillToken/file/:fileToken...
+    if (at(0) === "specs" && at(1) === "skills" && at(3) === "file" && segs.length >= 5) {
+      return linked([
+        ["Library", "/specs"],
+        ["Skills", "/specs/skills"],
+        [at(2), `/specs/skills/${at(2)}`],
+        [segs.slice(4).join("/")],
+      ]);
+    }
+
+    // Generic subroutes under /specs/skills/:skillToken/...
+    if (at(0) === "specs" && at(1) === "skills") {
+      return linked([
+        ["Library", "/specs"],
+        ["Skills", "/specs/skills"],
+        [at(2), `/specs/skills/${at(2)}`],
+        [segs.slice(3).join("/")],
+      ]);
+    }
+
+    // Topology pod detail: 4 segments or deeper
     if (at(0) === "topology" && at(1) === "pod") {
-      return rigCrumbs(at(2), rigName(at(2)), `${at(3)} pod`);
+      if (segs.length === 4) {
+        return rigCrumbs(at(2), rigName(at(2)), `${at(3)} pod`);
+      }
+      return linked([
+        ["Rigs", "/topology"],
+        [rigName(at(2)), `/topology/rig/${at(2)}`],
+        [`${at(3)} pod`, `/topology/pod/${at(2)}/${at(3)}`],
+        [segs.slice(4).join("/")],
+      ]);
     }
+
+    // Topology seat/agent detail: 4 segments or deeper
     if (at(0) === "topology" && at(1) === "seat") {
-      return rigCrumbs(at(2), rigName(at(2)), displayAgentName(at(3)));
+      if (segs.length === 4) {
+        return rigCrumbs(at(2), rigName(at(2)), displayAgentName(at(3)));
+      }
+      return linked([
+        ["Rigs", "/topology"],
+        [rigName(at(2)), `/topology/rig/${at(2)}`],
+        [displayAgentName(at(3)), `/topology/seat/${at(2)}/${at(3)}`],
+        [segs.slice(4).join("/")],
+      ]);
     }
+
+    // Legacy rig node detail: 4 segments or deeper
     if (at(0) === "rigs" && at(2) === "nodes") {
-      return rigCrumbs(at(1), rigName(at(1)), displayAgentName(at(3)));
+      if (segs.length === 4) {
+        return rigCrumbs(at(1), rigName(at(1)), displayAgentName(at(3)));
+      }
+      return linked([
+        ["Rigs", "/topology"],
+        [rigName(at(1)), `/topology/rig/${at(1)}`],
+        [displayAgentName(at(3)), `/topology/seat/${at(1)}/${at(3)}`],
+        [segs.slice(4).join("/")],
+      ]);
     }
-    if (at(0) === "specs") return linked([["Library", "/specs"], [at(3)]]);
-    return [{ label: at(3) }];
+
+    // Fallback for 4-segment routes
+    if (segs.length === 4) {
+      if (at(0) === "specs") return linked([["Library", "/specs"], [at(3)]]);
+      return [{ label: at(3) }];
+    }
   }
 
-  // Anything deeper: last decoded segment.
+  // Anything deeper: last decoded segment fallback
   return [{ label: segs[segs.length - 1]! }];
 }

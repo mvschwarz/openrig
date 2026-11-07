@@ -22,6 +22,7 @@ const config: Config = {
       colors: {
         /* Paper surfaces */
         background: "hsl(var(--background))",
+        surface: "hsl(var(--surface-container))",
         "surface-lowest": "hsl(var(--surface-container-lowest))",
         "surface-low": "hsl(var(--surface-container-low))",
         "surface-mid": "hsl(var(--surface-container))",
@@ -41,6 +42,7 @@ const config: Config = {
         secondary: {
           DEFAULT: "hsl(var(--secondary))",
           container: "hsl(var(--secondary-container))",
+          foreground: "hsl(var(--secondary-foreground))",
         },
 
         /* Alert red */

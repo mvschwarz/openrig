@@ -164,4 +164,58 @@ describe("AgentPropertiesPanel", () => {
 
     expect(await screen.findByText("Couldn't load this agent")).toBeDefined();
   });
+
+  it("accepts custom className and merges with defaults using cn", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => NODE_DETAIL });
+    render(
+      createTestRouter({
+        component: () => (
+          <AgentPropertiesPanel
+            rigId="rig-1"
+            logicalId="dev.impl"
+            className="w-full border-l-0 custom-mobile-test"
+          />
+        ),
+        path: "/test",
+      }),
+    );
+
+    const copyBtn = await screen.findByTestId("agent-properties-copy-attach");
+    expect(copyBtn).toBeDefined();
+    const panels = screen.getAllByTestId("agent-properties");
+    const panel = panels[panels.length - 1]!;
+    expect(panel.className).toContain("custom-mobile-test");
+    expect(panel.className).toContain("overflow-y-auto");
+    expect(panel.className).toContain("border-outline-variant");
+  });
+
+  it("renders close button when onClose prop is provided and invokes callback", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => NODE_DETAIL });
+    const onCloseSpy = vi.fn();
+    render(
+      createTestRouter({
+        component: () => (
+          <AgentPropertiesPanel
+            rigId="rig-1"
+            logicalId="dev.impl"
+            onClose={onCloseSpy}
+          />
+        ),
+        path: "/test",
+      }),
+    );
+
+    const closeBtn = await screen.findByTestId("agent-properties-close");
+    expect(closeBtn).toBeDefined();
+    fireEvent.click(closeBtn);
+    expect(onCloseSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits close button when onClose is omitted (desktop sidebar layout)", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => NODE_DETAIL });
+    renderPanel();
+
+    await screen.findByTestId("agent-properties-copy-attach");
+    expect(screen.queryByTestId("agent-properties-close")).toBeNull();
+  });
 });

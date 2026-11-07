@@ -35,7 +35,7 @@ const CASES: Array<[path: string, crumbs: Crumb[]]> = [
   ["/project/slice/s9", [{ label: "Projects", to: "/project" }, { label: "Slice s9" }]],
   ["/specs", [{ label: "Library" }]],
   ["/specs/skills", [{ label: "Library", to: "/specs" }, { label: "Skills" }]],
-  ["/specs/skills/build", [{ label: "Library" }, { label: "Skills", to: "/specs/skills" }, { label: "build" }]],
+  ["/specs/skills/build", [{ label: "Library", to: "/specs" }, { label: "Skills", to: "/specs/skills" }, { label: "build" }]],
   ["/specs/plugins", [{ label: "Library", to: "/specs" }, { label: "Plugins" }]],
   [
     "/plugins/my-plugin",
@@ -48,6 +48,39 @@ const CASES: Array<[path: string, crumbs: Crumb[]]> = [
   ["/settings/policies", [{ label: "Settings", to: "/settings" }, { label: "Policies" }]],
   ["/settings/log", [{ label: "Settings", to: "/settings" }, { label: "Log" }]],
   ["/settings/status", [{ label: "Settings", to: "/settings" }, { label: "Status" }]],
+  ["/bootstrap", [{ label: "Bootstrap" }]],
+  ["/import", [{ label: "Import" }]],
+  ["/packages", [{ label: "Packages" }]],
+  ["/search", [{ label: "Search" }]],
+  ["/packages/install", [{ label: "Packages", to: "/packages" }, { label: "Install" }]],
+  ["/packages/my-pack", [{ label: "Packages", to: "/packages" }, { label: "my-pack" }]],
+  [
+    "/specs/skills/developing-openrig/file/SKILL.md",
+    [
+      { label: "Library", to: "/specs" },
+      { label: "Skills", to: "/specs/skills" },
+      { label: "developing-openrig", to: "/specs/skills/developing-openrig" },
+      { label: "SKILL.md" },
+    ],
+  ],
+  [
+    "/specs/skills/build/file/scripts/test.py",
+    [
+      { label: "Library", to: "/specs" },
+      { label: "Skills", to: "/specs/skills" },
+      { label: "build", to: "/specs/skills/build" },
+      { label: "scripts/test.py" },
+    ],
+  ],
+  [
+    "/topology/seat/rig_alpha/lead.coordinator/logs",
+    [
+      { label: "Rigs", to: "/topology" },
+      { label: "acme-build", to: "/topology/rig/rig_alpha" },
+      { label: "coordinator", to: "/topology/seat/rig_alpha/lead.coordinator" },
+      { label: "logs" },
+    ],
+  ],
   ["/some/unknown%20page", [{ label: "unknown page" }]],
   ["/lab/card-previews", [{ label: "card-previews" }]],
   ["/lab/a/b/c", [{ label: "c" }]],

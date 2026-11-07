@@ -20,7 +20,7 @@
 // chrome). Expanded state rides ?open=<fleetKey> so every state is
 // deep-link addressable (the RigAgentsPage query-param idiom).
 
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Globe } from "lucide-react";
 import { cn } from "../../lib/utils.js";
 import { PageHeader } from "../ui/page-header.js";
@@ -63,10 +63,11 @@ function HostChip({ hostId }: { hostId: string }) {
  *  is idempotent, so the verb needs no local/remote special case. */
 function useOpenHost() {
   const selectHost = useSelectHost();
+  const navigate = useNavigate();
   return (hostId: string) => {
     selectHost.mutate(
       { hostId },
-      { onSuccess: () => window.location.assign("/project?from=fleet") },
+      { onSuccess: () => void navigate({ to: "/project", search: { from: "fleet" } }) },
     );
   };
 }

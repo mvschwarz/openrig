@@ -13,8 +13,8 @@
 // Startup section in Details no longer shows the preview pane (since
 // the terminal moved up to Overview).
 
-import { useMemo, useState } from "react";
-import { CirclePlay } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { CirclePlay, SlidersHorizontal } from "lucide-react";
 import { useNodeDetail, type NodeDetailData } from "../hooks/useNodeDetail.js";
 import { useTopologyActivity } from "../hooks/useTopologyActivity.js";
 import { useSpecLibrary, useLibraryReview } from "../hooks/useSpecLibrary.js";
@@ -185,7 +185,17 @@ function extractAgentPluginIds(review: unknown): string[] {
   return ids;
 }
 
-function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId: string; data: NodeDetailData }) {
+function ActionButtonsRow({
+  rigId,
+  logicalId,
+  data,
+  onOpenProperties,
+}: {
+  rigId: string;
+  logicalId: string;
+  data: NodeDetailData;
+  onOpenProperties?: () => void;
+}) {
   // OPR.0.4.6.MH2 rev1-r2 B1: every button here is a LOCAL action (cmux-open
   // POST; tmux-attach / resume commands for THIS host's sessions). Under a
   // remote selection the row renders an honest read-only marker instead —
@@ -206,12 +216,26 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
   };
   if (actionsAreRemote) {
     return (
-      <div
-        data-testid="live-node-actions-remote-readonly"
-        data-remote-readonly="true"
-        className="text-[11px] text-on-surface-variant"
-      >
-        read-only — remote host
+      <div data-testid="live-node-actions" className="flex flex-wrap items-center gap-2">
+        <div
+          data-testid="live-node-actions-remote-readonly"
+          data-remote-readonly="true"
+          className="text-[11px] text-on-surface-variant"
+        >
+          read-only — remote host
+        </div>
+        {onOpenProperties && (
+          <button
+            type="button"
+            onClick={onOpenProperties}
+            data-testid="detail-open-properties"
+            className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 text-[11px] text-on-surface hover:bg-surface-low/60 lg:hidden"
+            aria-label="Inspect agent properties"
+          >
+            <SlidersHorizontal aria-hidden="true" className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+            Properties
+          </button>
+        )}
       </div>
     );
   }
@@ -243,6 +267,18 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
         >
           <CirclePlay aria-hidden="true" className="h-4 w-4 shrink-0" strokeWidth={1.5} />
           Copy resume command
+        </button>
+      )}
+      {onOpenProperties && (
+        <button
+          type="button"
+          onClick={onOpenProperties}
+          data-testid="detail-open-properties"
+          className="inline-flex min-h-11 items-center gap-1.5 px-3 py-2 border border-outline-variant bg-surface-lowest/30 text-[11px] text-on-surface hover:bg-surface-low/60 lg:hidden"
+          aria-label="Inspect agent properties"
+        >
+          <SlidersHorizontal aria-hidden="true" className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+          Properties
         </button>
       )}
     </div>
@@ -698,8 +734,20 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
   // Analogous to slice 12's project-scope default-tab flip
   // (story → overview).
   const [activeTab, setActiveTab] = useState<Tab>("overview");
+  const [isPropertiesOpen, setIsPropertiesOpen] = useState(false);
   const isAgent = data ? data.nodeKind !== "infrastructure" : true;
   const tabs: Tab[] = ["overview", "details"];
+
+  useEffect(() => {
+    if (!isPropertiesOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setIsPropertiesOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isPropertiesOpen]);
 
   return (
     <WorkspacePage>
@@ -731,7 +779,12 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
 
         {data && (
           <>
-            <ActionButtonsRow rigId={rigId} logicalId={logicalId} data={data} />
+            <ActionButtonsRow
+              rigId={rigId}
+              logicalId={logicalId}
+              data={data}
+              onOpenProperties={() => setIsPropertiesOpen(true)}
+            />
             <TabNav tabs={tabs} activeTab={activeTab} onSelect={setActiveTab} />
             <div data-testid="live-node-tab-body" className="space-y-4">
               {activeTab === "overview" && <OverviewTab data={data} activityVisual={activityVisual} />}
@@ -746,6 +799,35 @@ export function LiveNodeDetails({ rigId, logicalId }: LiveNodeDetailsProps) {
           <AgentPropertiesPanel rigId={rigId} logicalId={logicalId} />
         </div>
       </div>
+
+      {isPropertiesOpen && (
+        <div
+          data-testid="agent-properties-drawer"
+          className="fixed inset-0 z-50 lg:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Properties"
+        >
+          <button
+            type="button"
+            data-testid="agent-properties-drawer-backdrop"
+            aria-label="Close properties drawer"
+            className="absolute inset-0 bg-stone-950/40 backdrop-blur-xs cursor-default"
+            onClick={() => setIsPropertiesOpen(false)}
+          />
+          <div
+            data-testid="agent-properties-drawer-panel"
+            className="absolute top-0 right-0 bottom-0 w-full max-w-sm bg-surface-lowest shadow-2xl flex flex-col pb-16 z-10 border-l border-outline-variant"
+          >
+            <AgentPropertiesPanel
+              rigId={rigId}
+              logicalId={logicalId}
+              className="w-full border-l-0 p-4 h-full"
+              onClose={() => setIsPropertiesOpen(false)}
+            />
+          </div>
+        </div>
+      )}
     </WorkspacePage>
   );
 }

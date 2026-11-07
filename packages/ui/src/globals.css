@@ -66,6 +66,7 @@
 
     --destructive: var(--tertiary);
     --destructive-foreground: 0 0% 100%;
+    --secondary-foreground: var(--on-surface-variant);
     --warning: 40 90% 50%;
     --accent: var(--secondary);
   }
@@ -642,6 +643,7 @@
      inherit the dark values automatically (--foreground/--card/--border/--input/
      --ring/--muted/--destructive/--accent/--popover). */
   --destructive-foreground: 0 0% 100%;
+  --secondary-foreground: var(--on-surface-variant);
 }
 
 /* --- Co-located .dark variants for the hardcoded-hex/rgba escape hatches that
@@ -704,6 +706,7 @@
   --on-surface-variant: 240 4% 42%;
   --secondary: 240 4% 46%;
   --secondary-container: 240 5% 94%;
+  --secondary-foreground: var(--on-surface-variant);
   --brand: 221 83% 53%;
   --brand-foreground: 0 0% 100%;
   --tertiary: 0 72% 51%;
@@ -712,8 +715,8 @@
   --inverse-surface: 240 6% 10%;
   --outline: 240 5% 65%;
   --outline-variant: 240 6% 88%;
-  --success: 142 71% 36%;
-  --warning: 38 92% 50%;
+  --success: 142 72% 29%;
+  --warning: 32 95% 34%;
   --ring: var(--brand);
   --radius: 0.5rem;
   --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.05);
@@ -731,6 +734,7 @@
   --on-surface-variant: 240 5% 65%;
   --secondary: 240 5% 65%;
   --secondary-container: 240 4% 16%;
+  --secondary-foreground: var(--on-surface-variant);
   --brand: 217 91% 60%;
   --brand-foreground: 0 0% 100%;
   --tertiary: 0 84% 60%;

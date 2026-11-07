@@ -3,12 +3,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { Command } from "cmdk";
 import { useNavigate } from "@tanstack/react-router";
-import { allNavItems } from "../../lib/nav.js";
+import { allNavItems, type NavItem } from "../../lib/nav.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { useTheme } from "../ThemeProvider.js";
 import { StatusDot } from "../ui/status-badge.js";
 import { useRigStatusResolver } from "../../hooks/useRigStatusResolver.js";
-import { DialogTitle } from "../ui/dialog.js";
+import { DialogTitle, DialogDescription } from "../ui/dialog.js";
+import { Kbd } from "../ui/kbd.js";
+import { useSettings } from "../../hooks/useSettings.js";
+import { readSettingString, resolveChatTo } from "../../lib/chat-targets.js";
 
 const SEARCH_PLACEHOLDER = "Search pages, rigs, actions…";
 
@@ -27,6 +30,20 @@ export function CommandPalette(): React.JSX.Element {
   const rigsQuery = useRigSummary();
   const rigStatus = useRigStatusResolver();
   const { resolved, setTheme } = useTheme();
+  const { data: settingsData } = useSettings();
+
+  const resolveTarget = useCallback(
+    (item: NavItem): string => {
+      if (item.id === "advisor" || item.id === "operator") {
+        return resolveChatTo(
+          readSettingString(settingsData, `agents.${item.id}_session`),
+          item.id,
+        );
+      }
+      return item.to;
+    },
+    [settingsData],
+  );
 
   const go = useCallback(
     (to: string, params?: Record<string, string>) => {
@@ -71,6 +88,9 @@ export function CommandPalette(): React.JSX.Element {
       >
         <div data-testid="command-palette">
           <DialogTitle className="sr-only">Command palette</DialogTitle>
+          <DialogDescription className="sr-only">
+            Search pages, rigs, actions, and navigation
+          </DialogDescription>
           <Command.Input placeholder={SEARCH_PLACEHOLDER} className="cmdk-input" />
           <Command.List className="cmdk-list">
             <Command.Empty className="cmdk-empty">No results found.</Command.Empty>
@@ -79,7 +99,7 @@ export function CommandPalette(): React.JSX.Element {
                 <Command.Item
                   key={item.id}
                   value={`${item.label} ${(item.keywords ?? []).join(" ")}`}
-                  onSelect={() => go(item.to)}
+                  onSelect={() => go(resolveTarget(item))}
                   className="cmdk-item"
                 >
                   {item.label}
@@ -91,7 +111,7 @@ export function CommandPalette(): React.JSX.Element {
                 {rigs.map((rig) => (
                   <Command.Item
                     key={rig.id}
-                    value={rig.name}
+                    value={`${rig.name} ${rig.id}`}
                     onSelect={() => go("/topology/rig/$rigId", { rigId: rig.id })}
                     className="cmdk-item"
                   >
@@ -138,21 +158,37 @@ export function CommandPalette(): React.JSX.Element {
         overlayClassName="cmdk-overlay"
         contentClassName="cmdk-content"
       >
-        <div data-testid="keyboard-shortcuts">
+        <div data-testid="keyboard-shortcuts" className="p-4 space-y-3">
           <DialogTitle className="sr-only">Keyboard shortcuts</DialogTitle>
-          <h2 aria-hidden="true">Keyboard shortcuts</h2>
-          <ul>
-            <li>
-              <kbd>⌘K</kbd> Search
+          <DialogDescription className="sr-only">
+            Overview of available keyboard navigation shortcuts
+          </DialogDescription>
+          <h2 aria-hidden="true" className="text-sm font-semibold text-on-surface">Keyboard shortcuts</h2>
+          <ul className="space-y-2 text-sm text-on-surface-variant">
+            <li className="flex items-center justify-between">
+              <span className="text-on-surface">Search</span>
+              <Kbd>⌘K</Kbd>
             </li>
-            <li>
-              <kbd>g d</kbd> Dashboard
+            <li className="flex items-center justify-between">
+              <span className="text-on-surface">Dashboard</span>
+              <span className="flex items-center gap-1 font-mono">
+                <Kbd>g</Kbd>
+                <Kbd>d</Kbd>
+              </span>
             </li>
-            <li>
-              <kbd>g i</kbd> Inbox
+            <li className="flex items-center justify-between">
+              <span className="text-on-surface">Inbox</span>
+              <span className="flex items-center gap-1 font-mono">
+                <Kbd>g</Kbd>
+                <Kbd>i</Kbd>
+              </span>
             </li>
-            <li>
-              <kbd>g r</kbd> Rigs
+            <li className="flex items-center justify-between">
+              <span className="text-on-surface">Rigs</span>
+              <span className="flex items-center gap-1 font-mono">
+                <Kbd>g</Kbd>
+                <Kbd>r</Kbd>
+              </span>
             </li>
           </ul>
         </div>
@@ -181,7 +217,10 @@ export function PaletteShortcuts(): React.JSX.Element {
       }
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isEditableTarget(e.target)) {
+      const isModalOpen = typeof document !== "undefined" && Boolean(
+        document.querySelector('[role="dialog"], [aria-modal="true"], dialog[open]'),
+      );
+      if (isEditableTarget(e.target) || isModalOpen) {
         clear();
         return;
       }

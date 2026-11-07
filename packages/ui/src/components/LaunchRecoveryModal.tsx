@@ -78,22 +78,24 @@ function PolicyOption({
       aria-pressed={selected}
       onClick={onSelect}
       className={cn(
-        "flex-1 border px-3 py-2 text-left",
-        selected ? "border-stone-900 bg-stone-900 text-white" : "border-outline bg-white text-stone-700",
+        "flex-1 border px-3 py-2 text-left rounded-md",
+        selected
+          ? "border-outline bg-surface-high text-on-surface"
+          : "border-outline-variant bg-surface-lowest text-on-surface",
         warn && !selected && "border-tertiary/50",
       )}
     >
-      <div className="flex items-center gap-1.5 text-[11px] ">
+      <div className="flex items-center gap-1.5 text-[11px] font-medium">
         {selected ? <Check className="h-3 w-3" /> : null}
         {label}
         {policy === "restore-original" ? (
-          <span className={cn("ml-auto text-[11px]", selected ? "text-white/70" : "text-secondary")}>Default</span>
+          <span className={cn("ml-auto text-[11px]", selected ? "text-on-surface-variant" : "text-secondary")}>Default</span>
         ) : null}
       </div>
       <div
         className={cn(
           "mt-1 font-mono text-[11px] leading-snug",
-          selected ? "text-white/75" : warn ? "text-tertiary" : "text-secondary",
+          selected ? "text-on-surface-variant" : warn ? "text-tertiary" : "text-secondary",
         )}
       >
         {sub}
@@ -143,7 +145,7 @@ export function LaunchRecoveryModal({ rigId, rigName, open, onOpenChange }: Laun
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent hideCloseButton className="max-w-3xl border-stone-900" data-testid="launch-recovery-modal">
+      <DialogContent hideCloseButton className="max-w-3xl border-outline-variant" data-testid="launch-recovery-modal">
         <DialogHeader>
           <DialogTitle className="font-headline tracking-tight flex items-center gap-2">
             <RotateCcw className="h-4 w-4" />
@@ -235,7 +237,7 @@ export function LaunchRecoveryModal({ rigId, rigName, open, onOpenChange }: Laun
         )}
 
         <DialogFooter className="items-center gap-2">
-          <p className="mr-auto font-mono text-[11px] text-stone-400 leading-snug">
+          <p className="mr-auto font-mono text-[11px] text-on-surface-variant leading-snug">
             src: composed from /api/rigs/:id/launch-plan (read-only forecast · mutated:false)
           </p>
           <Button

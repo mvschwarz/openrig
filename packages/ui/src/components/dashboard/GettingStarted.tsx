@@ -34,7 +34,7 @@ function Check({ done }: { done: boolean }) {
       aria-hidden="true"
       className={
         done
-          ? "inline-flex h-5 w-5 items-center justify-center rounded-full bg-brand text-xs text-white"
+          ? "inline-flex h-5 w-5 items-center justify-center rounded-full bg-brand text-xs text-brand-foreground"
           : "inline-flex h-5 w-5 items-center justify-center rounded-full border border-outline-variant text-xs text-on-surface-variant"
       }
     >

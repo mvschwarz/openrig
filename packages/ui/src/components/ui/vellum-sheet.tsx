@@ -42,7 +42,7 @@ export function VellumSheet({
   return (
     <div
       className={cn(
-        "vellum-heavy relative flex flex-col h-full shadow-[0_0_24px_rgba(0,0,0,0.08)]",
+        "vellum-heavy relative flex flex-col h-full shadow-[0_0_24px_rgba(0,0,0,0.08)] pb-16 lg:pb-0",
         widthClass[width],
         edgeClass[edge],
         className,

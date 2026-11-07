@@ -671,4 +671,90 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(resumeButton.textContent).not.toContain("Claude");
     expect(resumeButton.querySelector("svg")).toBeDefined();
   });
+
+  describe("LiveNodeDetails mobile/tablet properties accessibility", () => {
+    it("renders mobile properties button with lg:hidden in action buttons row", async () => {
+      mockNodeDetail(NODE_DETAIL);
+      renderDetails();
+
+      const openBtn = await screen.findByTestId("detail-open-properties");
+      expect(openBtn.className).toContain("lg:hidden");
+      expect(openBtn.textContent).toContain("Properties");
+      // Drawer is closed initially
+      expect(screen.queryByTestId("agent-properties-drawer")).toBeNull();
+    });
+
+    it("clicking mobile properties button opens drawer containing AgentPropertiesPanel with pb-16", async () => {
+      mockNodeDetail(NODE_DETAIL);
+      renderDetails();
+
+      const openBtn = await screen.findByTestId("detail-open-properties");
+      fireEvent.click(openBtn);
+
+      const drawer = await screen.findByTestId("agent-properties-drawer");
+      expect(drawer).toBeDefined();
+      expect(drawer.getAttribute("role")).toBe("dialog");
+      expect(drawer.className).toContain("lg:hidden");
+
+      // Drawer panel has bottom nav clearance (pb-16)
+      const panel = screen.getByTestId("agent-properties-drawer-panel");
+      expect(panel.className).toContain("pb-16");
+      expect(panel.className).toContain("border-outline-variant");
+
+      // AgentPropertiesPanel renders inside with close button
+      const closeBtn = screen.getByTestId("agent-properties-close");
+      expect(closeBtn).toBeDefined();
+    });
+
+    it("closing drawer via close button [×] dismisses drawer", async () => {
+      mockNodeDetail(NODE_DETAIL);
+      renderDetails();
+
+      fireEvent.click(await screen.findByTestId("detail-open-properties"));
+      expect(screen.getByTestId("agent-properties-drawer")).toBeDefined();
+
+      fireEvent.click(screen.getByTestId("agent-properties-close"));
+      expect(screen.queryByTestId("agent-properties-drawer")).toBeNull();
+    });
+
+    it("closing drawer via backdrop click dismisses drawer", async () => {
+      mockNodeDetail(NODE_DETAIL);
+      renderDetails();
+
+      fireEvent.click(await screen.findByTestId("detail-open-properties"));
+      expect(screen.getByTestId("agent-properties-drawer")).toBeDefined();
+
+      fireEvent.click(screen.getByTestId("agent-properties-drawer-backdrop"));
+      expect(screen.queryByTestId("agent-properties-drawer")).toBeNull();
+    });
+
+    it("closing drawer via Escape key dismisses drawer", async () => {
+      mockNodeDetail(NODE_DETAIL);
+      renderDetails();
+
+      fireEvent.click(await screen.findByTestId("detail-open-properties"));
+      expect(screen.getByTestId("agent-properties-drawer")).toBeDefined();
+
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(screen.queryByTestId("agent-properties-drawer")).toBeNull();
+    });
+
+    it("mobile properties button renders even when remote host read-only is active", async () => {
+      mockFetch.mockImplementation(async (url: string) => {
+        if (typeof url === "string" && url.includes("/api/hosts")) {
+          return { ok: true, json: async () => ({ selected: "remote-host-9", hosts: [] }) };
+        }
+        if (typeof url === "string" && url.includes("/nodes/")) {
+          return { ok: true, json: async () => NODE_DETAIL };
+        }
+        return { ok: true, json: async () => ({}) };
+      });
+      renderDetails();
+
+      await screen.findByTestId("live-node-actions-remote-readonly");
+      const openBtn = screen.getByTestId("detail-open-properties");
+      expect(openBtn).toBeDefined();
+      expect(openBtn.className).toContain("lg:hidden");
+    });
+  });
 });
