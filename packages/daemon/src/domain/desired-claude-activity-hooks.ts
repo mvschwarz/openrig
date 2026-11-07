@@ -33,7 +33,7 @@ function agentResolvedAgainstRecordedRoots(
   const rel = agentRef.startsWith("local:") ? agentRef.slice("local:".length) : "";
   if (!rel) return { ok: false, error: "Current agent reference/profile has no established absolute source location" };
   if (rigRoot && isAbsolute(rigRoot)) {
-    const root = reanchorBuiltinStartupFile({ path: "", absolutePath: nodePath.join(rigRoot, "rig.yaml"), ownerRoot: rigRoot }).ownerRoot;
+    const root = reanchorBuiltinStartupFile({ path: "", absolutePath: nodePath.join(nodePath.resolve(rigRoot, rel), "agent.yaml"), ownerRoot: rigRoot }).ownerRoot;
     const folder = nodePath.resolve(root, rel);
     const result = fsOps.exists(nodePath.join(folder, "agent.yaml"))
       ? resolveAgentRef(`path:${folder}`, folder, fsOps)
