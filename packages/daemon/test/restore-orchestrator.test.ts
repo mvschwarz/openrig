@@ -1,3 +1,5 @@
+import { seatSkillPaths, recordSeatSkillWrite, recordSeatSkillFollowing, cleanSeatSkills } from "../src/domain/seat-skill-storage.js";
+import type { RestoreOrchestratorDeps } from "../src/domain/restore-orchestrator.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { TerminalAdapter } from "../src/adapters/terminal-adapter.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -122,6 +124,7 @@ describe("RestoreOrchestrator", () => {
   });
 
   function createOrchestrator(opts?: {
+    seatSkillSelection?: RestoreOrchestratorDeps["seatSkillSelection"];
     tmux?: TmuxAdapter;
     claude?: ClaudeResumeAdapter;
     codex?: CodexResumeAdapter;
@@ -145,8 +148,81 @@ describe("RestoreOrchestrator", () => {
       ompResume: opts?.omp,
       listProcesses: opts?.listProcesses,
       freshLaunch: opts?.freshLaunch,
+      seatSkillSelection: opts?.seatSkillSelection,
     });
   }
+
+  it.each(["follow", "saved", "removed", "edited-catalog", "unavailable-spec", "delivery-failure"] as const)(
+    "Codex restore delivers the current catalog only for following seats: %s", async (mode) => {
+      const rig = rigRepo.createRig("follow-codex");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-follow", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.owner", { runtime: "codex", podId: "pod-follow" });
+      const token = "00000000-0000-4000-8000-000000000086";
+      const session = sessionRegistry.registerSession(node.id, "dev-owner@follow-codex");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateResumeToken(session.id, "codex_id", token);
+      const savedFiles = JSON.stringify([{ path: "old-role.md", absolutePath: "/old-role.md", ownerRoot: "/",
+        deliveryHint: "send_text", required: false, appliesOn: ["restore"] }]);
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', ?, '[]', 'codex')")
+        .run(node.id, savedFiles);
+      const paths = seatSkillPaths({ rigId: rig.id, logicalId: node.logicalId, runtime: "codex" });
+      const source = path.join(paths.root, "source");
+      const oldSource = path.join(paths.root, "old-source");
+      const oldFile = path.join(paths.skillsRoot, "old", "SKILL.md");
+      const oldText = "---\nname: old\ndescription: old trigger\n---\nold body";
+      for (const dir of [source, oldSource, path.dirname(oldFile)]) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(oldSource, "SKILL.md"), oldText);
+      fs.writeFileSync(oldFile, oldText);
+      recordSeatSkillWrite(paths.skillsRoot, oldFile, path.join(oldSource, "SKILL.md"), oldText);
+      if (mode !== "saved") recordSeatSkillFollowing(paths.skillsRoot, "old", oldSource);
+      cleanSeatSkills(paths);
+      fs.writeFileSync(path.join(source, "SKILL.md"), "---\nname: new-review\ndescription: review new changes\n---\nread the new instructions");
+      if (mode === "edited-catalog") fs.writeFileSync(paths.catalogPath, "personal catalog edit");
+      const snapshot = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      const delivered: string[] = [];
+      const order: string[] = [];
+      const adapter: RuntimeAdapter = {
+        runtime: "codex", listInstalled: async () => [], project: async () => ({ projected: [], skipped: [], failed: [] }),
+        launchHarness: vi.fn(async (_binding, opts) => {
+          expect(opts.resumeToken).toBe(token); order.push("resume");
+          return { ok: true, resumeToken: token, resumeType: "codex_id" };
+        }),
+        checkReady: async () => { order.push("ready"); return { ready: true }; },
+        deliverStartup: async (files) => {
+          for (const file of files) { delivered.push(fs.readFileSync(file.absolutePath, "utf8")); order.push("catalog"); }
+          return { delivered: files.length, failed: mode === "delivery-failure" && files.length > 0 ? [{ path: "catalog", error: "send failed" }] : [] };
+        },
+      };
+      const tmux = mockTmux();
+      tmux.getPaneCommand = vi.fn(async () => "codex");
+      const startedAt = "Sat Jan  1 12:00:00 2000";
+      const processes = [
+        { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, executableName: "bash", command: "-bash", startedAt },
+        { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, executableName: "codex", command: `/opt/native/codex resume ${token}`, argv: ["/opt/native/codex", "resume", token], startedAt },
+      ];
+      const result = await createOrchestrator({ tmux, listProcesses: async () => processes,
+        seatSkillSelection: async () => mode === "unavailable-spec" ? { ok: false, reason: "spec unavailable" } : {
+          ok: true, selection: mode === "saved" ? { selected: new Set(["old"]), following: [] }
+            : { selected: new Set(mode === "removed" ? [] : ["new-review"]), following: mode === "removed" ? [] : [{ id: "new-review", source }] },
+        },
+      }).restore(snapshot.id, { adapters: { codex: adapter } });
+      expect(result.ok).toBe(true);
+      if (mode === "saved" || mode === "edited-catalog") expect(delivered).toEqual([]);
+      else {
+        expect(delivered, JSON.stringify({ result, order })).toHaveLength(1);
+        expect(delivered[0]).toContain("replaces any earlier OpenRig skill list");
+        expect(order.indexOf("catalog")).toBeGreaterThan(order.indexOf("ready"));
+        if (mode === "removed") expect(delivered[0]).toContain("No OpenRig skills");
+        else if (mode === "unavailable-spec") expect(delivered[0]).toContain("old trigger");
+        else { expect(delivered[0]).toContain("new-review"); expect(delivered[0]).not.toContain("old trigger"); }
+      }
+      if (mode === "edited-catalog" && result.ok) expect(result.result.warnings.join("\n")).toContain("the updated catalog was not sent");
+      if (mode === "delivery-failure" && result.ok) expect(result.result.nodes[0]?.status).not.toBe("resumed");
+      expect(db.prepare("SELECT resolved_files_json FROM node_startup_context WHERE node_id = ?").get(node.id))
+        .toEqual({ resolved_files_json: savedFiles });
+      fs.rmSync(paths.root, { recursive: true, force: true });
+    });
 
   function seedRigAndSnapshot(opts?: {
     edges?: { sourceLogical: string; targetLogical: string; kind: string }[];
@@ -5687,6 +5763,166 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       const delivered = deliverStartup.mock.calls.flatMap((c) => c[0] as unknown[]);
       expect(delivered).toEqual([]);
+    });
+  });
+
+  describe("launch_wrapper native resume, fail-closed, and snapshot retention", () => {
+    it("passes current launch_wrapper as the new LAST arg after effort on Pi native resume and after beforeNativeDispatch (with undefined padding) on Codex native resume", async () => {
+      const rig = rigRepo.createRig("r99");
+      const piNode = rigRepo.addNode(rig.id, "pi-worker", {
+        role: "worker",
+        runtime: "pi",
+        cwd: "/repo/pi",
+        model: "pi-model",
+        effort: "high",
+        launchWrapper: ["rtk", "--pi-wrap"],
+      });
+      const codexNode = rigRepo.addNode(rig.id, "codex-worker", {
+        role: "worker",
+        runtime: "codex",
+        cwd: "/repo/codex",
+        model: "gpt-5",
+        launchWrapper: ["rtk", "--codex-wrap"],
+      });
+
+      const piSess = sessionRegistry.registerSession(piNode.id, "r99-pi-worker");
+      db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+        .run("pi_session_file", "/tmp/pi-session.jsonl", "resume_if_possible", piSess.id);
+      sessionRegistry.updateStatus(piSess.id, "running");
+
+      const codexSess = sessionRegistry.registerSession(codexNode.id, "r99-codex-worker");
+      db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+        .run("codex_id", "codex-tok-123", "resume_if_possible", codexSess.id);
+      sessionRegistry.updateStatus(codexSess.id, "running");
+
+      const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+      sessionRegistry.updateStatus(piSess.id, "exited");
+      sessionRegistry.updateStatus(codexSess.id, "exited");
+
+      const piResume = {
+        canResume: vi.fn((type: string | null, token: string | null) => type === "pi_session_file" && !!token),
+        resume: vi.fn(async () => ({ ok: true as const })),
+      } as unknown as PiResumeAdapter;
+      const codexResume = mockCodexResume({ ok: true as const });
+
+      const orch = createOrchestrator({
+        pi: piResume,
+        codex: codexResume,
+        listProcesses: nativeLineage("codex", "codex-tok-123"),
+      });
+
+      const result = await orch.restore(snap.id);
+      expect(result.ok).toBe(true);
+
+      // Pi resume: (sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort, launchWrapper)
+      const piCall = (piResume.resume as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect(piCall).toBeDefined();
+      expect(piCall).toHaveLength(8);
+      expect(piCall[6]).toBe("high");
+      expect(piCall[7]).toEqual(["rtk", "--pi-wrap"]);
+
+      // Codex resume: 7 base args + 7 tail args (effort, nonInterruptive, kernelAuthority, teamPermissionDefault, seatCodexHome, codexPermissions, beforeNativeDispatch) + launchWrapper at index 14
+      const codexCall = (codexResume.resume as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect(codexCall).toBeDefined();
+      expect(codexCall).toHaveLength(15);
+      expect(codexCall[0]).toBe("r99-codex-worker");
+      expect(codexCall[1]).toBe("codex_id");
+      expect(codexCall[2]).toBe("codex-tok-123");
+      expect(codexCall[3]).toBe("/repo/codex");
+      expect(codexCall[6]).toBe("gpt-5");
+      // Tail indices 0..6 (overall 7..13): effort=null at 7, teamPermissionDefault=true at 10, indices 11..13 padded with undefined
+      expect(codexCall[7]).toBeNull();
+      expect(codexCall[8]).toBe(false);
+      expect(codexCall[9]).toBe(false);
+      expect(codexCall[10]).toBe(true);
+      expect(codexCall[11]).toBeUndefined();
+      expect(codexCall[12]).toBeUndefined();
+      expect(codexCall[13]).toBeUndefined();
+      expect(codexCall[14]).toEqual(["rtk", "--codex-wrap"]);
+    });
+
+    it("fails closed before native dispatch when stored launch_wrapper is unreadable/corrupt", async () => {
+      const rig = rigRepo.createRig("r99");
+      const codexNode = rigRepo.addNode(rig.id, "worker-b", { role: "worker", runtime: "codex", cwd: "/repo" });
+      const piNode = rigRepo.addNode(rig.id, "worker-pi", { role: "worker", runtime: "pi", cwd: "/repo" });
+      db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("{corrupt-json", codexNode.id);
+      db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("[]", piNode.id);
+
+      const codexResume = mockCodexResume({ ok: true as const });
+      const piResume = {
+        canResume: vi.fn(() => true),
+        resume: vi.fn(async () => ({ ok: true as const })),
+      } as unknown as PiResumeAdapter;
+      const orch = createOrchestrator({
+        claude: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as ClaudeResumeAdapter,
+        codex: codexResume,
+        pi: piResume,
+      });
+
+      const codexAttempt = await (orch as any).attemptResume(
+        codexNode.id,
+        "r99-worker-b",
+        "codex_id",
+        "codex-tok-corrupt",
+        "/repo",
+        null,
+        "gpt-5",
+        "floor",
+      );
+      expect(codexAttempt).toMatchObject({
+        kind: "failed",
+        message: expect.stringMatching(/^Permission selection:.*launch_wrapper/),
+      });
+      expect(codexResume.resume).not.toHaveBeenCalled();
+
+      (orch as any).codexResume.canResume = vi.fn(() => false);
+      const piAttempt = await (orch as any).attemptResume(
+        piNode.id,
+        "r99-worker-pi",
+        "pi_session_file",
+        "/tmp/pi.jsonl",
+        "/repo",
+        null,
+        "pi-model",
+        "floor",
+      );
+      expect(piAttempt).toMatchObject({
+        kind: "failed",
+        message: expect.stringMatching(/^Permission selection:.*launch_wrapper/),
+      });
+      expect(piResume.resume).not.toHaveBeenCalled();
+    });
+
+    it("older snapshots captured without launchWrapper never erase the current row's launch_wrapper", async () => {
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker-b", role: "worker", runtime: "codex", cwd: "/repo" }],
+        edges: [],
+        resumeType: "codex_id",
+        resumeToken: "codex-tok-older-snap",
+      });
+      const nodeId = snap.data.nodes[0]!.id;
+      // Ensure snapshot node payload has no launchWrapper (simulating older snapshot before wrapper was set)
+      const olderSnap = updateSnapshotData(snap, (data) => {
+        for (const n of data.nodes) delete n.launchWrapper;
+      });
+      db.prepare("UPDATE sessions SET status = 'exited'").run();
+
+      // Current live row now has a launch_wrapper
+      rigRepo.setNodeLaunchWrapper(nodeId, ["rtk", "--live-row"]);
+      expect(rigRepo.getRig(snap.rigId)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--live-row"]);
+
+      const codexResume = mockCodexResume({ ok: true as const });
+      const orch = createOrchestrator({
+        codex: codexResume,
+        listProcesses: nativeLineage("codex", "codex-tok-older-snap"),
+      });
+      const result = await orch.restore(olderSnap.id);
+      expect(result.ok).toBe(true);
+
+      // Current row's launch_wrapper is preserved and passed to resume
+      expect(rigRepo.getRig(snap.rigId)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--live-row"]);
+      const codexCall = (codexResume.resume as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect(codexCall[14]).toEqual(["rtk", "--live-row"]);
     });
   });
 });

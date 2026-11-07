@@ -1,6 +1,8 @@
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, DaemonResponseError, DaemonTimeoutError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
+import { readOpenRigEnv } from "../openrig-compat.js";
+import { shellQuote } from "../cross-host-executor.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { streamOutcome } from "./stream-outcome.js";
@@ -40,6 +42,21 @@ function printResult(json: boolean, body: unknown, status: number): void {
     console.log(JSON.stringify(body, null, 2));
   }
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
+}
+
+/**
+ * Added to an emit whose reply came too late or unreadable: the item may still have landed, and the
+ * daemon keeps one item per stream item ID, so only a retry with the same ID can't add a second one.
+ */
+function emitRetryGuidance(id: string | undefined, source: string, sentAt: number): string {
+  if (id !== undefined) {
+    return `The item may still land. To retry safely, repeat the same emit with --id ${shellQuote(id)}; the daemon keeps one item per ID. To check first: rig stream show ${shellQuote(id)}.`;
+  }
+  // The daemon records the seat the request came from (its seat env), not --source, when the two differ.
+  const recorded = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim() || source;
+  // Five minutes before the send, for a daemon whose clock runs behind this one.
+  const since = new Date(sentAt - 5 * 60_000).toISOString();
+  return `The item may still land, and this emit had no --id, so emitting again can add a second item. Check first: rig stream list --source ${shellQuote(recorded)} --since ${since}. Pass a stable --id on emits so a later retry is safe.`;
 }
 
 function isWatchedStreamItem(value: unknown): value is WatchedStreamItem {
@@ -132,6 +149,7 @@ To keep emits passive: rig config set stream.intake off`)
       const deps = getDeps();
       const tags = opts.hintTags ? opts.hintTags.split(",").map((s) => s.trim()).filter(Boolean) : null;
       await withClient(deps, async (client) => {
+        const sentAt = Date.now();
         const res = await client.post<Record<string, unknown>>("/api/stream/emit", {
           streamItemId: opts.id,
           sourceSession: opts.source,
@@ -142,6 +160,12 @@ To keep emits passive: rig config set stream.intake off`)
           hintUrgency: opts.hintUrgency ?? null,
           hintTags: tags,
           interrupt: opts.interrupt ?? false,
+        }).catch((error: unknown): never => {
+          // The shared renderer reads both as an UNKNOWN outcome; name the retry that can't duplicate.
+          if (error instanceof DaemonTimeoutError || error instanceof DaemonResponseError) {
+            error.message += ` ${emitRetryGuidance(opts.id, opts.source, sentAt)}`;
+          }
+          throw error;
         });
         printResult(opts.json ?? false, res.data, res.status);
       });

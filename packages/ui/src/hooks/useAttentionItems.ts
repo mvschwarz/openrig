@@ -27,6 +27,8 @@ import { useQuery } from "@tanstack/react-query";
 export interface AttentionQueueItem {
   /** Structured questions already included in the queue API response. */
   humanQuestions?: unknown[] | null;
+  /** Recorded human answers already included in the queue API response. */
+  humanAnswers?: Record<string, unknown> | null;
   qitemId: string;
   tsCreated: string;
   tsUpdated: string;
@@ -97,12 +99,75 @@ async function fetchAggregatedAttention(limit?: number): Promise<AttentionData> 
  * instead of the single-host list. Callers pass true ONLY when a remote
  * host subscription is enabled — zero-config stays on the legacy wire.
  */
+export const MAX_RETAINED_ATTENTION_ITEMS = 50;
+const retainedAttentionItems = new Map<string, AttentionQueueItem>();
+const evictionListeners = new Set<(qitemId?: string) => void>();
+
+export function onRetainedAttentionEvict(fn: (qitemId?: string) => void): void {
+  evictionListeners.add(fn);
+}
+
+function notifyEvict(qitemId?: string): void {
+  for (const fn of evictionListeners) fn(qitemId);
+}
+
+export function retainAttentionItemInSession(qitemId: string, item?: AttentionQueueItem | null): void {
+  const next = item ?? retainedAttentionItems.get(qitemId);
+  if (!next) return;
+  retainedAttentionItems.delete(qitemId);
+  if (retainedAttentionItems.size >= MAX_RETAINED_ATTENTION_ITEMS) {
+    const oldestKey = retainedAttentionItems.keys().next().value;
+    if (oldestKey !== undefined) {
+      retainedAttentionItems.delete(oldestKey);
+      notifyEvict(oldestKey);
+    }
+  }
+  retainedAttentionItems.set(qitemId, next);
+}
+
+export function clearRetainedAttentionItems(): void {
+  retainedAttentionItems.clear();
+  notifyEvict();
+}
+
+function mergeRetained(items: AttentionQueueItem[], limit: number | undefined, aggregated: boolean): AttentionQueueItem[] {
+  const present = new Set<string>();
+  for (const item of items) {
+    if (!item.hostId || item.hostId === "local") {
+      present.add(item.qitemId);
+      if (retainedAttentionItems.has(item.qitemId)) {
+        retainedAttentionItems.set(item.qitemId, item);
+      }
+    }
+  }
+  const extra = [...retainedAttentionItems.values()].filter(
+    (item) => !present.has(item.qitemId) && (aggregated || !item.hostId || item.hostId === "local"),
+  );
+  if (!extra.length) return limit !== undefined ? items.slice(0, limit) : items;
+  if (limit === undefined) return [...items, ...extra];
+  const live = items.slice(0, Math.max(0, limit));
+  const spare = Math.max(0, limit - live.length);
+  const dropCount = Math.max(0, extra.length - spare);
+  for (let i = 0; i < dropCount; i++) {
+    const droppedId = extra[i]!.qitemId;
+    retainedAttentionItems.delete(droppedId);
+    notifyEvict(droppedId);
+  }
+  return spare > 0 ? [...live, ...extra.slice(dropCount)] : live;
+}
+
 export function useAttentionItems(limit: number = 50, aggregated: boolean = false) {
   return useQuery<AttentionData>({
     queryKey: ["attention-items", limit, aggregated],
     queryFn: aggregated
-      ? () => fetchAggregatedAttention(limit)
-      : async () => ({ items: await fetchAttentionItems(limit), hosts: [] }),
+      ? async () => {
+          const data = await fetchAggregatedAttention(limit);
+          return { items: mergeRetained(data.items, limit, true), hosts: data.hosts };
+        }
+      : async () => ({
+          items: mergeRetained(await fetchAttentionItems(limit), limit, false),
+          hosts: [],
+        }),
     staleTime: 15_000,
     // HG-8: 'always' (not `true`) — see file header comment.
     refetchOnWindowFocus: "always",

@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer } from "node:http";
 import Database from "better-sqlite3";
-import { SeatLaunchEnvironment, publicSeatEnvironment } from "../src/domain/seat-launch-environment.js";
+import { SeatLaunchEnvironment, publicSeatEnvironment, resolveLaunchWrapperArgv } from "../src/domain/seat-launch-environment.js";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
@@ -58,10 +58,12 @@ function fixture() {
     cleanup.push(() => new Promise<void>((r, reject) => server.close(e => e ? reject(e) : r())));
     env.OPENRIG_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   }
+  /** Execute the launch envelope and verify the child received the fixture connection and environment. */
   async function execute(command: string, managed = false) {
     expect(command).not.toContain(env.OPENRIG_ACTIVITY_HOOK_TOKEN);
     expect(command).not.toContain(env.ANTHROPIC_API_KEY);
-    const { stdout } = await exec("/bin/bash", ["--noprofile", "--rcfile", rc, "-ic", command], { env, cwd: binding.cwd, timeout: 5000 });
+    // This starts a shell, a Node fixture and its CLI child before the local HTTP check.
+    const { stdout } = await exec("/bin/bash", ["--noprofile", "--rcfile", rc, "-ic", command], { env, cwd: binding.cwd, timeout: 15_000 });
     const observed = JSON.parse(stdout);
     expect(observed).toMatchObject({ body: { node: "node-current" }, home: env.OPENRIG_HOME, node: "node-current", OPENRIG_DB: env.OPENRIG_DB, TMUX_TMPDIR: env.TMUX_TMPDIR });
     if (!managed) expect(observed).toMatchObject({ generation: "successor-generation", HOME: "/user/home", CODEX_HOME: "/user/codex", CLAUDE_CONFIG_DIR: "/user/claude", USER_VALUE: "keep" });
@@ -151,5 +153,134 @@ describe.skipIf(process.platform === "win32")("seat launch environment after she
   it("explicit allowlist never types unknown secrets or runtime/user variables", () => {
     expect(publicSeatEnvironment({ OPENRIG_HOME: "/instance", OPENRIG_URL: "http://127.0.0.1:1234", OPENRIG_NEW_SECRET: "secret", OPENRIG_ACTIVITY_HOOK_TOKEN: "token", ANTHROPIC_API_KEY: "key", HOME: "/home", CLAUDE_CONFIG_DIR: "/claude", CODEX_HOME: "/codex" })).toEqual({ OPENRIG_HOME: "/instance", OPENRIG_URL: "http://127.0.0.1:1234" });
     expect(publicSeatEnvironment({ OPENRIG_URL: "http://user:secret@127.0.0.1" })).toEqual({});
+  });
+  it.each(["fresh", "resume", "fork"] as const)("Codex %s with launch_wrapper resolves wrapper on daemon PATH before resolved Codex entry and preserves literal args", async kind => {
+    const f = fixture(); await f.serve(); f.identity.OPENRIG_RUNTIME = "codex";
+    vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue("bash");
+    const wrapperLog = path.join(f.root, "wrapper-observed.json");
+    writeFileSync(path.join(f.root, "user-bin", "test-wrapper"), "#!/bin/sh\necho wrong-user-wrapper >&2; exit 99\n", { mode: 0o700 });
+    writeFileSync(path.join(f.bin, "test-wrapper"), `#!${process.execPath}\nconst fs=require('node:fs'),{spawnSync}=require('node:child_process');const args=process.argv.slice(2);const sep=args.indexOf('--');const wArgs=args.slice(0,sep),cmd=args.slice(sep+1);fs.writeFileSync(${JSON.stringify(wrapperLog)},JSON.stringify({wArgs,cmd,cwd:process.cwd(),node:process.env.OPENRIG_NODE_ID,runtime:process.env.OPENRIG_RUNTIME}));const r=spawnSync(cmd[0],cmd.slice(1),{stdio:'inherit',env:process.env});process.exit(r.status??1);\n`, { mode: 0o700 });
+    const wrapper = ["test-wrapper", "space arg", "quote's", "$HOME; echo pwned", "", "--"];
+    const adapter = new CodexRuntimeAdapter({ tmux: f.tmux, fsOps: f.fsOps, seatLaunchEnvironment: f.launch, launchPath: f.env.PATH,
+      detectDaemonSupport: async () => ({ kind: "supported" }), resolveGitAddDirs: async () => [], listProcesses: () => [], sleep: async () => {} });
+    vi.spyOn(adapter as any, "dismissSkippableCodexUpdatePrompt").mockResolvedValue(undefined);
+    vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+    vi.spyOn(adapter as any, "captureFreshThreadId").mockResolvedValue("new-native-id");
+    vi.spyOn(adapter as any, "captureVerifiedForkId").mockResolvedValue("new-native-id");
+    const result = await adapter.launchHarness({ ...f.binding, launchWrapper: wrapper } as NodeBinding, { name: "seat", ...(kind === "resume" ? { resumeToken: "old-id" } : kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-id" } } : {}) });
+    expect(result.ok).toBe(true); expect(f.commands).toHaveLength(1);
+    const expectedPrefix = `${shellQuote(path.join(f.bin, "test-wrapper"))} 'space arg' 'quote'"'"'s' '$HOME; echo pwned' '' '--' ${shellQuote(path.join(f.bin, "codex"))} --no-daemon`;
+    expect(f.commands[0]).toContain(expectedPrefix);
+    await f.execute(f.commands[0]!);
+    const recorded = JSON.parse(require("node:fs").readFileSync(wrapperLog, "utf8"));
+    expect(recorded.wArgs).toEqual(["space arg", "quote's", "$HOME; echo pwned", ""]);
+    expect(recorded.cmd[0]).toBe(path.join(f.bin, "codex"));
+    expect(recorded.node).toBe("node-current");
+    expect(recorded.runtime).toBe("codex");
+  });
+  it("legacy CodexResumeAdapter with launchWrapper prefixes resolved wrapper and keeps unconfigured byte-identical", async () => {
+    const f = fixture(); await f.serve(); f.identity.OPENRIG_RUNTIME = "codex";
+    vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue("bash");
+    writeFileSync(path.join(f.bin, "test-wrapper"), `#!/bin/sh\nwhile [ "$#" -gt 0 ]; do shift; [ "$1" = "--" ] && { shift; break; }; done\nexec "$@"\n`, { mode: 0o700 });
+    const adapter = new CodexResumeAdapter(f.tmux, { seatLaunchEnvironment: f.launch, launchPath: f.env.PATH });
+    vi.spyOn(adapter as any, "verifyResume").mockResolvedValue({ ok: true });
+    const unwrapped = await f.launch.command("seat@rig", "codex -s workspace-write resume 'native-id'", { codexCwd: f.binding.cwd, runtime: "codex" });
+    const emptyWrapped = await f.launch.command("seat@rig", "codex -s workspace-write resume 'native-id'", { codexCwd: f.binding.cwd, runtime: "codex", launchWrapper: [] });
+    expect(emptyWrapped).toBe(unwrapped);
+    expect((await adapter.resume("seat@rig", "codex_id", "native-id", f.binding.cwd, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, ["test-wrapper", "--flag", "--"])).ok).toBe(true);
+    expect(f.commands[0]).toContain(`${shellQuote(path.join(f.bin, "test-wrapper"))} '--flag' '--' ${shellQuote(path.join(f.bin, "codex"))}`);
+    await f.execute(f.commands[0]!);
+  });
+  it("in-place launchShell hint validates the target execution shell when the pane foreground is codex/node and throws on refusal without leaking env values", async () => {
+    const f = fixture();
+    f.identity.OPENRIG_RUNTIME = "codex";
+    const getPaneCommand = vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue("codex");
+    writeFileSync(path.join(f.bin, "test-wrapper"), "#!/bin/sh\nexec \"$@\"\n", { mode: 0o700 });
+    const wrapper = ["test-wrapper", "sandbox", "--profile=dev team", "--"];
+
+    // 1. With launchShell: "bash" (or "/bin/zsh") and a wrapper while foreground is codex, returns the wrapped command without probing pane foreground.
+    const wrapped = await f.launch.command("seat@rig", "codex -s workspace-write resume 'native-id'", {
+      codexCwd: f.binding.cwd,
+      runtime: "codex",
+      launchWrapper: wrapper,
+      launchShell: "bash",
+    });
+    expect(wrapped).toContain(`${shellQuote(path.join(f.bin, "test-wrapper"))} 'sandbox' '--profile=dev team' '--' ${shellQuote(path.join(f.bin, "codex"))} -s workspace-write resume 'native-id'`);
+    expect(getPaneCommand).not.toHaveBeenCalled();
+
+    // 2. With launchShell: "fish" or "nu", rejects with fixed message and no env values.
+    for (const badShell of ["fish", "/usr/bin/fish", "nu", ""] as const) {
+      let caught: Error | undefined;
+      try {
+        await f.launch.command("seat@rig", "codex -s workspace-write resume 'native-id'", {
+          codexCwd: f.binding.cwd,
+          runtime: "codex",
+          launchWrapper: wrapper,
+          launchShell: badShell,
+        });
+      } catch (err) {
+        caught = err as Error;
+      }
+      expect(caught?.message).toBe("launch_wrapper unavailable; no agent started.");
+      expect(caught?.message).not.toContain(f.env.OPENRIG_ACTIVITY_HOOK_TOKEN);
+      expect(caught?.message).not.toContain(f.env.ANTHROPIC_API_KEY);
+    }
+
+    // 3. Without launchShell hint, a wrapper when getPaneCommand returns "codex" or "node" still returns the printf...false string (normal guard unchanged).
+    for (const fg of ["codex", "node"] as const) {
+      getPaneCommand.mockResolvedValueOnce(fg);
+      const noHintWrapped = await f.launch.command("seat@rig", "codex -s workspace-write resume 'native-id'", {
+        codexCwd: f.binding.cwd,
+        runtime: "codex",
+        launchWrapper: wrapper,
+      });
+      expect(noHintWrapped).toBe("printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false");
+    }
+
+    // 4. Unwrapped with getPaneCommand returning "codex" is unchanged.
+    getPaneCommand.mockResolvedValueOnce("codex");
+    const unwrapped = await f.launch.command("seat@rig", "codex -s workspace-write resume 'native-id'", {
+      codexCwd: f.binding.cwd,
+      runtime: "codex",
+    });
+    expect(unwrapped).toContain(`${shellQuote(path.join(f.bin, "codex"))} -s workspace-write resume 'native-id'`);
+    expect(unwrapped).not.toContain("test-wrapper");
+  });
+
+  it("resolveLaunchWrapperArgv and SeatLaunchEnvironment.resolveLaunchWrapper use daemonCwd (not codexCwd) as the single PATH authority and reject Pi shell prefixing", async () => {
+    const f = fixture();
+    f.identity.OPENRIG_RUNTIME = "codex";
+    vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue("bash");
+
+    const daemonRelBin = path.join(f.root, "rel-wrapper-bin");
+    const seatRelBin = path.join(f.binding.cwd, "rel-wrapper-bin");
+    mkdirSync(daemonRelBin, { recursive: true });
+    mkdirSync(seatRelBin, { recursive: true });
+    const daemonWrapper = path.join(daemonRelBin, "rel-wrapper");
+    const seatWrapper = path.join(seatRelBin, "rel-wrapper");
+    writeFileSync(daemonWrapper, "#!/bin/sh\nexec \"$@\"\n", { mode: 0o700 });
+    writeFileSync(seatWrapper, "#!/bin/sh\necho wrong-seat-cwd-wrapper >&2; exit 95\n", { mode: 0o700 });
+    writeFileSync(path.join(f.binding.cwd, "rel-wrapper-bin", "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+
+    f.env.PATH = `rel-wrapper-bin:${f.bin}:/usr/bin:/bin`;
+    const wrapper = ["rel-wrapper", "arg 1", "--"];
+
+    expect(resolveLaunchWrapperArgv(wrapper, f.env.PATH, f.root)).toEqual([daemonWrapper, "arg 1", "--"]);
+    expect(f.launch.resolveLaunchWrapper(wrapper)).toEqual([daemonWrapper, "arg 1", "--"]);
+
+    const codexCmd = await f.launch.command("seat@rig", "codex --no-daemon", {
+      codexCwd: f.binding.cwd,
+      runtime: "codex",
+      launchWrapper: wrapper,
+    });
+    expect(codexCmd).toContain(`${shellQuote(daemonWrapper)} 'arg 1' '--'`);
+    expect(codexCmd).not.toContain(seatWrapper);
+
+    // Passing launchWrapper to SeatLaunchEnvironment.command for runtime "pi" fails closed so shell prefixing cannot re-enter.
+    const piRefusal = await f.launch.command("seat@rig", "node '/runner.js'", {
+      runtime: "pi",
+      launchWrapper: wrapper,
+    });
+    expect(piRefusal).toBe("printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false");
   });
 });

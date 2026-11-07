@@ -101,6 +101,10 @@ when the command exits 0. A non-zero exit means no row was confirmed, even when 
 indeterminate answer repeats the request ID so you can reconcile by it. Don't merge stderr into stdout and keep the
 first `qitem-…` you find there; a refused create prints its request ID first, too.
 
+A timed-out write can still land late. To retry a `create` or `rig stream emit` safely, repeat it unchanged with the
+same `--id` (create's request ID, or the emit's own), since the daemon keeps one row or item per ID; an emit sent
+without `--id` has no ID to reuse, so look for it with `rig stream list --source <seat>` before emitting again.
+
 Read back (`rig queue show <id> --full --json`, or `rig queue transitions <id>`) when the answer doesn't show what you
 need, for example:
 

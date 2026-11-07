@@ -67,6 +67,7 @@ export function attentionItemToFeedCard(item: AttentionQueueItem): FeedCard {
       state: item.state,
       body: item.body,
       humanQuestions: item.humanQuestions ?? null,
+      humanAnswers: item.humanAnswers ?? null,
       tags: item.tags,
     },
     createdAt,

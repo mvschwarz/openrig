@@ -241,7 +241,7 @@ export function seatSkillPluginDirForNode(
 }
 
 export interface SeatSkillRehydration {
-  /** Files that were missing and were put back from their recorded source, with its mode. */
+  /** Files that were missing and were put back from their recorded source, with their saved mode. */
   restored: string[];
   /** Files that differ from what OpenRig recorded writing: kept as they are. */
   kept: string[];
@@ -252,6 +252,12 @@ export interface SeatSkillRehydration {
 }
 
 const sha256 = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+
+/** Compare bytes and, when recorded, permissions before treating a seat file as unchanged. */
+function matchesRecordedFile(file: string, entry: { sha256: string; mode?: number }): boolean {
+  return sha256(fs.readFileSync(file)) === entry.sha256
+    && (entry.mode === undefined || (fs.statSync(file).mode & 0o777) === entry.mode);
+}
 
 /** Whether a recorded copy's source still has the bytes OpenRig wrote from it, so a restore can rebuild that copy. */
 const sourceHasRecordedBytes = (entry: { sha256: string; source: string }): boolean => {
@@ -269,18 +275,18 @@ export function rehydrateSeatSkills(paths: SeatSkillPaths): SeatSkillRehydration
   for (const [file, entry] of recordedSeatSkillFiles(paths)) {
     if (!insideSeatStorage(paths.root, file)) { out.refused.push(file); continue; }
     if (lexists(file)) {
-      try { if (sha256(fs.readFileSync(file)) !== entry.sha256) out.kept.push(file); } catch { out.kept.push(file); }
+      try { if (!matchesRecordedFile(file, entry)) out.kept.push(file); } catch { out.kept.push(file); }
       continue;
     }
     let bytes: Buffer;
     let mode: number;
     try {
       bytes = fs.readFileSync(entry.source);
-      mode = fs.statSync(entry.source).mode & 0o777;
+      mode = entry.mode ?? (fs.statSync(entry.source).mode & 0o777);
     } catch { out.missing.push(file); continue; }
     if (sha256(bytes) !== entry.sha256) { out.missing.push(file); continue; }
     try {
-      // The recorded source still has the recorded bytes, so its mode (a helper's executable bit) comes back too.
+      // Older records lack a mode; new records restore exactly the permissions OpenRig wrote.
       writeInsideSeatStorage(paths.root, file, bytes, mode);
       out.restored.push(file);
     } catch {
@@ -415,10 +421,18 @@ export function seatSkillReplay(input: {
   const blocked = (target: string) => notPutBack.some((f) => f === target || f.startsWith(target + nodePath.sep));
   const kept = seatSkillsToKeep(input.entries, paths);
   const skipEntryIds = new Set(kept.keep);
+  const following = readProjections(paths.projectionsPath).following ?? {};
   const warnings = [...kept.warnings];
   for (const entry of input.entries) {
     if (entry.category !== "skill" || skipEntryIds.has(entry.effectiveId)) continue;
     const target = nodePath.resolve(paths.skillsRoot, entry.effectiveId);
+    // Reconciliation already decided a following skill's contents, including its absence. An older startup plan
+    // must not recreate it, even if today's spec becomes unavailable on a later restore.
+    if (following[entry.effectiveId] && !lexists(target)) {
+      skipEntryIds.add(entry.effectiveId);
+      if (blocked(target)) warnings.push(`Restore: ${entry.effectiveId} not projected again: its following copy is missing and could not be restored`);
+      continue;
+    }
     if (blocked(target)) {
       skipEntryIds.add(entry.effectiveId);
       warnings.push(`Restore: ${target} not projected again: its recorded source is gone or has changed`);
@@ -446,9 +460,12 @@ export function seatSkillReplay(input: {
 }
 
 interface ProjectionRecord {
-  files: Record<string, { sha256: string; source: string }>;
+  files: Record<string, { sha256: string; source: string; mode?: number }>;
   /** What OpenRig last wrote as the seat's generated files (the Codex catalog), so an edit there is told apart. */
   generated?: Record<string, string>;
+  /** Skills whose resource says `on_restore: follow_source`, by id (their folder under the skills root): the source
+   *  folder each was copied from. A restore brings these up to their source, and removes one no longer selected. */
+  following?: Record<string, { source: string }>;
 }
 
 const readProjections = (path: string): ProjectionRecord => {
@@ -458,9 +475,11 @@ const readProjections = (path: string): ProjectionRecord => {
   } catch { return { files: {} }; }
 };
 
+/** Persist ownership and following-policy metadata within the seat storage boundary. */
 function writeProjections(root: string, record: ProjectionRecord): void {
   writeInsideSeatStorage(root, nodePath.join(root, "skill-projections.json"),
-    `${JSON.stringify({ schema: "openrig.seat-skill-projections/v1", files: record.files, ...(record.generated ? { generated: record.generated } : {}) }, null, 2)}\n`);
+    `${JSON.stringify({ schema: "openrig.seat-skill-projections/v1", files: record.files, ...(record.generated ? { generated: record.generated } : {}),
+      ...(record.following && Object.keys(record.following).length > 0 ? { following: record.following } : {}) }, null, 2)}\n`);
 }
 
 /** Record a skill file the Claude adapter wrote (or found already identical) in a seat's storage, so cleanup can tell
@@ -469,19 +488,234 @@ export function recordSeatSkillWrite(skillsRoot: string, dest: string, source: s
   // `<root>/plugin/skills` (Claude) or `<root>/skills` (Codex): the record sits at the seat's root.
   const root = seatRootOfSkills(skillsRoot);
   const record = readProjections(nodePath.join(root, "skill-projections.json"));
-  record.files[nodePath.resolve(dest)] = { sha256: sha256(Buffer.from(bytes)), source: nodePath.resolve(source) };
+  // Mock filesystem adapters may not have a physical destination; older records also lack a mode.
+  let mode: number | undefined;
+  try { mode = fs.statSync(dest).mode & 0o777; } catch {}
+  record.files[nodePath.resolve(dest)] = { sha256: sha256(Buffer.from(bytes)), source: nodePath.resolve(source), ...(mode === undefined ? {} : { mode }) };
   writeProjections(root, record);
 }
 
 /** OPR.0.7.0.9: the seat's launch additions' locations, beside its skills: `additions/` (the prompt file and plugin
  *  folders) and, for Claude, its generated plugin's `agents/`. The same record, restore and cleanup route covers them. */
-export function seatAdditionLocations(paths: SeatSkillPaths): string[] {
+export function seatAdditionLocations(paths: Pick<SeatSkillPaths, "root" | "skillsRoot" | "pluginDir">): string[] {
   return [nodePath.join(paths.root, "additions"), ...(paths.skillsRoot === nodePath.join(paths.pluginDir, "skills") ? [nodePath.join(paths.pluginDir, "agents")] : [])];
 }
 
+/** Record that a skill copied into a seat's storage follows its source (`on_restore: follow_source`), or no longer does
+ *  (`source` undefined). `skillsRoot` is the binding's `seatSkillsRoot`. */
+export function recordSeatSkillFollowing(skillsRoot: string, id: string, source: string | undefined): void {
+  const root = seatRootOfSkills(skillsRoot);
+  const record = readProjections(nodePath.join(root, "skill-projections.json"));
+  const following = { ...(record.following ?? {}) };
+  if (source === undefined) {
+    if (!(id in following)) return;
+    delete following[id];
+  } else {
+    following[id] = { source: nodePath.resolve(source) };
+  }
+  writeProjections(root, { ...record, following });
+}
+
+/** Best-effort policy bookkeeping for a no-op skill; never make an unchanged copy fail launch. */
+export function recordUnchangedSeatSkillFollowing(skillsRoot: string, id: string, source: string | undefined): void {
+  try {
+    if (source === undefined) {
+      recordSeatSkillFollowing(skillsRoot, id, undefined);
+      return;
+    }
+    const root = seatRootOfSkills(skillsRoot);
+    const dir = nodePath.resolve(skillsRoot, id);
+    if (!insideSeatStorageFolder(root, dir)) return;
+    const files = filesBelow(dir);
+    if (!files.includes("SKILL.md")) return;
+    const owned = recordedSeatSkillFiles({ root, skillsRoot, pluginDir: nodePath.join(root, "plugin"),
+      manifestPath: nodePath.join(root, "skill-loadout.json"), projectionsPath: nodePath.join(root, "skill-projections.json") });
+    for (const rel of files) {
+      const file = nodePath.join(dir, rel);
+      const entry = owned.get(file);
+      if (!entry || !insideSeatStorage(root, file) || !matchesRecordedFile(file, entry)) return;
+    }
+    recordSeatSkillFollowing(skillsRoot, id, source);
+  } catch {
+    // An unreadable copy or unwritable record must leave the existing skill usable.
+  }
+}
+
+/** Today's skill selection for a seat, resolved from its spec as it is now. */
+export interface SeatSkillSelection {
+  /** Every skill id the seat's profile selects today. */
+  selected: ReadonlySet<string>;
+  /** The selected skills whose resource says `on_restore: follow_source`, with their source folders. */
+  following: ReadonlyArray<{ id: string; source: string }>;
+}
+
+export interface SeatSkillFollow {
+  /** Following skills whose copy now has its source's bytes, which differed from the saved copy. */
+  refreshed: string[];
+  /** Following skills newly selected, copied in. */
+  added: string[];
+  /** Following skills no longer selected, removed while still as OpenRig wrote them. */
+  removed: string[];
+  /** Copies kept as they are (an edit, an unprovable copy, a missing source), each named. */
+  warnings: string[];
+}
+
+/** Every file below `dir` (anything not a folder, links included), relative to it; empty when it isn't there. */
+function filesBelow(dir: string): string[] {
+  const out: string[] = [];
+  /** Collect relative file paths without descending through directory symlinks. */
+  const walk = (current: string) => {
+    const entries = fs.readdirSync(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = nodePath.join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else out.push(nodePath.relative(dir, full));
+    }
+  };
+  if (lexists(dir)) walk(dir);
+  return out.sort();
+}
+
+/** Remove the empty folders below `dir`, and `dir` itself if it ends up empty, inside the seat's storage only. */
+function removeEmptyFolders(root: string, dir: string): void {
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) if (entry.isDirectory()) removeEmptyFolders(root, nodePath.join(dir, entry.name));
+  try { if (fs.readdirSync(dir).length === 0 && insideSeatStorageFolder(root, dir)) fs.rmdirSync(dir); } catch {}
+}
+
+/** Transfer overlapping loadout ownership before following can replace or remove those files.
+ * Persist the complete projection record first, so an interrupted transfer never loses ownership. */
+function adoptFollowingLoadoutFiles(paths: SeatSkillPaths, ids: string[], record: ProjectionRecord): ProjectionRecord {
+  let manifest: Record<string, unknown> & { skills: Array<Record<string, unknown>> };
+  try {
+    manifest = JSON.parse(fs.readFileSync(paths.manifestPath, "utf8"));
+    if (!manifest || !Array.isArray(manifest.skills)) return record;
+  } catch { return record; }
+  const targets = new Set(ids.map((id) => nodePath.resolve(paths.skillsRoot, id)));
+  const adopted = manifest.skills.filter((skill) => typeof skill?.target === "string" && targets.has(nodePath.resolve(skill.target)));
+  if (adopted.length === 0) return record;
+  const roots = adopted.map((skill) => nodePath.resolve(skill.target as string) + nodePath.sep);
+  const files = { ...record.files };
+  for (const [file, entry] of recordedSeatSkillFiles(paths)) {
+    if (roots.some((root) => file.startsWith(root))) files[file] = entry;
+  }
+  const transferred = { ...record, files };
+  writeProjections(paths.root, transferred);
+  writeInsideSeatStorage(paths.root, paths.manifestPath,
+    `${JSON.stringify({ ...manifest, skills: manifest.skills.filter((skill) => !adopted.includes(skill)) }, null, 2)}\n`);
+  return transferred;
+}
+
+/**
+ * For a restore that keeps a seat's conversation, before its saved skills are put back: bring each following skill
+ * (`on_restore: follow_source`) up to today's selection. A selected one is copied from its source as it is now; one newly
+ * selected is copied in; one recorded as following and no longer selected is removed. Each only while the seat's copy
+ * is still what OpenRig wrote (or was removed by `rig down` for being so): an edited, unrecorded or linked copy is kept
+ * and named. A source that can't be read leaves the saved copy to the usual rehydration. A skill still selected but no
+ * longer following just stops following; its copy stays. Skills that keep their saved copy are not touched here.
+ */
+export function followSeatSkills(paths: SeatSkillPaths, today: SeatSkillSelection): SeatSkillFollow {
+  const out: SeatSkillFollow = { refreshed: [], added: [], removed: [], warnings: [] };
+  let record = readProjections(paths.projectionsPath);
+  if (today.following.length === 0 && Object.keys(record.following ?? {}).length === 0) return out; // nothing follows
+  record = adoptFollowingLoadoutFiles(paths, [...Object.keys(record.following ?? {}), ...today.following.map(({ id }) => id)], record);
+  const files = { ...record.files };
+  const following = { ...(record.following ?? {}) };
+  const folderOf = (id: string) => nodePath.resolve(paths.skillsRoot, id);
+  const recordedBelow = (dir: string) => Object.keys(files).filter((file) => file.startsWith(dir + nodePath.sep));
+  /** Why the copy cannot be replaced, or undefined when every present file is unchanged and owned. */
+  const notOurs = (dir: string): string | undefined => {
+    if (!insideSeatStorageFolder(paths.root, dir)) return "it is not inside this seat's storage (a link on the way)";
+    for (const file of recordedBelow(dir)) {
+      if (!lexists(file)) continue;
+      if (!insideSeatStorage(paths.root, file)) return `${file} is not inside this seat's storage (a link on the way)`;
+      try { if (!matchesRecordedFile(file, files[file]!)) return `${file} was edited`; } catch { return `${file} can't be read`; }
+    }
+    try {
+      for (const rel of filesBelow(dir)) if (!files[nodePath.join(dir, rel)]) return `${nodePath.join(dir, rel)} is not a file OpenRig wrote`;
+    } catch { return `${dir} can't be read`; }
+    return undefined;
+  };
+  const kept = (dir: string, why: string) =>
+    out.warnings.push(`Restore: kept ${dir}: ${why}; it follows its source (on_restore: follow_source), but an edit is never overwritten`);
+  /** Remove the already-verified files below `dir` and their ownership records. */
+  const clear = (dir: string) => {
+    for (const file of recordedBelow(dir)) {
+      if (lexists(file)) removeInsideSeatStorage(paths.root, file);
+      delete files[file];
+    }
+    removeEmptyFolders(paths.root, dir);
+  };
+
+  try {
+    for (const { id, source } of today.following) {
+      const dir = folderOf(id);
+      const sourceDir = nodePath.resolve(source);
+      let tree: Array<{ rel: string; bytes: Buffer; mode: number }>;
+      try {
+        const sourceFiles = filesBelow(sourceDir);
+        if (!sourceFiles.includes("SKILL.md")) throw new Error("no SKILL.md");
+        tree = sourceFiles.map((rel) => {
+          const file = nodePath.join(sourceDir, rel);
+          return { rel, bytes: fs.readFileSync(file), mode: fs.statSync(file).mode & 0o777 };
+        });
+      } catch {
+        out.warnings.push(`Restore: ${id} follows its source, but ${sourceDir} can't be read as a skill; its saved copy is kept`);
+        following[id] = { source: sourceDir };
+        continue;
+      }
+      const why = notOurs(dir);
+      if (why) { kept(dir, why); continue; }
+      const before = recordedBelow(dir);
+      following[id] = { source: sourceDir };
+      const same = before.length === tree.length
+        && tree.every(({ rel, bytes, mode }) => {
+          const file = nodePath.join(dir, rel);
+          return files[file]?.sha256 === sha256(bytes)
+            && files[file]?.source === nodePath.join(sourceDir, rel)
+            && (files[file]?.mode === undefined || files[file]?.mode === mode)
+            && (!lexists(file) || (fs.statSync(file).mode & 0o777) === mode);
+        });
+      if (same) continue; // the saved copy is today's; the usual rehydration puts back whatever rig down removed
+      clear(dir);
+      for (const { rel, bytes, mode } of tree) {
+        const file = nodePath.join(dir, rel);
+        writeInsideSeatStorage(paths.root, file, bytes, mode);
+        files[file] = { sha256: sha256(bytes), source: nodePath.join(sourceDir, rel), mode };
+      }
+      (before.length > 0 ? out.refreshed : out.added).push(id);
+    }
+
+    const followingToday = new Set(today.following.map((skill) => skill.id));
+    for (const id of Object.keys(following).sort()) {
+      if (followingToday.has(id)) continue;
+      if (today.selected.has(id)) { delete following[id]; continue; } // selected, now keeping its saved copy
+      const dir = folderOf(id);
+      const why = notOurs(dir);
+      if (why) { kept(dir, `${why}, and it is no longer selected`); continue; }
+      // Keep the following policy after removal: an older saved startup plan must not replay this skill later.
+      const hadCopy = recordedBelow(dir).length > 0 || lexists(dir);
+      clear(dir);
+      if (hadCopy) out.removed.push(id);
+    }
+
+  } finally {
+    // A partial refresh must remain owned so a later restore can finish it.
+    try { writeProjections(paths.root, { ...record, files, following }); }
+    catch (error) { out.warnings.push(`Restore: could not record skill ownership in ${paths.root}: ${(error as Error).message}`); }
+  }
+  return out;
+}
+
+/** Whether any of this seat's skills is recorded as following its source. */
+export function hasFollowingSeatSkills(paths: SeatSkillPaths): boolean {
+  return Object.keys(readProjections(paths.projectionsPath).following ?? {}).length > 0;
+}
+
 /** Every file OpenRig recorded writing into this seat's skills or launch additions: its recorded hash and source. */
-function recordedSeatSkillFiles(paths: SeatSkillPaths): Map<string, { sha256: string; source: string }> {
-  const out = new Map<string, { sha256: string; source: string }>();
+function recordedSeatSkillFiles(paths: Pick<SeatSkillPaths, "root" | "skillsRoot" | "pluginDir" | "manifestPath" | "projectionsPath">): Map<string, { sha256: string; source: string; mode?: number }> {
+  const out = new Map<string, { sha256: string; source: string; mode?: number }>();
   const roots = [paths.skillsRoot, ...seatAdditionLocations(paths)].map((dir) => nodePath.resolve(dir) + nodePath.sep);
   const inside = (file: string) => roots.some((root) => file.startsWith(root));
   try {
@@ -517,7 +751,7 @@ export interface SeatSkillCleanup {
 
 /**
  * Remove what OpenRig wrote into a seat's skills once the seat's consumers have stopped. A recorded file goes only
- * while its bytes still match the record and its source still has those bytes, so a later restore can rebuild it.
+ * while its bytes and recorded mode still match and its source still has those bytes, so a later restore can rebuild it.
  * The generated plugin's manifest goes too, so nothing points at the storage. Edited and unrecorded files are kept
  * and reported. So is a recorded file whose source moved on or can't be read: it is the only copy of the saved bytes,
  * and a restore can't put it back from the source. The records themselves stay, unless `dropRecords` (the rig is
@@ -532,7 +766,7 @@ export function cleanSeatSkills(paths: SeatSkillPaths, opts: { dropRecords?: boo
     if (!lexists(file)) continue;
     if (!insideSeatStorage(paths.root, file)) { out.refused.push(file); continue; }
     try {
-      if (sha256(fs.readFileSync(file)) !== entry.sha256) { out.kept.push(file); continue; }
+      if (!matchesRecordedFile(file, entry)) { out.kept.push(file); continue; }
       // A copy its source no longer has is the saved selection itself: keep it while a restore can still need it.
       if (!opts.dropRecords && !sourceHasRecordedBytes(entry)) { out.kept.push(file); continue; }
       if (removeInsideSeatStorage(paths.root, file)) { out.removed.push(file); removedFiles.push(file); }
@@ -669,7 +903,7 @@ export function writeSeatSkillCatalog(paths: SeatSkillPaths): SeatSkillCatalog {
     "OpenRig: this seat's skills. This list replaces any earlier OpenRig skill list in this conversation.",
     "",
     lines.length > 0
-      ? "Each skill says when to use it. When that moment comes, read its SKILL.md, then follow it."
+      ? "Each skill says when to use it. When that moment comes, read its current SKILL.md, then follow it; earlier copies read in this conversation may be out of date."
       : "No OpenRig skills are kept for this seat.",
     "",
     ...lines,

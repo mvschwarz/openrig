@@ -161,8 +161,12 @@ export async function selectTmuxServer(options: SelectionOptions): Promise<TmuxS
   }
 
   // A new home beneath a symlinked parent must exist before hashing its real path.
-  // Normal inheritance still has no writable-home prerequisite.
+  // Normal inheritance still has no writable-home prerequisite: it tries, so the record it writes names the real path
+  // a later boot (or a later switch to isolation) reads it back by, and goes on without the home if it can't.
   if (options.mode === "isolated") fs.mkdirSync(options.home, { recursive: true });
+  else if (options.persist !== false) {
+    try { fs.mkdirSync(options.home, { recursive: true }); } catch { /* inheritance is advisory; see the write below */ }
+  }
   const home = canonical(options.home);
   const stateFile = path.join(home, "tmux-server.json");
   const marker: ReturnType<typeof readPinMarker> = options.persist === false ? { active: false } : readPinMarker(home);
@@ -228,7 +232,6 @@ export async function selectTmuxServer(options: SelectionOptions): Promise<TmuxS
     const pinned = executionArgs.length > 0;
     const strict = pinned || previous?.pinned || marker.active;
     try {
-      fs.mkdirSync(home, { recursive: true });
       writeRecord(stateFile, { version: 1, home, mode, pinned, socketPath,
         ...(mode === "isolated" ? { isolatedSocketPath: socketPath }
           : previous?.isolatedSocketPath ? { isolatedSocketPath: previous.isolatedSocketPath } : {}) });

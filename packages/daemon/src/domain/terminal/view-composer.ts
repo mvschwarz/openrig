@@ -121,7 +121,7 @@ export function composeView(
   const localTmux = `${ctx.localTmux ? shellQuote(ctx.localTmux) : "tmux"}${localServer ? ` ${localServer}` : ""}`;
 
   for (const m of members) {
-    const attachFlag = m.readOnly ? "-r " : "-f ignore-size ";
+    const attachFlag = m.readOnly ? "-r " : "";
 
     if (m.host !== null) {
       // Remote member: classify by the registry entry's transport.

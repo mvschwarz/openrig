@@ -274,6 +274,7 @@ describe("F4: a restore puts back a helper with its executable mode", () => {
     const { paths, source, target } = claudeSeat();
     chmodSync(join(source, "scripts/helper.sh"), 0o755);
     chmodSync(join(target, "scripts/helper.sh"), 0o755);
+    recordSeatSkillWrite(paths.skillsRoot, join(target, "scripts/helper.sh"), join(source, "scripts/helper.sh"), readFileSync(join(target, "scripts/helper.sh")));
     cleanSeatSkills(paths);
     expect(existsSync(join(target, "scripts/helper.sh"))).toBe(false);
     expect(rehydrateSeatSkills(paths).restored).toContain(join(target, "scripts/helper.sh"));

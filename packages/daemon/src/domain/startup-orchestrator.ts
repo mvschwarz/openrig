@@ -18,6 +18,7 @@ import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp } from "./claude-mcp.js";
+import { readSeatLaunchWrapper } from "./launch-wrapper.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
 import { settleOwnStartupPaste, startupSubmissionEvidence, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, STARTUP_UNCONFIRMED_REASON, waitForClaudeInputBox, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
@@ -361,6 +362,11 @@ export class StartupOrchestrator {
       if (input.adapter.runtime === "claude-code") {
         input = { ...input, binding: { ...input.binding, claudeMcp: readSeatClaudeMcp(this.db, input.nodeId) } };
       }
+      if (input.adapter.runtime === "pi" || input.adapter.runtime === "codex") {
+        const launchWrapper = readSeatLaunchWrapper(this.db, input.nodeId);
+        const { launchWrapper: _prior, ...restBinding } = input.binding;
+        input = { ...input, binding: launchWrapper ? { ...restBinding, launchWrapper } : restBinding };
+      }
     } catch (error) {
       return this.fail(input, "failed", [`Permission selection: ${(error as Error).message}`], undefined, false, undefined, false, "permission_selection", true);
     }
@@ -578,7 +584,7 @@ export class StartupOrchestrator {
         "INSERT OR REPLACE INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
       ).run(
         input.nodeId,
-        JSON.stringify(input.plan.entries.map((e) => ({ category: e.category, effectiveId: e.effectiveId, sourceSpec: e.sourceSpec, sourcePath: e.sourcePath, resourcePath: e.resourcePath, absolutePath: e.absolutePath, resourceType: e.resourceType, mergeStrategy: e.mergeStrategy, target: e.target }))),
+        JSON.stringify(input.plan.entries.map((e) => ({ category: e.category, effectiveId: e.effectiveId, sourceSpec: e.sourceSpec, sourcePath: e.sourcePath, resourcePath: e.resourcePath, absolutePath: e.absolutePath, resourceType: e.resourceType, mergeStrategy: e.mergeStrategy, target: e.target, ...(e.onRestore ? { onRestore: e.onRestore } : {}) }))),
         JSON.stringify(input.resolvedStartupFiles),
         JSON.stringify(input.startupActions),
         input.adapter.runtime,

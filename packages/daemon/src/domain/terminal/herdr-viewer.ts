@@ -6,6 +6,7 @@ import path from "node:path";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
 import type { ComposedPane } from "./terminal-provider.js";
+import { earlierTileAttachment } from "./tile-attach.js";
 
 export interface ViewerKey { hostId: string; nodeId: string }
 export interface ViewerMapping { workspaceId: string; paneId: string; terminalId: string; readOnly: boolean }
@@ -133,6 +134,12 @@ export class HerdrViewer {
       const id = JSON.stringify([key.hostId, key.nodeId]);
       entry = journal.entries[id];
       let created = false;
+      // An upgrade can change only the tile script (argv[2]); the seat it attaches is the same, so the kept
+      // viewer moves to the current script.
+      if (entry && entry.command !== target.paneCommand && entry.readOnly === target.readOnly && Array.isArray(entry.argv)
+        && earlierTileAttachment(entry.argv, target.attachArgv, target.readOnly)) {
+        entry.command = target.paneCommand; entry.argv = target.attachArgv; if (provision) save();
+      }
       if (entry && (entry.command !== target.paneCommand || entry.readOnly !== target.readOnly)) {
         return unconfirmed("The seat attachment changed; the existing viewer must be inspected before reprovisioning.");
       }
@@ -204,7 +211,7 @@ export class HerdrViewer {
       // shared attach wrapper may be its parent; no mutable title/agent label.
       const argv = entry.argv;
       const server = argv.slice(6); // tileAttachArgv: sh,-c,script,name,session,tmux,...server
-      // A writable tile drops ignore-size when its session has no other sizing client (tile-attach).
+      // Recognize legacy ignore-size writable clients as well as current sizing attaches.
       const flags = entry.readOnly ? [["-r"]] : [["-f", "ignore-size"], []];
       const targetName = argv[4]!;
       const verified = info?.foreground_processes?.some(p => {

@@ -10,6 +10,7 @@ import { resolveExternal } from "./gateway/external-admission.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
 import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, type RecentQueueTransitionScope } from "./queue-transition-log.js";
 import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
+import { physicalSessionName } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { withRecoveryIndex } from "./queue-recovery.js";
@@ -1599,10 +1600,25 @@ export class QueueRepository {
 
   /** Recover current notifications once per pass. A snapshot horizon and seek cursor
    * prevent new arrivals or persistent failures from making this pass unbounded. `stopRequested` is checked before
-   * each delivery: a stopped pass leaves the notifications it has not attempted as they are, for the next start. */
-  async drainPendingWakeIntents(opts?: { stopRequested?: () => boolean }): Promise<{ delivered: number; indeterminate: number; failed: number; retained: number }> {
-    const tally = { delivered: 0, indeterminate: 0, failed: 0, retained: 0 };
+   * each delivery: a stopped pass leaves the notifications it has not attempted as they are, for the next start.
+   * A notification already tried for a seat that still has no session or transport would only fail again, so it isn't
+   * claimed, alone or in a group: it stays as it is, its row stays owed, and the pass reports it as waiting. The
+   * receiver is read at each claim, so a seat that starts during the pass gets its later notifications. */
+  async drainPendingWakeIntents(opts?: { stopRequested?: () => boolean }): Promise<{ delivered: number; indeterminate: number; failed: number; retained: number;
+    /** Present only when a notification waits for a seat with no session or transport. */
+    waiting?: { notifications: number; seats: string[] } }> {
+    const tally: { delivered: number; indeterminate: number; failed: number; retained: number;
+      waiting?: { notifications: number; seats: string[] } } = { delivered: 0, indeterminate: 0, failed: 0, retained: 0 };
     if (!this.outbox || !this.transport) return tally;
+    const attempted = new Set<string>();
+    // Notifications left alone for want of a receiver; one a later claim in this pass attempted isn't waiting.
+    const skipped = new Map<string, string>();
+    const result = () => {
+      const waitingBySeat = new Map<string, number>();
+      for (const [outboxId, seat] of skipped) if (!attempted.has(outboxId)) waitingBySeat.set(seat, (waitingBySeat.get(seat) ?? 0) + 1);
+      if (waitingBySeat.size) tally.waiting = { notifications: [...waitingBySeat.values()].reduce((a, b) => a + b, 0), seats: [...waitingBySeat.keys()] };
+      return tally;
+    };
     const BATCH = 200;
     const horizon = (this.db.prepare("SELECT COALESCE(MAX(rowid),0) AS id FROM outbox_entries").get() as { id: number }).id;
     // Retire never-attempted obsolete notifications without materializing historical intents.
@@ -1612,9 +1628,15 @@ export class QueueRepository {
         AND NOT EXISTS (SELECT 1 FROM queue_items q WHERE q.qitem_id = o.audit_pointer
           AND q.state = 'pending' AND q.destination_session = o.destination_session)`)
       .run(horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX).changes;
-    const attempted = new Set<string>();
     // A stop also refuses every later claim inside a delivery: coalesced peers and members it releases for their own send.
-    const eligible = () => !opts?.stopRequested?.();
+    // So does a missing receiver, for a notification already tried. One never tried still gets its attempt, so its row
+    // records why it didn't land.
+    const eligible = (entry: OutboxEntry): boolean => {
+      if (opts?.stopRequested?.()) return false;
+      if (entry.deliveryState === "pending" || !this.wakeHasNoReceiver(entry.destinationSession)) return true;
+      skipped.set(entry.outboxId, entry.destinationSession);
+      return false;
+    };
     let cursor = 0;
     for (;;) {
       const pending = this.db.prepare(`SELECT o.rowid AS id, o.outbox_id FROM outbox_entries o
@@ -1625,14 +1647,30 @@ export class QueueRepository {
         .all(cursor, horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
       if (pending.length === 0) break;
       for (const intent of pending) {
-        if (opts?.stopRequested?.()) return tally;
+        if (opts?.stopRequested?.()) return result();
         cursor = intent.id;
         const outcome = await this.deliverWakeIntent(intent.outbox_id, attempted, eligible);
         if (outcome !== "skipped") tally[outcome]++;
       }
       if (pending.length < BATCH) break; // served short batch ⇒ drained
     }
-    return tally;
+    return result();
+  }
+
+  /** Positive evidence only that a wake can't land now: no transport can hold the address, or the newest session
+   * under the name the transport sends to has stopped (exited, or detached because its tmux session is gone). A
+   * canonical address resolves to its current physical session first. Anything unknown may have a receiver. */
+  private wakeHasNoReceiver(destinationSession: string): boolean {
+    try {
+      const destClass = this.classifyDestinationOf(destinationSession).class;
+      if (destClass === "unroutable") return true;
+      if (destClass !== "pane-bound") return false;
+      const newest = this.db.prepare("SELECT status FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
+        .get(physicalSessionName(this.db, destinationSession)) as { status: string } | undefined;
+      return newest?.status === "exited" || newest?.status === "detached";
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -5207,8 +5245,8 @@ export class QueueRepository {
       target,
       reason: "no-live-local-successor",
       message: foreignTarget
-        ? `Successor custody for '${target}' is unverified on this daemon: the successor is named on that host, and this daemon cannot read its custody. This closure records a handoff claim, not proof of transfer or pickup. Use 'rig queue handoff' or 'handoff-and-complete': a local handoff is atomic, across hosts the successor is created first and the source closed after, and an uncertain result is reconciled by its exact id, since re-running the same handoff is idempotent.`
-        : `Successor custody for '${target}' is unverified on this daemon: no local row with this source's lineage was found. A successor may exist on another host. This closure records a handoff claim, not proof of transfer or pickup; reconcile the successor by ID. Use 'rig queue handoff' or 'handoff-and-complete': a local handoff is atomic, across hosts the successor is created first and the source closed after, and an uncertain result is reconciled by its exact id, since re-running the same handoff is idempotent.`,
+        ? `Successor custody for '${target}' is unverified on this daemon: the successor is named on that host, and this daemon cannot read its custody. This closure records a handoff claim, not proof of transfer or pickup. Use 'rig queue handoff' or 'handoff-and-complete' with '--to <seat@rig>'; add '--host <registered-host>' for another host instead of manually closing to the successor ID; a local handoff is atomic, across hosts the successor is created first and the source closed after, and an uncertain result is reconciled by its exact id, since re-running the same handoff is idempotent.`
+        : `Successor custody for '${target}' is unverified on this daemon: no local row with this source's lineage was found. A successor may exist on another host. This closure records a handoff claim, not proof of transfer or pickup; reconcile the successor by ID. Use 'rig queue handoff' or 'handoff-and-complete' with '--to <seat@rig>'; add '--host <registered-host>' for another host instead of manually closing to the successor ID; a local handoff is atomic, across hosts the successor is created first and the source closed after, and an uncertain result is reconciled by its exact id, since re-running the same handoff is idempotent.`,
     };
   }
 

@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
+import Database from "better-sqlite3";
 import { migrationsForFullTestDb, migrationsForFullTestDbExclusions } from "./helpers/test-app.js";
 import { assertExplicitSubsetOfAllMigrations } from "./helpers/migration-subset-guard.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { migrate } from "../src/db/migrate.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { readSeatLaunchWrapper } from "../src/domain/launch-wrapper.js";
 
 // P24 — the curated fixture lists must be DECLARED subsets of ALL_MIGRATIONS, not accidental ones.
 // A migration added to ALL_MIGRATIONS but forgotten in a curated list now FAILS LOUD with its name +
@@ -70,5 +75,36 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
         allMigrations: [fake("001_a.sql"), fake("002_b.sql")],
       }),
     ).toThrowError(/redundant[\s\S]*002_b\.sql/i);
+  });
+
+  it("150_node_launch_wrapper adds nullable launch_wrapper column and guards pre-150 databases", () => {
+    expect(ALL_MIGRATIONS.some((m) => m.name === "150_node_launch_wrapper.sql")).toBe(true);
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "150_node_launch_wrapper.sql"));
+      const repo = new RigRepository(db);
+      const rig = repo.createRig("pre-150");
+      const legacyNode = repo.addNode(rig.id, "legacy-codex", { runtime: "codex" });
+      expect(legacyNode.launchWrapper).toBeUndefined();
+      expect("launchWrapper" in legacyNode).toBe(false);
+      expect(readSeatLaunchWrapper(db, legacyNode.id)).toBeUndefined();
+      expect(repo.setNodeLaunchWrapper(legacyNode.id, null)).toBe(false);
+      expect(repo.setNodeLaunchWrapper(legacyNode.id, [])).toBe(false);
+      expect(() => repo.setNodeLaunchWrapper(legacyNode.id, ["mtn", "--"])).toThrow(/migration/i);
+      expect(() => repo.addNode(rig.id, "unmigrated-wrapped", { runtime: "codex", launchWrapper: ["mtn", "--"] })).toThrow(/migration/i);
+      expect(db.prepare("SELECT id FROM nodes WHERE logical_id = 'unmigrated-wrapped'").get()).toBeUndefined();
+
+      migrate(db, ALL_MIGRATIONS);
+      const cols = db.prepare("PRAGMA table_info(nodes)").all() as Array<{ name: string; notnull: number }>;
+      const col = cols.find((c) => c.name === "launch_wrapper");
+      expect(col).toBeDefined();
+      expect(col!.notnull).toBe(0);
+
+      const wrapped = repo.addNode(rig.id, "migrated-wrapped", { runtime: "pi", launchWrapper: ["mtn", "sandbox", "--"] });
+      expect(wrapped.launchWrapper).toEqual(["mtn", "sandbox", "--"]);
+      expect(readSeatLaunchWrapper(db, wrapped.id)).toEqual(["mtn", "sandbox", "--"]);
+    } finally {
+      db.close();
+    }
   });
 });

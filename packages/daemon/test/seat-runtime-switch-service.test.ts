@@ -870,4 +870,79 @@ describe("live seat runtime switch", () => {
       expect((fakeTmux as unknown as { capturePaneContent: ReturnType<typeof vi.fn> }).capturePaneContent).not.toHaveBeenCalled();
     });
   });
+
+  describe("launch_wrapper runtime-switch guard and carry", () => {
+    it("refuses switching a seat with a selected launch_wrapper to an unsupported runtime (claude-code) BEFORE side effects", async () => {
+      rigRepo.setNodeLaunchWrapper(nodeId, ["rtk", "--wrap"]);
+      const svc = service();
+      const result = await svc.setRuntime({
+        seatRef: SEAT,
+        runtime: "claude-code",
+        reason: "try-claude",
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        code: "runtime_switch_failed",
+        committed: false,
+      });
+      expect((result as { message: string }).message).toMatch(/launch_wrapper/i);
+      // Zero side effects: no switch row created, no staging session created, predecessor untouched
+      expect(openSwitch()).toBeUndefined();
+      expect(fakeTmux.createSession).not.toHaveBeenCalled();
+      expect(nodeRow().runtime).toBe("codex");
+      expect(rigRepo.getRig(rigRepo.listRigs()[0]!.id)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--wrap"]);
+    });
+
+    it("carries launch_wrapper onto a Codex successor (same-runtime account switch) and preserves it on the node row", async () => {
+      rigRepo.setNodeLaunchWrapper(nodeId, ["rtk", "--codex-carry"]);
+      const codexAdapter = adapter("codex");
+      const svc = service({
+        runtimeAdapters: { codex: codexAdapter, "claude-code": adapter("claude-code") },
+      });
+      onSleep = () => {
+        const row = openSwitch();
+        if (row?.phase !== "preparing") return;
+        if (!handoverTyped()) return;
+        svc.confirm({ seatRef: SEAT, switchId: row.id, note: "ready", actorSession: SEAT, generation: row.successor_generation });
+      };
+      const altHome = path.join(home, "alt-codex-home");
+      fs.mkdirSync(altHome, { recursive: true });
+      const result = await svc.setRuntime({
+        seatRef: SEAT,
+        runtime: "codex",
+        accountHome: altHome,
+        reason: "switch-account",
+      });
+      expect(result).toMatchObject({ ok: true, changed: true });
+      expect(vi.mocked(codexAdapter.launchHarness).mock.calls[0]?.[0]).toMatchObject({
+        nodeId,
+        launchWrapper: ["rtk", "--codex-carry"],
+      });
+      expect(rigRepo.getRig(rigRepo.listRigs()[0]!.id)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--codex-carry"]);
+    });
+
+    it("fails closed before side effects when stored launch_wrapper is corrupt", async () => {
+      const origListWindows = fakeTmux.listWindows;
+      fakeTmux.listWindows = vi.fn(async (name: string) => {
+        db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("{corrupt", nodeId);
+        return origListWindows(name);
+      });
+      const altHome = path.join(home, "alt-codex-home-2");
+      fs.mkdirSync(altHome, { recursive: true });
+      const result = await service().setRuntime({
+        seatRef: SEAT,
+        runtime: "codex",
+        accountHome: altHome,
+        reason: "switch-account",
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        code: "runtime_switch_failed",
+        committed: false,
+      });
+      expect((result as { message: string }).message).toMatch(/launch_wrapper/);
+      expect(openSwitch()).toBeUndefined();
+      expect(fakeTmux.createSession).not.toHaveBeenCalled();
+    });
+  });
 });

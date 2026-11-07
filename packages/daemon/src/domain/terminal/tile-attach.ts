@@ -1,3 +1,5 @@
+import { tileAttachArgv078, tileAttachArgv079 } from "./earlier-tile-attach.js";
+
 // A tile owns its attach process; no daemon watcher or steady-state polling.
 // Session names survive fresh launch, handover and restart. The node identity
 // must survive too: never follow a same-name session belonging to another seat.
@@ -5,32 +7,24 @@ export function tileAttachArgv(
   tmux: string, server: readonly string[], session: string, readOnly: boolean,
   retrySeconds = 30,
 ): string[] {
-  // tmux honours ignore-size server-wide: while any client of any session sizes
-  // its window, ignore-size clients size nothing, so a session they alone view
-  // keeps its 80x24 creation size. A writable tile therefore ignores size only
-  // when its session already has a sizing client.
-  const ro = readOnly ? "-r " : "$ro ";
-  const pick = (target: string) => (readOnly ? "" : `pick ${target} "$@"; `);
+  // Writable tiles contribute their visible size even when an older client is attached.
+  // Read-only tiles keep tmux's observer sizing behaviour.
+  const ro = readOnly ? "-r " : "";
   // No apostrophes or control characters in the script: Herdr also stores this
   // argv as its restart command. All external values stay positional arguments.
   const script = [
     'target=$1; shift;',
-    ...(readOnly ? [] : [
-      // Shell builtins only: the provider PATH may hold nothing but tmux.
-      'pick() { s=$1; shift; ro=; for f in $("$@" list-clients -t "$s" -F "#{client_flags}" 2>/dev/null); do',
-      'case ",$f," in *,ignore-size,*) ;; *) ro="-f ignore-size";; esac; done; };',
-    ]),
-    `snapshot=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || { ${pick('"=$target"')}exec "$@" attach ${ro}-t "=$target"; };`,
+    `snapshot=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || { exec "$@" attach ${ro}-t "=$target"; };`,
     // display-message may succeed with empty/fallback context for a missing target.
-    `if [ "\${snapshot#*:}" != "$target" ]; then ${pick('"=$target"')}exec "$@" attach ${ro}-t "=$target"; fi;`,
+    `if [ "\${snapshot#*:}" != "$target" ]; then exec "$@" attach ${ro}-t "=$target"; fi;`,
     'snapshot=${snapshot%%:*};',
     'node=$("$@" show-environment -t "${snapshot#* }" OPENRIG_NODE_ID 2>/dev/null) || node=;',
     'case "$node" in OPENRIG_NODE_ID=?*) ;; *) node=;; esac;',
     'if [ -z "$node" ]; then',
     'printf "%s\\n" "No managed identity for $target; reopen this view after replacement.";',
-    `${pick('"${snapshot#* }"')}exec "$@" attach ${ro}-t "\${snapshot#* }"; fi;`,
+    `exec "$@" attach ${ro}-t "\${snapshot#* }"; fi;`,
     'while :; do',
-    `${pick('"${snapshot#* }"')}"$@" attach ${ro}-t "\${snapshot#* }";`,
+    `"$@" attach ${ro}-t "\${snapshot#* }";`,
     `left=${retrySeconds}; same=0;`,
     'while [ "$left" -gt 0 ]; do',
     'next=$("$@" display-message -p -t "=$target:" "#{pid} #{session_id}:#{session_name}" 2>/dev/null) || next=;',
@@ -51,4 +45,16 @@ export function tileAttachArgv(
     'done',
   ].join(" ");
   return ["/bin/sh", "-c", script, "openrig-tile", session, tmux, ...server];
+}
+
+/** Whether a kept tile is the one an earlier release generated for the same seat: exactly the command 0.7.9's, or
+ * 0.7.5-0.7.8's, script makes for the current tile's session, tmux, server and read-only intent. An upgrade changes
+ * only OpenRig's own script; any other difference, an edited script included, is a different attachment. */
+export function earlierTileAttachment(kept: readonly string[], current: readonly string[], readOnly: boolean): boolean {
+  if (current.length < 6) return false;
+  const [session, tmux, ...server] = current.slice(4) as [string, string, ...string[]];
+  return [tileAttachArgv079, tileAttachArgv078].some((make) => {
+    const earlier = make(tmux, server, session, readOnly);
+    return earlier.length === kept.length && earlier.every((word, i) => word === kept[i]);
+  });
 }

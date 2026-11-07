@@ -71,6 +71,17 @@ if (process.env["TERM_PROGRAM"] === "rex") delete process.env["TERM_PROGRAM"];
 // 1), which flakes any test reading one vs the other under suite ordering. So reuse a
 // fixture home already established in this worker. Named as a realistic `.openrig`-style
 // home (still fixture-scoped via the marker) so path-shape assertions hold against it.
+// Where the fixture home and the worker TMPDIR go: the given temp folder with its symlinks resolved, so a path a
+// test builds and the same path the product resolves are spelled alike. macOS's default is a per-user folder under
+// /var/folders, ~57 characters once resolved, which leaves too little of the 104-byte Unix socket cap for the tmux
+// and daemon sockets under it; in its place the base is /tmp, resolved (/private/tmp), as the CI job gets by running
+// with a short resolved TMPDIR. This includes explicit overrides under /private/var/folders; set
+// OPENRIG_TEST_KEEP_TMPDIR=1 to preserve those exactly. Other roots are kept. mkdtemp makes each folder 0700.
+// A package that keeps its TMPDIR (OPENRIG_TEST_KEEP_TMPDIR=1) keeps it here too, unresolved.
+const keepTmpdir = process.env["OPENRIG_TEST_KEEP_TMPDIR"] === "1";
+const givenTmp = fs.realpathSync(os.tmpdir());
+const tmpBase = keepTmpdir ? os.tmpdir()
+  : process.platform === "darwin" && givenTmp.startsWith("/private/var/folders/") ? fs.realpathSync("/tmp") : givenTmp;
 const existingHome = process.env["OPENRIG_HOME"];
 let createdHome: string | undefined;
 let createdTmp: string | undefined;
@@ -78,7 +89,7 @@ const fixtureHome =
   existingHome && fs.existsSync(path.join(existingHome, ".openrig-fixture"))
     ? existingHome
     : (() => {
-        const h = fs.mkdtempSync(path.join(os.tmpdir(), ".openrig-test-fixture-home-"));
+        const h = fs.mkdtempSync(path.join(tmpBase, ".openrig-test-fixture-home-"));
         fs.writeFileSync(path.join(h, ".openrig-fixture"), "");
         createdHome = h;
         // The worker's own TMPDIR, so every os.tmpdir() mkdtemp a test makes lands in a directory removed with
@@ -86,8 +97,8 @@ const fixtureHome =
         // and a Unix socket path is capped (104 bytes on macOS, where TMPDIR is already ~49 long).
         // A package whose tests are tied to the length of the temp path (the tui's Unix socket tests) opts out with
         // test.env OPENRIG_TEST_KEEP_TMPDIR=1 in its vitest config and keeps the TMPDIR it was given.
-        if (process.env["OPENRIG_TEST_KEEP_TMPDIR"] !== "1") {
-          createdTmp = fs.mkdtempSync(path.join(os.tmpdir(), "o-"));
+        if (!keepTmpdir) {
+          createdTmp = fs.mkdtempSync(path.join(tmpBase, "o-"));
           process.env["TMPDIR"] = createdTmp;
         }
         return h;

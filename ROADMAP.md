@@ -6,9 +6,9 @@ This isn't a schedule or a promise: we release often, and an item ships when a g
 To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
 Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
 
-## Released in 0.7.8
+## Released in 0.7.9
 
-[0.7.8 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.8): it lets a person answer a runner seat's permission requests, with a conformance check and an example runner to build against. See its release notes for what shipped, known issues, upgrade instructions and contributor credits.
+[0.7.9 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.9): it follows through on 0.7.8. A person's typed words on a runner seat's permission ask now reach the agent, each permit OpenRig grants a runner by default is recorded, and a runner can keep a long, quiet turn reading working. See its release notes for what shipped, known issues, upgrade instructions and contributor credits.
 
 ## How to help
 

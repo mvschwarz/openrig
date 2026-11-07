@@ -1,4 +1,5 @@
 import { ACCOUNT_HOME_PROVIDER_ENV, RUNTIME_HOME_VAR, type HomeRuntime } from "./seat-runtime-home.js";
+import { isLaunchWrapperRuntime, validateLaunchWrapper } from "./launch-wrapper.js";
 import { accessSync, closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, statSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -74,6 +75,14 @@ export function launchExecutable(name: string, searchPath: string, cwd: string):
   throw new Error(`Seat launch requires ${name} on the daemon launch PATH.`);
 }
 
+/** Resolve and validate a `launch_wrapper` argv against the daemon launch PATH and daemon cwd. */
+export function resolveLaunchWrapperArgv(wrapper: readonly string[], searchPath: string, cwd: string): string[] {
+  if (!searchPath) throw new Error("Seat launch requires a daemon launch PATH.");
+  const validated = validateLaunchWrapper([...wrapper]);
+  if (validated.length === 0) throw new Error("launch_wrapper: must not be an empty array");
+  return [launchExecutable(validated[0]!, searchPath, cwd), ...validated.slice(1)];
+}
+
 /** Reassert only public seat metadata after shell startup. Session identity is
  * read from tmux's launch environment; a successor's reserved identity wins.
  * Credentials stay in the inherited channel. An explicitly selected Codex home
@@ -86,6 +95,10 @@ export class SeatLaunchEnvironment {
     private readonly cliPath?: string,
     private readonly codexHome?: string,
     private readonly selectedAccountHome?: (nodeId: string, runtime: string, ignoreAccountHome?: boolean) => string | undefined) {}
+
+  resolveLaunchWrapper(wrapper: readonly string[]): string[] {
+    return resolveLaunchWrapperArgv(wrapper, this.sessionEnv.PATH ?? "", this.daemonCwd);
+  }
 
   private rigBin(): string {
     const cli = realpathSync(this.cliPath ?? pairedCli());
@@ -107,11 +120,15 @@ export class SeatLaunchEnvironment {
     /** The seat's own CODEX_HOME when it declares one; it wins over the daemon's. */
     codexHome?: string;
     accountHome?: string | null;
+    launchWrapper?: readonly string[];
+    /** In-place restart only: the shell that will run this command. The pane foreground is the running agent, so it is not probed. Set => a refusal throws. */
+    launchShell?: string;
     /** A Claude seat's own token step (claude-seat-token.ts), run before Claude in the staged subshell. A POSIX pane only:
      *  a caller whose command comes back without it knows the token wasn't applied. */
     claudeTokenStep?: string } = {}): Promise<string> {
     const accountHome = target.accountHome !== undefined ? target.accountHome : (target.nodeId && target.runtime ? this.selectedAccountHome?.(target.nodeId, target.runtime) : undefined);
     const clearing = target.accountHome === null;
+    const wrapped = target.launchWrapper?.length ? target.launchWrapper : undefined;
     const configuredHome = clearing && target.nodeId && target.runtime ? this.selectedAccountHome?.(target.nodeId, target.runtime, true) : undefined;
     const homeVar = RUNTIME_HOME_VAR[target.runtime as HomeRuntime];
     const clearStep = clearing && homeVar ? `unset ${homeVar}; ${configuredHome !== undefined ? `export ${homeVar}=${shellQuote(configuredHome)}; ` : ""}` : "";
@@ -124,8 +141,8 @@ export class SeatLaunchEnvironment {
     const fallback = codexEnv.length ? `env ${codexEnv.join(" ")} ${command}` : command;
     try {
       // Nushell does not expand "$PATH". Keep its pre-existing literal command.
-      const shell = path.basename(await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
-      if (shell === "nu" || shell === "nu.exe" || ((accountHome || clearing) && !["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell))) throw new Error("Non-POSIX pane");
+      const shell = path.basename(target.launchShell ?? await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
+      if (shell === "nu" || shell === "nu.exe" || ((accountHome || clearing || wrapped) && !["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell))) throw new Error("Non-POSIX pane");
       // Pi keeps its existing command on shells where this PATH expression is not supported.
       if (target.runtime === "pi" && !["bash", "zsh", "sh", "dash", "ksh"].includes(shell)) {
         throw new Error("Unsupported Pi pane shell");
@@ -149,6 +166,13 @@ export class SeatLaunchEnvironment {
       if (target.codexCwd !== undefined) {
         if (!searchPath || !command.startsWith("codex ")) throw new Error("Expected a Codex launch command and PATH.");
         command = codexEntry(searchPath, target.codexCwd) + command.slice(5);
+      }
+      let prefix = "";
+      if (wrapped) {
+        if (!isLaunchWrapperRuntime(target.runtime) || target.runtime !== "codex") {
+          throw new Error("Unsupported launch_wrapper runtime.");
+        }
+        prefix = this.resolveLaunchWrapper(wrapped).map((arg) => shellQuote(arg)).join(" ") + " ";
       }
       const binDir = this.rigBin();
       const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });
@@ -180,13 +204,17 @@ export class SeatLaunchEnvironment {
         ].join("\n");
       }
       const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`));
-      return `${accountStep}/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
+      return `${accountStep}/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${prefix}${command}`;
     } catch {
       // This best-effort correction is not a new launch admission gate. Do not
       // include error details: transport errors may contain environment values.
-      console.warn(accountHome || clearing ? "[seat launch] Isolated account launch unavailable; no agent started."
+      console.warn(wrapped ? "[seat launch] launch_wrapper unavailable; no agent started."
+        : accountHome || clearing ? "[seat launch] Isolated account launch unavailable; no agent started."
         : "[seat launch] Environment correction unavailable; using the previous launch command.");
-      return accountHome || clearing ? "printf '%s\\n' 'OpenRig: isolated account launch unavailable; no agent started.' >&2; false" : fallback;
+      if (target.launchShell !== undefined) throw new Error("launch_wrapper unavailable; no agent started.");
+      return wrapped ? "printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false"
+        : accountHome || clearing ? "printf '%s\\n' 'OpenRig: isolated account launch unavailable; no agent started.' >&2; false"
+        : fallback;
     }
   }
 }

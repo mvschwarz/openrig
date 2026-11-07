@@ -2067,4 +2067,361 @@ state: 2-named
       realFs.rmSync(specDir, { recursive: true, force: true });
     }
   });
+
+  describe("launch_wrapper lifecycle and retention", () => {
+    it("persists launch_wrapper on new creation (instantiate and materialize) and passes it to launchHarness", async () => {
+      const piAdapter = mockAdapter("pi");
+      const { db, rigRepo, inst, codexAdapter } = setup(
+        {
+          [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+          [`${RIG_ROOT}/agents/pi-worker/agent.yaml`]: agentYaml("pi-worker"),
+        },
+        { pi: piAdapter },
+      );
+      try {
+        const spec = makeRigSpec({
+          pods: [{
+            id: "dev",
+            label: "Dev",
+            members: [
+              {
+                id: "impl",
+                agentRef: "local:agents/impl",
+                profile: "default",
+                runtime: "codex",
+                cwd: ".",
+                launchWrapper: ["/bin/sh", "-c"],
+              },
+              {
+                id: "pi-worker",
+                agentRef: "local:agents/pi-worker",
+                profile: "default",
+                runtime: "pi",
+                cwd: ".",
+                launchWrapper: ["/bin/sh", "-e"],
+              },
+            ],
+            edges: [],
+          }],
+        });
+        const result = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
+        expect(result.ok, JSON.stringify(result)).toBe(true);
+        if (!result.ok) return;
+
+        const rig = rigRepo.getRig(result.result.rigId)!;
+        const codexNode = rig.nodes.find((n) => n.logicalId === "dev.impl")!;
+        const piNode = rig.nodes.find((n) => n.logicalId === "dev.pi-worker")!;
+        expect(codexNode.launchWrapper).toEqual(["/bin/sh", "-c"]);
+        expect(piNode.launchWrapper).toEqual(["/bin/sh", "-e"]);
+
+        const recipe = rigRepo.getNodeLaunchRecipe(codexNode.id);
+        expect(recipe?.rigSpec.pods[0]?.members.find((m) => m.id === "impl")?.launchWrapper).toEqual(["/bin/sh", "-c"]);
+
+        expect(vi.mocked(codexAdapter.launchHarness).mock.calls[0]?.[0].launchWrapper).toEqual(["/bin/sh", "-c"]);
+        expect(vi.mocked(piAdapter.launchHarness).mock.calls[0]?.[0].launchWrapper).toEqual(["/bin/sh", "-e"]);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("existing authored member apply: absent preserves current, [] explicitly clears, non-empty array replaces (via operator-reachable launchMaterialized and stopped-rig re-import)", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const memberBase = {
+          id: "impl",
+          agentRef: "local:agents/impl",
+          profile: "default",
+          runtime: "codex" as const,
+          cwd: ".",
+        };
+        const getNode = (rigId: string, nodeId: string) => rigRepo.getRig(rigId)?.nodes.find((n) => n.id === nodeId);
+        const clearOccupancy = (rigId: string) => {
+          for (const s of sessionRegistry.getSessionsForRig(rigId)) {
+            sessionRegistry.markDetached(s.id);
+            sessionRegistry.clearBinding(s.nodeId);
+          }
+        };
+
+        // 1. Materialize with initial wrapper
+        const mat = await inst.materialize(
+          RigSpecCodec.serialize(makeRigSpec({
+            pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, launchWrapper: ["/bin/sh", "-x"] }], edges: [] }],
+          })),
+          RIG_ROOT,
+        );
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        expect(getNode(rigId, nodeId)?.launchWrapper).toEqual(["/bin/sh", "-x"]);
+
+        // 2. Apply spec with launch_wrapper absent -> preserves existing ["/bin/sh", "-x"]
+        const launchedPreserved = await inst.launchMaterialized(
+          RigSpecCodec.serialize(makeRigSpec({
+            pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase }], edges: [] }],
+          })),
+          RIG_ROOT,
+          rigId,
+        );
+        expect(launchedPreserved.ok, JSON.stringify(launchedPreserved)).toBe(true);
+        expect(getNode(rigId, nodeId)?.launchWrapper).toEqual(["/bin/sh", "-x"]);
+        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toEqual(["/bin/sh", "-x"]);
+
+        // 3. Apply edited spec with replacement array -> replaces stored wrapper and launch binding
+        clearOccupancy(rigId);
+        const launchedReplaced = await inst.launchMaterialized(
+          RigSpecCodec.serialize(makeRigSpec({
+            pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, launchWrapper: ["/bin/sh", "-v"] }], edges: [] }],
+          })),
+          RIG_ROOT,
+          rigId,
+        );
+        expect(launchedReplaced.ok, JSON.stringify(launchedReplaced)).toBe(true);
+        expect(getNode(rigId, nodeId)?.launchWrapper).toEqual(["/bin/sh", "-v"]);
+        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toEqual(["/bin/sh", "-v"]);
+
+        // 4. Apply edited spec with explicit empty array [] -> clears stored wrapper to NULL and launches unwrapped
+        clearOccupancy(rigId);
+        const launchedCleared = await inst.launchMaterialized(
+          RigSpecCodec.serialize(makeRigSpec({
+            pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, launchWrapper: [] }], edges: [] }],
+          })),
+          RIG_ROOT,
+          rigId,
+        );
+        expect(launchedCleared.ok, JSON.stringify(launchedCleared)).toBe(true);
+        expect(getNode(rigId, nodeId)?.launchWrapper).toBeUndefined();
+        const rawAfterClear = db.prepare("SELECT launch_wrapper FROM nodes WHERE id = ?").get(nodeId) as { launch_wrapper: string | null };
+        expect(rawAfterClear.launch_wrapper).toBeNull();
+        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toBeUndefined();
+
+        // 5. Operator-reachable recreate/import over a stopped rig replaces/removes wrapper on the recreated rig
+        for (const s of sessionRegistry.getSessionsForRig(rigId)) sessionRegistry.updateStatus(s.id, "stopped");
+        sessionRegistry.clearBinding(nodeId);
+        const reimported = await inst.instantiate(
+          RigSpecCodec.serialize(makeRigSpec({
+            pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, launchWrapper: ["/bin/sh", "-e"] }], edges: [] }],
+          })),
+          RIG_ROOT,
+          { force: true },
+        );
+        expect(reimported.ok, JSON.stringify(reimported)).toBe(true);
+        if (!reimported.ok) return;
+        const reimportedNode = rigRepo.getRig(reimported.result.rigId)!.nodes[0]!;
+        expect(reimportedNode.launchWrapper).toEqual(["/bin/sh", "-e"]);
+        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toEqual(["/bin/sh", "-e"]);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("current row overrides stale launchRecipe on launchPersistedFresh and stale materializedSources on launchFirstMaterializedNode so cleared wrapper never resurrects", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const getNode = (rigId: string, nodeId: string) => rigRepo.getRig(rigId)?.nodes.find((n) => n.id === nodeId);
+        const specWithWrapper = makeRigSpec({
+          pods: [{
+            id: "dev",
+            label: "Dev",
+            members: [{
+              id: "impl",
+              agentRef: "local:agents/impl",
+              profile: "default",
+              runtime: "codex",
+              cwd: ".",
+              launchWrapper: ["/bin/sh", "-x"],
+            }],
+            edges: [],
+          }],
+        });
+
+        // Part A: launchFirstMaterializedNode after clearing row wrapper
+        const mat = await inst.materialize(RigSpecCodec.serialize(specWithWrapper), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const matRigId = mat.result.rigId;
+        const matNodeId = rigRepo.getRig(matRigId)!.nodes[0]!.id;
+        expect(getNode(matRigId, matNodeId)?.launchWrapper).toEqual(["/bin/sh", "-x"]);
+
+        // Clear the row's wrapper before first materialized launch (materializedSources still holds ["/bin/sh", "-x"])
+        rigRepo.setNodeLaunchWrapper(matNodeId, null);
+        expect(getNode(matRigId, matNodeId)?.launchWrapper).toBeUndefined();
+
+        const firstLaunch = await inst.launchFirstMaterializedNode(matRigId, matNodeId);
+        expect(firstLaunch?.ok, JSON.stringify(firstLaunch)).toBe(true);
+        // Cleared wrapper on row must NOT resurrect from materializedSources
+        expect(getNode(matRigId, matNodeId)?.launchWrapper).toBeUndefined();
+        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toBeUndefined();
+
+        // Part B: launchPersistedFresh after clearing row wrapper while launch_recipe_json still has ["/bin/sh", "-x"]
+        const instRig = await inst.instantiate(
+          RigSpecCodec.serialize({ ...specWithWrapper, name: "fresh-rebuild-rig" }),
+          RIG_ROOT,
+        );
+        expect(instRig.ok, JSON.stringify(instRig)).toBe(true);
+        if (!instRig.ok) return;
+        const rebuildRigId = instRig.result.rigId;
+        const rebuildNodeId = rigRepo.getRig(rebuildRigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodeLaunchRecipe(rebuildNodeId)?.rigSpec.pods[0]?.members[0]?.launchWrapper).toEqual(["/bin/sh", "-x"]);
+
+        // Clear current row's wrapper while recipe still has ["/bin/sh", "-x"]
+        rigRepo.setNodeLaunchWrapper(rebuildNodeId, null);
+        for (const s of sessionRegistry.getSessionsForRig(rebuildRigId)) {
+          sessionRegistry.markDetached(s.id);
+          sessionRegistry.clearBinding(s.nodeId);
+        }
+
+        const freshRebuild = await inst.launchPersistedFresh(rebuildRigId, rebuildNodeId);
+        expect(freshRebuild.status, JSON.stringify(freshRebuild)).toBe("launched");
+        // Cleared wrapper on row must NOT resurrect from stale launch_recipe_json
+        expect(getNode(rebuildRigId, rebuildNodeId)?.launchWrapper).toBeUndefined();
+        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toBeUndefined();
+      } finally {
+        db.close();
+      }
+    });
+
+    it("retryFirstStart retains launch_wrapper key and enforces sameLaunchWrapper equality against the failed node", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
+      });
+      try {
+        const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+        expect(start.ok, JSON.stringify(start)).toBe(true);
+        if (!start.ok) return;
+        const rigId = start.result.rigId;
+
+        vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({
+          projected: [],
+          skipped: [],
+          failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }],
+        });
+        const memberRaw = {
+          id: "worker",
+          agent_ref: "local:agents/worker",
+          profile: "default",
+          runtime: "codex",
+          cwd: ".",
+          launch_wrapper: ["/bin/sh", "-x"],
+        };
+        const added = await inst.addMemberToPod(rigId, "dev", memberRaw, RIG_ROOT);
+        expect(added).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+        const worker = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.worker")!;
+        expect(worker.launchWrapper).toEqual(["/bin/sh", "-x"]);
+
+        const session = sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === worker.id)!;
+        sessionRegistry.updateStatus(session.id, "exited");
+        sessionRegistry.clearBinding(worker.id);
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+        // 1. Changing launch_wrapper on retryFirstStart is refused
+        expect(await inst.retryFirstStart(rigId, worker.id, { ...memberRaw, launch_wrapper: ["/bin/sh", "-v"] }, RIG_ROOT)).toMatchObject({
+          ok: false,
+          code: "first_start_retry_refused",
+          message: "Member source disagrees with the retained seat identity or policy.",
+        });
+
+        // 2. Clearing/removing launch_wrapper on retryFirstStart is refused
+        expect(await inst.retryFirstStart(rigId, worker.id, { ...memberRaw, launch_wrapper: [] }, RIG_ROOT)).toMatchObject({
+          ok: false,
+          code: "first_start_retry_refused",
+          message: "Member source disagrees with the retained seat identity or policy.",
+        });
+        const { launch_wrapper: _omitted, ...withoutWrapper } = memberRaw;
+        expect(await inst.retryFirstStart(rigId, worker.id, withoutWrapper, RIG_ROOT)).toMatchObject({
+          ok: false,
+          code: "first_start_retry_refused",
+          message: "Member source disagrees with the retained seat identity or policy.",
+        });
+
+        // 3. Matching launch_wrapper succeeds and launches with the retained wrapper
+        const retried = await inst.retryFirstStart(rigId, worker.id, memberRaw, RIG_ROOT);
+        expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toEqual(["/bin/sh", "-x"]);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("fork uses TARGET node launch_wrapper and NEVER inherits source parent launch_wrapper", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        const spec = makeRigSpec({
+          pods: [{
+            id: "dev",
+            label: "Dev",
+            members: [{
+              id: "impl",
+              agentRef: "local:agents/impl",
+              profile: "default",
+              runtime: "codex",
+              cwd: ".",
+              launchWrapper: ["/bin/sh", "-x"],
+            }],
+            edges: [],
+          }],
+        });
+        const created = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
+        expect(created.ok, JSON.stringify(created)).toBe(true);
+        if (!created.ok) return;
+        const rigId = created.result.rigId;
+        const parentSession = sessionRegistry.getSessionsForRig(rigId)[0]!;
+        sessionRegistry.updateResumeToken(parentSession.id, "codex_id", "11111111-2222-4333-8444-555555555555");
+
+        // Fork child 1: no launch_wrapper declared -> must NOT inherit parent's ["/bin/sh", "-x"]
+        const forkPlain = await inst.addMemberToPod(
+          rigId,
+          "dev",
+          {
+            id: "fork-plain",
+            agent_ref: "local:agents/impl",
+            profile: "default",
+            runtime: "codex",
+            cwd: ".",
+            session_source: { mode: "fork", ref: { kind: "native_id", value: "11111111-2222-4333-8444-555555555555" } },
+          },
+          RIG_ROOT,
+        );
+        expect(forkPlain.ok, JSON.stringify(forkPlain)).toBe(true);
+        if (!forkPlain.ok) return;
+        const plainNode = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.fork-plain")!;
+        expect(plainNode.launchWrapper).toBeUndefined();
+        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toBeUndefined();
+
+        // Fork child 2: declares its own launch_wrapper -> uses target's own wrapper
+        const forkWrapped = await inst.addMemberToPod(
+          rigId,
+          "dev",
+          {
+            id: "fork-wrapped",
+            agent_ref: "local:agents/impl",
+            profile: "default",
+            runtime: "codex",
+            cwd: ".",
+            launch_wrapper: ["/bin/sh", "-e"],
+            session_source: { mode: "fork", ref: { kind: "native_id", value: "11111111-2222-4333-8444-555555555555" } },
+          },
+          RIG_ROOT,
+        );
+        expect(forkWrapped.ok, JSON.stringify(forkWrapped)).toBe(true);
+        if (!forkWrapped.ok) return;
+        const wrappedNode = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.fork-wrapped")!;
+        expect(wrappedNode.launchWrapper).toEqual(["/bin/sh", "-e"]);
+        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toEqual(["/bin/sh", "-e"]);
+      } finally {
+        db.close();
+      }
+    });
+  });
 });

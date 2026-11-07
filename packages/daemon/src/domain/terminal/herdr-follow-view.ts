@@ -7,6 +7,7 @@ import { HerdrViewer, ViewerCreateNotDispatchedError, findAttributedViewerPanes,
 import { DEFAULT_FOLLOW_POLICY, planFollowingTiles, type FollowControls, type FollowPolicy, type FollowTile, type FollowingStatus } from "./terminal-follow-policy.js";
 import type { ComposedPane, ComposedView, OpenViewResult } from "./terminal-provider.js";
 import type { HerdrTransport } from "./herdr-transport.js";
+import { earlierTileAttachment } from "./tile-attach.js";
 
 export type ReadFollowInput = (target: ComposedPane) => Promise<"empty" | "text" | "unknown">;
 interface Tile extends FollowTile { member: ViewerKey; target: ComposedPane; viewer: ViewerMapping; reason?: string }
@@ -167,6 +168,11 @@ export class HerdrFollowView {
         const currentMember = view.task.members.find(m => keyOf(m.key.hostId, m.key.nodeId) === tile.key);
         if (currentMember?.availability === "available") {
           const target = view.opened.find(p => p.seat === currentMember.seat);
+          // An upgrade can change only the tile script; the kept tile then follows the current target.
+          if (target?.attachArgv && tile.target.attachArgv && target.paneCommand !== tile.target.paneCommand
+            && target.readOnly === tile.target.readOnly && earlierTileAttachment(tile.target.attachArgv, target.attachArgv, target.readOnly)) {
+            tile.target = target;
+          }
           if (!target || target.paneCommand !== tile.target.paneCommand || target.readOnly !== tile.target.readOnly
             || JSON.stringify(target.attachArgv) !== JSON.stringify(tile.target.attachArgv)) {
             throw new Error(`${tile.seat}: Core's current attachment differs from the retained viewer; keeping the previous view unconfirmed.`);
