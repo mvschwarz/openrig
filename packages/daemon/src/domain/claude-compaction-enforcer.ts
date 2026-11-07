@@ -151,6 +151,8 @@ export type EnforcerSkipReason =
   | "occupant_generation_unavailable"
   | "no_pending_stage"
   | "waiting_for_idle"
+  /** A completed map is held until a window opens (#2682): no /compact now, and no new preparation request. */
+  | "prepared_awaiting_window"
   | "pane_unknown_protected"
   | "input_box_not_empty";
 
@@ -471,6 +473,14 @@ export interface PreparationState {
   /** A completed automatic map may wait for idle until the original deadline plus the retry interval. */
   idleDeadlineAt?: number;
   reason?: string;
+  /** An automatic attempt whose map is complete but whose /compact was refused before input (a draft in the box, the pane
+   *  in a tmux mode) or whose seat never went idle in its grace: it is held, with the same map and no new request, until a
+   *  window opens (#2682). It stays `waiting`; the deadline no longer stops it. */
+  prepared?: true;
+  /** When the attempt was first held. Kept across polls and daemon restarts. */
+  preparedAt?: number;
+  /** Why the attempt was first held (`draft_input_*`, `pane_in_mode` or `map_complete_seat_never_idle`). */
+  preparedReason?: string;
   /** A record too old to resume that this attempt replaced (see `getStrandedCompaction`): its restore may have been owed. */
   supersedes?: StrandedCompaction;
 }
@@ -488,6 +498,11 @@ interface PreparationAttempt extends PreparationState {
   stoppedAt?: number;
   /** An explicit cancel, even one after a stop: a decision about this seat, never retried automatically. */
   cancelled?: boolean;
+  /** A held attempt's newest fresh sample was below the threshold (this.now() of that sample): its window stays closed,
+   *  for a stale-sample drain too, until a fresh sample is back above. */
+  belowSince?: number;
+  /** The /compact write has begun and its result isn't back: the attempt is never held then, only stopped as before. */
+  compactInFlight?: boolean;
 }
 
 /** What the restore request must carry because the /compact command could not. With --skip-map the attempt
@@ -529,9 +544,22 @@ interface CompactionRecord {
   compactSending?: true;
   /** The owed restore steps follow a /compact whose outcome is unknown, so each goes only into an empty input box. */
   uncertainCompact?: true;
+  /** A `preparing` attempt held with its map complete until a window (#2682); see `PreparationState.prepared`. */
+  prepared?: true;
+  preparedAt?: number;
+  preparedReason?: string;
+  /** A held attempt's window is closed (its newest fresh sample was below the threshold). Kept across a restart, so
+   *  a stale-sample drain there can't send /compact into a context that already dropped. */
+  belowSince?: number;
   lastDelivery?: RestoreDeliveryAttempt;
   updatedAt: number;
 }
+
+/** What an automatic attempt returns while it is held, its map complete, until a window opens (#2682). */
+const PREPARED_AWAITING_WINDOW = "prepared_awaiting_window";
+/** Refusals of the /compact before any input that hold a completed map instead of stopping it: a draft in the box (in
+ *  the receipt or thrown by the guard) and a pane in a tmux mode. Every other refusal stops as before. */
+const HOLD_REASONS = new Set(["draft_input_busy", "draft_input_unknown", "draft_input_changed", "pane_in_mode"]);
 
 const RECORD_PHASES = new Set(["preparing", "turn_boundary", "restore_prompt", "compliance_prompt", "compact_uncertain", "done", "ended"]);
 const RECORD_DELIVERIES = new Set(["pending", "not_sent", "delivered", "uncertain"]);
@@ -550,6 +578,8 @@ function readCompactionRecord(file: string): CompactionRecord | null {
       && text(r.mapPath) && text(r.marker) && text(r.compactInstruction) && textOrNull(r.preparationRoot) && Number.isFinite(r.updatedAt)
       && (r.operatorInitiated === undefined || typeof r.operatorInitiated === "boolean") && (r.compactSending === undefined || r.compactSending === true)
       && (r.uncertainCompact === undefined || r.uncertainCompact === true)
+      && (r.prepared === undefined || r.prepared === true) && (r.preparedAt === undefined || Number.isFinite(r.preparedAt))
+      && (r.preparedReason === undefined || text(r.preparedReason)) && (r.belowSince === undefined || Number.isFinite(r.belowSince))
       && (carry === undefined || (typeof carry === "object" && carry !== null && textOrNull(carry.mapPath) && textOrNull(carry.compactInstruction)
         && (carry.skipMap === undefined || (text(carry.skipMap?.mapPath) && text(carry.skipMap?.marker)))));
     return valid ? r : null;
@@ -780,9 +810,11 @@ export class ClaudeCompactionEnforcer {
       || attempt.delivery === "pending" || !this.mapReady(attempt)) return { triggered: false, reason: "no_pending_stage" };
     if (!isValidThresholdPercent(this.settingsStore.resolveClaudeCompactionPolicy().thresholdPercent))
       return { triggered: false, reason: "invalid_policy" };
+    // A held attempt whose newest fresh sample was below the threshold: no /compact into a context that already dropped.
+    if (attempt.prepared && attempt.belowSince !== undefined) return { triggered: false, reason: PREPARED_AWAITING_WINDOW };
     return this.withDeliveryGuard(unsampled, async () => {
       const result = await this.sendPreparedCompact(unsampled, attempt, false);
-      return result.ok ? { triggered: true } : { triggered: false, reason: result.reason === "waiting_for_idle" ? "waiting_for_idle" : "send_failed" };
+      return result.ok ? { triggered: true } : { triggered: false, reason: result.reason === "waiting_for_idle" || result.reason === PREPARED_AWAITING_WINDOW ? result.reason : "send_failed" };
     });
   }
 
@@ -1065,7 +1097,17 @@ export class ClaudeCompactionEnforcer {
       if (preparation?.status === "compact-sent") this.pendingPreCompactPrep.delete(input.sessionName);
       // A usage dip is not cancellation: retain an unfinished attempt and its
       // deadline so a later high sample can use its map without another prep.
+      // A held attempt keeps its map too, but its window closes while the context is below the threshold (#2682).
+      if (preparation?.prepared && preparation.status === "waiting" && preparation.belowSince === undefined) {
+        preparation.belowSince = this.now();
+        this.persist(input.sessionName, preparation.attemptId, { belowSince: preparation.belowSince });
+      }
       return { triggered: false, reason: "below_threshold" };
+    }
+    const held = this.pendingPreCompactPrep.get(input.sessionName);
+    if (held?.belowSince !== undefined) {
+      delete held.belowSince;
+      this.persist(input.sessionName, held.attemptId, { belowSince: undefined });
     }
 
     // No new automatic compaction while disabled. An already-owed stage above uses
@@ -1129,7 +1171,7 @@ export class ClaudeCompactionEnforcer {
     }
     if (attempt.delivery === "pending" || !this.mapReady(attempt)) return { triggered: false, reason: "preparation_pending" };
     const compact = await this.sendPreparedCompact(input, attempt, false);
-    if (!compact.ok) return { triggered: false, reason: compact.reason === "waiting_for_idle" ? "waiting_for_idle" : "send_failed" };
+    if (!compact.ok) return { triggered: false, reason: compact.reason === "waiting_for_idle" || compact.reason === PREPARED_AWAITING_WINDOW ? compact.reason : "send_failed" };
     return { triggered: true };
   }
 
@@ -1393,15 +1435,17 @@ export class ClaudeCompactionEnforcer {
     // restore request needs (the carried map and instruction, and a manual request's authority).
     const beforeWrite = () => {
       check();
-      if (!marked) { marked = true; this.persist(input.sessionName, attempt.attemptId, { compactSending: true, restoreCarry: carry, operatorInitiated }); }
+      if (!marked) { marked = true; attempt.compactInFlight = true; this.persist(input.sessionName, attempt.attemptId, { compactSending: true, restoreCarry: carry, operatorInitiated }); }
     };
     const send = async () => {
       check();
       // Both paths send only to an idle seat. Include the readable observation's budget in the wait,
-      // still bounded by the attempt's existing deadline.
+      // still bounded by the attempt's existing deadline, except for a held attempt: its deadline has no effect
+      // any more, and a capped wait would discard every idle read that ends after it, so the window would never open.
       // Idle comes from a live pane read: the newest hook can predate the rest of the preparation turn.
+      const idleWait = this.compactSendIdleWaitMs + CAPTURE_READABLE_BUDGET_MS;
       return this.sessionTransport.send(input.sessionName, composed.command,
-        { openrigNotice: true, preserveInput: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs + CAPTURE_READABLE_BUDGET_MS, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
+        { openrigNotice: true, preserveInput: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: attempt.prepared ? idleWait : Math.max(1, Math.min(idleWait, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
     };
     let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase">;
     let guardRefused = false;
@@ -1415,6 +1459,8 @@ export class ClaudeCompactionEnforcer {
       guardRefused = error instanceof DeliveryGuardError && !written && !attempted;
       result = { ok: false, reason: error instanceof DeliveryGuardError ? error.code : "delivery_uncertain",
         ...(written ? { sent: true, inputPhase: "written" as const } : attempted ? { inputPhase: "attempted" as const } : {}) };
+    } finally {
+      delete attempt.compactInFlight;
     }
     if (!result.ok || result.outcome === "retained") {
       const phase = result.inputPhase;
@@ -1424,6 +1470,11 @@ export class ClaudeCompactionEnforcer {
       // for a send that never reached its write.
       const notSent = !writeAttempted && (guardRefused || result.outcome === "retained" || result.sent === false);
       if (notSent && marked) this.persist(input.sessionName, attempt.attemptId, { compactSending: undefined });
+      // A completed map whose /compact was refused before any input, for a window that isn't open yet, is held with the
+      // same map instead of stopped and asked for again after the retry cooldown (#2682).
+      if (notSent && typeof result.reason === "string" && HOLD_REASONS.has(result.reason) && this.holdPrepared(input.sessionName, attempt, result.reason)) {
+        return { ok: false, reason: PREPARED_AWAITING_WINDOW };
+      }
       // Only a known pre-input idle deferral keeps the automatic attempt armed for a later poll; the transport
       // marks those `not_reached`. Reconciliation still bounds the idle grace and stops on an occupant change.
       // A typing-guard draft hold (`draft_*`) is `not_reached` too, but it is a refusal, not an idle wait: it stops
@@ -1503,11 +1554,31 @@ export class ClaudeCompactionEnforcer {
         ?? this.sessionTransport.deliveryGuard?.maybeTarget(session)?.occupant ?? null;
       if (generation !== attempt.occupantGeneration) this.stopPreparation(session, "stale_generation");
       else if (!enabled && (attempt.mode === "automatic" || attempt.policyWasEnabled)) this.stopPreparation(session, "disabled");
-      else if (attempt.deadlineAt !== null && this.now() >= this.compactDeadline(attempt)!) {
-        this.stopPreparation(session, this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete");
+      // A held attempt's deadline has no effect: it waits for its window for the rest of the occupancy (#2682).
+      else if (!attempt.prepared && attempt.deadlineAt !== null && this.now() >= this.compactDeadline(attempt)!) {
+        const ready = this.mapReady(attempt);
+        if (!(ready && this.holdPrepared(session, attempt, "map_complete_seat_never_idle"))) {
+          this.stopPreparation(session, ready ? "map_complete_seat_never_idle" : "preparation_incomplete");
+        }
       }
       if (enabled) attempt.policyWasEnabled = true;
     }
+  }
+
+  /** Hold an automatic attempt whose map is complete until a window opens, instead of stopping it (#2682). Only the
+   *  attempt that is current, armed and untouched: never one cancelled, stopped, manual, or with a /compact sent or in
+   *  flight. It keeps its controller, map and deadline, and is persisted only on the transition. */
+  private holdPrepared(session: string, attempt: PreparationAttempt, reason: string): boolean {
+    if (attempt.mode !== "automatic" || attempt.status !== "waiting" || attempt.compact !== "not_sent" || attempt.compactInFlight
+      || attempt.controller.signal.aborted || attempt.cancelled || attempt.reason !== undefined
+      || this.pendingPreCompactPrep.get(session) !== attempt || !this.mapReady(attempt)) return false;
+    if (!attempt.prepared) {
+      attempt.prepared = true;
+      attempt.preparedAt = this.now();
+      attempt.preparedReason = reason;
+      this.persist(session, attempt.attemptId, { prepared: true, preparedAt: attempt.preparedAt, preparedReason: reason });
+    }
+    return true;
   }
 
   /** Start the record for a new attempt, beside its map. */
@@ -1592,7 +1663,11 @@ export class ClaudeCompactionEnforcer {
     const phase = (record.phase === "preparing" && record.compactSending) || record.phase === "compact_uncertain" ? "turn_boundary" : record.phase;
     const inFlight = phase !== record.phase;
     if (phase === "preparing") {
-      if (stale) return; // Its preparation deadline passed long ago; a fresh attempt may begin.
+      // Its preparation deadline passed long ago; a fresh attempt may begin. A held attempt of this same occupant has no
+      // deadline that matters: it is picked up as it was, however old, and never asked for again (#2682).
+      const held = record.prepared === true && record.mode === "automatic" && record.deadlineAt !== null;
+      const heldHere = held && record.occupantGeneration !== null && live === record.occupantGeneration;
+      if (stale && !heldHere) return;
       this.records.set(session, newest);
       this.pendingPreCompactPrep.set(session, {
         policyActor: { source: "openrig" }, attemptId: record.attemptId, occupantGeneration: record.occupantGeneration,
@@ -1603,6 +1678,10 @@ export class ClaudeCompactionEnforcer {
         deadlineAt: record.deadlineAt ?? (record.delivery === "not_sent" ? null : record.updatedAt + AUTO_PREP_WAIT_MS_DEFAULT),
         policyWasEnabled: true, preparationRoot: record.preparationRoot, controller: new AbortController(),
         compactInstruction: record.compactInstruction,
+        // A held attempt comes back held, with its recorded hold (never stamped again) and its window as it was.
+        ...(held ? { prepared: true as const, preparedAt: record.preparedAt ?? record.updatedAt,
+          preparedReason: record.preparedReason ?? "map_complete_seat_never_idle",
+          ...(record.belowSince !== undefined ? { belowSince: record.belowSince } : {}) } : {}),
       });
       if (record.mode === "manual") this.stopPreparation(session, "daemon_restarted");
       return;
@@ -1664,8 +1743,10 @@ export class ClaudeCompactionEnforcer {
     const attempt = this.pendingPreCompactPrep.get(session);
     if (!attempt) return null;
     const { controller: _controller, sends: _sends, policyWasEnabled: _enabled, preparationRoot: _preparationRoot,
-      compactInstruction: _instruction, stoppedAt: _stoppedAt, cancelled: _cancelled, ...state } = attempt;
-    return { ...state, ...(attempt.mode === "automatic" && attempt.deadlineAt !== null && this.mapReady(attempt)
+      compactInstruction: _instruction, stoppedAt: _stoppedAt, cancelled: _cancelled, belowSince: _belowSince,
+      compactInFlight: _inFlight, ...state } = attempt;
+    // A held attempt has no idle deadline left to show: it waits for its window.
+    return { ...state, ...(attempt.mode === "automatic" && !attempt.prepared && attempt.deadlineAt !== null && this.mapReady(attempt)
       ? { idleDeadlineAt: this.compactDeadline(attempt)! } : {}) };
   }
 
