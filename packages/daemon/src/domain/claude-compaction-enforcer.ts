@@ -889,7 +889,13 @@ export class ClaudeCompactionEnforcer {
     if (!isValidThresholdPercent(threshold)) return { triggered: false, reason: "invalid_policy" };
     const dropped = lastUsedPercentage != null && lastUsedPercentage < threshold;
     const otherConversation = !!attempt.sessionId && !!input.sessionId && attempt.sessionId !== input.sessionId;
-    if ((dropped || otherConversation) && !attempt.compactInFlight) {
+    // Another conversation, known on both sides, ends an armed or held map, as on the fresh path: a later sample whose
+    // conversation reads unknown must not compact with it.
+    if (otherConversation && !attempt.compactInFlight) {
+      this.stopPreparation(input.sessionName, "below_threshold_while_prepared", attempt);
+      return { triggered: false, reason: "preparation_stopped" };
+    }
+    if (dropped && !attempt.compactInFlight) {
       // A held map ends, as on a fresh dip. An attempt not held keeps its deadline (and a later fresh sample above may
       // still use its map), but a stale sample never compacts it.
       if (attempt.prepared) {

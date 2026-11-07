@@ -457,6 +457,22 @@ it('#2682 S1e: a held attempt, a restart, and a stale sample 15 points above the
  }
 });
 
+it('#2682 S1f: an armed map not yet held, a stale sample of another conversation at the drain, then an unknown one: no /compact with the old map, in process or after a restart',async()=>{
+ for(const variant of ['in-process','restart'] as const){
+  const f=fixture();let e=f.daemon();
+  await e.maybeAutoCompact(hs);const a=completeMap(e);
+  expect(e.getPreparationState(seat),variant).toMatchObject({status:'waiting'});
+  expect(e.getPreparationState(seat)!.prepared,variant).toBeUndefined();
+  f.advance(60_000);
+  if(variant==='restart')e=f.daemon();
+  expect(await staleDrain(e,90,'conversation-two'),variant).toEqual({triggered:false,reason:'preparation_stopped'});
+  expect(e.getPreparationState(seat),variant).toMatchObject({attemptId:a.attemptId,status:'stopped',reason:'below_threshold_while_prepared'});
+  // The next sample names no conversation (unknown is not a mismatch): it must not reach the old map.
+  await e.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code',lastUsedPercentage:90});
+  expect(compacts(f),variant).toHaveLength(0);
+ }
+});
+
 /** An automatic attempt whose request was delivered and which ended with no map at its deadline, past the retry cooldown. */
 async function endedPastCooldown(f:F,e:ClaudeCompactionEnforcer){
  expect(await e.maybeAutoCompact(hs)).toEqual({triggered:true});
