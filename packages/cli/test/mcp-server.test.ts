@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, dropUnfilledSeat, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
+import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, senderIdentityHeaders, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
@@ -414,11 +414,12 @@ describe("MCP Server", () => {
       : route.startsWith("/api/rigs?") || route === "/api/rigs" ? { status: 200, data: [] } : { status: 200, data: { ok: true } });
     const sent = (fn: ReturnType<typeof post>, route: string) =>
       fn.mock.calls.filter(([path]) => path === route).map(([, body]) => body as Record<string, unknown>);
-    const seatless = async (unfilled: string, fn: ReturnType<typeof post>, get?: (path: string) => Promise<DaemonResponse>) => {
+    const seatless = async (unfilled: string, fn: ReturnType<typeof post>, get?: (path: string) => Promise<DaemonResponse>,
+      extra: Parameters<typeof createMcpServer>[1] = {}) => {
       vi.stubEnv("OPENRIG_SESSION_NAME", unfilled);
       vi.stubEnv("RIGGED_SESSION_NAME", "dev-impl@my-rig");
       const unfilledSeat = dropUnfilledSeat()!;
-      await setup({ post: fn, ...(get ? { get } : {}) }, { frontDoor: true, unfilledSeat });
+      await setup({ post: fn, ...(get ? { get } : {}) }, { frontDoor: true, unfilledSeat, ...extra });
       const whoami = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
       return (whoami.structuredContent as { unknownSender: string }).unknownSender;
     };
@@ -456,14 +457,14 @@ describe("MCP Server", () => {
         await mcpClient.callTool({ name: "rig_send", arguments: { session: "lead@my-team", text: "Is the build green?" } });
         const [send] = sent(fn, "/api/transport/send");
         expect(send!.text).toBe(`[Unknown sender ${label}: this app has no OpenRig seat (OPENRIG_SESSION_NAME is empty).`
-          + ` Its MCP client says it is "test-client 1.0.0". There's no return address: it follows this by its task id.]\nIs the build green?`);
+          + ` Its MCP client says it is "test-client 1.0.0". There's no return address.]\nIs the build green?`);
         expect(send).not.toHaveProperty("sender");
         expect(send).not.toHaveProperty("actorSession");
 
         await mcpClient.callTool({ name: "rig_chatroom_send", arguments: { rigName: "my-team", body: "Hello team" } });
         const chat = fn.mock.calls.find(([path]) => /\/chat\/send$/.test(path))?.[1] as Record<string, unknown> | undefined;
         expect(chat).toMatchObject({ sender: label });
-        expect(String(chat?.body)).toMatch(/^\[Unknown sender unknown-mcp-[0-9a-f]{8}: .*\]\nHello team$/);
+        expect(String(chat?.body)).toMatch(/^\[Unknown sender unknown-mcp-[0-9a-f]{8}: .* There's no return address\.\]\nHello team$/);
         await cleanup();
       } finally {
         vi.unstubAllEnvs();
@@ -499,6 +500,27 @@ describe("MCP Server", () => {
           }
         }
         await cleanup();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("servers given their process's unknown sender all write as it, as HTTP's per-request servers do", async () => {
+      try {
+        const shared = mintUnknownSender();
+        expect(shared).toMatch(UNKNOWN);
+        const bodies: unknown[] = [];
+        for (const request of [1, 2]) {
+          const fn = post();
+          expect(await seatless("${user_config.seat}", fn, undefined, { unknownSender: shared }), `request ${request}`).toBe(shared);
+          await mcpClient.callTool({ name: "rig_queue_create", arguments: { qitemId: "qitem-retry", destination: "lead@my-team", body: "Check the build." } });
+          const [create] = sent(fn, "/api/queue/create");
+          expect(create, `request ${request}`).toMatchObject({ qitemId: "qitem-retry", sourceSession: shared });
+          bodies.push(create!.body);
+          await cleanup();
+        }
+        // A retry with the same id carries the same source and body, so the daemon's id-reuse check matches it.
+        expect(bodies[1]).toBe(bodies[0]);
       } finally {
         vi.unstubAllEnvs();
       }

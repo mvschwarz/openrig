@@ -696,12 +696,17 @@ export function unfilledSeatText(seat: UnfilledSeat): string {
     : `${seat.variable} is empty`;
 }
 
+/** A label for a caller with no seat: no seat's address, and random, so each `rig mcp serve` process has its own. */
+export function mintUnknownSender(): string {
+  return `unknown-mcp-${randomBytes(4).toString("hex")}`;
+}
+
 /**
  * Creates an MCP server wrapping the daemon HTTP API.
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat } = {}): McpServer {
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string } = {}): McpServer {
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
@@ -715,13 +720,14 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   // unknown sender. Its label is this server's own and no seat's, so two unknown callers never count as one author (a
   // delegated decision compares authors). Its note says only what is known: why there's no seat, and how the client
   // describes itself in its handshake, which is the client's claim, not an identity. Every other write keeps its rules.
-  const unknownSender = `unknown-mcp-${randomBytes(4).toString("hex")}`;
-  const unknownSenderNote = (): string | null => {
+  // HTTP builds a server per request and passes its process's label, so a caller keeps the one rig_whoami names.
+  const unknownSender = options.unknownSender ?? mintUnknownSender();
+  const unknownSenderNote = (kind: "task" | "message"): string | null => {
     if (seatOf()) return null;
     const why = options.unfilledSeat ? unfilledSeatText(options.unfilledSeat) : "OPENRIG_SESSION_NAME isn't set where it was configured";
     const said = clientSaid(server.server.getClientVersion());
     return `[Unknown sender ${unknownSender}: this app has no OpenRig seat (${why}).${said ? ` Its MCP client says it is ${said}.` : ""}`
-      + " There's no return address: it follows this by its task id.]";
+      + (kind === "task" ? " There's no return address: it follows this by its task id.]" : " There's no return address.]");
   };
   const accessClass = new Map(MCP_OPERATIONS.map((op) => [op.tool, op.access]));
   // A local caller (no access) is offered every tool; an authenticated one, its class's; an external caller, its
@@ -1118,7 +1124,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (scope && !scope.session(session)) return outOfScope(`Session ${session}`);
         const waitForIdleMs = waitForIdleSeconds === undefined ? undefined : Math.ceil(waitForIdleSeconds * 1000);
         // Unsigned, as before (the transport names it "<unknown sender>"); the note tells the recipient what is known.
-        const note = unknownSenderNote();
+        const note = unknownSenderNote("message");
         const res = await client.post("/api/transport/send", {
           session,
           text: note ? `${note}\n${text}` : text,
@@ -1193,7 +1199,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if ("content" in rig) return rig;
         // P21: no body sender — the daemon derives it from the transport header (X-OpenRig-Session,
         // stamped by the MCP server's DaemonClient from its seat env). With no seat, the unknown sender is declared.
-        const note = unknownSenderNote();
+        const note = unknownSenderNote("message");
         const res = await client.post(`/api/rigs/${encodeURIComponent(rig.id)}/chat/send`, note
           ? { body: `${note}\n${body}`, sender: unknownSender } : { body });
         return mapResult(res);
@@ -1328,7 +1334,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       }
       const id = qitemId ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
       // With no seat, the task goes to its destination as from the unknown sender, with the note at the top of its body.
-      const note = unknownSenderNote();
+      const note = unknownSenderNote("task");
       try {
         const res = await client.post("/api/queue/create", {
           qitemId: id, destinationSession: destination, body: note ? `${note}\n\n${lineage?.body ?? body}` : lineage?.body ?? body,

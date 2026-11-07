@@ -1666,8 +1666,9 @@ grant offers the work tools; the workspace tools with `--workspace` or `--owner`
 
 **Identity:**
 - **Over stdio, and over HTTP with no grants:** the server acts as one seat, the `OPENRIG_SESSION_NAME` in its
-  environment. Every request carries that identity, so no tool call names a sender. Without it, writes that need an
-  actor are refused with `actor_required`.
+  environment. Every request carries that identity, so no tool call names a sender. Without it, messages, new tasks and
+  chat go through as an unknown sender (`unknown-mcp-` and eight hex digits, one per `rig mcp serve` process) with a
+  note at the top, and claim, update, hand off, unclaim and decide are refused with `actor_required`.
 - **Over HTTP with grants:** each caller acts as its own grant's seat.
 
 ### Over HTTP: an assistant that can't start a local process

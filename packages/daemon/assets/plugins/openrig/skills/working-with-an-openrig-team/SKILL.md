@@ -17,8 +17,9 @@ behave; this skill is the loop around them.
 
 - Call `rig_whoami`. It names the seat this connection acts as. Every item you create is recorded as coming from that seat,
   and the team's questions about your work come back to it.
-- If it has no seat, stop and help the person set one (the last section). Without one, your requests are unattributed and you
-  can't list your own work.
+- If it has no seat, you can still hand the team work. It goes as the unknown sender `rig_whoami` names, with no return
+  address, so tell the person the `qitemId` and follow it with `rig_queue_show`. Receiving the team's questions and
+  replies, recording the person's answers and listing your own work need a seat: offer to set one (the last section).
 - Call `rig_team` with the rig's name: it shows the team's seats, what each is for, and its lead. Work goes to the lead
   unless the person names a seat.
 - If `lead` is null (its `leadNote` says why), and the team has exactly one seat, send work there. Otherwise, ask the person
