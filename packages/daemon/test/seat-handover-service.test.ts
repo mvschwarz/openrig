@@ -1076,11 +1076,15 @@ describe("SeatHandoverService", () => {
   });
 
   it.each([
+    ...[
     ...(["fresh", "rebuild"] as const).flatMap(source =>
       (["clear", "staged", "unreadable", "edited", "unrelated"] as const).map(screen => ({ source, screen, held: false }))),
-    ...(["clear", "edited", "unreadable"] as const).map(screen => ({ source: "rebuild" as const, screen, held: true })),
-    { source: "rebuild" as const, screen: "retry-failed" as const, held: false },
-  ])("#1544 $source packet submission with $screen composer evidence (held=$held)", async ({ source, screen, held }) => {
+    ...(["clear", "staged", "edited", "unreadable"] as const).map(screen => ({ source: "rebuild" as const, screen, held: true })),
+    ...(["retry-failed", "retry-failed-staged-message", "send-failed", "submit-failed"] as const)
+      .map(screen => ({ source: "rebuild" as const, screen, held: false })),
+    ].map(row => ({ ...row, continuityPresent: true })),
+    { source: "rebuild" as const, screen: "staged" as const, held: false, continuityPresent: false },
+  ])("#1544 $source packet submission with $screen composer evidence (held=$held, continuity=$continuityPresent)", async ({ source, screen, held, continuityPresent }) => {
     const { node } = seedSeat({ runtime: "claude-code" });
     db.exec(outboxEntriesSchema.sql);
     db.exec(seatDeliveryGuardSchema.sql);
@@ -1095,9 +1099,10 @@ describe("SeatHandoverService", () => {
     const reads: Array<string | null> = [];
     let packet = "";
     let enters = 0;
+    if (!continuityPresent) hasSession.mockResolvedValue(false);
     const frame = (text: string) => `Claude Code v2.1.303\n${text.split("\n").map((line, i) => `${i === 0 ? "❯" : " "} ${line}`).join("\n")}\n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)`;
     const visible = () => screen === "unreadable" ? null : frame(screen === "clear" ? ""
-      : screen === "staged" || screen === "retry-failed" ? packet : screen === "edited" ? `${packet}\nEdited by the operator.` : "Unrelated operator draft.");
+      : ["staged", "retry-failed", "retry-failed-staged-message"].includes(screen) ? packet : screen === "edited" ? `${packet}\nEdited by the operator.` : "Unrelated operator draft.");
     capturePaneScreen.mockImplementation(async () => {
       if (!packet) return "predecessor screen tail";
       const pane = visible();
@@ -1105,9 +1110,14 @@ describe("SeatHandoverService", () => {
       if (reads.length > 8) throw new Error("fixture exceeded the finite submission observation budget");
       return pane;
     });
-    sendText.mockImplementation(async (_session: string, text: string) => { if (!packet) packet = text; return { ok: true }; });
+    sendText.mockImplementation(async (_session: string, text: string) => {
+      if (!packet) packet = text;
+      return screen === "send-failed" ? { ok: false, message: "synthetic initial delivery failure" } : { ok: true };
+    });
     sendKeys.mockImplementation(async (_session: string, keys: string[]) => {
       if (packet && keys.includes("Enter")) enters++;
+      if (screen === "submit-failed" && enters === 1) return { ok: false, message: "synthetic initial submit failure" };
+      if (screen === "retry-failed-staged-message" && enters === 2) return { ok: false, message: "the prompt still looked staged in the input box" };
       return screen === "retry-failed" && enters === 2
         ? { ok: false, message: "synthetic retry delivery failure" } : { ok: true };
     });
@@ -1123,7 +1133,7 @@ describe("SeatHandoverService", () => {
     const bindingAfter = sessionRegistry.getBindingForNode(node.id);
     const candidates = db.prepare("SELECT status,claimed_node_id FROM discovered_sessions").all();
     const completed = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed'").all() as Array<{ payload: string }>;
-    console.info("ISSUE1544_SUBMISSION", JSON.stringify({ source, screen, held, result, enters, sleeps, reads,
+    console.info("ISSUE1544_SUBMISSION", JSON.stringify({ source, screen, held, continuityPresent, result, enters, sleeps, reads,
       sent: sendText.mock.calls, keys: sendKeys.mock.calls, heldBefore, heldAfter: outbox.getById("held-rebuild"),
       visibleAfter: visible(), bindingBefore, bindingAfter, candidates, completed: completed.map(row => JSON.parse(row.payload)) }));
     expect(packet).toContain(source === "rebuild" ? "# Seat rebuild handover" : "OpenRig seat handover");
@@ -1133,18 +1143,23 @@ describe("SeatHandoverService", () => {
     if (held) {
       expect(heldBefore).toMatchObject({ body: "Retain this work without replaying it.", deliveryState: "retained", deliveredAt: null });
       expect(outbox.getById("held-rebuild")).toEqual(heldBefore);
-      expect(result).toMatchObject({ ok: true, result: { warnings: [notice] } });
+      expect.soft(result).toMatchObject({ ok: true, result: { warnings: [notice] } });
     }
-    expect(sleeps[0]).toBe(200);
+    if (screen === "send-failed") expect(sleeps).toEqual([]);
+    else expect(sleeps[0]).toBe(200);
     expect(killSession).not.toHaveBeenCalled();
     expect.soft(result.ok && result.result.sideEffects.startupContextDelivered,
       "delivery requires a clear composer, not only successful paste and Enter").toBe(screen === "clear");
-    if (screen === "staged" || screen === "retry-failed") {
-      expect.soft(result, "a packet still staged after the bounded retry must not finalize").toMatchObject({ ok: false, code: "context_delivery_failed" });
+    if ((screen === "staged" && source === "fresh") || ["retry-failed", "retry-failed-staged-message", "send-failed", "submit-failed"].includes(screen)) {
+      expect.soft(result, "fresh staged packets and real transport errors still fail delivery").toMatchObject({ ok: false, code: "context_delivery_failed" });
       expect.soft(bindingAfter).toEqual(bindingBefore);
       expect.soft(candidates).toEqual([expect.objectContaining({ status: "vanished", claimed_node_id: null })]);
       expect.soft(completed).toEqual([]);
-      expect.soft(enters).toBe(2);
+      expect.soft(enters).toBe(screen === "send-failed" ? 0 : screen === "submit-failed" ? 1 : 2);
+      expect(hasSession).not.toHaveBeenCalled();
+      if (screen === "retry-failed-staged-message") {
+        expect(result).toMatchObject({ ok: false, message: expect.stringContaining("the prompt still looked staged in the input box") });
+      }
       if (screen === "retry-failed") {
         expect(result).toMatchObject({ ok: false, message: expect.stringContaining("synthetic retry delivery failure") });
         expect(sendKeys.mock.calls).toEqual(Array.from({ length: 2 }, () => ["dev-impl@seat-rig", ["Enter"]]));
@@ -1155,6 +1170,25 @@ describe("SeatHandoverService", () => {
           expect.soft(result.guidance).toContain("re-wakeable from its provider session file");
         }
       }
+      return;
+    }
+    if (screen === "staged") {
+      expect.soft(enters).toBe(2);
+      expect.soft(hasSession, "staged screen evidence must still reach ordinary continuity verification").toHaveBeenCalledTimes(1);
+      if (!continuityPresent) {
+        expect.soft(result).toMatchObject({ ok: false, code: "successor_tmux_absent" });
+        expect.soft(bindingAfter).toEqual(bindingBefore);
+        expect.soft(candidates).toEqual([expect.objectContaining({ status: "vanished", claimed_node_id: null })]);
+        expect.soft(completed).toEqual([]);
+        return;
+      }
+      const restorePacket = { status: "unconfirmed", reason: "the prompt still looked staged in the input box" };
+      expect.soft(result, "a running rebuild successor completes unconfirmed after normal continuity checks").toMatchObject({
+        ok: true, result: { restorePacket, sideEffects: { startupContextDelivered: false } },
+      });
+      expect.soft(bindingAfter).toMatchObject({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9" });
+      expect.soft(candidates).toEqual([expect.objectContaining({ status: "claimed", claimed_node_id: node.id })]);
+      expect.soft(completed.map(row => JSON.parse(row.payload))).toEqual([expect.objectContaining({ restorePacket })]);
       return;
     }
     expect(result, JSON.stringify(result)).toMatchObject({ ok: true });

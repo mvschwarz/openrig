@@ -881,14 +881,18 @@ describe("rig seat status", () => {
     expect(output).not.toContain("restore packet) was delivered");
   });
 
-  it("handover rebuild output names the unconfirmed priming packet and preserves the JSON receipt", async () => {
-    const reason = "the input box could not be observed";
+  it.each(["the input box could not be observed", "the prompt still looked staged in the input box"])(
+    "handover rebuild output preserves the unconfirmed receipt and safe guidance (%s)", async reason => {
+    const staged = reason === "the prompt still looked staged in the input box";
+    const notice = "1 held message was kept for this seat and not delivered: read it with rig seat held-messages dev-impl@seat-rig.";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const receipt = {
       ...HANDOVER_RESULT_FRESH,
       source: { mode: "rebuild", raw: "rebuild" },
-      sourceOutcome: { mode: "rebuild", primedArtifacts: [], gaps: [] },
+      sourceOutcome: { mode: "rebuild", primedArtifacts: staged ? [{ address: "/fixture-seat/RECAP.md", label: "authored recap" }] : [], gaps: [] },
       restorePacket: { status: "unconfirmed", reason },
       sideEffects: { ...HANDOVER_RESULT_FRESH.sideEffects, startupContextDelivered: false },
+      ...(staged ? { warnings: [notice] } : {}),
     };
     const paths: string[] = [];
     const deps = makeDeps({ status: 200, data: receipt }, paths);
@@ -908,7 +912,20 @@ describe("rig seat status", () => {
     expect(human.errors).toEqual([]);
     expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
     expect(output).toContain(`The rebuild priming packet was sent to the successor, but its submission is unconfirmed: ${reason}.`);
-    expect(output).toContain("Check the successor's screen before sending the priming packet again; it may already be working on it.");
+    if (staged) {
+      expect.soft(output).toMatch(/successor.*running/i);
+      expect.soft(output).toMatch(/inspect.*screen/i);
+      expect.soft(output).toMatch(/(?:exact|same).*packet.*still.*staged/i);
+      expect.soft(output).toMatch(/(?:submit|press Enter).*existing packet.*once/i);
+      expect.soft(output).toMatch(/do not.*(?:resend|send).*blindly/i);
+      expect.soft(output).toMatch(/do not.*(?:rerun|repeat).*handover/i);
+      expect.soft(output).not.toMatch(/unwound|rollback|\bprimed\b|(?:packet|context) (?:was|is|has been) consumed|rig send/i);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(`Warning: ${notice}`);
+    } else {
+      expect(output).toContain("Check the successor's screen before sending the priming packet again; it may already be working on it.");
+      expect(warn).not.toHaveBeenCalled();
+    }
     expect(output).toContain("No conversation continuity was carried: the successor started a fresh conversation.");
     expect(output).not.toMatch(/captured startup context|restore packet|was delivered/);
   });
