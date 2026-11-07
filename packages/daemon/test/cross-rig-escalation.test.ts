@@ -125,6 +125,20 @@ describe("same-daemon escalation routes (#605)", () => {
     expect(resolve(a.session)).toMatchObject({ outcome: "routed", owner: b.session });
   });
 
+  it("marks the escalation hop only when the finding takes it: an edge removed during the pass leaves no hop tag or route note", async () => {
+    const a = seat("a", "top.lead", "lead@a");
+    const b = seat("b", "top.lead", "lead@b");
+    rigs.addEdge(a.rig.id, a.node.id, "lead@b", "escalates_to");
+    const original = await work(a.session); // listed first: routed to lead@b before the pass's first yield
+    for (let i = 0; i < 60; i++) await work("other@lane");
+    setImmediate(() => db.prepare("DELETE FROM edges WHERE kind = 'escalates_to'").run());
+    expect((await sweep()).outcome).toBe("findings");
+    const finding = queue.list({ limit: 200 }).find(r => r.tags?.includes(`stuck-sweep:unclaimed-obligation:${original.qitemId}`))!;
+    expect(finding.destinationSession).not.toBe(b.session);
+    expect(finding.tags).not.toContain(ESCALATION_HOP_TAG);
+    expect(finding.body).not.toContain("escalates_to routed");
+  });
+
   it("lands a stuck-sweep finding in the other rig's queue and never forwards it a second hop", async () => {
     const a = seat("a", "top.lead", "lead@a");
     const b = seat("b", "top.lead", "lead@b");
