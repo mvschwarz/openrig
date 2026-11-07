@@ -1079,6 +1079,7 @@ describe("SeatHandoverService", () => {
     ...(["fresh", "rebuild"] as const).flatMap(source =>
       (["clear", "staged", "unreadable", "edited", "unrelated"] as const).map(screen => ({ source, screen, held: false }))),
     ...(["clear", "edited", "unreadable"] as const).map(screen => ({ source: "rebuild" as const, screen, held: true })),
+    { source: "rebuild" as const, screen: "retry-failed" as const, held: false },
   ])("#1544 $source packet submission with $screen composer evidence (held=$held)", async ({ source, screen, held }) => {
     const { node } = seedSeat({ runtime: "claude-code" });
     db.exec(outboxEntriesSchema.sql);
@@ -1096,7 +1097,7 @@ describe("SeatHandoverService", () => {
     let enters = 0;
     const frame = (text: string) => `Claude Code v2.1.303\n${text.split("\n").map((line, i) => `${i === 0 ? "❯" : " "} ${line}`).join("\n")}\n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)`;
     const visible = () => screen === "unreadable" ? null : frame(screen === "clear" ? ""
-      : screen === "staged" ? packet : screen === "edited" ? `${packet}\nEdited by the operator.` : "Unrelated operator draft.");
+      : screen === "staged" || screen === "retry-failed" ? packet : screen === "edited" ? `${packet}\nEdited by the operator.` : "Unrelated operator draft.");
     capturePaneScreen.mockImplementation(async () => {
       if (!packet) return "predecessor screen tail";
       const pane = visible();
@@ -1105,7 +1106,11 @@ describe("SeatHandoverService", () => {
       return pane;
     });
     sendText.mockImplementation(async (_session: string, text: string) => { if (!packet) packet = text; return { ok: true }; });
-    sendKeys.mockImplementation(async (_session: string, keys: string[]) => { if (packet && keys.includes("Enter")) enters++; return { ok: true }; });
+    sendKeys.mockImplementation(async (_session: string, keys: string[]) => {
+      if (packet && keys.includes("Enter")) enters++;
+      return screen === "retry-failed" && enters === 2
+        ? { ok: false, message: "synthetic retry delivery failure" } : { ok: true };
+    });
     launchHarness.mockResolvedValue({ ok: true, resumeToken: "22222222-2222-4222-8222-222222222222", resumeType: "claude_id" });
     const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
       tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
@@ -1134,12 +1139,22 @@ describe("SeatHandoverService", () => {
     expect(killSession).not.toHaveBeenCalled();
     expect.soft(result.ok && result.result.sideEffects.startupContextDelivered,
       "delivery requires a clear composer, not only successful paste and Enter").toBe(screen === "clear");
-    if (screen === "staged") {
+    if (screen === "staged" || screen === "retry-failed") {
       expect.soft(result, "a packet still staged after the bounded retry must not finalize").toMatchObject({ ok: false, code: "context_delivery_failed" });
       expect.soft(bindingAfter).toEqual(bindingBefore);
       expect.soft(candidates).toEqual([expect.objectContaining({ status: "vanished", claimed_node_id: null })]);
       expect.soft(completed).toEqual([]);
       expect.soft(enters).toBe(2);
+      if (screen === "retry-failed") {
+        expect(result).toMatchObject({ ok: false, message: expect.stringContaining("synthetic retry delivery failure") });
+        expect(sendKeys.mock.calls).toEqual(Array.from({ length: 2 }, () => ["dev-impl@seat-rig", ["Enter"]]));
+        if (!result.ok) {
+          expect.soft(result.guidance).toContain("may still process the priming packet");
+          expect.soft(result.guidance).toMatch(/inspect the successor.*resolve.*before.*attempt/i);
+          expect.soft(result.guidance).toContain("binding is unchanged");
+          expect.soft(result.guidance).toContain("re-wakeable from its provider session file");
+        }
+      }
       return;
     }
     expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
