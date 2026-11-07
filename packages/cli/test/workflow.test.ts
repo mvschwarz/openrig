@@ -331,6 +331,57 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     expect(calls.find((c) => c.path === "/api/workflow/inst-1/trace")).toBeDefined();
   });
 
+  it("trace without --full keeps the daemon's default (no ?full=true)", async () => {
+    const { deps, calls } = makeDeps({
+      routes: { "GET /api/workflow/inst-1/trace": { status: 200, data: { instance: {}, trail: [], trailCompleteness: "recent" } } },
+    });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", "trace", "inst-1", "--json"]);
+    expect(calls.map((c) => c.path)).toEqual(["/api/workflow/inst-1/trace"]);
+  });
+
+  it("trace --full passes ?full=true through and prints the complete trail", async () => {
+    const trail = Array.from({ length: 52 }, (_, i) => ({ stepId: `s${i}`, actorSession: "a@r", closureReason: "done" }));
+    const { deps, calls } = makeDeps({
+      routes: { "GET /api/workflow/inst-1/trace?full=true": { status: 200, data: { instance: {}, trail, trailCompleteness: "complete" } } },
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "trace", "inst-1", "--full", "--json"]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(calls.map((c) => c.path)).toEqual(["/api/workflow/inst-1/trace?full=true"]);
+    const out = JSON.parse(logs.join("\n")) as { trail: unknown[]; trailCompleteness: string };
+    expect(out.trailCompleteness).toBe("complete");
+    expect(out.trail).toHaveLength(52);
+  });
+
+  it("trace in human mode says when the trail was cut and how to get all of it", async () => {
+    const { deps } = makeDeps({
+      routes: {
+        "GET /api/workflow/inst-1/trace": {
+          status: 200,
+          data: { instance: { instanceId: "inst-1", status: "active" }, trail: [], trailCompleteness: "recent" },
+        },
+      },
+    });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "trace", "inst-1"]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(logs.join("\n")).toContain("rig workflow trace inst-1 --full");
+  });
+
   it("continue POSTs /api/workflow/:instanceId/continue", async () => {
     const { deps, calls } = makeDeps({
       routes: { "POST /api/workflow/inst-1/continue": { status: 200, data: { instance: {}, trail: [] } } },
