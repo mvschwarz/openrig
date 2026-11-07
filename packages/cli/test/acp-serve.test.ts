@@ -349,7 +349,7 @@ describe("rig acp serve", () => {
   it("an app that asks forms gets a question's choices as a form, each by its label, and the choice is recorded", async () => {
     const { client, updates } = connect({}, "former@team");
     const asked: Array<Record<string, any>> = [];
-    client.onRequest("elicitation/create", async (params) => { asked.push(params as Record<string, any>); return { action: "accept", content: { q1: "b" } }; });
+    client.onRequest("elicitation/create", async (params) => { asked.push(params as Record<string, any>); return { action: "accept", content: { q1: "SQLite (recommended)" } }; });
     client.onRequest("session/request_permission", async () => { throw new Error("no permission request was expected"); });
     const sessionId = await open(client, { elicitation: { form: {} } });
     const turn = client.request("session/prompt", prompt(sessionId, "Pick a store for the cache"));
@@ -366,11 +366,30 @@ describe("rig acp serve", () => {
     expect(await turn).toEqual({ stopReason: "end_turn" });
     expect(asked).toEqual([{
       sessionId, toolCallId: "qitem-form-db#q1", mode: "form", message: "former@team asks: Which store?",
-      requestedSchema: { type: "object", required: ["q1"], properties: { q1: { type: "string", title: "Which store?",
-        oneOf: [{ const: "a", title: "Redis" }, { const: "b", title: "SQLite (recommended)" }] } } },
+      requestedSchema: { type: "object", required: ["q1"], properties: { q1: { type: "string", title: "Which store?", enum: ["Redis", "SQLite (recommended)"] } } },
     }]);
     const result = updates.filter((u) => u.toolCallId === "qitem-form-db#q1").at(-1)!;
     expect((result.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe("You answered: SQLite. former@team gets it as your answer.");
+  });
+
+  it("#2708 choices whose labels repeat carry their ids, so the answer names one choice", async () => {
+    const { client } = connect({}, "twins@team");
+    const asked: Array<Record<string, any>> = [];
+    client.onRequest("elicitation/create", async (params) => { asked.push(params as Record<string, any>); return { action: "accept", content: { q1: "Same (b)" } }; });
+    const sessionId = await open(client, { elicitation: { form: {} } });
+    const turn = client.request("session/prompt", prompt(sessionId, "Pick one"));
+    const task = await until(() => rowsTo("twins@team")[0], "the work row");
+    await move("twins@team", `/api/queue/${task.qitem_id}/claim`, {});
+    await move("twins@team", "/api/queue/create", { qitemId: "qitem-form-twins", destinationSession: CALLER, body: "Twins", summary: "Which?", nudge: false,
+      tags: [`acp-session:${sessionId}`], humanQuestions: [{ id: "q1", question: "Which?", options: [{ id: "a", label: "Same" }, { id: "b", label: "Same" }] }] });
+    const answered = await until(() => {
+      const row = db.prepare("SELECT human_answers FROM queue_items WHERE qitem_id = 'qitem-form-twins'").get() as { human_answers: string | null };
+      return row.human_answers ? JSON.parse(row.human_answers) : undefined;
+    }, "the recorded answer");
+    expect(asked[0]!.requestedSchema.properties.q1.enum).toEqual(["Same (a)", "Same (b)"]);
+    expect(JSON.stringify(answered)).toContain('"b"');
+    client.notify("session/cancel", { sessionId });
+    expect(await turn).toEqual({ stopReason: "cancelled" });
   });
 
   it("a form declined, cancelled, or answered with no option of the question's records nothing; form: null gets a permission request", async () => {

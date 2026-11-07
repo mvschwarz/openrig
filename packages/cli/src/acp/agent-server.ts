@@ -281,15 +281,17 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       turn.outstanding.add(toolCallId);
       try {
         if (asksForms) {
+          // Each choice is offered as its label, the one form every app shows as choices: T3 Code 0.1.7 builds them only
+          // from `enum`, a value serving as both label and answer, and reads `oneOf` as free text. Labels that repeat
+          // carry their option's id, so a value names one choice; the answer is mapped back by that exact value.
+          const shown = q.options.map(label);
+          const values = new Set(shown).size === shown.length ? shown : q.options.map((o, i) => `${shown[i]} (${o.id})`);
           const result = (await peer.request("elicitation/create", {
             sessionId, toolCallId, mode: "form", message: `${ask.sourceSession} asks: ${q.question}`,
-            requestedSchema: {
-              type: "object", required: [q.id],
-              properties: { [q.id]: { type: "string", title: q.question, oneOf: q.options.map((o) => ({ const: o.id, title: label(o) })) } },
-            },
+            requestedSchema: { type: "object", required: [q.id], properties: { [q.id]: { type: "string", title: q.question, enum: values } } },
           })) as { action?: string; content?: Record<string, unknown> | null } | undefined;
           const value = result?.action === "accept" ? result.content?.[q.id] : undefined;
-          chosenId = typeof value === "string" ? value : undefined;
+          chosenId = typeof value === "string" ? q.options[values.indexOf(value)]?.id : undefined;
         } else {
           const result = (await peer.request("session/request_permission", {
             sessionId,
