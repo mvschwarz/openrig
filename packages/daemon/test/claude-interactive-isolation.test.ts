@@ -17,8 +17,10 @@ it.each(['return','exit','errexit'])('keeps pane environment, lifetime and histo
  const env={HOME:root,PATH:process.env.PATH!,TMPDIR:root,TERM:'xterm-256color'};
  const tm=async(args:string[])=>(await run('tmux',['-S',socket,'-f','/dev/null',...args],{env,timeout:8000})).stdout;
  const snapshot=`printf '%s|' "$$" "$FIXTURE_MUTATION" "$OPENRIG_HOME" "$PWD" "$-" "$HISTFILE"`;
+ // Publish only a complete exit-status receipt; redirection creates an empty file before echo writes.
+ const promptCommand=`echo "$?" > ${q(status+'.tmp')}; mv ${q(status+'.tmp')} ${q(status)}`;
  const rc=path.join(root,'bashrc');fs.writeFileSync(history,'prior-history-sentinel\n');
- fs.writeFileSync(rc,`cd ${q(root)}\nexport FIXTURE_MUTATION=parent OPENRIG_HOME=parent-home HISTFILE=${q(history)}\nHISTSIZE=1000\nHISTFILESIZE=1000\nset -o history\nhistory -r\nPS1='FIXTURE> '\n${snapshot} > ${q(before)}\nPROMPT_COMMAND='echo "$?" > ${status}'\n`);
+ fs.writeFileSync(rc,`cd ${q(root)}\nexport FIXTURE_MUTATION=parent OPENRIG_HOME=parent-home HISTFILE=${q(history)}\nHISTSIZE=1000\nHISTFILESIZE=1000\nset -o history\nhistory -r\nPS1='FIXTURE> '\n${snapshot} > ${q(before)}\nPROMPT_COMMAND=${q(promptCommand)}\n`);
  const writes:Array<{path:string,content:string,mode:number,uid:number}>=[];
  const ops:TmuxFileOps={tmpName:()=>path.join(root,'stage-'+randomUUID()),bufferName:()=>('fixture_'+randomUUID().replaceAll('-','')),writeFile:async(p,c,o)=>{await fs.promises.writeFile(p,c,{encoding:'utf8',...o});const st=fs.statSync(p);writes.push({path:p,content:c,mode:st.mode&0o777,uid:st.uid});},unlink:p=>fs.promises.unlink(p)};
  const transport=new TmuxAdapter(async cmd=>{if(!cmd.startsWith('tmux '))throw Error('unexpected fixture command');return(await run('/bin/sh',['-c',cmd.replace(/^tmux /,`tmux -S ${q(socket)} -f /dev/null `)],{env,timeout:8000})).stdout;},ops);
