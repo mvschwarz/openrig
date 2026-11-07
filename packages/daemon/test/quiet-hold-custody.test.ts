@@ -38,17 +38,32 @@ describe("custody of asks held for quiet hours", () => {
   let failPosts = false;
   let rejectPosts = false; // the connector answers, but refuses the post
   const wires: Array<ReturnType<typeof buildSlackGatewayWire>> = [];
+  let useRelayBinding = false;
+  let relaySecretsPath = "";
   const registry = () => ({ ok: true as const, entities: [{
     entityId: "person", class: "human" as const, displayName: "Person", address: "person@external", prefs,
-    connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UPERSON" }],
+    connectorBindings: useRelayBinding
+      ? [{ kind: "relay" as const, connectorRef: "relay-primary", secretsRef: `file:${relaySecretsPath}`, role: "primary" as const, handle: "person_relay" }]
+      : [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UPERSON" }],
   }] });
 
   beforeEach(() => {
     db = createDb();
     migrate(db, ALL_MIGRATIONS);
     prefs = { deliveryClass: "B", availability: "available" };
+    useRelayBinding = false;
     repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true, loadHumanRegistry: registry as never });
     home = mkdtempSync(join(tmpdir(), "quiet-custody-"));
+    relaySecretsPath = join(home, "relay.env");
+    writeFileSync(
+      relaySecretsPath,
+      [
+        "OPENRIG_RELAY_URL=http://127.0.0.1:44199/outbound",
+        "OPENRIG_RELAY_OUTBOUND_TOKEN=out-secret-token-123456",
+        "OPENRIG_RELAY_INBOUND_TOKEN=in-secret-token-654321",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
     quiet = new HumanQuietStore(db);
     posts.length = 0;
     failPosts = false;
@@ -68,6 +83,12 @@ describe("custody of asks held for quiet hours", () => {
           posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
           if (rejectPosts) return new Response(JSON.stringify({ ok: false, error: "channel_not_found" }), { status: 200, headers: { "content-type": "application/json" } });
           return new Response(JSON.stringify({ ok: true, ts: `1724.${100 + posts.length}` }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (String(url).includes("127.0.0.1:44199/outbound")) {
+          if (failPosts) throw new Error("relay bridge down before the post");
+          posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (rejectPosts) return new Response(JSON.stringify({ ok: false, error: "bridge_rejected" }), { status: 503, headers: { "content-type": "application/json" } });
+          return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
         }
         return new Response(JSON.stringify({ ok: true, messages: [] }), { status: 200, headers: { "content-type": "application/json" } });
       },
@@ -437,5 +458,91 @@ describe("custody of asks held for quiet hours", () => {
     expect(findingFor(r, ordinary).length).toBeGreaterThan(0);
     expect(findingFor(r, digest).length).toBeGreaterThan(0);
     expect(findingWhy(digest)).not.toMatch(/quiet hours/);
+  });
+
+  it("Relay quiet release failure yields release-failed, named in waitingView and sweep, and the ladder takes it up", async () => {
+    useRelayBinding = true;
+    const failedRow = await held();
+    asBaton(failedRow);
+    quiet.end("person", { endedBy: "t", now: new Date() });
+    rejectPosts = true;
+    const w = wires[0]!;
+    const [job] = releaseJobs();
+    await runQuietRelease({
+      queueRepo: repo,
+      jobsRepo: new WatchdogJobsRepository(db),
+      home,
+      jobId: job!.jobId,
+      registry: { loadHumanRegistry: registry as never },
+      dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never),
+    });
+    await settle();
+    expect(posts).toHaveLength(1);
+    expect(
+      repo.listTransitions(failedRow.qitemId).some((t) =>
+        (t.transitionNote ?? "").startsWith("relay-owner-notification-transport-failed "),
+      ),
+    ).toBe(true);
+    expect(quietHoldCustody(db, failedRow.qitemId)).toMatchObject({
+      state: "release-failed",
+      failure: "http-503",
+    });
+    expect(String((repo.waitingView(failedRow.qitemId)!.nextBackstop as { note?: string }).note)).toMatch(
+      /^Released when quiet ended, but its post failed \(http-503\); the release stays queued for redelivery\./,
+    );
+    const rFailed = await sweep();
+    expect(findingFor(rFailed, failedRow)).toHaveLength(1);
+    expect(findingFor(rFailed, failedRow)[0]!.kind).toBe("undelivered-human-notice");
+    expect(findingWhy(failedRow)).toMatch(
+      /released after quiet hours; its post failed \(http-503\); the release stays queued for redelivery/,
+    );
+    await ladder();
+    expect(ladderTouched(failedRow)).toBe(true);
+  });
+
+  it("Relay bridge acceptance resolves quiet-release ownership so the release job retires and custody ends without becoming orphaned", async () => {
+    useRelayBinding = true;
+    const acceptedRow = await held();
+    quiet.end("person", { endedBy: "t", now: new Date() });
+    const w = wires[0]!;
+    const [job] = releaseJobs();
+    // Pass 1 dispatches the release to the relay bridge, which accepts it
+    expect(
+      await runQuietRelease({
+        queueRepo: repo,
+        jobsRepo: new WatchdogJobsRepository(db),
+        home,
+        jobId: job!.jobId,
+        registry: { loadHumanRegistry: registry as never },
+        dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never),
+      }),
+    ).toMatchObject({ state: "pending", released: 1 });
+    await settle();
+    expect(posts).toHaveLength(1);
+    expect(
+      repo.listTransitions(acceptedRow.qitemId).some((t) =>
+        (t.transitionNote ?? "").startsWith("relay-owner-notification-accepted "),
+      ),
+    ).toBe(true);
+    // Pass 2 sees the relay acceptance receipt via resolved(), retires the release job, and leaves custody null (never orphaned)
+    expect(
+      await runQuietRelease({
+        queueRepo: repo,
+        jobsRepo: new WatchdogJobsRepository(db),
+        home,
+        jobId: job!.jobId,
+        registry: { loadHumanRegistry: registry as never },
+        dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never),
+      }),
+    ).toMatchObject({ state: "released", released: 0 });
+    expect(releaseJobs()).toHaveLength(0);
+    expect(new WatchdogJobsRepository(db).getById(job!.jobId)?.terminalReason).toBe(
+      "quiet release complete: every held ask posted, accepted by its bridge, or given a disposition",
+    );
+    expect(quietHoldCustody(db, acceptedRow.qitemId)).toBeNull();
+    expect(repo.waitingView(acceptedRow.qitemId)!.nextBackstop).toMatchObject({
+      mechanism: "none (accepted by the bridge; awaiting their decision)",
+    });
+    expect(findingFor(await sweep(), acceptedRow)).toEqual([]);
   });
 });

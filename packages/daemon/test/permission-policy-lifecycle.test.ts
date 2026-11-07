@@ -566,7 +566,7 @@ describe("GF2 — the COMPLETE production-altitude launch/restore matrix", () =>
     try {
       const { PiRuntimeAdapter } = await import("../src/adapters/pi-runtime-adapter.js");
       const { PiResumeAdapter } = await import("../src/adapters/pi-resume.js");
-      const piFs = { readFile: () => "{}", writeFile: () => {}, exists: () => true, mkdirp: () => {}, listFiles: () => [] };
+      const piFs = { readFile: () => "{}", writeFile: () => {}, exists: (file: string) => !file.endsWith("/.openrig-account"), mkdirp: () => {}, listFiles: () => [] };
       for (const [posture, expectedTrust] of [["full_bypass", "approve"], ["floor", "no-approve"]] as const) {
         const tmux = mockTmux();
         const adapter = new PiRuntimeAdapter({ tmux, fsOps: piFs as never, stateRoot: "/tmp/pi-state", runnerEntryPath: "/tmp/pi-runner.js", sleep: async () => {} });

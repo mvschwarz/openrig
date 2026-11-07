@@ -42,7 +42,7 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
-import { isTypedGateBlocker, UNATTRIBUTED_ACTOR, type QueueRepository, type QueueItem } from "../queue-repository.js";
+import { isTypedGateBlocker, mcOperationTag, UNATTRIBUTED_ACTOR, type QueueRepository, type QueueItem } from "../queue-repository.js";
 import type { PersistedEvent } from "../types.js";
 import {
   MissionControlActionLog,
@@ -178,7 +178,13 @@ export class MissionControlWriteContract {
         return { actionId: last.actionId, verb: input.verb, qitemId: input.qitemId, closedQitem: item, createdQitemId: null,
           notifyAttempted: false, notifyResult: null, auditedAt: last.actedAt, reconciled: true, decisionRevision: current! };
       }
-      throw this.revisionChanged(item, current!);
+      const withoutOwnReply =
+        operation && input.verb === "answer"
+          ? this.queueRepo.decisionRevision(item, { excludeOperationReply: operation })
+          : current;
+      if (withoutOwnReply !== input.expectedRevision) {
+        throw this.revisionChanged(item, current!);
+      }
     }
     const result = await this.actOn(operation ? { ...input, auditNotes: { ...input.auditNotes, operation } } : input);
     const saved = this.queueRepo.getById(input.qitemId);
@@ -596,11 +602,29 @@ export class MissionControlWriteContract {
     if (existing && (ask.state === "pending" || ask.state === "done")) {
       const decision = questions.length && unansweredQuestions(questions, ask.humanAnswers ?? {}).length === 0
         ? formatHumanAnswers(questions, ask.humanAnswers ?? {}).join("; ") : humanAnswerText(existing.body);
-      if (ask.state === "pending" && !this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision, primaryUser })) {
-        throw new MissionControlWriteContractError("answer_not_closed", `The answer is already in ${existing.qitemId}, but ${input.qitemId} didn't close.`, { qitemId: input.qitemId });
-      }
-      return this.recordAnswer(input, before, decision, { outcome: "answered", unanswered: [],
-        message: `Already answered; the original answer went to ${existing.destinationSession} as ${existing.qitemId}. No new reply was sent.` }, existing.qitemId);
+      return this.recordAnswer(
+        input,
+        before,
+        decision,
+        {
+          outcome: "answered",
+          unanswered: [],
+          message: `Already answered; the original answer went to ${existing.destinationSession} as ${existing.qitemId}. No new reply was sent.`,
+        },
+        existing.qitemId,
+        ask.state === "pending"
+          ? {
+              primaryUser,
+              allowAlreadyDone: false,
+              onUnclosed: () =>
+                new MissionControlWriteContractError(
+                  "answer_not_closed",
+                  `The answer is already in ${existing.qitemId}, but ${input.qitemId} didn't close.`,
+                  { qitemId: input.qitemId },
+                ),
+            }
+          : undefined,
+      );
     }
     // One answer per ask: another person's committed return is the answer. Before anything of this person's is recorded,
     // finish settling the ask with it and say who answered; nothing of theirs is recorded or sent.
@@ -650,13 +674,21 @@ export class MissionControlWriteContract {
     const answeredBy = !forAsked ? `Answered by ${input.actorSession}`
       : unattributed ? `Answered at the terminal by someone OpenRig can't name (${UNNAMED_PRIMARY_USER}), unattributed, on ${forAsked}'s ask`
       : `Answered by ${input.actorSession}, ${primaryUser ? "the primary user at the terminal" : "a registered person"}, on ${forAsked}'s ask`;
+    const operation =
+      typeof input.auditNotes?.operation === "string" && input.auditNotes.operation.length > 0
+        ? input.auditNotes.operation
+        : null;
     let returned: QueueItem;
     try {
       returned = await this.queueRepo.createHumanAnswer({
         sourceSession: input.actorSession, destinationSession: ask.sourceSession,
         body: `${reply}\n${answeredBy} in OpenRig.`,
         summary: `${forAsked && unattributed ? `Unattributed (${UNNAMED_PRIMARY_USER})` : input.actorSession} answered${forAsked ? ` ${forAsked}'s ask` : ""}: ${ask.summary ?? input.qitemId}`,
-        tags: ["human-answer", ...(ask.tags ?? []).filter((t) => /^(project|mission|slice):/.test(t))],
+        tags: [
+          "human-answer",
+          ...(ask.tags ?? []).filter((t) => /^(project|mission|slice):/.test(t)),
+          ...(operation ? [mcOperationTag(operation)] : []),
+        ],
         inboundReplyTo: input.qitemId, ...(input.notify === false ? { nudge: false } : {}),
       });
     } catch (error) {
@@ -681,13 +713,23 @@ export class MissionControlWriteContract {
       const revision = now ? this.queueRepo.decisionRevision(now) : null;
       if (now && revision !== input.expectedRevision) throw this.revisionChanged(now, revision!);
     }
-    if (!this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision, primaryUser })
-      && this.queueRepo.getById(input.qitemId)?.state !== "done") {
-      throw new MissionControlWriteContractError("answer_not_closed",
-        `The answer went back to ${ask.sourceSession} as ${replyId}, but qitem ${input.qitemId} didn't close: it changed meanwhile.`,
-        { qitemId: input.qitemId, replyQitemId: replyId });
-    }
-    return this.recordAnswer(input, before, decision, { outcome: "answered", unanswered: [] }, replyId);
+    return this.recordAnswer(
+      input,
+      before,
+      decision,
+      { outcome: "answered", unanswered: [] },
+      replyId,
+      {
+        primaryUser,
+        allowAlreadyDone: true,
+        onUnclosed: () =>
+          new MissionControlWriteContractError(
+            "answer_not_closed",
+            `The answer went back to ${ask.sourceSession} as ${replyId}, but qitem ${input.qitemId} didn't close: it changed meanwhile.`,
+            { qitemId: input.qitemId, replyQitemId: replyId },
+          ),
+      },
+    );
   }
 
   /** Another person's committed return already answers the ask: settle the ask with it if it's still pending (the
@@ -700,23 +742,74 @@ export class MissionControlWriteContract {
       { qitemId: input.qitemId, answeredBy: other.sourceSession, replyQitemId: other.qitemId });
   }
 
-  /** The audit row and event for one answer (its queue writes are the repository's own). */
-  private recordAnswer(input: MissionControlActionInput, before: Record<string, unknown>, reason: string,
-    answer: NonNullable<MissionControlActionResult["answer"]>, createdQitemId: string | null = null): MissionControlActionResult {
+  /** Close a pending ask (when requested) and record its audit row and event in one atomic transaction. */
+  private recordAnswer(
+    input: MissionControlActionInput,
+    before: Record<string, unknown>,
+    reason: string,
+    answer: NonNullable<MissionControlActionResult["answer"]>,
+    createdQitemId: string | null = null,
+    closePending?: {
+      primaryUser: boolean;
+      allowAlreadyDone: boolean;
+      onUnclosed: () => MissionControlWriteContractError;
+    },
+  ): MissionControlActionResult {
     const evaluatedAt = this.now().toISOString();
-    const after = this.queueRepo.getById(input.qitemId);
+    let after: QueueItem | null = null;
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
-    const persistedEvents: PersistedEvent[] = [];
-    this.db.transaction(() => {
-      actionEntry = this.actionLog.record({ actionVerb: "answer", qitemId: input.qitemId, actorSession: input.actorSession,
-        actedAt: evaluatedAt, beforeState: before, afterState: after ? snapshotQitem(after) : null, reason,
-        auditNotes: input.auditNotes ?? null, identityProvenance: input.identityProvenance ?? null });
-      persistedEvents.push(this.eventBus.persistWithinTransaction({ type: "mission_control.action_executed",
-        actionId: actionEntry.actionId, actionVerb: "answer", qitemId: input.qitemId, actorSession: input.actorSession }));
-    })();
-    for (const e of persistedEvents) this.eventBus.notifySubscribers(e);
-    return { actionId: actionEntry!.actionId, verb: "answer", qitemId: input.qitemId, closedQitem: after, createdQitemId,
-      notifyAttempted: false, notifyResult: null, auditedAt: evaluatedAt, answer };
+    try {
+      this.eventBus.withNotifyEnvelope((register) => {
+        if (closePending) {
+          const closed = this.queueRepo.resolveDirectHumanReply({
+            qitemId: input.qitemId,
+            actorSession: input.actorSession,
+            decision: reason,
+            primaryUser: closePending.primaryUser,
+          });
+          if (!closed && (!closePending.allowAlreadyDone || this.queueRepo.getById(input.qitemId)?.state !== "done")) {
+            throw closePending.onUnclosed();
+          }
+        }
+        after = this.queueRepo.getById(input.qitemId);
+        actionEntry = this.actionLog.record({
+          actionVerb: "answer",
+          qitemId: input.qitemId,
+          actorSession: input.actorSession,
+          actedAt: evaluatedAt,
+          beforeState: before,
+          afterState: after ? snapshotQitem(after) : null,
+          reason,
+          auditNotes: input.auditNotes ?? null,
+          identityProvenance: input.identityProvenance ?? null,
+        });
+        register(
+          this.eventBus.persistWithinTransaction({
+            type: "mission_control.action_executed",
+            actionId: actionEntry.actionId,
+            actionVerb: "answer",
+            qitemId: input.qitemId,
+            actorSession: input.actorSession,
+          }),
+        );
+      });
+    } catch (err) {
+      if (err instanceof MissionControlActionLogError) {
+        throw new MissionControlWriteContractError(err.code, err.message, err.details);
+      }
+      throw err;
+    }
+    return {
+      actionId: actionEntry!.actionId,
+      verb: "answer",
+      qitemId: input.qitemId,
+      closedQitem: after,
+      createdQitemId,
+      notifyAttempted: false,
+      notifyResult: null,
+      auditedAt: evaluatedAt,
+      answer,
+    };
   }
 
   /**

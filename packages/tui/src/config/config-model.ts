@@ -73,6 +73,7 @@ const LABELS: Record<string, string> = {
   "usage.pi_cost_facts": "Pi cost from persisted entries",
   "usage.pi_openrouter_charge": "OpenRouter charge for Pi requests",
   "transport.verify_input_box": "Verify by input box (Claude Code, Codex)",
+  "transport.draft_delivery": "Send to a seat with a draft at its prompt",
   "terminal.history_limit": "tmux scrollback rows",
   "ui.enabled": "Web UI",
   "health.context_pressure.warning_percent": "Context warning threshold",

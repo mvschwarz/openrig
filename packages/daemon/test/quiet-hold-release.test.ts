@@ -1098,3 +1098,243 @@ describe("after review: the outbound sweep when a dispatch throws", () => {
     expect(buffer.pending().filter((d) => (d.payload as { qitemId?: string }).qitemId === "q-1")).toHaveLength(1);
   });
 });
+
+describe("Capability 3 — relay-bound human reuses quiet hold/release, digest, and deferral policies", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+  let home: string;
+  let quiet: HumanQuietStore;
+  let prefs: Record<string, unknown>;
+  const relayPosts: Array<Record<string, unknown>> = [];
+
+  function relayRegistry(p: Record<string, unknown>, secretsFile: string) {
+    return {
+      ok: true as const,
+      entities: [
+        {
+          entityId: HUMAN,
+          class: "human" as const,
+          displayName: "Founder",
+          address: `${HUMAN}@external`,
+          connectorBindings: [
+            {
+              kind: "relay" as const,
+              connectorRef: "wa-founder",
+              secretsRef: `file:${secretsFile}`,
+              role: "primary" as const,
+              handle: "founder_wa",
+            },
+          ],
+          prefs: p,
+        },
+      ],
+    };
+  }
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    home = mkdtempSync(join(tmpdir(), "quiet-relay-"));
+    const secretsFile = join(home, "relay.env");
+    writeFileSync(
+      secretsFile,
+      [
+        "OPENRIG_RELAY_URL=http://127.0.0.1:44102/outbound",
+        "OPENRIG_RELAY_OUTBOUND_TOKEN=out-secret-token-123456",
+        "OPENRIG_RELAY_INBOUND_TOKEN=in-secret-token-654321",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    prefs = { deliveryClass: "B", availability: "available" };
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => relayRegistry(prefs, secretsFile),
+    });
+    quiet = new HumanQuietStore(db);
+    relayPosts.length = 0;
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("holds routine relay asks during quiet hours, releases them after quiet ends, and flushes digest asks with per-question replyRefs", async () => {
+    const secretsFile = join(home, "relay.env");
+    const w = buildSlackGatewayWire({
+      home,
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => relayRegistry(prefs, secretsFile), resolveSlackHandle },
+      outboundIntervalMs: 60_000,
+      fetchImpl: async (_url, init) => {
+        relayPosts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      },
+    });
+
+    try {
+      w.startServices?.();
+      const now = new Date();
+      quiet.setUntil(HUMAN, { until: new Date(now.getTime() + 3_600_000), timezone: "UTC", setBy: "test", now });
+
+      const row = await repo.create({
+        sourceSession: "dev-qa@r",
+        destinationSession: "orch-lead@r",
+        body: "Relay park body",
+        nudge: false,
+      });
+      repo.update({
+        qitemId: row.qitemId,
+        actorSession: "orch-lead@r",
+        state: "blocked",
+        blockedOn: `${HUMAN}@kernel`,
+        summary: "Approve relay park",
+        evidenceRef: "/proof/relay.md",
+        transitionNote: "parked",
+      });
+
+      const ports = makeQueuePorts(repo, { loadHumanRegistry: () => relayRegistry(prefs, secretsFile) } as never);
+      const alert = (await ports.listHumanAlerts({ minimumLevel: "NOTICE" })).find((a) => a.qitemId === row.qitemId)!;
+
+      w.dispatcher.dispatch(OUTBOUND_OP, alert.destinationSession!, alert);
+      await settle();
+      expect(relayPosts).toHaveLength(0);
+      expect(repo.listTransitions(row.qitemId).some((t) => (t.transitionNote ?? "").startsWith("delivery-decision: quiet-hold "))).toBe(true);
+
+      // End quiet hours and run release -> delivers via relay transport and records relay-owner-notification-accepted
+      quiet.end(HUMAN, { endedBy: "test", now: new Date() });
+      const jobs = new WatchdogJobsRepository(db).listActive().filter((j) => j.policy === QUIET_RELEASE_POLICY);
+      expect(jobs).toHaveLength(1);
+      const rel = await runQuietRelease({
+        queueRepo: repo,
+        jobsRepo: new WatchdogJobsRepository(db),
+        home,
+        jobId: jobs[0]!.jobId,
+        now: new Date(),
+        registry: { loadHumanRegistry: () => relayRegistry(prefs, secretsFile) },
+        dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never),
+      });
+      expect(rel).toMatchObject({ released: 1 });
+      await settle();
+      expect(relayPosts).toHaveLength(1);
+      expect(relayPosts[0]).toMatchObject({
+        v: 1,
+        recipient: { handle: "founder_wa" },
+        intent: "decision",
+        outcome: "notify",
+      });
+      expect(typeof relayPosts[0]!.replyRef).toBe("string");
+      expect(repo.hasRelayOwnerNotificationReceipt(row.qitemId, alert.notificationKey!)).toBe(true);
+    } finally {
+      w.stop();
+    }
+  });
+
+  it("reuses digest flush (with distinct per-question replyRefs) and away-escalation deferral for a relay-bound human", async () => {
+    const secretsFile = join(home, "relay.env");
+    writeFileSync(
+      secretsFile,
+      [
+        "OPENRIG_RELAY_URL=http://127.0.0.1:44100/outbound",
+        "OPENRIG_RELAY_OUTBOUND_TOKEN=out-secret-token-123456",
+        "OPENRIG_RELAY_INBOUND_TOKEN=in-secret-token-654321",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    let prefs: Record<string, unknown> = { deliveryClass: "C", availability: "available" };
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => relayRegistry(prefs, secretsFile),
+    });
+
+    const relayPosts: Array<Record<string, unknown>> = [];
+    const w = buildSlackGatewayWire({
+      home,
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => relayRegistry(prefs, secretsFile), resolveSlackHandle },
+      outboundIntervalMs: 60_000,
+      fetchImpl: async (_url, init) => {
+        relayPosts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      },
+    });
+
+    try {
+      w.startServices?.();
+      const [r1, r2] = [
+        await repo.create({ sourceSession: "dev@r", destinationSession: "orch@r", body: "Digest ask 1", nudge: false }),
+        await repo.create({ sourceSession: "dev@r", destinationSession: "orch@r", body: "Digest ask 2", nudge: false }),
+      ];
+      repo.update({ qitemId: r1.qitemId, actorSession: "orch@r", state: "blocked", blockedOn: `${HUMAN}@kernel`, summary: "Ask 1", evidenceRef: "/proof/1.md", transitionNote: "parked" });
+      repo.update({ qitemId: r2.qitemId, actorSession: "orch@r", state: "blocked", blockedOn: `${HUMAN}@kernel`, summary: "Ask 2", evidenceRef: "/proof/2.md", transitionNote: "parked" });
+
+      const ports = makeQueuePorts(repo, { loadHumanRegistry: () => relayRegistry(prefs, secretsFile) } as never);
+      const alerts = await ports.listHumanAlerts({ minimumLevel: "NOTICE" });
+      const a1 = alerts.find((a) => a.qitemId === r1.qitemId)!;
+      const a2 = alerts.find((a) => a.qitemId === r2.qitemId)!;
+
+      // Dispatch both as Class C available -> recorded into 4h digest, not posted immediately
+      w.dispatcher.dispatch(OUTBOUND_OP, a1.destinationSession!, a1);
+      w.dispatcher.dispatch(OUTBOUND_OP, a2.destinationSession!, a2);
+      await settle();
+      expect(relayPosts).toHaveLength(0);
+
+      // Flush 4h digest -> dispatches both asks as outcome="digest" with distinct per-question replyRefs
+      const flushed = await runDeliveryDigestFlush({
+        queueRepo: repo,
+        registry: { loadHumanRegistry: () => relayRegistry(prefs, secretsFile) },
+        home,
+        window: "4h",
+        dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never),
+      });
+      await settle();
+      expect(flushed.dispatched).toBe(2);
+      expect(relayPosts).toHaveLength(2);
+      expect(relayPosts[0]).toMatchObject({
+        v: 1,
+        recipient: { handle: "founder_wa" },
+        intent: "decision",
+        outcome: "digest",
+      });
+      expect(relayPosts[1]).toMatchObject({
+        v: 1,
+        recipient: { handle: "founder_wa" },
+        intent: "decision",
+        outcome: "digest",
+      });
+      expect(typeof relayPosts[0]!.replyRef).toBe("string");
+      expect(typeof relayPosts[1]!.replyRef).toBe("string");
+      expect(relayPosts[0]!.replyRef).not.toBe(relayPosts[1]!.replyRef);
+      expect(repo.hasRelayOwnerNotificationReceipt(r1.qitemId, a1.notificationKey!)).toBe(true);
+      expect(repo.hasRelayOwnerNotificationReceipt(r2.qitemId, a2.notificationKey!)).toBe(true);
+
+      // Switch human to Class B + away, and dispatch an escalation -> deferred for 30 minutes
+      prefs = { deliveryClass: "B", availability: "away" };
+      const urgent = await repo.create({
+        sourceSession: "dev@r",
+        destinationSession: "orch@r",
+        body: "Urgent away ask",
+        tags: ["escalation"],
+        nudge: false,
+      });
+      repo.update({
+        qitemId: urgent.qitemId,
+        actorSession: "orch@r",
+        state: "blocked",
+        blockedOn: `${HUMAN}@kernel`,
+        summary: "Urgent ask",
+        evidenceRef: "/proof/urgent.md",
+        transitionNote: "parked",
+      });
+      const urgentAlert = (await ports.listHumanAlerts({ minimumLevel: "NOTICE" })).find((a) => a.qitemId === urgent.qitemId)!;
+      w.dispatcher.dispatch(OUTBOUND_OP, urgentAlert.destinationSession!, urgentAlert);
+      await settle();
+      expect(relayPosts).toHaveLength(2);
+      expect(
+        new WatchdogJobsRepository(db).listActive().some((j) => JSON.stringify(j).includes(urgent.qitemId)),
+      ).toBe(true);
+    } finally {
+      w.stop();
+    }
+  });
+});

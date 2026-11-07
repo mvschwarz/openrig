@@ -2,6 +2,8 @@ import type { HumanFragment } from "./human-registry.js";
 import type { SlackConnectorConfig } from "./slack/config.js";
 import { verifyScopes, verifyChannelMembership, type ScopeVerdict } from "./slack/slack-api.js";
 import { mappedChannels } from "./slack/channel-map.js";
+import { loadRelayProfiles, type LoadRelayProfilesResult } from "./relay-config.js";
+import type { SecretFsOps } from "./slack/secrets.js";
 
 export type HumanDeliveryReadinessState = "ready" | "not-ready" | "indeterminate";
 
@@ -23,12 +25,17 @@ export interface HumanDeliveryReadinessInput {
   config: SlackConnectorConfig;
   gatewayState: string;
   botToken: string | null;
+  /** Optional preloaded relay profiles; when omitted for a relay primary binding, loaded from the full human registry. */
+  relayProfiles?: LoadRelayProfilesResult | null;
+  home?: string;
 }
 
 export interface HumanDeliveryReadinessDeps {
   verifyScopes?: (token: string, required: string[]) => Promise<ScopeVerdict>;
   verifyMembership?: (token: string, channel: string) => Promise<{ ok: boolean; isMember: boolean; error?: string }>;
   now?: () => Date;
+  fsops?: SecretFsOps;
+  entities?: readonly HumanFragment[];
 }
 
 /** Resolve the registered human's PRIMARY binding to delivery truth in one record.
@@ -49,6 +56,50 @@ export async function resolveHumanDeliveryReadiness(
     connector: { kind: primary.kind, ref: primary.connectorRef },
     checkedAt,
   };
+  if (primary.kind === "relay") {
+    const loaded = input.relayProfiles !== undefined
+      ? input.relayProfiles
+      : loadRelayProfiles(input.home, { entities: deps.entities, fsops: deps.fsops });
+    const profile = loaded?.ok ? loaded.get(primary.connectorRef) : undefined;
+    const defaultNextAction = "rig gateway human show " + input.human.entityId + " --json";
+    if (!profile || !profile.ready) {
+      return {
+        state: "not-ready",
+        configured: profile?.configured ?? false,
+        enabled: true,
+        active: false,
+        ready: false,
+        ...base,
+        reason: profile?.reason
+          ?? (loaded && !loaded.ok && loaded.registryError
+            ? loaded.registryError
+            : `relay profile '${primary.connectorRef}' is not configured`),
+        nextAction: profile?.nextAction ?? defaultNextAction,
+      };
+    }
+    if (input.gatewayState !== "active") {
+      return {
+        state: "not-ready",
+        configured: true,
+        enabled: true,
+        active: false,
+        ready: false,
+        ...base,
+        reason: `gateway subsystem is ${input.gatewayState}`,
+        nextAction: "rig daemon logs",
+      };
+    }
+    return {
+      state: "ready",
+      configured: true,
+      enabled: true,
+      active: true,
+      ready: true,
+      ...base,
+      reason: profile.reason,
+      nextAction: null,
+    };
+  }
   const configured = primary.kind === "slack" && input.botToken !== null && input.config.channel !== null;
   const enabled = input.config.enabled;
   const active = enabled && input.gatewayState === "active";
