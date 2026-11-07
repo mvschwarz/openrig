@@ -497,7 +497,7 @@ export function recordSeatSkillWrite(skillsRoot: string, dest: string, source: s
 
 /** OPR.0.7.0.9: the seat's launch additions' locations, beside its skills: `additions/` (the prompt file and plugin
  *  folders) and, for Claude, its generated plugin's `agents/`. The same record, restore and cleanup route covers them. */
-export function seatAdditionLocations(paths: SeatSkillPaths): string[] {
+export function seatAdditionLocations(paths: Pick<SeatSkillPaths, "root" | "skillsRoot" | "pluginDir">): string[] {
   return [nodePath.join(paths.root, "additions"), ...(paths.skillsRoot === nodePath.join(paths.pluginDir, "skills") ? [nodePath.join(paths.pluginDir, "agents")] : [])];
 }
 
@@ -514,6 +514,23 @@ export function recordSeatSkillFollowing(skillsRoot: string, id: string, source:
     following[id] = { source: nodePath.resolve(source) };
   }
   writeProjections(root, { ...record, following });
+}
+
+/** Record a no-op skill's policy only when every present file is already owned and unchanged. */
+export function recordUnchangedSeatSkillFollowing(skillsRoot: string, id: string, source: string | undefined): void {
+  const root = seatRootOfSkills(skillsRoot);
+  const dir = nodePath.resolve(skillsRoot, id);
+  if (!insideSeatStorageFolder(root, dir)) return;
+  const files = filesBelow(dir);
+  if (!files.includes("SKILL.md")) return;
+  const owned = recordedSeatSkillFiles({ root, skillsRoot, pluginDir: nodePath.join(root, "plugin"),
+    manifestPath: nodePath.join(root, "skill-loadout.json"), projectionsPath: nodePath.join(root, "skill-projections.json") });
+  for (const rel of files) {
+    const file = nodePath.join(dir, rel);
+    const entry = owned.get(file);
+    if (!entry || !insideSeatStorage(root, file) || !matchesRecordedFile(file, entry)) return;
+  }
+  recordSeatSkillFollowing(skillsRoot, id, source);
 }
 
 /** Today's skill selection for a seat, resolved from its spec as it is now. */
@@ -689,7 +706,7 @@ export function hasFollowingSeatSkills(paths: SeatSkillPaths): boolean {
 }
 
 /** Every file OpenRig recorded writing into this seat's skills or launch additions: its recorded hash and source. */
-function recordedSeatSkillFiles(paths: SeatSkillPaths): Map<string, { sha256: string; source: string; mode?: number }> {
+function recordedSeatSkillFiles(paths: Pick<SeatSkillPaths, "root" | "skillsRoot" | "pluginDir" | "manifestPath" | "projectionsPath">): Map<string, { sha256: string; source: string; mode?: number }> {
   const out = new Map<string, { sha256: string; source: string; mode?: number }>();
   const roots = [paths.skillsRoot, ...seatAdditionLocations(paths)].map((dir) => nodePath.resolve(dir) + nodePath.sep);
   const inside = (file: string) => roots.some((root) => file.startsWith(root));

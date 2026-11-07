@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs, { chmodSync, statSync, symlinkSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { planProjection } from "../src/domain/projection-planner.js";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -374,6 +375,49 @@ describe("a launch records which of a seat's skills follow their source", () => 
   };
 
   for (const runtime of ["claude-code", "codex"] as const) {
+    it.each(["projection", "loadout", "unowned", "edited", ...(process.platform === "win32" ? [] : ["linked"])])(`${runtime}: records no-op policy only for unchanged owned files (%s)`, async ownership => {
+      const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime }, home);
+      if (runtime === "claude-code") ensureSeatSkillPlugin(paths);
+      const source = join(home, "review");
+      const target = join(paths.skillsRoot, "review");
+      for (const dir of [source, target]) {
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "SKILL.md"), "review");
+        writeFileSync(join(dir, "helper.txt"), "original");
+      }
+      if (ownership === "loadout") {
+        writeFileSync(paths.manifestPath, JSON.stringify({ skills: [{ target, sourceDir: source, files: {
+          "SKILL.md": createHash("sha256").update("review").digest("hex"),
+          "helper.txt": createHash("sha256").update("original").digest("hex"),
+        } }] }));
+      } else if (ownership !== "unowned") {
+        for (const file of ["SKILL.md", "helper.txt"]) recordSeatSkillWrite(paths.skillsRoot, join(target, file), join(source, file), readFileSync(join(source, file)));
+      }
+      if (ownership === "edited") writeFileSync(join(target, "helper.txt"), "seat edit");
+      if (ownership === "linked") { rmSync(join(target, "helper.txt")); symlinkSync(join(source, "helper.txt"), join(target, "helper.txt")); }
+      const adapter = runtime === "codex" ? new CodexRuntimeAdapter({ tmux: {} as never, fsOps: realFs as never })
+        : new ClaudeCodeAdapter({ tmux: {} as never, fsOps: realFs });
+      const binding = { cwd: home, seatSkillsRoot: paths.skillsRoot } as NodeBinding;
+      const following = () => existsSync(paths.projectionsPath) ? JSON.parse(readFileSync(paths.projectionsPath, "utf8")).following : undefined;
+      for (const onRestore of ["follow_source", "keep_saved"] as const) {
+        const result = planProjection({ config: { runtime, cwd: home, restorePolicy: "resume_if_possible", startup: { files: [], actions: [] },
+          resolvedSpecName: "team", resolvedSpecVersion: "1", resolvedSpecHash: "fixture",
+          selectedResources: { guidance: [], plugins: [], runtimeResources: [], subagents: [], skills: [
+            { effectiveId: "review", sourceSpec: "team", sourcePath: home, resource: { id: "review", path: source, onRestore } },
+          ] },
+        }, collisions: [], fsOps: realFs, resolveTargetPath: () => join(target, "SKILL.md") });
+        expect(result.ok).toBe(true);
+        if (!result.ok) throw new Error(result.errors.join("; "));
+        expect(result.plan.entries[0]?.classification).toBe("no_op");
+        const writes = vi.spyOn(realFs, "writeFile");
+        try {
+          expect(await adapter.project(result.plan, binding)).toMatchObject({ projected: [], skipped: ["review"], failed: [] });
+          expect(writes).not.toHaveBeenCalled();
+        } finally { writes.mockRestore(); }
+        expect(following()?.review).toEqual(onRestore === "follow_source" && ["projection", "loadout"].includes(ownership) ? { source } : undefined);
+      }
+    });
+
     it(`${runtime}: marks a follow_source skill as following, and unmarks it when it is launched as keep_saved`, async () => {
       const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime }, home);
       if (runtime === "claude-code") ensureSeatSkillPlugin(paths);

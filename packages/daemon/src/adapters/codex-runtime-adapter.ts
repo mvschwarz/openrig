@@ -70,7 +70,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 };
 
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
-import { recordSeatSkillFollowing, recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "../domain/seat-skill-storage.js";
+import { recordUnchangedSeatSkillFollowing, recordSeatSkillFollowing, recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "../domain/seat-skill-storage.js";
 import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
 import { findTomlTable, opensTomlTable, parseTomlRoot, tomlArrayTableHeaderPath, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
 
@@ -808,12 +808,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const failed: Array<{ effectiveId: string; error: string }> = [];
 
     for (const entry of plan.entries) {
-      if (entry.classification === "no_op") {
-        skipped.push(entry.effectiveId);
-        continue;
-      }
-
       try {
+        if (entry.classification === "no_op") {
+          if (entry.category === "skill" && binding.seatSkillsRoot && !binding.seatSkillsRefused) {
+            recordUnchangedSeatSkillFollowing(binding.seatSkillsRoot, entry.effectiveId,
+              entry.onRestore === "follow_source" ? entry.absolutePath : undefined);
+          }
+          skipped.push(entry.effectiveId);
+          continue;
+        }
         const didProject = this.projectEntry(entry, binding.cwd, warnings, binding.seatSkillsRoot, binding.seatSkillsRefused, this.homeFor(binding), binding);
         if (didProject) {
           projected.push(entry.effectiveId);

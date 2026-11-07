@@ -31,7 +31,7 @@ import { unresolvedClaudePermissionModes } from "../domain/native-permission-sel
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
 import { seatLaunchAdditionArgs, seatLaunchAdditionShellArgs } from "../domain/seat-launch-additions.js";
-import { recordSeatSkillFollowing, recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
+import { recordUnchangedSeatSkillFollowing, recordSeatSkillFollowing, recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
 
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
@@ -169,12 +169,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const failed: Array<{ effectiveId: string; error: string }> = [];
 
     for (const entry of plan.entries) {
-      if (entry.classification === "no_op") {
-        skipped.push(entry.effectiveId);
-        continue;
-      }
-
       try {
+        if (entry.classification === "no_op") {
+          if (entry.category === "skill" && binding.seatSkillsRoot && !binding.seatSkillsRefused) {
+            recordUnchangedSeatSkillFollowing(binding.seatSkillsRoot, entry.effectiveId,
+              entry.onRestore === "follow_source" ? entry.absolutePath : undefined);
+          }
+          skipped.push(entry.effectiveId);
+          continue;
+        }
         const didProject = this.projectEntry(entry, binding.cwd, binding.claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, warnings, binding.seatSkillsRoot, binding.seatSkillsRefused);
         if (didProject) {
           projected.push(entry.effectiveId);
