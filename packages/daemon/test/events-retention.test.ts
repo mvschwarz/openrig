@@ -275,6 +275,47 @@ describe("events retention — bounded work", () => {
     expect(second[0]!.lo).toBe(first.lowWater);
     expect(again.batches).toBeLessThanOrEqual(1);
   });
+
+  it("re-examines a kept young row that sits outside the first window, and deletes every such row once it ages", async () => {
+    const db = makeDb();
+    const window = 10;
+    for (let seq = 1; seq <= 30; seq++) {
+      // 13.5 days old: kept today, past the cutoff tomorrow. Neither sits in the first window.
+      insertAt(db, seq, seq === 15 || seq === 25 ? "view.changed" : "agent.activity", seq === 15 || seq === 25 ? ago(13, 43_200) : ago(20));
+    }
+    insertAt(db, 31, "node.held", ago(0));
+
+    const first = await pruneEvents(db, { nowIso: NOW, eventsWindow: window, ...noPause });
+    expect(first.deletedRows).toBe(0);
+    expect(first.lowWater).toBe(14); // stops below the lowest kept young row, whichever window it is in
+
+    const later = new Date(new Date(NOW).getTime() + 86_400_000).toISOString();
+    const second = await pruneEvents(db, { nowIso: later, eventsWindow: window, ...noPause });
+    expect(second.deletedRows).toBe(2);
+    expect(seqs(db)).not.toContain(15);
+    expect(seqs(db)).not.toContain(25);
+  });
+
+  it("a kept row does not hold the pass to the first maxBatchesPerTable windows: the next sweep continues where the cap stopped", async () => {
+    const db = makeDb();
+    const window = 10;
+    insertAt(db, 1, "queue.created", ago(-365)); // dated a year ahead: kept, and the mark stays below it
+    for (let seq = 2; seq <= 60; seq++) insertAt(db, seq, seq === 55 ? "queue.created" : "agent.activity", ago(30));
+    insertAt(db, 61, "node.held", ago(0));
+    const opts = { nowIso: NOW, eventsWindow: window, maxBatchesPerTable: 2, ...noPause };
+
+    const sweeps: Array<Array<{ lo: number; hi: number }>> = [];
+    for (let i = 0; i < 4; i++) {
+      const windows: Array<{ lo: number; hi: number }> = [];
+      const result = await pruneEvents(db, { ...opts, onEventsWindow: (w) => windows.push(w) });
+      sweeps.push(windows);
+      expect(result.lowWater).toBe(0); // the future-dated row is re-examined on every full pass
+    }
+
+    expect(sweeps.map((s) => s[0]!.lo)).toEqual([0, 20, 40, 0]); // continues, then starts again at the mark
+    expect(seqs(db)).not.toContain(55); // reached on the third sweep, beyond 2 × window of the mark
+    expect(seqs(db)).toContain(1);
+  });
 });
 
 describe("events retention — the sweep and the scheduler", () => {

@@ -432,10 +432,12 @@ function sleep(ms: number): Promise<void> {
  * older rows from the pass.
  *
  * The window cursor starts at a low-water mark (events_retention_marks, migration 152): every seq at or below it
- * has been checked, so a sweep starts where the previous one could not finish. The mark never passes a prunable
- * row that was kept for being too new, so such a row is checked again and goes once it ages; in practice the mark
- * sits where the retained history begins. It records the allowlist it was made with; a different allowlist starts
- * again from the oldest row. The newest row is never deleted, so the log's highest seq never moves backwards. No
+ * has been checked. The mark never passes a prunable row that was kept for being too new, so such a row is checked
+ * again and goes once it ages; in practice the mark sits where the retained history begins. A sweep that hits its
+ * batch cap stores where it stopped (resume_seq), and the next sweep continues from there instead of from the mark,
+ * so a kept row (one dated in the future, say) never holds the pass to the first maxBatchesPerTable windows above
+ * it; once a pass reaches the newest row the resume point is cleared, and the next pass starts again at the mark.
+ * The mark records the allowlist it was made with; a different allowlist starts again from the oldest row. The newest row is never deleted, so the log's highest seq never moves backwards. No
  * checkpoint is forced: SQLite's automatic checkpoint runs as usual. The file does not shrink: freed pages are
  * reused; giving them back to the disk is an offline VACUUM with the daemon stopped.
  */
@@ -455,7 +457,7 @@ export async function pruneEvents(db: Database.Database, opts: RetentionOptions)
   });
   const typesKey = PRUNABLE_EVENT_TYPES.join(",");
   const mark = persistMark
-    ? db.prepare("SELECT low_water_seq AS seq, prunable_types AS types FROM events_retention_marks WHERE id = 1").get() as { seq: number; types: string } | undefined
+    ? db.prepare("SELECT low_water_seq AS seq, resume_seq AS resume, prunable_types AS types FROM events_retention_marks WHERE id = 1").get() as { seq: number; resume: number | null; types: string } | undefined
     : undefined;
   const validMark = mark && mark.types === typesKey ? mark.seq : null;
   const bounds = eventsSeqBounds(db);
@@ -464,7 +466,9 @@ export async function pruneEvents(db: Database.Database, opts: RetentionOptions)
   const cutoffSql = eventsCutoffSql(opts.nowIso, days);
   // Up to the row before the newest: the newest stays, whatever its age.
   const last = bounds.hi - 1;
-  let lo = Math.max(validMark ?? 0, bounds.lo - 1);
+  // The previous sweep hit its batch cap above a kept row: continue where it stopped, keeping the mark below that row.
+  const resume = validMark !== null && mark!.resume !== null && mark!.resume > validMark && mark!.resume < last ? mark!.resume : null;
+  let lo = Math.max(resume ?? validMark ?? 0, bounds.lo - 1);
   const placeholders = PRUNABLE_EVENT_TYPES.map(() => "?").join(", ");
   const deleteWindow = db.prepare(
     `DELETE FROM events
@@ -479,15 +483,15 @@ export async function pruneEvents(db: Database.Database, opts: RetentionOptions)
   const keptYoung = db.prepare(`SELECT MIN(seq) AS seq FROM events WHERE seq > ? AND seq <= ? AND type IN (${placeholders})`);
   const saveMark = persistMark
     ? db.prepare(
-      `INSERT INTO events_retention_marks (id, low_water_seq, prunable_types, updated_at) VALUES (1, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET low_water_seq = excluded.low_water_seq, prunable_types = excluded.prunable_types,
-         updated_at = excluded.updated_at`,
+      `INSERT INTO events_retention_marks (id, low_water_seq, resume_seq, prunable_types, updated_at) VALUES (1, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET low_water_seq = excluded.low_water_seq, resume_seq = excluded.resume_seq,
+         prunable_types = excluded.prunable_types, updated_at = excluded.updated_at`,
     )
     : null;
 
   let deletedRows = 0;
   let batches = 0;
-  let cap: number | null = null;
+  let cap: number | null = resume !== null ? validMark : null;
   let lowWater = validMark;
   while (lo < last && batches < maxBatches) {
     const hi = Math.min(lo + window, last);
@@ -497,7 +501,8 @@ export async function pruneEvents(db: Database.Database, opts: RetentionOptions)
       if (young !== null) cap = young - 1;
     }
     lowWater = cap ?? hi;
-    saveMark?.run(lowWater, typesKey, opts.nowIso);
+    // The resume point is cleared once the pass reaches the newest row: the next pass starts again at the mark.
+    saveMark?.run(lowWater, hi >= last ? null : hi, typesKey, opts.nowIso);
     opts.onEventsWindow?.({ lo, hi, deleted });
     deletedRows += deleted;
     batches++;

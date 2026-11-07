@@ -104,9 +104,9 @@ after an upgrade it can still hold the previous version's note.
   growth; other tables still grow. To give the space back to the disk: find the file with `rig config get db.path`, stop the daemon
   (`rig daemon stop`), copy the file aside, run `sqlite3 <that file> "VACUUM;"` (it needs free disk about the size of
   the file and can take a few minutes), then `rig daemon start`. Never vacuum the file of a running daemon.
-- **With pruning on, `rig telemetry events` reports the pruned ranges.** A page that spans pruned events has a
-  `retained_sequence_gap` for each missing seq range and `coverage.status` `partial`, where an older window used to read
-  as complete.
+- **With pruning on, `rig telemetry events` reports the pruned ranges.** A page that spans pruned events inside the
+  retained window has a `retained_sequence_gap` for each missing seq range and `coverage.status` `partial` (it used to be
+  `retained_window`); events pruned from the start of the log show up as `before_retained_floor`.
 
 - **Team skills live in each seat's own storage** (`$OPENRIG_HOME/state/seats/<rig id>/<logical seat>/<runtime>/`), not
   in the project's `.claude/skills` or `.agents/skills`. Claude seats get them as a generated plugin (`openrig:<id>`),
