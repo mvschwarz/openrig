@@ -11,7 +11,7 @@ import type { ViewerPane } from "../src/domain/terminal/herdr-viewer.js";
 import { inspectComposerInput } from "../src/domain/session-transport.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
-import { tileAttachArgv078, tileAttachArgv079 } from "./fixtures/earlier-tile-attach.js";
+import { tileAttachArgv078, tileAttachArgv079 } from "../src/domain/terminal/earlier-tile-attach.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -444,4 +444,18 @@ describe("follow views kept from an earlier release", () => {
       expect(JSON.parse(readFileSync(canvasFile, "utf8")).tiles.map((t: { target: { paneCommand: string } }) => t.target.paneCommand))
         .toEqual(current.map(t => t.paneCommand));
     });
+
+  it("holds a kept follow view whose tile script only shares a tile script's opening, and leaves its saved tiles", async () => {
+    const f = fixture(); expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
+    const canvasFile = path.join(path.dirname(path.dirname(f.journal())), "canvas.json");
+    const canvas = JSON.parse(readFileSync(canvasFile, "utf8"));
+    const tile = canvas.tiles[0];
+    tile.target.attachArgv[2] = 'target=$1; shift; printf "%s\\n" "custom viewer";';
+    tile.target.paneCommand = tile.target.attachArgv.map(quote).join(" ");
+    writeFileSync(canvasFile, JSON.stringify(canvas));
+    const before = f.calls.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, following: { state: "retained" }, error: expect.stringContaining("current attachment differs") });
+    expect(f.calls.slice(before).some(c => ["create", "split", "run", "close"].includes(c[1]!))).toBe(false);
+    expect(JSON.parse(readFileSync(canvasFile, "utf8")).tiles[0].target).toEqual(tile.target);
+  });
 });

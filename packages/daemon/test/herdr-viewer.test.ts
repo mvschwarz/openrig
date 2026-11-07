@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { HerdrViewer, type HerdrViewerRun } from "../src/domain/terminal/herdr-viewer.js";
 import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
-import { tileAttachArgv078, tileAttachArgv079 } from "./fixtures/earlier-tile-attach.js";
+import { tileAttachArgv078, tileAttachArgv079 } from "../src/domain/terminal/earlier-tile-attach.js";
 import { composeView } from "../src/domain/terminal/view-composer.js";
 import { Hono } from "hono";
 import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
@@ -282,5 +282,19 @@ describe("viewers kept from an earlier release", () => {
     expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
     expect(stored().argv[2]).toBe("exec /usr/bin/tmux attach");
     expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+  });
+
+  it("holds a kept viewer whose script only shares a tile script's opening, and leaves its saved command", async () => {
+    const f = fixture(); expect((await f.viewer().ensure(key, f.target)).ok).toBe(true);
+    const stored = keepFrom(f, tileAttachArgv079, false);
+    const file = path.join(f.root, readdirSync(f.root).find(n => n.endsWith(".json"))!);
+    const journal = JSON.parse(readFileSync(file, "utf8"));
+    journal.entries[id].argv[2] = 'target=$1; shift; printf "%s\\n" "custom viewer";';
+    journal.entries[id].command = journal.entries[id].argv.map(quote).join(" ");
+    writeFileSync(file, JSON.stringify(journal));
+    const before = stored();
+    expect(await f.viewer().lookup(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(stored()).toEqual(before);
   });
 });

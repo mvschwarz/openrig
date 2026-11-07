@@ -1,3 +1,5 @@
+import { tileAttachArgv078, tileAttachArgv079 } from "./earlier-tile-attach.js";
+
 // A tile owns its attach process; no daemon watcher or steady-state polling.
 // Session names survive fresh launch, handover and restart. The node identity
 // must survive too: never follow a same-name session belonging to another seat.
@@ -45,10 +47,14 @@ export function tileAttachArgv(
   return ["/bin/sh", "-c", script, "openrig-tile", session, tmux, ...server];
 }
 
-/** Whether a kept tile attaches the same seat as the current one. An upgrade can change only OpenRig's own script
- * (argv[2]), so every other argument must match and the kept script must be a tile script. Callers also compare the
- * read-only intent they recorded. A kept argv that differs anywhere else is a different attachment. */
-export function sameTileAttachment(kept: readonly string[], current: readonly string[]): boolean {
-  if (kept.length !== current.length || kept.length < 5 || kept[0] !== "/bin/sh" || kept[1] !== "-c" || kept[3] !== "openrig-tile") return false;
-  return kept[2]!.startsWith("target=$1; shift;") && kept.every((word, i) => i === 2 || word === current[i]);
+/** Whether a kept tile is the one an earlier release generated for the same seat: exactly the command 0.7.9's, or
+ * 0.7.5-0.7.8's, script makes for the current tile's session, tmux, server and read-only intent. An upgrade changes
+ * only OpenRig's own script; any other difference, an edited script included, is a different attachment. */
+export function earlierTileAttachment(kept: readonly string[], current: readonly string[], readOnly: boolean): boolean {
+  if (current.length < 6) return false;
+  const [session, tmux, ...server] = current.slice(4) as [string, string, ...string[]];
+  return [tileAttachArgv079, tileAttachArgv078].some((make) => {
+    const earlier = make(tmux, server, session, readOnly);
+    return earlier.length === kept.length && earlier.every((word, i) => word === kept[i]);
+  });
 }

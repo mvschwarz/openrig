@@ -1,4 +1,5 @@
-// The tile scripts earlier releases stored in kept views, verbatim, so upgrade tests compare against what users have.
+// The tile commands earlier releases generated, verbatim, so a view kept across an upgrade is recognised only by
+// a command OpenRig actually generated for the same seat. Kept views exist from 0.7.5 on.
 // 0.7.9: tile-attach.ts at 7cabac44 (#2464). 0.7.5 through 0.7.8: tile-attach.ts at 80616b79 (#2133).
 export function tileAttachArgv079(
   tmux: string, server: readonly string[], session: string, readOnly: boolean,
