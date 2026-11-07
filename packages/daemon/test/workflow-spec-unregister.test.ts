@@ -4,7 +4,7 @@
 // is kept, since the next scan would register it again.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -181,6 +181,38 @@ describe("POST /api/workflow/specs/unregister (#2635)", () => {
 
     expect(body.removed.map((row) => row.name)).toEqual(["alpha"]);
     expect(registered()).toEqual(["beta@1"]);
+  });
+
+  // #2676 review: existsSync is also false on an access error, so an unreadable parent folder looked like a missing file.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("--prune-missing keeps and names a spec whose file can't be checked (EACCES), and removes a really missing one", async () => {
+    const lockedDir = join(scratch, "locked");
+    mkdirSync(lockedDir);
+    const locked = register(lockedDir, "locked.yaml", "locked-flow", "1");
+    const gone = register(scratch, "gone.yaml", "gone-flow", "1");
+    unlinkSync(gone);
+    chmodSync(lockedDir, 0o000);
+    try {
+      const { status, body } = await unregister({ pruneMissing: true });
+
+      expect(status).toBe(200);
+      expect(body.removed).toEqual([{ name: "gone-flow", version: "1", sourcePath: gone }]);
+      expect(body.kept).toEqual([{ name: "locked-flow", version: "1", sourcePath: locked, reason: "unchecked" }]);
+      expect(registered()).toEqual(["locked-flow@1"]);
+      expect(removedEvents()).toEqual(["gone-flow@1:source_missing"]);
+    } finally {
+      chmodSync(lockedDir, 0o755);
+    }
+  });
+
+  it("an empty version is a usage error and removes nothing (#2676 review)", async () => {
+    register(scratch, "flow-v1.yaml", "flow", "1");
+    register(scratch, "flow-v2.yaml", "flow", "2");
+
+    const res = await unregister({ name: "flow", version: "" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("spec_selector_required");
+    expect(registered()).toEqual(["flow@1", "flow@2"]);
   });
 
   it("refuses without a selector and answers 404 for an unknown name", async () => {

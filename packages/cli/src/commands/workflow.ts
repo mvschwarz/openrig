@@ -646,6 +646,8 @@ A version that unfinished work (an active, waiting or resumable failed instance)
 is never removed; with --prune-missing it is retained, readable by that work but hidden from
 the library, and a later prune removes it. A file still inside the workflows folder or the
 built-in starters is kept, because the next scan registers it again: move or delete the file.
+A file whose presence can't be checked (an access error, not "no such file") is kept and named.
+An empty version (name@) is a usage error.
 
 Examples:
   $ rig workflow unregister qa-probe
@@ -666,11 +668,16 @@ Examples:
         name = at > 0 ? spec.slice(0, at) : spec;
         version = at > 0 ? spec.slice(at + 1) : undefined;
       }
+      if (version !== undefined && version.trim() === "") {
+        console.error(`The version after @ is empty in "${spec}": use <name>@<version>, or <name> for every version.`);
+        process.exitCode = 1;
+        return;
+      }
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<{
           removed?: Array<{ name: string; version: string; sourcePath: string }>;
-          kept?: Array<{ name: string; version: string; sourcePath: string; reason: "pinned" | "scanned" }>;
+          kept?: Array<{ name: string; version: string; sourcePath: string; reason: "pinned" | "scanned" | "unchecked" }>;
         }>("/api/workflow/specs/unregister", { name, version, pruneMissing: opts.pruneMissing === true });
         if (opts.json || res.status >= 400) {
           printResult(opts.json ?? false, res.data, res.status);
@@ -683,7 +690,9 @@ Examples:
         for (const row of kept) {
           const why = row.reason === "pinned"
             ? "unfinished work is pinned to this version"
-            : "the file is still in a scanned folder; move or delete it";
+            : row.reason === "unchecked"
+              ? "its file couldn't be checked (not ENOENT), so it isn't treated as missing"
+              : "the file is still in a scanned folder; move or delete it";
           console.log(`kept     ${row.name}@${row.version}  ${row.sourcePath}  (${why})`);
         }
       });

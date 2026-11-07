@@ -357,6 +357,23 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     expect(logs.join("\n")).toContain("kept     wf-keep@2  /tmp/keep.yaml  (unfinished work is pinned to this version)");
   });
 
+  it("unregister name@ (an empty version) is a usage error and sends nothing (#2676 review)", async () => {
+    const { deps, calls } = makeDeps();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const before = process.exitCode;
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", "unregister", "flow@"]);
+      expect(process.exitCode).toBe(1);
+      expect(err.mock.calls.join(" ")).toContain("The version after @ is empty");
+    } finally {
+      err.mockRestore();
+      process.exitCode = before;
+    }
+    expect(calls).toEqual([]);
+  });
+
   it("unregister with neither a spec nor --prune-missing sends nothing and fails (#2635)", async () => {
     const { deps, calls } = makeDeps();
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
