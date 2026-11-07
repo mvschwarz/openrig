@@ -474,6 +474,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // (same injected-predicate layering — the queue never imports the session domain).
     resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
     resolveSessionAddresses: (sessionName) => sessionRegistry.sessionAddresses(sessionName),
+    // #2575: a prompt-clear wake retry waits for a managed compaction's owed steps, as parked-owner reminders do.
+    hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
   });
   // W1 (transactional closure): ONE OutboxHandler shared between the deps slot
   // (sender-side audit surface) and the queue repo's durable wake-intent
