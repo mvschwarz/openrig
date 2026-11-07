@@ -307,18 +307,23 @@ function skipClaudeStatusRows(lines: string[], from: number): number {
   return bar;
 }
 
-/** The current Claude footer follows the input frame; earlier examples are history or draft text. */
-function findClaudeFooterIndex(lines: string[]): number {
-  const bar = skipClaudeStatusRows(lines, lines.length - 1);
-  // The task panel is skipped only in its own shape and only right under a recognized footer, past blank and known
-  // status rows (#2605's banner can sit between them). Anything else stops the search here, as before.
-  if (!CLAUDE_TASK_PANEL_ROW.test(lines[bar] ?? "")) return bar;
-  let top = bar;
+/** The first row of Claude's task panel when it sits right under a recognized footer (#2700), or -1. The panel is
+ * recognized in its own shape only, past blank and known status rows (#2605's banner can sit between them). */
+function claudeTaskPanelTop(lines: string[]): number {
+  const last = skipClaudeStatusRows(lines, lines.length - 1);
+  if (!CLAUDE_TASK_PANEL_ROW.test(lines[last] ?? "")) return -1;
+  let top = last;
   while (top > 0 && CLAUDE_TASK_PANEL_ROW.test(lines[top - 1]!)) top--;
   if (top > 0 && CLAUDE_TASK_PANEL_TITLE.test(lines[top - 1]!)) top--;
-  const footer = skipClaudeStatusRows(lines, top - 1);
-  const row = lines[footer]?.trim() ?? "";
-  return CLAUDE_MODE_FOOTER.test(row) || isComposerFooter(row) ? footer : bar;
+  const row = lines[skipClaudeStatusRows(lines, top - 1)]?.trim() ?? "";
+  return CLAUDE_MODE_FOOTER.test(row) || isComposerFooter(row) ? top : -1;
+}
+
+/** The current Claude footer follows the input frame; earlier examples are history or draft text. */
+function findClaudeFooterIndex(lines: string[]): number {
+  // The task panel is skipped as described above; anything else stops the search here, as before.
+  const panel = claudeTaskPanelTop(lines);
+  return skipClaudeStatusRows(lines, (panel < 0 ? lines.length : panel) - 1);
 }
 
 // Claude's task-list rows, the only rows it draws between a live status row and the input box. Its renderer marks pending,
@@ -335,38 +340,50 @@ function isFramedClaudePrompt(upper: string, prompt: string, indent: string): bo
     prompt.startsWith(`${indent}❯`) && !!readComposerPromptLine(prompt, composerPromptClassForRuntime("claude-code"));
 }
 
+/** The closing rule of a framed Claude prompt above a user statusLine drawn between it and the recognized footer at
+ * `bar` (#2700), or -1 (no such statusLine, or not a frame). The climb starts only from a recognized footer, and the
+ * gap rows are trusted only by position: the frame above them must check out, and none may be a rule or
+ * prompt-shaped. */
+function claudeCloseAboveStatusLine(lines: string[], bar: number): number {
+  const footer = lines[bar]?.trim() ?? "";
+  if (bar < 1 || (!CLAUDE_MODE_FOOTER.test(footer) && !isComposerFooter(footer)) || /^[ \t]*─{3,}$/.test(lines[bar - 1]!)) return -1;
+  let close = bar - 1;
+  while (close >= 0 && !rule(lines[close]!)) close--;
+  const indent = /^([ \t]*)─{3,}$/.exec(lines[close] ?? "")?.[1];
+  const gap = lines.slice(close + 1, bar).map(line => line.trimStart());
+  if (close < 2 || indent === undefined || gap.some(line => /^[❯›»]/.test(line) || COMPOSER_SELECTION_SCAN_PATTERN.test(line)) ||
+      !isFramedClaudePrompt(lines[close - 2]!, lines[close - 1]!, indent)) return -1;
+  return close;
+}
+
 function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = {}) {
   // Preserve columns: a multiline draft may contain indented border/prompt text.
-  // This classifier scans at most 20 physical lines; captures can be taller.
-  // Exhausting the scan without reaching the status head is unknown, not idle.
-  // The 20 end at the last drawn row: Claude draws inline, so a short screen in a tall pane leaves its input box above
-  // blank rows that the capture keeps.
+  // This classifier scans at most 20 physical lines, not counting a user statusLine below the box; captures can be
+  // taller. Exhausting the scan without reaching the status head is unknown, not idle.
+  // The 20 end at the last drawn row (above the task panel): Claude draws inline, so a short screen in a tall pane
+  // leaves its input box above blank rows that the capture keeps.
   const physical = paneContent.split("\n");
   let end = physical.length;
   while (end > 0 && physical[end - 1]!.trim().length === 0) end--;
-  // The task panel below the footer (#2700) can hold a row per background task; it must not spend the window that
-  // reaches the status head, so the 20 end at the footer when the panel is recognized there.
+  // Rows Claude draws outside its box (#2700) must not spend the window that reaches the status head: the task panel
+  // below the footer (the 20 end above it), and a statusLine between the closing rule and the footer (not counted).
   const drawn = physical.slice(0, end).map((line) => line.trimEnd());
-  const footerAbovePanel = findClaudeFooterIndex(drawn);
-  if (footerAbovePanel !== skipClaudeStatusRows(drawn, drawn.length - 1)) end = footerAbovePanel + 1;
-  const lines = physical.slice(Math.max(0, end - 20), end)
+  const panel = claudeTaskPanelTop(drawn);
+  if (panel >= 0) {
+    end = panel;
+    while (end > 0 && physical[end - 1]!.trim().length === 0) end--;
+  }
+  const footerAt = findClaudeFooterIndex(drawn.slice(0, end));
+  const statusLineClose = claudeCloseAboveStatusLine(drawn, footerAt);
+  const statusLineRows = statusLineClose < 0 ? 0 : footerAt - statusLineClose - 1;
+  const lines = physical.slice(Math.max(0, end - 20 - statusLineRows), end)
     .map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
   const bar = findClaudeFooterIndex(lines);
   const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
   const modeFooter = CLAUDE_MODE_FOOTER.test(lines[bar]?.trim() ?? "");
-  // The closing rule is right above the footer, or above a user statusLine drawn between them (#2700). The climb starts
-  // only from a recognized footer, and rows in that gap are trusted only by position: the frame above them must check
-  // out, and none may be a rule or prompt-shaped.
-  let close = bar - 1;
-  const footerRow = lines[bar]?.trim() ?? "";
-  if ((CLAUDE_MODE_FOOTER.test(footerRow) || isComposerFooter(footerRow)) && !/^[ \t]*─{3,}$/.test(lines[close] ?? "")) {
-    let i = close;
-    while (i >= 0 && !rule(lines[i]!)) i--;
-    const gap = lines.slice(i + 1, bar).map(line => line.trimStart());
-    const ruleIndent = /^([ \t]*)─{3,}$/.exec(lines[i] ?? "")?.[1];
-    if (i > 1 && ruleIndent !== undefined && !gap.some(line => /^[❯›»]/.test(line) || COMPOSER_SELECTION_SCAN_PATTERN.test(line)) &&
-        isFramedClaudePrompt(lines[i - 2]!, lines[i - 1]!, ruleIndent)) close = i;
-  }
+  // The closing rule is right above the footer, or above a user statusLine drawn between them (#2700).
+  const aboveStatusLine = claudeCloseAboveStatusLine(lines, bar);
+  const close = aboveStatusLine < 0 ? bar - 1 : aboveStatusLine;
   let indent = /^([ \t]*)─{3,}$/.exec(lines[close] ?? "")?.[1];
   const framed = indent !== undefined;
   let prompt = lines[close - 1] ?? "";

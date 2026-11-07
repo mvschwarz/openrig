@@ -48,3 +48,41 @@ describe("Claude composer gap rows in another harness's prompt shape (#2700)", (
     expect(classifyPaneActivity(plain(shaped.screen), { composerSnapshot: shaped, runtime: "claude-code" }).state).not.toBe("agent_idle");
   });
 });
+
+describe("Claude composer under a tall statusLine (#2700)", () => {
+  // Edited: the captured statusLine row followed by more statusLine rows, so the gap between the closing rule and the
+  // footer is `rows` tall. The pane height grows to hold them.
+  const tallStatusLine = (rows: number, head?: string) => edit(F1, screen => {
+    screen.splice(6, 0, ...Array.from({ length: rows - 1 }, (_, i) => `  \x1b[36mstatus row ${i}\x1b[39m · ${i} items`));
+    if (head) screen[0] = head;
+  }, { height: 60 });
+
+  it.each([1, 15, 16, 30])("reads a finished turn as idle with %i statusLine rows", rows => {
+    const snapshot = tallStatusLine(rows);
+    expect(classifyPaneActivity(plain(snapshot.screen), { composerSnapshot: snapshot, runtime: "claude-code" }))
+      .toMatchObject({ state: "agent_idle" });
+  });
+
+  it.each([1, 17, 30])("reads a running turn as active with %i statusLine rows", rows => {
+    // Edited: the completed status row above the box replaced by a live one.
+    const snapshot = tallStatusLine(rows, "\x1b[38;5;246m✻\x1b[39m Thinking… (12s · ↓ 1.2k tokens · esc to interrupt)");
+    expect(classifyPaneActivity(plain(snapshot.screen), { composerSnapshot: snapshot, runtime: "claude-code" }))
+      .toMatchObject({ state: "agent_active" });
+  });
+});
+
+describe("Claude composer with a known status row between its footer and the task panel (#2700)", () => {
+  it("keeps the warning row as a trailing row: an unframed empty prompt stays not idle, as without the panel", () => {
+    // Edited from F2: the box's rules removed (an unframed prompt, now on row 2), and Claude's own-row update banner
+    // (#2605) between the footer and the blank row above the panel. Without the panel this reads not idle (a trailing
+    // row under an unframed prompt); the panel must not change that.
+    const unframed = edit(F2, rows => {
+      rows.splice(6, 0, "✔ Update installed · Restart to update");
+      rows.splice(4, 1);
+      rows.splice(2, 1);
+    }, { y: 2 });
+    const withoutPanel = edit(unframed, rows => { rows.splice(5); });
+    const read = (s: ComposerSnapshot) => classifyPaneActivity(plain(s.screen), { composerSnapshot: s, runtime: "claude-code" }).state;
+    expect(read(unframed)).toBe(read(withoutPanel));
+  });
+});
