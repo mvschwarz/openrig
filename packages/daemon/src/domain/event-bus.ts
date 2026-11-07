@@ -175,6 +175,8 @@ export class EventBus {
    * Deliver an event to the in-memory subscribers WITHOUT storing it: no row, no seq of its own, no move of the notify
    * watermark, never in a replay. For high-volume signals whose only readers are live (view.changed). The event carries
    * `transient: true` and, as its `seq`, `causeSeq` (the stored event that caused it; the newest stored seq without one).
+   * Pass `causeSeq` whenever there is a cause (the view event bridge always does): without it, the newest stored seq may
+   * be a row not drained yet, and the transient then reaches subscribers before the stored event whose seq it carries.
    *
    * Every published transient goes to one pending queue, and the whole queue is emptied at the end of every fan-out
    * (notifySubscribers), before the rows that subscribers stored meanwhile are drained. Published during a fan-out (a

@@ -148,14 +148,24 @@ describe("view.changed is transient (never stored, delivered live)", () => {
   });
 
   it("publishTransient and notifyViewChanged move neither the notify watermark nor maxSeq", async () => {
-    await queueRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "seed", nudge: false });
+    // Two delivered events: the watermark is at the 2nd. Transients caused by the 1st (below the watermark) and by a
+    // stored row not drained yet (above it) must leave the watermark where it is, checked after every call.
+    const first = bus.emit({ type: "rig.created", rigId: "rig-a" });
+    const second = bus.emit({ type: "rig.created", rigId: "rig-b" });
     const watermark = bus.getNotifyDrainStatus().watermark;
+    expect(watermark).toBe(second.seq);
+
+    bus.publishTransient({ type: "view.changed", viewName: "activity", cause: "below" }, first.seq);
+    expect(bus.getNotifyDrainStatus().watermark).toBe(watermark);
+    projector.notifyViewChanged("activity", "below", first.seq);
+    expect(bus.getNotifyDrainStatus().watermark).toBe(watermark);
+
+    const undrained = bus.persistWithinTransaction({ type: "rig.created", rigId: "rig-c" }); // stored, not notified
     const max = bus.maxSeq();
-
-    bus.publishTransient({ type: "view.changed", viewName: "activity", cause: "test" }, max);
-    projector.notifyViewChanged("activity", "test", max);
-    projector.notifyViewChanged("activity", "test");
-
+    expect(max).toBe(undrained.seq);
+    bus.publishTransient({ type: "view.changed", viewName: "activity", cause: "above" }, undrained.seq);
+    expect(bus.getNotifyDrainStatus().watermark).toBe(watermark);
+    projector.notifyViewChanged("activity", "no-cause"); // the default seq is maxSeq(), the undrained row's
     expect(bus.getNotifyDrainStatus().watermark).toBe(watermark);
     expect(bus.maxSeq()).toBe(max);
   });

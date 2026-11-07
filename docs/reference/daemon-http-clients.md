@@ -74,7 +74,7 @@ All of them are server-sent events (`text/event-stream`):
 
 - **`GET /api/events`**: the daemon's event log, stored events only. `?rigId=` limits it to one rig. Each event
   carries `id: <seq>`. `view.changed` is not stored, so it does not appear here, live or replayed; `view.changed`
-  rows stored by older versions still replay until they are pruned.
+  rows stored by older versions still replay until an events retention (a separate change) removes them.
   Without `Last-Event-ID`, `?replay=<n>` first sends the newest `n` stored events (`0`: none, live events only);
   `?replay=all`, no `replay`, or any other value sends the whole log first. A `Last-Event-ID` header (what
   `EventSource` sends when it reconnects) sends the events after that id instead, whatever `replay` says.

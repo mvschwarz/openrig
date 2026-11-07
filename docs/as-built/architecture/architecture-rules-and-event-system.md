@@ -215,15 +215,15 @@ inside a caller-managed transaction, `eventBus.persistWithinTransaction(...)`
 services (`stream-store.ts`, `workflow-runtime.ts`, `restore-orchestrator.ts`,
 `node-launcher.ts`, etc.) and route handlers. The event log is append-only and
 SQLite-backed, and it holds stored events only. `view.changed`, which the view
-event bridge (`view-event-bridge.ts`) produces for each queue or proof change,
+event bridge (`view-event-bridge.ts`) produces for each queue, inbox, proof or project-classification change,
 is transient: `eventBus.publishTransient(...)` delivers it to the live
 subscribers without a row, without a `seq` of its own and without moving the
 notify watermark. It carries `transient: true` and, as its `seq`, the `seq` of
 the stored event that caused it.
 
 Upgrade note: `view.changed` rows stored by older versions stay in the log, so
-`/api/events` replays and the telemetry export still return them until they
-are pruned.
+`/api/events` replays and the telemetry export still return them until an events retention
+(a separate change) removes them.
 
 SSE delivery surfaces include the following. The daemon has **11**
 `streamSSE(` call sites across **10** files in `packages/daemon/src/routes/`
