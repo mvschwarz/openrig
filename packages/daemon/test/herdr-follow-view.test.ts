@@ -111,6 +111,20 @@ function fixture() {
 }
 
 describe("stable task-following workspace", () => {
+  it("keeps a known strip pane through a directory change and owner handoff", async () => {
+    const f = fixture();
+    expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });
+    const strip = [...f.panes.values()].find(p => p.cwd.endsWith("/strip"))!;
+    const identity = [strip.workspace_id, strip.pane_id, strip.terminal_id];
+    strip.cwd = tmpdir();
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    expect([strip.workspace_id, strip.pane_id, strip.terminal_id]).toEqual(identity);
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(1);
+    const effects = f.calls.filter(c => ["run", "split", "close"].includes(c[1]!)).length;
+    strip.terminal_id = "replacement-generation";
+    expect(await f.follow(["a", "b", "c"])).toMatchObject({ ok: false, code: "follow_unconfirmed" });
+    expect(f.calls.filter(c => ["run", "split", "close"].includes(c[1]!))).toHaveLength(effects);
+  });
   it("resumes a join paused before attach dispatch through its existing journal without changing drafts or focus", async () => {
     const f = fixture(); await f.follow(); f.inputs.set("b", "text"); f.focusSeat("b");
     const before = [...f.panes.values()].map(p => [p.pane_id, p.terminal_id]); const count = f.calls.length; let reads = 0;

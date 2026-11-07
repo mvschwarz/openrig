@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync, existsSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { HerdrViewer, type HerdrViewerRun } from "../src/domain/terminal/herdr-viewer.js";
@@ -23,6 +23,7 @@ function fixture() {
   let label = "", running = false, uncertainCreate = false, uncertainRun = false, idless = false;
   let gone = false, enumerable = true, unreadable = false, attachFlags = ["-f", "ignore-size"];
   let workspaceInventory: unknown[] | undefined, paneInventory: Record<string, unknown> | undefined;
+  let canonicalCreateCwd = false;
   const inspect = async () => ({ sessionId: "$1", nodeId: key.nodeId });
   const run: HerdrViewerRun = async args => {
     calls.push(args);
@@ -31,6 +32,7 @@ function fixture() {
     if (command === "workspace create") {
       gone = false; enumerable = true;
       ids.cwd = args[args.indexOf("--cwd") + 1]!; label = args[args.indexOf("--label") + 1]!;
+      if (canonicalCreateCwd) ids.cwd = realpathSync(ids.cwd);
       if (uncertainCreate) { uncertainCreate = false; throw new Error("lost response"); }
       return JSON.stringify({ result: { root_pane: idless ? {} : ids } });
     }
@@ -49,8 +51,9 @@ function fixture() {
       ? ["/usr/bin/tmux", "-S", "/tmp/own-tmux.sock", "attach", ...attachFlags, "-t", "$1"] : ["/bin/bash"] }] } } });
     throw new Error(`Unexpected provider operation ${args}`);
   };
-  const viewer = () => new HerdrViewer(socket, run, "linux", root, inspect);
+  const viewer = (viewerRoot = root) => new HerdrViewer(socket, run, "linux", viewerRoot, inspect);
   return { root, target, calls, viewer, ids,
+    canonicalizeCreateCwd: () => { canonicalCreateCwd = true; },
     lose: (listed: boolean, malformed = false) => { gone = true; enumerable = listed; unreadable = malformed; },
     loseChanged: () => { gone = false; enumerable = false; },
     setEnumeration: (workspaces: unknown[], panes: Record<string, unknown>) => { workspaceInventory = workspaces; paneInventory = panes; },
@@ -59,6 +62,25 @@ function fixture() {
 }
 
 describe("owned Herdr viewer", () => {
+  it("keeps a known viewer after its cwd changes and still checks its process", async () => {
+    const f = fixture(), v = f.viewer();
+    expect(await v.ensure(key, f.target)).toMatchObject({ ok: true, created: true });
+    const attributionDirectory = f.ids.cwd;
+    f.ids.cwd = tmpdir();
+    expect(await v.ensure(key, f.target)).toMatchObject({ ok: true, created: false });
+    expect(existsSync(attributionDirectory)).toBe(true);
+    f.exit();
+    expect(await v.ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+    expect(f.calls.filter(a => a[1] === "run")).toHaveLength(1);
+  });
+  it("recognizes a private creation directory returned through its realpath alias", async () => {
+    const f = fixture(), alias = path.join(f.root, "alias");
+    symlinkSync(f.root, alias, "dir");
+    f.canonicalizeCreateCwd();
+    expect(await f.viewer(alias).ensure(key, f.target)).toMatchObject({ ok: true, created: true });
+    expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
+  });
   it("creates once, verifies empty pane-run response, and reuses under concurrent requests", async () => {
     const f = fixture(), v = f.viewer();
     const result = await Promise.all([v.ensure(key, f.target), v.ensure(key, f.target), v.ensure(key, f.target)]);

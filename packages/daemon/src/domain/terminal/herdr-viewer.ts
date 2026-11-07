@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
@@ -60,8 +60,13 @@ function pane(raw: unknown): Pane | null {
   return ["workspace_id", "pane_id", "terminal_id", "cwd"].every(k => typeof p[k] === "string" && p[k] !== "") ? p as unknown as Pane : null;
 }
 
+export function sameHerdrPath(left: string, right: string): boolean {
+  if (left === right) return true;
+  try { return realpathSync(left) === realpathSync(right); } catch { return false; }
+}
+
 /** Complete endpoint-wide attribution; mutable labels are never ownership. */
-export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string): Promise<Pane[]> {
+export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string, known?: ViewerPane): Promise<Pane[]> {
   // 0.9.5 emits JSON by default here; unlike status server, list rejects --json.
   const listed = body(await run(["workspace", "list"]));
   if (!Array.isArray(listed.workspaces)) throw new Error("Viewer enumeration is unreadable.");
@@ -73,7 +78,8 @@ export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string
     for (const raw of listedPanes.panes) {
       const candidate = pane(raw);
       if (!candidate || candidate.workspace_id !== workspace.workspace_id) throw new Error("Viewer pane enumeration is incomplete.");
-      if (candidate.cwd === cwd) found.push(candidate);
+      if (sameHerdrPath(candidate.cwd, cwd) || (known && candidate.workspace_id === known.workspace_id
+        && candidate.pane_id === known.pane_id && candidate.terminal_id === known.terminal_id)) found.push(candidate);
     }
   }
   return found;
@@ -102,7 +108,7 @@ export class HerdrViewer {
     this.pending = result.then(() => {}, () => {}); return result;
   }
   private async ownedPanes(entry: Entry): Promise<Pane[]> {
-    return findAttributedViewerPanes(this.run, entry.cwd);
+    return findAttributedViewerPanes(this.run, entry.cwd, entry.pane);
   }
   private async ensureOnce(key: ViewerKey, target: ComposedPane, provision = true, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane): Promise<ViewerResult> {
     let entry: Entry | undefined;
@@ -167,7 +173,7 @@ export class HerdrViewer {
         }
         const reply = body(raw);
         const made = pane(reply.root_pane);
-        if (!made || made.cwd !== cwd) return unconfirmed("Create returned no attributable pane/terminal pair; its effect remains uncertain.");
+        if (!made || !sameHerdrPath(made.cwd, cwd)) return unconfirmed("Create returned no attributable pane/terminal pair; its effect remains uncertain.");
         entry.pane = made; entry.phase = "created"; save(); created = true;
       }
       if (!entry.pane) {
@@ -180,8 +186,9 @@ export class HerdrViewer {
       let current: Pane | null;
       try { current = pane(body(await this.run(["pane", "get", entry.pane.pane_id])).pane); }
       catch { current = null; } // A missing ID alone never proves absence.
+      // pane get reports the shell's live cwd; the recorded IDs survive an rc's cd.
       if (!current || current.pane_id !== entry.pane.pane_id || current.terminal_id !== entry.pane.terminal_id
-        || current.workspace_id !== entry.pane.workspace_id || current.cwd !== entry.cwd) {
+        || current.workspace_id !== entry.pane.workspace_id) {
         if (!provision || (await this.ownedPanes(entry)).length !== 0) {
           return unconfirmed("Viewer identity changed or disappeared; an enumerable viewer cannot be replaced.");
         }

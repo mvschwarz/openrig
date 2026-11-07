@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
-import { HerdrViewer, ViewerCreateNotDispatchedError, findAttributedViewerPanes, readHerdrViewerBody as body, parseHerdrViewerPane as pane,
+import { HerdrViewer, ViewerCreateNotDispatchedError, findAttributedViewerPanes, sameHerdrPath, readHerdrViewerBody as body, parseHerdrViewerPane as pane,
   type HerdrViewerRun, type InspectViewerSeat, type ViewerKey, type ViewerMapping, type ViewerPane } from "./herdr-viewer.js";
 import { DEFAULT_FOLLOW_POLICY, planFollowingTiles, type FollowControls, type FollowPolicy, type FollowTile, type FollowingStatus } from "./terminal-follow-policy.js";
 import type { ComposedPane, ComposedView, OpenViewResult } from "./terminal-provider.js";
@@ -78,7 +78,7 @@ export class HerdrFollowView {
       try {
         const saved = JSON.parse(readFileSync(file, "utf8")) as Canvas;
         if (saved.version !== 1 || !saved.policy || !Array.isArray(saved.tiles) || !Array.isArray(saved.events)
-          || saved.cwd !== path.join(root, "strip")) throw new Error("Following provenance is unreadable; it was preserved.");
+          || !sameHerdrPath(saved.cwd, path.join(root, "strip"))) throw new Error("Following provenance is unreadable; it was preserved.");
         state = saved;
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       if (!controls.enabled) return result(true, "disabled"); // Keep the fixed canvas exactly as it is.
@@ -102,7 +102,7 @@ export class HerdrFollowView {
         const reply = body(await this.deps.run(["workspace", "create", "--cwd", state.cwd,
           "--label", view.task.name, "--no-focus"]));
         const made = pane(reply.root_pane);
-        if (!made || made.cwd !== state.cwd) throw new Error("Workspace creation returned no attributable pane/terminal pair.");
+        if (!made || !sameHerdrPath(made.cwd, state.cwd)) throw new Error("Workspace creation returned no attributable pane/terminal pair.");
         state.pane = made; state.phase = "created"; save();
       }
       if (!state.pane) {
@@ -116,7 +116,7 @@ export class HerdrFollowView {
         if (!current || current.pane_id !== (isStored ? expected.pane_id : expected.paneId)
           || current.terminal_id !== (isStored ? expected.terminal_id : expected.terminalId)
           || current.workspace_id !== (isStored ? expected.workspace_id : expected.workspaceId)
-          || (isStored && current.cwd !== expected.cwd) || typeof current.focused !== "boolean") {
+          || typeof current.focused !== "boolean") {
           throw new Error("Provider generation or pane attribution changed; keeping the previous view.");
         }
         return current;
