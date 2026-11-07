@@ -163,6 +163,12 @@ export async function installRigMods(appHome: string, opts: { shippedDir?: strin
       result.refused.push({ name, reason: `${dest} isn't the copy OpenRig installed (its files were made or changed by someone else); it was left as it is.` });
       continue;
     }
+    // A file this release newly ships (not recorded as OpenRig's) that is already there is the person's: never replace it.
+    const collisions = [...shipped.keys()].filter((f) => !recorded.files.includes(f) && present.has(f) && present.get(f) !== shipped.get(f));
+    if (collisions.length) {
+      result.refused.push({ name, reason: `${dest} already has ${collisions.join(", ")}, which this OpenRig release now ships as its own; it was left as it is. Rename or remove ${collisions.length > 1 ? "them" : "it"} and run \`rig herdr install\` again.` });
+      continue;
+    }
     plan.push({ name, files: shipped, dest, kind: "updated", drop: recorded.files.filter((f) => !shipped.has(f) && present.has(f)) });
   }
   if (result.refused.length) { result.ok = false; return result; }

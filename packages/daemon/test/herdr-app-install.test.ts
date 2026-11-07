@@ -93,6 +93,43 @@ describe("installRigMods", () => {
     expect((await installRigMods(home, { check: true })).ok).toBe(false);
     expect(() => readdirSync(join(home, "mods"))).toThrow();
   });
+
+  describe("a release that ships a new file name", () => {
+    it("refuses to overwrite a person's existing file when a new release ships the same file name with different content", async () => {
+      await installRigMods(home, { shippedDir: shipped("v1") });
+      const manifestBefore = readFileSync(join(home, "openrig", "mods.json"), "utf8");
+      writeFileSync(join(home, "mods", "rig-strip", "extra.js"), "// the person's extra.js");
+      const v2 = shipped("v2", { "extra.js": "// openrig's extra.js" });
+      const result = await installRigMods(home, { shippedDir: v2 });
+      expect(result.ok).toBe(false);
+      expect(result.refused).toEqual([
+        expect.objectContaining({
+          name: "rig-strip",
+          reason: expect.stringContaining("extra.js"),
+        }),
+      ]);
+      expect(readFileSync(join(home, "mods", "rig-strip", "extra.js"), "utf8")).toBe("// the person's extra.js");
+      for (const name of RIG_MODS) {
+        expect(readFileSync(join(home, "mods", name, "main.js"), "utf8")).toBe(`// v1 ${name}`);
+      }
+      expect(readFileSync(join(home, "openrig", "mods.json"), "utf8")).toBe(manifestBefore);
+    });
+
+    it("adopts a newly shipped file name when the existing file on disk has identical bytes, or when nobody has that name", async () => {
+      await installRigMods(home, { shippedDir: shipped("v1") });
+      for (const name of RIG_MODS) {
+        writeFileSync(join(home, "mods", name, "extra.js"), "// identical extra.js");
+      }
+      const sameBytes = await installRigMods(home, { shippedDir: shipped("v2", { "extra.js": "// identical extra.js" }) });
+      expect(sameBytes).toMatchObject({ ok: true, updated: [...RIG_MODS], refused: [] });
+      const manifest = JSON.parse(readFileSync(join(home, "openrig", "mods.json"), "utf8")) as Record<string, { files: string[] }>;
+      expect(manifest["rig-strip"]!.files).toContain("extra.js");
+
+      const freshName = await installRigMods(home, { shippedDir: shipped("v3", { "extra.js": "// identical extra.js", "fresh.js": "// brand new" }) });
+      expect(freshName).toMatchObject({ ok: true, updated: [...RIG_MODS], refused: [] });
+      expect(readFileSync(join(home, "mods", "rig-strip", "fresh.js"), "utf8")).toBe("// brand new");
+    });
+  });
 });
 
 describe("installRigKeys (opt-in, reversible)", () => {
