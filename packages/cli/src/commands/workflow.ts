@@ -637,6 +637,59 @@ exception routes only. Existing obligations keep their owners and evidence.
     });
 
   cmd
+    .command("unregister [spec]")
+    .description("Take a workflow spec out of the registry: <name> or <name>@<version>, or --prune-missing for versions whose file is gone")
+    .option("--prune-missing", "Remove every registered version whose source file no longer exists (scoped to [spec] when given)")
+    .option("--json", "JSON output for agents")
+    .addHelpText("after", `
+A version that unfinished work (an active, waiting or resumable failed instance) is pinned to
+is never removed; with --prune-missing it is retained, readable by that work but hidden from
+the library, and a later prune removes it. A file still inside the workflows folder or the
+built-in starters is kept, because the next scan registers it again: move or delete the file.
+
+Examples:
+  $ rig workflow unregister qa-probe
+  $ rig workflow unregister pedido-do-board@1
+  $ rig workflow unregister --prune-missing
+  $ rig workflow unregister --prune-missing --json | jq '.removed[] | "\\(.name)@\\(.version) \\(.sourcePath)"'
+`)
+    .action(async (spec: string | undefined, opts: { pruneMissing?: boolean; json?: boolean }) => {
+      if (!spec && !opts.pruneMissing) {
+        console.error("Name a workflow spec (<name> or <name>@<version>) or pass --prune-missing.");
+        process.exitCode = 1;
+        return;
+      }
+      let name: string | undefined;
+      let version: string | undefined;
+      if (spec) {
+        const at = spec.lastIndexOf("@");
+        name = at > 0 ? spec.slice(0, at) : spec;
+        version = at > 0 ? spec.slice(at + 1) : undefined;
+      }
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<{
+          removed?: Array<{ name: string; version: string; sourcePath: string }>;
+          kept?: Array<{ name: string; version: string; sourcePath: string; reason: "pinned" | "scanned" }>;
+        }>("/api/workflow/specs/unregister", { name, version, pruneMissing: opts.pruneMissing === true });
+        if (opts.json || res.status >= 400) {
+          printResult(opts.json ?? false, res.data, res.status);
+          return;
+        }
+        const removed = res.data.removed ?? [];
+        const kept = res.data.kept ?? [];
+        if (removed.length === 0 && kept.length === 0) console.log("Nothing to remove.");
+        for (const row of removed) console.log(`removed  ${row.name}@${row.version}  ${row.sourcePath}`);
+        for (const row of kept) {
+          const why = row.reason === "pinned"
+            ? "unfinished work is pinned to this version"
+            : "the file is still in a scanned folder; move or delete it";
+          console.log(`kept     ${row.name}@${row.version}  ${row.sourcePath}  (${why})`);
+        }
+      });
+    });
+
+  cmd
     .command("trace <instanceId>")
     .description("Show one workflow instance + its append-only step trail (audit-only verdict)")
     .option("--json", "JSON output for agents")
