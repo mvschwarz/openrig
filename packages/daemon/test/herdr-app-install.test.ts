@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installRigKeys, installRigMods, resolveModsDir, RIG_MODS, SHIPPED_MODS_DIR, SUITE_MODS } from "../src/domain/terminal/herdr-app-install.js";
+import { installRigKeys, installRigMods, RIG_MODS, SHIPPED_MODS_DIR } from "../src/domain/terminal/herdr-app-install.js";
 
 let home: string;
 beforeEach(() => { home = mkdtempSync(join(tmpdir(), "herdr-app-install-")); });
@@ -197,54 +197,67 @@ describe("installRigKeys (opt-in, reversible)", () => {
   });
 });
 
-describe("installing a fuller mod suite from its folder (OPENRIG_HERDR_MODS_DIR)", () => {
-  /** A suite's folder: the view mods, its own mods, and `_shared/` (what its own mods import). */
-  function suite(dir = join(home, "suite")) {
-    for (const name of [...RIG_MODS, ...SUITE_MODS]) {
-      mkdirSync(join(dir, name), { recursive: true });
-      writeFileSync(join(dir, name, "main.js"), `// suite ${name}`);
-      writeFileSync(join(dir, name, "mod.json"), "{}");
+describe("installRigMods: scope and coexistence", () => {
+  it("leaves non-OpenRig mods (such as my-mod or custom-panel) and openrig/config.json completely untouched", async () => {
+    for (const userMod of ["my-mod", "custom-panel"]) {
+      mkdirSync(join(home, "mods", userMod), { recursive: true });
+      writeFileSync(join(home, "mods", userMod, "main.js"), `// user's own ${userMod}`);
     }
-    mkdirSync(join(dir, "_shared"));
-    writeFileSync(join(dir, "_shared", "lib.js"), "// shared");
-    return dir;
-  }
+    mkdirSync(join(home, "openrig"), { recursive: true });
+    const legacyConfig = `${JSON.stringify({ customKey: "/old/custom/dir", extra: 42 }, null, 2)}\n`;
+    writeFileSync(join(home, "openrig", "config.json"), legacyConfig);
 
-  it("without a named folder installs only the four shipped view mods", async () => {
-    expect(await resolveModsDir({ appHome: home, env: {} })).toEqual({ dir: SHIPPED_MODS_DIR, source: "shipped" });
-    const r = await installRigMods(home, { env: {} });
-    expect(r).toMatchObject({ ok: true, from: SHIPPED_MODS_DIR, installed: [...RIG_MODS] });
-    expect(readdirSync(join(home, "mods")).sort()).toEqual([...RIG_MODS].sort());
-    expect(existsSync(join(home, "openrig", "config.json"))).toBe(false);
+    const res = await installRigMods(home);
+    expect(res).toMatchObject({ ok: true, from: SHIPPED_MODS_DIR, installed: [...RIG_MODS], refused: [] });
+    expect(readFileSync(join(home, "mods", "my-mod", "main.js"), "utf8")).toBe("// user's own my-mod");
+    expect(readFileSync(join(home, "mods", "custom-panel", "main.js"), "utf8")).toBe("// user's own custom-panel");
+    const manifest = JSON.parse(readFileSync(join(home, "openrig", "mods.json"), "utf8")) as Record<string, unknown>;
+    expect(Object.keys(manifest).sort()).toEqual([...RIG_MODS].sort());
+    expect(readFileSync(join(home, "openrig", "config.json"), "utf8")).toBe(legacyConfig);
   });
 
-  it("installs the suite's mods too, with its shared files in its own mods, and records the folder", async () => {
-    const dir = suite();
-    const r = await installRigMods(home, { env: { OPENRIG_HERDR_MODS_DIR: dir } });
-    expect(r).toMatchObject({ ok: true, from: dir, installed: [...RIG_MODS, ...SUITE_MODS] });
-    expect(readFileSync(join(home, "mods", "rig-strip", "main.js"), "utf8")).toBe("// suite rig-strip");
-    expect(readFileSync(join(home, "mods", "rig-menu", "lib.js"), "utf8")).toBe("// shared");
-    expect(existsSync(join(home, "mods", "rig-strip", "lib.js"))).toBe(false);
-    expect(JSON.parse(readFileSync(join(home, "openrig", "config.json"), "utf8"))).toEqual({ modsDir: dir });
+  it("returns ok:false with an error (without throwing or writing) when a shipped mod folder is missing", async () => {
+    const incomplete = join(home, "incomplete-shipped");
+    for (const name of RIG_MODS.filter((n) => n !== "rig-pad")) {
+      mkdirSync(join(incomplete, name), { recursive: true });
+      writeFileSync(join(incomplete, name, "main.js"), "// ok");
+      writeFileSync(join(incomplete, name, "mod.json"), "{}");
+    }
+    const res = await installRigMods(home, { shippedDir: incomplete });
+    expect(res).toEqual({
+      ok: false,
+      error: `OpenRig's rig-pad mod is missing from ${incomplete}; reinstall OpenRig.`,
+      installed: [],
+      updated: [],
+      unchanged: [],
+      refused: [],
+    });
+    expect(existsSync(join(home, "mods"))).toBe(false);
   });
 
-  it("the daemon's top-up (no variable) copies from the recorded folder and never puts the shipped view mods back", async () => {
-    const dir = suite();
-    await installRigMods(home, { env: { OPENRIG_HERDR_MODS_DIR: dir } });
-    expect(await installRigMods(home, { env: {} })).toMatchObject({ ok: true, from: dir, unchanged: [...RIG_MODS, ...SUITE_MODS] });
-    expect(readFileSync(join(home, "mods", "rig-strip", "main.js"), "utf8")).toBe("// suite rig-strip");
-  });
+  it("treats a malformed manifest entry for one of OpenRig's mods as unrecorded (refusing without throwing) and preserves unrelated manifest keys", async () => {
+    mkdirSync(join(home, "mods", "rig-strip"), { recursive: true });
+    writeFileSync(join(home, "mods", "rig-strip", "main.js"), "// unrecorded rig-strip");
+    mkdirSync(join(home, "openrig"), { recursive: true });
+    writeFileSync(join(home, "openrig", "mods.json"), JSON.stringify({
+      "rig-strip": { installedAt: 1 },
+      mods: ["my-mod", "custom-panel"],
+    }));
 
-  it("a named or recorded folder without mods is an error that changes nothing, never a quiet fall-back", async () => {
-    const named = await installRigMods(home, { env: { OPENRIG_HERDR_MODS_DIR: join(home, "nowhere") } });
-    expect(named).toMatchObject({ ok: false, installed: [] });
-    expect(named.error).toContain("OPENRIG_HERDR_MODS_DIR");
-    const dir = suite();
-    await installRigMods(home, { env: { OPENRIG_HERDR_MODS_DIR: dir } });
-    rmSync(dir, { recursive: true });
-    const recorded = await installRigMods(home, { env: {} });
-    expect(recorded).toMatchObject({ ok: false });
-    expect(recorded.error).toContain("no longer holds them");
-    expect(readFileSync(join(home, "mods", "rig-strip", "main.js"), "utf8")).toBe("// suite rig-strip");
+    const refused = await installRigMods(home);
+    expect(refused.ok).toBe(false);
+    expect(refused.refused).toEqual([
+      expect.objectContaining({
+        name: "rig-strip",
+        reason: expect.stringContaining("left as it is"),
+      }),
+    ]);
+
+    // After the person removes their conflicting folder, a later install succeeds and keeps the unrelated top-level key
+    rmSync(join(home, "mods", "rig-strip"), { recursive: true, force: true });
+    const installed = await installRigMods(home);
+    expect(installed).toMatchObject({ ok: true, installed: [...RIG_MODS] });
+    const manifestAfter = JSON.parse(readFileSync(join(home, "openrig", "mods.json"), "utf8")) as Record<string, unknown>;
+    expect(manifestAfter.mods).toEqual(["my-mod", "custom-panel"]);
   });
 });

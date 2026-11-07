@@ -125,7 +125,7 @@ let world: World;
 let files: HerdrAppClientFiles;
 let provider: HerdrAppProvider;
 
-function makeProvider(opts: { ackTimeoutMs?: number; core?: { session: string; socket?: string } } = {}) {
+function makeProvider(opts: { ackTimeoutMs?: number; core?: { session: string; socket?: string }; ensureMods?: () => Promise<{ ok: true } | { ok: false; error: string }> } = {}) {
   files = new HerdrAppClientFiles(join(home, "app"), join(home, "journal"));
   const realWrite = files.writeRig.bind(files);
   files.writeRig = async (tree) => {
@@ -143,7 +143,7 @@ function makeProvider(opts: { ackTimeoutMs?: number; core?: { session: string; s
   const hc: HcRunner = Object.assign((args: string[]) => world.hc(args), opts.core ? { core: opts.core } : {});
   provider = new HerdrAppProvider({
     files, app: world.app(files) as never, hc, daemonInstance: "inst1", viewerCwd: join(home, "viewers"),
-    ensureMods: async () => ({ ok: true }), ackTimeoutMs: opts.ackTimeoutMs ?? 300, nonce: () => `n${++n}`, now: () => world.clock,
+    ensureMods: opts.ensureMods ?? (async () => ({ ok: true })), ackTimeoutMs: opts.ackTimeoutMs ?? 300, nonce: () => `n${++n}`, now: () => world.clock,
     runTmux: async (argv) => {
       world.tmuxCalls.push(argv);
       world.log.push(`tmux:${argv.slice(3).join(" ")}`);
@@ -269,6 +269,55 @@ describe("HerdrAppProvider.openView", () => {
     expect(result).toMatchObject({ ok: false, code: "rig_layout_not_owned" });
     expect(world.runs).toBe(0);
     expect(readFileSync(files.rigPath, "utf8")).toBe("{\"id\":\"mine\"}\n");
+  });
+
+  it("when ensureMods refuses, openView fails with herdr_app_mods before any hc run or layout write, while closeView and reconcile on an earlier view still work", async () => {
+    const opened = await provider.openView(composed([pane("dev.build@demo")]));
+    expect(opened.ok).toBe(true);
+    const viewId = opened.space!.id;
+    const runsBefore = world.runs;
+    const writesBefore = world.log.filter((e) => e.startsWith("write:")).length;
+
+    makeProvider({
+      ensureMods: async () => ({
+        ok: false,
+        error: "OpenRig's herdr-app mods were not installed: /app/mods/rig-pad isn't the copy OpenRig installed; it was left as it is.",
+      }),
+    });
+
+    const refused = await provider.openView(composed([pane("dev.qa@demo")]));
+    expect(refused).toMatchObject({ ok: false, code: "herdr_app_mods" });
+    expect(refused.error).toMatch(/Nothing was started\. Move or rename the folder named above \(or remove it\) and run `rig herdr install`\.$/);
+    expect(world.runs).toBe(runsBefore);
+    expect(world.log.filter((e) => e.startsWith("write:")).length).toBe(writesBefore);
+
+    // When the installer's collision message already ends with `rig herdr install`, it is not repeated
+    makeProvider({
+      ensureMods: async () => ({
+        ok: false,
+        error: "OpenRig's herdr-app mods were not installed: /app/mods/rig-pad/custom.js exists and is not part of OpenRig's mod; it was left as it is. Rename or remove it and run `rig herdr install` again.",
+      }),
+    });
+    const refusedDup = await provider.openView(composed([pane("dev.qa@demo")]));
+    expect(refusedDup.error?.match(/rig herdr install/g)).toHaveLength(1);
+    expect(refusedDup.error).not.toContain("Move or rename the folder named above");
+    expect(refusedDup.error).toContain("Nothing was started.");
+
+    // When a shipped mod folder is missing, openView does not tell the user to remove their folder
+    makeProvider({
+      ensureMods: async () => ({
+        ok: false,
+        error: "OpenRig's rig-pad mod is missing from /shipped; reinstall OpenRig.",
+      }),
+    });
+    const refusedMissing = await provider.openView(composed([pane("dev.qa@demo")]));
+    expect(refusedMissing.error).toBe("OpenRig's rig-pad mod is missing from /shipped; reinstall OpenRig. Nothing was started.");
+
+    // Reconcile and closeView on the earlier view still succeed despite the mod refusal
+    expect(await provider.reconcile()).toEqual([]);
+    const closed = await provider.closeView(viewId);
+    expect(closed.ok).toBe(true);
+    expect(world.terminals.get("t10")!.state).toBe("finished");
   });
 
   it("rolls back a failed open: the started viewer leaves the file first, then only it is ended", async () => {

@@ -17,7 +17,8 @@ rig herdr install --keys     # optional: alt-arrows move between a view's cells
 - The mods go to `<app home>/mods/rig-*`. The app home is herdr-app's own: `HERDR_APP_HOME`, else
   `$XDG_CONFIG_HOME/herdr-app`, else `~/.config/herdr-app`. `--app-home <dir>` names another.
 - OpenRig owns only the files it ships there (recorded in `<app home>/openrig/mods.json`). An update replaces those
-  and nothing else in the folder. If you changed one of them, the install says so and leaves the mod as it is.
+  and nothing else in the folder. If you changed one of them, the install says so and leaves the mod as it is. Mods you
+  install yourself, from any source, are never touched.
 - `--keys` adds a `layout:rig` section to `keys.json`. Keys already bound there, in `terminal` (which wins while a
   cell has focus) or in `global` are left alone and named. herdr-app's own `global` defaults for these keys
   (`pane.go` on alt-left/right, `agent.prev`/`agent.next` on alt-up/down) are the exception: in the Rig layout the
@@ -25,10 +26,6 @@ rig herdr install --keys     # optional: alt-arrows move between a view's cells
   shortcuts in later releases are not added to it automatically. `rig herdr install --keys --remove` takes OpenRig's
   bindings out again; your file before the change is kept at `<app home>/openrig/keys.json.before-openrig`.
 - Opening a view installs missing mods by itself. It never replaces a mod you changed.
-- **A fuller mod suite** (a Rig sidebar, page, palette and menus, with richer view mods) can be installed instead of
-  the four above: name its folder with `OPENRIG_HERDR_MODS_DIR` when you run `rig herdr install`. OpenRig records the
-  folder in `<app home>/openrig/config.json` (`modsDir`), so later installs and the top-up when a view opens copy the
-  same mods. A named or recorded folder that doesn't hold mods is reported, and nothing is changed.
 
 ## Open a view
 
@@ -37,19 +34,19 @@ rig herdr install --keys     # optional: alt-arrows move between a view's cells
   open both use that window, so the plan you previewed is the one that opens. The preview says the view opens in
   this window; it shows no desktop or SSH recipe. A shared TUI viewed from a herdr-app terminal does the same. The
   kernel view opens in its narrow arrangement there (one seat per page): the window's width isn't the TUI's.
-- **From a shell:** `--provider herdr-app` opens the view in the herdr-app window you run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same while that window is answering. `--window` always asks for a new desktop window.
+- **From a shell:** `--provider herdr-app` opens the view in the herdr-app window you run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same when that window is answering. `--window` always asks for a new desktop window.
 
   | Command | Where the view opens |
   |---|---|
   | `rig terminal open <view> --provider herdr-app [--app-home <dir>]` | In the herdr-app window this runs in (requires the window to answer). |
-  | `rig terminal open <view>` | Inside an answering herdr-app terminal, in that herdr-app window; otherwise a desktop window. |
+  | `rig terminal open <view>` | Inside a herdr-app terminal when the window is answering, in that herdr-app window; otherwise a desktop window. |
   | `rig terminal open <view> --window` | Always asks for a new desktop terminal window, even inside a herdr-app terminal. |
 
 The herdr-app window must be answering on its socket (`<app home>/herdr-app.sock`); otherwise an explicit open fails and says
 so. Finding the socket file is how OpenRig guesses you are in a herdr-app window; whether the window is reachable is
 checked by asking it. When a plain `rig terminal open <view>` in a herdr-app terminal finds that the socket does not
-answer, it says so and opens a desktop window instead; `--provider herdr-app` never falls back to a desktop window or
-an SSH recipe.
+answer, it says so and opens a desktop window instead; `--provider herdr-app` never
+falls back to a desktop window or an SSH recipe.
 
 What an open does, in order:
 

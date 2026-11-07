@@ -225,7 +225,15 @@ export class HerdrAppProvider implements TerminalProvider {
         { absent: view.absent, degraded: view.degraded });
     }
     const mods = await this.deps.ensureMods();
-    if (!mods.ok) return fail("herdr_app_mods", mods.error, { absent: view.absent, degraded: view.degraded });
+    if (!mods.ok) {
+      const base = mods.error.trimEnd();
+      const parts = [base];
+      if (!base.includes("Nothing was started.")) parts.push("Nothing was started.");
+      if (base.startsWith("OpenRig's herdr-app mods were not installed:") && !base.includes("rig herdr install")) {
+        parts.push("Move or rename the folder named above (or remove it) and run `rig herdr install`.");
+      }
+      return fail("herdr_app_mods", parts.join(" "), { absent: view.absent, degraded: view.degraded });
+    }
     const state = await files.load();
     const owned = await files.rigOwnership(state);
     if (!owned.ours) return fail("rig_layout_not_owned", owned.reason, { absent: view.absent, degraded: view.degraded });

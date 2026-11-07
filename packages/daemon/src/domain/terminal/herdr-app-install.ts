@@ -1,9 +1,8 @@
 // OpenRig's mods in a herdr-app home (`rig herdr install`, and on an open that finds them missing).
 //
 // Four mods draw a Rig-layout view (the strip, cell headers, pad and ended cells); they ship in
-// packages/daemon/assets/herdr-app/mods. A fuller mod suite (a Rig sidebar, page, palette and menus, with upgraded
-// view mods) can be installed instead from its folder (resolveModsDir). Mods are
-// copied to <app home>/mods/<name>. OpenRig owns only the files it copies there, recorded with their hash in
+// packages/daemon/assets/herdr-app/mods and are copied to <app home>/mods/<name>. OpenRig owns only the files it
+// copies there, recorded with their hash in
 // <app home>/openrig/mods.json:
 // - a missing folder is installed whole;
 // - an update replaces those files, one at a time and atomically, and removes only files OpenRig itself shipped
@@ -18,61 +17,14 @@ import path from "node:path";
 export const SHIPPED_MODS_DIR = path.resolve(import.meta.dirname, "../../../assets/herdr-app/mods");
 /** The mods a Rig-layout view needs; every mods folder has them. */
 export const RIG_MODS = ["rig-strip", "rig-cell-header", "rig-pad", "rig-ended"] as const;
-/** A fuller suite's own mods, installed when its folder has them; they import `_shared/` (copied into each). */
-export const SUITE_MODS = ["rig", "rig-view", "rig-palette", "rig-menu"] as const;
-/** Names a mods folder to install from instead of the shipped one. */
-export const HERDR_MODS_DIR_ENV = "OPENRIG_HERDR_MODS_DIR";
 
-/** The regular files directly in a mod folder, plus `_shared/`'s for a suite mod. */
+/** The regular files directly in a mod folder. */
 async function shippedFiles(dir: string): Promise<Map<string, string>> {
   const out = new Map<string, string>();
-  const add = async (folder: string) => {
-    for (const entry of await readdir(folder, { withFileTypes: true })) {
-      if (entry.isFile() && !entry.name.startsWith(".")) out.set(entry.name, await readFile(path.join(folder, entry.name), "utf8"));
-    }
-  };
-  if ((SUITE_MODS as readonly string[]).includes(path.basename(dir))) await add(path.join(path.dirname(dir), "_shared")).catch(() => {});
-  await add(dir);
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    if (entry.isFile() && !entry.name.startsWith(".")) out.set(entry.name, await readFile(path.join(dir, entry.name), "utf8"));
+  }
   return out;
-}
-
-/** A folder with every view mod's mod.json. */
-async function isModsDir(dir: string): Promise<boolean> {
-  for (const name of RIG_MODS) if (!await exists(path.join(dir, name, "mod.json"))) return false;
-  return true;
-}
-
-const configPath = (appHome: string): string => path.join(appHome, "openrig", "config.json");
-
-/**
- * Where to install mods from: `OPENRIG_HERDR_MODS_DIR`; else the folder an earlier install from such a folder recorded
- * in `<app home>/openrig/config.json` (`modsDir`), so the daemon's own top-up on an open copies the same mods and never
- * puts the shipped ones back over them; else the shipped view mods. A named or recorded folder that doesn't hold mods
- * is an error, never a quiet fall-back.
- */
-export async function resolveModsDir(opts: { appHome?: string; env?: NodeJS.ProcessEnv } = {}): Promise<{ dir: string; source: "env" | "recorded" | "shipped" } | { error: string }> {
-  const named = (opts.env ?? process.env)[HERDR_MODS_DIR_ENV];
-  if (named) {
-    const dir = path.resolve(named);
-    return await isModsDir(dir) ? { dir, source: "env" } : { error: `${HERDR_MODS_DIR_ENV} names ${named}, which doesn't hold herdr-app mods (${RIG_MODS.join(", ")}).` };
-  }
-  if (opts.appHome) {
-    const recorded = await readFile(configPath(opts.appHome), "utf8").then((t) => (JSON.parse(t) as { modsDir?: unknown }).modsDir).catch(() => undefined);
-    if (typeof recorded === "string" && path.isAbsolute(recorded)) {
-      return await isModsDir(recorded) ? { dir: recorded, source: "recorded" }
-        : { error: `The mods were installed from ${recorded}, which no longer holds them. Install again (rig herdr install), naming the folder with ${HERDR_MODS_DIR_ENV}.` };
-    }
-  }
-  return { dir: SHIPPED_MODS_DIR, source: "shipped" };
-}
-
-/** Records the folder mods were installed from, keeping everything else in the config. */
-async function recordModsDir(appHome: string, dir: string): Promise<void> {
-  const file = configPath(appHome);
-  const before = await readFile(file, "utf8").then((t) => JSON.parse(t) as Record<string, unknown>).catch((): Record<string, unknown> => ({}));
-  if (before.modsDir === dir) return;
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFileAtomic(file, `${JSON.stringify({ ...before, modsDir: dir }, null, 2)}\n`);
 }
 
 /** The named files in an installed folder: their text, null when absent, or "not-a-file" for a link or folder. */
@@ -109,7 +61,7 @@ async function writeFileAtomic(file: string, text: string): Promise<void> {
 
 export interface ModInstallResult {
   ok: boolean;
-  /** No mods to install from (resolveModsDir): what to do. Nothing was changed. */
+  /** Shipped mods missing from OpenRig's install: what to do. Nothing was changed. */
   error?: string;
   /** The folder the mods came from. */
   from?: string;
@@ -123,21 +75,22 @@ export interface ModInstallResult {
 /** What OpenRig recorded per mod: the hash of its own files, and their names. */
 type ManifestEntry = { hash: string; files: string[] };
 
-export async function installRigMods(appHome: string, opts: { shippedDir?: string; check?: boolean; env?: NodeJS.ProcessEnv } = {}): Promise<ModInstallResult> {
-  const resolved = opts.shippedDir ? { dir: opts.shippedDir, source: "shipped" as const } : await resolveModsDir({ appHome, ...(opts.env ? { env: opts.env } : {}) });
-  if ("error" in resolved) return { ok: false, error: resolved.error, installed: [], updated: [], unchanged: [], refused: [] };
-  const shippedDir = resolved.dir;
-  // The view mods always; a suite's own mods when its folder has them.
-  const names: string[] = [...RIG_MODS];
-  for (const name of SUITE_MODS) if (await exists(path.join(shippedDir, name, "mod.json"))) names.push(name);
+export async function installRigMods(appHome: string, opts: { shippedDir?: string; check?: boolean } = {}): Promise<ModInstallResult> {
+  const shippedDir = opts.shippedDir ?? SHIPPED_MODS_DIR;
+  const names: readonly string[] = [...RIG_MODS];
   const manifestPath = path.join(appHome, "openrig", "mods.json");
-  let manifest: Record<string, ManifestEntry> = {};
-  try { manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, ManifestEntry>; } catch { /* first install */ }
+  let manifest: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(await readFile(manifestPath, "utf8")) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) manifest = parsed as Record<string, unknown>;
+  } catch { /* first install */ }
   const result: ModInstallResult = { ok: true, from: shippedDir, installed: [], updated: [], unchanged: [], refused: [] };
   const plan: { name: string; files: Map<string, string>; dest: string; kind: "installed" | "updated"; drop: string[] }[] = [];
   for (const name of names) {
     const shipped = await shippedFiles(path.join(shippedDir, name)).catch(() => null);
-    if (!shipped?.size) throw new Error(`OpenRig's ${name} mod is missing from ${shippedDir}.`);
+    if (!shipped?.size) {
+      return { ok: false, error: `OpenRig's ${name} mod is missing from ${shippedDir}; reinstall OpenRig.`, installed: [], updated: [], unchanged: [], refused: [] };
+    }
     const dest = path.join(appHome, "mods", name);
     // A linked mod folder (a dotfiles copy, say) is never written through: an update would land in the link's target.
     if ((await lstat(dest).catch(() => null))?.isSymbolicLink()) {
@@ -145,7 +98,11 @@ export async function installRigMods(appHome: string, opts: { shippedDir?: strin
       continue;
     }
     if (!await exists(dest)) { plan.push({ name, files: shipped, dest, kind: "installed", drop: [] }); continue; }
-    const recorded = manifest[name];
+    const entry = manifest[name] as Partial<ManifestEntry> | undefined;
+    const recorded: ManifestEntry | undefined = entry && typeof entry.hash === "string" && Array.isArray(entry.files)
+      && entry.files.every((f): f is string => typeof f === "string")
+      ? { hash: entry.hash, files: entry.files }
+      : undefined;
     // OpenRig's files there now: the ones it recorded, else (never recorded) the names it ships.
     const own = await namedFiles(dest, new Set([...(recorded?.files ?? []), ...shipped.keys()]));
     if ([...own.values()].includes("not-a-file")) {
@@ -195,8 +152,6 @@ export async function installRigMods(appHome: string, opts: { shippedDir?: strin
     manifest[name] = { hash: folderHash(shipped), files: [...shipped.keys()].sort() };
   }
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  // Installed from a named folder: later installs and the daemon's top-up copy from it too.
-  if (resolved.source === "env") await recordModsDir(appHome, shippedDir);
   return result;
 }
 
