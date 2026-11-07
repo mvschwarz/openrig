@@ -250,17 +250,18 @@ describe("view-event-bridge (PL-004 Phase B R1; BLOCKER 2 fix)", () => {
     expect(events.filter((e) => e.cause === "classifier.lease_acquired")).toHaveLength(0);
   });
 
-  it("notifyViewChanged persists only and view.changed does not echo through the bridge", () => {
+  it("notifyViewChanged stores no row, is delivered once and view.changed does not echo through the bridge", () => {
     projector.notifyViewChanged("recently-active", "manual-test");
     captured.length = 0;
     projector.notifyViewChanged("recently-active", "manual-test-2");
-    expect(captured).toEqual([]);
-    const persisted = bus.replayAll(0).filter((event) => event.type === "view.changed");
-    expect(persisted).toHaveLength(2);
-    expect(persisted.map((event) => event.cause)).toEqual(["manual-test", "manual-test-2"]);
+    // Delivered once to the subscriber, and the bridge does not react to view.changed (no feedback loop).
+    expect(captured.map((event) => `${event.type}:${(event as { cause?: string }).cause}`)).toEqual([
+      "view.changed:manual-test-2",
+    ]);
+    expect(bus.replayAll(0).filter((event) => event.type === "view.changed")).toEqual([]);
   });
 
-  it("W2b drains outer events before re-entrant view.changed rows and delivers each exactly once", () => {
+  it("W2b delivers each stored event, then its transient view.changed, then the next stored event, each exactly once", () => {
     captured.length = 0;
 
     bus.withNotifyEnvelope((register) => {
@@ -281,29 +282,30 @@ describe("view-event-bridge (PL-004 Phase B R1; BLOCKER 2 fix)", () => {
       }));
     });
 
-    expect(captured.slice(0, 2).map((event) => event.type)).toEqual([
-      "queue.handed_off",
-      "inbox.denied",
+    // The new order: each trigger, then the transient view.changed it caused (same seq as the trigger), then the next.
+    expect(captured.map((event) => event.type === "view.changed"
+      ? `${event.seq}:view.changed:${event.viewName}`
+      : `${event.seq}:${event.type}`)).toEqual([
+      "1:queue.handed_off",
+      "1:view.changed:recently-active",
+      "1:view.changed:pod-load",
+      "1:view.changed:activity",
+      "2:inbox.denied",
+      "2:view.changed:activity",
     ]);
+    // Only the stored events are in the log, each delivered exactly once, in the log's order.
+    const stored = captured.filter((event) => !event.transient);
     const replayed = bus.replayAll(0);
-    expect(captured.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6]);
-    expect(captured.map((event) => event.seq)).toEqual(replayed.map((event) => event.seq));
-    expect(new Set(captured.map((event) => event.seq)).size).toBe(captured.length);
-    expect(
-      captured
-        .filter((event) => event.type === "view.changed")
-        .map((event) => `${event.viewName}:${event.cause}`),
-    ).toEqual([
-      "recently-active:queue.handed_off",
-      "pod-load:queue.handed_off",
-      "activity:queue.handed_off",
-      "activity:inbox.denied",
-    ]);
+    expect(stored.map((event) => event.seq)).toEqual([1, 2]);
+    expect(stored.map((event) => event.seq)).toEqual(replayed.map((event) => event.seq));
+    expect(replayed.some((event) => event.type === "view.changed")).toBe(false);
   });
 
-  it("W2b keeps drain-time delivery failures outside the bridge best-effort persist catch", () => {
-    const originalNotify = bus.notifySubscribers.bind(bus);
-    vi.spyOn(bus, "notifySubscribers").mockImplementation((event) => {
+  it("W2b keeps drain-time delivery failures outside the bridge best-effort catch", () => {
+    // The bridge only queues view.changed (inside its try/catch); the delivery runs at the end of the drain's fan-out,
+    // outside that catch, so a failure there still reaches the envelope's caller.
+    const originalNotify = bus.notifyTransientSubscribers.bind(bus);
+    vi.spyOn(bus, "notifyTransientSubscribers").mockImplementation((event) => {
       if (event.type === "view.changed") throw new Error("drain delivery failed");
       originalNotify(event);
     });

@@ -964,7 +964,9 @@ export async function verifyPaneIdleShell(input: {
     try {
       const pid = await input.tmux.getPanePid(input.target);
       if (!pid) return null;
-      const root = idleShellRoot(await (input.listProcesses ?? listNativeProcesses)(), pid);
+      // Idle proof needs the complete table, but no executable-path or argv enrichment.
+      const rows = await (input.listProcesses ?? (() => runAsyncSite("codex.runtime.list_processes", readProcessTable)))();
+      const root = idleShellRoot(rows, pid);
       return root ? JSON.stringify(root) : null;
     } catch { return null; }
   };

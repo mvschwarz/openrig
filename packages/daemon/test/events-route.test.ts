@@ -262,6 +262,24 @@ describe("SSE events route", () => {
       expect(ids(await readSSEEvents(res, 3))).toEqual(seqs.slice(1));
     });
 
+    it("the UI's first connection, replay=100 over 1,000 stored events, gets the newest 100 in order, then live", async () => {
+      const rig = rigRepo.createRig("r01");
+      const seqs = emitMany(rig.id, 1000);
+      const res = await app.request("/api/events?replay=100");
+      setTimeout(() => eventBus.emit({ type: "rig.created", rigId: rig.id }), 50);
+      const events = await readSSEEvents(res, 101, 5000);
+      expect(ids(events.slice(0, 100))).toEqual(seqs.slice(-100));
+      expect(events).toHaveLength(101);
+      expect(JSON.parse(events[100]!.data).type).toBe("rig.created");
+    });
+
+    it("a reconnect with Last-Event-ID gets every event after it, not only the replay=100", async () => {
+      const rig = rigRepo.createRig("r01");
+      const seqs = emitMany(rig.id, 1000);
+      const res = await app.request("/api/events?replay=100", { headers: { "Last-Event-ID": String(seqs[499]) } });
+      expect(ids(await readSSEEvents(res, 500, 5000))).toEqual(seqs.slice(500));
+    });
+
     it("a count beyond SQLite's integers replays the whole log", async () => {
       const rig = rigRepo.createRig("r01");
       const seqs = emitMany(rig.id, 3);

@@ -64,7 +64,7 @@ describe("useRigEvents hook", () => {
 
     await waitFor(() => {
       expect(instances).toHaveLength(1);
-      expect(instances[0]!.url).toBe("/api/events");
+      expect(instances[0]!.url).toBe("/api/events?replay=100");
     });
   });
 
@@ -153,14 +153,14 @@ describe("useRigEvents hook", () => {
 
     await waitFor(() => expect(instances).toHaveLength(1));
     const first = instances[0]!;
-    expect(first.url).toBe("/api/events");
+    expect(first.url).toBe("/api/events?replay=100");
 
     act(() => { getByText("change").click(); });
 
     await waitFor(() => {
       expect(instances).toHaveLength(2);
       expect(first.readyState).toBe(2); // CLOSED
-      expect(instances[1]!.url).toBe("/api/events");
+      expect(instances[1]!.url).toBe("/api/events?replay=100");
     });
   });
 

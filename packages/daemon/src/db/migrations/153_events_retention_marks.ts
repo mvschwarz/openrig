@@ -5,7 +5,7 @@ import type { Migration } from "../migrate.js";
  *  sweep that hit its batch cap stopped, so the next one continues from there; it is cleared when a pass reaches
  *  the newest row, and the pass after that starts again at the mark. */
 export const eventsRetentionMarksSchema: Migration = {
-  name: "152_events_retention_marks.sql",
+  name: "153_events_retention_marks.sql",
   sql: `
     CREATE TABLE IF NOT EXISTS events_retention_marks (
       id INTEGER PRIMARY KEY CHECK (id = 1),

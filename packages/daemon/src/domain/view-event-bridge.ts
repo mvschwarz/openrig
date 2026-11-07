@@ -95,7 +95,7 @@ export function wireViewEventBridge(
     if (!affectedViews) return;
     for (const viewName of affectedViews) {
       try {
-        viewProjector.notifyViewChanged(viewName, event.type);
+        viewProjector.notifyViewChanged(viewName, event.type, event.seq);
       } catch {
         // Best-effort: bridge errors must not unwind the underlying state
         // mutation. Drop silently; SSE consumers' worst case is a missed

@@ -4,7 +4,7 @@ import { lastMeaningfulTransition } from "./queue-waiting.js";
 import { derivePickup } from "./queue-pickup.js";
 import { ulid } from "ulid";
 import type { EventBus } from "./event-bus.js";
-import { buildExecutionView, type ExecutionViewDeps } from "./execution-view.js";
+import { buildExecutionView, compactionOwedSinceOf, type ExecutionViewDeps } from "./execution-view.js";
 
 /**
  * View projector (PL-004 Phase B; L5 View — read-only projections).
@@ -214,6 +214,8 @@ export class ViewProjector {
         const receipt = derivePickup({
           lastMeaningfulAt: lastMeaningfulTransition(this.db, String(r.qitem_id))?.at,
           activity: activity?.activity, needsInput: activity?.needsInput.count, needsInputReason: activity?.needsInput.reason,
+          backgroundWork: activity?.backgroundWork ?? null,
+          compactionOwedSince: this.executionDeps ? compactionOwedSinceOf(this.executionDeps, String(r.destination_session)) : null,
           state: String(r.state),
           claimedAt: (r.claimed_at as string | null) ?? null,
           lastHeartbeat: (r.last_heartbeat as string | null) ?? null,
@@ -439,13 +441,16 @@ export class ViewProjector {
    * Used by routes/views.ts to emit view.changed when underlying state
    * changes. Phase B does not auto-evaluate; callers (route SSE handlers)
    * subscribe to event-bus events and trigger this notify.
+   *
+   * view.changed is transient: delivered to the live subscribers (the view SSE streams) and never stored, so it costs
+   * no row in the events table. `causeSeq` is the seq of the stored event that caused it (the SSE id it goes out with).
    */
-  notifyViewChanged(viewName: string, cause: string): void {
-    this.eventBus.persistWithinTransaction({
+  notifyViewChanged(viewName: string, cause: string, causeSeq?: number): void {
+    this.eventBus.publishTransient({
       type: "view.changed",
       viewName,
       cause,
-    });
+    }, causeSeq);
   }
 
   private getCustomViewByIdOrThrow(viewId: string): CustomView {

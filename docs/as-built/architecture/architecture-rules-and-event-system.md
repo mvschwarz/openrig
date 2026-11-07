@@ -214,16 +214,26 @@ inside a caller-managed transaction, `eventBus.persistWithinTransaction(...)`
 (`event-bus.ts:70`) with subscribers notified after commit — across domain
 services (`stream-store.ts`, `workflow-runtime.ts`, `restore-orchestrator.ts`,
 `node-launcher.ts`, etc.) and route handlers. The event log is append-only and
-SQLite-backed.
+SQLite-backed, and it holds stored events only. `view.changed`, which the view
+event bridge (`view-event-bridge.ts`) produces for each queue, inbox, proof or project-classification change,
+is transient: `eventBus.publishTransient(...)` delivers it to the live
+subscribers without a row, without a `seq` of its own and without moving the
+notify watermark. It carries `transient: true` and, as its `seq`, the `seq` of
+the stored event that caused it.
+
+Upgrade note: `view.changed` rows stored by older versions stay in the log, so
+`/api/events` replays and the telemetry export still return them until an events retention
+(a separate change) removes them.
 
 SSE delivery surfaces include the following. The daemon has **11**
 `streamSSE(` call sites across **10** files in `packages/daemon/src/routes/`
 (`git grep -o 'streamSSE(' -- packages/daemon/src/routes | wc -l`;
 `git grep -l 'streamSSE(' -- packages/daemon/src/routes | wc -l`).
 
-- `GET /api/events` — global stream of all events (`server.ts:730`
-  `app.route("/api/events", eventsRoute)`); `?rigId=` keeps one rig's. Each
-  event's SSE `id` is its `seq`. Before going live, a connection replays
+- `GET /api/events` — global stream of the stored events (`server.ts:730`
+  `app.route("/api/events", eventsRoute)`); `?rigId=` keeps one rig's.
+  Transient events (`view.changed`) are not stored, so they appear here
+  neither live nor in a replay. Each event's SSE `id` is its `seq`. Before going live, a connection replays
   stored events, read and written 500 at a time (`routes/events.ts`):
   - with a `Last-Event-ID` header (an `EventSource` sends it when it
     reconnects), every event after that `seq`, whatever `replay` says;
@@ -234,6 +244,10 @@ SSE delivery surfaces include the following. The daemon has **11**
   Either way the replay ends at the newest event stored as the connection
   subscribes; the events stored meanwhile were buffered and follow it, each
   once and in order, before the stream goes live.
+- `GET /api/views/sse` (alias `/api/views/watch`) and
+  `GET /api/views/:viewName/sse` — `view.changed`, live only (`routes/views.ts`).
+  An event's `id` there is the `seq` of the stored event that caused it, so it
+  repeats across the views one change touches; it is not a replay cursor.
 - `GET /api/stream/watch` — new stream items (`routes/stream.ts:194`).
 - `GET /api/queue/watch` — queue/inbox coordination events
   (`routes/queue.ts:1054`, with a `/sse` alias at `:1055`).

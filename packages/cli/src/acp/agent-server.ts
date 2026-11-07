@@ -36,16 +36,18 @@ export interface TeamTransition {
   actorSession: string;
 }
 
-/** An open row to the caller that asks for a decision, with the choices it offers (none: words only). */
+/** A row to the caller that asks for a decision, with the choices it offers (none: words only). */
 export interface TeamAsk {
   qitemId: string;
   sourceSession: string;
+  state: string;
   tsCreated: string;
   summary: string | null;
   body: string;
   tags: string[];
   questions: Array<{ id: string; question: string; options: Array<{ id: string; label: string; recommended?: boolean }> }>;
-  answered: string[];
+  /** What's recorded so far, by question id: the chosen option's id, or the words of a typed reply. */
+  answers: Record<string, string>;
 }
 
 /** A row the caller sent through rig acp serve. */
@@ -74,6 +76,8 @@ export interface TeamQueue {
   successor(qitemId: string): Promise<string | undefined>;
   /** Open asks addressed to `person`. */
   openAsks(person: string): Promise<TeamAsk[]>;
+  /** Every ask to `person` tagged for one chat, open or settled, to replay with it. */
+  sessionAsks(person: string, sessionId: string): Promise<TeamAsk[]>;
   /** Record the caller's choice on an ask, through the person's answer path; a refusal comes back with its reason. */
   answer(qitemId: string, questionId: string, optionId: string): Promise<{ ok: true } | { ok: false; reason: string }>;
   /** Rows the caller sent through rig acp serve. */
@@ -85,6 +89,8 @@ export interface TeamConnection {
   queue: TeamQueue;
   caller: string;
   receiver: string | undefined;
+  /** Something about this connection the person should know, said once in each session before its first prompt's work. */
+  notice?: string;
 }
 
 export interface AcpAgentOptions {
@@ -114,6 +120,7 @@ interface Session {
   /** The first row each prompt created, oldest first, with the last row its work reached. */
   sent: Array<{ root: string; tail: string }>;
   turn?: { cancel: () => void };
+  noticed?: boolean;
 }
 
 type ContentBlock = { type: string; text?: string; uri?: string; name?: string; resource?: { uri?: string; text?: string } };
@@ -121,6 +128,8 @@ type ContentBlock = { type: string; text?: string; uri?: string; name?: string; 
 /** The questions one turn has put to the app. Once the turn has ended, nothing from them reaches the app or the queue. */
 interface TurnQuestions {
   finished: boolean;
+  /** The person cancelled the turn: no further question opens, though one the app is showing still settles. */
+  cancelled: boolean;
   /** Questions the app is still showing, by tool call id. */
   outstanding: Set<string>;
   tasks: Set<Promise<void>>;
@@ -162,7 +171,7 @@ type ChainState = { kind: "open"; tail: TeamRow } | { kind: "ended"; tail: TeamR
 /** Follows one prompt's work through its rows: each row is a step, and its new notes are emitted as they appear. */
 class ChainFollower {
   private readonly chain: string[];
-  private readonly seen = new Map<string, { lines: string[]; lastId: number; status: string }>();
+  private readonly seen = new Map<string, { lines: string[]; lastId: number; status: string; title: string }>();
   /** The seats the work has reached; a question from one of them during the turn belongs to it. */
   readonly seats = new Set<string>();
 
@@ -181,19 +190,22 @@ class ChainFollower {
         const status = toolStatus(row.state);
         let entry = this.seen.get(qitemId);
         if (!entry) {
-          entry = { lines: [], lastId: 0, status };
+          const title = qitemId === this.root ? `Sent to ${row.destinationSession} (${qitemId})` : `Handed to ${row.destinationSession} (${qitemId})`;
+          entry = { lines: [], lastId: 0, status, title };
           this.seen.set(qitemId, entry);
-          this.emit({
-            sessionUpdate: "tool_call", toolCallId: qitemId, kind: "other", status,
-            title: qitemId === this.root ? `Sent to ${row.destinationSession} (${qitemId})` : `Handed to ${row.destinationSession} (${qitemId})`,
-            rawInput: { qitemId, destination: row.destinationSession },
-          });
+          this.emit({ sessionUpdate: "tool_call", toolCallId: qitemId, kind: "other", status, title, rawInput: { qitemId, destination: row.destinationSession } });
         }
         const fresh = transitions.filter((t) => t.transitionId > entry!.lastId);
         if (fresh.length > 0 || status !== entry.status) {
           for (const t of fresh) { entry.lines.push(transitionLine(t)); entry.lastId = Math.max(entry.lastId, t.transitionId); }
           entry.status = status;
-          this.emit({ sessionUpdate: "tool_call_update", toolCallId: qitemId, status, ...(entry.lines.length > 0 ? { content: textContent(entry.lines.join("\n")) } : {}) });
+          // An app that shows a step collapsed still shows its title, so the latest note leads it: a narrow panel cuts the end.
+          const noted = fresh.filter((t) => t.transitionNote).at(-1);
+          this.emit({
+            sessionUpdate: "tool_call_update", toolCallId: qitemId, status,
+            ...(noted ? { title: `${noted.actorSession}: ${oneLine(noted.transitionNote!, 100)} · ${entry.title}` } : {}),
+            ...(entry.lines.length > 0 ? { content: textContent(entry.lines.join("\n")) } : {}),
+          });
         }
       }
       // Both handoff forms pass the work on: `handoff` leaves the row handed-off, `handoff-and-complete` closes it done
@@ -245,8 +257,8 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `\n\n${ask.sourceSession} asks you: ${ask.summary ?? oneLine(ask.body, 200)} (${ask.qitemId}). It wants an answer in words, which this app can't send: answer it in the OpenRig TUI or Slack.\n\n` } });
       return;
     }
-    for (const q of ask.questions.filter((question) => !ask.answered.includes(question.id))) {
-      if (turn.finished) return;
+    for (const q of ask.questions.filter((question) => !(question.id in ask.answers))) {
+      if (turn.finished || turn.cancelled) return;
       const toolCallId = `${ask.qitemId}#${q.id}`;
       emit({ sessionUpdate: "tool_call", toolCallId, kind: "other", status: "pending", title: `${ask.sourceSession} asks: ${q.question}`, content: textContent(ask.body) });
       let outcome: { outcome?: string; optionId?: string } | undefined;
@@ -338,12 +350,26 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
     const roots = await sessionRoots(team, sessionId);
     if (roots.length === 0) throw new AcpError(INVALID_PARAMS, `No session ${sessionId} from ${team.caller} on this machine`);
     const session: Session = { id: sessionId, cwd: String(p.cwd ?? ""), sent: [] };
-    // Replay: each prompt as the caller wrote it, then its work as it stands now.
-    for (const row of roots) {
+    const asks = (await team.queue.sessionAsks(team.caller, sessionId)).sort((a, b) => a.tsCreated.localeCompare(b.tsCreated));
+    // Replay: each prompt as the caller wrote it, then its work as it stands now, the questions the team asked during
+    // it with what's recorded, and the reply. Nothing is asked again here; an open question comes up in the next turn.
+    for (const [i, row] of roots.entries()) {
       update(sessionId, { sessionUpdate: "user_message_chunk", content: { type: "text", text: row.body.split(FOOTER)[0] ?? "" } });
       const follower = new ChainFollower(team.queue, (u) => update(sessionId, u), row.qitemId);
       const state = await follower.read();
       session.sent.push({ root: row.qitemId, tail: state.tail.qitemId });
+      const next = roots[i + 1]?.tsCreated;
+      for (const ask of asks.filter((a) => (i === 0 || a.tsCreated >= row.tsCreated) && (next === undefined || a.tsCreated < next))) {
+        for (const q of ask.questions) {
+          const answer = ask.answers[q.id];
+          const outcome = answer !== undefined ? `You answered: ${q.options.find((o) => o.id === answer)?.label ?? answer}.`
+            : ACTIVE_STATES.has(ask.state) ? "Not answered yet. It's still open in the OpenRig TUI and Slack." : `Not answered: ${ask.qitemId} was closed (${ask.state}).`;
+          update(sessionId, {
+            sessionUpdate: "tool_call", toolCallId: `${ask.qitemId}#${q.id}`, kind: "other", status: answer === undefined && ACTIVE_STATES.has(ask.state) ? "pending" : "completed",
+            title: `${ask.sourceSession} asks: ${q.question}`, content: [...textContent(ask.body), ...textContent(outcome)],
+          });
+        }
+      }
       say(sessionId, state.kind === "ended" ? state.reply : `${state.tail.qitemId} is still ${state.tail.state} with ${state.tail.destinationSession}.`);
     }
     sessions.set(sessionId, session);
@@ -367,14 +393,17 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       return { stopReason: "end_turn" };
     }
     if (!team.receiver) {
-      say(session.id, "This OpenRig agent has no team receiver, so nothing was sent. Add `--to <member@rig>` (the seat that takes your team's new work) to the agent's command in your app's settings.");
+      say(session.id, "This OpenRig agent has no team receiver, so nothing was sent. Choose the seat that takes your team's new work with `rig config set acp.to <member@rig>`, or add `--to <member@rig>` to the agent's command in your app's settings.");
       return { stopReason: "end_turn" };
     }
+    if (team.notice && !session.noticed) {
+      session.noticed = true;
+      say(session.id, `${team.notice}\n\n`);
+    }
 
-    let cancelled = false;
     let wake: () => void = () => {};
-    const questions: TurnQuestions = { finished: false, outstanding: new Set(), tasks: new Set() };
-    session.turn = { cancel: () => { cancelled = true; wake(); } };
+    const questions: TurnQuestions = { finished: false, cancelled: false, outstanding: new Set(), tasks: new Set() };
+    session.turn = { cancel: () => { questions.cancelled = true; wake(); } };
     let root: string | undefined;
     try {
       // Each earlier item as it stands; one whose create was never confirmed may not exist, or can't be read: say which.
@@ -433,7 +462,9 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
           say(session.id, state.reply);
           return { stopReason: "end_turn" };
         }
-        for (const ask of await team.queue.openAsks(team.caller)) {
+        const asks = await team.queue.openAsks(team.caller);
+        // After a cancel, even one that landed during that read, no new question goes to the person.
+        for (const ask of questions.cancelled ? [] : asks) {
           if (seen.has(ask.qitemId)) continue;
           // An ask tagged for a chat belongs to that chat alone. An untagged one from a seat this work reached might be
           // another chat's, so it isn't asked here; it's named, with where to answer it.
@@ -449,7 +480,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
             say(session.id, `\n\n${ask.sourceSession}, which this work reached, has a question for you that isn't tagged for this chat (${ask.qitemId}: ${ask.summary ?? oneLine(ask.body, 120)}). Answer it in the OpenRig TUI or Slack.\n\n`);
           }
         }
-        if (cancelled) {
+        if (questions.cancelled) {
           // ACP has the app answer the questions it was showing as cancelled; let those answers land before the turn ends.
           if (questions.tasks.size > 0) await Promise.race([Promise.allSettled([...questions.tasks]), sleep(QUESTION_SETTLE_MS)]);
           finishQuestions("Not answered here: the turn was cancelled.");

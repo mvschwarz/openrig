@@ -135,8 +135,9 @@ describe("config routes (User Settings v0)", () => {
     // + 1 stream.intake (issue #1856 queue intake routing; default queue.worker).
     // + 1 launch.codex_login_shell (defer to Codex's own login-shell setting; default off).
     // + 1 transport.draft_delivery (whether ordinary sends reach a seat whose prompt holds a draft; default deliver).
+    // + 1 acp.to (the ACP agent's receiver; default empty).
     // + 1 retention.events_days (the history-only event types of events; default 0 = keep).
-    expect(Object.keys(body.settings).length).toBe(98);
+    expect(Object.keys(body.settings).length).toBe(99);
     expect(body.settings["launch.codex_login_shell"]).toMatchObject({ value: false, source: "default", defaultValue: false });
     expect(body.settings["transport.draft_delivery"]).toMatchObject({ value: "deliver", source: "default", defaultValue: "deliver" });
     expect(body.settings["retention.events_days"]).toMatchObject({ value: 0, source: "default", defaultValue: 0 });

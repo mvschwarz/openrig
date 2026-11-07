@@ -431,7 +431,7 @@ function sleep(ms: number): Promise<void> {
  * assumed to rise with seq, so a row dated in the future (or one written after the clock stepped back) never hides
  * older rows from the pass.
  *
- * The window cursor starts at a low-water mark (events_retention_marks, migration 152): every seq at or below it
+ * The window cursor starts at a low-water mark (events_retention_marks, migration 153): every seq at or below it
  * has been checked. The mark never passes a prunable row that was kept for being too new, so such a row is checked
  * again and goes once it ages; in practice the mark sits where the retained history begins. A sweep that hits its
  * batch cap stores where it stopped (resume_seq), and the next sweep continues from there instead of from the mark,

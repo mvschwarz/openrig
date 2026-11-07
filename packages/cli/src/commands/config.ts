@@ -139,6 +139,8 @@ Keys:
                          rig process that runs them; off makes no provider calls (default off). rig project decisions status shows the state
   decisions.consumers    comma-separated consumers that may call (supported: stream; default none). An unknown name makes no calls
   decisions.template_dir absolute folder of <name>.yaml templates that replace the shipped ones (default empty: shipped templates only)
+  acp.to                 the seat (member@rig) that receives tasks from rig acp serve when it isn't given --to, as when an ACP app
+                         starts it from the ACP registry (default empty: none, so nothing is sent until one is set)
 
 Precedence: CLI flag > environment variable > config file > default`)
     .action((opts: { json?: boolean; withSource?: boolean }) => {

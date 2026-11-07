@@ -327,6 +327,33 @@ describe("MCP Server", () => {
     }
   });
 
+  it("rig_artifact_read returns a code-result manifest's exact pair as codeResult, and every other file as before", async () => {
+    const base = "a".repeat(40), revision = "b".repeat(40);
+    const manifest = JSON.stringify({ kind: "openrig.code-result/v1", repo: "/work/app", base, revision, paths: ["src/a.ts"], branch: "feature/x" });
+    const files: Record<string, string> = { "result.json": manifest, "report.md": "# Report\n", "loose.json": JSON.stringify({ kind: "openrig.code-result/v1", repo: "/work/app", base: "main", revision }) };
+    const getFn = vi.fn(async (p: string) => {
+      const item = /^\/api\/queue\/(q-[a-z]+)$/.exec(p);
+      if (item) return { status: 200, data: { qitemId: item[1], state: "done", evidenceRef: `/shared/proof/${({ "q-code": "result.json", "q-text": "report.md", "q-loose": "loose.json" } as Record<string, string>)[item[1]!]}` } };
+      if (p === "/api/files/roots") return { status: 200, data: { roots: [{ name: "proof", path: "/shared/proof" }] } };
+      const read = /^\/api\/files\/read\?root=proof&path=(.+)$/.exec(p);
+      if (read) { const name = decodeURIComponent(read[1]!); return { status: 200, data: { root: "proof", path: name, content: files[name], size: files[name]!.length } }; }
+      return { status: 404, data: {} };
+    });
+    await setup({ get: getFn });
+    const code = await mcpClient.callTool({ name: "rig_artifact_read", arguments: { qitemId: "q-code" } });
+    expect(code.structuredContent).toMatchObject({ available: true, text: manifest,
+      codeResult: { repo: "/work/app", base, revision, paths: ["src/a.ts"], branch: "feature/x" } });
+    // A manifest whose base is a branch isn't exact: it says why, and gives no pair.
+    const loose = await mcpClient.callTool({ name: "rig_artifact_read", arguments: { qitemId: "q-loose" } });
+    expect(loose.structuredContent).toMatchObject({ available: true, codeResultIssue: expect.stringContaining("base must be a full commit id") });
+    expect(loose.structuredContent).not.toHaveProperty("codeResult");
+    const text = await mcpClient.callTool({ name: "rig_artifact_read", arguments: { qitemId: "q-text" } });
+    expect(text.structuredContent).toMatchObject({ available: true, text: "# Report\n" });
+    expect(text.structuredContent).not.toHaveProperty("codeResult");
+    expect(text.structuredContent).not.toHaveProperty("codeResultIssue");
+    await cleanup();
+  });
+
   it("a front door gets front-door instructions, not the member workflow, and its declared seat with no session reads as itself", async () => {
     try {
       vi.stubEnv("OPENRIG_SESSION_NAME", "claude-app@my-rig");

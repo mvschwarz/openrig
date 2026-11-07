@@ -181,7 +181,11 @@ UI event consumption is centralized through one shared `/api/events`
 connection (`lib/topology-events.ts`) so related surfaces avoid duplicate
 SSE connections. Current consumers: For You feed hydration, topology
 activity rings + hot-potato movement, the activity feed/system surfaces,
-and rig event surfaces. `useGlobalEvents` reports whether that connection
+and rig event surfaces. That connection carries stored events only:
+`view.changed` is delivered on the live view streams (`/api/views/sse`) and
+is not stored, so it no longer appears in the activity feed, as a For You
+observation card or in the telemetry export (entries stored by older
+versions still replay until an events retention, a separate change, removes them). `useGlobalEvents` reports whether that connection
 is up and refetches review, slice and mission data on reconnect and on
 `proof.*` events. Reduced-motion preference is honoured for pulse/packet
 animation. (Daemon SSE surfaces: `/api/events`, `/api/stream/watch`,
