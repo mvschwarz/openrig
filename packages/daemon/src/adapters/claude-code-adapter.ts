@@ -1,3 +1,5 @@
+import { verifyNativeRecovery } from "../domain/native-runtime-recovery.js";
+import type { RecoveryVerificationInput } from "../domain/runtime-recovery.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
@@ -463,6 +465,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // Fresh launches already have an explicit --session-id. A same-name file
     // can belong to another seat sharing the Claude config directory.
     return { ok: true, resumeToken: generatedSessionId!, resumeType: "claude_id", appliedLaunch, ...launchNotes() };
+  }
+
+  verifyRecovery(input: RecoveryVerificationInput) {
+    return verifyNativeRecovery(input, this.runtime);
   }
 
   async checkReady(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult> {

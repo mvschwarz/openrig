@@ -52,6 +52,8 @@ export const PI_RUNNER_ERROR_MARKER = "[pi-runner] ERROR";
 
 export interface PiRunnerState {
   ready: boolean;
+  /** This live runner's read-only recovery endpoint; absent on older runners. */
+  recovery?: { port: number; pid: number; childPid: number };
   /** Launch-attempt scope (guard fold, code-review):
    *  the adapter mints a launchId per attempt, pre-writes a pending sidecar
    *  carrying it, and passes --launch-id to the runner; the runner stamps it

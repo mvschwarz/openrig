@@ -1,3 +1,5 @@
+import { verifyNativeRecovery } from "../domain/native-runtime-recovery.js";
+import type { RecoveryVerificationInput } from "../domain/runtime-recovery.js";
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
 import { codexMemberEnvelope, observeCodexEnvelope, readProfileFingerprint, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
@@ -1237,6 +1239,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // dismissed prompts, loading headers, or refusals from earlier attempts.
     if (this.tmux.capturePaneScreen) return await this.tmux.capturePaneScreen(target) ?? "";
     return await this.tmux.capturePaneContent(target, 40) ?? "";
+  }
+
+  verifyRecovery(input: RecoveryVerificationInput) {
+    return verifyNativeRecovery(input, this.runtime);
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {

@@ -1,3 +1,5 @@
+import { verifyNativeRecovery } from "./native-runtime-recovery.js";
+import type { RecoveryEvidence, RecoveryVerificationInput, RunnerRecoveryFailureCode } from "./runtime-recovery.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { automaticRestoreOverrides, type AutomaticSeatReplacement } from "./existing-rig-restore.js";
 import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
@@ -29,9 +31,8 @@ import { readFreshOccupantRelations } from "./fresh-occupant-relation.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
-import { assessNativeResumeProbe } from "./native-resume-probe.js";
-import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-resume-probe-evidence.js";
-import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
+import type { NativeResumeProbeEvidence } from "./native-resume-probe-evidence.js";
+import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyClaudePaneRuntime, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
@@ -68,7 +69,7 @@ export type ReconcileNodeResult =
       attemptId: number;
       from: "failed" | "attention_required";
       to: "operator_recovered";
-      evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" };
+      evidence: RecoveryEvidence;
     }
   | {
       ok: false;
@@ -81,7 +82,8 @@ export type ReconcileNodeResult =
         | "process_lineage_mismatch"
         | "fg_process_not_runtime"
         | "resume_token_not_used"
-        | "pane_not_usable";
+        | "pane_not_usable"
+        | RunnerRecoveryFailureCode;
       detail: string;
       probe?: NativeResumeProbeEvidence;
       attemptId?: number;
@@ -2618,6 +2620,7 @@ export class RestoreOrchestrator {
   async reconcileNodeRuntimeTruth(
     rigId: string,
     nodeId: string,
+    adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>,
   ): Promise<ReconcileNodeResult> {
     // Locate the latest restore attempt for this rig.
     const startedRow = this.db.prepare(
@@ -2680,8 +2683,8 @@ export class RestoreOrchestrator {
     }
 
     const sessRow = this.db.prepare(
-      "SELECT session_name, resume_type, resume_token, resume_provenance, resume_rotated_from, resume_rotated_process, resume_launch_process FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-    ).get(nodeId) as { session_name: string; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null; resume_launch_process: string | null } | undefined;
+      "SELECT id, session_name, resume_type, resume_token, resume_provenance, resume_rotated_from, resume_rotated_process, resume_launch_process FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(nodeId) as { id: string; session_name: string; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null; resume_launch_process: string | null } | undefined;
     if (!sessRow || sessRow.session_name !== sessionName) {
       return { ok: false, code: "binding_mismatch", detail: `Canonical binding ${sessionName} does not match the latest session row.` };
     }
@@ -2713,57 +2716,24 @@ export class RestoreOrchestrator {
       "SELECT runtime FROM nodes WHERE id = ?"
     ).get(nodeId) as { runtime: string | null } | undefined;
     const runtime = nodeRow?.runtime ?? null;
-    // One exact-lineage check per process, accepting the stored token or the recorded rotation.
-    const identity = await rebindAndVerifyPaneIdentity({
-      db: this.db,
-      sessionRegistry: this.sessionRegistry,
-      tmux: this.tmuxAdapter,
-      nodeId,
-      sessionName,
-      runtime,
-      expectedResumeToken,
-      requireExactResumeLineage: true,
-      resumeRotation: rotation,
-      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
-    });
-    if (!identity.ok) {
-      return { ok: false, code: "process_lineage_mismatch", detail: identity.detail };
-    }
-    const paneCommand = await this.tmuxAdapter.getPaneCommand(identity.pane);
-    const paneContent = (await this.tmuxAdapter.capturePaneContent(identity.pane, 40)) ?? "";
-    const claudeResumeIdentityVerified = runtime === "claude-code" && !!await verifyClaudePaneProcess({
-      target: identity.pane,
-      tmux: this.tmuxAdapter,
-      expectedToken: expectedResumeToken,
-      rotation,
-      requireResume: true,
-      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
-    });
-    const probe = assessNativeResumeProbe({
-      runtime,
-      paneCommand,
-      paneContent,
-      // Headerless readiness requires the same stable foreground/argv proof
-      // as the resume adapter; a token-bearing descendant alone is insufficient.
-      ...(runtime === "claude-code" ? { claudeResumeIdentityVerified } : {}),
-      ...(runtime === "codex" ? { codexProcessVerified: true } : {}),
-    });
-    const fgProcess = runtime === "claude-code" ? "claude" as const : runtime === "codex" ? "codex" as const : null;
-    if (!fgProcess) {
-      return { ok: false, code: "fg_process_not_runtime", detail: `Node runtime is ${runtime ?? "unknown"}, not claude/codex.` };
-    }
-
-    // Precondition #4: pane is at a usable/idle state — explicitly NOT a
-    // resume-selection prompt and not the "returned to shell" failure mode.
-    if (probe.status !== "resumed") {
-      const evidence = await resumeProbeEvidence(probe, paneContent, this.tmuxAdapter, identity.pane);
-      // The label reads as a shell, but the runtime's lineage was just proven in this pane: name a shell only for a proven idle one.
-      if (probe.code === "returned_to_shell" && !await verifyPaneIdleShell({ target: identity.pane, tmux: this.tmuxAdapter,
-        ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) })) {
-        return { ok: false, code: "pane_not_usable", probe: evidence, attemptId, detail: "Pane is not shown to be resumed: its command reads as a shell, but it is not a proven idle shell (the runtime may be starting or showing a dialog); reconciliation requires resumed." };
-      }
-      return { ok: false, code: "pane_not_usable", probe: evidence, attemptId, detail: `Pane state is ${probe.status} (${probe.code}); reconciliation requires resumed.` };
-    }
+    const input: RecoveryVerificationInput = {
+      db: this.db, sessionRegistry: this.sessionRegistry, tmux: this.tmuxAdapter,
+      nodeId, sessionName, expectedResumeToken, resumeType: sessRow.resume_type, rotation,
+      listProcesses: this.listProcesses,
+      assertCurrent: () => {
+        const current = this.db.prepare("SELECT s.id, s.resume_token, n.runtime FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE s.node_id = ? ORDER BY s.created_at DESC, s.id DESC LIMIT 1").get(nodeId) as { id: string; resume_token: string | null; runtime: string | null } | undefined;
+        const latestAttempt = this.db.prepare("SELECT seq FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1").get(rigId) as { seq: number } | undefined;
+        return latestAttempt?.seq === attemptId && current?.id === sessRow.id && current.resume_token === expectedResumeToken
+          && current.runtime === runtime && this.sessionRegistry.getBindingForNode(nodeId)?.tmuxSession === sessionName;
+      },
+    };
+    const adapter = runtime ? adapters?.[runtime] : undefined;
+    const verified = adapter?.verifyRecovery
+      ? await adapter.verifyRecovery(input)
+      : await verifyNativeRecovery(input, runtime);
+    if (!verified.ok) return { ...verified, attemptId };
+    if (!input.assertCurrent()) return { ok: false, code: "binding_mismatch", detail: "The seat changed during recovery verification." };
+    const evidence = verified.evidence;
 
     // All four preconditions hold. Append (never mutate) the audit event.
     this.eventBus.emit({
@@ -2773,7 +2743,7 @@ export class RestoreOrchestrator {
       attemptId,
       from: fromStatus,
       to: "operator_recovered",
-      evidence: { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" },
+      evidence,
     });
 
     return {
@@ -2781,7 +2751,7 @@ export class RestoreOrchestrator {
       attemptId,
       from: fromStatus,
       to: "operator_recovered",
-      evidence: { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" },
+      evidence,
     };
   }
 
