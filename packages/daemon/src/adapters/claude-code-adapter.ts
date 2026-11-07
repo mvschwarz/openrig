@@ -1400,7 +1400,8 @@ const defaultSelfReportRead: ClaudeSelfReportRead = {
 
 /** Read the freshest self-report for `sessionName` as ladder evidence, or null.
  *  Mapping: busy→working; idle→idle-at-prompt; shell→idle-at-prompt (turn over, a
- *  background shell lives — the omnigent-proven mapping); waiting→needs-input (a dialog
+ *  background shell lives — the omnigent-proven mapping) plus backgroundWork, kept so the
+ *  pickup and the parked watchdog can tell it from a plain idle (#2661); waiting→needs-input (a dialog
  *  owns input; Claude's internal `waiting` ≠ omnigent's — the collision both codebases
  *  warn about, kept OUT of the activity enum). */
 export function readClaudeSelfReportEvidence(input: {
@@ -1439,8 +1440,9 @@ export function readClaudeSelfReportEvidence(input: {
       case "busy":
         return { ...base, activity: "working" };
       case "idle":
-      case "shell":
         return { ...base, activity: "idle-at-prompt" };
+      case "shell":
+        return { ...base, activity: "idle-at-prompt", backgroundWork: true };
       case "waiting":
         return { ...base, needsInput: { count: 1, reason: "dialog owns input" } };
       default:
