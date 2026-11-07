@@ -30,9 +30,13 @@ export interface TeamTransition {
   actorSession: string;
 }
 
+/** The daemon answered a create and refused it, so nothing was written. Any other failure of a create leaves it unknown. */
+export class TeamRefused extends Error {}
+
 /** The queue verbs the adapter uses, acting as the caller. */
 export interface TeamQueue {
-  /** Create the row under the id the adapter chose, so a create whose answer is lost can be read back by that id. */
+  /** Create the row under the id the adapter chose, so a create whose answer is lost can be read back by that id. Throws
+   *  TeamRefused only for a refusal the daemon answered with. */
   create(row: { qitemId: string; destination: string; body: string; summary: string; tags: string[] }): Promise<void>;
   show(qitemId: string): Promise<TeamRow>;
   /** The row, or null when this machine has no such row; throws when it can't tell. */
@@ -186,7 +190,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       // Each earlier item as it stands; one whose create was never confirmed may not exist, or can't be read: say which.
       const earlier = await Promise.all(session.sent.map(async (s) => {
         const row = await team.queue.find(s.tail).catch(() => undefined);
-        return { ...s, row, state: row === undefined ? "state unknown" : row === null ? "not on this machine" : row.state };
+        return { ...s, row, state: row === undefined ? "state unknown" : row === null ? "not found here" : row.state };
       }));
       const open = earlier.filter((s) => s.row && ACTIVE_STATES.has(s.row.state));
       if (open.length > 0) say(session.id, `${open.map((s) => `${s.row!.qitemId} is still ${s.row!.state} with ${s.row!.destinationSession}`).join("; ")}. Sending this as a follow-up.\n\n`);
@@ -197,15 +201,17 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       try {
         await team.queue.create({ qitemId, destination: team.receiver, body, summary: `ACP: ${oneLine(text, 100)}`, tags: ["acp-serve", `acp-session:${session.id}`] });
       } catch (error) {
-        // The answer was lost, not necessarily the row: read it back by its id before saying what happened.
+        const reason = (error as Error).message;
+        // A refusal the daemon answered with wrote nothing, so it can be said plainly.
+        if (error instanceof TeamRefused) throw new AcpError(-32603, `The team's queue refused the task: ${reason}`);
+        // No answer: the request may still land after any readback, so only a row that reads back settles it.
         const landed = await team.queue.find(qitemId).catch(() => undefined);
-        if (landed === null) throw new AcpError(-32603, `Couldn't send the task (${(error as Error).message}); nothing reached the team.`);
-        if (landed === undefined) {
+        if (!landed) {
           session.sent.push({ root: qitemId, tail: qitemId, closed: false });
-          say(session.id, `Sending ${qitemId} to ${team.receiver} wasn't confirmed (${(error as Error).message}), and it couldn't be read back: it may or may not have reached the team. Its state is unknown from here; a new prompt in this session names it, and \`rig queue show ${qitemId}\` shows it if it exists.`);
-          throw new AcpError(-32603, `Couldn't confirm ${qitemId}: ${(error as Error).message}`);
+          say(session.id, `Sending ${qitemId} to ${team.receiver} got no answer (${reason}), and ${landed === null ? "it wasn't found on the immediate readback" : "it couldn't be read back"}: delivery is unconfirmed, so it may still reach the team. A new prompt in this session names it, and \`rig queue show ${qitemId}\` shows it if it landed.`);
+          throw new AcpError(-32603, `Couldn't confirm ${qitemId}: ${reason}`);
         }
-        log(`session ${session.id}: ${qitemId}'s create wasn't acknowledged, but it reads back`);
+        log(`session ${session.id}: ${qitemId}'s create got no answer, but it reads back`);
       }
       root = qitemId;
       const sent = { root, tail: root, closed: false };
@@ -251,7 +257,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
           const next = await team.queue.successor(tail.qitemId);
           if (next) { chain.push(next); continue; }
           sent.closed = true;
-          say(session.id, `${tail.qitemId} was handed to ${tail.handedOffTo ?? tail.closureTarget ?? "another seat"}, whose row isn't on this machine, so this app can't follow it further. The work goes on there; ask your team for its result.`);
+          say(session.id, `${tail.qitemId} was handed to ${tail.handedOffTo ?? tail.closureTarget ?? "another seat"}, whose row isn't on this machine, so this app can't follow it further. Ask your team for its result.`);
           return { stopReason: "end_turn" };
         }
         if (!ACTIVE_STATES.has(tail.state)) {
