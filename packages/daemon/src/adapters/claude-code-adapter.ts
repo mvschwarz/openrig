@@ -835,6 +835,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return { ok: false, error: "Claude resume failed: timed out waiting for Claude to become active", probe: probeEvidence };
   }
 
+  /** Copy one selected resource, preserving source modes and recording owned seat-skill files after writing. */
   private projectEntry(entry: ProjectionEntry, cwd: string, managedBlockFile: ClaudeManagedBlockFile, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string): boolean {
     // A skipped fragment is reported skipped; it never falls through to the generic extensions copy.
     const handled = entry.category === "runtime_resource" ? this.applyRuntimeResource(entry, cwd, warnings) : false;
