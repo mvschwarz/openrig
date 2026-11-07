@@ -534,6 +534,15 @@ it('#2682 P1: a fresh high sample from another conversation, in process or after
    expect(compacts(g)).toHaveLength(1);
   }
  }
+ // The low sample of the /clear seen, but from the new conversation: it ends the armed attempt too, so a later high sample
+ // whose conversation reads unknown never compacts with the old conversation's map.
+ {
+  const h=fixture();const c=h.daemon();await c.maybeAutoCompact(hs);const b=completeMap(c);
+  expect(await c.maybeAutoCompact({...other,usedPercentage:20})).toMatchObject({triggered:false});
+  expect(c.getPreparationState(seat)).toMatchObject({attemptId:b.attemptId,status:'stopped'});
+  await c.maybeAutoCompact({...high,sessionId:null});
+  expect(compacts(h)).toHaveLength(0);
+ }
  // A request that never went out was made in no conversation: the attempt takes the sample's conversation, and a request
  // and map made in the new one are kept, with one request and the /compact.
  const g=fixture();const d=g.daemon();

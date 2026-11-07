@@ -1184,6 +1184,27 @@ export class ClaudeCompactionEnforcer {
     // themselves exceed a low threshold; keep the same stage, authorization and idle gates.
     const drained = await this.drainPendingStage(input, policy);
     if (drained) return drained;
+    // Another conversation, proved by both sample and attempt naming theirs, ends an armed or held automatic attempt, on a
+    // low sample as on a high one, as in the stale-sample drain: the map is of a context that is gone, and a later sample
+    // whose conversation reads unknown must not compact with it.
+    // A conversation that reads unknown on either side is not a mismatch.
+    const armed = this.pendingPreCompactPrep.get(input.sessionName);
+    // A request that never went out was made in no conversation: the attempt takes the sample's, and only a request
+    // delivered (or possibly delivered) in another conversation stops it.
+    if (armed?.mode === "automatic" && armed.status === "sending" && armed.delivery === "not_sent"
+      && !!input.sessionId && armed.sessionId !== input.sessionId) {
+      // A replacement moving to another conversation drops the gate it was replacing: in memory that gate fell on this
+      // same sample (another conversation), so a restart must not bring it back for the new conversation.
+      const dropGate = !!armed.sessionId && armed.afterEnded !== undefined;
+      if (dropGate) armed.afterEnded = undefined;
+      armed.sessionId = input.sessionId;
+      this.persist(input.sessionName, armed.attemptId, { sessionId: input.sessionId, ...(dropGate ? { afterEnded: undefined } : {}) });
+    }
+    if (armed?.mode === "automatic" && armed.status === "waiting" && armed.compact === "not_sent" && !armed.compactInFlight
+      && !!armed.sessionId && !!input.sessionId && armed.sessionId !== input.sessionId) {
+      this.stopPreparation(input.sessionName, "below_threshold_while_prepared", armed);
+      return { triggered: false, reason: "preparation_stopped" };
+    }
     if (input.usedPercentage < policy.thresholdPercent) {
       this.triggeredAboveThreshold.delete(input.sessionName);
       const preparation = this.pendingPreCompactPrep.get(input.sessionName);
@@ -1203,26 +1224,6 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, reason: "below_threshold" };
     }
     // A climb back above the threshold keeps the dip's mark (belowSince): the attempt that dipped is never held (#2682).
-    // Another conversation, proved by both sample and attempt naming theirs, ends an armed or held automatic attempt, as in
-    // the stale-sample drain: the /clear and its low sample may have been missed, and the map is of a context that is gone.
-    // A conversation that reads unknown on either side is not a mismatch.
-    const armed = this.pendingPreCompactPrep.get(input.sessionName);
-    // A request that never went out was made in no conversation: the attempt takes the sample's, and only a request
-    // delivered (or possibly delivered) in another conversation stops it.
-    if (armed?.mode === "automatic" && armed.status === "sending" && armed.delivery === "not_sent"
-      && !!input.sessionId && armed.sessionId !== input.sessionId) {
-      // A replacement moving to another conversation drops the gate it was replacing: in memory that gate fell on this
-      // same sample (another conversation), so a restart must not bring it back for the new conversation.
-      const dropGate = !!armed.sessionId && armed.afterEnded !== undefined;
-      if (dropGate) armed.afterEnded = undefined;
-      armed.sessionId = input.sessionId;
-      this.persist(input.sessionName, armed.attemptId, { sessionId: input.sessionId, ...(dropGate ? { afterEnded: undefined } : {}) });
-    }
-    if (armed?.mode === "automatic" && armed.status === "waiting" && armed.compact === "not_sent" && !armed.compactInFlight
-      && !!armed.sessionId && !!input.sessionId && armed.sessionId !== input.sessionId) {
-      this.stopPreparation(input.sessionName, "below_threshold_while_prepared", armed);
-      return { triggered: false, reason: "preparation_stopped" };
-    }
 
     // No new automatic compaction while disabled. An already-owed stage above uses
     // drainPendingStage's existing operator-initiated manual exemption.
