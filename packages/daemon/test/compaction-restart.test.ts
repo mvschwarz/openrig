@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {Hono} from 'hono';
-import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT, RESTART_RECOVERY_WINDOW_MS_DEFAULT, buildPostCompactTurnBoundaryPrompt} from '../src/domain/claude-compaction-enforcer.js';
+import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, RESTART_RECOVERY_WINDOW_MS_DEFAULT, buildPostCompactTurnBoundaryPrompt} from '../src/domain/claude-compaction-enforcer.js';
 import {SessionTransport} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {compactionRoutes} from '../src/routes/compaction.js';
@@ -356,7 +356,7 @@ it('a restart retains a completed automatic map after its prep deadline and the 
  for(let i=0;i<4;i++)await staleTick(restarted);
  expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(audits(f)).toHaveLength(1);
 });
-it('#2682: a held attempt whose window a below-threshold sample closed stays closed across a restart, for the stale drain too',async()=>{
+it('#2682: a fresh below-threshold sample ends a held attempt; a restart does not bring it back, and a busy seat gets no fresh request until it is idle',async()=>{
  const f=fixture();const e=f.daemon();
  await e.maybeAutoCompact(high);completeMap(e);
  f.hooks.busy=true;
@@ -364,15 +364,21 @@ it('#2682: a held attempt whose window a below-threshold sample closed stays clo
  const held=e.getPreparationState(seat)!;
  expect(held).toMatchObject({status:'waiting',prepared:true,preparedReason:'map_complete_seat_never_idle'});
  await e.maybeAutoCompact({...high,usedPercentage:30});
- expect(JSON.parse(readFileSync(recordFile(e),'utf8')).belowSince).toEqual(expect.any(Number));
+ expect(e.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,status:'stopped',reason:'below_threshold_while_prepared'});
+ const record=JSON.parse(readFileSync(recordFile(e),'utf8'));
+ expect(record).toMatchObject({phase:'ended',reason:'below_threshold_while_prepared',delivery:'delivered',endedAt:expect.any(Number)});
+ expect(record.prepared).toBeUndefined();
  f.hooks.busy=false;f.advance(60_000);
  const restarted=f.daemon();
- // The monitor's drain for an idle seat whose sample is stale: the window is still closed.
- expect(await restarted.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code'})).toMatchObject({triggered:false,reason:'prepared_awaiting_window'});
- expect(compacts(f)).toHaveLength(0);
- expect(restarted.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,prepared:true,preparedAt:held.preparedAt});
- // A fresh sample back above reopens it, with the same map and no new preparation prompt.
+ // The monitor's drain for an idle seat whose sample is stale: nothing is resumed, nothing is sent.
+ expect(await restarted.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code'})).toMatchObject({triggered:false,reason:'no_pending_stage'});
+ expect(restarted.getPreparationState(seat)).toBeNull();
+ // Past the retry cooldown, a busy seat is not asked again; once it is idle it gets one fresh request, never the old map.
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT);f.hooks.busy=true;
+ expect(await restarted.maybeAutoCompact(high)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(f)).toHaveLength(1);expect(restarted.getPreparationState(seat)).toBeNull();
+ f.hooks.busy=false;
  expect(await restarted.maybeAutoCompact(high)).toEqual({triggered:true});
- expect(compacts(f)).toHaveLength(1);expect(prepPrompts(f)).toHaveLength(1);
- expect(JSON.parse(readFileSync(recordFile(restarted),'utf8')).belowSince).toBeUndefined();
+ expect(prepPrompts(f)).toHaveLength(2);expect(compacts(f)).toHaveLength(0);
+ expect(restarted.getPreparationState(seat)!.attemptId).not.toBe(held.attemptId);
 });

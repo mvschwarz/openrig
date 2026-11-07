@@ -713,9 +713,10 @@ it('automatic: completed map survives the prep deadline and sends once at the ne
   expect(f.e.getPreparationState(seat)).toMatchObject({attemptId: first.attemptId, status: 'compact-sent'});
 });
 
-// #2682 review: a dip in the context BEFORE the hold (during the idle grace) closes the held attempt's window too.
+// #2682: an attempt whose context dropped below the threshold BEFORE it was held is never held; it stops as it did before
+// the hold existed, and a held map is never sent into a context that already dropped.
 for (const how of ['draft at the stale drain', 'idle grace running out'] as const) {
-  it(`automatic: a fresh below-threshold sample before the hold (${how}) keeps the held window closed; a fresh sample above reopens it (#2682)`, async () => {
+  it(`automatic: a fresh below-threshold sample before the hold (${how}) means the attempt is never held; it stops as before and sends nothing (#2682)`, async () => {
     const f = fixture();
     await armed(f);
     const attemptId = f.e.getPreparationState(seat)!.attemptId;
@@ -730,19 +731,20 @@ for (const how of ['draft at the stale drain', 'idle grace running out'] as cons
       f.e.reconcilePreparations();
       f.activity('idle');
     }
-    expect(f.e.getPreparationState(seat)).toMatchObject({attemptId, status: 'waiting', prepared: true});
     const before = compactWrites(f);
-    // An idle seat with an empty box and a stale sample: the monitor's drain sends nothing into the dropped context.
-    expect(await f.e.drainPendingPreparedCompact({sessionName: seat, runtime: 'claude-code'})).toEqual({triggered: false, reason: 'prepared_awaiting_window'});
+    const state = f.e.getPreparationState(seat)!;
+    expect(state).toMatchObject({attemptId, status: 'stopped', compact: 'not_sent',
+      reason: how === 'draft at the stale drain' ? 'draft_input_busy' : 'map_complete_seat_never_idle'});
+    expect(state.prepared).toBeUndefined();
+    // Neither the monitor's stale drain nor a fresh sample back above sends the old map; the retry cooldown holds.
+    expect(await f.e.drainPendingPreparedCompact({sessionName: seat, runtime: 'claude-code'})).toEqual({triggered: false, reason: 'no_pending_stage'});
+    expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'preparation_stopped'});
     expect(compactWrites(f)).toBe(before);
-    expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: true});
-    expect(compactWrites(f)).toBe(before + 1);
-    expect(f.e.getPreparationState(seat)).toMatchObject({attemptId, status: 'compact-sent'});
     expect(f.texts().filter((t) => !t.startsWith('/compact'))).toHaveLength(1);
   });
 }
 
-it('automatic: the idle grace running out while the drain waits for the delivery lease holds the attempt with its window closed; nothing is written (#2682)', async () => {
+it('automatic: the idle grace running out while the drain waits for the delivery lease stops an attempt whose context dropped, instead of holding it; nothing is written (#2682)', async () => {
   const f = fixture();
   await armed(f);
   const attemptId = f.e.getPreparationState(seat)!.attemptId;
@@ -756,9 +758,11 @@ it('automatic: the idle grace running out while the drain waits for the delivery
     return real(ids, fn);
   });
   const before = compactWrites(f);
-  expect(await f.e.drainPendingPreparedCompact({sessionName: seat, runtime: 'claude-code'})).toEqual({triggered: false, reason: 'prepared_awaiting_window'});
+  expect(await f.e.drainPendingPreparedCompact({sessionName: seat, runtime: 'claude-code'})).toEqual({triggered: false, reason: 'send_failed'});
   expect(compactWrites(f)).toBe(before);
-  expect(f.e.getPreparationState(seat)).toMatchObject({attemptId, status: 'waiting', prepared: true, compact: 'not_sent'});
-  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: true});
-  expect(compactWrites(f)).toBe(before + 1);
+  const state = f.e.getPreparationState(seat)!;
+  expect(state).toMatchObject({attemptId, status: 'stopped', reason: 'map_complete_seat_never_idle', compact: 'not_sent'});
+  expect(state.prepared).toBeUndefined();
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'preparation_stopped'});
+  expect(compactWrites(f)).toBe(before);
 });
