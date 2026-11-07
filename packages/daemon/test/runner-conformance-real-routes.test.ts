@@ -128,7 +128,8 @@ async function launchRunner(d: Awaited<ReturnType<typeof daemon>>, scenario: obj
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const entries = (): LogEntry[] => !existsSync(log) ? [] : readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  const opened = await waitFor(() => existsSync(record) && JSON.parse(readFileSync(record, "utf8")).nativeRef);
+  // Shell, runner and agent startup can be slower than the route checks under suite load.
+  const opened = await waitFor(() => existsSync(record) && JSON.parse(readFileSync(record, "utf8")).nativeRef, 15000);
   expect(opened, "the runner opens its conversation and writes the launch record").toBeTruthy();
   return {
     send: (text: string) => child.stdin.write(`\x1b[200~${text}\x1b[201~\r`),
