@@ -123,7 +123,7 @@ it("export helper resolves executable from cwd when PATH has empty segments", ()
 });
 
 
-it.each(["nu", "nu.exe", "fish", "csh", "", "unknown"])("Pi preserves its existing command on an unsupported pane: %s", async shell => {
+it.each(["nu", "nu.exe", "fish", "csh", "", "unknown"])("Pi preserves its account-free command on an unsupported pane: %s", async shell => {
   const f = fixture(); f.tmux.getPaneCommand.mockResolvedValue(shell);
   const command = "node '/runner.js' --session '/history.jsonl'";
   expect(await f.launch.command("seat@rig", command, { runtime: "pi" })).toBe(command);

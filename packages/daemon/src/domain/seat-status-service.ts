@@ -44,10 +44,10 @@ export interface SeatStatus {
   previous_occupant: string | null;
   handover_at: string | null;
   restore_outcome: NodeInventoryEntry["restoreOutcome"];
-  /** Claude and Codex seats: the home (and with it the login) the seat's launches use. Configured, not proof of
+  /** Claude, Codex and Pi seats: the home (and with it the login) the seat's launches use. Configured, not proof of
    *  which login a running process holds. `ignored` is a declared value that isn't an absolute path. */
   runtime_home?: {
-    variable: "CLAUDE_CONFIG_DIR" | "CODEX_HOME";
+    variable: "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "PI_CODING_AGENT_DIR";
     home: string | null;
     source: "member" | "rig" | "account-switch" | "daemon" | "native_default";
     ignored?: { source: "member" | "rig" | "account-switch"; value: string };
@@ -215,10 +215,11 @@ export class SeatStatusService {
     const ignored = own.ignored ? { ignored: own.ignored } : {};
     if (own.home && own.source) return { runtime_home: { variable, home: own.home, source: own.source } };
     // The daemon's explicit value, as its launches pass it on; else the runtime's native default under HOME.
-    const daemon = this.env[variable];
+    const daemon = runtime === "pi" ? undefined : this.env[variable];
     if (daemon) return { runtime_home: { variable, home: daemon, source: "daemon", ...ignored } };
     const home = this.env.HOME;
-    const native = home ? path.join(home, runtime === "codex" ? ".codex" : ".claude") : null;
+    // Unconfigured Pi uses its managed seat directory, not the operator's ~/.pi/agent login.
+    const native = home && runtime !== "pi" ? path.join(home, runtime === "codex" ? ".codex" : ".claude") : null;
     return { runtime_home: { variable, home: native, source: "native_default", ...ignored } };
   }
 

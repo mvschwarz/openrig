@@ -8,7 +8,59 @@ import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, sla
 import { sharedChannelAddresses } from "./gateway/participants.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
-import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, type RecentQueueTransitionScope } from "./queue-transition-log.js";
+import {
+  QueueTransitionLog,
+  RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
+  RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
+  formatRelayOwnerNotificationAccepted,
+  formatRelayOwnerNotificationTransportFailed,
+  parseRelayOwnerNotificationAccepted,
+  parseRelayOwnerNotificationTransportFailed,
+  type FormatRelayOwnerNotificationAcceptedInput,
+  type FormatRelayOwnerNotificationTransportFailedInput,
+  type OwnerNotificationLevel,
+  type QueueTransition,
+  type RecentQueueTransitionScope,
+  type RelayOwnerNotificationReceipt,
+  type RelayOwnerNotificationTransportFailure,
+} from "./queue-transition-log.js";
+
+export {
+  RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
+  RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
+  formatRelayOwnerNotificationAccepted,
+  formatRelayOwnerNotificationTransportFailed,
+  parseRelayOwnerNotificationAccepted,
+  parseRelayOwnerNotificationTransportFailed,
+  type FormatRelayOwnerNotificationAcceptedInput,
+  type FormatRelayOwnerNotificationTransportFailedInput,
+  type RelayOwnerNotificationReceipt,
+  type RelayOwnerNotificationTransportFailure,
+};
+
+export type HumanIntent = "decision" | "update";
+
+export const MC_OPERATION_TAG_PREFIX = "mc-operation:" as const;
+
+export function mcOperationTag(operation: string): string {
+  return `${MC_OPERATION_TAG_PREFIX}${operation}`;
+}
+
+export interface DecisionRevisionOptions {
+  excludeOperationReply?: string | null;
+}
+
+export interface RecordRelayOwnerNotificationAcceptedInput extends FormatRelayOwnerNotificationAcceptedInput {
+  qitemId: string;
+  actorSession?: string;
+  closeUpdate?: boolean;
+  humanIntent?: HumanIntent | null;
+}
+
+export interface RecordRelayOwnerNotificationTransportFailedInput extends FormatRelayOwnerNotificationTransportFailedInput {
+  qitemId: string;
+  actorSession?: string;
+}
 import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import { physicalSessionName } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
@@ -210,10 +262,10 @@ export interface QueueItem {
   priority: QueuePriority;
   tier: string | null;
   /** OPR.0.5.6.14 — the delivery LEDGER verdict for gateway-routed rows
-   *  (posted / transport-failed / never-posted), derived from the row's own
+   *  (posted / accepted / transport-failed / never-posted), derived from the row's own
    *  transitions. Pane-bound rows carry null — the field never lies about a
    *  class it does not govern. Populated on getById and findUndelivered. */
-  deliveryOutcome?: "posted" | "transport-failed" | "never-posted" | null;
+  deliveryOutcome?: "posted" | "accepted" | "transport-failed" | "never-posted" | null;
   /** The undelivered surface's class for ledger-derived entries (the route
    *  prefers this over the nudge-literal regex when present). */
   deliveryFailureClass?: string;
@@ -1206,10 +1258,15 @@ export class QueueRepository {
       // A person's Slack message routed to a person is already in Slack: as it arrived, it's on Steering and the TUI and
       // isn't echoed back. A later park of it on a person is a new ask, classified (and posted) on that update.
       if (input.gatewayInbound) return { kind: "human-required", level: "RECORD" };
-      // The person's Slack subscription decides: `every-ask` (the default) posts every ask (ALERT); `urgent-only` posts only
-      // one marked --alert, and a plain ask lands on Steering and the TUI (RECORD: below the posting dial, so no post is owed).
+      // Slack subscription filters only apply when Slack is the primary connector. When a person's primary connector
+      // is relay (or by default when no Slack subscription restricts it), plain asks post by default (`every-ask`),
+      // so ordinary relay asks post (ALERT) independently of any retained Slack-specific subscription.
       const person = people.find((entity) => entity.address === destinationHuman);
-      const posts = input.humanAlert === true || slackSubscriptionFor(person).preset === "every-ask";
+      const primaryBinding = person?.connectorBindings.find((b) => b.role === "primary");
+      const posts = input.humanAlert === true
+        || (primaryBinding?.kind === "relay"
+          ? true
+          : slackSubscriptionFor(person).preset === "every-ask");
       return input.humanIntent === "update"
         ? { kind: "human-update", level: "NOTICE" }
         : { kind: "human-required", level: posts ? "ALERT" : "RECORD" };
@@ -3908,7 +3965,9 @@ export class QueueRepository {
       return this.closeDirectAsk(item, input.actorSession, input.decision, input.primaryUser === true);
     })();
     if (!result) return false;
-    for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
+    for (const event of result.persistedEvents) {
+      if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
+    }
     return mine;
   }
 
@@ -4031,10 +4090,24 @@ export class QueueRepository {
   /** The opaque revision of what a person decides on (#2446): the question (body, intent, questions) and its decision state
    *  (open, blocked or terminal; who it's addressed to or parked on; its answers, a decision made for them, the current park,
    *  and the replies returned). A label, a wake, a claim or a note on a park doesn't change it; a new park does, on any blocker. */
-  decisionRevision(item: QueueItem): string {
+  decisionRevision(item: QueueItem, opts?: DecisionRevisionOptions): string {
     const phase = item.state === "blocked" ? "blocked" : item.state === "pending" || item.state === "in-progress" ? "open" : item.state;
-    const replies = this.hasReplyToColumn ? (this.db.prepare("SELECT qitem_id FROM queue_items WHERE reply_to = ? ORDER BY ts_created, rowid")
-      .all(item.qitemId) as Array<{ qitem_id: string }>).map((row) => row.qitem_id) : [];
+    const excludeOp =
+      typeof opts?.excludeOperationReply === "string" && opts.excludeOperationReply.length > 0
+        ? mcOperationTag(opts.excludeOperationReply)
+        : null;
+    const replies = this.hasReplyToColumn
+      ? (excludeOp
+          ? (this.db
+              .prepare(
+                "SELECT qitem_id FROM queue_items WHERE reply_to = ? AND NOT (tags IS NOT NULL AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)) ORDER BY ts_created, rowid",
+              )
+              .all(item.qitemId, excludeOp) as Array<{ qitem_id: string }>)
+          : (this.db
+              .prepare("SELECT qitem_id FROM queue_items WHERE reply_to = ? ORDER BY ts_created, rowid")
+              .all(item.qitemId) as Array<{ qitem_id: string }>)
+        ).map((row) => row.qitem_id)
+      : [];
     // The park this is: the transition into blocked from another state (a later blocked-to-blocked note stays this park).
     const transitions = item.state === "blocked" ? this.transitionLog.listForQitem(item.qitemId) : [];
     let parkEntry: number | null = null;
@@ -4044,6 +4117,92 @@ export class QueueRepository {
     const decision = [item.body, item.humanIntent ?? null, item.humanQuestions ?? null, phase, item.destinationSession, item.blockedOn,
       item.humanAnswers ?? null, item.delegatedDecision ?? null, this.currentHumanRequiredEpisode(item.qitemId)?.key ?? null, parkEntry, replies];
     return `dr1-${createHash("sha256").update(JSON.stringify(decision)).digest("hex").slice(0, 24)}`;
+  }
+
+  listRelayOwnerNotificationReceipts(qitemId: string): RelayOwnerNotificationReceipt[] {
+    return this.transitionLog.listRelayOwnerNotificationReceipts(qitemId);
+  }
+
+  getRelayOwnerNotificationReceipt(qitemId: string, notificationKey?: string): RelayOwnerNotificationReceipt | null {
+    return this.transitionLog.getRelayOwnerNotificationReceipt(qitemId, notificationKey);
+  }
+
+  hasRelayOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
+    return this.transitionLog.hasRelayOwnerNotificationReceipt(qitemId, notificationKey);
+  }
+
+  findRelayOwnerNotificationReceiptByReplyRef(
+    replyRef: string,
+  ): (RelayOwnerNotificationReceipt & { qitemId: string }) | null {
+    return this.transitionLog.findRelayOwnerNotificationReceiptByReplyRef(replyRef);
+  }
+
+  recordRelayOwnerNotificationTransportFailed(input: RecordRelayOwnerNotificationTransportFailedInput): QueueItem {
+    const current = this.getByIdOrThrow(input.qitemId);
+    const key = typeof input.notificationKey === "string" && input.notificationKey.trim().length > 0
+      ? input.notificationKey.trim()
+      : input.qitemId;
+    const normalizedConnectorRef =
+      typeof input.connectorRef === "string" && input.connectorRef.trim().length > 0
+        ? input.connectorRef.trim()
+        : null;
+    const previousFailure = this.transitionLog
+      .listForQitem(input.qitemId)
+      .filter(
+        (transition) =>
+          (transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ") ||
+            transition.transitionNote?.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `)) &&
+          transition.transitionNote.split(/\s+/).includes(`notification_key=${key}`),
+      )
+      .at(-1);
+    if (previousFailure?.transitionNote?.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `)) {
+      const parsedPrevious = parseRelayOwnerNotificationTransportFailed(previousFailure.transitionNote);
+      if (parsedPrevious && parsedPrevious.connectorRef === normalizedConnectorRef) {
+        return current;
+      }
+    }
+    const note = formatRelayOwnerNotificationTransportFailed({
+      notificationKey: key,
+      connectorRef: normalizedConnectorRef,
+      failureClass: input.failureClass,
+      detail: input.detail,
+    });
+    return this.update({
+      qitemId: input.qitemId,
+      actorSession: input.actorSession ?? "daemon@kernel",
+      transitionNote: note,
+    });
+  }
+
+  recordRelayOwnerNotificationAccepted(input: RecordRelayOwnerNotificationAcceptedInput): QueueItem {
+    const current = this.getByIdOrThrow(input.qitemId);
+    const isUpdate =
+      current.humanIntent === "update" &&
+      current.state !== "blocked" &&
+      !current.blockedOn &&
+      this.isPersonAddress(current.destinationSession);
+    const shouldCloseUpdate = isUpdate && input.closeUpdate !== false && isBlockerLive(current.state);
+    if (this.transitionLog.hasRelayOwnerNotificationReceipt(input.qitemId, input.notificationKey)) {
+      if (shouldCloseUpdate) {
+        return this.update({
+          qitemId: input.qitemId,
+          actorSession: input.actorSession ?? "daemon@kernel",
+          state: "done",
+          closureReason: "no-follow-on",
+        });
+      }
+      return current;
+    }
+    const note = formatRelayOwnerNotificationAccepted({
+      ...input,
+      revision: input.revision ?? this.decisionRevision(current),
+    });
+    return this.update({
+      qitemId: input.qitemId,
+      actorSession: input.actorSession ?? "daemon@kernel",
+      ...(shouldCloseUpdate ? { state: "done", closureReason: "no-follow-on" } : {}),
+      transitionNote: note,
+    });
   }
 
   currentHumanRequiredEpisode(qitemId: string): { key: string; receipt: ReturnType<QueueTransitionLog["getOwnerNotificationReceipt"]> } | null {
@@ -4160,7 +4319,7 @@ export class QueueRepository {
     return {
       ...item,
       deliveryOutcome: ledger?.outcome ?? null,
-      ...(ledger && ledger.outcome !== "posted" ? { deliveryFailureDetail: ledger.detail } : {}),
+      ...(ledger && ledger.outcome !== "posted" && ledger.outcome !== "accepted" ? { deliveryFailureDetail: ledger.detail } : {}),
       ...(item.replyTo ? { replyToFallback: this.replyToFallbackFor(item.qitemId) } : {}),
     };
   }
@@ -4313,7 +4472,7 @@ export class QueueRepository {
       return {
         ...item,
         deliveryOutcome: ledger?.outcome ?? null,
-        ...(ledger && ledger.outcome !== "posted" ? { deliveryFailureDetail: ledger.detail } : {}),
+        ...(ledger && ledger.outcome !== "posted" && ledger.outcome !== "accepted" ? { deliveryFailureDetail: ledger.detail } : {}),
       };
     });
     return opts?.compact ? items.map(compactRow) : items;
@@ -4350,7 +4509,7 @@ export class QueueRepository {
    */
   /** Delivered informational records remain queryable after closure. Receipt filtering
    * happens before LIMIT; no prose/tier classifier and no second event store. */
-  listDeliveredHumanUpdates(opts: { limit?: number } = {}): Array<QueueItem & { deliveredAt: string; deliveryReceipt: string }> {
+  listDeliveredHumanUpdates(opts: { limit?: number } = {}): Array<QueueItem & { deliveredAt: string; deliveryReceipt: string; deliveryOutcome: "posted" | "accepted" }> {
     if (!this.hasHumanIntentColumn) return [];
     const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(101, Math.floor(opts.limit!))) : 20;
     const receipts = `SELECT qitem_id, ts, transition_note FROM queue_transitions` +
@@ -4359,10 +4518,20 @@ export class QueueRepository {
       SELECT q.*, r.ts AS delivered_at, r.transition_note AS delivery_receipt
       FROM queue_items q JOIN (${receipts}) r ON r.qitem_id = q.qitem_id
       WHERE q.human_intent = 'update' AND is_human_seat_session(q.destination_session) = 1
-        AND r.transition_note LIKE 'slack-owner-notification-posted %'
+        AND (r.transition_note LIKE 'slack-owner-notification-posted %' OR r.transition_note LIKE 'relay-owner-notification-accepted %')
       ORDER BY r.ts DESC, q.qitem_id DESC LIMIT ?
     `).all(limit) as Array<QueueItemRow & { delivered_at: string; delivery_receipt: string }>;
-    return rows.map((row) => ({ ...this.rowToItem(row), deliveredAt: row.delivered_at, deliveryReceipt: row.delivery_receipt }));
+    return rows.map((row) => {
+      const deliveryOutcome: "posted" | "accepted" = row.delivery_receipt.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `)
+        ? "accepted"
+        : "posted";
+      return {
+        ...this.rowToItem(row),
+        deliveryOutcome,
+        deliveredAt: row.delivered_at,
+        deliveryReceipt: row.delivery_receipt,
+      };
+    });
   }
 
   /** Current explicit human FYIs; delivery receipts are not required for local visibility.
@@ -4578,7 +4747,9 @@ export class QueueRepository {
          OR EXISTS (SELECT 1 FROM queue_transitions receipt
                       WHERE receipt.qitem_id = queue_items.qitem_id
                         AND (receipt.transition_note LIKE 'slack-owner-notification-posted %'
-                          OR receipt.transition_note LIKE 'slack-owner-notification-transport-failed %')))`,
+                          OR receipt.transition_note LIKE 'relay-owner-notification-accepted %'
+                          OR receipt.transition_note LIKE 'slack-owner-notification-transport-failed %'
+                          OR receipt.transition_note LIKE 'relay-owner-notification-transport-failed %')))`,
     ];
     const params: unknown[] = [];
     if (opts?.rig) {
@@ -4593,7 +4764,7 @@ export class QueueRepository {
     for (const r of rows) {
       const item = this.rowToItem(r, !opts?.compact);
       const ledger = this.deliveryOutcomeFor(item.qitemId);
-      if (ledger?.outcome === "posted") continue; // the receipt wins, always
+      if (ledger?.outcome === "posted" || ledger?.outcome === "accepted") continue; // the receipt wins, always
       if (ledger?.outcome === "transport-failed") {
         out.push({
           ...item,
@@ -4761,23 +4932,34 @@ export class QueueRepository {
    *  transitions are same-row but keyed by qitemId:OWNER-transitionId; an old
    *  posted receipt cannot mask a later human park. Legacy pre-OWNER or literal
    *  external rows retain their row-scoped fallback. */
-  deliveryOutcomeFor(qitemId: string): { outcome: "posted" | "transport-failed" | "never-posted"; detail: string } | null {
+  deliveryOutcomeFor(qitemId: string): { outcome: "posted" | "accepted" | "transport-failed" | "never-posted"; detail: string } | null {
     const ledger = this.deliveryLedger(qitemId);
     return ledger ? { outcome: ledger.outcome, detail: ledger.detail } : null;
   }
 
-  /** #514 — true only when this row's CURRENT human-notification episode (OWNER history addressed
-   *  to a registered human, aliases included) has a POSTED receipt. Legacy rows with no OWNER
+  /** OPR.0.5.6.14 + #514 — true when the row's CURRENT ask episode (create-time pending ask
+   *  to a registered human, aliases included) has a POSTED or ACCEPTED receipt. Legacy rows with no OWNER
    *  history, inactive episodes, never-posted and transport-failed all read false. Same derivation
    *  as deliveryOutcomeFor; it reads row fields, never the waiting view. */
   humanNotificationPostedThisEpisode(qitemId: string, listed?: ListedLedger): boolean {
-    if (!this.hasQueueTransitionsTable) return false;
+    return this.humanNotificationDeliveryThisEpisode(qitemId, listed) !== null;
+  }
+
+  private humanNotificationDeliveryThisEpisode(qitemId: string, listed?: ListedLedger): "posted" | "accepted" | null {
+    if (!this.hasQueueTransitionsTable) return null;
     const owners = listed?.owners ?? this.transitionLog.ownerNotificationsForQitems([qitemId]).get(qitemId) ?? [];
     const owner = this.currentAskNotification(qitemId, owners);
-    if (!owner) return false;
+    if (!owner) return null;
     // The ledger's episode exists only when the destination resolves to a registered human (aliases included).
     const ledger = listed ? listed.ledger : this.deliveryLedger(qitemId, owners);
-    return ledger !== null && ledger.outcome === "posted" && ledger.episode?.notificationKey === `${qitemId}:${owner.transitionId}`;
+    if (
+      ledger !== null &&
+      (ledger.outcome === "posted" || ledger.outcome === "accepted") &&
+      ledger.episode?.notificationKey === `${qitemId}:${owner.transitionId}`
+    ) {
+      return ledger.outcome;
+    }
+    return null;
   }
 
   /** The ask's own notification while it still binds its recipient. Only that notification does: create writes it in
@@ -4860,7 +5042,9 @@ export class QueueRepository {
     this.receiptNotesStatement ??= this.db.prepare(
       `SELECT qitem_id, transition_note FROM queue_transitions
         WHERE qitem_id IN (SELECT value FROM json_each(?)) AND (transition_note LIKE 'slack-owner-notification-posted %'
-                             OR transition_note LIKE 'slack-owner-notification-transport-failed %')
+                             OR transition_note LIKE 'relay-owner-notification-accepted %'
+                             OR transition_note LIKE 'slack-owner-notification-transport-failed %'
+                             OR transition_note LIKE 'relay-owner-notification-transport-failed %')
         ORDER BY transition_id DESC`,
     );
     const notes = new Map<string, string[]>();
@@ -4879,7 +5063,13 @@ export class QueueRepository {
       : notes;
     const posted = currentNotes.find((note) => note.startsWith("slack-owner-notification-posted "));
     if (posted) return { outcome: "posted", detail: posted, episode };
-    const failed = currentNotes.find((note) => note.startsWith("slack-owner-notification-transport-failed "));
+    const accepted = currentNotes.find((note) => note.startsWith("relay-owner-notification-accepted "));
+    if (accepted) return { outcome: "accepted", detail: accepted, episode };
+    const failed = currentNotes.find(
+      (note) =>
+        note.startsWith("slack-owner-notification-transport-failed ") ||
+        note.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `),
+    );
     if (failed) return { outcome: "transport-failed", detail: failed, episode };
     if (episode?.quiet) return null;
     const startedAt = episode?.startedAt ?? item.tsCreated;
@@ -5177,7 +5367,8 @@ export class QueueRepository {
     if (view && ["pending", "in-progress"].includes(view.state)) {
       // #514 — the unclaimed sweep skips a pending ask already posted to its human in the current
       // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
-      const posted = view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId, listed);
+      const episodeDelivery = view.state === "pending" ? this.humanNotificationDeliveryThisEpisode(qitemId, listed) : null;
+      const posted = episodeDelivery !== null;
       const onSteering = !posted && view.state === "pending" && this.humanAskWithoutAlert(qitemId, listed);
       const row = view.state === "pending" && !onSteering
         ? this.db.prepare(`SELECT state, ${this.hasHumanIntentColumn ? "human_intent" : "NULL AS human_intent"}, destination_session, last_nudge_result FROM queue_items WHERE qitem_id = ?`).get(qitemId) as { state: QueueItem["state"]; human_intent: QueueItem["humanIntent"]; destination_session: string; last_nudge_result: string | null } | undefined
@@ -5188,13 +5379,14 @@ export class QueueRepository {
         && this.isLocalHumanDecisionWithoutGateway({ state: row.state, humanIntent: row.human_intent, destinationSession: row.destination_session, lastNudgeResult: row.last_nudge_result });
       const awaitingHuman = posted || onSteering || localOnly;
       if (awaitingHuman || humanUpdate) {
+        const deliveryPhrase = episodeDelivery === "accepted" ? "accepted by the bridge" : "posted to the human";
         view.nextBackstop = { owner: view.owner, mechanism: localOnly ? "local attention feed (no registered human gateway)" : onSteering
           ? "none (on Steering for the human, with no Slack alert; awaiting their decision)"
           : humanUpdate
             ? posted
-              ? "none (posted to the human; informational correspondence requires no claim)"
+              ? `none (${deliveryPhrase}; informational correspondence requires no claim)`
               : "none (informational correspondence to the human; no claim required)"
-            : "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
+            : `none (${deliveryPhrase}; awaiting their decision)`, dueAt: null, intervalSeconds: null };
       }
       // Quiet hours: a held ask is owned by its window's release job until it posts.
       const quiet = awaitingHuman ? null : quietCustodyBackstop(view.owner, quietHoldCustody(this.db, qitemId));
@@ -5317,7 +5509,7 @@ export class QueueRepository {
 /** The row fields a delivery ledger reads, as rowToItem presents them. */
 type LedgerItem = Pick<QueueItem, "qitemId" | "state" | "blockedOn" | "destinationSession" | "tsCreated" | "lastNudgeResult">;
 
-type DeliveryLedger = { outcome: "posted" | "transport-failed" | "never-posted"; detail: string; episode: { notificationKey: string; startedAt: string } | null };
+type DeliveryLedger = { outcome: "posted" | "accepted" | "transport-failed" | "never-posted"; detail: string; episode: { notificationKey: string; startedAt: string } | null };
 
 /** A listed row's owner notifications (newest first) and its delivery ledger, read once for the whole listing. */
 type ListedLedger = { owners: QueueTransition[]; ledger: DeliveryLedger | null };

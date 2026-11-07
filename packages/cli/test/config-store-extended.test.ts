@@ -202,6 +202,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "usage.pi_openrouter_charge",
       "transport.verify_input_box",
       "transport.local_user_guard",
+      "transport.draft_delivery",
       // Slice 22 (OPR.0.7.2.22) — typed decisions, off by default.
       "decisions.enabled",
       "decisions.consumers",
@@ -329,11 +330,11 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
   it("transport.verify_input_box defaults off, resolves its env twin, and appears in the resolved config", () => {
     const store = new ConfigStore(configPath);
     expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: false, source: "default", defaultValue: false });
-    expect(store.resolve().transport).toEqual({ verifyInputBox: false, localUserGuard: false });
+    expect(store.resolve().transport).toEqual({ verifyInputBox: false, localUserGuard: false, draftDelivery: "deliver" });
     try {
       process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX = "1";
       expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: true, source: "env" });
-      expect(store.resolve().transport).toEqual({ verifyInputBox: true, localUserGuard: false });
+      expect(store.resolve().transport).toEqual({ verifyInputBox: true, localUserGuard: false, draftDelivery: "deliver" });
     } finally {
       delete process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX;
     }

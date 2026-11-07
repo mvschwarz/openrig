@@ -46,7 +46,10 @@ import { humanAnswerText } from "../../human-questions.js";
 import { formatReplyToChoice, formatReplyToThreadMissing, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
-import { ownerNotificationLevelAtLeast } from "../../queue-transition-log.js";
+import {
+  ownerNotificationLevelAtLeast,
+  RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
+} from "../../queue-transition-log.js";
 // OPR.0.5.6.1 — the delivery rules engine: ONE decision per message replaces
 // the two dial-reads (the S14 default-decision stub). The legacy dial path
 // survives ONLY as the stated degrade when the destination is not a
@@ -64,6 +67,14 @@ import { confirmReleaseAtPost, currentAskVerdict, holdForQuiet } from "../../pol
 import { noteRePresentNotPosted, RE_PRESENT_DECISION_PREFIX } from "./open-asks.js";
 import { quietHoldFor } from "../human-quiet-windows.js";
 import { WatchdogJobsRepository } from "../../watchdog-jobs-repository.js";
+import { loadRelayProfiles } from "../relay-config.js";
+import {
+  createRelayOutboundTransport,
+  prepareRelayDecision,
+  relayStatePaths,
+  resolvePrimaryRelayBinding,
+  type RelayPayloadCarry,
+} from "../relay-outbound.js";
 
 const SECRET_BOT = "SLACK_BOT_TOKEN";
 const SECRET_APP = "SLACK_APP_TOKEN";
@@ -306,7 +317,34 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const deadForwards = new DeadLetterStore<{ host: string; envelope: SocketEnvelope }>(
     path.join(stateDir(opts.home), "slack-inbound-forward-deadletter.jsonl"));
 
-  if (!outboundReady && !inboundReady) {
+  const registrySurface: RegistrySurface = opts.registry ?? { loadHumanRegistry, resolveSlackHandle };
+  const hasRelayPrimaryBinding = (): boolean => {
+    try {
+      const reg = registrySurface.loadHumanRegistry(opts.home);
+      return (
+        reg.ok &&
+        reg.entities.some((e) =>
+          e.connectorBindings.some((b) => b.role === "primary" && (b.kind as string) === "relay"),
+        )
+      );
+    } catch {
+      return false;
+    }
+  };
+  const hasPendingRelayDecisions = (): boolean => {
+    try {
+      return new DispatchBuffer(opts.home).pending().some((d) => {
+        const p = (d.payload ?? {}) as RelayPayloadCarry;
+        return Boolean(p.relayConnectorRef || p.relayEnvelope);
+      });
+    } catch {
+      return false;
+    }
+  };
+  const relayConfigured = hasRelayPrimaryBinding() || hasPendingRelayDecisions();
+  const anyOutboundEnabled = outboundReady || relayConfigured;
+
+  if (!outboundReady && !inboundReady && !relayConfigured) {
     const missing = !cfg.enabled ? "connector disabled (rig slack enable)" : !bot ? "SLACK_BOT_TOKEN unresolved" : "channel unconfigured";
     log(`slack delivery not configured (${missing}) — wire is inert; dispatches would be refused honestly`);
     const inert = buildInProcessWire({
@@ -318,7 +356,6 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     return { ...inert, status: () => ({ platform: "slack", configurationDigest: channelStateDigest(cfg), outboundReady: false, inboundReady: false, inboundRouting, recovery: { state: "unavailable", reason: "inbound-not-configured" }, inbound: { state: "not-configured" }, ...deadLetterBacklogFields(dead, deadActions, deadForwards) }) };
   }
 
-  const registrySurface: RegistrySurface = opts.registry ?? { loadHumanRegistry, resolveSlackHandle };
   const ports = makeQueuePorts(opts.queueRepo, {
     loadHumanRegistry: () => registrySurface.loadHumanRegistry(opts.home),
     sharedChannels: () => sharedChannelAddresses(opts.home),
@@ -401,19 +438,53 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     }).catch((e) => log(`undeliverable notice FAILED for ${p.qitemId}: ${(e as Error).message}`));
   };
 
-  const recordTransportFailed = (p: OutboundPostPayload, failureClass: string, detail: string, partlyPosted?: boolean): void => {
+  const resolveRelayConnectorRef = (p: OutboundPostPayload): string | null => {
+    const carry = p as RelayPayloadCarry;
+    if (typeof carry.relayConnectorRef === "string" && carry.relayConnectorRef.trim().length > 0) {
+      return carry.relayConnectorRef.trim();
+    }
+    try {
+      const reg = registrySurface.loadHumanRegistry(opts.home);
+      return resolvePrimaryRelayBinding(p.destinationSession, reg)?.connectorRef ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const recordTransportFailed = (
+    p: OutboundPostPayload,
+    failureClass: string,
+    detail: string,
+    partlyPosted?: boolean,
+    relay = false,
+  ): void => {
     if (!p.qitemId) return;
-    if (failureClass === "human-message-unrenderable" || failureClass === "slack-invalid-blocks") {
+    const carry = p as RelayPayloadCarry;
+    const isRelay = relay || Boolean(carry.relayConnectorRef || carry.relayEnvelope);
+    if (!isRelay && (failureClass === "human-message-unrenderable" || failureClass === "slack-invalid-blocks")) {
       notifySourceUndeliverable(p, detail, partlyPosted, failureClass === "slack-invalid-blocks");
     }
     const key = p.notificationKey ?? p.qitemId;
+    if (isRelay) {
+      opts.queueRepo.recordRelayOwnerNotificationTransportFailed({
+        qitemId: p.qitemId,
+        notificationKey: key,
+        connectorRef: resolveRelayConnectorRef(p),
+        failureClass,
+        detail,
+      });
+      return;
+    }
     const previousFailure = opts.queueRepo.transitionLog.listForQitem(p.qitemId).filter((transition) =>
-      transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ")
+      (transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ")
+        || transition.transitionNote?.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `))
         && transition.transitionNote.split(/\s+/).includes(`notification_key=${key}`)).at(-1);
     // A corrected attempt can fail transiently after a permanent rejection, and a
     // transient failure can be followed by a definite rejection. Preserve both changes.
-    const alreadyRecorded = previousFailure &&
-      previousFailure.transitionNote!.includes("class=slack-invalid-blocks ") === (failureClass === "slack-invalid-blocks");
+    const alreadyRecorded = Boolean(
+      previousFailure?.transitionNote?.startsWith("slack-owner-notification-transport-failed ") &&
+      previousFailure.transitionNote.includes("class=slack-invalid-blocks ") === (failureClass === "slack-invalid-blocks"),
+    );
     if (alreadyRecorded) return;
     opts.queueRepo.update({
       qitemId: p.qitemId,
@@ -694,6 +765,98 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       })
     : async () => ({ ok: false as const, class: "slack-outbound-not-configured", detail: "bot token or channel missing" });
 
+  const { attemptedPath: relayAttemptedPath, deliveredPath: relayDeliveredPath } = relayStatePaths(opts.home);
+  const relayAttempted = new SeenStore(relayAttemptedPath);
+  const relayDelivered = new SeenStore(relayDeliveredPath);
+  const relayTransport = createRelayOutboundTransport({
+    attempted: relayAttempted,
+    delivered: relayDelivered,
+    outboundSeen,
+    fetchImpl: opts.fetchImpl,
+    stopSignal: runCtl.signal,
+    log,
+    resolveProfile: (connectorRef) => {
+      const reg = registrySurface.loadHumanRegistry(opts.home);
+      const loaded = loadRelayProfiles(opts.home, reg.ok ? { entities: reg.entities } : undefined);
+      if (!loaded.ok && loaded.registryError) {
+        return { ok: false, reason: loaded.registryError };
+      }
+      const profile = loaded.get(connectorRef);
+      if (!profile) {
+        return { ok: false, reason: `relay profile "${connectorRef}" is not registered` };
+      }
+      if (!profile.ready || !profile.credentials) {
+        return { ok: false, reason: profile.reason };
+      }
+      return {
+        ok: true,
+        connectorRef: profile.connectorRef,
+        url: profile.credentials.url,
+        outboundToken: profile.credentials.outboundToken,
+      };
+    },
+    hasAcceptedReceipt: ({ qitemId, notificationKey }) =>
+      opts.queueRepo.hasRelayOwnerNotificationReceipt(qitemId, notificationKey),
+    onAccepted: (info) => {
+      opts.queueRepo.recordRelayOwnerNotificationAccepted({
+        qitemId: info.qitemId,
+        notificationKey: info.notificationKey,
+        deliveryId: info.deliveryId,
+        connectorRef: info.connectorRef,
+        replyRef: info.replyRef,
+        replyRefHash: info.refHash,
+        revision: info.revision,
+        episodeKey: info.episodeKey,
+        level: info.level,
+        kind: info.kind,
+        humanIntent: info.humanIntent,
+        closeUpdate: !info.digestId,
+        ...(info.digestId ? { digest: info.digestId } : {}),
+      });
+    },
+    onTransportFailed: (p, failureClass, detail) => recordTransportFailed(p, failureClass, detail, false, true),
+    release: (q) => releaseRef(q),
+  });
+
+  const prepareDecision = (decision: Parameters<SubsystemDeliverFn>[0]) =>
+    prepareRelayDecision(decision, {
+      loadHumanRegistry: () => registrySurface.loadHumanRegistry(opts.home),
+      queueRepo: opts.queueRepo,
+      resolveOutcome: (p) => {
+        let ruled: DeliveryDecision | null = null;
+        try { ruled = p.qitemId ? decideForPayload(p) : null; } catch { ruled = null; }
+        if (ruled) {
+          if (ruled.outcome === "interrupt" && ruled.deferMinutes === undefined) return "interrupt";
+          if (ruled.outcome === "digest") return "digest";
+          return "notify";
+        }
+        const interrupt = Boolean(
+          p.ownerNotificationLevel && ownerNotificationLevelAtLeast(p.ownerNotificationLevel, cfg.minimumLevelThatInterrupts),
+        );
+        return interrupt ? "interrupt" : "notify";
+      },
+    });
+
+  const isRelayDecision = (decision: Parameters<SubsystemDeliverFn>[0], p: OutboundPostPayload): boolean => {
+    const carry = p as RelayPayloadCarry;
+    if (carry.relayConnectorRef || carry.relayEnvelope) return true;
+    try {
+      const reg = registrySurface.loadHumanRegistry(opts.home);
+      return resolvePrimaryRelayBinding(p.destinationSession ?? decision.entityBindingRef, reg) !== null;
+    } catch {
+      return false;
+    }
+  };
+
+  const targetDeliverFor = (decision: Parameters<SubsystemDeliverFn>[0], p: OutboundPostPayload): SubsystemDeliverFn => {
+    if (!isRelayDecision(decision, p)) return deliver;
+    return (d) => {
+      const carry = (d.payload ?? {}) as RelayPayloadCarry;
+      const readyDecision = carry.relayConnectorRef && carry.relayEnvelope ? d : prepareDecision(d);
+      return relayTransport.deliver(readyDecision);
+    };
+  };
+
   // OPR.0.5.6.1 — decision containment ahead of the transport: log-class and
   // digest-class produce ZERO post attempts (AM-F5 tooth); an away-escalation
   // deferral arms the watchdog substrate and posts nothing now (AM-F1); an
@@ -753,8 +916,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // contents, and receipts bind to exactly the members posted under it. An earlier attempt of the original that may
   // have landed is resolved by the reconciler first. If the quiet state can't be read, nothing posts (see the catch).
   const deliverDigestPost = async (decision: Parameters<SubsystemDeliverFn>[0], p: OutboundPostPayload) => {
-    const settled = await resolveEarlierAttempt(decision);
-    if (settled) return settled;
+    const relay = isRelayDecision(decision, p);
+    const targetDeliver = targetDeliverFor(decision, p);
+    if (!relay) {
+      const settled = await resolveEarlierAttempt(decision);
+      if (settled) return settled;
+    }
     const recipient = (p.destinationSession ?? "").split("@")[0] ?? "";
     let quiet: ReturnType<typeof quietHoldFor>;
     try {
@@ -763,7 +930,10 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // An attempted digest (it may be in Slack) is retained: acked, the next flush would mint the ask again from the
       // row as it is now. A never-attempted one is acked: its members keep their digest notes, so the next flush
       // selects them again. A store check only: no Slack read on a failure path.
-      if ("attempted" in deliver && (deliver as { attempted: (d: typeof decision) => boolean }).attempted(decision)) {
+      const wasAttempted = relay
+        ? relayTransport.wasAttempted(decision)
+        : "attempted" in deliver && (deliver as { attempted: (d: typeof decision) => boolean }).attempted(decision);
+      if (wasAttempted) {
         log(`digest post ${decision.decisionId} retained: quiet hours couldn't be read: ${(error as Error).message}`);
         return { ok: false as const, class: "quiet-unreadable", detail: (error as Error).message };
       }
@@ -788,7 +958,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       holdForQuiet({ queueRepo: opts.queueRepo, jobsRepo, qitemId: m.qitemId, entityId: recipient, hold: { ...quiet!, notificationKey: m.notificationKey } });
       return false;
     });
-    if (kept.length === members.length) return deliver(decision); // unchanged: the original, as it is
+    if (kept.length === members.length) return targetDeliver(decision); // unchanged: the original, as it is
     if (kept.length === 0 || !aggregate) return { ok: true as const }; // nothing left to post under it
     const keptIds = new Set(kept.map((m) => m.qitemId));
     const body = String(p.body ?? "").split("\n").filter((line) => [...keptIds].some((id) => line.endsWith(`[${id}]`))).join("\n");
@@ -796,12 +966,26 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     const keptId = `${decision.decisionId}:kept:${createHash("sha256").update(kept.map((m) => m.notificationKey).sort().join(",")).digest("hex").slice(0, 16)}`;
     // Durable first: the new decision is in the buffer before the original is acked (returning ok). A crash between the
     // two replays the original, which computes the same kept set and id; the dispatcher accepts the pending id once.
-    const res = selfDispatch(keptId, { ...p, memberReceipts: kept, body, summary });
+    const { relayConnectorRef: _rc, relayEnvelope: _re, relayRevision: _rr, ...restPayload } = p as RelayPayloadCarry;
+    const res = selfDispatch(keptId, { ...restPayload, memberReceipts: kept, body, summary });
     return res.ok ? { ok: true as const } : { ok: false as const, class: "kept-dispatch-refused", detail: res.error };
   };
 
   const engineDeliver: SubsystemDeliverFn = async (decision) => {
     const p = ((decision as { payload?: unknown }).payload ?? {}) as OutboundPostPayload & { deliveryDeferralFire?: boolean };
+    const relay = isRelayDecision(decision, p);
+    const targetDeliver = targetDeliverFor(decision, p);
+    if (relay) {
+      let alreadyAttempted = false;
+      try {
+        alreadyAttempted = relayTransport.wasAttempted(decision);
+      } catch {
+        return targetDeliver(decision);
+      }
+      if (alreadyAttempted) {
+        return targetDeliver(decision);
+      }
+    }
     // The decision-resolved notice is written at closure, so a closed row is its normal case.
     if (replayedAtStart.has(decision.decisionId) && p.qitemId && p.ownerNotificationKind !== "human-decision-resolved"
       && !(p as { deliveryDigestPost?: boolean }).deliveryDigestPost) {
@@ -827,8 +1011,10 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         releaseRef(p.qitemId);
         return { ok: true as const };
       }
-      const settled = await resolveEarlierAttempt(decision);
-      if (settled) return settled;
+      if (!relay) {
+        const settled = await resolveEarlierAttempt(decision);
+        if (settled) return settled;
+      }
       const verdict = !p.qitemId ? "post" : await confirmReleaseAtPost({
         queueRepo: opts.queueRepo,
         jobsRepo: new WatchdogJobsRepository(opts.queueRepo.db),
@@ -838,7 +1024,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         qitemId: p.qitemId,
         notificationKey: key,
       });
-      if (verdict === "post") return deliver(decision);
+      if (verdict === "post") return targetDeliver(decision);
       // Declined (the row says why) or couldn't be checked (nothing written): either way nothing posts now. Acking is
       // safe because the window's release job owns redelivery until the ask has a receipt or a disposition; keeping it
       // buffered would wait for a restart and block the job's own re-dispatch of the same decision id.
@@ -859,21 +1045,27 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // leniently. A log that exists but can't be read is unknown, not "never attempted": the decision stays in the buffer,
       // with no post (delivery's reconcile reads the same log) and no not-posted record, until it reads.
       try {
-        attempted.statuses();
+        (relay ? relayAttempted : attempted).statuses();
       } catch (error) {
         log(`re-shown ${decision.decisionId} retained: the attempt log couldn't be read (${(error as Error).message})`);
         return { ok: false as const, class: "re-present-attempt-log-unreadable", detail: (error as Error).message };
       }
       // An earlier attempt of this decision found in Slack goes to delivery, which records it.
-      const landing = "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<string> }).landing(decision) : "unattempted";
-      if (landing === "found" || landing === "partial") return deliver(decision);
+      const landing = !relay && "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<string> }).landing(decision) : "unattempted";
+      if (landing === "found" || landing === "partial") return targetDeliver(decision);
+      const regForVerdict = registrySurface.loadHumanRegistry(opts.home);
+      const alertsForVerdict =
+        regForVerdict.ok || regForVerdict.noHumans
+          ? await ports.listHumanAlerts({ minimumLevel: cfg.minimumLevelThatPosts })
+          : undefined;
       const verdict = await currentAskVerdict({
         queueRepo: opts.queueRepo,
         home: opts.home,
-        registry: { loadHumanRegistry: () => registrySurface.loadHumanRegistry(opts.home) },
+        registry: { loadHumanRegistry: () => regForVerdict },
         entityId: (p.destinationSession ?? "").split("@")[0] ?? "",
         qitemId: p.qitemId,
         notificationKey: key,
+        ...(alertsForVerdict ? { alerts: alertsForVerdict } : {}),
       });
       if (verdict.kind !== "post") {
         // One whose earlier attempt Slack couldn't rule out may already be posted: it's never recorded as not posted, and
@@ -894,12 +1086,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         releaseRef(p.qitemId);
         return { ok: true as const };
       }
-      return deliver(decision);
+      return targetDeliver(decision);
     }
     // A post confirmed partly in Slack finishes without consulting quiet hours, so it is resolved before the decision
     // (which reads them). Only a started multipart post is checked here, from the stores first, so an ordinary
     // retry isn't scanned twice; any other attempted decision is resolved at the gate below.
-    const started = "unfinished" in deliver && (deliver as { unfinished: (d: typeof decision) => boolean }).unfinished(decision);
+    const started = !relay && "unfinished" in deliver && (deliver as { unfinished: (d: typeof decision) => boolean }).unfinished(decision);
     if (started) {
       const settled = await resolveEarlierAttempt(decision);
       if (settled) return settled;
@@ -911,7 +1103,10 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // An attempted decision (it may be partly or wholly in Slack) is retained and nothing posts: acking it would drop
       // the post's missing parts and let the sweep offer the ask again under a new id, posting it from the start. Its
       // replay decides again once the quiet state reads. A store check only: no Slack read on a failure path.
-      if ("attempted" in deliver && (deliver as { attempted: (d: typeof decision) => boolean }).attempted(decision)) {
+      const wasAttempted = relay
+        ? relayTransport.wasAttempted(decision)
+        : "attempted" in deliver && (deliver as { attempted: (d: typeof decision) => boolean }).attempted(decision);
+      if (wasAttempted) {
         log(`delivery decision for attempted ${decision.decisionId} couldn't be made; retained: ${(error as Error).message}`);
         return { ok: false as const, class: "quiet-unreadable", detail: (error as Error).message };
       }
@@ -927,7 +1122,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       releaseRef(p.notificationKey ?? p.qitemId!);
       return { ok: true as const };
     }
-    if (!started && ruled && (ruled.outcome === "log" || (ruled.outcome === "hold" && ruled.quietHold)
+    if (!relay && !started && ruled && (ruled.outcome === "log" || (ruled.outcome === "hold" && ruled.quietHold)
       || ruled.outcome === "digest" || ruled.deferMinutes !== undefined)) {
       const settled = await resolveEarlierAttempt(decision);
       if (settled) return settled;
@@ -983,20 +1178,21 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           });
         } catch (e) {
           log(`deferral arm failed for ${p.qitemId}: ${(e as Error).message} — falling through to immediate notify-class delivery (fail-loud beats silent loss)`);
-          return deliver(decision);
+          return targetDeliver(decision);
         }
         outboundSeen.mark(episodeKey, "interrupt-deferred");
         releaseRef(p.qitemId);
         return { ok: true as const };
       }
     }
-    return deliver(decision);
+    return targetDeliver(decision);
   };
 
   const wire = buildInProcessWire({
     home: opts.home,
-    ops: outboundReady ? [OUTBOUND_OP] : [],
-    deliver: outboundReady ? engineDeliver : deliver,
+    ops: anyOutboundEnabled ? [OUTBOUND_OP] : [],
+    ...(anyOutboundEnabled ? { prepare: prepareDecision } : {}),
+    deliver: anyOutboundEnabled ? engineDeliver : deliver,
     log,
   });
   selfDispatch = (decisionId, payload) =>
@@ -1026,10 +1222,23 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     ...(relayed ? { relayed: true } : {}),
   });
 
-  if (outboundReady) {
+  if (anyOutboundEnabled) {
+    const driverQueue = outboundReady
+      ? ports
+      : {
+          listHumanAlerts: async (filter: Parameters<typeof ports.listHumanAlerts>[0]) => {
+            const alerts = await ports.listHumanAlerts(filter);
+            try {
+              const reg = registrySurface.loadHumanRegistry(opts.home);
+              return alerts.filter((alert) => resolvePrimaryRelayBinding(alert.destinationSession, reg) !== null);
+            } catch {
+              return [];
+            }
+          },
+        };
     const driver = new SlackOutboundDriver({
       home: opts.home,
-      queue: ports,
+      queue: driverQueue,
       seen: outboundSeen,
       filter: { minimumLevel: cfg.minimumLevelThatPosts },
       dispatch: (op, ref, payload) => wire.dispatcher.dispatch(op, ref, payload),

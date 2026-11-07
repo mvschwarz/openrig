@@ -256,8 +256,9 @@ const CLAUDE_STATUS_WARNINGS = [
   /^Update available! Run: \S.*$/,
   // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
   /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
-  // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30) or "Restart to apply".
-  /^✔ Update installed · (?:\/restart|Restart) to apply$/,
+  // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30), "Restart to apply", or
+  // "Restart to update" on its own row (Claude 2.1.319, #2605).
+  /^✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))$/,
 ];
 // Claude can draw noninteractive UI rows after its mode footer. They do not
 // replace the composer and should only be skipped when they match a known row.
@@ -1045,6 +1046,21 @@ function pickDefined(result: object, keys: readonly string[]): Record<string, un
 /** Observation must never alter a transport result: any sink failure is swallowed here. */
 function safeRecord(sink: CaptureObserverSink, input: ObservationInput): void {
   try { sink.record(input); } catch { /* observer failure never reaches the caller */ }
+}
+
+/** transport.draft_delivery as the daemon reads it. deliver is the product default, so only a readable `refuse` opts out:
+ *  an unset, unreadable or invalid value follows the default, as other settings fall back to theirs. */
+export function draftDeliveryAllows(read: () => unknown): boolean {
+  try { return read() !== "refuse"; } catch { return true; }
+}
+
+/** The setting's value, taking a valid OPENRIG_TRANSPORT_DRAFT_DELIVERY first: the environment outranks the file, and the
+ *  settings store reads the file before its environment override, so an unreadable config.json would otherwise turn an
+ *  explicit environment refuse into the default. Valid means exactly what the store accepts (no trimming); anything else
+ *  comes from the store, which drops an invalid environment value for the file's. */
+export function readDraftDeliverySetting(resolve: () => unknown, env: NodeJS.ProcessEnv = process.env): unknown {
+  const fromEnv = env.OPENRIG_TRANSPORT_DRAFT_DELIVERY;
+  return fromEnv === "refuse" || fromEnv === "deliver" ? fromEnv : resolve();
 }
 
 export function mapPaneState(state: PaneActivityClassification["state"]): AgentActivity["state"] {
@@ -2069,6 +2085,9 @@ interface SessionTransportDeps {
   runtimeAdapters?: Record<string, TransportReadinessChecker>;
   /** transport.verify_input_box, read per verified Claude Code or Codex send. Absent means off. */
   verifyInputBox?: () => boolean;
+  /** Whether transport.draft_delivery lets this send through a person's draft, read per send that meets one. The daemon
+   *  wires draftDeliveryAllows (deliver by default); a transport built without it keeps refusing. */
+  deliverOverDraft?: () => boolean;
 }
 
 interface SessionRow { node_id: string; session_name: string; }
@@ -2122,6 +2141,7 @@ export class SessionTransport {
   private runtimeAdapters: Record<string, TransportReadinessChecker>;
   private inFlightReconciliations = new Map<string, Promise<boolean>>();
   private verifyInputBox?: () => boolean;
+  private deliverOverDraft?: () => boolean;
 
   constructor(deps: SessionTransportDeps) {
     this.contextUsageStore = deps.contextUsageStore;
@@ -2141,6 +2161,7 @@ export class SessionTransport {
     this.listProcesses = deps.listProcesses;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.verifyInputBox = deps.verifyInputBox;
+    this.deliverOverDraft = deps.deliverOverDraft;
     const guard = this.tmuxAdapter.deliveryGuard;
     if (guard && (this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>).some(c => c.name === "guard_delivery")) this.guardedDelivery = new DraftAwareDelivery(this.db, guard,
       (session, text, opts) => this.sendUnguarded(session, text, opts));
@@ -2904,7 +2925,10 @@ export class SessionTransport {
       let failure = "";
       const failed = (message: string) => { failure = ` Leaving it failed: ${message.trim().replace(/\s+/g, " ").replace(/\.$/, "")}.`; };
       try {
-        const left = typeof this.tmuxAdapter.cancelPaneMode === "function" ? await this.tmuxAdapter.cancelPaneMode(readTarget) : undefined;
+        // Leave through the seat's address, as the text and Enter writes do; the guard writes to its bound pane. A raw
+        // pane id can match a stale binding elsewhere (tmux reuses ids after a server restart), and the guard refuses an
+        // ambiguous target before writing anything, so the mode was never left.
+        const left = typeof this.tmuxAdapter.cancelPaneMode === "function" ? await this.tmuxAdapter.cancelPaneMode(sessionName) : undefined;
         if (left && !left.ok) failed(left.message);
       } catch (error) { failed(error instanceof Error ? error.message : String(error)); }
       if (await readPaneInMode() !== true) return null;
@@ -3316,7 +3340,9 @@ export class SessionTransport {
         if (!audit.ok) sendAdvisory = "prompt-override: audit unavailable (" + audit.reason + "); input sent anyway.";
       }
       if (readiness.state === "needs_input") {
-        if (!promptOverride) {
+        if (!promptOverride && this.deliversOverDraft(readiness, opts)) {
+          sendAdvisory = [sendAdvisory, `'${sessionName}' had a draft at its prompt and transport.draft_delivery is deliver: this message was pasted at the current cursor into that draft (normally its end), then Enter was sent to submit the combined input. The delivery result says whether that was confirmed.`].filter(Boolean).join(" ");
+        } else if (!promptOverride) {
           return {
             ok: false,
             sessionName,
@@ -3801,6 +3827,15 @@ export class SessionTransport {
       if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
     }
     return paneCommand.replace(/^-/, "");
+  }
+
+  /** transport.draft_delivery = deliver (the default): a person's draft at the prompt is the one needs_input an ordinary send or work
+   *  notice goes through. Menus, permission prompts and hook-reported requests still refuse, and so does a send that must
+   *  not join a draft (preserveInput: managed compaction). A send that waits for idle keeps waiting. */
+  private deliversOverDraft(readiness: AgentActivity, opts?: SendOpts): boolean {
+    if (readiness.state !== "needs_input" || readiness.reason !== "prompt_draft" || readiness.evidenceSource !== "pane_heuristic") return false;
+    if (opts?.preserveInput) return false;
+    try { return this.deliverOverDraft?.() === true; } catch { return false; }
   }
 
   private async classifySendReadiness(input: {

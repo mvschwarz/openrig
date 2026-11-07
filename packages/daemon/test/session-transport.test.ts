@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
@@ -15,7 +19,7 @@ import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { classifyPaneActivity, classifyStyledFrame, hasExpectedStagedText, inspectStartupStagedText, probeSessionActivity, promptTextIsFaint, SessionTransport, type TransportReadinessChecker } from "../src/domain/session-transport.js";
+import { classifyPaneActivity, classifyStyledFrame, draftDeliveryAllows, readDraftDeliverySetting, hasExpectedStagedText, inspectStartupStagedText, probeSessionActivity, promptTextIsFaint, SessionTransport, type TransportReadinessChecker } from "../src/domain/session-transport.js";
 import { SeatDeliveryGuard, resolveGuardTarget, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
@@ -575,6 +579,7 @@ describe("SessionTransport", () => {
     now?: () => Date;
     eventBus?: EventBus;
     runtimeAdapters?: Record<string, TransportReadinessChecker>;
+    deliverOverDraft?: () => boolean;
   }) {
     return new SessionTransport({
       db,
@@ -671,6 +676,135 @@ describe("SessionTransport", () => {
     expect(callOrder).toEqual(["sendText", "sendKeys:Enter"]);
   });
 
+  describe("transport.draft_delivery: a person's draft at the prompt", () => {
+    const DRAFT = ["❯ I am still typing a message", "  ⏵⏵ accept edits on (shift+tab to cycle)"].join("\n");
+    function draftPane(capture = DRAFT) {
+      const callOrder: string[] = [];
+      const tmux = mockTmux({
+        capturePaneContent: async () => capture,
+        sendText: async (_t, text) => { callOrder.push(`sendText:${text}`); return { ok: true }; },
+        sendKeys: async (_t, keys) => { callOrder.push(`sendKeys:${keys.join(",")}`); return { ok: true }; },
+      });
+      return { tmux, callOrder };
+    }
+
+    it("refuses when the setting is refuse, the opt-out", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux, { deliverOverDraft: () => false }).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false, activity: { reason: "prompt_draft" } });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("keeps refusing in a transport built without the daemon's setting reader", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false, activity: { reason: "prompt_draft" } });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("pastes into the draft at the cursor and sends Enter for the combined input when the setting is deliver", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux, { deliverOverDraft: () => true }).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: true });
+      expect(callOrder).toEqual(["sendText:hello", "sendKeys:Enter"]);
+      expect(result.warning).toContain("transport.draft_delivery is deliver");
+    });
+
+    it("still refuses a numbered choice under deliver: a message never answers a menu", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane(["› 1. Yes, continue", "  2. Yes, allow all tools", "  3. No, cancel"].join("\n"));
+      const result = await createTransport(tmux, { deliverOverDraft: () => true }).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", activity: { state: "needs_input", reason: "selection_prompt" } });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("still refuses a hook-reported permission prompt under deliver, even over a draft-shaped pane", async () => {
+      seedCanonicalRig();
+      const eventBus = new EventBus(db);
+      const agentActivityStore = new AgentActivityStore({ db, eventBus });
+      agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Notification", subtype: "permission_prompt" });
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux, { agentActivityStore, deliverOverDraft: () => true }).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", activity: { state: "needs_input", evidenceSource: "runtime_hook" } });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("keeps refusing a send that must not join a draft (managed compaction's preserveInput)", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux, { deliverOverDraft: () => true }).send("dev-impl@my-rig", "/compact", { preserveInput: true });
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", activity: { reason: "prompt_draft" } });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("keeps waiting for idle when the caller asked to wait", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const transport = createTransport(tmux, { deliverOverDraft: () => true, sleep: async () => undefined, waitForIdlePollMs: 1 });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false });
+      expect(callOrder).toEqual([]);
+    });
+
+    it("reads the setting as the daemon does: only a readable refuse opts out of the deliver default", () => {
+      expect(draftDeliveryAllows(() => "refuse")).toBe(false);
+      expect(draftDeliveryAllows(() => "deliver")).toBe(true);
+      expect(draftDeliveryAllows(() => undefined)).toBe(true);
+      expect(draftDeliveryAllows(() => "something-else")).toBe(true);
+      expect(draftDeliveryAllows(() => { throw new Error("settings unreadable"); })).toBe(true);
+    });
+
+    it("honours an explicit environment refuse when config.json can't be parsed (the real settings reader)", () => {
+      const dir = mkdtempSync(join(tmpdir(), "draft-delivery-settings-"));
+      try {
+        const malformed = join(dir, "config.json");
+        writeFileSync(malformed, "{ not json");
+        const store = new SettingsStore(malformed);
+        const fromStore = () => store.resolveOne("transport.draft_delivery").value;
+        // The store reads the file before its environment override, so it throws here whatever the environment says.
+        expect(fromStore).toThrow(/malformed/);
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: "refuse" }))).toBe(false);
+        // A padded value isn't one the store accepts, so it goes to the store, as the store's own resolver would.
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: " refuse " }))).toBe(true);
+        // No valid opt-out: an unreadable file and an invalid environment value both follow the deliver default.
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, {}))).toBe(true);
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: "maybe" }))).toBe(true);
+
+        // A readable file's refuse still applies without an environment value, and the environment outranks it.
+        const readable = join(dir, "readable.json");
+        writeFileSync(readable, JSON.stringify({ transport: { draftDelivery: "refuse" } }));
+        const fileStore = new SettingsStore(readable);
+        const fromFile = () => fileStore.resolveOne("transport.draft_delivery").value;
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromFile, {}))).toBe(false);
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromFile, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: "deliver" }))).toBe(true);
+        // A padded environment value doesn't defeat the file's refuse: the store's own resolver rejects it (it reads the
+        // real environment) and reads the file, and the early read defers to it.
+        const saved = process.env.OPENRIG_TRANSPORT_DRAFT_DELIVERY;
+        process.env.OPENRIG_TRANSPORT_DRAFT_DELIVERY = " deliver ";
+        try {
+          expect(fileStore.resolveOne("transport.draft_delivery")).toMatchObject({ value: "refuse", source: "file" });
+          expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromFile))).toBe(false);
+        } finally {
+          if (saved === undefined) delete process.env.OPENRIG_TRANSPORT_DRAFT_DELIVERY;
+          else process.env.OPENRIG_TRANSPORT_DRAFT_DELIVERY = saved;
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps refusing when a transport's own reader throws (the daemon's reader never does)", async () => {
+      seedCanonicalRig();
+      const { tmux, callOrder } = draftPane();
+      const result = await createTransport(tmux, { deliverOverDraft: () => { throw new Error("settings unreadable"); } }).send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input" });
+      expect(callOrder).toEqual([]);
+    });
+  });
+
   describe("#331: pane in tmux copy mode", () => {
     // A pane that stays in its mode until cancelPaneMode runs, recording every call in order.
     function modalPane(opts: { leaves: boolean; callOrder: string[]; capture?: string }) {
@@ -692,6 +826,40 @@ describe("SessionTransport", () => {
       const result = await transport.send("dev-impl@my-rig", "hello");
       expect(result.ok).toBe(true);
       expect(callOrder).toEqual(["cancelPaneMode", "sendText", "sendKeys:Enter"]);
+    });
+
+    it("leaves the mode through the seat's address when a stale binding elsewhere names the same pane", async () => {
+      const { node } = seedCanonicalRig();
+      sessionRegistry.updateBinding(node.id, { tmuxPane: "%27" });
+      // tmux reuses pane ids after a server restart: another rig's binding can still name %27.
+      const studio = rigRepo.createRig("studio-build");
+      const stale = rigRepo.addNode(studio.id, "sdk.impl", { role: "worker", runtime: "claude-code" });
+      sessionRegistry.registerSession(stale.id, "sdk-impl@studio-build");
+      sessionRegistry.updateBinding(stale.id, { tmuxSession: "sdk-impl@studio-build", tmuxPane: "%27" });
+      // The guard can't resolve the raw pane id to one seat, so a write addressed to it is refused before any key.
+      expect(resolveGuardTarget(db, "%27")).toBeNull();
+      expect(resolveGuardTarget(db, "dev-impl@my-rig")).toMatchObject({ nodeId: node.id, pane: "%27" });
+      const callOrder: string[] = [];
+      const tmux = modalPane({ leaves: true, callOrder });
+      const modeReads: string[] = [];
+      let left = false;
+      tmux.isPaneInMode = vi.fn(async (target: string) => { modeReads.push(target); return !left; });
+      const cancelTargets: string[] = [];
+      // As the adapter's guarded write does: an unresolvable target writes nothing, so the pane stays in its mode.
+      tmux.cancelPaneMode = vi.fn(async (target: string) => {
+        cancelTargets.push(target); callOrder.push("cancelPaneMode");
+        if (!resolveGuardTarget(db, target)) return { ok: false as const, code: "guard_target_unknown", message: `Cannot establish managed input target ${target}; no input written.` };
+        left = true;
+        return { ok: true as const };
+      });
+      const transport = createTransport(tmux);
+
+      const result = await transport.send("dev-impl@my-rig", "hello");
+      // The person's harm first: the message is delivered and submitted, not refused as pane_in_mode.
+      expect(result).toMatchObject({ ok: true });
+      expect(callOrder).toEqual(["cancelPaneMode", "sendText", "sendKeys:Enter"]);
+      expect(cancelTargets).toEqual(["dev-impl@my-rig"]);
+      expect(modeReads.every(target => target === "%27")).toBe(true);
     });
 
     it("leaves the mode before a submitOnly Enter", async () => {

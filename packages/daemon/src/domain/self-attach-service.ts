@@ -160,7 +160,7 @@ export class SelfAttachService {
       runtime: node.runtime ?? opts.runtime,
       cwd: node.cwd ?? opts.cwd,
       displayName: opts.displayName,
-      context: this.resolveContext(node.logicalId, rig.rig.name, opts.displayName, opts.context),
+      context: this.resolveContext(node.id, node.logicalId, rig.rig.name, opts.displayName, opts.context),
     });
   }
 
@@ -203,7 +203,7 @@ export class SelfAttachService {
         nodeId: node.id,
         logicalId,
         displayName: opts.displayName,
-        context: this.resolveContext(logicalId, rig.rig.name, opts.displayName, opts.context),
+        context: this.resolveContext(node.id, logicalId, rig.rig.name, opts.displayName, opts.context),
       });
       return attached;
     });
@@ -334,6 +334,7 @@ export class SelfAttachService {
   }
 
   private resolveContext(
+    nodeId: string,
     logicalId: string,
     rigName: string,
     displayName?: string,
@@ -343,9 +344,16 @@ export class SelfAttachService {
       return context;
     }
     const explicit = context?.attachmentType === "external_cli" ? context.sessionName?.trim() : displayName?.trim();
+    let sessionName = `${logicalId.replace(/\./g, "-")}@${rigName}`;
+    if (explicit) {
+      // Release keeps history; an ordinary re-attach is not an identity repair.
+      const savedName = this.db.prepare("SELECT 1 FROM sessions WHERE node_id=? AND session_name=? LIMIT 1")
+        .get(nodeId, explicit);
+      sessionName = explicit.includes("@") || savedName ? explicit : `${explicit}@${rigName}`;
+    }
     return {
       attachmentType: "external_cli",
-      sessionName: explicit || `${logicalId.replace(/\./g, "-")}@${rigName}`,
+      sessionName,
     };
   }
 

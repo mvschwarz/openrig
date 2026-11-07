@@ -64,15 +64,16 @@ function fixture() {
   };
   const revision = async (id: string) => (await (await app.request(`/api/queue/${id}`)).json() as { decisionRevision?: unknown }).decisionRevision;
   const act = async (body: Record<string, unknown>) => {
+    const actor = (body.actorSession as string | undefined) ?? PERSON;
     const response = await app.request("/api/mission-control/action", { method: "POST",
-      headers: { "Content-Type": "application/json", "X-OpenRig-Session": PERSON }, body: JSON.stringify({ actorSession: PERSON, ...body }) });
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": actor }, body: JSON.stringify({ actorSession: actor, ...body }) });
     return { status: response.status, body: await response.json() as Record<string, any> };
   };
   const count = (sql: string, id: string) => (db.prepare(sql).get(id) as { n: number }).n;
   const written = (id: string) => ({ row: repo.getById(id), transitions: repo.listTransitions(id).length,
     replies: count("SELECT count(*) n FROM queue_items WHERE reply_to = ?", id),
     actions: count("SELECT count(*) n FROM mission_control_actions WHERE qitem_id = ?", id) });
-  return { db, repo, ask, park, permissionAsk, revision, act, written };
+  return { db, repo, contract, ask, park, permissionAsk, revision, act, written };
 }
 
 describe("an opt-in decision revision on the settling verbs (#2446)", () => {
@@ -198,6 +199,188 @@ describe("an opt-in decision revision on the settling verbs (#2446)", () => {
     f.db.prepare("UPDATE queue_items SET summary = 'Ship? (relabelled)', ts_updated = '2099-01-01T00:00:00.000Z', last_nudge_attempt = '2099-01-01T00:00:00.000Z', last_nudge_result = 'delivered', state = 'in-progress', claimed_at = '2099-01-01T00:00:00.000Z' WHERE qitem_id = ?").run(id);
     expect(await f.revision(id)).toBe(read);
     expect(await f.act({ verb: "approve", qitemId: id, expectedRevision: read })).toMatchObject({ status: 200, body: { closedQitem: { state: "done" } } });
+  });
+
+  it("repairs a direct-answer partial commit on retry without duplicating the reply row, then reconciles subsequent retries", async () => {
+    const f = fixture();
+    const row = await f.repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Ship the relay?", summary: "Ship?", humanIntent: "decision", nudge: false });
+    const id = row.qitemId;
+    const read = await f.revision(id);
+
+    const original = f.repo.createHumanAnswer.bind(f.repo);
+    vi.spyOn(f.repo, "createHumanAnswer").mockImplementationOnce(async input => {
+      await original(input);
+      throw new Error("simulated crash after answer row commit before audit");
+    });
+
+    await expect(
+      f.contract.act({
+        verb: "answer",
+        qitemId: id,
+        actorSession: PERSON,
+        decision: "Ship it now",
+        expectedRevision: read as string,
+        auditNotes: { operationId: "relay-op-1" },
+      }),
+    ).rejects.toThrow("simulated crash after answer row commit before audit");
+
+    expect(f.written(id)).toMatchObject({ replies: 1, actions: 0, row: { state: "pending" } });
+    expect(await f.revision(id)).not.toBe(read);
+
+    const retry = await f.act({
+      verb: "answer",
+      qitemId: id,
+      decision: "Ship it now",
+      expectedRevision: read,
+      auditNotes: { operationId: "relay-op-1" },
+    });
+    expect(retry.status).toBe(200);
+    expect(f.written(id)).toMatchObject({ replies: 1, actions: 1, row: { state: "done" } });
+
+    const replyRow = f.db.prepare("SELECT tags FROM queue_items WHERE reply_to = ?").get(id) as { tags: string };
+    const tags = JSON.parse(replyRow.tags) as string[];
+    expect(tags.some(t => t.startsWith("mc-operation:"))).toBe(true);
+
+    const third = await f.act({
+      verb: "answer",
+      qitemId: id,
+      decision: "Ship it now",
+      expectedRevision: read,
+      auditNotes: { operationId: "relay-op-1" },
+    });
+    expect(third).toMatchObject({ status: 200, body: { reconciled: true } });
+    expect(f.written(id)).toMatchObject({ replies: 1, actions: 1 });
+  });
+
+  it("recovers from a crash between ask close and audit record with one answer, one close transition, and one audit row", async () => {
+    const f = fixture();
+    const id = await f.ask();
+    const read = await f.revision(id);
+
+    // Fault injected at audit record time (after resolveDirectHumanReply inside the atomic close+audit transaction)
+    const actionLog = (f.contract as unknown as { actionLog: MissionControlActionLog }).actionLog;
+    const origRecord = actionLog.record.bind(actionLog);
+    let stateAtAuditCall: string | undefined;
+    vi.spyOn(actionLog, "record").mockImplementationOnce((entry) => {
+      stateAtAuditCall = f.repo.getById(id)?.state;
+      throw new Error("simulated crash after ask close before audit");
+      return origRecord(entry);
+    });
+
+    await expect(
+      f.contract.act({
+        verb: "answer",
+        qitemId: id,
+        actorSession: PERSON,
+        decision: "Ship Option A",
+        expectedRevision: read as string,
+        auditNotes: { operationId: "relay-close-audit-op-1" },
+      }),
+    ).rejects.toThrow("simulated crash after ask close before audit");
+
+    expect(stateAtAuditCall).toBe("done");
+    // Atomic rollback of close+audit leaves the ask pending with only the 1 tagged reply row
+    expect(f.written(id)).toMatchObject({ replies: 1, actions: 0, row: { state: "pending" } });
+
+    // Conflicting payload or different operationId under the original revision still rejects (409)
+    expect(
+      await f.act({
+        verb: "answer",
+        qitemId: id,
+        decision: "Different words",
+        expectedRevision: read,
+        auditNotes: { operationId: "relay-close-audit-op-1" },
+      }),
+    ).toMatchObject({ status: 409, body: { error: "decision_revision_changed" } });
+
+    const retry = await f.act({
+      verb: "answer",
+      qitemId: id,
+      decision: "Ship Option A",
+      expectedRevision: read,
+      auditNotes: { operationId: "relay-close-audit-op-1" },
+    });
+    expect(retry.status).toBe(200);
+    expect(f.written(id)).toMatchObject({ replies: 1, actions: 1, row: { state: "done" } });
+    const resolvedTransitions = f.repo
+      .listTransitions(id)
+      .filter((t) => t.ownerNotificationKind === "human-decision-resolved");
+    expect(resolvedTransitions).toHaveLength(1);
+  });
+
+  it("enforces guarded retry non-bypass invariants across different payloads, stale edits, and cross-responder attempts", async () => {
+    const f = fixture();
+    const row1 = await f.repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Ship the relay?", summary: "Ship?", humanIntent: "decision", nudge: false });
+    const id1 = row1.qitemId;
+    const read1 = await f.revision(id1);
+
+    const original = f.repo.createHumanAnswer.bind(f.repo);
+    vi.spyOn(f.repo, "createHumanAnswer").mockImplementationOnce(async input => {
+      await original(input);
+      throw new Error("simulated crash after answer row commit before audit");
+    });
+
+    await expect(
+      f.contract.act({
+        verb: "answer",
+        qitemId: id1,
+        actorSession: PERSON,
+        decision: "Yes",
+        expectedRevision: read1 as string,
+        auditNotes: { operationId: "relay-op-2" },
+      }),
+    ).rejects.toThrow("simulated crash after answer row commit before audit");
+
+    expect(await f.act({ verb: "answer", qitemId: id1, decision: "Yes", expectedRevision: read1, auditNotes: { operationId: "relay-op-other" } }))
+      .toMatchObject({ status: 409, body: { error: "decision_revision_changed" } });
+    expect(await f.act({ verb: "answer", qitemId: id1, decision: "No", expectedRevision: read1, auditNotes: { operationId: "relay-op-2" } }))
+      .toMatchObject({ status: 409, body: { error: "decision_revision_changed" } });
+    expect(await f.act({ verb: "answer", qitemId: id1, decision: "Yes", expectedRevision: read1 }))
+      .toMatchObject({ status: 409, body: { error: "decision_revision_changed" } });
+    expect(await f.act({ verb: "answer", qitemId: id1, actorSession: OTHER, decision: "Yes", expectedRevision: read1, auditNotes: { operationId: "relay-op-2" } }))
+      .toMatchObject({ status: 409, body: { error: "decision_revision_changed" } });
+
+    // Stale edit during partial commit
+    const row2 = await f.repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Initial ask text", summary: "Ship?", humanIntent: "decision", nudge: false });
+    const id2 = row2.qitemId;
+    const read2 = await f.revision(id2);
+
+    vi.spyOn(f.repo, "createHumanAnswer").mockImplementationOnce(async input => {
+      await original(input);
+      throw new Error("simulated crash after answer row commit before audit");
+    });
+
+    await expect(
+      f.contract.act({
+        verb: "answer",
+        qitemId: id2,
+        actorSession: PERSON,
+        decision: "Proceed",
+        expectedRevision: read2 as string,
+        auditNotes: { operationId: "relay-op-3" },
+      }),
+    ).rejects.toThrow("simulated crash after answer row commit before audit");
+
+    f.db.prepare("UPDATE queue_items SET body = 'Edited ask text' WHERE qitem_id = ?").run(id2);
+
+    expect(await f.act({ verb: "answer", qitemId: id2, decision: "Proceed", expectedRevision: read2, auditNotes: { operationId: "relay-op-3" } }))
+      .toMatchObject({ status: 409, body: { error: "decision_revision_changed" } });
+  });
+
+  it("keeps resolve operation fingerprint retry intact and rejects a new park episode under an old revision", async () => {
+    const f = fixture();
+    const id = await f.park();
+    const read = await f.revision(id);
+
+    const first = await f.act({ verb: "resolve", qitemId: id, decision: "Unblocked", expectedRevision: read, auditNotes: { operationId: "resolve-op-1" } });
+    expect(first.status).toBe(200);
+
+    const retry = await f.act({ verb: "resolve", qitemId: id, decision: "Unblocked", expectedRevision: read, auditNotes: { operationId: "resolve-op-1" } });
+    expect(retry).toMatchObject({ status: 200, body: { reconciled: true } });
+
+    f.repo.update({ qitemId: id, actorSession: "owner@test-rig", state: "blocked", blockedOn: PERSON });
+    const staleNewEpisode = await f.act({ verb: "resolve", qitemId: id, decision: "Unblocked", expectedRevision: read, auditNotes: { operationId: "resolve-op-2" } });
+    expect(staleNewEpisode).toMatchObject({ status: 409, body: { error: "decision_revision_changed" } });
   });
 });
 

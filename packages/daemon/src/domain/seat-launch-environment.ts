@@ -1,4 +1,4 @@
-import { ACCOUNT_HOME_PROVIDER_ENV, RUNTIME_HOME_VAR, type HomeRuntime } from "./seat-runtime-home.js";
+import { ACCOUNT_HOME_PROVIDER_ENV, PI_ACCOUNT_HOME_PROVIDER_ENV, RUNTIME_HOME_VAR, type HomeRuntime } from "./seat-runtime-home.js";
 import { isLaunchWrapperRuntime, validateLaunchWrapper } from "./launch-wrapper.js";
 import { accessSync, closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, statSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -100,6 +100,11 @@ export class SeatLaunchEnvironment {
     return resolveLaunchWrapperArgv(wrapper, this.sessionEnv.PATH ?? "", this.daemonCwd);
   }
 
+  /** The persisted account selection, also used to decide whether a bare launch fallback is safe. */
+  accountHome(nodeId: string, runtime: string, ignoreAccountHome = false): string | undefined {
+    return this.selectedAccountHome?.(nodeId, runtime, ignoreAccountHome);
+  }
+
   private rigBin(): string {
     const cli = realpathSync(this.cliPath ?? pairedCli());
     accessSync(cli, constants.X_OK);
@@ -126,7 +131,7 @@ export class SeatLaunchEnvironment {
     /** A Claude seat's own token step (claude-seat-token.ts), run before Claude in the staged subshell. A POSIX pane only:
      *  a caller whose command comes back without it knows the token wasn't applied. */
     claudeTokenStep?: string } = {}): Promise<string> {
-    const accountHome = target.accountHome !== undefined ? target.accountHome : (target.nodeId && target.runtime ? this.selectedAccountHome?.(target.nodeId, target.runtime) : undefined);
+    const accountHome = target.accountHome !== undefined ? target.accountHome : (target.nodeId && target.runtime ? this.accountHome(target.nodeId, target.runtime) : undefined);
     const clearing = target.accountHome === null;
     const wrapped = target.launchWrapper?.length ? target.launchWrapper : undefined;
     const configuredHome = clearing && target.nodeId && target.runtime ? this.selectedAccountHome?.(target.nodeId, target.runtime, true) : undefined;
@@ -134,7 +139,9 @@ export class SeatLaunchEnvironment {
     const clearStep = clearing && homeVar ? `unset ${homeVar}; ${configuredHome !== undefined ? `export ${homeVar}=${shellQuote(configuredHome)}; ` : ""}` : "";
     const codexHome = (target.runtime === "codex" ? accountHome : undefined) ?? target.codexHome ?? this.codexHome;
     const searchPath = this.sessionEnv.PATH;
-    const accountStep = clearStep + (accountHome ? `unset ${ACCOUNT_HOME_PROVIDER_ENV.join(" ")}; ` : "");
+    const selectedPiHome = target.runtime === "pi" ? accountHome ?? configuredHome : undefined;
+    const scrub = target.runtime === "pi" ? [...ACCOUNT_HOME_PROVIDER_ENV, ...PI_ACCOUNT_HOME_PROVIDER_ENV] : ACCOUNT_HOME_PROVIDER_ENV;
+    const accountStep = clearStep + (accountHome || selectedPiHome ? `unset ${scrub.join(" ")}; ` : "");
     const codexEnv = target.codexCwd !== undefined
       ? [searchPath ? `PATH=${shellQuote(searchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean)
       : [];
@@ -178,6 +185,9 @@ export class SeatLaunchEnvironment {
       const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });
       if (target.codexCwd !== undefined && codexHome) env.CODEX_HOME = codexHome;
       if (accountHome && target.runtime === "claude-code") env.CLAUDE_CONFIG_DIR = accountHome;
+      if (target.runtime === "pi") {
+        if (selectedPiHome) env.PI_CODING_AGENT_DIR = selectedPiHome;
+      }
       // Classic Claude may be an rc alias or function, not a PATH executable.
       // Its caller sources the staged command in a pane-shell subshell. Leading
       // assignments preserve shell lookup; /usr/bin/env would bypass it.

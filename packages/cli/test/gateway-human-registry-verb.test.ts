@@ -48,6 +48,23 @@ describe("rig gateway human add verb (post-relocate)", () => {
     expect(bindingOpt).toBeDefined();
     expect(bindingOpt!.description).toContain("connectorRef and secretsRef are config/vault labels");
     expect(bindingOpt!.description).toContain("tokens come from 'rig slack setup --secrets-env-file'");
+    expect(bindingOpt!.description).toContain("or file:<path> for relay");
+  });
+
+  it("gateway human add help text documents relay binding syntax and requirements", () => {
+    const gw = createProgram().commands.find((c) => c.name() === "gateway");
+    const human = gw!.commands.find((c) => c.name() === "human");
+    const addCmd = human!.commands.find((c) => c.name() === "add");
+    let help = "";
+    addCmd!.configureOutput({
+      writeOut: (text) => { help += text; },
+      writeErr: () => {},
+    });
+    addCmd!.outputHelp();
+    expect(help).toContain("relay:<connectorRef>:file:<absolute-env-file>:primary:handle=<safe-alias>");
+    expect(help).toContain("OPENRIG_RELAY_URL");
+    expect(help).toContain("OPENRIG_RELAY_OUTBOUND_TOKEN");
+    expect(help).toContain("OPENRIG_RELAY_INBOUND_TOKEN");
   });
 
   it("add writes a fragment + projection; address DERIVED; vault-pointer secretsRef (with ':') survives", async () => {
