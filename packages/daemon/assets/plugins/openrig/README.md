@@ -13,7 +13,8 @@ on an OpenRig team load `openrig-core` instead.
     Claude Code substitutes that seat into the server's environment.
   - **In the root `plugin.json` and `mcp.json`** (the Agent Plugins 1.0 format, which VS Code, Copilot CLI and Cursor
     read): the same command with no seat. That format allows no per-person values, so it can't carry one. Claude Code
-    ignores these root files and runs only its own entry.
+    ignores these root files and runs only its own entry. Cursor reads them because `.cursor-plugin/plugin.json`, which
+    carries only the plugin's name, version and description, is there; without it, Cursor runs the Claude Code entry.
   - Codex gets the server from one command (below).
 - **`--front-door`** tells your agent the team's questions to its seat are yours to answer: it shows them to you and
   records only what you say, instead of working them itself as a team member would.
@@ -63,11 +64,13 @@ codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --fr
 
 **VS Code, Copilot CLI and Cursor**
 
-Not yet verified in these apps: the steps below follow each app's documentation.
+- **VS Code:** verified on 1.145. Older versions, such as 1.110, don't load Agent Plugins.
+- **Cursor:** verified on 3.27, as a local plugin.
+- **Copilot CLI:** not yet verified; the steps follow its documentation.
 
 Install the plugin from this folder with the app's own install-from-folder step. In VS Code that's **Chat: Install Plugin
-from Source**; in Cursor, copy the folder to `~/.cursor/plugins/local/openrig` and reload. The app should load the skill
-and start `rig mcp serve --front-door` from the root `mcp.json`.
+from Source**; in Cursor, copy the folder to `~/.cursor/plugins/local/openrig` and reload. The app starts one `openrig`
+server, `rig mcp serve --front-door`, from the root `mcp.json`, and should load the skill.
 
 - **No seat:** these apps can't set a seat for a plugin's server, so it starts with none. The exception is an app started
   from a shell where `OPENRIG_SESSION_NAME` (or the older `RIGGED_SESSION_NAME`) is set: its server acts as that seat.
