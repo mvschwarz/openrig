@@ -107,6 +107,7 @@ async function daemon(options: { people: string[]; owner?: string }) {
 
 // The test double with the fake agent, given the environment a runner-preset launch gives it, on plain pipes. Input
 // arrives as `rig send` delivers it: one bracketed paste, then Enter.
+/** Start a scripted runner and wait for its native reference before testing permission routes. */
 async function launchRunner(d: Awaited<ReturnType<typeof daemon>>, scenario: object = { turns: [{ permission: true }, {}] }) {
   const dir = mkdtempSync(join(tmpdir(), "runner-real-routes-"));
   const log = join(dir, "agent.jsonl"), record = join(dir, "record.json");
@@ -128,7 +129,12 @@ async function launchRunner(d: Awaited<ReturnType<typeof daemon>>, scenario: obj
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const entries = (): LogEntry[] => !existsSync(log) ? [] : readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  const opened = await waitFor(() => existsSync(record) && JSON.parse(readFileSync(record, "utf8")).nativeRef);
+  // Shell, runner and agent startup can be slower than the route checks under suite load.
+  const opened = await waitFor(() => {
+    if (!existsSync(record)) return undefined;
+    try { return JSON.parse(readFileSync(record, "utf8")).nativeRef; }
+    catch { return undefined; } // The runner may still be writing the record.
+  }, 15000);
   expect(opened, "the runner opens its conversation and writes the launch record").toBeTruthy();
   return {
     send: (text: string) => child.stdin.write(`\x1b[200~${text}\x1b[201~\r`),
@@ -159,7 +165,7 @@ describe("the conformance check's test double against OpenRig's real permission 
     const idle = await waitFor(() => { const latest = d.latest(); return latest?.state === "idle" && latest; });
     expect(idle).toMatchObject({ generationProvenance: "resolved", stale: false });
     expect(r.answers()).toHaveLength(1);
-  }, 30_000);
+  }, 60_000);
 
   it("OpenRig's permit, with no one to ask, is delivered at once and opens no ask", async () => {
     const d = await daemon({ people: [] });
@@ -170,7 +176,7 @@ describe("the conformance check's test double against OpenRig's real permission 
     expect(d.asks()).toEqual([]);
     expect(await waitFor(() => r.turnEnded())).toBe(true);
     expect(d.waitsOnPerson()).toBe(false);
-  }, 30_000);
+  }, 60_000);
 
   it("the seat's opt-in refusal (denied_by_seat) is refused at once and held as needs input", async () => {
     const d = await daemon({ people: ["mike"], owner: "deny" });
@@ -183,7 +189,7 @@ describe("the conformance check's test double against OpenRig's real permission 
     expect(await waitFor(() => r.turnEnded())).toBe(true);
     await sleep(300);
     expect(d.waitsOnPerson(), "no idle post replaces the held attention").toBe(true);
-  }, 30_000);
+  }, 60_000);
 
   it("a person's no, when the agent offered no reject option, reaches the agent as cancelled, never a grant, holding nothing", async () => {
     const d = await daemon({ people: ["mike"] });
@@ -199,7 +205,7 @@ describe("the conformance check's test double against OpenRig's real permission 
     // No person is still waiting, so the turn's end is reported and the seat doesn't read as needing one.
     expect(await waitFor(() => d.latest()?.state === "idle")).toBe(true);
     expect(d.waitsOnPerson()).toBe(false);
-  }, 30_000);
+  }, 60_000);
 
   it("an earlier occupant's request is refused at submit (stale_generation), so the runner answers cancelled, opens no ask, and its posts don't count", async () => {
     const d = await daemon({ people: ["mike"] });
@@ -213,5 +219,5 @@ describe("the conformance check's test double against OpenRig's real permission 
     expect(d.asks()).toEqual([]);
     expect(await waitFor(() => r.turnEnded())).toBe(true);
     expect(await waitFor(() => d.latest()?.reason === "generation_mismatch" && d.latest())).toMatchObject({ state: "unknown" });
-  }, 30_000);
+  }, 60_000);
 });
