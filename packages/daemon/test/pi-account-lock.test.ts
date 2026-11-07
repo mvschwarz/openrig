@@ -14,11 +14,15 @@ const shim = path.resolve(import.meta.dirname, "../assets/pi-account-lock.cjs");
 const roots: string[] = [];
 afterEach(() => roots.splice(0).forEach(root => fs.rmSync(root, { recursive: true, force: true })));
 
-it.each([false, true])("Pi's realpath:false lock across account aliases (shim: %s)", async useShim => {
+it.each([[false, false], [true, false], [true, true]])("Pi's realpath:false lock across account aliases (shim: %s, linked source: %s)", async (useShim, linkedSource) => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-lock-"))); roots.push(root);
   const account = path.join(root, "account"), a = path.join(root, "a"), b = path.join(root, "b");
   fs.mkdirSync(account); const source = path.join(account, "auth.json");
-  fs.writeFileSync(source, "{}"); preparePiAccount(a, account); preparePiAccount(b, account);
+  if (linkedSource) {
+    fs.writeFileSync(path.join(root, "credentials.json"), "{}");
+    fs.symlinkSync("../credentials.json", source);
+  } else fs.writeFileSync(source, "{}");
+  preparePiAccount(a, account); preparePiAccount(b, account);
   const env = (agentDir: string) => ({ ...process.env, NODE_OPTIONS: useShim ? `--require=${JSON.stringify(shim)}` : "", PI_CODING_AGENT_DIR: agentDir });
   const child = spawn(process.execPath, ["-e", `
     const fs = require('node:fs'), lock = require(${JSON.stringify(lockModule)});
@@ -55,3 +59,33 @@ it.each([false, true])("Pi's realpath:false lock across account aliases (shim: %
     expect(fs.existsSync(path.join(b, "auth.json.lock"))).toBe(false);
   } finally { child.kill(); }
 }, 10000);
+
+// Exercise the process boundary used by Pi's bash tool without provider access.
+it("consumes only its preload and leaves Node tools and nested unselected Pi untouched", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-child-"))); roots.push(root);
+  const account = path.join(root, "account"), agent = path.join(root, "agent");
+  fs.mkdirSync(account); fs.writeFileSync(path.join(account, "auth.json"), "{}");
+  preparePiAccount(agent, account);
+  const nested = path.join(root, "nested");
+  fs.mkdirSync(nested); fs.writeFileSync(path.join(nested, "auth.json"), "{}");
+  const probe = `
+    const fs = require('node:fs');
+    const native = Function.prototype.toString.call(fs.mkdirSync);
+    if (native.includes('lockPath')) throw new Error('filesystem was patched');
+    if (process.env.NODE_OPTIONS !== '--no-warnings') throw new Error('other options lost');
+    const lock = require(${JSON.stringify(lockModule)});
+    lock.lockSync(${JSON.stringify(path.join(nested, "auth.json"))}, {realpath:false})();
+  `;
+  execFileSync(process.execPath, ["-e", `
+    const {execFileSync} = require('node:child_process');
+    for (const dir of [process.env.PI_CODING_AGENT_DIR, ${JSON.stringify(nested)}, '/missing/pi-home']) {
+      execFileSync(process.execPath, ['-e', ${JSON.stringify(probe)}], {
+        env: {...process.env, PI_CODING_AGENT_DIR: dir}
+      });
+    }
+  `], { env: { ...process.env, PI_CODING_AGENT_DIR: agent,
+    NODE_OPTIONS: `--no-warnings --require=${JSON.stringify(shim)}` } });
+  // A wrapper may preload into an unrelated process itself: this must be harmless too.
+  execFileSync(process.execPath, ["-e", probe], { env: { ...process.env,
+    PI_CODING_AGENT_DIR: nested, NODE_OPTIONS: `--require=${JSON.stringify(shim)} --no-warnings` } });
+});
