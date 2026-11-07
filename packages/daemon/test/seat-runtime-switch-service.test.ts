@@ -55,7 +55,7 @@ describe("live seat runtime switch", () => {
     listWindows: vi.fn(async (name: string) => panes.has(name) ? [{ id: "@1", index: 0, name: "main", panes: 1, active: true }] : []),
     probeSession: vi.fn(async (name: string) => ({ state: panes.has(name) ? "present" : "absent" })),
     capturePaneScreen: vi.fn(async () => "predecessor screen tail"),
-    createSession: vi.fn(async (name: string) => { panes.set(name, "%5"); return { ok: true }; }),
+    createSession: vi.fn(async (name: string, _cwd?: string, _env?: Record<string, string>) => { panes.set(name, "%5"); return { ok: true }; }),
     getDefaultShell: vi.fn(async () => "/bin/zsh"),
     getPaneCommand: vi.fn(async () => "zsh"),
     sendText: vi.fn(async (target: string, text: string) => { typed.push({ target, text }); return { ok: true }; }),
@@ -135,8 +135,8 @@ describe("live seat runtime switch", () => {
   });
   afterEach(() => { db.close(); fs.rmSync(home, { recursive: true, force: true }); });
 
-  it("switches a Pi account only after confirmation, preserves its seat and selects durable isolated state", async () => {
-    db.prepare("UPDATE nodes SET runtime = 'pi', model = 'mistral/devstral', effort_choice = 'max', codex_config_profile = NULL WHERE id = ?").run(nodeId);
+  it.each(["pi", "codex", "claude-code"])("switches %s to Pi only after confirmation and selects durable isolated state", async from => {
+    db.prepare("UPDATE nodes SET runtime = ?, model = 'mistral/devstral', effort_choice = 'max', codex_config_profile = NULL WHERE id = ?").run(from, nodeId);
     const base = path.join(home, "state", "pi");
     const original = piSeatPaths(base, SEAT).agentDir;
     fs.mkdirSync(original, { recursive: true });
@@ -149,12 +149,13 @@ describe("live seat runtime switch", () => {
     const target = adapter("pi");
     vi.mocked(target.launchHarness).mockImplementation(async binding => {
       expect(binding.accountHome).toBe(accountHome);
-      expect(binding.launchWrapper).toEqual(["wrapper", "--"]);
+      expect(binding.launchWrapper).toEqual(from === "claude-code" ? undefined : ["wrapper", "--"]);
       expect(rigRepo.getEffectiveSeatEnv(nodeId).PI_CODING_AGENT_DIR).toBeUndefined();
       expect(piAccountStateRoot(db, base, SEAT)).toBe(base);
       expect(fs.readFileSync(path.join(original, "auth.json"), "utf8")).toBe("original-seat-login");
       const successor = piSeatPaths(piAccountSwitchStateRoot(base, binding.launchGeneration!), SEAT);
-      expect(fs.readFileSync(path.join(successor.agentDir, "models.json"), "utf8")).toBe("{\"providers\":{}}");
+      if (from === "pi") expect(fs.readFileSync(path.join(successor.agentDir, "models.json"), "utf8")).toBe("{\"providers\":{}}");
+      else expect(fs.existsSync(path.join(successor.agentDir, "models.json"))).toBe(false);
       expect(fs.existsSync(path.join(successor.agentDir, "auth.json"))).toBe(false);
       fs.mkdirSync(successor.sessionsDir, { recursive: true });
       const token = path.join(successor.sessionsDir, "conversation.jsonl");
@@ -162,11 +163,13 @@ describe("live seat runtime switch", () => {
       fs.writeFileSync(successor.runnerStatePath, JSON.stringify({ ready: true, sessionFile: token, launchId: "successor", updatedAt: "now" }));
       return { ok: true, resumeType: "pi_session_file", resumeToken: token };
     });
-    db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(JSON.stringify(["wrapper", "--"]), nodeId);
+    if (from !== "claude-code") db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(JSON.stringify(["wrapper", "--"]), nodeId);
     const svc = service({ runtimeAdapters: { pi: target } }); successorConfirms(svc);
     expect(await svc.setRuntime({ seatRef: SEAT, runtime: "pi", accountHome, reason: "Change budget" }))
-      .toMatchObject({ ok: true, changed: true, from: "pi", to: "pi", claimsMoved: 1, recoveryPending: false });
-    expect(nodeRow()).toMatchObject({ runtime: "pi", model: "mistral/devstral", effort: "high", effort_choice: "max" });
+      .toMatchObject({ ok: true, changed: true, from, to: "pi", claimsMoved: 1, recoveryPending: false });
+    expect(nodeRow()).toMatchObject(from === "pi"
+      ? { runtime: "pi", model: "mistral/devstral", effort: "high", effort_choice: "max" }
+      : { runtime: "pi", model: null, effort: null, effort_choice: null });
     expect(rigRepo.getEffectiveSeatEnv(nodeId).PI_CODING_AGENT_DIR).toBe(accountHome);
     expect(piAccountStateRoot(db, base, SEAT)).toBe(piAccountSwitchStateRoot(base, openSwitch()!.successor_generation));
     expect(sessionRegistry.getBindingForNode(nodeId)).toMatchObject({ tmuxSession: SEAT, tmuxPane: "%5" });
@@ -232,11 +235,116 @@ describe("live seat runtime switch", () => {
     expect(result.settings.effort.value).toBe("max");
   });
 
-  it("refuses Pi homes without credentials before staging, and keeps cross-runtime Pi switches out of scope", async () => {
+  it("refuses Pi homes without credentials before staging", async () => {
     db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(nodeId);
     expect(await service().setRuntime({ seatRef: SEAT, runtime: "pi", accountHome: home, reason: "No auth", dryRun: true })).toMatchObject({ ok: false, code: "invalid_runtime_settings" });
-    expect(await service().setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Change runtime", dryRun: true })).toMatchObject({ ok: false, code: "runtime_switch_unsupported" });
     expect(fakeTmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("switches to Pi and back with a confirmed successor and an isolated account", async () => {
+    const accountHome = path.join(home, "mistral-plan");
+    fs.mkdirSync(accountHome);
+    fs.writeFileSync(path.join(accountHome, "auth.json"), "{}");
+    const svc = service();
+    successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "pi", model: "mistral/devstral-latest", accountHome, reason: "Mistral plan" }))
+      .toMatchObject({ ok: true, changed: true, to: "pi" });
+    expect(rigRepo.getRig((db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string }).rig_id)?.nodes.find(n => n.id === nodeId)).toMatchObject({ runtime: "pi", accountHome });
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Pi allowance ran out" }))
+      .toMatchObject({ ok: true, changed: true, to: "codex" });
+    expect(rigRepo.getRig((db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string }).rig_id)?.nodes.find(n => n.id === nodeId)).toMatchObject({ runtime: "codex" });
+  });
+
+  it("entering Pi does not revive an earlier Pi occupant's settings or credentials", async () => {
+    const base = path.join(home, "state", "pi");
+    const original = piSeatPaths(base, SEAT).agentDir;
+    fs.mkdirSync(original, { recursive: true });
+    fs.writeFileSync(path.join(original, "settings.json"), '{"defaultModel":"old-pi-model"}');
+    fs.writeFileSync(path.join(original, "auth.json"), "old-pi-login");
+    const target = adapter("pi");
+    vi.mocked(target.launchHarness).mockImplementation(async binding => {
+      const staged = piSeatPaths(piAccountSwitchStateRoot(base, binding.launchGeneration!), SEAT).agentDir;
+      expect(fs.existsSync(path.join(staged, "settings.json"))).toBe(false);
+      expect(fs.existsSync(path.join(staged, "auth.json"))).toBe(false);
+      expect(fs.readFileSync(path.join(original, "auth.json"), "utf8")).toBe("old-pi-login");
+      return { ok: true };
+    });
+    const svc = service({ runtimeAdapters: { pi: target } }); successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "pi", reason: "Fresh target defaults" })).toMatchObject({ ok: true });
+  });
+
+  const piTransitions = [
+    ["codex", "pi"], ["claude-code", "pi"], ["pi", "codex"], ["pi", "claude-code"],
+  ] as const;
+
+  describe.each(piTransitions)("%s → %s", (from, to) => {
+    it.each(["confirm", "timeout", "launch-failure"])("keeps identity, claims and credentials through %s", async outcome => {
+      const oldToken = JSON.stringify({ label: "source", tokenFile: "/synthetic/source-token" });
+      db.prepare("UPDATE nodes SET runtime = ?, account_home = '/accounts/source', claude_token_ref = ?, effort_choice = 'max', advisor = 'source-advisor' WHERE id = ?")
+        .run(from, oldToken, nodeId);
+      const claimed = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "review" });
+      queueRepo.claim({ qitemId: claimed.qitemId, destinationSession: SEAT });
+      const pending = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "next" });
+      const accountHome = path.join(home, "target-account");
+      fs.mkdirSync(accountHome);
+      fs.writeFileSync(path.join(accountHome, "auth.json"), "{}");
+      const target = adapter(to);
+      vi.mocked(target.launchHarness).mockImplementation(async binding => {
+        expect(nodeRow().runtime).toBe(from);
+        expect(sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid).toBe(predecessorGeneration);
+        expect(fakeTmux.signalPaneProcess).not.toHaveBeenCalled();
+        expect(binding).toMatchObject({ accountHome, accountToken: null });
+        const stagedEnv = fakeTmux.createSession.mock.calls[0]![2]!;
+        const sourceHomeVar = from === "pi" ? "PI_CODING_AGENT_DIR" : from === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR";
+        expect(stagedEnv[sourceHomeVar]).toBeUndefined();
+        expect(binding.model).toBeUndefined();
+        expect(binding.effort).toBeUndefined();
+        expect(binding.launchWrapper).toBeUndefined();
+        return outcome === "launch-failure" ? { ok: false, error: "synthetic launch failure" } : { ok: true };
+      });
+      const svc = service({ runtimeAdapters: { [to]: target } });
+      if (outcome === "confirm") successorConfirms(svc);
+      const result = await svc.setRuntime({ seatRef: SEAT, runtime: to, accountHome, reason: "Change provider", confirmTimeoutMs: 1 });
+      const committed = outcome === "confirm";
+      expect(result).toMatchObject(committed ? { ok: true, changed: true, from, to, claimsMoved: 1 } : { ok: false, committed: false });
+      expect(nodeRow()).toMatchObject(committed
+        ? { runtime: to, model: null, effort: null, effort_choice: null, advisor: null, codex_config_profile: null }
+        : { runtime: from, model: "gpt-5.5", effort: "high", effort_choice: "max", advisor: "source-advisor" });
+      expect(db.prepare("SELECT account_home, claude_token_ref FROM nodes WHERE id = ?").get(nodeId))
+        .toEqual({ account_home: committed ? accountHome : "/accounts/source", claude_token_ref: committed ? null : oldToken });
+      expect(sessionRegistry.getBindingForNode(nodeId)).toMatchObject({ tmuxSession: SEAT, tmuxPane: committed ? "%5" : "%0" });
+      expect(db.prepare("SELECT state, claimed_by_generation_uuid g FROM queue_items WHERE qitem_id = ?").get(claimed.qitemId))
+        .toMatchObject({ state: "in-progress", g: committed ? openSwitch()!.successor_generation : predecessorGeneration });
+      expect(db.prepare("SELECT state, destination_session FROM queue_items WHERE qitem_id = ?").get(pending.qitemId))
+        .toMatchObject({ state: "pending", destination_session: SEAT });
+      expect([...panes.keys()]).toEqual([SEAT]);
+    });
+
+    it.each([true, false])("clears the source selection and token without reusing it (home selected: %s)", async selected => {
+      db.prepare("UPDATE nodes SET runtime = ?, account_home = ?, claude_token_ref = ? WHERE id = ?")
+        .run(from, selected ? "/accounts/source" : null, JSON.stringify({ label: "source", tokenFile: "/synthetic/token" }), nodeId);
+      const target = adapter(to);
+      vi.mocked(target.launchHarness).mockImplementation(async binding => {
+        expect(binding.accountHome).toBeNull();
+        expect(binding.accountToken).toBeNull();
+        return { ok: true };
+      });
+      const svc = service({ runtimeAdapters: { [to]: target } }); successorConfirms(svc);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: to, reason: "Target default", clearAccountHome: selected })).toMatchObject({ ok: true });
+      expect(db.prepare("SELECT account_home, claude_token_ref FROM nodes WHERE id = ?").get(nodeId))
+        .toEqual({ account_home: null, claude_token_ref: null });
+    });
+  });
+
+  it.each(["codex", "pi"] as const)("carries the explicitly configured wrapper from %s to the other supported runtime", async from => {
+    const to = from === "pi" ? "codex" : "pi";
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(from, nodeId);
+    rigRepo.setNodeLaunchWrapper(nodeId, ["wrapper", "--"]);
+    const target = adapter(to);
+    const svc = service({ runtimeAdapters: { [to]: target } }); successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: to, reason: "Wrapped switch" })).toMatchObject({ ok: true });
+    expect(vi.mocked(target.launchHarness).mock.calls[0]![0].launchWrapper).toEqual(["wrapper", "--"]);
+    expect(rigRepo.getRig(rigRepo.listRigs()[0]!.id)?.nodes[0]?.launchWrapper).toEqual(["wrapper", "--"]);
   });
 
   it("switches a Codex seat to another account home on the same runtime, committing only after confirmation", async () => {
@@ -382,7 +490,8 @@ describe("live seat runtime switch", () => {
     }
   });
 
-  it("a target Claude setup-token reference is staged and committed with its home, replacing any previous token", async () => {
+  it.each(["codex", "pi"])("a %s seat stages and commits the target Claude token with its home", async from => {
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(from, nodeId);
     const accountHome = path.join(home, "plan-account"); fs.mkdirSync(accountHome);
     const tokenFile = path.join(home, "plan-token"); fs.writeFileSync(tokenFile, "synthetic-fixture-not-a-token", { mode: 0o600 });
     const accountToken = { label: "claude-plan", tokenFile };
@@ -742,7 +851,7 @@ describe("live seat runtime switch", () => {
     it("a seat on another runtime", async () => {
       db.prepare("UPDATE nodes SET runtime = 'omp' WHERE id = ?").run(nodeId);
       expect(await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "x", dryRun: true }))
-        .toMatchObject({ ok: false, code: "runtime_switch_unsupported", message: expect.stringMatching(/only Codex and Claude Code seats can change runtime/) });
+        .toMatchObject({ ok: false, code: "runtime_switch_unsupported", message: expect.stringMatching(/only Codex, Claude Code and Pi seats can change runtime/) });
     });
     it("a target this daemon can't start", async () => {
       expect(await service({ runtimeAdapters: { codex: adapter("codex") } }).setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "x", dryRun: true }))
@@ -808,6 +917,25 @@ describe("live seat runtime switch", () => {
       expect(panes.get(SEAT)).toBe(phase === "committed" ? "%5" : "%0");
       expect(rigRepo.getEffectiveSeatEnv(nodeId).PI_CODING_AGENT_DIR).toBe(phase === "committed" ? "/accounts/new" : "/accounts/old");
       expect(piAccountStateRoot(db, home, SEAT)).toBe(phase === "committed" ? piAccountSwitchStateRoot(home, "g-next") : home);
+    });
+
+    describe.each(piTransitions)("recover %s → %s", (from, to) => {
+      it.each(["preparing", "confirmed", "committed"] as const)("retains the durable runtime and state after %s", async phase => {
+        record(phase);
+        const committed = phase === "committed";
+        db.prepare("UPDATE seat_runtime_switches SET from_runtime = ?, to_runtime = ?").run(from, to);
+        db.prepare("UPDATE nodes SET runtime = ?, account_home = ? WHERE id = ?")
+          .run(committed ? to : from, committed ? "/accounts/target" : "/accounts/source", nodeId);
+        panes.set(SEAT, phase === "preparing" ? "%0" : "%5");
+        panes.set("openrig-switch-sw1", phase === "preparing" ? "%5" : "%0");
+        expect(await service().recover(nodeId)).toMatchObject({ ok: true });
+        expect(nodeRow().runtime).toBe(committed ? to : from);
+        expect(db.prepare("SELECT account_home FROM nodes WHERE id = ?").get(nodeId))
+          .toEqual({ account_home: committed ? "/accounts/target" : "/accounts/source" });
+        expect(panes.get(SEAT)).toBe(committed ? "%5" : "%0");
+        expect([...panes.keys()]).toEqual([SEAT]);
+        expect(piAccountStateRoot(db, home, SEAT)).toBe(committed && to === "pi" ? piAccountSwitchStateRoot(home, "g-next") : home);
+      });
     });
 
     it("panes that match neither side: nothing is touched, and the seat's status says why", async () => {
@@ -993,7 +1121,8 @@ describe("live seat runtime switch", () => {
   });
 
   describe("launch_wrapper runtime-switch guard and carry", () => {
-    it("refuses switching a seat with a selected launch_wrapper to an unsupported runtime (claude-code) BEFORE side effects", async () => {
+    it.each(["codex", "pi"])("refuses switching a wrapped %s seat to Claude before side effects", async from => {
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(from, nodeId);
       rigRepo.setNodeLaunchWrapper(nodeId, ["rtk", "--wrap"]);
       const svc = service();
       const result = await svc.setRuntime({
@@ -1010,7 +1139,7 @@ describe("live seat runtime switch", () => {
       // Zero side effects: no switch row created, no staging session created, predecessor untouched
       expect(openSwitch()).toBeUndefined();
       expect(fakeTmux.createSession).not.toHaveBeenCalled();
-      expect(nodeRow().runtime).toBe("codex");
+      expect(nodeRow().runtime).toBe(from);
       expect(rigRepo.getRig(rigRepo.listRigs()[0]!.id)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--wrap"]);
     });
 
