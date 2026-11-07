@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
+/** Run the real setup in a child and return its paths after exit-time cleanup. */
 function runSetup(env: Record<string, string | undefined> = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fixture-home-run-"));
   roots.push(tmp);

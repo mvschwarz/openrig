@@ -16,6 +16,7 @@ import { provenCodexResume } from "./helpers/codex-resume-proof.js";
 const exec = promisify(execFile), roots: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const r of roots.splice(0)) fs.rmSync(r, { recursive: true, force: true }); });
 
+/** Build a private launch environment whose scripted Codex reports its selected home. */
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-seat-home-")); roots.push(root);
   const home = path.join(root, "home"), daemonHome = path.join(root, "daemon codex"), seatHome = path.join(root, "seat's codex");

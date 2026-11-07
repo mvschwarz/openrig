@@ -33,6 +33,7 @@ afterEach(async () => {
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
+/** Wait for a spawned probe to publish its PID and register it for cleanup. */
 async function readPid(file: string): Promise<number> {
   for (let i = 0; i < 600; i++) {
     const text = fs.existsSync(file) ? fs.readFileSync(file, "utf-8").trim() : "";

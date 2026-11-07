@@ -107,6 +107,7 @@ async function daemon(options: { people: string[]; owner?: string }) {
 
 // The test double with the fake agent, given the environment a runner-preset launch gives it, on plain pipes. Input
 // arrives as `rig send` delivers it: one bracketed paste, then Enter.
+/** Start a scripted runner and wait for its native reference before testing permission routes. */
 async function launchRunner(d: Awaited<ReturnType<typeof daemon>>, scenario: object = { turns: [{ permission: true }, {}] }) {
   const dir = mkdtempSync(join(tmpdir(), "runner-real-routes-"));
   const log = join(dir, "agent.jsonl"), record = join(dir, "record.json");

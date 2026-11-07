@@ -58,6 +58,7 @@ function fixture() {
     cleanup.push(() => new Promise<void>((r, reject) => server.close(e => e ? reject(e) : r())));
     env.OPENRIG_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   }
+  /** Execute the launch envelope and verify the child received the fixture connection and environment. */
   async function execute(command: string, managed = false) {
     expect(command).not.toContain(env.OPENRIG_ACTIVITY_HOOK_TOKEN);
     expect(command).not.toContain(env.ANTHROPIC_API_KEY);

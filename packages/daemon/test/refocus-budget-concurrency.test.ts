@@ -25,6 +25,7 @@ afterEach(() => {
 
 interface Fixture { home: string; bin: string; log: string }
 
+/** Build isolated hook state and controllable lookup scripts for timing and overlap cases. */
 function fixture(): Fixture {
   root = mkdtempSync(join(tmpdir(), "refocus-budget-"));
   const home = join(root, "openrig");
