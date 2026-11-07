@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
@@ -15,7 +19,7 @@ import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { classifyPaneActivity, classifyStyledFrame, draftDeliveryAllows, hasExpectedStagedText, inspectStartupStagedText, probeSessionActivity, promptTextIsFaint, SessionTransport, type TransportReadinessChecker } from "../src/domain/session-transport.js";
+import { classifyPaneActivity, classifyStyledFrame, draftDeliveryAllows, readDraftDeliverySetting, hasExpectedStagedText, inspectStartupStagedText, probeSessionActivity, promptTextIsFaint, SessionTransport, type TransportReadinessChecker } from "../src/domain/session-transport.js";
 import { SeatDeliveryGuard, resolveGuardTarget, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
@@ -751,6 +755,33 @@ describe("SessionTransport", () => {
       expect(draftDeliveryAllows(() => undefined)).toBe(true);
       expect(draftDeliveryAllows(() => "something-else")).toBe(true);
       expect(draftDeliveryAllows(() => { throw new Error("settings unreadable"); })).toBe(true);
+    });
+
+    it("honours an explicit environment refuse when config.json can't be parsed (the real settings reader)", () => {
+      const dir = mkdtempSync(join(tmpdir(), "draft-delivery-settings-"));
+      try {
+        const malformed = join(dir, "config.json");
+        writeFileSync(malformed, "{ not json");
+        const store = new SettingsStore(malformed);
+        const fromStore = () => store.resolveOne("transport.draft_delivery").value;
+        // The store reads the file before its environment override, so it throws here whatever the environment says.
+        expect(fromStore).toThrow(/malformed/);
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: "refuse" }))).toBe(false);
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: " refuse " }))).toBe(false);
+        // No valid opt-out: an unreadable file and an invalid environment value both follow the deliver default.
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, {}))).toBe(true);
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromStore, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: "maybe" }))).toBe(true);
+
+        // A readable file's refuse still applies without an environment value, and the environment outranks it.
+        const readable = join(dir, "readable.json");
+        writeFileSync(readable, JSON.stringify({ transport: { draftDelivery: "refuse" } }));
+        const fileStore = new SettingsStore(readable);
+        const fromFile = () => fileStore.resolveOne("transport.draft_delivery").value;
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromFile, {}))).toBe(false);
+        expect(draftDeliveryAllows(() => readDraftDeliverySetting(fromFile, { OPENRIG_TRANSPORT_DRAFT_DELIVERY: "deliver" }))).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it("keeps refusing when a transport's own reader throws (the daemon's reader never does)", async () => {

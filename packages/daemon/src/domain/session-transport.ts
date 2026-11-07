@@ -1053,6 +1053,14 @@ export function draftDeliveryAllows(read: () => unknown): boolean {
   try { return read() !== "refuse"; } catch { return true; }
 }
 
+/** The setting's value, taking a valid OPENRIG_TRANSPORT_DRAFT_DELIVERY first: the environment outranks the file, and the
+ *  settings store reads the file before its environment override, so an unreadable config.json would otherwise turn an
+ *  explicit environment refuse into the default. Anything else comes from the store. */
+export function readDraftDeliverySetting(resolve: () => unknown, env: NodeJS.ProcessEnv = process.env): unknown {
+  const fromEnv = env.OPENRIG_TRANSPORT_DRAFT_DELIVERY?.trim();
+  return fromEnv === "refuse" || fromEnv === "deliver" ? fromEnv : resolve();
+}
+
 export function mapPaneState(state: PaneActivityClassification["state"]): AgentActivity["state"] {
   if (state === "agent_active") return "running";
   if (state === "attention") return "needs_input";
