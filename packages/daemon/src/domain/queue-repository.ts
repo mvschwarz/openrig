@@ -11,21 +11,31 @@ import type { AgentActivity, PersistedEvent } from "./types.js";
 import {
   QueueTransitionLog,
   RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
+  RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
   formatRelayOwnerNotificationAccepted,
+  formatRelayOwnerNotificationTransportFailed,
   parseRelayOwnerNotificationAccepted,
+  parseRelayOwnerNotificationTransportFailed,
   type FormatRelayOwnerNotificationAcceptedInput,
+  type FormatRelayOwnerNotificationTransportFailedInput,
   type OwnerNotificationLevel,
   type QueueTransition,
   type RecentQueueTransitionScope,
   type RelayOwnerNotificationReceipt,
+  type RelayOwnerNotificationTransportFailure,
 } from "./queue-transition-log.js";
 
 export {
   RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
+  RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
   formatRelayOwnerNotificationAccepted,
+  formatRelayOwnerNotificationTransportFailed,
   parseRelayOwnerNotificationAccepted,
+  parseRelayOwnerNotificationTransportFailed,
   type FormatRelayOwnerNotificationAcceptedInput,
+  type FormatRelayOwnerNotificationTransportFailedInput,
   type RelayOwnerNotificationReceipt,
+  type RelayOwnerNotificationTransportFailure,
 };
 
 export type HumanIntent = "decision" | "update";
@@ -45,6 +55,11 @@ export interface RecordRelayOwnerNotificationAcceptedInput extends FormatRelayOw
   actorSession?: string;
   closeUpdate?: boolean;
   humanIntent?: HumanIntent | null;
+}
+
+export interface RecordRelayOwnerNotificationTransportFailedInput extends FormatRelayOwnerNotificationTransportFailedInput {
+  qitemId: string;
+  actorSession?: string;
 }
 import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import { physicalSessionName } from "./session-registry.js";
@@ -3950,7 +3965,9 @@ export class QueueRepository {
       return this.closeDirectAsk(item, input.actorSession, input.decision, input.primaryUser === true);
     })();
     if (!result) return false;
-    for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
+    for (const event of result.persistedEvents) {
+      if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
+    }
     return mine;
   }
 
@@ -4112,6 +4129,58 @@ export class QueueRepository {
 
   hasRelayOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
     return this.transitionLog.hasRelayOwnerNotificationReceipt(qitemId, notificationKey);
+  }
+
+  listRelayOwnerNotificationTransportFailures(qitemId: string): RelayOwnerNotificationTransportFailure[] {
+    return this.transitionLog.listRelayOwnerNotificationTransportFailures(qitemId);
+  }
+
+  getRelayOwnerNotificationTransportFailure(
+    qitemId: string,
+    notificationKey?: string,
+  ): RelayOwnerNotificationTransportFailure | null {
+    return this.transitionLog.getRelayOwnerNotificationTransportFailure(qitemId, notificationKey);
+  }
+
+  hasRelayOwnerNotificationTransportFailure(qitemId: string, notificationKey: string): boolean {
+    return this.transitionLog.hasRelayOwnerNotificationTransportFailure(qitemId, notificationKey);
+  }
+
+  recordRelayOwnerNotificationTransportFailed(input: RecordRelayOwnerNotificationTransportFailedInput): QueueItem {
+    const current = this.getByIdOrThrow(input.qitemId);
+    const key = typeof input.notificationKey === "string" && input.notificationKey.trim().length > 0
+      ? input.notificationKey.trim()
+      : input.qitemId;
+    const normalizedConnectorRef =
+      typeof input.connectorRef === "string" && input.connectorRef.trim().length > 0
+        ? input.connectorRef.trim()
+        : null;
+    const previousFailure = this.transitionLog
+      .listForQitem(input.qitemId)
+      .filter(
+        (transition) =>
+          (transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ") ||
+            transition.transitionNote?.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `)) &&
+          transition.transitionNote.split(/\s+/).includes(`notification_key=${key}`),
+      )
+      .at(-1);
+    if (previousFailure?.transitionNote?.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `)) {
+      const parsedPrevious = parseRelayOwnerNotificationTransportFailed(previousFailure.transitionNote);
+      if (parsedPrevious && parsedPrevious.connectorRef === normalizedConnectorRef) {
+        return current;
+      }
+    }
+    const note = formatRelayOwnerNotificationTransportFailed({
+      notificationKey: key,
+      connectorRef: normalizedConnectorRef,
+      failureClass: input.failureClass,
+      detail: input.detail,
+    });
+    return this.update({
+      qitemId: input.qitemId,
+      actorSession: input.actorSession ?? "daemon@kernel",
+      transitionNote: note,
+    });
   }
 
   recordRelayOwnerNotificationAccepted(input: RecordRelayOwnerNotificationAcceptedInput): QueueItem {
@@ -4449,7 +4518,7 @@ export class QueueRepository {
    */
   /** Delivered informational records remain queryable after closure. Receipt filtering
    * happens before LIMIT; no prose/tier classifier and no second event store. */
-  listDeliveredHumanUpdates(opts: { limit?: number } = {}): Array<QueueItem & { deliveredAt: string; deliveryReceipt: string }> {
+  listDeliveredHumanUpdates(opts: { limit?: number } = {}): Array<QueueItem & { deliveredAt: string; deliveryReceipt: string; deliveryOutcome: "posted" | "accepted" }> {
     if (!this.hasHumanIntentColumn) return [];
     const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(101, Math.floor(opts.limit!))) : 20;
     const receipts = `SELECT qitem_id, ts, transition_note FROM queue_transitions` +
@@ -4461,7 +4530,17 @@ export class QueueRepository {
         AND (r.transition_note LIKE 'slack-owner-notification-posted %' OR r.transition_note LIKE 'relay-owner-notification-accepted %')
       ORDER BY r.ts DESC, q.qitem_id DESC LIMIT ?
     `).all(limit) as Array<QueueItemRow & { delivered_at: string; delivery_receipt: string }>;
-    return rows.map((row) => ({ ...this.rowToItem(row), deliveredAt: row.delivered_at, deliveryReceipt: row.delivery_receipt }));
+    return rows.map((row) => {
+      const deliveryOutcome: "posted" | "accepted" = row.delivery_receipt.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `)
+        ? "accepted"
+        : "posted";
+      return {
+        ...this.rowToItem(row),
+        deliveryOutcome,
+        deliveredAt: row.delivered_at,
+        deliveryReceipt: row.delivery_receipt,
+      };
+    });
   }
 
   /** Current explicit human FYIs; delivery receipts are not required for local visibility.
@@ -4678,7 +4757,8 @@ export class QueueRepository {
                       WHERE receipt.qitem_id = queue_items.qitem_id
                         AND (receipt.transition_note LIKE 'slack-owner-notification-posted %'
                           OR receipt.transition_note LIKE 'relay-owner-notification-accepted %'
-                          OR receipt.transition_note LIKE 'slack-owner-notification-transport-failed %')))`,
+                          OR receipt.transition_note LIKE 'slack-owner-notification-transport-failed %'
+                          OR receipt.transition_note LIKE 'relay-owner-notification-transport-failed %')))`,
     ];
     const params: unknown[] = [];
     if (opts?.rig) {
@@ -4965,7 +5045,8 @@ export class QueueRepository {
       `SELECT qitem_id, transition_note FROM queue_transitions
         WHERE qitem_id IN (SELECT value FROM json_each(?)) AND (transition_note LIKE 'slack-owner-notification-posted %'
                              OR transition_note LIKE 'relay-owner-notification-accepted %'
-                             OR transition_note LIKE 'slack-owner-notification-transport-failed %')
+                             OR transition_note LIKE 'slack-owner-notification-transport-failed %'
+                             OR transition_note LIKE 'relay-owner-notification-transport-failed %')
         ORDER BY transition_id DESC`,
     );
     const notes = new Map<string, string[]>();
@@ -4986,7 +5067,11 @@ export class QueueRepository {
     if (posted) return { outcome: "posted", detail: posted, episode };
     const accepted = currentNotes.find((note) => note.startsWith("relay-owner-notification-accepted "));
     if (accepted) return { outcome: "accepted", detail: accepted, episode };
-    const failed = currentNotes.find((note) => note.startsWith("slack-owner-notification-transport-failed "));
+    const failed = currentNotes.find(
+      (note) =>
+        note.startsWith("slack-owner-notification-transport-failed ") ||
+        note.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `),
+    );
     if (failed) return { outcome: "transport-failed", detail: failed, episode };
     if (episode?.quiet) return null;
     const startedAt = episode?.startedAt ?? item.tsCreated;

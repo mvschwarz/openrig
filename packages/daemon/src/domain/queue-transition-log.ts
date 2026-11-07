@@ -8,6 +8,7 @@ export const OWNER_NOTIFICATION_LEVELS = ["RECORD", "NOTICE", "ALERT"] as const;
 export type OwnerNotificationLevel = (typeof OWNER_NOTIFICATION_LEVELS)[number];
 
 export const RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX = "relay-owner-notification-accepted" as const;
+export const RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX = "relay-owner-notification-transport-failed" as const;
 
 export interface RelayOwnerNotificationReceipt {
   notificationKey: string;
@@ -33,6 +34,20 @@ export interface FormatRelayOwnerNotificationAcceptedInput {
   level?: OwnerNotificationLevel | string | null;
   kind?: string | null;
   digest?: string | null;
+}
+
+export interface RelayOwnerNotificationTransportFailure {
+  notificationKey: string;
+  connectorRef: string | null;
+  failureClass: string;
+  error: string;
+}
+
+export interface FormatRelayOwnerNotificationTransportFailedInput {
+  notificationKey: string;
+  connectorRef?: string | null;
+  failureClass: string;
+  detail: string;
 }
 
 function encodeReceiptToken(value: string | null | undefined): string | null {
@@ -126,6 +141,61 @@ export function parseRelayOwnerNotificationAccepted(
     level,
     kind: decodedValue("kind"),
     digest: decodedValue("digest"),
+  };
+}
+
+export function formatRelayOwnerNotificationTransportFailed(
+  input: FormatRelayOwnerNotificationTransportFailedInput,
+): string {
+  const notificationKey = typeof input.notificationKey === "string" ? input.notificationKey.trim() : "";
+  if (!notificationKey || /\s/.test(notificationKey)) {
+    throw new Error("formatRelayOwnerNotificationTransportFailed requires a non-empty notificationKey");
+  }
+  const connectorRef = encodeConnectorRefToken(input.connectorRef ?? null);
+  const failureClass = encodeReceiptToken(input.failureClass);
+  if (!failureClass) {
+    throw new Error("formatRelayOwnerNotificationTransportFailed requires a non-empty failureClass");
+  }
+  const detail = typeof input.detail === "string" ? input.detail.replace(/[\r\n]+/g, " ").trim() : "";
+  const tokens = [
+    `${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX}`,
+    `notification_key=${notificationKey}`,
+  ];
+  if (connectorRef) tokens.push(`connector_ref=${connectorRef}`);
+  tokens.push(`class=${failureClass}`);
+  tokens.push(`error=${detail}`);
+  return tokens.join(" ");
+}
+
+export function parseRelayOwnerNotificationTransportFailed(
+  note: string | null | undefined,
+): RelayOwnerNotificationTransportFailure | null {
+  if (!note || !note.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `)) return null;
+  const trimmed = note.trim();
+  const fields = trimmed.split(/\s+/);
+  const rawValue = (...names: string[]): string | null => {
+    for (const name of names) {
+      const prefix = `${name}=`;
+      const found = fields.find((field) => field.startsWith(prefix));
+      if (found) {
+        const sliced = found.slice(prefix.length);
+        if (sliced.length > 0) return sliced;
+      }
+    }
+    return null;
+  };
+  const notificationKey = rawValue("notification_key");
+  if (!notificationKey) return null;
+  const connectorRef = decodeReceiptToken(rawValue("connector_ref"));
+  const failureClass = decodeReceiptToken(rawValue("class"));
+  if (!failureClass) return null;
+  const errorIdx = trimmed.indexOf(" error=");
+  const error = errorIdx >= 0 ? trimmed.slice(errorIdx + " error=".length) : (rawValue("error") ?? "");
+  return {
+    notificationKey,
+    connectorRef,
+    failureClass,
+    error,
   };
 }
 
@@ -693,6 +763,38 @@ export class QueueTransitionLog {
       }
     }
     return null;
+  }
+
+  listRelayOwnerNotificationTransportFailures(qitemId: string): RelayOwnerNotificationTransportFailure[] {
+    const rows = this.db
+      .prepare(
+        `SELECT transition_id, transition_note FROM ${this.historySource}
+          WHERE qitem_id = ? AND transition_note LIKE 'relay-owner-notification-transport-failed %'
+          ORDER BY transition_id DESC`,
+      )
+      .all(qitemId) as Array<{ transition_id: number; transition_note: string }>;
+    const failures: RelayOwnerNotificationTransportFailure[] = [];
+    for (const row of rows) {
+      const parsed = parseRelayOwnerNotificationTransportFailed(row.transition_note);
+      if (parsed) failures.push(parsed);
+    }
+    return failures;
+  }
+
+  getRelayOwnerNotificationTransportFailure(
+    qitemId: string,
+    notificationKey?: string,
+  ): RelayOwnerNotificationTransportFailure | null {
+    for (const parsed of this.listRelayOwnerNotificationTransportFailures(qitemId)) {
+      if (notificationKey === undefined || parsed.notificationKey === notificationKey) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
+  hasRelayOwnerNotificationTransportFailure(qitemId: string, notificationKey: string): boolean {
+    return this.getRelayOwnerNotificationTransportFailure(qitemId, notificationKey) !== null;
   }
 
   private rowToTransition(row: QueueTransitionRow): QueueTransition {

@@ -46,7 +46,10 @@ import { humanAnswerText } from "../../human-questions.js";
 import { formatReplyToChoice, formatReplyToThreadMissing, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
-import { ownerNotificationLevelAtLeast } from "../../queue-transition-log.js";
+import {
+  ownerNotificationLevelAtLeast,
+  RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
+} from "../../queue-transition-log.js";
 // OPR.0.5.6.1 — the delivery rules engine: ONE decision per message replaces
 // the two dial-reads (the S14 default-decision stub). The legacy dial path
 // survives ONLY as the stated degrade when the destination is not a
@@ -435,19 +438,53 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     }).catch((e) => log(`undeliverable notice FAILED for ${p.qitemId}: ${(e as Error).message}`));
   };
 
-  const recordTransportFailed = (p: OutboundPostPayload, failureClass: string, detail: string, partlyPosted?: boolean): void => {
+  const resolveRelayConnectorRef = (p: OutboundPostPayload): string | null => {
+    const carry = p as RelayPayloadCarry;
+    if (typeof carry.relayConnectorRef === "string" && carry.relayConnectorRef.trim().length > 0) {
+      return carry.relayConnectorRef.trim();
+    }
+    try {
+      const reg = registrySurface.loadHumanRegistry(opts.home);
+      return resolvePrimaryRelayBinding(p.destinationSession, reg)?.connectorRef ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const recordTransportFailed = (
+    p: OutboundPostPayload,
+    failureClass: string,
+    detail: string,
+    partlyPosted?: boolean,
+    relay = false,
+  ): void => {
     if (!p.qitemId) return;
-    if (failureClass === "human-message-unrenderable" || failureClass === "slack-invalid-blocks") {
+    const carry = p as RelayPayloadCarry;
+    const isRelay = relay || Boolean(carry.relayConnectorRef || carry.relayEnvelope);
+    if (!isRelay && (failureClass === "human-message-unrenderable" || failureClass === "slack-invalid-blocks")) {
       notifySourceUndeliverable(p, detail, partlyPosted, failureClass === "slack-invalid-blocks");
     }
     const key = p.notificationKey ?? p.qitemId;
+    if (isRelay) {
+      opts.queueRepo.recordRelayOwnerNotificationTransportFailed({
+        qitemId: p.qitemId,
+        notificationKey: key,
+        connectorRef: resolveRelayConnectorRef(p),
+        failureClass,
+        detail,
+      });
+      return;
+    }
     const previousFailure = opts.queueRepo.transitionLog.listForQitem(p.qitemId).filter((transition) =>
-      transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ")
+      (transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ")
+        || transition.transitionNote?.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `))
         && transition.transitionNote.split(/\s+/).includes(`notification_key=${key}`)).at(-1);
     // A corrected attempt can fail transiently after a permanent rejection, and a
     // transient failure can be followed by a definite rejection. Preserve both changes.
-    const alreadyRecorded = previousFailure &&
-      previousFailure.transitionNote!.includes("class=slack-invalid-blocks ") === (failureClass === "slack-invalid-blocks");
+    const alreadyRecorded = Boolean(
+      previousFailure?.transitionNote?.startsWith("slack-owner-notification-transport-failed ") &&
+      previousFailure.transitionNote.includes("class=slack-invalid-blocks ") === (failureClass === "slack-invalid-blocks"),
+    );
     if (alreadyRecorded) return;
     opts.queueRepo.update({
       qitemId: p.qitemId,
@@ -777,7 +814,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         ...(info.digestId ? { digest: info.digestId } : {}),
       });
     },
-    onTransportFailed: recordTransportFailed,
+    onTransportFailed: (p, failureClass, detail) => recordTransportFailed(p, failureClass, detail, false, true),
     release: (q) => releaseRef(q),
   });
 

@@ -94,6 +94,7 @@ export interface RecordingRelayHandle {
   readonly custodyFilePath: string;
   setLoseNextAck(lose: boolean): void;
   getCustodyRecords(): BridgeCustodyRecord[];
+  getReassembledDeliveries(): RelayOutboundEnvelope[];
   getSanitizedStats(): BridgeSanitizedStats;
   restart(): Promise<void>;
   stop(): Promise<void>;
@@ -102,6 +103,91 @@ export interface RecordingRelayHandle {
     payload: RelayInboundReplyInput,
     opts?: SendInboundReplyOptions,
   ): Promise<SendInboundReplyResult>;
+}
+
+/** Deterministically reassemble ordered or unordered multi-part relay envelopes back into a complete logical envelope. */
+export function reassembleRelayEnvelopeParts(
+  parts: readonly RelayOutboundEnvelope[],
+): RelayOutboundEnvelope {
+  if (parts.length === 0) {
+    throw new Error("cannot reassemble empty relay envelope parts");
+  }
+  if (parts.length === 1 && !parts[0]!.part) {
+    return parts[0]!;
+  }
+  const sorted = [...parts].sort((a, b) => (a.part?.index ?? 1) - (b.part?.index ?? 1));
+  const first = sorted[0]!;
+  const parentDeliveryId = first.part?.parentDeliveryId ?? first.deliveryId;
+  const expectedTotal = first.part?.total ?? sorted.length;
+  if (sorted.length !== expectedTotal) {
+    throw new Error(`incomplete relay envelope parts: got ${sorted.length}, expected ${expectedTotal}`);
+  }
+  for (let i = 0; i < sorted.length; i++) {
+    const p = sorted[i]!;
+    if (
+      p.part &&
+      (p.part.index !== i + 1 ||
+        p.part.parentDeliveryId !== parentDeliveryId ||
+        p.part.total !== expectedTotal)
+    ) {
+      throw new Error(`mismatched relay envelope part metadata at index ${i + 1}`);
+    }
+  }
+  const combinedBody = sorted.map((p) => p.body).join("");
+  let combinedItems: RelayDigestItem[] | undefined;
+  if (sorted.some((p) => p.items !== undefined)) {
+    combinedItems = [];
+    for (const p of sorted) {
+      for (const item of p.items ?? []) {
+        const prev = combinedItems[combinedItems.length - 1];
+        if (
+          prev &&
+          prev.qitemId === item.qitemId &&
+          prev.notificationKey === item.notificationKey &&
+          prev.summary === item.summary &&
+          prev.replyRef === item.replyRef &&
+          typeof prev.body === "string" &&
+          typeof item.body === "string"
+        ) {
+          prev.body += item.body;
+        } else {
+          combinedItems.push({ ...item });
+        }
+      }
+    }
+  }
+  return {
+    v: 1,
+    deliveryId: parentDeliveryId,
+    recipient: { handle: first.recipient.handle },
+    intent: first.intent,
+    outcome: first.outcome,
+    summary: first.summary,
+    body: combinedBody,
+    replyRef: first.replyRef,
+    ...(combinedItems !== undefined ? { items: combinedItems } : {}),
+  };
+}
+
+/** Group and reassemble all complete logical deliveries from bridge custody records by `parentDeliveryId` (or `deliveryId`). */
+export function reassembleCustodyDeliveries(
+  records: readonly BridgeCustodyRecord[],
+): RelayOutboundEnvelope[] {
+  const groups = new Map<string, RelayOutboundEnvelope[]>();
+  for (const r of records) {
+    const key = r.envelope.part?.parentDeliveryId ?? r.envelope.deliveryId;
+    const list = groups.get(key) ?? [];
+    list.push(r.envelope);
+    groups.set(key, list);
+  }
+  const result: RelayOutboundEnvelope[] = [];
+  for (const parts of groups.values()) {
+    const expectedTotal = parts[0]?.part?.total ?? 1;
+    if (parts.length === expectedTotal) {
+      result.push(reassembleRelayEnvelopeParts(parts));
+    }
+  }
+  return result;
 }
 
 function canonicalJsonStringify(value: unknown): string {
@@ -154,6 +240,13 @@ const ALLOWED_ENVELOPE_KEYS = new Set([
   "body",
   "replyRef",
   "items",
+  "part",
+]);
+
+const ALLOWED_PART_KEYS = new Set([
+  "parentDeliveryId",
+  "index",
+  "total",
 ]);
 
 const ALLOWED_ITEM_KEYS = new Set([
@@ -243,6 +336,36 @@ function validateOutboundEnvelope(
     }
   }
 
+  let part: { parentDeliveryId: string; index: number; total: number } | undefined;
+  if (parsed.part !== undefined) {
+    if (!isPlainObject(parsed.part)) {
+      return { ok: false, error: "Invalid part metadata object" };
+    }
+    for (const k of Object.keys(parsed.part)) {
+      if (!ALLOWED_PART_KEYS.has(k)) {
+        return { ok: false, error: `Unknown part field: ${k}` };
+      }
+    }
+    if (
+      typeof parsed.part.parentDeliveryId !== "string" ||
+      !parsed.part.parentDeliveryId.trim() ||
+      typeof parsed.part.index !== "number" ||
+      !Number.isInteger(parsed.part.index) ||
+      parsed.part.index < 1 ||
+      typeof parsed.part.total !== "number" ||
+      !Number.isInteger(parsed.part.total) ||
+      parsed.part.total < 2 ||
+      parsed.part.index > parsed.part.total
+    ) {
+      return { ok: false, error: "Malformed part metadata fields" };
+    }
+    part = {
+      parentDeliveryId: parsed.part.parentDeliveryId,
+      index: parsed.part.index,
+      total: parsed.part.total,
+    };
+  }
+
   return {
     ok: true,
     envelope: {
@@ -255,6 +378,7 @@ function validateOutboundEnvelope(
       body: parsed.body,
       replyRef: parsed.replyRef,
       ...(items !== undefined ? { items } : {}),
+      ...(part !== undefined ? { part } : {}),
     },
   };
 }
@@ -531,6 +655,9 @@ export async function startRecordingRelay(
     },
     getCustodyRecords(): BridgeCustodyRecord[] {
       return loadCustodyRecordsStrict(custodyFilePath);
+    },
+    getReassembledDeliveries(): RelayOutboundEnvelope[] {
+      return reassembleCustodyDeliveries(loadCustodyRecordsStrict(custodyFilePath));
     },
     getSanitizedStats(): BridgeSanitizedStats {
       let records: BridgeCustodyRecord[] = [];

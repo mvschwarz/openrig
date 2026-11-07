@@ -9,10 +9,12 @@ import { SeenStore, type StateFsOps } from "../src/domain/gateway/slack/state-st
 import type { OutboundDecision } from "../src/domain/gateway/protocol.js";
 import {
   RELAY_PROTOCOL_VERSION,
+  RELAY_ENVELOPE_MAX_BYTES,
   encodeRelayReplyRef,
   decodeRelayReplyRef,
   hashRelayReplyRef,
   validateRelayOutboundEnvelope,
+  splitRelayOutboundEnvelope,
   findPendingRelayReplyRef,
   resolvePrimaryRelayBinding,
   prepareRelayDecision,
@@ -20,8 +22,13 @@ import {
   createRelayOutboundTransport,
   type RelayAcceptedReceiptInfo,
   type RelayOutboundEnvelope,
+  type RelayPayloadCarry,
   type RelayReplyRefPayload,
 } from "../src/domain/gateway/relay-outbound.js";
+import {
+  reassembleRelayEnvelopeParts,
+  startRecordingRelay,
+} from "./fixtures/recording-relay.js";
 
 function memFs(): StateFsOps & { files: Map<string, string>; failReadsFor: Set<string> } {
   const files = new Map<string, string>();
@@ -878,6 +885,394 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
         handle: "bob",
         secretsRef: "file:/tmp/bob.env",
       });
+    });
+  });
+
+  describe("R1-C Fix 3 — full long-text, multibyte CJK, emoji boundary, digest, and multi-part replay", () => {
+    const reg = {
+      ok: true as const,
+      entities: [
+        {
+          entityId: "sam",
+          class: "human" as const,
+          displayName: "Sam",
+          address: "sam@external",
+          connectorBindings: [
+            {
+              kind: "relay" as const,
+              connectorRef: "wa-main",
+              secretsRef: "file:/tmp/wa.env",
+              role: "primary" as const,
+              handle: "sam_wa",
+            },
+          ],
+          prefs: { deliveryClass: "A" as const, availability: "available" as const },
+        },
+      ],
+    };
+
+    it("renders and splits full ASCII, multibyte CJK, emoji, humanDetail, and humanQuestions/options without silent clipping or surrogate corruption", () => {
+      const asciiBlock = "ASCII-LINE-0123456789-abcdefghijklmnopqrstuvwxyz\n".repeat(900) + "ASCII-TAIL-MARKER";
+      const cjkBlock = "日本語と中国語と한국어の長文テスト検証データ".repeat(1400) + "CJK-TAIL-終端";
+      const emojiBlock = "🚀👩‍💻🎉🔥🧪".repeat(1200) + "EMOJI-TAIL-🏁";
+      const detailBlock = "DETAIL-SECTION-" + "D".repeat(12_000) + "-DETAIL-TAIL";
+
+      const prepared = prepareRelayDecision(
+        {
+          kind: "outbound_decision",
+          decisionId: "dec-long-cjk-1",
+          op: OUTBOUND_OP,
+          entityBindingRef: "sam@external",
+          payload: {
+            qitemId: "q-long-1",
+            notificationKey: "q-long-1:1",
+            ownerNotificationKind: "human-required",
+            ownerNotificationLevel: "ALERT",
+            humanIntent: "decision",
+            destinationSession: "sam@external",
+            state: "blocked",
+            summary: "S".repeat(1200) + "-SUMMARY-TAIL",
+            body: `${asciiBlock}\n${cjkBlock}\n${emojiBlock}`,
+            humanDetail: detailBlock,
+            humanQuestions: [
+              {
+                id: "q-rollout",
+                header: "Deployment Gate",
+                question: "Which rollout strategy should we execute for the multi-region cluster?",
+                options: [
+                  {
+                    id: "canary",
+                    label: "Canary 5%",
+                    description: "Roll out to 5% of edge nodes first and monitor p99 latency for 30m",
+                    recommended: true,
+                  },
+                  {
+                    id: "blue-green",
+                    label: "Blue/Green Cutover",
+                    description: "Switch full traffic to green standby with instant DNS rollback",
+                  },
+                ],
+              },
+            ],
+          } satisfies OutboundPostPayload,
+        },
+        {
+          loadHumanRegistry: () => reg,
+          lookupQuestionState: () => ({
+            qitemId: "q-long-1",
+            mode: "park",
+            episodeKey: "q-long-1:1",
+            decisionRevision: "dr1-long-1",
+            humanIntent: "decision",
+          }),
+        },
+      );
+
+      const carry = prepared.payload as RelayPayloadCarry;
+      const fullEnvelope = carry.relayEnvelope!;
+      expect(fullEnvelope).toBeDefined();
+      expect(fullEnvelope.body).toContain("SUMMARY-TAIL");
+      expect(fullEnvelope.body).toContain("ASCII-TAIL-MARKER");
+      expect(fullEnvelope.body).toContain("CJK-TAIL-終端");
+      expect(fullEnvelope.body).toContain("EMOJI-TAIL-🏁");
+      expect(fullEnvelope.body).toContain("DETAIL-TAIL");
+      expect(fullEnvelope.body).toContain("Deployment Gate");
+      expect(fullEnvelope.body).toContain("Which rollout strategy should we execute for the multi-region cluster?");
+      expect(fullEnvelope.body).toContain("Canary 5% (recommended)");
+      expect(fullEnvelope.body).toContain("Roll out to 5% of edge nodes first and monitor p99 latency for 30m");
+      expect(fullEnvelope.body).toContain("Blue/Green Cutover");
+      expect(fullEnvelope.body).toContain("Switch full traffic to green standby with instant DNS rollback");
+
+      const parts = carry.relayEnvelopes ?? splitRelayOutboundEnvelope(fullEnvelope);
+      expect(parts.length).toBeGreaterThan(2);
+
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i]!;
+        const raw = JSON.stringify(part);
+        expect(Buffer.byteLength(raw, "utf8")).toBeLessThanOrEqual(RELAY_ENVELOPE_MAX_BYTES);
+        expect(part.deliveryId).toBe(`dec-long-cjk-1:part:${i + 1}`);
+        expect(part.part).toEqual({
+          parentDeliveryId: "dec-long-cjk-1",
+          index: i + 1,
+          total: parts.length,
+        });
+        expect(part.replyRef).toBe(fullEnvelope.replyRef);
+        // Verify no unpaired UTF-16 surrogates in any part
+        expect(part.body).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+      }
+
+      const reassembled = reassembleRelayEnvelopeParts(parts);
+      expect(reassembled).toEqual(fullEnvelope);
+    });
+
+    it("replays failed/ACK-lost middle part across bridge and transport restart with stable part identities/bytes and commits custody only after all parts succeed", async () => {
+      const fsx = memFs();
+      const relayDir = mkdtempSync(join(tmpdir(), "openrig-relay-mp-"));
+      const relay = await startRecordingRelay({
+        custodyFilePath: join(relayDir, "bridge-state.jsonl"),
+        outboundToken: "out-tok-valid-123456",
+        inboundToken: "in-tok-valid-654321",
+      });
+
+      try {
+        const attempted = new SeenStore("/state/relay-attempted-decisions.jsonl", fsx);
+        const delivered = new SeenStore("/state/relay-delivered-decisions.jsonl", fsx);
+        const outboundSeen = new SeenStore("/state/slack-outbound-seen.jsonl", fsx);
+        const receipts: RelayAcceptedReceiptInfo[] = [];
+        const releasedKeys: string[] = [];
+
+        const cjkBody =
+          "第一段内容：多字节UTF-8编码边界与分片恢复测试。".repeat(950) +
+          "\nMIDDLE-MARKER-中間標記\n" +
+          "第二段内容：确保在中间分片丢失ACK后重启不会丢失尾部也不会重复接管。".repeat(950) +
+          "\nFINAL-TAIL-MARKER-最終尾部";
+
+        const prepared = prepareRelayDecision(
+          {
+            kind: "outbound_decision",
+            decisionId: "dec-mp-ack-lost-1",
+            op: OUTBOUND_OP,
+            entityBindingRef: "sam@external",
+            payload: {
+              qitemId: "q-mp-1",
+              notificationKey: "q-mp-1:1",
+              ownerNotificationKind: "human-required",
+              ownerNotificationLevel: "ALERT",
+              humanIntent: "decision",
+              destinationSession: "sam@external",
+              state: "blocked",
+              summary: "Multi-part lost ACK test",
+              body: cjkBody,
+            } satisfies OutboundPostPayload,
+          },
+          {
+            loadHumanRegistry: () => reg,
+            lookupQuestionState: () => ({
+              qitemId: "q-mp-1",
+              mode: "park",
+              episodeKey: "q-mp-1:1",
+              decisionRevision: "dr1-mp-1",
+              humanIntent: "decision",
+            }),
+          },
+        );
+
+        const expectedParts = (prepared.payload as RelayPayloadCarry).relayEnvelopes!;
+        expect(expectedParts).toBeDefined();
+        expect(expectedParts.length).toBe(3);
+
+        // Fail HTTP ACK on the 2nd part (index 2 of 3) AFTER the bridge persists custody for part 2
+        let outboundCallIndex = 0;
+        const realFetch: typeof fetch = async (url, init) => {
+          outboundCallIndex += 1;
+          if (outboundCallIndex === 2) {
+            relay.setLoseNextAck(true);
+          }
+          return fetch(url, init);
+        };
+
+        const transport1 = createRelayOutboundTransport({
+          attempted,
+          delivered,
+          outboundSeen,
+          fetchImpl: realFetch,
+          resolveProfile: (connectorRef) => ({
+            ok: true,
+            connectorRef,
+            url: relay.outboundUrl,
+            outboundToken: "out-tok-valid-123456",
+          }),
+          onAccepted: (info) => receipts.push(info),
+          release: (key) => releasedKeys.push(key),
+        });
+
+        const wire1 = buildInProcessWire({
+          home,
+          ops: [OUTBOUND_OP],
+          deliver: (d) => transport1.deliver(d),
+        });
+
+        wire1.dispatcher.dispatch(OUTBOUND_OP, "sam@external", prepared.payload, {
+          decisionId: "dec-mp-ack-lost-1",
+        });
+        for (let i = 0; i < 40 && relay.getSanitizedStats().lostAckCount === 0; i++) {
+          await tick();
+        }
+        await tick();
+
+        // Part 1 succeeded (200), Part 2 committed custody on bridge then returned 502 (lost ACK), Part 3 not sent yet.
+        expect(relay.getSanitizedStats().custodyCount).toBe(2);
+        expect(receipts, "logical custody receipt must NOT fire before all parts succeed").toHaveLength(0);
+        expect(outboundSeen.load().has("q-mp-1:1")).toBe(false);
+        expect(delivered.load().has("dec-mp-ack-lost-1")).toBe(false);
+        expect(releasedKeys).toEqual([]);
+        expect(new DispatchBuffer(home).pending()).toHaveLength(1);
+
+        // Pending replyRef lookup still correlates parent decisionId while buffered
+        const parentReplyRef = (prepared.payload as RelayPayloadCarry).relayEnvelope!.replyRef!;
+        const pendingRef = findPendingRelayReplyRef(home, parentReplyRef);
+        expect(pendingRef.found).toBe(true);
+        expect(pendingRef.decisionId).toBe("dec-mp-ack-lost-1");
+
+        // Restart the recording relay server (reloads persisted custody from disk) and create fresh transport/wire
+        await relay.restart();
+
+        const transport2 = createRelayOutboundTransport({
+          attempted,
+          delivered,
+          outboundSeen,
+          fetchImpl: fetch,
+          resolveProfile: (connectorRef) => ({
+            ok: true,
+            connectorRef,
+            url: relay.outboundUrl,
+            outboundToken: "out-tok-valid-123456",
+          }),
+          onAccepted: (info) => receipts.push(info),
+          release: (key) => releasedKeys.push(key),
+        });
+
+        const wire2 = buildInProcessWire({
+          home,
+          ops: [OUTBOUND_OP],
+          deliver: (d) => transport2.deliver(d),
+        });
+        wire2.startServices?.();
+        for (let i = 0; i < 40 && receipts.length === 0; i++) {
+          await tick();
+        }
+        await tick();
+
+        // Part 1 was skipped (already delivered locally), Part 2 replayed with identical deliveryId/bytes (deduplicated), Part 3 delivered fresh!
+        expect(relay.getSanitizedStats().custodyCount, "exactly 3 unique part deliveries in bridge custody").toBe(3);
+        expect(relay.getSanitizedStats().deduplicatedCount, "middle part replay deduplicated by bridge without conflict").toBe(1);
+        expect(receipts).toHaveLength(1);
+        expect(receipts[0]?.deliveryId).toBe("dec-mp-ack-lost-1");
+        expect(outboundSeen.load().has("q-mp-1:1")).toBe(true);
+        expect(delivered.load().has("dec-mp-ack-lost-1")).toBe(true);
+        expect(releasedKeys).toEqual(["q-mp-1:1"]);
+        expect(new DispatchBuffer(home).pending()).toHaveLength(0);
+
+        const committedEnvelopes = relay.getCustodyRecords().map((d) => d.envelope);
+        const reassembled = reassembleRelayEnvelopeParts(committedEnvelopes);
+        expect(relay.getReassembledDeliveries()).toEqual([reassembled]);
+        expect(reassembled.body).toBe(cjkBody);
+        expect(reassembled.body).toContain("MIDDLE-MARKER-中間標記");
+        expect(reassembled.body).toContain("FINAL-TAIL-MARKER-最終尾部");
+      } finally {
+        await relay.stop();
+        rmSync(relayDir, { recursive: true, force: true });
+      }
+    });
+
+    it("splits and delivers oversized multi-item digests with full item content and records all member receipts only on complete acceptance", async () => {
+      const fsx = memFs();
+      const attempted = new SeenStore("/state/relay-attempted-decisions.jsonl", fsx);
+      const delivered = new SeenStore("/state/relay-delivered-decisions.jsonl", fsx);
+      const outboundSeen = new SeenStore("/state/slack-outbound-seen.jsonl", fsx);
+      const bridge = recordingBridgeFixture();
+      const receipts: RelayAcceptedReceiptInfo[] = [];
+
+      const item1Body = "DIGEST-ITEM-1-" + "甲乙丙丁戊己庚辛壬癸".repeat(2500) + "-ITEM-1-TAIL";
+      const item2Body = "DIGEST-ITEM-2-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ".repeat(1600) + "-ITEM-2-TAIL";
+
+      const prepared = prepareRelayDecision(
+        {
+          kind: "outbound_decision",
+          decisionId: "dec-digest-long-1",
+          op: OUTBOUND_OP,
+          entityBindingRef: "sam@external",
+          payload: {
+            deliveryDigestPost: true,
+            digestId: "long-1",
+            qitemId: "q-dig-1",
+            notificationKey: "digest:sam@external:long",
+            ownerNotificationKind: "human-required",
+            ownerNotificationLevel: "INFO",
+            humanIntent: "update",
+            destinationSession: "sam@external",
+            summary: "Digest summary header",
+            body: `${item1Body}\n\n${item2Body}`,
+            memberReceipts: [
+              {
+                qitemId: "q-dig-1",
+                notificationKey: "q-dig-1:1",
+                level: "ALERT",
+                kind: "human-required",
+                summary: "Item 1 summary",
+                body: item1Body,
+              },
+              {
+                qitemId: "q-dig-2",
+                notificationKey: "q-dig-2:1",
+                level: "ALERT",
+                kind: "human-required",
+                summary: "Item 2 summary",
+                body: item2Body,
+              },
+            ],
+          } as OutboundPostPayload,
+        },
+        {
+          loadHumanRegistry: () => reg,
+          lookupQuestionState: (qitemId) => ({
+            qitemId,
+            mode: "ask",
+            episodeKey: `${qitemId}:1`,
+            decisionRevision: `dr1-${qitemId}`,
+            humanIntent: "decision",
+            summary: qitemId === "q-dig-1" ? "Item 1 summary" : "Item 2 summary",
+            body: qitemId === "q-dig-1" ? item1Body : item2Body,
+          }),
+        },
+      );
+
+      const parts = (prepared.payload as RelayPayloadCarry).relayEnvelopes!;
+      expect(parts).toBeDefined();
+      expect(parts.length).toBeGreaterThan(1);
+      for (const part of parts) {
+        expect(Buffer.byteLength(JSON.stringify(part), "utf8")).toBeLessThanOrEqual(RELAY_ENVELOPE_MAX_BYTES);
+      }
+
+      const transport = createRelayOutboundTransport({
+        attempted,
+        delivered,
+        outboundSeen,
+        fetchImpl: bridge.fetchImpl,
+        resolveProfile: (connectorRef) => ({
+          ok: true,
+          connectorRef,
+          url: "http://127.0.0.1:43110/outbound",
+          outboundToken: "out-tok-valid-123456",
+        }),
+        onAccepted: (info) => receipts.push(info),
+      });
+
+      const outcome = await transport.deliver({
+        kind: "outbound_decision",
+        decisionId: "dec-digest-long-1",
+        op: OUTBOUND_OP,
+        entityBindingRef: "sam@external",
+        payload: prepared.payload,
+      });
+
+      expect(outcome.ok).toBe(true);
+      expect(bridge.custodyByDeliveryId.size).toBe(parts.length);
+      expect(receipts.map((r) => `${r.qitemId}:${r.notificationKey}`)).toEqual([
+        "q-dig-1:q-dig-1:1",
+        "q-dig-2:q-dig-2:1",
+      ]);
+
+      const reassembled = reassembleRelayEnvelopeParts(Array.from(bridge.custodyByDeliveryId.values()));
+      expect(reassembled.body).toContain("ITEM-1-TAIL");
+      expect(reassembled.body).toContain("ITEM-2-TAIL");
+      expect(reassembled.items).toHaveLength(2);
+      expect(reassembled.items?.[0]?.body).toContain("ITEM-1-TAIL");
+      expect(reassembled.items?.[1]?.body).toContain("ITEM-2-TAIL");
+      const ref1 = decodeRelayReplyRef(reassembled.items?.[0]?.replyRef ?? "");
+      const ref2 = decodeRelayReplyRef(reassembled.items?.[1]?.replyRef ?? "");
+      expect(ref1.ok && ref1.ref.qitemId).toBe("q-dig-1");
+      expect(ref2.ok && ref2.ref.qitemId).toBe("q-dig-2");
     });
   });
 });

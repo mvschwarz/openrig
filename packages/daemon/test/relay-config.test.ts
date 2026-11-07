@@ -147,11 +147,19 @@ describe("relay-config: loadRelayProfiles(home)", () => {
     expect(authenticateRelayInboundToken(loaded, "wrong").ok).toBe(false);
   });
 
-  it("rejects group/world readable secret file, missing file, equal directional tokens, and never falls back to process.env", () => {
+  it("warns on group/world accessible secret file or identical directional tokens while keeping the profile ready (0600 and 0400 produce no warning), and still rejects missing keys/files without falling back to process.env", () => {
+    const mode0400File = join(home, "mode0400.env");
+    writeFileSync(
+      mode0400File,
+      "OPENRIG_RELAY_URL=http://127.0.0.1:8787/out\nOPENRIG_RELAY_OUTBOUND_TOKEN=o-400\nOPENRIG_RELAY_INBOUND_TOKEN=i-400\n",
+      { mode: 0o400 },
+    );
+    chmodSync(mode0400File, 0o400);
+
     const insecureFile = join(home, "insecure.env");
     writeFileSync(
       insecureFile,
-      "OPENRIG_RELAY_URL=http://127.0.0.1:8787/out\nOPENRIG_RELAY_OUTBOUND_TOKEN=o1\nOPENRIG_RELAY_INBOUND_TOKEN=i1\n",
+      "OPENRIG_RELAY_URL=http://127.0.0.1:8787/out\nOPENRIG_RELAY_OUTBOUND_TOKEN=o1-secret\nOPENRIG_RELAY_INBOUND_TOKEN=i1-secret\n",
       { mode: 0o644 },
     );
     chmodSync(insecureFile, 0o644);
@@ -178,25 +186,62 @@ describe("relay-config: loadRelayProfiles(home)", () => {
     process.env.OPENRIG_RELAY_INBOUND_TOKEN = "env-in-token";
 
     try {
+      expect(addHumanFragment(relayHuman("u0", "r-0400", `file:${mode0400File}`), home).ok).toBe(true);
       expect(addHumanFragment(relayHuman("u1", "r-insecure", `file:${insecureFile}`), home).ok).toBe(true);
       expect(addHumanFragment(relayHuman("u2", "r-equal", `file:${equalTokensFile}`), home).ok).toBe(true);
       expect(addHumanFragment(relayHuman("u3", "r-missing-key", `file:${missingKeyFile}`), home).ok).toBe(true);
       expect(addHumanFragment(relayHuman("u4", "r-missing-file", `file:${join(home, "nope.env")}`), home).ok).toBe(true);
 
       const loaded = loadRelayProfiles(home);
-      expect(loaded.get("r-insecure")!.ready).toBe(false);
-      expect(loaded.get("r-insecure")!.reason).toMatch(/insecure|permissions|0600/i);
-      expect(loaded.get("r-insecure")!.credentials).toBeNull();
 
-      expect(loaded.get("r-equal")!.ready).toBe(false);
-      expect(loaded.get("r-equal")!.reason).toMatch(/distinct/i);
-      expect(loaded.get("r-equal")!.reason).not.toContain("same-secret-tok");
+      // 0400 has zero group/other bits -> ready with zero warnings
+      const p0400 = loaded.get("r-0400")!;
+      expect(p0400.ready).toBe(true);
+      expect(p0400.warnings).toEqual([]);
+      expect(p0400.reason).not.toMatch(/warning|insecure/i);
 
+      // 0644 has group/other bits -> warns like Slack, does NOT make profile unready
+      const pInsecure = loaded.get("r-insecure")!;
+      expect(pInsecure.ready).toBe(true);
+      expect(pInsecure.state).toBe("ready");
+      expect(pInsecure.credentials).toEqual({
+        url: "http://127.0.0.1:8787/out",
+        outboundToken: "o1-secret",
+        inboundToken: "i1-secret",
+      });
+      expect(pInsecure.warnings.length).toBeGreaterThan(0);
+      expect(pInsecure.warnings[0]).toMatch(/0644/);
+      expect(pInsecure.warnings[0]).toMatch(/group\/other/i);
+      expect(pInsecure.reason).toMatch(/warning.*0644/i);
+      expect(pInsecure.reason).not.toContain("o1-secret");
+      expect(pInsecure.reason).not.toContain("i1-secret");
+
+      // Same token in both directions -> allowed and ready, with a useful redacted warning
+      const pEqual = loaded.get("r-equal")!;
+      expect(pEqual.ready).toBe(true);
+      expect(pEqual.state).toBe("ready");
+      expect(pEqual.credentials).toEqual({
+        url: "http://127.0.0.1:8787/out",
+        outboundToken: "same-secret-tok",
+        inboundToken: "same-secret-tok",
+      });
+      expect(pEqual.warnings.length).toBeGreaterThan(0);
+      expect(pEqual.warnings[0]).toMatch(/OPENRIG_RELAY_OUTBOUND_TOKEN.*OPENRIG_RELAY_INBOUND_TOKEN|separate/i);
+      expect(pEqual.reason).toMatch(/warning/i);
+      expect(pEqual.reason).not.toContain("same-secret-tok");
+      expect(authenticateRelayInboundToken(loaded, "same-secret-tok")).toMatchObject({
+        ok: true,
+        connectorRef: "r-equal",
+      });
+
+      // Missing key or missing file still not-ready
       expect(loaded.get("r-missing-key")!.ready).toBe(false);
       expect(loaded.get("r-missing-key")!.reason).toMatch(/OPENRIG_RELAY_INBOUND_TOKEN/);
+      expect(loaded.get("r-missing-key")!.credentials).toBeNull();
 
       expect(loaded.get("r-missing-file")!.ready).toBe(false);
       expect(loaded.get("r-missing-file")!.reason).toMatch(/missing or unreadable/i);
+      expect(loaded.get("r-missing-file")!.credentials).toBeNull();
     } finally {
       if (savedUrl === undefined) delete process.env.OPENRIG_RELAY_URL;
       else process.env.OPENRIG_RELAY_URL = savedUrl;

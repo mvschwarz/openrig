@@ -26,7 +26,6 @@ import { resolvePrimaryRelayBinding, type RelayPayloadCarry } from "../domain/ga
 import { resolveSecret } from "../domain/gateway/slack/secrets.js";
 import { resolveHumanDeliveryReadiness, type HumanDeliveryReadiness } from "../domain/gateway/human-readiness.js";
 import {
-  RELAY_FORWARDING_HEADERS,
   RELAY_INBOUND_MAX_BODY_BYTES,
   isDirectLoopbackPeer,
   type RelayInboundHandler,
@@ -80,18 +79,6 @@ export function gatewayRoutes(opts: {
           },
           403,
         );
-      }
-
-      for (const headerName of RELAY_FORWARDING_HEADERS) {
-        if (c.req.header(headerName) !== undefined) {
-          return c.json(
-            {
-              error: "forwarded_requests_forbidden",
-              message: `Relay inbound requests must not carry forwarding header '${headerName}'.`,
-            },
-            403,
-          );
-        }
       }
 
       return next();

@@ -29,6 +29,7 @@ import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import {
   RELAY_INBOUND_SEEN_FILE,
+  computeRelayEventFingerprint,
   computeRelayEventKey,
   createRelayInboundHandler,
 } from "../src/domain/gateway/relay-inbound.js";
@@ -502,28 +503,7 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     );
     expect(nonLoopbackRes.status).toBe(403);
 
-    // 3. Forwarding / proxy headers over real loopback TCP are rejected (403)
-    for (const headerName of [
-      "X-Forwarded-For",
-      "Forwarded",
-      "X-Real-Ip",
-      "Via",
-      "X-Forwarded-Host",
-      "X-Forwarded-Proto",
-    ]) {
-      const proxiedRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${f.inboundTokenMain}`,
-          "Content-Type": "application/json",
-          [headerName]: "127.0.0.1",
-        },
-        body: JSON.stringify(validBody),
-      });
-      expect(proxiedRes.status, `header ${headerName}`).toBe(403);
-    }
-
-    // 4. Browser boundary rejects cross-origin and untrusted Host requests (403)
+    // 3. Browser boundary rejects cross-origin and untrusted Host requests (403)
     const crossOriginRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
       method: "POST",
       headers: {
@@ -535,8 +515,26 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     });
     expect(crossOriginRes.status).toBe(403);
 
-    // Verify qitem is still untouched (pending)
+    // Verify qitem is still untouched (pending) after all boundary rejections
     expect(f.daemon.queueRepo.getById(qitemId)?.state).toBe("pending");
+
+    // 4. Forwarding / proxy headers (Via, X-Forwarded-*, Forwarded, X-Real-Ip) over a direct loopback TCP peer are ignored
+    const withForwardingHeadersRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+        Via: "1.1 local-bridge",
+        "X-Forwarded-For": "203.0.113.9",
+        "X-Forwarded-Host": "relay.example",
+        "X-Forwarded-Proto": "https",
+        Forwarded: "for=203.0.113.9;proto=https",
+        "X-Real-Ip": "203.0.113.9",
+      },
+      body: JSON.stringify(validBody),
+    });
+    expect(withForwardingHeadersRes.status).toBe(200);
+    expect(f.daemon.queueRepo.getById(qitemId)?.state).toBe("done");
   });
 
   it("enforces explicit relay bearer token authentication and never allows null-token bypass when unready", async () => {
@@ -557,26 +555,31 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     expect(noHeaderOnUnready.status).toBe(401);
     expect(unconfigured.daemon.queueRepo.getById(unreadyQitem)?.state).toBe("pending");
 
-    // Insecure permissions (0644) -> unready profile, rejects even with matching token and never leaks secret
-    const insecure = await createRelayFixture({ mainSecretMode: 0o644 });
-    const { replyRef: insecureRef } = await createAskWithAcceptedRelayRef(insecure);
-    const insecureRes = await fetch(`${insecure.baseUrl}/api/gateway/relay/inbound`, {
+    // Missing inbound token in env file -> unready profile, rejects and never leaks outbound secret
+    const missingInbound = await createRelayFixture({
+      mainVars: {
+        OPENRIG_RELAY_URL: "http://127.0.0.1:19876/outbound",
+        OPENRIG_RELAY_OUTBOUND_TOKEN: "relay-out-secret-main-token-001",
+      },
+    });
+    const { replyRef: missingInboundRef } = await createAskWithAcceptedRelayRef(missingInbound);
+    const missingInboundRes = await fetch(`${missingInbound.baseUrl}/api/gateway/relay/inbound`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${insecure.inboundTokenMain}`,
+        Authorization: `Bearer ${missingInbound.inboundTokenMain}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
         eventId: "evt-auth-2",
         sender: { handle: "founder-handle" },
-        replyRef: insecureRef,
-        text: "Should fail due to 0644",
+        replyRef: missingInboundRef,
+        text: "Should fail due to missing inbound token",
       }),
     });
-    expect(insecureRes.status).toBe(401);
-    const insecureBodyText = await insecureRes.text();
-    expect(insecureBodyText).not.toContain(insecure.inboundTokenMain);
-    expect(insecureBodyText).not.toContain(insecure.outboundTokenMain);
+    expect(missingInboundRes.status).toBe(401);
+    const missingInboundBodyText = await missingInboundRes.text();
+    expect(missingInboundBodyText).not.toContain(missingInbound.inboundTokenMain);
+    expect(missingInboundBodyText).not.toContain(missingInbound.outboundTokenMain);
 
     // Configured ready profile: test missing bearer, wrong bearer, and outbound token used on inbound
     const f = await createRelayFixture({
@@ -655,9 +658,9 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     expect(authForward.status).toBe(503);
   });
 
-  it("validates closed bounded JSON schema and rejects unknown keys, malformed JSON, and oversized bodies", async () => {
+  it("validates bounded JSON schema and size limits while accepting and ignoring harmless extra top-level and sender fields", async () => {
     const f = await createRelayFixture();
-    const { replyRef } = await createAskWithAcceptedRelayRef(f);
+    const { qitemId, replyRef } = await createAskWithAcceptedRelayRef(f);
 
     // Malformed JSON
     const malformed = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
@@ -669,39 +672,6 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
       body: "{bad json",
     });
     expect(malformed.status).toBe(400);
-
-    // Unknown top-level key (e.g., actorSession injection attempt)
-    const extraTopKey = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${f.inboundTokenMain}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        eventId: "evt-schema-1",
-        sender: { handle: "founder-handle" },
-        replyRef,
-        text: "Hello",
-        actorSession: "founder@external",
-      }),
-    });
-    expect(extraTopKey.status).toBe(400);
-
-    // Unknown nested sender key
-    const extraSenderKey = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${f.inboundTokenMain}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        eventId: "evt-schema-2",
-        sender: { handle: "founder-handle", entityId: "founder" },
-        replyRef,
-        text: "Hello",
-      }),
-    });
-    expect(extraSenderKey.status).toBe(400);
 
     // Invalid ordering value
     const badOrdering = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
@@ -735,6 +705,36 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
       }),
     });
     expect(oversized.status).toBe(413);
+
+    // Harmless extra top-level and sender fields are accepted and ignored (never overriding handle attribution)
+    const withExtras = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "evt-schema-extras-ok",
+        sender: {
+          handle: "founder-handle",
+          displayName: "Founder Extra",
+          entityId: "partner",
+        },
+        replyRef,
+        text: "Approve Option A with extra fields ignored",
+        ordering: "after-question",
+        actorSession: "partner@external",
+        bridgeMeta: { bridgeVersion: "1.0.0" },
+      }),
+    });
+    expect(withExtras.status).toBe(200);
+    expect(await withExtras.json()).toMatchObject({
+      ok: true,
+      qitemId,
+      actorSession: "founder@external",
+      deduplicated: false,
+    });
+    expect(f.daemon.queueRepo.getById(qitemId)?.state).toBe("done");
   });
 
   it("answers a direct ask and resolves a parked item with after-question ordering, including pending-buffer replyRef acceptance", async () => {
@@ -1342,6 +1342,67 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     expect(seen.statuses().get(keyBNeg)).toMatch(/^received:/);
     f.daemon.queueRepo.createHumanAnswer = origCreateHumanAnswer;
 
+    // Case B2: Crash between ask close (resolveDirectHumanReply) and audit record (missionControlActionLog.record),
+    // then retry the same received event through a fresh handler -> one answer, one close/resume transition, one audit row.
+    const askB2 = await createAskWithAcceptedRelayRef(f);
+    const bodyB2 = {
+      eventId: "evt-crash-b2-close-before-audit",
+      sender: { handle: "founder-handle" },
+      replyRef: askB2.replyRef,
+      text: "Recovered answer B2 after close-before-audit crash",
+      ordering: "after-question" as const,
+    };
+    const origRecord = f.daemon.missionControlActionLog.record.bind(f.daemon.missionControlActionLog);
+    let failAuditOnce = true;
+    f.daemon.missionControlActionLog.record = (entry) => {
+      if (failAuditOnce && entry.qitemId === askB2.qitemId) {
+        failAuditOnce = false;
+        throw new Error("simulated crash after ask close before audit record");
+      }
+      return origRecord(entry);
+    };
+
+    const failedAttemptB2 = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(bodyB2),
+    });
+    expect(failedAttemptB2.status).toBe(500);
+    f.daemon.missionControlActionLog.record = origRecord;
+
+    const keyB2 = computeRelayEventKey("relay-main", "evt-crash-b2-close-before-audit");
+    expect(seen.statuses().get(keyB2)).toMatch(/^received:/);
+    // Close rolled back atomically with the failed audit; only the 1 reply row is present
+    expect(f.daemon.queueRepo.getById(askB2.qitemId)?.state).toBe("pending");
+    expect(f.daemon.missionControlActionLog.listForQitem(askB2.qitemId, 5)).toHaveLength(0);
+
+    // Retry the same received event through a freshly constructed RelayInboundHandler
+    const freshHandler = createRelayInboundHandler({
+      home: f.home,
+      queueRepo: f.daemon.queueRepo,
+      missionControlWriteContract: f.daemon.missionControlWriteContract,
+      missionControlActionLog: f.daemon.missionControlActionLog,
+    });
+    const retryB2 = await freshHandler.handle({
+      authorizationHeader: `Bearer ${f.inboundTokenMain}`,
+      rawBody: JSON.stringify(bodyB2),
+    });
+    expect(retryB2.status).toBe(200);
+    expect(seen.statuses().get(keyB2)).toMatch(/^processed:/);
+    expect(f.daemon.queueRepo.getById(askB2.qitemId)?.state).toBe("done");
+    expect(f.daemon.missionControlActionLog.listForQitem(askB2.qitemId, 5)).toHaveLength(1);
+    const b2Replies = f.daemon.db
+      .prepare("SELECT count(*) as n FROM queue_items WHERE reply_to = ?")
+      .get(askB2.qitemId) as { n: number };
+    expect(b2Replies.n).toBe(1);
+    const b2CloseTransitions = f.daemon.queueRepo
+      .listTransitions(askB2.qitemId)
+      .filter((t) => t.ownerNotificationKind === "human-decision-resolved");
+    expect(b2CloseTransitions).toHaveLength(1);
+
     // Case C: Crash after resolve commit before processed mark, AND qitem is subsequently re-parked in a new episode!
     // Retry of the original event must reconcile its OWN committed resolve and mark processed without unparking the new episode.
     const parkC = await createParkedItemWithAcceptedRelayRef(f);
@@ -1395,7 +1456,209 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     expect(seen.statuses().get(keyC)).toMatch(/^processed:/);
     expect(f.daemon.queueRepo.getById(parkC.qitemId)?.state).toBe("blocked");
 
-    // Case D: Corrupt seen-store file refuses 2xx (returns 503)
+    // Case D: Seen-ledger scoping:
+    // D1. Keyed records with valid received:/processed:<fingerprint> still vouch for identity/result even with
+    // missing/invalid ts or extra diagnostic metadata; truly missing/unknown status or conflicting fingerprints
+    // refuse ONLY that key (503, never unseen), while unrelated keys remain available.
+    const askProcessedNoTs = await createAskWithAcceptedRelayRef(f);
+    const eventProcessedNoTs = "evt-processed-missing-ts";
+    const keyProcessedNoTs = computeRelayEventKey("relay-main", eventProcessedNoTs);
+    const fpProcessedNoTs = computeRelayEventFingerprint({
+      connectorRef: "relay-main",
+      eventId: eventProcessedNoTs,
+      senderHandle: "founder-handle",
+      actorSession: "founder@external",
+      replyRef: askProcessedNoTs.replyRef,
+      qitemId: askProcessedNoTs.qitemId,
+      episodeKey: askProcessedNoTs.payload.episodeKey,
+      decisionRevision: askProcessedNoTs.payload.decisionRevision,
+      mode: askProcessedNoTs.payload.mode,
+      ordering: "after-question",
+      text: "Already processed with missing ts",
+    });
+
+    const askReceivedNoTs = await createAskWithAcceptedRelayRef(f);
+    const eventReceivedNoTs = "evt-received-missing-ts";
+    const keyReceivedNoTs = computeRelayEventKey("relay-main", eventReceivedNoTs);
+    const fpReceivedNoTs = computeRelayEventFingerprint({
+      connectorRef: "relay-main",
+      eventId: eventReceivedNoTs,
+      senderHandle: "founder-handle",
+      actorSession: "founder@external",
+      replyRef: askReceivedNoTs.replyRef,
+      qitemId: askReceivedNoTs.qitemId,
+      episodeKey: askReceivedNoTs.payload.episodeKey,
+      decisionRevision: askReceivedNoTs.payload.decisionRevision,
+      mode: askReceivedNoTs.payload.mode,
+      ordering: "after-question",
+      text: "Reserved received with missing ts",
+    });
+
+    const suspectEventId1 = "evt-suspect-unknown-status";
+    const suspectKey1 = computeRelayEventKey("relay-main", suspectEventId1);
+    const suspectEventId2 = "evt-suspect-missing-status";
+    const suspectKey2 = computeRelayEventKey("relay-main", suspectEventId2);
+    const suspectEventId3 = "evt-suspect-conflicting-fps";
+    const suspectKey3 = computeRelayEventKey("relay-main", suspectEventId3);
+    const existingSeenRaw = readFileSync(seenPath, "utf8");
+    writeFileSync(
+      seenPath,
+      existingSeenRaw +
+        JSON.stringify({ id: keyProcessedNoTs, status: `processed:${fpProcessedNoTs}`, extraDiag: 123 }) +
+        "\n" +
+        JSON.stringify({ id: keyReceivedNoTs, ts: null, status: `received:${fpReceivedNoTs}`, note: "diag" }) +
+        "\n" +
+        JSON.stringify({ id: suspectKey1, ts: "2026-11-07T00:00:00.000Z", status: "unknown:status" }) +
+        "\n" +
+        JSON.stringify({ id: suspectKey2, ts: "2026-11-07T00:00:00.000Z" }) +
+        "\n" +
+        JSON.stringify({ id: suspectKey3, status: `received:${"a".repeat(64)}` }) +
+        "\n" +
+        JSON.stringify({ id: suspectKey3, status: `processed:${"b".repeat(64)}` }) +
+        "\n",
+      "utf8",
+    );
+
+    // Valid processed record missing ts still deduplicates safely (200, zero new effects) and rejects conflict (409)
+    const processedNoTsRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: eventProcessedNoTs,
+        sender: { handle: "founder-handle" },
+        replyRef: askProcessedNoTs.replyRef,
+        text: "Already processed with missing ts",
+        ordering: "after-question",
+      }),
+    });
+    expect(processedNoTsRes.status).toBe(200);
+    expect(await processedNoTsRes.json()).toMatchObject({ ok: true, deduplicated: true });
+    expect(f.daemon.queueRepo.getById(askProcessedNoTs.qitemId)?.state).toBe("pending");
+    expect(f.daemon.missionControlActionLog.listForQitem(askProcessedNoTs.qitemId, 5)).toHaveLength(0);
+
+    const processedNoTsConflict = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: eventProcessedNoTs,
+        sender: { handle: "founder-handle" },
+        replyRef: askProcessedNoTs.replyRef,
+        text: "Different text under processed missing-ts key",
+        ordering: "after-question",
+      }),
+    });
+    expect(processedNoTsConflict.status).toBe(409);
+
+    // Valid received record missing ts can safely complete/reconcile (200)
+    const receivedNoTsRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: eventReceivedNoTs,
+        sender: { handle: "founder-handle" },
+        replyRef: askReceivedNoTs.replyRef,
+        text: "Reserved received with missing ts",
+        ordering: "after-question",
+      }),
+    });
+    expect(receivedNoTsRes.status).toBe(200);
+    expect(f.daemon.queueRepo.getById(askReceivedNoTs.qitemId)?.state).toBe("done");
+    expect(seen.statuses().get(keyReceivedNoTs)).toBe(`processed:${fpReceivedNoTs}`);
+
+    // Unrelated already-processed keyA still deduplicates (200) and rejects equivocation (409)
+    const dupA = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(bodyA),
+    });
+    expect(dupA.status).toBe(200);
+    expect(await dupA.json()).toMatchObject({ ok: true, deduplicated: true });
+
+    const conflictA = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ...bodyA, text: "Conflicting text for keyA" }),
+    });
+    expect(conflictA.status).toBe(409);
+
+    // Unrelated brand-new key on a fresh ask still succeeds (200)
+    const askUnrelated = await createAskWithAcceptedRelayRef(f);
+    const unrelatedRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "evt-unrelated-healthy",
+        sender: { handle: "founder-handle" },
+        replyRef: askUnrelated.replyRef,
+        text: "Unrelated key succeeds despite keyed suspect records",
+        ordering: "after-question",
+      }),
+    });
+    expect(unrelatedRes.status).toBe(200);
+    expect(f.daemon.queueRepo.getById(askUnrelated.qitemId)?.state).toBe("done");
+
+    // Request for the keyed suspect eventIds (unknown status, missing status, conflicting fingerprints) is refused with 503 (never treated as unseen!)
+    const askSuspect = await createAskWithAcceptedRelayRef(f);
+    for (const badEventId of [suspectEventId1, suspectEventId2, suspectEventId3]) {
+      const suspectRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${f.inboundTokenMain}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          eventId: badEventId,
+          sender: { handle: "founder-handle" },
+          replyRef: askSuspect.replyRef,
+          text: "Should be refused because its keyed seen record is unvouched",
+          ordering: "after-question",
+        }),
+      });
+      expect(suspectRes.status, `eventId=${badEventId}`).toBe(503);
+    }
+    expect(f.daemon.queueRepo.getById(askSuspect.qitemId)?.state).toBe("pending");
+
+    // D2. Unkeyable record (missing id) and unparseable JSONL line refuse with scoped 503 even for unseen keys
+    writeFileSync(
+      seenPath,
+      existingSeenRaw + JSON.stringify({ ts: "2026-11-07T00:00:00.000Z", status: `processed:${"b".repeat(64)}` }) + "\n",
+      "utf8",
+    );
+    const unkeyableRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${f.inboundTokenMain}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "evt-unseen-during-unkeyable-history",
+        sender: { handle: "founder-handle" },
+        replyRef: askSuspect.replyRef,
+        text: "Must not count as unseen when history has unkeyable line",
+        ordering: "after-question",
+      }),
+    });
+    expect(unkeyableRes.status).toBe(503);
+    expect(f.daemon.queueRepo.getById(askSuspect.qitemId)?.state).toBe("pending");
+
     writeFileSync(seenPath, "{corrupt-jsonl-line\n", "utf8");
     const corruptRes = await fetch(`${f.baseUrl}/api/gateway/relay/inbound`, {
       method: "POST",

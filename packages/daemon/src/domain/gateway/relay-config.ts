@@ -31,6 +31,7 @@ export interface RelayProfileReadiness {
   readonly ready: boolean;
   readonly reason: string;
   readonly nextAction: string | null;
+  readonly warnings: readonly string[];
 }
 
 export interface RelayBoundHuman {
@@ -146,6 +147,22 @@ function createPrivateCredentials(url: string, outboundToken: string, inboundTok
   return Object.freeze(creds);
 }
 
+/** Check permissions on a relay secret file. Like Slack secret file checks, unsafe group/other
+ *  permission bits (`(mode & 0o077) !== 0`) produce a warning rather than making the profile unready.
+ *  Owner-only modes such as `0600` or `0400` produce no warning (`null`). */
+function checkRelaySecretFilePermissions(
+  envFile: string,
+  fsops: SecretFsOps,
+  connectorRef: string,
+): string | null {
+  const mode = fsops.statMode(envFile);
+  if (mode === null) return null;
+  if ((mode & 0o077) !== 0) {
+    return `relay secret file for '${connectorRef}' has insecure permissions (mode 0${mode.toString(8).padStart(3, "0")}; group/other access bits are set — restrict so group/other have no access, e.g. 0600 or 0400)`;
+  }
+  return null;
+}
+
 interface CandidateProfile {
   connectorRef: string;
   secretsRef: string | null;
@@ -153,6 +170,7 @@ interface CandidateProfile {
   endpointUrl: string | null;
   humans: RelayBoundHuman[];
   nextAction: string | null;
+  warnings: string[];
   unreadyReason?: string;
   url?: string;
   outboundToken?: string;
@@ -166,6 +184,7 @@ function evaluateRelayCandidate(
 ): CandidateProfile {
   const firstHuman = humans[0]!;
   const defaultNextAction = `rig gateway human show ${firstHuman.entityId} --json`;
+  const warnings: string[] = [];
   const fail = (
     unreadyReason: string,
     secretsRef: string | null = firstHuman.secretsRef,
@@ -178,6 +197,7 @@ function evaluateRelayCandidate(
     endpointUrl: null,
     humans,
     nextAction,
+    warnings,
     unreadyReason,
   });
 
@@ -209,12 +229,9 @@ function evaluateRelayCandidate(
   if (mode === null) {
     return fail(`relay secret file for '${connectorRef}' is missing or unreadable`, secretsRef, envFile!);
   }
-  if ((mode & 0o077) !== 0) {
-    return fail(
-      `relay secret file for '${connectorRef}' has insecure permissions (mode 0${mode.toString(8).padStart(3, "0")}; group/world access is refused, expected 0600)`,
-      secretsRef,
-      envFile!,
-    );
+  const permWarning = checkRelaySecretFilePermissions(envFile!, fsops, connectorRef);
+  if (permWarning) {
+    warnings.push(permWarning);
   }
 
   let rawText: string;
@@ -239,10 +256,8 @@ function evaluateRelayCandidate(
     return fail(`relay profile '${connectorRef}' is missing ${RELAY_ENV_KEYS.inboundToken}`, secretsRef, envFile!);
   }
   if (constantTimeEqual(outboundToken, inboundToken)) {
-    return fail(
-      `relay profile '${connectorRef}' must have distinct ${RELAY_ENV_KEYS.outboundToken} and ${RELAY_ENV_KEYS.inboundToken} values`,
-      secretsRef,
-      envFile!,
+    warnings.push(
+      `relay profile '${connectorRef}' uses the same token for ${RELAY_ENV_KEYS.outboundToken} and ${RELAY_ENV_KEYS.inboundToken}; separate tokens are recommended so outbound bridge capture cannot authenticate inbound replies`,
     );
   }
 
@@ -262,6 +277,7 @@ function evaluateRelayCandidate(
     endpointUrl: urlVerdict.url,
     humans,
     nextAction: defaultNextAction,
+    warnings,
     url: urlVerdict.url,
     outboundToken,
     inboundToken,
@@ -270,13 +286,20 @@ function evaluateRelayCandidate(
 
 function buildRelayProfile(c: CandidateProfile): RelayProfile {
   const ready = !c.unreadyReason;
+  const frozenWarnings = Object.freeze([...c.warnings]);
+  const baseVerifiedReason = "relay profile verified (loopback HTTP endpoint and directional tokens configured)";
+  const readyReason =
+    frozenWarnings.length > 0
+      ? `${baseVerifiedReason}; warning: ${frozenWarnings.join("; ")}`
+      : baseVerifiedReason;
   const readiness: RelayProfileReadiness = Object.freeze({
     connectorRef: c.connectorRef,
     state: ready ? "ready" : "not-ready",
     configured: ready,
     ready,
-    reason: c.unreadyReason ?? "relay profile verified (loopback HTTP endpoint and directional tokens configured)",
+    reason: c.unreadyReason ?? readyReason,
     nextAction: ready ? null : c.nextAction,
+    warnings: frozenWarnings,
   });
   const credentials = ready ? createPrivateCredentials(c.url!, c.outboundToken!, c.inboundToken!) : null;
   const profile = {

@@ -213,6 +213,53 @@ describe("relay primary-binding readiness", () => {
     }
   });
 
+  it("keeps relay profile ready with redacted warning when secret file has group/other bits or uses the same directional token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "relay-warn-ready-"));
+    try {
+      const envFile = join(dir, "relay-warn.env");
+      writeFileSync(
+        envFile,
+        [
+          "OPENRIG_RELAY_URL=http://127.0.0.1:8787/outbound",
+          "OPENRIG_RELAY_OUTBOUND_TOKEN=shared-bidirectional-tok-99",
+          "OPENRIG_RELAY_INBOUND_TOKEN=shared-bidirectional-tok-99",
+        ].join("\n"),
+        { mode: 0o644 },
+      );
+      const relayHuman: HumanFragment = {
+        ...human,
+        connectorBindings: [
+          {
+            kind: "relay",
+            connectorRef: "bridge-warn",
+            secretsRef: `file:${envFile}`,
+            role: "primary",
+            handle: "founder",
+          },
+        ],
+      };
+      const result = await resolveHumanDeliveryReadiness(
+        { human: relayHuman, config: unconfiguredSlack, gatewayState: "active", botToken: null, home: dir },
+        { entities: [relayHuman], now: () => new Date("2026-11-07T00:00:00.000Z") },
+      );
+      expect(result).toMatchObject({
+        state: "ready",
+        configured: true,
+        enabled: true,
+        active: true,
+        ready: true,
+        connector: { kind: "relay", ref: "bridge-warn" },
+        nextAction: null,
+      });
+      expect(result.reason).toMatch(/warning/i);
+      expect(result.reason).toMatch(/group\/other/i);
+      expect(result.reason).toMatch(/OPENRIG_RELAY_OUTBOUND_TOKEN/);
+      expect(JSON.stringify(result)).not.toContain("shared-bidirectional-tok-99");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("reports not-ready with sanitized reason when relay credentials are invalid or ambiguous", async () => {
     const dir = mkdtempSync(join(tmpdir(), "relay-unready-"));
     try {

@@ -32,20 +32,11 @@ import type { MissionControlActionLog } from "../mission-control/mission-control
 export const RELAY_INBOUND_SEEN_FILE = "relay-inbound-seen.jsonl" as const;
 export const RELAY_INBOUND_MAX_BODY_BYTES = 64 * 1024;
 
-export const RELAY_FORWARDING_HEADERS = [
-  "forwarded",
-  "x-forwarded-for",
-  "x-forwarded-host",
-  "x-forwarded-proto",
-  "x-real-ip",
-  "via",
-] as const;
-
 const EVENT_ID_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/;
 const MAX_REPLY_REF_CHARS = 4096;
 const MAX_REPLY_TEXT_CHARS = 32_768;
-const ALLOWED_TOP_KEYS = new Set(["eventId", "sender", "replyRef", "text", "ordering"]);
-const ALLOWED_SENDER_KEYS = new Set(["handle"]);
+const VALID_SEEN_STATUS_PATTERN = /^(received|processed):([0-9a-f]{64})$/;
+const SUSPECT_SEEN_STATUS = "suspect";
 
 export type RelayInboundOrdering = "after-question" | "uncertain";
 
@@ -191,17 +182,6 @@ function parseInboundEnvelope(
   }
 
   const obj = parsed as Record<string, unknown>;
-  for (const key of Object.keys(obj)) {
-    if (!ALLOWED_TOP_KEYS.has(key)) {
-      return {
-        ok: false,
-        status: 400,
-        code: "invalid_envelope",
-        message: `unexpected field '${key}' in relay inbound envelope`,
-      };
-    }
-  }
-
   const { eventId, sender, replyRef, text, ordering } = obj;
   if (typeof eventId !== "string" || !EVENT_ID_PATTERN.test(eventId)) {
     return {
@@ -221,16 +201,6 @@ function parseInboundEnvelope(
     };
   }
   const senderObj = sender as Record<string, unknown>;
-  for (const key of Object.keys(senderObj)) {
-    if (!ALLOWED_SENDER_KEYS.has(key)) {
-      return {
-        ok: false,
-        status: 400,
-        code: "invalid_envelope",
-        message: `unexpected field 'sender.${key}' in relay inbound envelope`,
-      };
-    }
-  }
   if (typeof senderObj.handle !== "string" || !HANDLE_PATTERN.test(senderObj.handle)) {
     return {
       ok: false,
@@ -390,15 +360,22 @@ function formatDecisionText(text: string, ordering: RelayInboundOrdering): strin
 }
 
 /**
- * Wrap StateFsOps so SeenStore.statuses() fails closed on any corrupted or
- * non-JSONL line in the relay inbound ledger without altering Slack's global
- * SeenStore torn-line tolerance.
+ * Wrap StateFsOps so SeenStore.statuses() fails closed (503) when history is
+ * unreadable or contains unparseable/unkeyable lines, while scoping keyed
+ * suspect records (missing/invalid status or conflicting fingerprints) to only
+ * their own eventKey so unrelated keys remain available and unvouched history
+ * never counts as unseen. Diagnostic fields such as `ts` or extra metadata are
+ * ignored when `id` and `status` vouch for the event.
  */
 function strictRelayStateFs(base: StateFsOps = nodeStateFs): StateFsOps {
   return {
     ...base,
     readFileSync(p: string): string {
       const raw = base.readFileSync(p);
+      const suspectIds = new Set<string>();
+      const seenFingerprints = new Map<string, string>();
+      const normalizedLines: string[] = [];
+
       for (const line of raw.split("\n")) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -413,16 +390,28 @@ function strictRelayStateFs(base: StateFsOps = nodeStateFs): StateFsOps {
           typeof parsed !== "object" ||
           Array.isArray(parsed) ||
           typeof (parsed as { id?: unknown }).id !== "string" ||
-          !(parsed as { id: string }).id ||
-          typeof (parsed as { status?: unknown }).status !== "string" ||
-          !(parsed as { status: string }).status ||
-          typeof (parsed as { ts?: unknown }).ts !== "string" ||
-          !(parsed as { ts: string }).ts
+          !(parsed as { id: string }).id.trim()
         ) {
-          throw new Error("invalid relay inbound seen-store record");
+          throw new Error("unkeyable relay inbound seen-store record");
+        }
+        const rec = parsed as { id: string; status?: unknown };
+        const id = rec.id;
+        const statusStr = typeof rec.status === "string" ? rec.status : "";
+        const match = VALID_SEEN_STATUS_PATTERN.exec(statusStr);
+        const priorFp = seenFingerprints.get(id);
+        if (
+          !match ||
+          suspectIds.has(id) ||
+          (priorFp !== undefined && priorFp !== match[2])
+        ) {
+          suspectIds.add(id);
+          normalizedLines.push(JSON.stringify({ id, status: SUSPECT_SEEN_STATUS }));
+        } else {
+          seenFingerprints.set(id, match[2]!);
+          normalizedLines.push(trimmed);
         }
       }
-      return raw;
+      return normalizedLines.join("\n");
     },
   };
 }
@@ -587,8 +576,17 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
         const verb = ref.mode === "ask" ? ("answer" as const) : ("resolve" as const);
 
         if (existingStatus !== undefined) {
-          const colonIdx = existingStatus.indexOf(":");
-          const existingFp = colonIdx >= 0 ? existingStatus.slice(colonIdx + 1) : existingStatus;
+          const match = VALID_SEEN_STATUS_PATTERN.exec(existingStatus);
+          if (!match) {
+            return {
+              status: 503,
+              body: {
+                error: "seen_store_unavailable",
+                message: "Relay inbound seen-store record for this eventId is corrupt or unvouched; refusing to process or acknowledge",
+              },
+            };
+          }
+          const existingFp = match[2];
           if (existingFp !== fingerprint) {
             return {
               status: 409,

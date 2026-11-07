@@ -188,11 +188,29 @@ describe("complete human notifications", () => {
     expect(await (await app.request("/api/queue/list?attention=1")).json()).toEqual([]);
   });
 
-  it("keeps failed FYIs pending and out of delivered history", async () => {
+  it("keeps failed FYIs pending and out of delivered history for both Slack and Relay failure notes", async () => {
     const item = await repo.create({ ...request, humanIntent: "update" });
     expect(item.state).toBe("pending"); expect(repo.listDeliveredHumanUpdates()).toEqual([]);
-    repo.update({ qitemId: item.qitemId, actorSession: "daemon@kernel", transitionNote: "slack-owner-notification-transport-failed notification_key=x class=transport error=synthetic" });
-    expect(repo.getById(item.qitemId)?.state).toBe("pending"); expect(repo.listDeliveredHumanUpdates()).toEqual([]);
+    const slackKey = `${item.qitemId}:${repo.transitionLog.latestOwnerNotificationForQitem(item.qitemId)!.transitionId}`;
+    repo.update({ qitemId: item.qitemId, actorSession: "daemon@kernel", transitionNote: `slack-owner-notification-transport-failed notification_key=${slackKey} class=transport error=synthetic` });
+    expect(repo.getById(item.qitemId)).toMatchObject({ state: "pending", deliveryOutcome: "transport-failed" });
+    expect(repo.listDeliveredHumanUpdates()).toEqual([]);
+
+    const relayItem = await repo.create({ ...request, humanIntent: "update", summary: "Relay FYI" });
+    const relayKey = `${relayItem.qitemId}:${repo.transitionLog.latestOwnerNotificationForQitem(relayItem.qitemId)!.transitionId}`;
+    repo.update({
+      qitemId: relayItem.qitemId,
+      actorSession: "daemon@kernel",
+      transitionNote: `relay-owner-notification-transport-failed notification_key=${relayKey} connector_ref=relay-1 class=relay-http-502 error=bad-gateway`,
+    });
+    expect(repo.getById(relayItem.qitemId)).toMatchObject({
+      state: "pending",
+      deliveryOutcome: "transport-failed",
+      deliveryFailureDetail: expect.stringContaining("relay-owner-notification-transport-failed"),
+    });
+    expect(repo.getById(relayItem.qitemId)?.deliveryFailureDetail).toContain("connector_ref=relay-1");
+    expect(repo.findUndelivered().map((q) => q.qitemId)).toContain(relayItem.qitemId);
+    expect(repo.listDeliveredHumanUpdates()).toEqual([]);
   });
 
   it("keeps digest timing but dispatches each human request/update completely with stable identity", async () => {
@@ -289,6 +307,7 @@ describe("complete human notifications", () => {
     const deliveredUpdate = delivered.find((item) => item.qitemId === update.qitemId);
     expect(deliveredUpdate).toBeDefined();
     expect(deliveredUpdate?.deliveryReceipt.startsWith("relay-owner-notification-accepted ")).toBe(true);
+    expect(deliveredUpdate?.deliveryOutcome).toBe("accepted");
 
     // Caller humanIntent override cannot close a decision ask or alter recorded answers
     repo.recordRelayOwnerNotificationAccepted({

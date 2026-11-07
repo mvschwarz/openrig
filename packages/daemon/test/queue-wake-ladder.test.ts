@@ -275,6 +275,25 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(calls.some((c) => c.target === "worker@r")).toBe(false);
   });
 
+  it("DELIVERY MACHINERY IS NOT PICKUP: a relay-owner-notification-transport-failed note on an unconfirmed or held baton does not count as pickup evidence", async () => {
+    const mod = await ladderMod();
+    for (const [idx, result] of ["gateway-owned: virtual destination", "retained:typing_guard"].entries()) {
+      const baton = await mkBaton(`worker-${idx}@r`);
+      setNudgeResult(baton.qitemId, result, 45);
+      ageCreated(baton.qitemId, 45);
+      repo.transitionLog.append({
+        qitemId: baton.qitemId,
+        state: "pending",
+        actorSession: "daemon@kernel",
+        transitionNote: `relay-owner-notification-transport-failed notification_key=${baton.qitemId}:1 connector_ref=wa-main class=http-503 error=http 503`,
+      });
+      expect(mod.readWakeLadderBackstop(db, baton.qitemId)).not.toBeNull();
+      await tick();
+      expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX)).toHaveLength(1);
+      expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX)[0]).toMatch(/orchestrator/);
+    }
+  });
+
   // ── G4: F2 — SUSPENSION DERIVES FROM THE SWAP STATE ──────────────────────────
 
   it("SWAP SUSPENDS THE LADDER: a destination inside the post-swap grace gets ZERO wake attempts and one recorded suspend marker (the stale-wake-burst specimen)", async () => {

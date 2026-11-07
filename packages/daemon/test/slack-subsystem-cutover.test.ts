@@ -429,6 +429,14 @@ describe("Capability 3 — single-wire relay port isolation and attempted-replay
       evidenceRef: "/proof/relay-ask.md",
       transitionNote: "parked",
     });
+    const askEpisodeKey = `${ask.qitemId}:${repo.transitionLog.latestOwnerNotificationForQitem(ask.qitemId)!.transitionId}`;
+    // Seed an earlier Slack-named transport-failed note for the same episode (as baseline 5d188a43b wrote before the fix);
+    // a subsequent Relay failure for this episode must still record a relay-owner-notification-transport-failed note.
+    repo.update({
+      qitemId: ask.qitemId,
+      actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-transport-failed notification_key=${askEpisodeKey} class=relay-profile-unready error=legacy-slack-named-failure`,
+    });
 
     const slackCalls: string[] = [];
     const relayCalls: Array<Record<string, unknown>> = [];
@@ -462,8 +470,46 @@ describe("Capability 3 — single-wire relay port isolation and attempted-replay
       expect(slackCalls).toHaveLength(0);
       expect(relayCalls).toHaveLength(0);
       expect(new DispatchBuffer(home).pending()).toHaveLength(1);
+      const w1Notes = repo.listTransitions(ask.qitemId).map((t) => t.transitionNote ?? "");
+      const relayFailureNotes = w1Notes.filter((n) => n.startsWith("relay-owner-notification-transport-failed "));
+      expect(relayFailureNotes).toHaveLength(1);
+      expect(relayFailureNotes[0]).toContain("connector_ref=wa-main");
+      expect(relayFailureNotes[0]).toContain("class=relay-profile-unready");
+      expect(repo.getById(ask.qitemId)).toMatchObject({
+        deliveryOutcome: "transport-failed",
+        deliveryFailureDetail: expect.stringContaining("relay-owner-notification-transport-failed"),
+      });
+      expect(repo.findUndelivered().map((q) => q.qitemId)).toContain(ask.qitemId);
     } finally {
       w1.stop();
+    }
+
+    // If the relay connectorRef changes while still failing, it must record a new note naming the new connector rather than suppressing
+    registry.entities[0]!.connectorBindings[0]!.connectorRef = "wa-failover";
+    const originalPending = new DispatchBuffer(home).pending()[0]!;
+    const {
+      relayConnectorRef: _oldRef,
+      relayEnvelope: _oldEnv,
+      relayEnvelopes: _oldEnvs,
+      ...unpreparedPayload
+    } = (originalPending.payload ?? {}) as Record<string, unknown>;
+    const w1b = makeWire();
+    try {
+      w1b.dispatcher.dispatch("post_message", "sam@kernel", unpreparedPayload, {
+        decisionId: "failover-probe",
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      const w1bRelayFailureNotes = repo
+        .listTransitions(ask.qitemId)
+        .map((t) => t.transitionNote ?? "")
+        .filter((n) => n.startsWith("relay-owner-notification-transport-failed "));
+      expect(w1bRelayFailureNotes).toHaveLength(2);
+      expect(w1bRelayFailureNotes[1]).toContain("connector_ref=wa-failover");
+      expect(repo.getById(ask.qitemId)?.deliveryFailureDetail).toContain("connector_ref=wa-failover");
+    } finally {
+      new DispatchBuffer(home).ack("failover-probe");
+      w1b.stop();
+      registry.entities[0]!.connectorBindings[0]!.connectorRef = "wa-main";
     }
 
     // Write valid relay secrets and replay: first HTTP attempt drops after recording attempt metadata

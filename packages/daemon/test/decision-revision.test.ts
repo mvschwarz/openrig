@@ -252,6 +252,62 @@ describe("an opt-in decision revision on the settling verbs (#2446)", () => {
     expect(f.written(id)).toMatchObject({ replies: 1, actions: 1 });
   });
 
+  it("recovers from a crash between ask close and audit record with one answer, one close transition, and one audit row", async () => {
+    const f = fixture();
+    const id = await f.ask();
+    const read = await f.revision(id);
+
+    // Fault injected at audit record time (after resolveDirectHumanReply inside the atomic close+audit transaction)
+    const actionLog = (f.contract as unknown as { actionLog: MissionControlActionLog }).actionLog;
+    const origRecord = actionLog.record.bind(actionLog);
+    let stateAtAuditCall: string | undefined;
+    vi.spyOn(actionLog, "record").mockImplementationOnce((entry) => {
+      stateAtAuditCall = f.repo.getById(id)?.state;
+      throw new Error("simulated crash after ask close before audit");
+      return origRecord(entry);
+    });
+
+    await expect(
+      f.contract.act({
+        verb: "answer",
+        qitemId: id,
+        actorSession: PERSON,
+        decision: "Ship Option A",
+        expectedRevision: read as string,
+        auditNotes: { operationId: "relay-close-audit-op-1" },
+      }),
+    ).rejects.toThrow("simulated crash after ask close before audit");
+
+    expect(stateAtAuditCall).toBe("done");
+    // Atomic rollback of close+audit leaves the ask pending with only the 1 tagged reply row
+    expect(f.written(id)).toMatchObject({ replies: 1, actions: 0, row: { state: "pending" } });
+
+    // Conflicting payload or different operationId under the original revision still rejects (409)
+    expect(
+      await f.act({
+        verb: "answer",
+        qitemId: id,
+        decision: "Different words",
+        expectedRevision: read,
+        auditNotes: { operationId: "relay-close-audit-op-1" },
+      }),
+    ).toMatchObject({ status: 409, body: { error: "decision_revision_changed" } });
+
+    const retry = await f.act({
+      verb: "answer",
+      qitemId: id,
+      decision: "Ship Option A",
+      expectedRevision: read,
+      auditNotes: { operationId: "relay-close-audit-op-1" },
+    });
+    expect(retry.status).toBe(200);
+    expect(f.written(id)).toMatchObject({ replies: 1, actions: 1, row: { state: "done" } });
+    const resolvedTransitions = f.repo
+      .listTransitions(id)
+      .filter((t) => t.ownerNotificationKind === "human-decision-resolved");
+    expect(resolvedTransitions).toHaveLength(1);
+  });
+
   it("enforces guarded retry non-bypass invariants across different payloads, stale edits, and cross-responder attempts", async () => {
     const f = fixture();
     const row1 = await f.repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Ship the relay?", summary: "Ship?", humanIntent: "decision", nudge: false });

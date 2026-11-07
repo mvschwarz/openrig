@@ -259,5 +259,67 @@ describe("archived audit identity — real migration, writer and history readers
     expect(noteWithSpaces).not.toBe(noteWithUnderscore);
     expect(parseRelayOwnerNotificationAccepted(noteWithSpaces)?.connectorRef).toBe("bridge one");
     expect(parseRelayOwnerNotificationAccepted(noteWithUnderscore)?.connectorRef).toBe("bridge_one");
+
+    // Relay transport-failed note with connector_ref, dedupe, and queue-repository readers
+    const failedAsk = await repo.create({
+      sourceSession: "sender@rig-a",
+      destinationSession: "human-founder@external",
+      body: "Relay ask that fails transport",
+      summary: "Fail ask?",
+      nudge: false,
+    });
+    const failedEpisode = log.latestOwnerNotificationForQitem(failedAsk.qitemId)!;
+    const failedKey = `${failedAsk.qitemId}:${failedEpisode.transitionId}`;
+    repo.recordRelayOwnerNotificationTransportFailed({
+      qitemId: failedAsk.qitemId,
+      notificationKey: failedKey,
+      connectorRef: "tg-main",
+      failureClass: "relay-http-503",
+      detail: "bridge unavailable",
+    });
+    const countAfterFirstFailure = repo.listTransitions(failedAsk.qitemId).length;
+    // Duplicate failure for the same episode and same connector is deduplicated
+    repo.recordRelayOwnerNotificationTransportFailed({
+      qitemId: failedAsk.qitemId,
+      notificationKey: failedKey,
+      connectorRef: "tg-main",
+      failureClass: "relay-http-503",
+      detail: "bridge unavailable",
+    });
+    expect(repo.listTransitions(failedAsk.qitemId)).toHaveLength(countAfterFirstFailure);
+    expect(repo.deliveryOutcomeFor(failedAsk.qitemId)).toEqual({
+      outcome: "transport-failed",
+      detail: `relay-owner-notification-transport-failed notification_key=${failedKey} connector_ref=tg-main class=relay-http-503 error=bridge unavailable`,
+    });
+    expect(repo.getById(failedAsk.qitemId)).toMatchObject({
+      deliveryOutcome: "transport-failed",
+      deliveryFailureDetail: expect.stringContaining("relay-owner-notification-transport-failed"),
+    });
+    expect(repo.findUndelivered().find((q) => q.qitemId === failedAsk.qitemId)).toMatchObject({
+      qitemId: failedAsk.qitemId,
+      deliveryOutcome: "transport-failed",
+      deliveryFailureClass: "transport-failed",
+      deliveryFailureDetail: expect.stringContaining("connector_ref=tg-main"),
+    });
+
+    // Failure under a changed relay connectorRef must record a new note naming the new connector rather than suppressing
+    repo.recordRelayOwnerNotificationTransportFailed({
+      qitemId: failedAsk.qitemId,
+      notificationKey: failedKey,
+      connectorRef: "wa-backup",
+      failureClass: "relay-http-502",
+      detail: "backup bridge bad gateway",
+    });
+    expect(repo.listTransitions(failedAsk.qitemId)).toHaveLength(countAfterFirstFailure + 1);
+    expect(repo.getRelayOwnerNotificationTransportFailure(failedAsk.qitemId, failedKey)).toMatchObject({
+      notificationKey: failedKey,
+      connectorRef: "wa-backup",
+      failureClass: "relay-http-502",
+      error: "backup bridge bad gateway",
+    });
+    expect(repo.deliveryOutcomeFor(failedAsk.qitemId)).toEqual({
+      outcome: "transport-failed",
+      detail: `relay-owner-notification-transport-failed notification_key=${failedKey} connector_ref=wa-backup class=relay-http-502 error=backup bridge bad gateway`,
+    });
   });
 });

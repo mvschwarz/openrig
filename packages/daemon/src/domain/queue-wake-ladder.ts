@@ -72,7 +72,10 @@ import {
   resolveOperatorSeat,
   resolveSessionNodeId,
 } from "./queue-stuck-sweep.js";
-import { RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX } from "./queue-transition-log.js";
+import {
+  RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
+  RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
+} from "./queue-transition-log.js";
 
 export const WAKE_RETRY_INTERVAL_KEY = "queue.wake_retry_interval_seconds";
 export const DEFAULT_WAKE_RETRY_INTERVAL_SECONDS = 300;
@@ -363,6 +366,7 @@ function hasPickupEvidence(db: Database.Database, row: Pick<QueueItem, "qitemId"
       // ladder before the resolution pass reads it.
       note.startsWith("slack-owner-notification-") ||
       note.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `) ||
+      note.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `) ||
       note.startsWith("delivery-termination:") ||
       note.startsWith("delivery-deferral-") ||
       // Quiet hours: holding an ask and releasing it are delivery machinery too, never someone picking it up.

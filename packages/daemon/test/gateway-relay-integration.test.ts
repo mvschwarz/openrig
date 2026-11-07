@@ -41,8 +41,12 @@ import { loadConfig } from "../src/domain/gateway/slack/config.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
 import { encodeRelayReplyRef } from "../src/domain/gateway/relay-outbound.js";
-import { RELAY_INBOUND_SEEN_FILE } from "../src/domain/gateway/relay-inbound.js";
 import {
+  computeRelayEventKey,
+  RELAY_INBOUND_SEEN_FILE,
+} from "../src/domain/gateway/relay-inbound.js";
+import {
+  reassembleRelayEnvelopeParts,
   startRecordingRelay,
   type RecordingRelayHandle,
 } from "./fixtures/recording-relay.js";
@@ -243,7 +247,7 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
   });
 
   it(
-    "proves post-bind network discipline, ordinary ask outbound custody via real daemon poller, probe filtering, and inbound reply with real attribution",
+    "proves post-bind network discipline, multi-part CJK/emoji ordinary ask outbound custody via real daemon poller, probe filtering, and inbound reply with ignored proxy headers/extras and real attribution",
     async () => {
       const outboundToken = "sec-relay-out-integration-01";
       const inboundToken = "sec-relay-in-integration-01";
@@ -278,20 +282,41 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
       const { daemon } = running;
       daemon.deps.rigRepo.createRig("ops-rig");
 
+      const longSummary =
+        "Production rollout gate — " +
+        "日本語確認🧪".repeat(165) +
+        " [SUMMARY-TAIL-MARKER-901]";
+      expect(longSummary.length).toBeGreaterThan(1000);
+
+      const longBody =
+        "Confirm whether we should promote release candidate v2.4.\n" +
+        "段落ブロック🚀漢字テスト-alpha-beta-gamma\n".repeat(2400) +
+        "[BODY-TAIL-MARKER-902]";
+      const longDetail =
+        "Canary telemetry detail: p99=42ms, error_rate=0.00% 🛰️ [DETAIL-TAIL-MARKER-903]";
+      const expectedPartCount = 3;
+
       const ask = await daemon.deps.queueRepo!.create({
         sourceSession: "planner@ops-rig",
         destinationSession: "alice-ops@external",
-        summary: "Production rollout gate",
-        body: "Confirm whether we should promote release candidate v2.4.",
+        summary: longSummary,
+        body: longBody,
         humanIntent: "decision",
+        humanDetail: longDetail,
         humanQuestions: [
           {
             id: "q-promote",
-            header: "Release",
-            question: "Promote release candidate v2.4?",
+            question: "Promote release candidate v2.4? [QUESTION-TAIL-MARKER-904]",
             options: [
-              { id: "yes", label: "Promote now", description: "Proceed with rollout" },
-              { id: "hold", label: "Hold", description: "Wait for metrics" },
+              {
+                id: "yes",
+                label: "Promote now [OPT-YES-TAIL-905]",
+                recommended: true,
+              },
+              {
+                id: "hold",
+                label: "Hold [OPT-HOLD-TAIL-906]",
+              },
             ],
           },
         ],
@@ -310,77 +335,162 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
       expect(bridge.getSanitizedStats().relayPostCount).toBe(0);
 
       // Start post-bind services: do NOT call manual sweepOutboundOnce for this first ask.
-      // Wait for actual composition-owned default 30-second poller to produce bridge custody.
+      // Wait for actual composition-owned default 30-second poller to produce all multi-part bridge custody records.
       // We budget 38,000ms (38s) for the ~30s production polling cadence to fire.
       daemon.deps.gatewaySubsystem?.startServices();
-      await waitForCondition(() => bridge.getCustodyRecords().length === 1, 38_000);
+      await waitForCondition(
+        () =>
+          bridge.getCustodyRecords().length === expectedPartCount &&
+          daemon.deps.queueRepo!.hasRelayOwnerNotificationReceipt(ask.qitemId),
+        38_000,
+      );
 
       const stats = bridge.getSanitizedStats();
-      expect(stats.relayPostCount).toBe(1);
-      expect(stats.acceptedCount).toBe(1);
-      expect(stats.custodyCount).toBe(1);
+      expect(stats.relayPostCount).toBe(expectedPartCount);
+      expect(stats.acceptedCount).toBe(expectedPartCount);
+      expect(stats.custodyCount).toBe(expectedPartCount);
 
-      const record = bridge.getCustodyRecords()[0]!;
-    expect(record.envelope).toMatchObject({
-      v: 1,
-      recipient: { handle: "alice_ops" },
-      intent: "decision",
-      outcome: "interrupt",
-      summary: "Production rollout gate",
-    });
-    expect(typeof record.envelope.replyRef).toBe("string");
+      const custodyRecords = bridge.getCustodyRecords();
+      expect(custodyRecords).toHaveLength(expectedPartCount);
 
-    // Custody log and sanitized diagnostics must never contain tokens.
-    const rawCustody = readFileSync(custodyFilePath, "utf8");
-    expect(rawCustody).not.toContain(outboundToken);
-    expect(rawCustody).not.toContain(inboundToken);
-    expect(JSON.stringify(stats)).not.toContain(outboundToken);
-    expect(JSON.stringify(stats)).not.toContain(inboundToken);
+      const receipt = daemon.deps.queueRepo!.getRelayOwnerNotificationReceipt(ask.qitemId);
+      expect(receipt?.connectorRef).toBe("local-bridge");
+      const parentDeliveryId = receipt!.deliveryId;
 
-    await waitForCondition(() =>
-      daemon.deps.queueRepo!.hasRelayOwnerNotificationReceipt(ask.qitemId),
-    );
-    const receipt = daemon.deps.queueRepo!.getRelayOwnerNotificationReceipt(ask.qitemId);
-    expect(receipt?.connectorRef).toBe("local-bridge");
-    expect(receipt?.deliveryId).toBe(record.deliveryId);
+      const loneSurrogateRe =
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+      for (let i = 0; i < expectedPartCount; i++) {
+        const rec = custodyRecords[i]!;
+        expect(Buffer.byteLength(JSON.stringify(rec.envelope), "utf8")).toBeLessThanOrEqual(
+          65_536,
+        );
+        expect(rec.deliveryId).toBe(`${parentDeliveryId}:part:${i + 1}`);
+        expect(rec.envelope.part).toEqual({
+          parentDeliveryId,
+          index: i + 1,
+          total: expectedPartCount,
+        });
+        expect(rec.envelope.summary.length).toBeLessThanOrEqual(1000);
+        expect(rec.envelope.summary).not.toMatch(loneSurrogateRe);
+        expect(rec.envelope.body).not.toMatch(loneSurrogateRe);
+      }
 
-    const replyRes = await bridge.sendInboundReply(running.baseUrl, {
-      eventId: "evt-ordinary-ask-1",
-      sender: { handle: "alice_ops" },
-      replyRef: record.envelope.replyRef!,
-      text: "Promote now — canary metrics are clean.",
-      ordering: "after-question",
-    });
-    expect(replyRes.status).toBe(200);
-    expect(replyRes.body).toMatchObject({
-      ok: true,
-      qitemId: ask.qitemId,
-      verb: "answer",
-      actorSession: "alice-ops@external",
-      deduplicated: false,
-    });
+      const reassembled = reassembleRelayEnvelopeParts(
+        custodyRecords.map((r) => r.envelope),
+      );
+      expect(bridge.getReassembledDeliveries()).toEqual([reassembled]);
+      expect(reassembled).toMatchObject({
+        v: 1,
+        deliveryId: parentDeliveryId,
+        recipient: { handle: "alice_ops" },
+        intent: "decision",
+        outcome: "interrupt",
+      });
+      expect(reassembled.part).toBeUndefined();
+      expect(typeof reassembled.replyRef).toBe("string");
+      expect(reassembled.body).toContain(longSummary);
+      expect(reassembled.body).toContain("[SUMMARY-TAIL-MARKER-901]");
+      expect(reassembled.body).toContain(longBody);
+      expect(reassembled.body).toContain("[BODY-TAIL-MARKER-902]");
+      expect(reassembled.body).toContain(longDetail);
+      expect(reassembled.body).toContain("[DETAIL-TAIL-MARKER-903]");
+      expect(reassembled.body).toContain(
+        "Promote release candidate v2.4? [QUESTION-TAIL-MARKER-904]",
+      );
+      expect(reassembled.body).toContain(
+        "- Promote now [OPT-YES-TAIL-905] (recommended)",
+      );
+      expect(reassembled.body).toContain(
+        "- Hold [OPT-HOLD-TAIL-906]",
+      );
+      // Receipt records bridge custody acceptance only; the ask remains pending until an inbound reply settles it.
+      expect(daemon.deps.queueRepo!.getById(ask.qitemId)?.state).toBe("pending");
 
-    const settledAsk = daemon.deps.queueRepo!.getById(ask.qitemId)!;
-    expect(settledAsk.state).toBe("done");
-    expect(settledAsk.humanAnswers).toEqual({
-      "q-promote": {
-        kind: "typed-reply",
-        placement: "first-unanswered",
+      // Custody log and sanitized diagnostics must never contain tokens.
+      const rawCustody = readFileSync(custodyFilePath, "utf8");
+      expect(rawCustody).not.toContain(outboundToken);
+      expect(rawCustody).not.toContain(inboundToken);
+      expect(JSON.stringify(stats)).not.toContain(outboundToken);
+      expect(JSON.stringify(stats)).not.toContain(inboundToken);
+
+      // Inbound reply with forwarding/proxy headers and harmless extra fields:
+      // proxy headers are ignored, extra fields are ignored and cannot spoof sender/actor,
+      // and event fingerprint is unchanged when replayed without extras.
+      const rawInboundRes = await fetch(
+        `${running.baseUrl}/api/gateway/relay/inbound`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${inboundToken}`,
+            via: "1.1 local-bridge",
+            "x-forwarded-for": "203.0.113.9",
+            forwarded: "for=203.0.113.9;proto=http",
+            "x-real-ip": "203.0.113.9",
+          },
+          body: JSON.stringify({
+            eventId: "evt-ordinary-ask-1",
+            sender: {
+              handle: "alice_ops",
+              displayName: "Spoofed Display Name",
+              externalId: "ext-999",
+            },
+            replyRef: reassembled.replyRef!,
+            text: "Promote now — canary metrics are clean.",
+            ordering: "after-question",
+            actorSession: "spoofed-actor@external",
+            bridgeMetadata: { traceId: "trace-001" },
+          }),
+        },
+      );
+      expect(rawInboundRes.status).toBe(200);
+      const replyBody = (await rawInboundRes.json()) as Record<string, unknown>;
+      expect(replyBody).toMatchObject({
+        ok: true,
+        qitemId: ask.qitemId,
+        verb: "answer",
+        actorSession: "alice-ops@external",
+        deduplicated: false,
+      });
+
+      const replayWithoutExtras = await bridge.sendInboundReply(running.baseUrl, {
+        eventId: "evt-ordinary-ask-1",
+        sender: { handle: "alice_ops" },
+        replyRef: reassembled.replyRef!,
         text: "Promote now — canary metrics are clean.",
-        unansweredCount: 0,
-      },
-    });
+        ordering: "after-question",
+      });
+      expect(replayWithoutExtras.status).toBe(200);
+      expect(replayWithoutExtras.body).toMatchObject({
+        ok: true,
+        qitemId: ask.qitemId,
+        actorSession: "alice-ops@external",
+        deduplicated: true,
+      });
 
-    const seenRaw = readFileSync(
-      join(OPENRIG_HOME, "state", RELAY_INBOUND_SEEN_FILE),
-      "utf8",
-    );
-    expect(seenRaw).not.toContain("Promote now — canary metrics are clean.");
-    expect(seenRaw).not.toContain(inboundToken);
-    expect(seenRaw).not.toContain(outboundToken);
-  }, 50_000);
+      const settledAsk = daemon.deps.queueRepo!.getById(ask.qitemId)!;
+      expect(settledAsk.state).toBe("done");
+      expect(settledAsk.humanAnswers).toEqual({
+        "q-promote": {
+          kind: "typed-reply",
+          placement: "first-unanswered",
+          text: "Promote now — canary metrics are clean.",
+          unansweredCount: 0,
+        },
+      });
 
-  it("delivers operator notices without closing underlying blocked work and rejects replies to informational updates", async () => {
+      const seenRaw = readFileSync(
+        join(OPENRIG_HOME, "state", RELAY_INBOUND_SEEN_FILE),
+        "utf8",
+      );
+      expect(seenRaw).not.toContain("Promote now — canary metrics are clean.");
+      expect(seenRaw).not.toContain(inboundToken);
+      expect(seenRaw).not.toContain(outboundToken);
+    },
+    50_000,
+  );
+
+  it("delivers operator notices without closing underlying blocked work, exposes accepted outcome on delivered human updates API, and rejects replies to informational updates", async () => {
     const outboundToken = "sec-relay-out-integration-02";
     const inboundToken = "sec-relay-in-integration-02";
     const custodyFilePath = join(testScratchDir, "bridge-custody-2.jsonl");
@@ -464,6 +574,27 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
       () => daemon.deps.queueRepo!.getById(infoUpdate.qitemId)?.state === "done",
     );
 
+    // Real serialized delivered-updates HTTP endpoint exposes deliveryOutcome: "accepted" for relay-accepted updates
+    const deliveredUpdatesRes = await fetch(
+      `${running.baseUrl}/api/queue/human-updates`,
+    );
+    expect(deliveredUpdatesRes.status).toBe(200);
+    const deliveredUpdatesJson = (await deliveredUpdatesRes.json()) as {
+      items: Array<Record<string, unknown>>;
+    };
+    const deliveredInfoItem = deliveredUpdatesJson.items.find(
+      (it) => it.qitemId === infoUpdate.qitemId,
+    );
+    expect(deliveredInfoItem).toBeDefined();
+    expect(deliveredInfoItem).toMatchObject({
+      qitemId: infoUpdate.qitemId,
+      summary: "Deployment completed",
+      deliveryOutcome: "accepted",
+    });
+    expect(String(deliveredInfoItem?.deliveryReceipt ?? "")).toMatch(
+      /^relay-owner-notification-accepted /,
+    );
+
     const updateTransitions = daemon.deps.queueRepo!.listTransitions(infoUpdate.qitemId);
     const forgedUpdateRef = encodeRelayReplyRef({
       v: 1,
@@ -487,7 +618,7 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
     expect(updateReplyRes.status).toBe(409);
   });
 
-  it("survives bridge lost ACK after durable custody commit and replays stable deliveryId/bytes across actual daemon + bridge restart", async () => {
+  it("survives bridge lost ACK after durable custody commit, records relay-specific transport-failed note, and replays stable deliveryId/bytes across actual daemon + bridge restart", async () => {
     const outboundToken = "sec-relay-out-integration-03";
     const inboundToken = "sec-relay-in-integration-03";
     const custodyFilePath = join(testScratchDir, "bridge-custody-restart.jsonl");
@@ -541,6 +672,39 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
     bridge.setLoseNextAck(true);
     await sweepOutboundOnce(daemon1.daemon);
     await waitForCondition(() => bridge.getSanitizedStats().lostAckCount === 1);
+    await waitForCondition(() =>
+      daemon1.daemon.deps
+        .queueRepo!.listTransitions(ask.qitemId)
+        .some((t) =>
+          (t.transitionNote ?? "").startsWith(
+            "relay-owner-notification-transport-failed ",
+          ),
+        ),
+    );
+
+    const transitionNotes = daemon1.daemon.deps
+      .queueRepo!.listTransitions(ask.qitemId)
+      .map((t) => t.transitionNote ?? "");
+    expect(
+      transitionNotes.some(
+        (n) =>
+          n.startsWith("relay-owner-notification-transport-failed ") &&
+          n.includes("connector_ref=local-bridge"),
+      ),
+    ).toBe(true);
+    expect(
+      daemon1.daemon.deps.queueRepo!.getRelayOwnerNotificationTransportFailure(
+        ask.qitemId,
+      ),
+    ).toMatchObject({
+      connectorRef: "local-bridge",
+      failureClass: "http-502",
+    });
+    expect(
+      transitionNotes.some((n) =>
+        n.startsWith("slack-owner-notification-transport-failed"),
+      ),
+    ).toBe(false);
 
     const firstCustody = bridge.getCustodyRecords();
     expect(firstCustody).toHaveLength(1);
@@ -592,7 +756,7 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
     ).toBe(true);
   });
 
-  it("enforces inbound idempotency, equivocation conflict, stale episode/repark rejection, second-person attribution, and uncertain ordering context", async () => {
+  it("enforces inbound idempotency, equivocation conflict, stale episode/repark rejection, second-person attribution, uncertain ordering context, atomic close+audit recovery, and scoped seen-ledger handling", async () => {
     const outboundToken = "sec-relay-out-integration-04";
     const inboundToken = "sec-relay-in-integration-04";
     const custodyFilePath = join(testScratchDir, "bridge-custody-inbound.jsonl");
@@ -720,13 +884,46 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
       nudge: false,
     });
 
+    const askAtomic = await daemon.deps.queueRepo!.create({
+      sourceSession: "architect@ops-rig",
+      destinationSession: "alice-ops@external",
+      summary: "Atomic close+audit ask",
+      body: "Confirm atomic close and audit recovery?",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+
+    const askLedger = await daemon.deps.queueRepo!.create({
+      sourceSession: "architect@ops-rig",
+      destinationSession: "alice-ops@external",
+      summary: "Scoped seen-ledger ask",
+      body: "Confirm healthy key works alongside keyed suspect entry?",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+
     await sweepOutboundOnce(daemon);
-    await waitForCondition(() =>
-      bridge.getCustodyRecords().some((r) => r.envelope.summary === "Primary ask for Alice"),
-    );
+    await waitForCondition(() => {
+      const summaries = new Set(
+        bridge.getCustodyRecords().map((r) => r.envelope.summary),
+      );
+      return (
+        summaries.has("Primary ask for Alice") &&
+        summaries.has("Atomic close+audit ask") &&
+        summaries.has("Scoped seen-ledger ask")
+      );
+    });
     const ask1Record = bridge
       .getCustodyRecords()
       .find((r) => r.envelope.summary === "Primary ask for Alice")!;
+    const askAtomicRecord = bridge
+      .getCustodyRecords()
+      .find((r) => r.envelope.summary === "Atomic close+audit ask")!;
+    const askLedgerRecord = bridge
+      .getCustodyRecords()
+      .find((r) => r.envelope.summary === "Scoped seen-ledger ask")!;
 
     const bobRes = await bridge.sendInboundReply(running.baseUrl, {
       eventId: "evt-bob-answer-1",
@@ -770,11 +967,120 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
       ordering: "after-question",
     });
     expect(eqTextRes.status).toBe(409);
+
+    // Atomic close+audit recovery: simulated audit write throw rolls back ask close while preserving
+    // the reply row and received:<fp>; retry under the original replyRef succeeds without duplicate reply rows.
+    const actionLog = daemon.deps.missionControlActionLog!;
+    const origRecord = actionLog.record.bind(actionLog);
+    let threwOnce = false;
+    actionLog.record = ((entry: Parameters<typeof origRecord>[0]) => {
+      if (!threwOnce) {
+        threwOnce = true;
+        throw new Error("simulated audit failure inside atomic close+audit transaction");
+      }
+      return origRecord(entry);
+    }) as typeof actionLog.record;
+
+    try {
+      const crashRes = await bridge.sendInboundReply(running.baseUrl, {
+        eventId: "evt-atomic-crash-1",
+        sender: { handle: "alice_ops" },
+        replyRef: askAtomicRecord.envelope.replyRef!,
+        text: "Approve atomic close.",
+        ordering: "after-question",
+      });
+      expect(crashRes.status).toBe(500);
+      expect(daemon.deps.queueRepo!.getById(askAtomic.qitemId)?.state).toBe("pending");
+      expect(
+        daemon.deps.queueRepo!.listHumanAnswers(askAtomic.qitemId, "alice-ops@external"),
+      ).toHaveLength(1);
+    } finally {
+      actionLog.record = origRecord;
+    }
+
+    const recoveredRes = await bridge.sendInboundReply(running.baseUrl, {
+      eventId: "evt-atomic-crash-1",
+      sender: { handle: "alice_ops" },
+      replyRef: askAtomicRecord.envelope.replyRef!,
+      text: "Approve atomic close.",
+      ordering: "after-question",
+    });
+    expect(recoveredRes.status).toBe(200);
+    expect(recoveredRes.body).toMatchObject({
+      ok: true,
+      qitemId: askAtomic.qitemId,
+      actorSession: "alice-ops@external",
+      deduplicated: false,
+    });
+    expect(daemon.deps.queueRepo!.getById(askAtomic.qitemId)?.state).toBe("done");
+    expect(
+      daemon.deps.queueRepo!.listHumanAnswers(askAtomic.qitemId, "alice-ops@external"),
+    ).toHaveLength(1);
+
+    const postRecoveryDupRes = await bridge.sendInboundReply(running.baseUrl, {
+      eventId: "evt-atomic-crash-1",
+      sender: { handle: "alice_ops" },
+      replyRef: askAtomicRecord.envelope.replyRef!,
+      text: "Approve atomic close.",
+      ordering: "after-question",
+    });
+    expect(postRecoveryDupRes.status).toBe(200);
+    expect(postRecoveryDupRes.body.deduplicated).toBe(true);
+
+    // Scoped seen-ledger handling: keyed suspect record scopes 503 to that eventId only;
+    // unrelated keys still succeed; unkeyable/corrupt JSONL returns 503.
+    const seenFilePath = join(OPENRIG_HOME, "state", RELAY_INBOUND_SEEN_FILE);
+    const suspectKey = computeRelayEventKey("local-bridge", "evt-suspect-only");
+    writeFileSync(
+      seenFilePath,
+      `${readFileSync(seenFilePath, "utf8")}${JSON.stringify({ id: suspectKey, status: "corrupt-status" })}\n`,
+      "utf8",
+    );
+
+    const suspectRes = await bridge.sendInboundReply(running.baseUrl, {
+      eventId: "evt-suspect-only",
+      sender: { handle: "alice_ops" },
+      replyRef: askLedgerRecord.envelope.replyRef!,
+      text: "Blocked by suspect record",
+      ordering: "after-question",
+    });
+    expect(suspectRes.status).toBe(503);
+    expect(daemon.deps.queueRepo!.getById(askLedger.qitemId)?.state).toBe("pending");
+
+    const healthyRes = await bridge.sendInboundReply(running.baseUrl, {
+      eventId: "evt-ledger-healthy-1",
+      sender: { handle: "alice_ops" },
+      replyRef: askLedgerRecord.envelope.replyRef!,
+      text: "Healthy event settles askLedger.",
+      ordering: "after-question",
+    });
+    expect(healthyRes.status).toBe(200);
+    expect(healthyRes.body).toMatchObject({
+      ok: true,
+      qitemId: askLedger.qitemId,
+      deduplicated: false,
+    });
+    expect(daemon.deps.queueRepo!.getById(askLedger.qitemId)?.state).toBe("done");
+
+    writeFileSync(
+      seenFilePath,
+      `${readFileSync(seenFilePath, "utf8")}{corrupt-unparseable-jsonl\n`,
+      "utf8",
+    );
+    const corruptLedgerRes = await bridge.sendInboundReply(running.baseUrl, {
+      eventId: "evt-ledger-after-corrupt",
+      sender: { handle: "alice_ops" },
+      replyRef: askLedgerRecord.envelope.replyRef!,
+      text: "Refused due to corrupt ledger",
+      ordering: "after-question",
+    });
+    expect(corruptLedgerRes.status).toBe(503);
   });
 
-  it("localizes missing/invalid/insecure relay auth without secret leaks and preserves default no-relay/Slack behavior", async () => {
+  it("warns on permissive 0644/shared-token relay config while remaining ready, localizes missing/ambiguous/invalid auth without secret leaks, and preserves default no-relay/Slack behavior", async () => {
     const outboundToken = "sec-relay-out-integration-05";
     const inboundToken = "sec-relay-in-integration-05";
+    const sharedToken = "sec-relay-shared-integration-05";
     const custodyFilePath = join(testScratchDir, "bridge-custody-auth.jsonl");
 
     const bridge = await startRecordingRelay({
@@ -795,32 +1101,126 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
     await defaultDaemon.stop();
     activeDaemons.pop();
 
-    // Provision relay with insecure 0644 permissions -> localized not-ready, no secret leak.
-    const insecureEnvPath = writeRelaySecretsFile(
-      join(testScratchDir, "relay-insecure.env"),
-      { url: bridge.outboundUrl, outboundToken, inboundToken },
+    // Provision relay with 0644 permissions + shared directional token -> ready: true with redacted warnings, no secret leak.
+    const envPath = writeRelaySecretsFile(
+      join(testScratchDir, "relay-permissive.env"),
+      { url: bridge.outboundUrl, outboundToken: sharedToken, inboundToken: sharedToken },
       0o644,
     );
     registerRelayPerson({
       entityId: "alice-ops",
       displayName: "Alice Ops",
       connectorRef: "local-bridge",
-      envFilePath: insecureEnvPath,
+      envFilePath: envPath,
       handle: "alice_ops",
     });
 
     const running = await bootProductionDaemon({ startPostBind: true });
-    const readinessRes = await fetch(
+    const permissiveRes = await fetch(
       `${running.baseUrl}/api/gateway/human/alice-ops/readiness`,
     );
-    expect(readinessRes.status).toBe(200);
-    const readinessJson = (await readinessRes.json()) as Record<string, unknown>;
-    expect(readinessJson).toMatchObject({
+    expect(permissiveRes.status).toBe(200);
+    const permissiveJson = (await permissiveRes.json()) as {
+      ok: boolean;
+      readiness: { state: string; ready: boolean; reason?: string };
+    };
+    expect(permissiveJson).toMatchObject({
+      ok: true,
+      readiness: { state: "ready", ready: true },
+    });
+    expect(permissiveJson.readiness.reason ?? "").toMatch(/warning/i);
+    expect(permissiveJson.readiness.reason ?? "").toMatch(/0644/);
+    expect(permissiveJson.readiness.reason ?? "").toMatch(/same token|separate tokens/i);
+    expect(JSON.stringify(permissiveJson)).not.toContain(sharedToken);
+
+    // Strict 0400 permissions + distinct tokens -> ready: true with no warning.
+    writeRelaySecretsFile(
+      envPath,
+      { url: bridge.outboundUrl, outboundToken, inboundToken },
+      0o400,
+    );
+    const strict0400Res = await fetch(
+      `${running.baseUrl}/api/gateway/human/alice-ops/readiness`,
+    );
+    expect(strict0400Res.status).toBe(200);
+    const strict0400Json = (await strict0400Res.json()) as {
+      ok: boolean;
+      readiness: { state: string; ready: boolean; reason?: string };
+    };
+    expect(strict0400Json).toMatchObject({
+      ok: true,
+      readiness: { state: "ready", ready: true },
+    });
+    expect(strict0400Json.readiness.reason ?? "").not.toMatch(/warning/i);
+
+    // Missing required credential key -> localized not-ready, no secret leak.
+    chmodSync(envPath, 0o600);
+    writeFileSync(
+      envPath,
+      `OPENRIG_RELAY_URL=${bridge.outboundUrl}\nOPENRIG_RELAY_OUTBOUND_TOKEN=${outboundToken}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+    const missingKeyRes = await fetch(
+      `${running.baseUrl}/api/gateway/human/alice-ops/readiness`,
+    );
+    expect(missingKeyRes.status).toBe(200);
+    const missingKeyJson = (await missingKeyRes.json()) as Record<string, unknown>;
+    expect(missingKeyJson).toMatchObject({
       ok: true,
       readiness: { state: "not-ready", ready: false },
     });
-    expect(JSON.stringify(readinessJson)).not.toContain(outboundToken);
-    expect(JSON.stringify(readinessJson)).not.toContain(inboundToken);
+    expect(JSON.stringify(missingKeyJson)).not.toContain(outboundToken);
+
+    // Restore valid distinct credentials on local-bridge; register second connector profile reusing the same inbound token -> ambiguous not-ready + 401.
+    writeRelaySecretsFile(
+      envPath,
+      { url: bridge.outboundUrl, outboundToken, inboundToken },
+      0o600,
+    );
+    const dupEnvPath = writeRelaySecretsFile(
+      join(testScratchDir, "relay-second-profile.env"),
+      {
+        url: bridge.outboundUrl,
+        outboundToken: "sec-relay-out-second-05",
+        inboundToken,
+      },
+      0o600,
+    );
+    registerRelayPerson({
+      entityId: "bob-dup",
+      displayName: "Bob Dup",
+      connectorRef: "second-bridge",
+      envFilePath: dupEnvPath,
+      handle: "bob_dup",
+    });
+
+    const ambigReadinessRes = await fetch(
+      `${running.baseUrl}/api/gateway/human/alice-ops/readiness`,
+    );
+    expect(ambigReadinessRes.status).toBe(200);
+    expect(await ambigReadinessRes.json()).toMatchObject({
+      ok: true,
+      readiness: { state: "not-ready", ready: false },
+    });
+
+    const ambigInboundRes = await bridge.sendInboundReply(running.baseUrl, {
+      eventId: "evt-ambig-1",
+      sender: { handle: "alice_ops" },
+      replyRef: "forged",
+      text: "Ambiguous inbound token must fail",
+    });
+    expect(ambigInboundRes.status).toBe(401);
+
+    // Give second-bridge its own distinct inbound token so local-bridge is unambiguous again.
+    writeRelaySecretsFile(
+      dupEnvPath,
+      {
+        url: bridge.outboundUrl,
+        outboundToken: "sec-relay-out-second-05",
+        inboundToken: "sec-relay-in-second-05",
+      },
+      0o600,
+    );
 
     const unauthRes = await bridge.sendInboundReply(
       running.baseUrl,

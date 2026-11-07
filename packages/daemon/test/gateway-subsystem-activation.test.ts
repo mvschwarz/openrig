@@ -180,7 +180,7 @@ describe("S10 gateway subsystem activation (RED at tip: no boot-time subsystem c
         intent: "decision",
       });
       const episode = repo.currentHumanRequiredEpisode(row.qitemId)!;
-      expect(repo.hasRelayOwnerNotificationReceipt(row.qitemId, episode.notificationKey)).toBe(true);
+      expect(repo.hasRelayOwnerNotificationReceipt(row.qitemId, episode.key)).toBe(true);
     } finally {
       wire.stop();
       db.close();
