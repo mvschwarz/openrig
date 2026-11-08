@@ -606,6 +606,32 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
   });
 
+  // The repository records the prefix in lowercase and its undelivered listing matches it exactly; the sweep's retry
+  // matches it the same way, so a listed row whose result only resembles it is not taken for an unbound pane and re-sent.
+  it("does not re-send a wake whose result only matches 'unroutable:' ignoring case", async () => {
+    db.prepare("INSERT INTO rigs(id,name) VALUES ('fixture-rig','r')").run();
+    db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime,profile) VALUES ('late-node','fixture-rig','late','codex','none')").run();
+    const sent: string[] = [];
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      transport: { send: async (destination) => { sent.push(destination); return { ok: true, verified: true }; } },
+    });
+    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body: "work" });
+    expect(row.lastNudgeResult).toMatch(/^unroutable:/);
+    const failedAt = new Date(Date.now() - 10 * 60_000);
+    setNudgeResult(row.qitemId, "Unroutable: no pane yet", failedAt);
+    // Offer the row to the sweep as undelivered, whatever the listing's own prefix filter says.
+    vi.spyOn(repo, "findUndelivered").mockImplementation(((opts?: { qitemId?: string }) =>
+      !opts?.qitemId || opts.qitemId === row.qitemId ? [repo.getById(row.qitemId)!] : []) as typeof repo.findUndelivered);
+    db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
+    // The row's finding goes to the orchestrator, so only a wake retry could reach the seat.
+    await runSweep({ resolveOrchestrator: () => "orch@r" });
+    expect(sent).not.toContain("late@r");
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).toBe("Unroutable: no pane yet");
+    expect(repo.getById(row.qitemId)!.lastNudgeAttempt).toBe(failedAt.toISOString());
+  });
+
   // With the durable wake intents in place (the production path), the re-send goes through the row's own intent: it's
   // claimed and settled, so a later startup drain doesn't wake the seat a second time.
   async function lateSeatWithOutbox() {

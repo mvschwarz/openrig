@@ -751,7 +751,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // again, and one already in flight or settled isn't sent twice. The next tick reads the new result, so a failed send
     // is reported then. A row with a live retry ladder is left to the ladder.
     const wakeToRetry = (row: QueueItem, humanNotice: boolean): boolean => !humanNotice
-      && startsWithCI(row.lastNudgeResult, "unroutable:")
+      && !!row.lastNudgeResult?.startsWith("unroutable:")
       && !hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes)
       && deps.queueRepo.classifyDestinationOf(row.destinationSession).class === "pane-bound";
     const isHumanNotice = (row: QueueItem): boolean => row.deliveryOutcome === "never-posted" || row.deliveryOutcome === "transport-failed";
@@ -1049,7 +1049,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         othersMayHaveRun();
         // judged again on the row as the send (and anyone else during it) left it
         row = undeliveredNow(row.qitemId);
-        if (!row || !startsWithCI(row.lastNudgeResult, "unroutable:")) continue;
+        if (!row?.lastNudgeResult?.startsWith("unroutable:")) continue;
       }
       const c = undeliveredCandidate(row, true);
       if (c) candidates.push(c);
