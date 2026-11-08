@@ -31,8 +31,9 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     db.prepare("INSERT INTO sessions (id,node_id,session_name,status) VALUES (?,?,?,?)").run(`session-${++seq}`, node.id, session, "running");
     return { rig, node, session };
   }
-  async function sweep() {
-    return runStuckSweep({ db, queueRepo: queue, status: createStuckSweepStatus(), unclaimedAgeMinutes: 60, log: () => {},
+  /** One pass at the unclaimed threshold `age` (minutes), as of `now`. */
+  async function sweep(age = 60, now?: Date) {
+    return runStuckSweep({ db, queueRepo: queue, status: createStuckSweepStatus(), unclaimedAgeMinutes: age, now, log: () => {},
       isRegisteredHost: () => false, resolveRecoveryAgentSeat: () => null, resolveOperatorSeat: () => null });
   }
   /** A task for `destination`, actionable since `minutesAgo` (fixture aging of existing facts, as the sweep tests do). */
@@ -148,5 +149,87 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     const filed = findingsTo("someone@elsewhere");
     expect(filed).toHaveLength(2);
     for (const row of rows) expect(filed.some((f) => f.tags?.includes(`stuck-sweep:unclaimed-obligation:${row.qitemId}`))).toBe(true);
+  });
+
+  it("a row that crosses the threshold after its seat's notice closed files a new notice", async () => {
+    seat("front", "door.root", "root@front");
+    const first = await work("root@front");
+    await sweep();
+    const [notice] = findingsTo("root@front");
+    queue.claim({ qitemId: first.qitemId, destinationSession: "root@front" });
+    await sweep();
+    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "done" });
+    db.prepare("UPDATE queue_items SET ts_updated = ? WHERE qitem_id = ?").run(new Date(Date.now() - 20 * 60_000).toISOString(), notice!.qitemId);
+    // Pending since before the close, past the threshold only after it: the closed notice never stood for it.
+    const later = await work("root@front", 70);
+    await sweep();
+    const open = findingsTo("root@front").filter(isOpen);
+    expect(open).toHaveLength(1);
+    expect(open[0]!.body).toContain(later.qitemId);
+  });
+
+  it("a raised threshold doesn't close a notice whose rows are still unclaimed, and restoring it keeps them listed", async () => {
+    seat("front", "door.root", "root@front");
+    const row = await work("root@front", 90);
+    await sweep();
+    const [notice] = findingsTo("root@front");
+    await sweep(120);
+    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "pending" });
+    expect(queue.getById(notice!.qitemId)!.body).toContain(row.qitemId);
+    await sweep(60);
+    const open = findingsTo("root@front").filter(isOpen);
+    expect(open).toHaveLength(1);
+    expect(open[0]!.body).toContain(row.qitemId);
+  });
+
+  it("closing a notice holds back only the rows it listed: a younger row that becomes eligible later files a new one", async () => {
+    seat("front", "door.root", "root@front");
+    await work("root@front", 240);
+    const younger = await work("root@front", 10);
+    await sweep();
+    const [first] = findingsTo("root@front");
+    expect(first!.body).not.toContain(younger.qitemId);
+    queue.update({ qitemId: first!.qitemId, actorSession: "root@front", state: "done", closureReason: "no-follow-on", transitionNote: "read the listed rows" });
+    await sweep(60, new Date(Date.now() + 65 * 60_000));
+    const open = findingsTo("root@front").filter(isOpen);
+    expect(open).toHaveLength(1);
+    expect(open[0]!.body).toContain(younger.qitemId);
+  });
+
+  it("keeps a row the wake ladder is waking listed in the open notice beside the others", async () => {
+    seat("front", "door.root", "root@front");
+    const laddered = await work("root@front");
+    const other = await work("root@front");
+    await sweep();
+    const [notice] = findingsTo("root@front");
+    queue.update({ qitemId: laddered.qitemId, actorSession: "wake-ladder@system", transitionNote: "wake-attempt: 1 of 3" });
+    await sweep();
+    const after = queue.getById(notice!.qitemId)!;
+    expect(after).toMatchObject({ state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (2 rows)" });
+    expect(after.body).toContain(laddered.qitemId);
+    expect(after.body).toContain(other.qitemId);
+  });
+
+  it("once the seat declares the escalates_to edge its notice suggests, each row's finding goes to the watcher and the notice closes", async () => {
+    const door = seat("front", "door.root", "root@front");
+    const row = await work("root@front");
+    await sweep();
+    const [notice] = findingsTo("root@front");
+    seat("ops", "watch.desk", "desk@ops");
+    rigs.addEdge(door.rig.id, door.node.id, "desk@ops", "escalates_to");
+    await sweep();
+    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "done" });
+    expect(findingsTo("desk@ops").map((f) => f.tags)).toEqual([expect.arrayContaining([`stuck-sweep:unclaimed-obligation:${row.qitemId}`])]);
+  });
+
+  it("a seat with a declared delegation parent that has no session keeps a finding per row, not a notice that says it has none", async () => {
+    const lead = seat("lane", "work.lead", "lead@lane");
+    const parent = rigs.addNode(lead.rig.id, "coord.owner", { runtime: "claude-code" });
+    rigs.addEdge(lead.rig.id, parent.id, lead.node.id, "delegates_to");
+    const row = await work("lead@lane");
+    await sweep();
+    const filed = findingsTo("lead@lane");
+    expect(filed).toHaveLength(1);
+    expect(filed[0]!.tags).toContain(`stuck-sweep:unclaimed-obligation:${row.qitemId}`);
   });
 });
