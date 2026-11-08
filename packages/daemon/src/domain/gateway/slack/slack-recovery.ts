@@ -111,7 +111,8 @@ export class SlackRecovery {
     if (!this.initialized) this.initialize();
     const pass = this.scan().then(() => this.retryWhileUnready());
     this.pass = pass;
-    void pass.finally(() => { if (this.pass === pass) this.pass = undefined; });
+    const clear = () => { if (this.pass === pass) this.pass = undefined; };
+    pass.then(clear, clear); // a failed pass is the caller's to handle, never an unhandled rejection here
     return pass;
   }
 
