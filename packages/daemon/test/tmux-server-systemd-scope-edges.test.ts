@@ -9,7 +9,7 @@ const NO_SERVER = Object.assign(new Error("Command failed: tmux has-session\nno 
 });
 
 /** A host where `tmux -D` (loose, or inside the scope's sh -c) brings the server up unless `scopedServerStarts` is false. */
-function host(options: { systemdRun?: (cmd: string) => string; scopedServerStarts?: boolean } = {}) {
+function host(options: { systemdRun?: (cmd: string) => string; scopedServerStarts?: boolean; serverArgs?: string[] } = {}) {
   let up = false;
   const calls: string[] = [];
   const exec = vi.fn(async (cmd: string) => {
@@ -19,12 +19,26 @@ function host(options: { systemdRun?: (cmd: string) => string; scopedServerStart
       if (options.scopedServerStarts !== false) up = true;
       return out;
     }
-    if (cmd.startsWith("tmux -D")) { up = true; return ""; }
-    if (cmd.startsWith("tmux has-session")) throw up ? new Error("can't find session: x") : NO_SERVER;
+    // `tmux [-S <socket>] -D` / `has-session`: the socket of serverArgs comes first when there is one
+    if (/^tmux (-S \S+ )?-D/.test(cmd)) { up = true; return ""; }
+    if (/^tmux (-S \S+ )?has-session/.test(cmd)) throw up ? new Error("can't find session: x") : NO_SERVER;
     return "";
   });
-  return { adapter: new TmuxAdapter(exec), calls, systemdRuns: () => calls.filter(c => c.startsWith("systemd-run ")) };
+  return {
+    adapter: new TmuxAdapter(exec, undefined, undefined, options.serverArgs ?? []),
+    calls,
+    systemdRuns: () => calls.filter(c => c.startsWith("systemd-run ")),
+    /** The server goes away (killed, or never started): the next startServer starts it again. */
+    down: () => { up = false; },
+  };
 }
+
+const UNRECOGNIZED = (cmd: string) => Object.assign(
+  new Error(`Command failed: ${cmd}\nsystemd-run: unrecognized option '--expand-environment=no'`),
+  { execStderr: "systemd-run: unrecognized option '--expand-environment=no'\n" });
+const NO_OOM = (cmd: string) => Object.assign(
+  new Error(`Command failed: ${cmd}\nFailed to start transient scope unit: Cannot set property OOMPolicy, or unknown property.`),
+  { execStderr: "Failed to start transient scope unit: Cannot set property OOMPolicy, or unknown property.\n" });
 
 describe("seat tmux server systemd user scope: edges (#2710)", () => {
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
@@ -49,7 +63,7 @@ describe("seat tmux server systemd user scope: edges (#2710)", () => {
     const h = host();
     expect(await h.adapter.startServer()).toEqual({ ok: true });
     expect(h.systemdRuns()).toEqual([]);
-    expect(h.calls.filter(c => c.startsWith("tmux -D"))).toHaveLength(1);
+    expect(h.calls.filter(c => /^tmux (-S \S+ )?-D/.test(c))).toHaveLength(1);
     expect(warnings.filter(w => w.includes("MANAGERPID"))).toHaveLength(1);
   });
 
@@ -67,7 +81,7 @@ describe("seat tmux server systemd user scope: edges (#2710)", () => {
     expect(await h.adapter.startServer()).toEqual({ ok: true });
     expect(h.systemdRuns()).toHaveLength(2);
     expect(h.systemdRuns()[1]).not.toContain("OOMPolicy");
-    expect(h.calls.filter(c => c.startsWith("tmux -D"))).toEqual([]);
+    expect(h.calls.filter(c => /^tmux (-S \S+ )?-D/.test(c))).toEqual([]);
     expect(warnings.filter(w => w.includes("without OOMPolicy=continue"))).toHaveLength(1);
   });
 
@@ -81,14 +95,67 @@ describe("seat tmux server systemd user scope: edges (#2710)", () => {
     });
     expect(await h.adapter.startServer()).toEqual({ ok: true });
     expect(h.systemdRuns()).toHaveLength(1);
-    expect(h.calls.filter(c => c.startsWith("tmux -D"))).toHaveLength(1);
+    expect(h.calls.filter(c => /^tmux (-S \S+ )?-D/.test(c))).toHaveLength(1);
+  });
+
+  it("a socket path with a literal $ reaches the server unexpanded on a systemd that expands ${VAR} (258)", async () => {
+    // systemd-run 258 expands ${VAR} in the command's arguments unless --expand-environment=no; 255 does not for --scope.
+    const socket = "/tmp/rig-${USER}/s";
+    const seen: string[] = [];
+    const h = host({
+      serverArgs: ["-S", socket],
+      systemdRun: cmd => {
+        seen.push(cmd.includes("--expand-environment=no") ? cmd : cmd.replace(/\$\{USER\}/g, "bruno"));
+        return "";
+      },
+    });
+    expect(await h.adapter.startServer()).toEqual({ ok: true });
+    expect(h.systemdRuns()).toHaveLength(1);
+    expect(h.systemdRuns()[0]).toContain("--expand-environment=no");
+    expect(seen[0]).toContain("${USER}");
+    expect(seen[0]).not.toContain("rig-bruno");
+    expect(h.calls.filter(c => /^tmux (-S \S+ )?-D/.test(c))).toEqual([]);
+  });
+
+  it("a systemd before 254 (no --expand-environment, which never expands) gets the scope on a retry without it", async () => {
+    const h = host({ systemdRun: cmd => { if (cmd.includes("--expand-environment")) throw UNRECOGNIZED(cmd); return ""; } });
+    expect(await h.adapter.startServer()).toEqual({ ok: true });
+    expect(h.systemdRuns()).toHaveLength(2);
+    expect(h.systemdRuns()[1]).not.toContain("--expand-environment");
+    expect(h.systemdRuns()[1]).toContain("OOMPolicy=continue");
+    expect(h.calls.filter(c => /^tmux (-S \S+ )?-D/.test(c))).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("a systemd that knows neither (before 253) still gets the scope, dropping one option per retry", async () => {
+    const h = host({
+      systemdRun: cmd => {
+        if (cmd.includes("--expand-environment")) throw UNRECOGNIZED(cmd);
+        if (cmd.includes("OOMPolicy=continue")) throw NO_OOM(cmd);
+        return "";
+      },
+    });
+    expect(await h.adapter.startServer()).toEqual({ ok: true });
+    expect(h.systemdRuns()).toHaveLength(3);
+    expect(h.systemdRuns()[2]).not.toMatch(/expand-environment|OOMPolicy/);
+    expect(warnings.filter(w => w.includes("without OOMPolicy=continue"))).toHaveLength(1);
+  });
+
+  it("the reason no scope is tried is logged once per adapter, not at every server start", async () => {
+    vi.stubEnv("MANAGERPID", undefined);
+    const h = host();
+    expect(await h.adapter.startServer()).toEqual({ ok: true });
+    h.down();
+    expect(await h.adapter.startServer()).toEqual({ ok: true });
+    expect(h.calls.filter(c => /^tmux (-S \S+ )?-D/.test(c))).toHaveLength(2);
+    expect(warnings.filter(w => w.includes("MANAGERPID"))).toHaveLength(1);
   });
 
   it("a scope whose server never answers falls back to the start of today with a log line", async () => {
     const h = host({ scopedServerStarts: false });
     expect(await h.adapter.startServer()).toEqual({ ok: true });
     expect(h.systemdRuns()).toHaveLength(1);
-    expect(h.calls.filter(c => c.startsWith("tmux -D"))).toHaveLength(1);
+    expect(h.calls.filter(c => /^tmux (-S \S+ )?-D/.test(c))).toHaveLength(1);
     expect(warnings.filter(w => w.includes("did not answer in time"))).toHaveLength(1);
   });
 });

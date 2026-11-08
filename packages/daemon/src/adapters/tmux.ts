@@ -607,6 +607,8 @@ export class TmuxAdapter {
   ) { this.serverArgs = [...serverArgs]; }
 
   private readonly serverArgs: readonly string[];
+  /** #2710: the "no scope tried" reason is logged once per adapter, not at every server start. */
+  private scopeSkipLogged = false;
 
   /** Prefix one adapter-owned tmux invocation, including its chained commands.
    * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
@@ -699,7 +701,8 @@ export class TmuxAdapter {
 
   /** Linux only: run `tmux -D` as the command of a transient `systemd-run --user --scope`. systemd-run exits once the
    *  scope holds the backgrounded server, so its exit status says whether the scope was made. True when it was; false,
-   *  with one log line giving the reason, when the start must fall back to the daemon's own cgroup. */
+   *  with a log line giving the reason, when the start must fall back to the daemon's own cgroup. A start where no scope
+   *  is tried (not a user service, no user manager) says why once per adapter, not at every server start. */
   private async startServerInUserScope(): Promise<boolean> {
     if (process.platform !== "linux") return false;
     const fallback = (reason: string) => {
@@ -707,25 +710,37 @@ export class TmuxAdapter {
       return false;
     };
     const unavailable = this.userScopeUnavailable();
-    if (unavailable) return fallback(unavailable);
+    if (unavailable) {
+      if (this.scopeSkipLogged) return false;
+      this.scopeSkipLogged = true;
+      return fallback(unavailable);
+    }
     const server = posixJoinArgv(["tmux", ...this.serverArgs, "-D"]);
-    const scoped = (properties: string[]) => posixJoinArgv(["systemd-run", "--user", "--scope", "--quiet", "--collect",
-      "--unit", `openrig-tmux-${randomUUID().slice(0, 8)}`, "--description", "OpenRig seat terminal server", ...properties,
-      "--", "/bin/sh", "-c", `${server} </dev/null >/dev/null 2>&1 &`]);
-    try {
+    // systemd-run 254+ expands ${VAR} in the command's arguments (by default from 258, also for --scope): the
+    // socket path must reach /bin/sh exactly as given, so expansion is turned off where the option exists.
+    const scoped = (oomPolicy: boolean, literal: boolean) => posixJoinArgv(["systemd-run", "--user", "--scope",
+      "--quiet", "--collect", "--unit", `openrig-tmux-${randomUUID().slice(0, 8)}`,
+      "--description", "OpenRig seat terminal server", ...(literal ? ["--expand-environment=no"] : []),
       // A scope's default OOM policy stops every process in it when the kernel OOM-kills one: one seat would take all.
-      await this.exec(scoped(["-p", "OOMPolicy=continue"]));
-      return true;
-    } catch (error) {
-      const reason = execFailureReason(error);
-      // systemd before 253 has no OOMPolicy= for scopes: the scope is still worth having without it.
-      if (!/OOMPolicy/.test(reason)) return fallback(reason);
+      ...(oomPolicy ? ["-p", "OOMPolicy=continue"] : []),
+      "--", "/bin/sh", "-c", `${server} </dev/null >/dev/null 2>&1 &`]);
+    let oomPolicy = true;
+    let literal = true;
+    const dropped: string[] = [];
+    for (;;) {
       try {
-        await this.exec(scoped([]));
-        console.warn(`[tmux] Seat terminal server in a systemd user scope without OOMPolicy=continue (${reason}).`);
+        await this.exec(scoped(oomPolicy, literal));
+        if (!oomPolicy) {
+          console.warn(`[tmux] Seat terminal server in a systemd user scope without OOMPolicy=continue (${dropped.join("; ")}).`);
+        }
         return true;
-      } catch (retry) {
-        return fallback(execFailureReason(retry));
+      } catch (error) {
+        const reason = execFailureReason(error);
+        // systemd before 254 has no --expand-environment (and never expands): retry without it.
+        if (literal && /expand-environment/.test(reason)) { literal = false; dropped.push(reason); continue; }
+        // systemd before 253 has no OOMPolicy= for scopes: the scope is still worth having without it.
+        if (oomPolicy && /OOMPolicy/.test(reason)) { oomPolicy = false; dropped.push(reason); continue; }
+        return fallback(reason);
       }
     }
   }
@@ -742,7 +757,8 @@ export class TmuxAdapter {
   }
 
   /** Why no systemd user scope is tried, or null. Only the environment is read. The scope is for a daemon that is itself
-   *  a service of the systemd user manager (MANAGERPID is set for user services only): restarting that unit no longer
+   *  a service of the systemd user manager (the manager sets MANAGERPID for its services; a process started by hand
+   *  from a shell that inherited it, under such a service, also counts, which is harmless): restarting that unit no longer
    *  takes the seats along. A daemon started from a login session keeps its seats in that session, as before: there a
    *  scope under the user manager would die with it when the last session ends without lingering. */
   private userScopeUnavailable(): string | null {
