@@ -475,6 +475,7 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
     const help = text.replace(/\s+/g, " ");
     expect(help).toContain("After a restore, rig up exits 0 only when the rig came back whole (rigResult fully_restored).");
     expect(help).toContain("It exits 1 when it didn't (partially_restored, failed or not_attempted), including when every seat is running but some started fresh without their conversation, or came back with a guidance or restore gap.");
-    expect(help).toContain("read rigResult and each nodes[].status");
+    expect(help).toContain("read rigResult and each node's status, noConversation, guidanceGaps and restoreGaps to tell these apart");
+    expect(help).toContain("A refused request exits 1 for a conflict (HTTP 409, such as a rig still running or a restore not attempted) and 2 for any other refusal (400, 404 or 500, such as no rig by that name or a failed boot).");
   });
 });
