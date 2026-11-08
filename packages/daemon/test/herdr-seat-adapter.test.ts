@@ -77,7 +77,9 @@ describe("HerdrSeatAdapter", () => {
     bind("dev-solo@hr", "w1:p1");
     expect(await adapter.probeSession("dev-solo@hr")).toEqual({ state: "present" });
     expect(db.prepare("SELECT herdr_workspace, herdr_socket FROM bindings").get()).toEqual({ herdr_workspace: "w1", herdr_socket: "/sandbox/herdr.sock" });
-    expect(await adapter.getSessionEnv("dev-solo@hr", "FOO")).toBe("bar");
+    // FOO isn't read back by value, so only its presence is kept (F3).
+    expect(await adapter.getSessionEnv("dev-solo@hr", "FOO")).toBeUndefined();
+    expect(await adapter.hasSessionEnv("dev-solo@hr", "FOO")).toBe(true);
   });
 
   it("refuses a duplicate label", async () => {
@@ -205,5 +207,46 @@ describe("HerdrSeatAdapter activity and transcripts (M3)", () => {
     expect(overlap(["a", "b", "c"], ["b", "c", "d"])).toBe(2);
     expect(overlap(["a"], ["b"])).toBe(0);
     expect(overlap([], ["a"])).toBe(0);
+  });
+});
+
+describe("HerdrSeatAdapter review fixes (F1-F5)", () => {
+  it("F3: stores identity env by value and every other variable as presence only", async () => {
+    const { db, adapter, bind } = setup();
+    await adapter.createSession("dev-solo@hr", "/tmp", { OPENRIG_NODE_ID: "n1", OPENRIG_ACTIVITY_HOOK_TOKEN: "secret-token", ANTHROPIC_API_KEY: "sk-x" });
+    bind("dev-solo@hr", "w1:p1");
+    const stored = JSON.stringify(db.prepare("SELECT * FROM herdr_session_meta").all());
+    expect(stored).not.toContain("secret-token");
+    expect(stored).not.toContain("sk-x");
+    expect(await adapter.getSessionEnv("dev-solo@hr", "OPENRIG_NODE_ID")).toBe("n1");
+    expect(await adapter.getSessionEnv("dev-solo@hr", "OPENRIG_ACTIVITY_HOOK_TOKEN")).toBeUndefined();
+    expect(await adapter.hasSessionEnv("dev-solo@hr", "OPENRIG_ACTIVITY_HOOK_TOKEN")).toBe(true);
+  });
+
+  it("F4: a Herdr pane id that belongs to no known seat is refused, never written to", async () => {
+    const { adapter, herdr } = setup();
+    herdr.workspaces.set("w9", { label: "person's own", panes: ["w9:p1"], env: {} });
+    expect(await adapter.sendText("w9:p1", "x")).toMatchObject({ ok: false, code: "guard_target_unknown" });
+    expect(await adapter.sendKeys("w9:p1", ["Enter"])).toMatchObject({ ok: false, code: "guard_target_unknown" });
+    expect(herdr.sent.some(s => s.method.startsWith("pane.send"))).toBe(false);
+  });
+
+  it("F5: after a restart, a seat whose binding lacks the Herdr ids keeps its own endpoint, not the current setting", async () => {
+    const { db, herdr, bind } = setup();
+    const first = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/A.sock", rpcFor: () => herdr.rpc, transcriptIntervalMs: 0 });
+    await first.createSession("dev-solo@hr");
+    bind("dev-solo@hr", "w1:p1"); // the launcher's binding, without herdr_workspace/socket
+    const sockets: string[] = [];
+    const restarted = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/B.sock", rpcFor: (s) => { sockets.push(s); return herdr.rpc; }, transcriptIntervalMs: 0 });
+    expect(await restarted.probeSession("dev-solo@hr")).toEqual({ state: "present" });
+    expect(sockets).toEqual(["/sandbox/A.sock"]);
+    expect(db.prepare("SELECT herdr_workspace, herdr_socket FROM bindings").get()).toEqual({ herdr_workspace: "w1", herdr_socket: "/sandbox/A.sock" });
+  });
+
+  it("F1: non-decimal Herdr ids are recognised", async () => {
+    const { adapter, herdr, db } = setup();
+    herdr.workspaces.set("w3A", { label: "dev-solo@hr", panes: ["w3A:p2"], env: {} });
+    db.prepare("INSERT INTO bindings (id, node_id, tmux_session, tmux_pane, herdr_workspace, herdr_socket) SELECT 'b1', id, 'dev-solo@hr', 'w3A:p2', 'w3A', '/sandbox/herdr.sock' FROM nodes").run();
+    expect(await adapter.sendText("w3A:p2", "x")).toEqual({ ok: true });
   });
 });

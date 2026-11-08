@@ -26,7 +26,8 @@ export class TerminalSubstrateError extends Error {
   }
 }
 
-const HERDR_PANE_ID = /^w\d+:p\d+$/;
+// Herdr ids are opaque and not always decimal (e.g. w3A:p2).
+const HERDR_PANE_ID = /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/;
 const TMUX_ID = /^[%$@]\d+$/;
 
 /** Methods whose first argument is not a seat target; they always run on tmux. */
@@ -96,10 +97,18 @@ export class SubstrateResolver {
     return this.cache;
   }
 
-  /** The substrate of the node with this id (tmux when it has none stored). */
+  /** The substrate of the node with this id (tmux when it has none stored). A cache miss reads the node itself, so
+   *  a seat created since the last load is never routed to tmux by a stale cache; finding one drops the cache so its
+   *  names route from now on (F2). */
   forNode(nodeId: string | undefined | null): SubstrateRoute {
     if (!nodeId) return { kind: "tmux" };
-    return this.load().nodes.get(nodeId) ?? { kind: "tmux" };
+    const cached = this.load().nodes.get(nodeId);
+    if (cached) return cached;
+    if (!this.hasColumn) return { kind: "tmux" };
+    const row = this.db.prepare("SELECT terminal_substrate FROM nodes WHERE id = ?").get(nodeId) as { terminal_substrate: string | null } | undefined;
+    const route = readStoredSubstrate(row?.terminal_substrate) as SubstrateRoute;
+    if (route.kind !== "tmux") this.invalidate();
+    return route;
   }
 
   /** The substrate a target string belongs to. */

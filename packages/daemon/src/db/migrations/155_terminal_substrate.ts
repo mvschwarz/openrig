@@ -17,7 +17,7 @@ export const terminalSubstrateSchema: Migration = {
     ALTER TABLE bindings ADD COLUMN herdr_socket TEXT;
     CREATE TABLE IF NOT EXISTS herdr_session_meta (
       session_name TEXT NOT NULL,
-      kind TEXT NOT NULL CHECK (kind IN ('env', 'option')),
+      kind TEXT NOT NULL CHECK (kind IN ('env', 'env_present', 'option', 'seat')),
       key TEXT NOT NULL,
       value TEXT NOT NULL,
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),

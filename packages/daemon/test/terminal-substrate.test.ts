@@ -149,3 +149,24 @@ describe("terminal substrate: service fences (design §5)", () => {
     expect(substrateFence(db, herdrNode.id, "A runtime switch")).toMatchObject({ code: "substrate_unknown" });
   });
 });
+
+describe("terminal router review fixes", () => {
+  it("F1: a non-decimal Herdr pane id routes to Herdr, never tmux", async () => {
+    const db = createFullTestDb();
+    const tmux = fakeTmux();
+    const router = createTerminalRouter(tmux as unknown as TmuxAdapter, { resolver: new SubstrateResolver(db) });
+    await expect(router.capturePaneContent("w3A:p2")).rejects.toMatchObject({ code: "herdr_unavailable" });
+    expect(tmux.capturePaneContent).not.toHaveBeenCalled();
+  });
+
+  it("F2: a seat created after the cache loaded routes by node and then by name", async () => {
+    const db = createFullTestDb();
+    const repo = new RigRepository(db);
+    const rig = repo.createRig("late");
+    const resolver = new SubstrateResolver(db, 60_000);
+    expect(resolver.forTarget("dev-new@late")).toEqual({ kind: "tmux" }); // cache loaded, no Herdr seat yet
+    const node = repo.addNode(rig.id, "dev.new", { runtime: "terminal", terminalSubstrate: "herdr" });
+    expect(resolver.forNode(node.id)).toEqual({ kind: "herdr" });
+    expect(resolver.forTarget("dev-new@late")).toEqual({ kind: "herdr" });
+  });
+});

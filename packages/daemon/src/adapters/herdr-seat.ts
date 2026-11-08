@@ -22,13 +22,21 @@ import { createHerdrSocketRpc, HerdrRpcError, type HerdrResult, type HerdrSocket
 
 /** A refusal with a stated code, which classifyWriteError keeps (never read as absence). */
 export class HerdrSeatError extends Error {
-  constructor(readonly resultCode: "herdr_unsupported" | "transport_unavailable" | "guard_target_changed" | "session_not_found" | "duplicate_session", message: string) {
+  constructor(readonly resultCode: "herdr_unsupported" | "transport_unavailable" | "guard_target_changed" | "guard_target_unknown" | "session_not_found" | "duplicate_session", message: string) {
     super(message);
     this.name = "HerdrSeatError";
   }
 }
 
-const HERDR_PANE_ID = /^w\d+:p\d+$/;
+// Herdr ids are opaque and not always decimal (e.g. w3A:p2).
+const HERDR_PANE_ID = /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/;
+/** The session-environment names OpenRig reads back by value (seat-launch-environment, claude-managed-launch,
+ *  pi-resume, restart-in-place, session-transport's reachability check). None is a secret. */
+const READ_BACK_ENV = new Set([
+  "OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "OPENRIG_RUNTIME", "OPENRIG_OCCUPANT_GENERATION", "OPENRIG_SEAT_ENV_KEYS",
+  "CODEX_HOME", "OPENRIG_URL", "OPENRIG_PORT", "RIGGED_URL", "RIGGED_PORT", "RIGGED_RUNTIME",
+]);
+
 /** tmux key names the daemon sends, as Herdr's logical keys. */
 const KEY_MAP: Record<string, string> = {
   Enter: "enter", "C-m": "enter", Escape: "esc", "C-c": "ctrl+c", "C-u": "ctrl+u", "C-d": "ctrl+d", "C-l": "ctrl+l",
@@ -132,18 +140,36 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     const made = row?.session ? this.created.get(row.session) : this.created.get(bare)
       ?? [...this.created.entries()].find(([, v]) => v.pane === bare)?.[1];
     if (row && row.session) {
-      // Fill the Herdr ids into a binding the launcher wrote without them.
-      if ((!row.workspace || !row.socket) && made) {
+      // Fill the Herdr ids into a binding the launcher wrote without them, from memory or the durable creation
+      // record (F5); never from the current endpoint setting.
+      const known = (!row.workspace || !row.socket) ? (made ?? this.durableSeat(row.session)) : null;
+      if (known && known.workspace && known.socket) {
         this.deps.db.prepare("UPDATE bindings SET herdr_workspace = ?, herdr_socket = ? WHERE tmux_session = ? AND herdr_workspace IS NULL")
-          .run(made.workspace, made.socket, row.session);
-        return { session: row.session, pane: row.pane ?? made.pane, workspace: made.workspace, socket: made.socket };
+          .run(known.workspace, known.socket, row.session);
+        return { session: row.session, pane: row.pane ?? known.pane, workspace: known.workspace, socket: known.socket };
       }
       return { session: row.session, pane: row.pane, workspace: row.workspace, socket: row.socket ?? this.deps.socketForNewSeats() };
     }
     const sessionName = this.created.has(bare) ? bare : [...this.created.entries()].find(([, v]) => v.pane === bare)?.[0];
     if (made && sessionName) return { session: sessionName, pane: made.pane, workspace: made.workspace, socket: made.socket };
-    if (HERDR_PANE_ID.test(bare)) return { session: bare, pane: bare, workspace: bare.split(":")[0]!, socket: this.deps.socketForNewSeats() };
+    // The durable record written at creation (F5): a restart before the binding carries the ids still finds them.
+    const durable = this.durableSeat(bare);
+    if (durable) return durable;
+    // A Herdr pane id that belongs to no known seat is never acted on: it could be the person's own workspace (F4).
+    if (HERDR_PANE_ID.test(bare)) return null;
     return { session: bare, pane: null, workspace: null, socket: this.deps.socketForNewSeats() };
+  }
+
+  /** The ids written when this adapter created the seat (kind 'seat'), by session name or pane id. */
+  private durableSeat(target: string): SeatRecord | null {
+    const rows = this.deps.db.prepare(`SELECT session_name, key, value FROM herdr_session_meta WHERE kind = 'seat'
+      AND session_name IN (SELECT session_name FROM herdr_session_meta WHERE kind = 'seat' AND (session_name = ? OR (key = 'pane' AND value = ?)))`)
+      .all(target, target) as Array<{ session_name: string; key: string; value: string }>;
+    if (rows.length === 0) return null;
+    const get = (k: string) => rows.find(r => r.key === k)?.value ?? null;
+    const socket = get("socket");
+    if (!socket) return null;
+    return { session: rows[0]!.session_name, pane: get("pane"), workspace: get("workspace"), socket };
   }
 
   /** The seat's workspace, checked to still be the seat's (R4/D3). null on positive absence. */
@@ -177,7 +203,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   /** The pane to write to or read from, after checking it is still in the seat's workspace. */
   private async paneFor(target: string): Promise<{ socket: string; pane: string } | null> {
     const seat = this.seat(target);
-    if (!seat) return null;
+    if (!seat) throw new HerdrSeatError("guard_target_unknown", `${target} is not a Herdr seat this daemon knows; nothing was done.`);
     const ws = await this.workspaceOf(seat);
     if (!ws) return null;
     const panes = await this.panesOf(seat.socket, ws.workspace_id);
@@ -342,7 +368,13 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       const workspace = created.workspace?.workspace_id ?? created.root_pane.workspace_id;
       const pane = created.root_pane.pane_id;
       this.created.set(name, { workspace, pane, socket });
-      for (const [key, value] of Object.entries(seatEnv)) this.writeMeta(name, "env", key, value);
+      for (const [key, value] of Object.entries({ workspace, pane, socket })) this.writeMeta(name, "seat", key, value);
+      // Only identity values OpenRig reads back are kept; any other variable (tokens, provider auth) is kept as
+      // presence only, never its value (F3).
+      for (const [key, value] of Object.entries(seatEnv)) {
+        if (READ_BACK_ENV.has(key)) this.writeMeta(name, "env", key, value);
+        else this.writeMeta(name, "env_present", key, value.trim() ? "1" : "0");
+      }
       if (this.deliveryGuard && env?.OPENRIG_NODE_ID) {
         this.deliveryGuard.noteFreshLifecyclePane(env.OPENRIG_NODE_ID, pane);
         this.freshManaged.set(name, { nodeId: env.OPENRIG_NODE_ID, pane });
@@ -500,26 +532,32 @@ export class HerdrSeatAdapter extends TmuxAdapter {
 
   // --- Session environment and options (DB-backed: herdr_session_meta) -------------------------
 
-  private writeMeta(session: string, kind: "env" | "option", key: string, value: string): void {
+  private writeMeta(session: string, kind: "env" | "env_present" | "option" | "seat", key: string, value: string): void {
     this.deps.db.prepare(`INSERT INTO herdr_session_meta (session_name, kind, key, value) VALUES (?, ?, ?, ?)
       ON CONFLICT (session_name, kind, key) DO UPDATE SET value = excluded.value,
       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`).run(session, kind, key, value);
   }
 
-  private readMeta(session: string, kind: "env" | "option", key: string): string | undefined {
+  private readMeta(session: string, kind: "env" | "env_present" | "option" | "seat", key: string): string | undefined {
     const row = this.deps.db.prepare("SELECT value FROM herdr_session_meta WHERE session_name = ? AND kind = ? AND key = ?")
       .get(session.replace(/^=/, ""), kind, key) as { value: string } | undefined;
     return row?.value;
   }
 
   override async getSessionEnv(session: string, key: string): Promise<string | undefined> { return this.readMeta(session, "env", key); }
-  override async setSessionEnv(session: string, key: string, value: string): Promise<void> { this.writeMeta(session.replace(/^=/, ""), "env", key, value); }
+  override async setSessionEnv(session: string, key: string, value: string): Promise<void> {
+    const s = session.replace(/^=/, "");
+    if (READ_BACK_ENV.has(key)) this.writeMeta(s, "env", key, value);
+    else this.writeMeta(s, "env_present", key, value.trim() ? "1" : "0");
+  }
   override async unsetSessionEnv(session: string, key: string): Promise<void> {
-    this.deps.db.prepare("DELETE FROM herdr_session_meta WHERE session_name = ? AND kind = 'env' AND key = ?").run(session.replace(/^=/, ""), key);
+    this.deps.db.prepare("DELETE FROM herdr_session_meta WHERE session_name = ? AND kind IN ('env', 'env_present') AND key = ?").run(session.replace(/^=/, ""), key);
   }
   override async hasSessionEnv(sessionName: string, varName: string): Promise<boolean | null> {
     const value = this.readMeta(sessionName, "env", varName);
-    return value === undefined ? false : value.trim().length > 0;
+    if (value !== undefined) return value.trim().length > 0;
+    const present = this.readMeta(sessionName, "env_present", varName);
+    return present === "1";
   }
   override async hasSessionEnvBatch(sessionName: string, varNames: readonly string[]): Promise<Record<string, boolean | null>> {
     return Object.fromEntries(await Promise.all(varNames.map(async n => [n, await this.hasSessionEnv(sessionName, n)] as const)));
