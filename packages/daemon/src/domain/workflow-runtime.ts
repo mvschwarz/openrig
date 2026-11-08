@@ -367,9 +367,9 @@ export class WorkflowRuntime {
   };
 
   validate(specPath: string, seatLivenessCheck?: SeatLivenessCheckFn): ValidationResult & { exceptionReadiness: ExceptionReadiness } {
-    const specRow = this.specCache.readThrough(specPath);
-    return { ...this.validator.validate(specRow.spec, seatLivenessCheck ?? this.seatLivenessCheck, this.hostRegistryLookup),
-      exceptionReadiness: this.readExceptionReadiness(specRow.spec, exceptionConfigurationSource(specRow.sourcePath)) };
+    const read = this.specCache.readFromDisk(specPath); // #2726: in memory, never written to workflow_specs
+    return { ...this.validator.validate(read.spec, seatLivenessCheck ?? this.seatLivenessCheck, this.hostRegistryLookup),
+      exceptionReadiness: this.readExceptionReadiness(read.spec, exceptionConfigurationSource(read.sourcePath)) };
   }
 
   /**
