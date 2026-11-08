@@ -748,6 +748,7 @@ export class WorkflowRuntime {
         workflowVersion: specRow.version,
         // #2607: the run keeps the spec it starts with and its file; another file with this id and version can't move it.
         startedSpec: { sourcePath: specSource, spec: specRow.spec },
+        rootObjective: input.rootObjective,
         createdBySession: input.createdBySession,
         initialFrontier: [],
         // R2 fix: set durable current_step_id at instantiate so the
