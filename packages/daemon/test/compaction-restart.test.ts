@@ -621,3 +621,57 @@ it('#2682: an ended attempt whose conversation reads unknown keeps its gate when
  expect(await e.maybeAutoCompact({...high,sessionId:'conversation-two'})).toEqual({triggered:false,reason:'waiting_for_idle'});
  expect(prepPrompts(f)).toHaveLength(1);
 });
+
+/** An ended attempt whose conversation reads unknown, then its replacement refused before its request went out, made in
+ *  conversation-one. */
+async function unsentReplacementAfterUnknownEnded(f:F){
+ const e=f.daemon();
+ expect(await e.maybeAutoCompact(high)).toEqual({triggered:true});
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);e.reconcilePreparations();
+ expect(e.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'delivered'});
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);
+ vi.spyOn(f.transport,'send').mockResolvedValueOnce({ok:false,sent:false,reason:'mid_work'} as any);
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'send_failed'});
+ expect(e.getPreparationState(seat)).toMatchObject({status:'sending',delivery:'not_sent'});
+ return e;
+}
+
+for(const restart of ['before','after'] as const){
+ it(`#2682: a restart ${restart} the unsent replacement moves to another conversation keeps the gate of the ended attempt whose conversation reads unknown, as in memory: a busy seat in a third conversation gets no second request`,async()=>{
+  const f=fixture();let e=await unsentReplacementAfterUnknownEnded(f);
+  if(restart==='before')e=f.daemon();
+  await e.maybeAutoCompact({...high,usedPercentage:40,sessionId:'conversation-two'});
+  if(restart==='after')e=f.daemon();
+  f.hooks.busy=true;
+  expect(await e.maybeAutoCompact({...high,sessionId:'conversation-three'})).toEqual({triggered:false,reason:'waiting_for_idle'});
+  expect(prepPrompts(f)).toHaveLength(1);
+ });
+}
+
+it('#2682: a replacement that moved to another conversation and stopped with its request never sent keeps, after a restart, the gate of the ended attempt whose conversation reads unknown: a busy seat in a third conversation gets no request',async()=>{
+ const f=fixture();const e=await unsentReplacementAfterUnknownEnded(f);
+ await e.maybeAutoCompact({...high,usedPercentage:40,sessionId:'conversation-two'});
+ vi.spyOn(f.transport,'send').mockResolvedValue({ok:false,sent:false,reason:'mid_work'} as any);
+ for(let i=0;i<4&&e.getPreparationState(seat)?.status!=='stopped';i++)await e.maybeAutoCompact({...high,sessionId:'conversation-two'});
+ expect(e.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'not_sent'});
+ vi.mocked(f.transport.send).mockRestore();
+ const restarted=f.daemon();f.hooks.busy=true;
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);
+ await restarted.maybeAutoCompact({...high,sessionId:'conversation-three'});
+ expect(prepPrompts(f)).toHaveLength(1);
+});
+
+for(const otherUsage of [20,90,null] as (number|null)[]){
+ for(const next of ['stale','fresh'] as const){
+  it(`#2682: a stale sample of another known conversation (at ${otherUsage}) ends an automatic attempt whose request went out before its map is complete: a later ${next} sample whose conversation reads unknown never compacts with that map`,async()=>{
+   const f=fixture();const e=f.daemon();
+   expect(await e.maybeAutoCompact(hs)).toEqual({triggered:true});
+   expect(await e.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code',lastUsedPercentage:otherUsage,sessionId:'conversation-two'}))
+    .toEqual({triggered:false,reason:'preparation_stopped'});
+   completeMap(e);
+   if(next==='stale')await e.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code',lastUsedPercentage:90,sessionId:null});
+   else await e.maybeAutoCompact({...high,sessionId:null});
+   expect(compacts(f)).toHaveLength(0);
+  });
+ }
+}
