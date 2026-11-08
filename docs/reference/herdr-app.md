@@ -45,8 +45,11 @@ rig herdr install --keys     # optional: alt-arrows move between a view's cells
   | `rig terminal open <view>` | Inside an answering herdr-app terminal, in that herdr-app window; otherwise a desktop window. |
   | `rig terminal open <view> --window` | Always asks for a new desktop terminal window, even inside a herdr-app terminal. |
 
-The herdr-app window must be answering on its socket (`<app home>/herdr-app.sock`); otherwise the open fails and says
-so. Nothing falls back to a desktop window or an SSH recipe.
+The herdr-app window must be answering on its socket (`<app home>/herdr-app.sock`); otherwise an explicit open fails and says
+so. Finding the socket file is how OpenRig guesses you are in a herdr-app window; whether the window is reachable is
+checked by asking it. When a plain `rig terminal open <view>` in a herdr-app terminal finds that the socket does not
+answer, it says so and opens a desktop window instead; `--provider herdr-app` never falls back to a desktop window or
+an SSH recipe.
 
 What an open does, in order:
 

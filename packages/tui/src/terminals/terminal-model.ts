@@ -19,7 +19,8 @@ export interface TerminalPreview {
   view: string;
   provider: string;
   planId: string;
-  status: { available: boolean };
+  status: { available: boolean; launch?: { socketPath?: string } };
+  herdrApp?: { appHome?: string };
   composed: {
     id: string;
     pages: Array<Array<{ seat: string; label: string; readOnly: boolean; paneCommand: string; recoveryCommand?: string }>>;
@@ -39,7 +40,7 @@ export interface TerminalRead {
 }
 
 export async function readTerminals(client: DaemonClient, view?: string | null,
-  provider: () => Promise<WindowTarget | WindowTarget["provider"]> = () => windowTarget()): Promise<TerminalRead> {
+  provider: () => Promise<WindowTarget | WindowTarget["provider"]> = windowTarget): Promise<TerminalRead> {
   const result: TerminalRead = { catalog: [], preview: null };
   // Display the endpoint without URL credentials, query parameters or fragments.
   try { result.daemonTarget = new URL(client.baseUrl).origin; } catch { /* unavailable target */ }
@@ -54,7 +55,10 @@ export async function readTerminals(client: DaemonClient, view?: string | null,
     if (view) {
       const target = await provider();
       // herdr-app carries its client; the other providers are named as before.
-      result.preview = await client.previewTerminal(view, typeof target === "string" || target.provider !== "herdr-app" ? (typeof target === "string" ? target : target.provider) as "herdr" | "rex" | "cmux" : target);
+      const preview = await client.previewTerminal(view, typeof target === "string" || target.provider !== "herdr-app" ? (typeof target === "string" ? target : target.provider) as "herdr" | "rex" | "cmux" : target);
+      result.preview = preview && typeof target !== "string" && target.provider === "herdr-app" && !preview.herdrApp
+        ? { ...preview, herdrApp: { appHome: target.appHome } }
+        : preview;
     }
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
@@ -115,9 +119,10 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
   lines.push({ text: preview.view }, { text: `${plan.opened.length} attachable · ${plan.absent.length} absent · ${plan.degraded.length} degraded` });
   // Actions precede the diagram so explicit Open/Back remain accessible at 80×24.
   lines.push({ text: "Back to views", action: { type: "back" } });
-  if (plan.opened.length) {
+  const herdrAppUnavailable = preview.provider === "herdr-app" && !preview.status.available;
+  if (plan.opened.length && !herdrAppUnavailable) {
     lines.push({ text: `Open terminals ▸ all ${plan.pages.length} pages`, action: { type: "act", act: "open-terminal", view: preview.view, expectedPlan: preview.planId } });
-  } else lines.push({ text: "Nothing attachable; no space will be opened." });
+  } else if (!plan.opened.length) lines.push({ text: "Nothing attachable; no space will be opened." });
   lines.push({ text: "Refresh preview", action: { type: "terminal-preview", view: preview.view } });
   if (plan.pages.length > 1) {
     if (pageIndex > 0) lines.push({ text: "Previous page", action: { type: "terminal-page", page: pageIndex - 1 } });
@@ -142,8 +147,13 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
   lines.push({ text: "Auto-layout: equal cells, at most 9 members per page. Blank cells fill incomplete rectangles. Saved views store membership only; no custom geometry editor." });
   for (const member of [...plan.absent, ...plan.degraded]) lines.push({ text: `Unavailable · ${member.seat}: ${member.reason}` });
   if (page.length && preview.provider === "herdr-app") {
-    // The view opens in the herdr-app window this TUI runs in: no desktop window, no attach-by-hand recipe.
-    lines.push({ text: "Opens here: a new Rig view in this herdr-app window, beside your tabs, switched from the strip above them. Nothing needs a desktop display or SSH. Existing conversations stay in place." });
+    if (preview.status.available) {
+      // The view opens in the herdr-app window this TUI runs in: no desktop window, no attach-by-hand recipe.
+      lines.push({ text: "Opens here: a new Rig view in this herdr-app window, beside your tabs, switched from the strip above them. Nothing needs a desktop display or SSH. Existing conversations stay in place." });
+    } else {
+      const socketPath = preview.status.launch?.socketPath ?? (preview.herdrApp?.appHome ? `${preview.herdrApp.appHome}/herdr-app.sock` : "herdr-app.sock");
+      lines.push({ text: `herdr-app is not answering at ${socketPath} (the socket file exists, but nothing replied). Nothing will open from here. Start herdr-app, or run \`rig terminal open ${preview.view} --window\` for a desktop window.` });
+    }
   } else if (page.length) {
     lines.push({ text: "On a desktop, opens a new terminal tab or window: a Rex session when run inside Rex, a new cmux workspace when run inside cmux, Herdr if installed, otherwise the same layout in plain tmux." });
     lines.push({ text: `Run this TUI on the selected daemon's desktop (${read.daemonTarget ?? "address unreported"}). Existing conversations stay in place.` });

@@ -155,7 +155,7 @@ before retrying. `rig terminal status` gives Rex about a second to answer.
 
 ## herdr-app
 
-`--provider herdr-app` opens the view in the herdr-app window you run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same while that window is answering. `--window` always asks for a new desktop window. See [OpenRig views in herdr-app](herdr-app.md).
+`--provider herdr-app` opens the view in the herdr-app window you run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same when that window is answering (finding the socket file is how OpenRig guesses you are in a herdr-app window, and whether the window is reachable is checked by asking it). `--window` always asks for a new desktop window. See [OpenRig views in herdr-app](herdr-app.md).
 
 ## HTTP API
 

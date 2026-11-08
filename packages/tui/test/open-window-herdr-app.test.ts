@@ -61,19 +61,26 @@ describe("herdr-app as the TUI's terminal target", () => {
     expect(previewed).toEqual([{ provider: "herdr-app", appHome }]);
   });
 
-  it("a herdr-app preview says where the view opens and gives no desktop or SSH recipe", () => {
+  it("a herdr-app preview says where the view opens when available, and refuses with no open action when not answering", () => {
     const pane = { seat: "dev.build@demo", label: "dev.build", readOnly: false, paneCommand: "tmux attach -t =dev.build@demo" };
-    const preview = (provider: string) => ({
+    const preview = (provider: string, available = true) => ({
       catalog: [], catalogLoaded: true, daemonTarget: "http://127.0.0.1:7433",
-      preview: { view: "rig:demo", provider, planId: "p1", status: { available: true },
+      preview: { view: "rig:demo", provider, planId: "p1", status: { available, launch: { socketPath: `${appHome}/herdr-app.sock` } },
         composed: { id: "c", pages: [[pane]], opened: [{ seat: pane.seat }], absent: [], degraded: [] }, grids: [{ columns: 1, rows: 1, blanks: 0 }] },
     });
     const state = { terminalView: "rig:demo", terminalPage: 0, filter: "", expanded: [] } as unknown as ViewState;
-    const text = (provider: string) => terminalLines(state, { terminals: preview(provider) } as unknown as FleetSnapshot, 200).map((l) => l.text).join("\n");
-    const inApp = text("herdr-app");
+    const linesFor = (provider: string, available = true) => terminalLines(state, { terminals: preview(provider, available) } as unknown as FleetSnapshot, 300);
+    const text = (provider: string, available = true) => linesFor(provider, available).map((l) => l.text).join("\n");
+    const inApp = text("herdr-app", true);
     expect(inApp).toContain("Opens here: a new Rig view in this herdr-app window");
+    expect(linesFor("herdr-app", true).some((l) => l.action?.type === "act" && l.action.act === "open-terminal")).toBe(true);
     for (const absent of ["On a desktop", "Headless or remote", "env -u TMUX", "desktop window"]) expect(inApp).not.toContain(absent);
     expect(text("herdr")).toContain("Headless or remote"); // other targets keep their recipe
+
+    const stale = text("herdr-app", false);
+    expect(stale).toContain(`herdr-app is not answering at ${appHome}/herdr-app.sock (the socket file exists, but nothing replied). Nothing will open from here. Start herdr-app, or run \`rig terminal open rig:demo --window\` for a desktop window.`);
+    expect(stale).not.toContain("Opens here");
+    expect(linesFor("herdr-app", false).some((l) => l.action?.type === "act" && l.action.act === "open-terminal")).toBe(false);
   });
 
   it("opens in the TUI's own herdr-app window through the daemon: --provider herdr-app with that client, never --window", async () => {
@@ -83,7 +90,7 @@ describe("herdr-app as the TUI's terminal target", () => {
     writeFileSync(entry, `import {writeFileSync} from 'node:fs';
 writeFileSync(${JSON.stringify(calls)},JSON.stringify({args:process.argv.slice(2),display:process.env.DISPLAY??null}));
 console.log(JSON.stringify({provider:"herdr-app",ok:true,opened:["dev.build@demo"],absent:[],degraded:[],pages:1}));`);
-    const result = await openTerminalInWindow("rig:demo", "http://localhost:7433", entry, "plan-1", undefined, async () => undefined);
+    const result = await openTerminalInWindow("rig:demo", "http://localhost:7433", entry, "plan-1");
     expect(result.opened).toEqual(["dev.build@demo"]);
     const seen = JSON.parse(readFileSync(calls, "utf8")) as { args: string[] };
     expect(seen.args).toEqual(["terminal", "open", "--provider", "herdr-app", "--app-home", appHome, "--json", "--expected-plan", "plan-1", "--", "rig:demo"]);
