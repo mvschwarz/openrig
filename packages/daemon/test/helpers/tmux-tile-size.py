@@ -85,14 +85,15 @@ class Server:
     def seat_screen(self):
         return self.call("capture-pane", "-p", "-J", "-t", "seat:")
 
-    def wait_for(self, predicate, expected, seconds=6):
+    def wait_for(self, predicate, expected, seconds=6, detail=None):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             self.drain()
             if predicate():
                 return
             time.sleep(0.05)
-        raise AssertionError(expected + "; window=" + self.geometry() + "; clients=" + repr(self.client_ttys()))
+        raise AssertionError(expected + "; window=" + self.geometry() + "; clients=" + repr(self.client_ttys())
+                             + ("; " + detail() if detail else ""))
 
     def stop(self):
         try:
@@ -242,7 +243,9 @@ def writable_first_input(server):
     framed = server.seen(tile).rfind("\x1b[?2004h") > server.seen(tile).rfind("\x1b[?2004l")
     os.write(tile[1], b"\x1b[200~" + paste + b"\x1b[201~" if framed else paste)
     expected += b"A\x1b[200~" + paste + b"\x1b[201~"
-    server.wait_for(lambda: received(server) == expected, "a key then a paste arrive in order, the paste framed")
+    # A rare CI failure here is unexplained: say what the seat got.
+    server.wait_for(lambda: received(server) == expected, "a key then a paste arrive in order, the paste framed",
+                    detail=lambda: "framed=%r; seat got %r; expected %r" % (framed, received(server)[-80:], expected[-80:]))
     server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
     # A run of text that ends in ; keeps it, through the client and before a paste alike.
     os.write(tile[1], b"ls;\r")
