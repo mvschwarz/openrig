@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
@@ -143,3 +143,81 @@ for (const shell of ["bash", "zsh", "dash", "ksh"]) {
     },
   );
 }
+
+// Real tmux and a real interactive bash with an rc that sets PATH. `claude` and the wrapper are private fixtures that record
+// the argv they were really started with; nothing here starts Claude Code or reads a provider setting.
+describe.skipIf(process.platform === "win32" || !hasTmux || !available("bash", ["-c", ":"]))(
+  "classic Claude launch_wrapper through a native pane",
+  () => {
+    /** Create an isolated tmux pane with argv-recording Claude and wrapper fixtures. */
+    async function pane(wrapperName: string | null) {
+      const temp = fs.realpathSync(fs.mkdtempSync(path.join(process.env.TMUX_TMPDIR ?? (process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "claude-wrap-")));
+      const socket = path.join(temp, "tmux.sock"); const session = "claude-fixture";
+      const bin = path.join(temp, "bin"); const userBin = path.join(temp, "user-bin"); const cwd = path.join(temp, "work");
+      for (const dir of [bin, userBin, cwd]) fs.mkdirSync(dir);
+      const claudeLog = path.join(temp, "claude-argv.log"); const wrapperLog = path.join(temp, "wrapper-argv.log");
+      const logArgv = (log: string) => `for a in "$@"; do printf '%s\\n' "$a"; done > ${quote(log + ".part")} && mv ${quote(log + ".part")} ${quote(log)}`;
+      // The rc PATH selects user-bin's claude, which a PATH-only lookup by the daemon would not.
+      fs.writeFileSync(path.join(userBin, "claude"), `#!/bin/sh\n${logArgv(claudeLog)}\nsleep 30\n`, { mode: 0o755 });
+      if (wrapperName) fs.writeFileSync(path.join(bin, wrapperName), `#!/bin/sh\nwhile [ "$#" -gt 0 ]; do a="$1"; shift; [ "$a" = "--" ] && break; done\n${logArgv(wrapperLog)}\nexec "$@"\n`, { mode: 0o755 });
+      fs.writeFileSync(path.join(temp, "rig"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      const rc = path.join(temp, "pane.rc");
+      const readyMarker = path.join(temp, "rc-ready");
+      fs.writeFileSync(rc, `export PATH=${quote(userBin + ":" + bin + ":/usr/bin:/bin")}\n: > ${quote(readyMarker)}\n`);
+      const sessionEnv = { PATH: `${bin}:/usr/bin:/bin`, OPENRIG_HOME: path.join(temp, "instance"), OPENRIG_URL: "", OPENRIG_NODE_ID: "fixture-node",
+        OPENRIG_SESSION_NAME: session, OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: "gen-1" };
+      const tm = async (args: string[]) => (await run("tmux", ["-S", socket, "-f", "/dev/null", ...args], { timeout: 8000 })).stdout;
+      await tm(["new-session", "-d", "-s", session, "-x", "200", "-y", "50",
+        ...Object.entries(sessionEnv).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
+        `/bin/bash --noprofile --rcfile ${quote(rc)} -i`]);
+      const tmux = new TmuxAdapter(async command => {
+        if (!command.startsWith("tmux ")) throw Error("Unexpected fixture command");
+        return (await run("/bin/sh", ["-c", command.replace(/^tmux /, "tmux -S " + quote(socket) + " -f /dev/null ")], { timeout: 8000 })).stdout;
+      });
+      const capture = async () => (await tmux.capturePaneContent(session, 40)) ?? "";
+      await expect.poll(() => fs.existsSync(readyMarker), { timeout: 5000 }).toBe(true);
+      const fsOps = { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {}, readdir: () => [], homedir: temp };
+      const adapter = new ClaudeCodeAdapter({ tmux, fsOps: fsOps as never, seatLaunchEnvironment: new SeatLaunchEnvironment(tmux, sessionEnv, cwd, path.join(temp, "rig")), sleep: async () => {} });
+      vi.spyOn(adapter as never, "verifyResumeLaunch").mockResolvedValue({ ok: true } as never);
+      const binding = { launchWrapper: wrapperName ? [wrapperName, "--"] : undefined, id: "b", nodeId: "fixture-node", tmuxSession: session, tmuxPane: "%0", tmuxWindow: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd };
+      const lines = (file: string) => fs.readFileSync(file, "utf8").split("\n").slice(0, -1);
+      const cleanup = async () => {
+        await tm(["kill-server"]).catch(() => {});
+        fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      };
+      return { temp, userBin, adapter, binding, capture, claudeLog, wrapperLog, lines, cleanup, tmux, session, tm };
+    }
+
+    it.each(["fresh", "resume", "fork"] as const)("%s launch starts the wrapper with the rc-selected claude executable and its native args as the child", async kind => {
+      const p = await pane("native-wrapper");
+      try {
+        const result = await p.adapter.launchHarness(p.binding as never, { name: p.session, ...(kind === "resume" ? { resumeToken: "old-id" } : kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-id" } } : {}) });
+        expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+        await expect.poll(() => fs.existsSync(p.claudeLog), { timeout: 5000 }).toBe(true);
+        const argv = p.lines(p.claudeLog); const wrapped = p.lines(p.wrapperLog);
+        expect(wrapped[0], await p.capture()).toBe(path.join(p.userBin, "claude"));
+        expect(wrapped.slice(1)).toEqual(argv); // the wrapper's child is exactly claude and the args claude then received
+        expect(argv).toEqual(expect.arrayContaining(kind === "resume" ? ["--resume", "old-id"] : kind === "fork" ? ["--resume", "parent-id", "--fork-session"] : ["--session-id"]));
+        for (const intermediary of ["eval", "sh", "bash", "env", "exec"]) expect(wrapped).not.toContain(intermediary);
+      } finally { await p.cleanup(); }
+    });
+
+    it("a missing wrapper starts nothing: claude never ran and the pane says so", async () => {
+      const p = await pane(null);
+      try {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        await p.adapter.launchHarness({ ...p.binding, launchWrapper: ["absent-wrapper", "--"] } as never, { name: p.session });
+        warn.mockRestore();
+        // A probe typed after the launch line only runs once the fail-closed line has finished.
+        const probe = path.join(p.temp, "probe");
+        await p.tm(["send-keys", "-t", p.session, `printf '%s\\n' "$?" > ${quote(probe)}`, "Enter"]);
+        await expect.poll(() => fs.existsSync(probe) && fs.readFileSync(probe, "utf8").includes("\n"), { timeout: 5000 }).toBe(true);
+        const screen = await p.capture();
+        expect(fs.existsSync(p.claudeLog), `claude ran unwrapped; pane:\n${screen}`).toBe(false);
+        expect(fs.existsSync(p.wrapperLog), `the wrapper ran; pane:\n${screen}`).toBe(false);
+        expect(fs.readFileSync(probe, "utf8").trim(), `exit status; pane:\n${screen}`).not.toBe("0");
+        expect(screen).toContain("launch_wrapper unavailable; no agent started.");
+      } finally { await p.cleanup(); }
+    });
+  },
+);

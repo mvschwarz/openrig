@@ -2219,10 +2219,11 @@ state: 2-named
       }
     });
 
-    it("current row overrides stale launchRecipe on launchPersistedFresh and stale materializedSources on launchFirstMaterializedNode so cleared wrapper never resurrects", async () => {
-      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+    it.each(["codex", "claude-code"])("current row overrides stale launchRecipe on launchPersistedFresh and stale materializedSources on launchFirstMaterializedNode so cleared wrapper never resurrects (%s)", async runtime => {
+      const { db, rigRepo, sessionRegistry, inst, adapter, codexAdapter, tmux } = setup({
         [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
       });
+      const targetAdapter = runtime === "claude-code" ? adapter : codexAdapter;
       try {
         tmux.startServer = vi.fn(async () => {});
         tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
@@ -2235,7 +2236,7 @@ state: 2-named
               id: "impl",
               agentRef: "local:agents/impl",
               profile: "default",
-              runtime: "codex",
+              runtime,
               cwd: ".",
               launchWrapper: ["/bin/sh", "-x"],
             }],
@@ -2259,7 +2260,7 @@ state: 2-named
         expect(firstLaunch?.ok, JSON.stringify(firstLaunch)).toBe(true);
         // Cleared wrapper on row must NOT resurrect from materializedSources
         expect(getNode(matRigId, matNodeId)?.launchWrapper).toBeUndefined();
-        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toBeUndefined();
+        expect(vi.mocked(targetAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toBeUndefined();
 
         // Part B: launchPersistedFresh after clearing row wrapper while launch_recipe_json still has ["/bin/sh", "-x"]
         const instRig = await inst.instantiate(
@@ -2283,24 +2284,25 @@ state: 2-named
         expect(freshRebuild.status, JSON.stringify(freshRebuild)).toBe("launched");
         // Cleared wrapper on row must NOT resurrect from stale launch_recipe_json
         expect(getNode(rebuildRigId, rebuildNodeId)?.launchWrapper).toBeUndefined();
-        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toBeUndefined();
+        expect(vi.mocked(targetAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toBeUndefined();
       } finally {
         db.close();
       }
     });
 
-    it("retryFirstStart retains launch_wrapper key and enforces sameLaunchWrapper equality against the failed node", async () => {
-      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+    it.each(["codex", "claude-code"])("retryFirstStart retains launch_wrapper key and enforces sameLaunchWrapper equality against the failed node (%s)", async runtime => {
+      const { db, rigRepo, sessionRegistry, inst, adapter, codexAdapter, tmux } = setup({
         [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
         [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
       });
+      const targetAdapter = runtime === "claude-code" ? adapter : codexAdapter;
       try {
         const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
         expect(start.ok, JSON.stringify(start)).toBe(true);
         if (!start.ok) return;
         const rigId = start.result.rigId;
 
-        vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({
+        vi.spyOn(targetAdapter, "project").mockResolvedValueOnce({
           projected: [],
           skipped: [],
           failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }],
@@ -2309,7 +2311,7 @@ state: 2-named
           id: "worker",
           agent_ref: "local:agents/worker",
           profile: "default",
-          runtime: "codex",
+          runtime,
           cwd: ".",
           launch_wrapper: ["/bin/sh", "-x"],
         };
@@ -2346,7 +2348,7 @@ state: 2-named
         // 3. Matching launch_wrapper succeeds and launches with the retained wrapper
         const retried = await inst.retryFirstStart(rigId, worker.id, memberRaw, RIG_ROOT);
         expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
-        expect(vi.mocked(codexAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toEqual(["/bin/sh", "-x"]);
+        expect(vi.mocked(targetAdapter.launchHarness).mock.calls.at(-1)?.[0].launchWrapper).toEqual(["/bin/sh", "-x"]);
       } finally {
         db.close();
       }

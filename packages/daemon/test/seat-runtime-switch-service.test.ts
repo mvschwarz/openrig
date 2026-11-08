@@ -1073,25 +1073,18 @@ describe("live seat runtime switch", () => {
   });
 
   describe("launch_wrapper runtime-switch guard and carry", () => {
-    it("refuses switching a seat with a selected launch_wrapper to an unsupported runtime (claude-code) BEFORE side effects", async () => {
-      rigRepo.setNodeLaunchWrapper(nodeId, ["rtk", "--wrap"]);
-      const svc = service();
-      const result = await svc.setRuntime({
-        seatRef: SEAT,
-        runtime: "claude-code",
-        reason: "try-claude",
-      });
-      expect(result).toMatchObject({
-        ok: false,
-        code: "runtime_switch_failed",
-        committed: false,
-      });
-      expect((result as { message: string }).message).toMatch(/launch_wrapper/i);
-      // Zero side effects: no switch row created, no staging session created, predecessor untouched
+    it("accepts switching a wrapped Codex seat to Claude Code in the dry run, and the real switch hands the Claude successor the same wrapper", async () => {
+      rigRepo.setNodeLaunchWrapper(nodeId, ["rtk", "--to-claude"]);
+      // The dry run reports acceptance, as execution does, and changes nothing.
+      expect(await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "try-claude", dryRun: true }))
+        .toMatchObject({ ok: true, dryRun: true, changed: true, from: "codex", to: "claude-code" });
       expect(openSwitch()).toBeUndefined();
       expect(fakeTmux.createSession).not.toHaveBeenCalled();
-      expect(nodeRow().runtime).toBe("codex");
-      expect(rigRepo.getRig(rigRepo.listRigs()[0]!.id)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--wrap"]);
+      const target = adapter("claude-code");
+      const svc = service({ runtimeAdapters: { "claude-code": target } }); successorConfirms(svc);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "try-claude" })).toMatchObject({ ok: true, changed: true });
+      expect(vi.mocked(target.launchHarness).mock.calls[0]?.[0]).toMatchObject({ nodeId, launchWrapper: ["rtk", "--to-claude"] });
+      expect(rigRepo.getRig(rigRepo.listRigs()[0]!.id)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--to-claude"]);
     });
 
     it("carries launch_wrapper onto a Codex successor (same-runtime account switch) and preserves it on the node row", async () => {

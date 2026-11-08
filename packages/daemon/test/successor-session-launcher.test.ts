@@ -634,9 +634,9 @@ describe("SuccessorSessionLauncher", () => {
   });
 
   describe("launch_wrapper forwarding", () => {
-    it("forwards node.launchWrapper on binding for createSuccessor and stageSuccessor", async () => {
+    it.each(["codex", "claude-code"])("forwards %s node.launchWrapper on binding for createSuccessor and stageSuccessor", async runtime => {
       const created = await launcher().createSuccessor({
-        node: { id: "node-1", runtime: "codex", cwd: "/w", launchWrapper: ["rtk", "--succ"] },
+        node: { id: "node-1", runtime, cwd: "/w", launchWrapper: ["rtk", "--succ"] },
         departingSessionName: "dev-impl@rig",
       });
       expect(created.ok).toBe(true);
@@ -647,7 +647,7 @@ describe("SuccessorSessionLauncher", () => {
 
       launchHarness.mockClear();
       const staged = await launcher().stageSuccessor({
-        node: { id: "node-1", runtime: "codex", cwd: "/w", launchWrapper: ["rtk", "--staged"] },
+        node: { id: "node-1", runtime, cwd: "/w", launchWrapper: ["rtk", "--staged"] },
         canonicalSession: "dev-impl@rig",
         stagingSession: "openrig-switch-1",
         occupantGeneration: "gen-1",
