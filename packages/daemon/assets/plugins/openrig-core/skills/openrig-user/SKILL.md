@@ -1628,11 +1628,11 @@ rig mcp token list [--json]
 rig mcp token revoke <name>
 ```
 
-The 38 shipped tools fall into four groups. Over stdio, and over HTTP with no grants, every tool but the person tools is
+The 39 shipped tools fall into four groups. Over stdio, and over HTTP with no grants, every tool but the person tools is
 offered. An HTTP grant offers the work tools; the workspace tools with `--workspace` or `--owner`; and the owner tools only
 with `--owner`, which offers every tool but the person tools. Only a grant service's grant that names its person offers
 the person tools.
-- **Work (19):** orientation, communication and the durable work loop.
+- **Work (20):** orientation, communication and the durable work loop.
   - `rig_whoami`: the seat the server acts as (rig, pod, peers, edges) and the `caller`: authenticated (an HTTP
     credential, with its principal) or declared (`OPENRIG_SESSION_NAME` where the server was configured, which nothing
     verifies).
@@ -1650,6 +1650,9 @@ the person tools.
   - `rig_artifact_read`: a finished item's artifact (its `evidenceRef`) or a named file, through the daemon's shared
     roots (`OPENRIG_FILES_ALLOWLIST`), in windows (`offset`, `nextOffset`). Outside those roots it answers unavailable
     rather than reading a local path.
+  - `rig_environment_export`: copies a bound worker's JSON artifact to the host, checks its bytes, schema and context, and
+    adds a receipt to its existing work. It doesn't close the work, stop compute or restore native history, and it needs
+    an authenticated HTTP work connection.
   - `rig_human_decision_room`, then `rig_queue_decide`: on your own pending ask to a person, read the decision room of
     the mode they have on, and record a decision you made for them inside it. Only the person tools record a person's own
     answer, and only for the person a grant names.
@@ -1662,8 +1665,9 @@ the person tools.
   - `rig_restore_status`, that attempt's receipt.
 - **Person (2):** `rig_question_list` and `rig_question_answer`, offered only on a grant service's grant that names the
   person who owns the connection (`person.entity_id`, with the `question` pair). They list the team's questions waiting on
-  that person, as Steering shows them, and record that person's own answer, given through the connection, with the verb
-  Steering uses. `docs/reference/hosted-members.md` has the contract.
+  that person, as Steering shows them, and record that person's own answer, given through the connection: `answer` for an
+  ask, which returns their words to the asker, and `resolve` for a park. `docs/reference/hosted-members.md` has the
+  contract.
 
 **Results:**
 - A structured result comes beside the text from the queue tools, `rig_whoami`, `rig_team`, the four workspace tools,

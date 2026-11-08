@@ -1851,8 +1851,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   );
 
   // The person an external grant names: the connection's owner, as the grant service vouches. The team's questions to
-  // them are what Steering shows them as answerable, read from Steering's own view of them, and answered with the verb
-  // Steering would use, as them, through their own client. The caller's seat is only the route the answer came by.
+  // them are what Steering shows them as answerable, read from Steering's own view of them, and answered through
+  // Steering's write path (answer for an ask, resolve for a park), as them, through their own client. The caller's seat
+  // is only the route the answer came by.
   const person = access?.external?.person;
   const personAddress = person ? `${person}@external` : undefined;
   type Answerable = { qitemId: string; verb: "answer" | "approve" | "resolve"; item: Record<string, any> };
@@ -1872,11 +1873,21 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       return qitemId && (verb === "answer" || verb === "approve" || verb === "resolve") ? [{ qitemId, verb, item }] : [];
     });
   };
-  /** One question as Steering shows it to the person, with the revision their answer must name. */
-  const questionView = async (entry: Answerable): Promise<Record<string, unknown> | null> => {
-    const res = await client.get(`/api/queue/${encodeURIComponent(entry.qitemId)}`);
-    if (res.status >= 400) return null;
-    const row = (res.data ?? {}) as Record<string, any>;
+  /** Whether a row read after the view is still the question the view named: open for its verb, with the same recipient.
+   *  A park moved to another person between the two reads is theirs now, so nothing of it is shown or answered here. */
+  const stillListed = (entry: Answerable, row: Record<string, any>): boolean => entry.verb === "resolve"
+    ? row.state === "blocked" && row.blockedOn === entry.item.recipient
+    : row.state === "pending" && row.destinationSession === entry.item.recipient;
+  /** One question as Steering shows it to the person, with the revision their answer must name, or null once the row is
+   *  no longer the question the view named. */
+  const questionView = async (entry: Answerable, read?: Record<string, any>): Promise<Record<string, unknown> | null> => {
+    let row = read;
+    if (!row) {
+      const res = await client.get(`/api/queue/${encodeURIComponent(entry.qitemId)}`);
+      if (res.status >= 400) return null;
+      row = (res.data ?? {}) as Record<string, any>;
+    }
+    if (!stillListed(entry, row)) return null;
     const questions = Array.isArray(row.humanQuestions) && row.humanQuestions.length > 0 ? row.humanQuestions : null;
     return {
       qitemId: entry.qitemId,
@@ -1906,7 +1917,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const found = await answerable();
         if (!Array.isArray(found)) return found;
-        const items = (await Promise.all(found.slice(0, QUESTION_LIST_LIMIT).map(questionView))).filter((view) => view !== null);
+        const items = (await Promise.all(found.slice(0, QUESTION_LIST_LIMIT).map((entry) => questionView(entry)))).filter((view) => view !== null);
         return mapResult({ status: 200, data: { person: personAddress, items, ...(found.length > QUESTION_LIST_LIMIT ? { more: found.length - QUESTION_LIST_LIMIT } : {}) } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
@@ -1918,7 +1929,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_question_answer")) server.registerTool(
     "rig_question_answer",
     {
-      description: "Submit the person's answer to a question rig_question_list showed them: only what they explicitly told you, never your own choice. Name the revision you showed them, and give either the options they chose (one per question) or exactly what they typed, with no label or words of your own. It's recorded as their answer, given through this connection, and the team's work continues.",
+      description: "Submit the person's answer to a question rig_question_list showed them: only what they explicitly told you, never your own choice. Name the revision you showed them, and give either the options they chose (one per question) or exactly what they typed, with no label or words of your own. It's recorded as their answer, given through this connection, and the team's work continues. After an uncertain result, send the same call again: it confirms or finishes what was recorded.",
       inputSchema: z.object({
         qitemId: z.string().describe("The question's qitemId, from rig_question_list"),
         revision: z.string().describe("The revision rig_question_list gave for the question you showed the person"),
@@ -1933,78 +1944,97 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         errorResult(JSON.stringify({ ok: false, error: code, message, ...extra }), code, message, extra);
       try {
         if ((choices === undefined) === (words === undefined)) return refuse("answer_shape", "Give either the options the person chose or exactly what they typed, not both.");
-        if (!options.personClient) return refuse("person_unavailable", "This connection can't act for its person here.");
+        const personClient = options.personClient;
+        if (!personClient) return refuse("person_unavailable", "This connection can't act for its person here.");
         const found = await answerable();
         if (!Array.isArray(found)) return found;
-        const entry = found.find((candidate) => candidate.qitemId === qitemId);
-        if (!entry) {
-          // What became of it is said only for a question that was addressed to, or parked on, this person.
-          const res = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
-          const row = res.status < 400 ? (res.data ?? {}) as Record<string, any> : null;
-          const theirs = row !== null && (row.destinationSession === personAddress || row.blockedOn === personAddress);
-          // A retry after an uncertain result: the person's closed question already holds exactly this answer.
-          const recorded = (row?.humanAnswers ?? {}) as Record<string, unknown>;
-          const same = choices ? choices.every(({ questionId, optionId }) => recorded[questionId] === optionId)
-            : Object.values(recorded).some((value) => (value as { kind?: unknown; text?: unknown } | null)?.kind === "typed-reply" && (value as { text?: unknown }).text === words);
-          if (theirs && row.state === "done" && same) {
-            return mapResult({ status: 200, data: { ok: true, outcome: "already-recorded", qitemId, state: row.state, answered: row.humanAnswers ?? null,
-              message: "This answer is already recorded for the person; nothing new was sent." } }, undefined, { structured: true });
-          }
-          return theirs
-            ? refuse("not_waiting_on_person", `That question isn't waiting on ${personAddress} any more: it's ${row.state}.`, { state: row.state, answered: row.humanAnswers ?? null })
-            : refuse("not_waiting_on_person", "That question isn't waiting on this connection's person: it was answered or closed, or it isn't theirs.");
-        }
-        const current = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
-        if (current.status >= 400) return mapResult(current);
-        const row = (current.data ?? {}) as Record<string, any>;
-        if (row.decisionRevision !== revision) {
-          return refuse("question_changed", "The question changed since that revision, so nothing was recorded. Show the person the current question and ask again.", { current: await questionView(entry) });
-        }
+        const read = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
+        const row = read.status < 400 ? (read.data ?? {}) as Record<string, any> : null;
+        const listed = found.find((candidate) => candidate.qitemId === qitemId);
+        const entry = listed && row && stillListed(listed, row) ? listed : undefined;
+        // What became of a question is said only when it was addressed to, or parked on, this person.
+        const theirs = row !== null && (row.destinationSession === personAddress || row.blockedOn === personAddress);
+        const notWaiting = (): TextResult => theirs
+          ? refuse("not_waiting_on_person", `That question isn't waiting on ${personAddress} any more: it's ${row!.state}.`, { state: row!.state, answered: row!.humanAnswers ?? null })
+          : refuse("not_waiting_on_person", "That question isn't waiting on this connection's person: it was answered or closed, or it isn't theirs.");
+        // Out of the person's view, only a row no longer open for any answer is asked about: an identical retry there
+        // learns whether this same operation settled it. An open row out of view is never answered.
+        if (!row || (!entry && (row.state === "pending" || row.state === "blocked"))) return notWaiting();
+        // A settled park is back at work and a settled ask is done. The verb shapes only the daemon's fingerprint: the
+        // operation id on its last action is what's checked.
+        const verb = entry ? (entry.verb === "resolve" ? "resolve" : "answer") : row.state === "in-progress" ? "resolve" : "answer";
         const questions: Array<{ id: string; options: Array<{ id: string }> }> = Array.isArray(row.humanQuestions) ? row.humanQuestions : [];
-        if (choices) {
+        if (entry && choices) {
           if (entry.verb !== "answer" || questions.length === 0) return refuse("answer_shape", "This question takes the person's words, not options.");
-          const seen = new Set<string>();
-          for (const { questionId, optionId } of choices) {
-            const question = questions.find((q) => q.id === questionId);
-            if (!question || seen.has(questionId) || !question.options.some((option) => option.id === optionId)) {
-              return refuse("unknown_option", `${questionId}/${optionId} isn't one of this question's options (one choice per question).`, { questions });
+          // Options are checked against the question the person saw. If it has changed since, the daemon says so: that's
+          // the truth to tell them, rather than that their choice isn't an option.
+          if (row.decisionRevision === revision) {
+            const seen = new Set<string>();
+            for (const { questionId, optionId } of choices) {
+              const question = questions.find((q) => q.id === questionId);
+              if (!question || seen.has(questionId) || !question.options.some((option) => option.id === optionId)) {
+                return refuse("unknown_option", `${questionId}/${optionId} isn't one of this question's options (one choice per question).`, { questions });
+              }
+              seen.add(questionId);
             }
-            seen.add(questionId);
           }
         }
         // The route the answer came by, recorded beside it: never the person, and never the caller's own judgment.
         const grant = access?.external?.grant;
         const route = { route: "external-assistant", assistantSeat: seatOf(), principal: access?.principal, ...(grant ? { grant: grant.id, grantVersion: grant.version } : {}), person: personAddress };
-        // One operation per submission: a retry of the same answer to the same revision is answered from the record.
+        // One operation per submission, one id per step: a retry of the same answer to the same revision is recognised by
+        // these ids, never by equal answers.
         const operation = `assistant:${createHash("sha256").update(JSON.stringify([grant?.id ?? access?.principal, qitemId, revision, choices ?? null, words ?? null])).digest("hex").slice(0, 24)}`;
         const steps: Array<Record<string, string>> = choices ? choices.map((choice) => ({ ...choice })) : [{ decision: words! }];
+        const ownStep = (id: unknown): number | null => {
+          if (typeof id !== "string" || !id.startsWith(`${operation}:`)) return null;
+          const step = Number(id.slice(operation.length + 1));
+          return Number.isInteger(step) && step >= 0 && step < steps.length ? step : null;
+        };
+        const label = (step: Record<string, string>): string => step.questionId ?? "their words";
         let expected = revision;
-        let reconciled = true;
-        for (const [index, step] of steps.entries()) {
-          const res = await options.personClient.post<Record<string, any>>("/api/mission-control/action", {
-            verb: entry.verb === "resolve" ? "resolve" : "answer", qitemId, ...step, expectedRevision: expected,
-            auditNotes: { operationId: `${operation}:${index}`, ...route },
+        let next = 0;
+        let fresh = 0;
+        while (next < steps.length) {
+          const res = await personClient.post<Record<string, any>>("/api/mission-control/action", {
+            verb, qitemId, ...steps[next], expectedRevision: expected, auditNotes: { operationId: `${operation}:${next}`, ...route },
           });
-          if (res.status >= 400) {
-            const failure = (res.data ?? {}) as Record<string, any>;
-            const ours = typeof failure.lastAction?.auditNotes?.operationId === "string" && failure.lastAction.auditNotes.operationId.startsWith(`${operation}:`);
-            if (failure.error === "decision_revision_changed" && ours) break;
-            if (failure.error === "decision_revision_changed") {
-              const still = await answerable();
-              const again = Array.isArray(still) ? still.find((candidate) => candidate.qitemId === qitemId) : undefined;
-              return again
-                ? refuse("question_changed", "The question changed before the answer was recorded. Show the person the current question and ask again.", { current: await questionView(again) })
-                : refuse("not_waiting_on_person", "The question was answered or closed before this answer was recorded.", { state: failure.state, answered: failure.humanAnswers ?? null });
-            }
-            return mapResult(res);
+          if (res.status < 400) {
+            if (res.data?.reconciled !== true) fresh += 1;
+            expected = typeof res.data?.decisionRevision === "string" ? res.data.decisionRevision : expected;
+            next += 1;
+            continue;
           }
-          reconciled = reconciled && res.data?.reconciled === true;
-          expected = typeof res.data?.decisionRevision === "string" ? res.data.decisionRevision : expected;
+          const failure = (res.data ?? {}) as Record<string, any>;
+          // This submission's own step is the last thing on the question (its result was lost, or a later step failed):
+          // carry on after it, from the revision it left. Any other change is refused.
+          const own = failure.error === "decision_revision_changed" ? ownStep(failure.lastAction?.auditNotes?.operationId) : null;
+          if (own !== null && own >= next && typeof failure.currentRevision === "string") {
+            next = own + 1;
+            expected = failure.currentRevision;
+            continue;
+          }
+          if (!entry) return notWaiting();
+          const recorded = steps.slice(0, next).map(label);
+          const partial = next > 0 ? { recorded, notRecorded: steps.slice(next).map(label) } : {};
+          const said = next > 0 ? `Recorded: ${recorded.join(", ")}. Not recorded: ${steps.slice(next).map(label).join(", ")}.` : "Nothing was recorded.";
+          if (failure.error === "decision_revision_changed") {
+            const still = await answerable();
+            const again = Array.isArray(still) ? still.find((candidate) => candidate.qitemId === qitemId) : undefined;
+            const view = again ? await questionView(again) : null;
+            return view
+              ? refuse("question_changed", `The question changed since the revision the person saw. ${said} Show them the current question and ask again.`, { ...partial, current: view })
+              : refuse("not_waiting_on_person", `The question was answered or closed by someone else. ${said}`, partial);
+          }
+          const refused = mapResult(res);
+          if (next === 0) return refused;
+          const detail = (refused.structuredContent ?? {}) as Record<string, unknown>;
+          return refuse(typeof detail.code === "string" ? detail.code : "request_failed", `${typeof detail.message === "string" ? detail.message : "The answer stopped partway."} ${said}`, partial);
         }
         const saved = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
         const after = (saved.status < 400 ? saved.data ?? {} : {}) as Record<string, any>;
-        const open = entry.verb !== "resolve" && after.state === "pending";
-        const outcome = reconciled ? "already-recorded" : open ? "recorded" : "answered";
+        const open = verb === "answer" && after.state === "pending";
+        const outcome = fresh === 0 ? "already-recorded" : open ? "recorded" : "answered";
         const message = outcome === "already-recorded" ? "This answer was already recorded; nothing new was sent."
           : open ? "Recorded. The question still has parts the person hasn't answered."
             : `Recorded as ${personAddress}'s answer, given through this connection. The team's work continues.`;

@@ -265,16 +265,20 @@ async function grantServiceCaller(service: GrantServiceOptions, url: URL, key: s
     : !strings(roots) ? "artifact_roots"
     : accessClass !== "work" ? "access_class"
     : !objects || typeof objects !== "object" || Array.isArray(objects) || !Object.values(objects).every(strings) ? "objects"
-    // The person who owns this connection, when the service vouches for one. Optional; one it sends must be usable.
-    : person !== undefined && person !== null && (typeof person?.entity_id !== "string" || !PERSON_ENTITY_ID.test(person.entity_id)) ? "person.entity_id"
     : grant.expires_at !== null && grant.expires_at !== undefined && !(Date.parse(grant.expires_at) > Date.now()) ? "expired" : null;
   if (problem === "expired") return unauthenticated("This credential has expired.");
   if (problem) return unavailable(`an active answer with an unusable ${problem}`);
+  // The person who owns this connection, when the service vouches for one. It's optional, and an unusable one withholds
+  // only the person tools: every other tool the grant names is served as before.
+  const personId = typeof person?.entity_id === "string" && PERSON_ENTITY_ID.test(person.entity_id) ? person.entity_id : undefined;
+  if (person !== undefined && person !== null && !personId) {
+    console.error(`rig mcp serve --http: grant ${grant.id} names an unusable person.entity_id, so this connection isn't offered the person tools (rig_question_*)`);
+  }
   // The principal the daemon records beside this caller's rows. A version that isn't a finite number is left out (a v1
   // answer sends a number).
   const version = Number.isFinite(grant.version) ? { version: grant.version as number } : {};
   return { seat, access: { principal: principal.id, owner: false, rigs, roots, workspace: false,
-      external: { objects, grant: { id: grant.id, ...version }, ...(typeof person?.entity_id === "string" ? { person: person.entity_id } : {}) } },
+      external: { objects, grant: { id: grant.id, ...version }, ...(personId ? { person: personId } : {}) } },
     principal: { source: "grant-service", id: principal.id, grant: grant.id, ...version } };
 }
 

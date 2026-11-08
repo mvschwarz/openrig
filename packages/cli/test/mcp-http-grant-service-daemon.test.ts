@@ -515,9 +515,18 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       const plain = (noPerson.instructions() ?? "").split("\n")[0]!;
       expect(plain.length).toBeLessThanOrEqual(512);
       expect(plain).toContain("reserved for a person");
-      // A person the service sends must be usable.
-      answer = () => [200, grantFor("Not An Id")];
-      expect((await post((await listen()).url, { Authorization: `Bearer ${KEY}` })).status).toBe(503);
+      // An unusable person withholds only the person tools; the grant's other tools keep working, and the log says why.
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        answer = () => [200, grantFor("Not An Id")];
+        const malformed = await connect((await listen()).url);
+        const tools = await malformed.tools();
+        expect(tools).toEqual(expect.arrayContaining(["rig_queue_create", "rig_queue_show", "rig_artifact_read"]));
+        expect(tools.filter((tool) => tool.startsWith("rig_question_"))).toEqual([]);
+        expect(logged.mock.calls.flat().join("\n")).toContain("unusable person.entity_id");
+      } finally {
+        logged.mockRestore();
+      }
     });
 
     it("records the person's choice as theirs, through this connection: the same in Steering, the asker woken once, and a repeat answered from the record", async () => {
@@ -586,8 +595,10 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(stale.structured).toMatchObject({ ok: false, code: "question_changed", current: { qitemId: row.qitemId, revision: current.revision } });
       expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending" });
       expect(audit(row.qitemId)).toEqual([]);
-      // A choice that isn't one of the question's options, or both shapes at once, is refused before anything is sent.
+      // On the question the person saw, a choice that isn't one of its options, or both shapes at once, is refused before
+      // anything is sent. On a changed question, the truth is that it changed.
       expect((await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: current.revision, choices: [{ questionId: "layout", optionId: "z" }] })).structured).toMatchObject({ code: "unknown_option" });
+      expect((await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: "dr1-000000000000000000000000", choices: [{ questionId: "layout", optionId: "z" }] })).structured).toMatchObject({ code: "question_changed" });
       expect((await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: current.revision, words: "a", choices: [{ questionId: "layout", optionId: "a" }] })).structured).toMatchObject({ code: "answer_shape" });
       expect(audit(row.qitemId)).toEqual([]);
     });
@@ -634,11 +645,89 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       const resolved = await asPerson("rig_question_answer", { qitemId: work.qitemId, revision: parked.revision, words: "Yes, ship them" });
       expect(resolved.structured).toMatchObject({ ok: true, outcome: "answered", state: "in-progress" });
       expect(JSON.stringify(repo.listTransitions(work.qitemId))).toContain("Yes, ship them");
+      // The park is back at work, its blocker cleared: an identical retry is confirmed from the record, nothing resent.
+      expect((await asPerson("rig_question_answer", { qitemId: work.qitemId, revision: parked.revision, words: "Yes, ship them" })).structured).toMatchObject({ ok: true, outcome: "already-recorded" });
+      expect(audit(work.qitemId)).toHaveLength(1);
 
       const legacyRevision = items.find((entry: any) => entry.qitemId === legacy.qitemId).revision;
       expect((await asPerson("rig_question_answer", { qitemId: legacy.qitemId, revision: legacyRevision, choices: [{ questionId: "layout", optionId: "a" }] })).structured)
         .toMatchObject({ ok: true, outcome: "answered", answered: { layout: "a" } });
       expect(audit(legacy.qitemId)[0]).toMatchObject({ actor: `${PERSON}@external` });
+      // The legacy ask keeps human@host: an identical retry is still confirmed by its operation, and nothing is resent.
+      expect((await asPerson("rig_question_answer", { qitemId: legacy.qitemId, revision: legacyRevision, choices: [{ questionId: "layout", optionId: "a" }] })).structured)
+        .toMatchObject({ ok: true, outcome: "already-recorded" });
+      expect(audit(legacy.qitemId)).toHaveLength(1);
+      expect(replies(legacy.qitemId)).toBe(1);
+    });
+
+    it("finishes a submission that stopped partway, recognising its own recorded steps by operation id, and says what was recorded", async () => {
+      register(PERSON, true);
+      answer = () => [200, grantFor(PERSON)];
+      const asPerson = await connect((await listen()).url);
+      const both = await ask(`${PERSON}@external`, [LAYOUT, SHIP]);
+      const revision = (await asPerson("rig_question_list")).structured.items[0].revision;
+      const choices = [{ questionId: "layout", optionId: "a" }, { questionId: "ship", optionId: "no" }];
+      // The second step's post fails after the first landed.
+      let posts = 0;
+      broken = (req) => req.method === "POST" && new URL(req.url).pathname === "/api/mission-control/action" && ++posts === 2
+        ? new Response(JSON.stringify({ error: "unavailable", message: "the daemon couldn't take it" }), { status: 503, headers: { "Content-Type": "application/json" } }) : undefined;
+      const stopped = await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices });
+      expect(stopped.structured).toMatchObject({ ok: false, recorded: ["layout"], notRecorded: ["ship"] });
+      expect(stopped.structured.message).toContain("Recorded: layout. Not recorded: ship.");
+      expect(repo.getById(both.qitemId)).toMatchObject({ state: "pending", humanAnswers: { layout: "a" } });
+      broken = undefined;
+      // The identical retry continues after its own first step: only the second is recorded now, and the asker hears once.
+      const finished = await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices });
+      expect(finished.structured).toMatchObject({ ok: true, outcome: "answered", answered: { layout: "a", ship: "no" } });
+      expect(audit(both.qitemId)).toHaveLength(2);
+      expect(replies(both.qitemId)).toBe(1);
+
+      // A one-of-two answer whose result was lost: its identical retry is already recorded, not a changed question.
+      const half = await ask(`${PERSON}@external`, [LAYOUT, SHIP]);
+      const halfRevision = (await asPerson("rig_question_list")).structured.items.find((entry: any) => entry.qitemId === half.qitemId).revision;
+      expect((await asPerson("rig_question_answer", { qitemId: half.qitemId, revision: halfRevision, choices: [{ questionId: "layout", optionId: "b" }] })).structured).toMatchObject({ ok: true, outcome: "recorded" });
+      expect((await asPerson("rig_question_answer", { qitemId: half.qitemId, revision: halfRevision, choices: [{ questionId: "layout", optionId: "b" }] })).structured).toMatchObject({ ok: true, outcome: "already-recorded" });
+      expect(audit(half.qitemId)).toHaveLength(1);
+      // Another registered person answers the rest on Steering's path: the same retry is refused, and their answer isn't
+      // taken for this submission's.
+      register("ana", false);
+      const other = await fetch(`${daemonUrl}/api/mission-control/action`, { method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "ana@external" },
+        body: JSON.stringify({ verb: "answer", qitemId: half.qitemId, questionId: "ship", optionId: "yes" }) });
+      expect(other.status).toBe(200);
+      const after = await asPerson("rig_question_answer", { qitemId: half.qitemId, revision: halfRevision, choices: [{ questionId: "layout", optionId: "b" }] });
+      expect(after.structured).toMatchObject({ ok: false, code: "not_waiting_on_person" });
+      expect(audit(half.qitemId)).toHaveLength(2);
+      expect(audit(half.qitemId)[1]).toMatchObject({ actor: "ana@external" });
+    });
+
+    it("leaves out a park that moved to someone else between Steering's view and the read of its row, and never answers it", async () => {
+      register(PERSON, true);
+      register("ana", false);
+      answer = () => [200, grantFor(PERSON)];
+      const asPerson = await connect((await listen()).url);
+      const work = await create("lead@team-a", "impl@team-a", "Ship the release notes");
+      repo.update({ qitemId: work.qitemId, actorSession: "impl@team-a", state: "blocked", blockedOn: `${PERSON}@external`, summary: "Ship the notes as drafted?", evidenceRef: "/proof/notes.md", transitionNote: "asking the person" } as never);
+      const seen = (await asPerson("rig_question_list")).structured.items.find((entry: any) => entry.qitemId === work.qitemId);
+      expect(seen).toMatchObject({ kind: "parked" });
+      // Between the two reads, the owner unparks it and asks Ana instead, with evidence only she should see.
+      const movePark = () => {
+        repo.update({ qitemId: work.qitemId, actorSession: "impl@team-a", state: "in-progress", transitionNote: "rethinking" } as never);
+        repo.update({ qitemId: work.qitemId, actorSession: "impl@team-a", state: "blocked", blockedOn: "ana@external", summary: "Ana: ship them?", evidenceRef: "/proof/ana-only.md", transitionNote: "asking Ana" } as never);
+      };
+      let moved = false;
+      broken = (req) => {
+        if (!moved && req.method === "GET" && new URL(req.url).pathname === `/api/queue/${work.qitemId}`) { moved = true; movePark(); }
+        return undefined;
+      };
+      const listed = await asPerson("rig_question_list");
+      expect(listed.structured.items.map((entry: any) => entry.qitemId)).not.toContain(work.qitemId);
+      expect(listed.text).not.toContain("ana-only");
+      broken = undefined;
+      const refused = await asPerson("rig_question_answer", { qitemId: work.qitemId, revision: seen.revision, words: "Yes" });
+      expect(refused.structured).toMatchObject({ ok: false, code: "not_waiting_on_person" });
+      expect(refused.text).not.toContain("ana-only");
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: "ana@external" });
+      expect(audit(work.qitemId)).toEqual([]);
     });
   });
 

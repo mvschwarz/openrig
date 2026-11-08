@@ -145,13 +145,15 @@ and nothing else is offered:
 A grant can name the person who owns the connection: `person.entity_id`, their gateway entity id on this instance, so their
 address is `<entity_id>@external`. The service sends it only for a connection that person owns. With it and the `question`
 pair, the person's assistant can read the team's questions waiting on them and submit their answers, without opening
-Steering. The caller's seat is never taken for a person: without `person`, the `question` pair offers nothing.
+Steering. The caller's seat is never taken for a person: without `person`, the `question` pair offers nothing, and an
+unusable `person` withholds only these two tools while the grant's other tools keep working.
 
 - **Register the person** on the instance, once: `rig gateway human add <entity_id> --display-name "<name>" --default`.
   Without `--binding`, they're asked in the Feed and on Steering only. As the default person, today's asks addressed to no
   registered person (such as `human@host`) are theirs too.
 - **`rig_question_list`** shows what Steering shows that person as answerable: an ask addressed to them, or a row parked on
-  them. Each comes with its options when it has any, and the `revision` an answer names.
+  them. Each comes with its options when it has any, and the `revision` an answer names. A question that moved to someone
+  else between Steering's view and the read of its row is left out.
 - **`rig_question_answer`** takes the question, the revision the person saw, and either the options they chose (one per
   question) or exactly what they typed. It records through Steering's own write path (`answer` for an ask, `resolve` for a
   park), as the person, so Steering shows the same answer and the asker's work continues once. The answer's audit names the
@@ -159,8 +161,11 @@ Steering. The caller's seat is never taken for a person: without `person`, the `
 - **What it says back:**
   - `answered`;
   - `recorded`, when parts of the question are still unanswered;
-  - `already-recorded`, for a retry of an answer the question already holds;
-  - `question_changed`, with the current question, when it changed since the revision the person saw. Nothing is recorded.
+  - `already-recorded`, for an identical retry whose submission is already on the question, recognised by its operation id
+    (never by an equal answer). That includes a settled ask or a park that's back at work;
+  - `question_changed`, with the current question, when someone else changed it since the revision the person saw;
+  - a retry of a submission that stopped partway records only the parts not yet recorded, and a refusal partway names
+    which parts were recorded (`recorded`, `notRecorded`);
   - `not_waiting_on_person`, when it was answered or closed, or isn't theirs;
   - `person_not_registered`, when the grant's person isn't registered on this instance. While no one is registered, Steering
     shows every request, so nothing is answered for anyone.
