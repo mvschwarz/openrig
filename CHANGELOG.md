@@ -204,9 +204,12 @@ to end: see Known limits.
 - **`launch_wrapper`,** an argv prefix whose launcher prepares the environment
   and execs the agent, works for local Claude Code, Pi and Codex seats; a
   wrapped seat never starts unwrapped. ([#2746](https://github.com/mvschwarz/openrig/pull/2746), [#2609](https://github.com/mvschwarz/openrig/pull/2609))
-- **`rig provider switch --seat <pi seat> --account-home <dir>`** moves a Pi
-  seat to another account through a confirmed successor, keeping its model,
-  effort and wrapper; `--dry-run` shows the plan. ([#2630](https://github.com/mvschwarz/openrig/pull/2630))
+- **`rig provider switch --seat <pi seat> --to-account <name> --account-home <dir> --reason "<why>"`**
+  moves a Pi seat to another account through a confirmed successor, keeping its
+  model, effort and wrapper; `--dry-run` shows the plan. A Pi seat whose spec
+  declares its account home starts, resumes and switches accounts again: on the
+  first 0.7.11 candidate it didn't start, because the staged command began with
+  shell setup that `exec` can't run. ([#2630](https://github.com/mvschwarz/openrig/pull/2630), [#2782](https://github.com/mvschwarz/openrig/pull/2782))
 - **Claude seats that load openrig-core themselves** stop loading its skills
   twice: the next launch removes OpenRig's unchanged copies. ([#2660](https://github.com/mvschwarz/openrig/pull/2660))
 - **Also:** a short permission-hook policy name; `rig attach --self` outside

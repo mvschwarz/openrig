@@ -162,8 +162,9 @@ port (normally 7433)."
 - **`rig stream emit` timeouts:** repeat with the same `--id`, or check with
   `rig stream list` before emitting again.
 - **Launch and setup:** `launch_wrapper` works for local Claude Code, Pi and
-  Codex seats; `rig provider switch --seat <pi seat> --account-home <dir>`
-  switches a Pi seat's account (`--dry-run` first); `rig config set` says when
+  Codex seats; `rig provider switch --seat <pi seat> --to-account <name>
+  --account-home <dir> --reason "<why>"` switches a Pi seat's account (`--dry-run`
+  first), and a Pi seat with a declared account home starts again; `rig config set` says when
   an environment variable masks the saved value.
 - **Linux seats:** when the daemon runs as a systemd user service, the seats'
   tmux server starts in its own user scope (`openrig-tmux-<id>.scope`), so the
