@@ -258,7 +258,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
             coverage?: { coverageStart: string; coveredThrough: string; pending?: { upper: string; nextLatest: string }; nextRetryAt?: number } | null;
             channels?: Array<{ channel?: string | null; state?: string; reason?: string; lastScanAt?: string;
               coverage?: { coverageStart: string; coveredThrough: string; nextRetryAt?: number } | null }>;
-            threads?: { state?: string; reason?: string; tracked?: number; scanned?: number; pending?: number; oldestPendingSeconds?: number | null;
+            threads?: { state?: string; reason?: string; tracked?: number; scanned?: number; pending?: number; settled?: number; oldestPendingSeconds?: number | null;
               backoff?: Record<string, number>; incomplete?: Record<string, number> };
             limits?: string[] } } | undefined;
         if (connector) {
@@ -288,6 +288,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
             const behind = threads.oldestPendingSeconds != null ? ` (oldest ${Math.round(threads.oldestPendingSeconds / 60)} min behind)` : "";
             log(`  Thread recovery: ${threads.state ?? "unknown"}${threads.reason ? ` (${threads.reason})` : ""}; ${threads.tracked ?? 0} tracked (open, or closed within seven days); `
               + `${threads.scanned ?? 0} scanned, ${threads.pending ?? 0} waiting their turn${behind}`
+              + `${threads.settled ? `, ${threads.settled} settled (nobody waiting; rescanned daily)` : ""}`
               + `${reasons(threads.backoff) ? `; backing off: ${reasons(threads.backoff)}` : ""}${reasons(threads.incomplete) ? `; incomplete: ${reasons(threads.incomplete)}` : ""}`);
           }
           log(`  Recovery counts since connector start: accepted ${recovery?.acceptedThisProcess ?? "unknown"}; dead-lettered ${recovery?.deadLetteredThisProcess ?? "unknown"} (custody, not delivery)`);

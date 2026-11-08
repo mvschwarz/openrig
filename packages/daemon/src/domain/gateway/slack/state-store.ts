@@ -402,6 +402,8 @@ export interface ThreadCoverage {
   nextRetryAt?: number;
   /** Whether nextRetryAt came from Slack's rate limit, which holds the whole method. */
   rateLimited?: boolean;
+  /** When Slack last answered thread_not_found (ms). Saved, so a restart doesn't ask again at once. */
+  notFoundAt?: number;
 }
 
 /** Scan boundaries for tracked threads, keyed `channel:thread_ts`. A separate file, so a channel
@@ -418,7 +420,8 @@ export class ThreadCoverageStore {
       const start = slackMicros(c?.coverageStart), through = slackMicros(c?.coveredThrough);
       if (start === null || through === null || start > through ||
         (c.rateLimited !== undefined && typeof c.rateLimited !== "boolean") ||
-        (c.nextRetryAt !== undefined && (!Number.isFinite(c.nextRetryAt) || c.nextRetryAt < 0))) throw new Error("invalid thread checkpoint");
+        (c.nextRetryAt !== undefined && (!Number.isFinite(c.nextRetryAt) || c.nextRetryAt < 0)) ||
+        (c.notFoundAt !== undefined && (!Number.isFinite(c.notFoundAt) || c.notFoundAt < 0))) throw new Error("invalid thread checkpoint");
       if (c.pending) {
         const upper = slackMicros(c.pending.upper);
         if (upper === null || upper <= through) throw new Error("invalid pending interval");
