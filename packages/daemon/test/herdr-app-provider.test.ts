@@ -776,3 +776,48 @@ describe("HerdrAppProvider: every viewer it starts is ended or still tracked", (
     expect(reconciled).toBe(1);
   });
 });
+
+describe("startup wiring (createHerdrAppProviders): passive lookups", () => {
+  type FakeChild = import("node:events").EventEmitter & { stdout: import("node:events").EventEmitter; unref(): void; kill(): void; killed: boolean; exitCode: number | null; signalCode: string | null; args: string[] };
+  let spawned: FakeChild[];
+  let spawnFn: typeof import("node:child_process").spawn;
+  let herdrAppDir: string;
+  const hcCalls: string[][] = [];
+  const hc: HcRunner = async (args) => {
+    hcCalls.push(args);
+    // The viewer recorded as live ended while the daemon was down.
+    if (args[0] === "get") return { exit: 3, json: null, stdout: "", error: { kind: "not_found" } };
+    return { exit: 0, json: { terminals: [] }, stdout: "" };
+  };
+
+  beforeEach(async () => {
+    const { EventEmitter } = await import("node:events");
+    spawned = [];
+    hcCalls.length = 0;
+    herdrAppDir = join(home, "openrig", "private", "herdr-app");
+    spawnFn = ((_cmd: string, args: string[]) => {
+      const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), unref: () => {}, killed: false, exitCode: null, signalCode: null, args,
+        kill() { child.killed = true; child.emit("exit", null, "SIGTERM"); } }) as FakeChild;
+      spawned.push(child);
+      return child as unknown as import("node:child_process").ChildProcess;
+    }) as unknown as typeof import("node:child_process").spawn;
+  });
+
+  const create = async () => {
+    const { createHerdrAppProviders } = await import("../src/startup.js");
+    return createHerdrAppProviders({ herdrAppDir, daemonInstance: "inst1", hcEnv: {}, hc, defaultAppHome: () => join(home, "app"), spawnFn });
+  };
+
+  it("a status, a listing and a refused open start no hc events and create no viewers folder", async () => {
+    const herdrApp = await create();
+    const provider = herdrApp.resolve({})!;
+    const status = await provider.status(); // no window answers at this app home
+    expect(status.available).toBe(false);
+    expect(await provider.listViews()).toEqual([]);
+    expect((await provider.openView(composed([pane("dev.build@demo")]))).code).toBe("herdr_app_unavailable");
+    expect(spawned).toEqual([]);
+    expect(existsSync(join(herdrAppDir, "viewers"))).toBe(false);
+    expect(hcCalls).toEqual([]);
+  });
+
+});

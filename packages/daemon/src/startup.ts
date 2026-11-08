@@ -2187,56 +2187,20 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
     // herdr-app: one provider per client (app home), created on first use. Viewers carry this instance's label, so a
     // second OpenRig daemon never claims them; one `hc events` watcher brings every client's layout in line when a
-    // viewer ends outside OpenRig.
-    const { HerdrAppProvider, execTmux } = await import("./domain/terminal/herdr-app-provider.js");
-    const { HerdrAppClientFiles } = await import("./domain/terminal/herdr-app-state.js");
-    const { HerdrAppClient, createAppSocketExchange, createHcRunner, hcEnv, herdrAppSocketPath, resolveHerdrAppHome } = await import("./domain/terminal/herdr-app-transport.js");
-    const { installRigMods, describeModInstall } = await import("./domain/terminal/herdr-app-install.js");
+    // viewer ends outside OpenRig. Resolving a provider is passive (a status, a preview, the CLI's availability probe):
+    // the viewers folder and the watcher start only for owned-view work, or below, for views a journal already records.
     const herdrAppDir = nodePath.join(OPENRIG_HOME, "private", "herdr-app");
-    const herdrAppInstance = createHash("sha256").update(nodePath.resolve(OPENRIG_HOME)).digest("hex").slice(0, 12);
+    const { createHcRunner, hcEnv, resolveHerdrAppHome } = await import("./domain/terminal/herdr-app-transport.js");
     const herdrAppHcEnv = hcEnv();
-    const herdrAppHc = createHcRunner({ env: herdrAppHcEnv });
-    const herdrAppProviders = new Map<string, InstanceType<typeof HerdrAppProvider>>();
-    const watchHerdrApp = createHerdrAppWatcher({
-      daemonInstance: herdrAppInstance,
-      env: herdrAppHcEnv,
-      reconcileAll: () => {
-        for (const provider of herdrAppProviders.values()) void provider.reconcile().catch(() => {});
-      },
+    const herdrApp = await createHerdrAppProviders({
+      herdrAppDir,
+      daemonInstance: createHash("sha256").update(nodePath.resolve(OPENRIG_HOME)).digest("hex").slice(0, 12),
+      hcEnv: herdrAppHcEnv,
+      hc: createHcRunner({ env: herdrAppHcEnv }),
+      defaultAppHome: () => resolveHerdrAppHome(process.env),
+      subscribe: (listener) => eventBus.subscribe(listener),
     });
-    // A seat's tmux session replaced (handover, fresh launch, restart): a viewer of it attaches again with a new tmux
-    // client, which gets the keyboard back if the person had it.
-    const unsubscribeHerdrAppRegrant = eventBus.subscribe((event) => {
-      if (event.type !== "seat.handover_completed" && event.type !== "seat.fresh_launched" && event.type !== "node.startup_ready") return;
-      for (const provider of herdrAppProviders.values()) provider.regrantSoon();
-    });
-    void unsubscribeHerdrAppRegrant;
-    const resolveHerdrAppProvider = (target: { appHome?: string }) => {
-      const appHome = target.appHome ? target.appHome : resolveHerdrAppHome(process.env);
-      if (!nodePath.isAbsolute(appHome) || appHome.includes("\0")) return null;
-      const key = nodePath.resolve(appHome);
-      let provider = herdrAppProviders.get(key);
-      if (!provider) {
-        fs.mkdirSync(nodePath.join(herdrAppDir, "viewers"), { recursive: true });
-        provider = new HerdrAppProvider({
-          files: new HerdrAppClientFiles(key, nodePath.join(herdrAppDir, "clients")),
-          app: new HerdrAppClient(createAppSocketExchange(herdrAppSocketPath(key))),
-          hc: herdrAppHc,
-          daemonInstance: herdrAppInstance,
-          viewerCwd: nodePath.join(herdrAppDir, "viewers"),
-          ensureMods: async () => {
-            const installed = await installRigMods(key);
-            if (!installed.ok) return { ok: false, error: describeModInstall(installed) };
-            // A folder the person changed stays theirs and the view opens with it; the open says so.
-            return { ok: true, ...(installed.refused.length || installed.error ? { notes: [describeModInstall(installed)] } : {}) };
-          },
-          runTmux: execTmux,
-        });
-        herdrAppProviders.set(key, provider);
-        watchHerdrApp();
-      }
-      return provider;
-    };
+    const resolveHerdrAppProvider = herdrApp.resolve;
 
     const scopeTasks = deps.sliceIndexer ? createScopedTaskResolver(db, deps.sliceIndexer, address =>
       resolveLocalTaskSeat(db, address, getSelfHostId(), sessionRegistry.resolveAddress(address)?.nodeId),
@@ -2883,6 +2847,75 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 }
 
 /** Watch `hc events` for this daemon's viewer terminals, retrying after exit or a spawn error. */
+/**
+ * herdr-app: one provider per client (app home), created on first use. Viewers carry this instance's label, so a second
+ * OpenRig daemon never claims them; one `hc events` watcher brings every client's layout in line when a viewer ends
+ * outside OpenRig. Resolving a provider is passive (a status, a preview, the CLI's availability probe): the viewers
+ * folder and the watcher start only for owned-view work.
+ */
+export async function createHerdrAppProviders(opts: {
+  /** OpenRig's private herdr-app folder: `clients/` (journals) and `viewers/` (the viewers' cwd). */
+  herdrAppDir: string;
+  daemonInstance: string;
+  hcEnv: NodeJS.ProcessEnv;
+  hc: import("./domain/terminal/herdr-app-transport.js").HcRunner;
+  defaultAppHome: () => string;
+  subscribe?: (listener: (event: { type: string }) => void) => () => void;
+  spawnFn?: typeof spawn;
+}): Promise<{
+  resolve: (target: { appHome?: string }) => import("./domain/terminal/herdr-app-provider.js").HerdrAppProvider | null;
+}> {
+  const { HerdrAppProvider, execTmux } = await import("./domain/terminal/herdr-app-provider.js");
+  const { HerdrAppClientFiles } = await import("./domain/terminal/herdr-app-state.js");
+  const { HerdrAppClient, createAppSocketExchange, herdrAppSocketPath } = await import("./domain/terminal/herdr-app-transport.js");
+  const { installRigMods, describeModInstall } = await import("./domain/terminal/herdr-app-install.js");
+  const providers = new Map<string, InstanceType<typeof HerdrAppProvider>>();
+  const watch = createHerdrAppWatcher({
+    daemonInstance: opts.daemonInstance,
+    env: opts.hcEnv,
+    ...(opts.spawnFn ? { spawnFn: opts.spawnFn } : {}),
+    reconcileAll: () => {
+      for (const provider of providers.values()) void provider.reconcile().catch(() => {});
+    },
+  });
+  // A seat's tmux session replaced (handover, fresh launch, restart): a viewer of it attaches again with a new tmux
+  // client, which gets the keyboard back if the person had it.
+  opts.subscribe?.((event) => {
+    if (event.type !== "seat.handover_completed" && event.type !== "seat.fresh_launched" && event.type !== "node.startup_ready") return;
+    for (const provider of providers.values()) provider.regrantSoon();
+  });
+  const ownWork = () => {
+    fs.mkdirSync(nodePath.join(opts.herdrAppDir, "viewers"), { recursive: true });
+    watch();
+  };
+  const resolve = (target: { appHome?: string }) => {
+    const appHome = target.appHome ? target.appHome : opts.defaultAppHome();
+    if (!nodePath.isAbsolute(appHome) || appHome.includes("\0")) return null;
+    const key = nodePath.resolve(appHome);
+    let provider = providers.get(key);
+    if (!provider) {
+      provider = new HerdrAppProvider({
+        files: new HerdrAppClientFiles(key, nodePath.join(opts.herdrAppDir, "clients")),
+        app: new HerdrAppClient(createAppSocketExchange(herdrAppSocketPath(key))),
+        hc: opts.hc,
+        daemonInstance: opts.daemonInstance,
+        viewerCwd: nodePath.join(opts.herdrAppDir, "viewers"),
+        ensureMods: async () => {
+          const installed = await installRigMods(key);
+          if (!installed.ok) return { ok: false, error: describeModInstall(installed) };
+          // A folder the person changed stays theirs and the view opens with it; the open says so.
+          return { ok: true, ...(installed.refused.length || installed.error ? { notes: [describeModInstall(installed)] } : {}) };
+        },
+        runTmux: execTmux,
+        ownWork,
+      });
+      providers.set(key, provider);
+    }
+    return provider;
+  };
+  return { resolve };
+}
+
 export function createHerdrAppWatcher(opts: {
   daemonInstance: string;
   env: NodeJS.ProcessEnv;

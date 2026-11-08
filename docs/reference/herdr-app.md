@@ -116,6 +116,9 @@ terminals, or none, in the view's cells. Open failures (`herdr_app_unavailable`,
 when a window has not acknowledged a write also name the daemon's core (`HC_SESSION`/`HC_SOCKET`) so a mismatch is
 visible straight away.
 
+A status or a preview only reads: it starts no herdr-core process and creates nothing. OpenRig watches herdr-core's
+events (`hc events`) and creates its viewers folder only when it opens or closes a view.
+
 ## Limits
 
 - A Rig view is a layout inside herdr-app, not a herdr tab: other windows and other layouts don't show it.

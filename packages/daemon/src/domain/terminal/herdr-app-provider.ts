@@ -59,6 +59,9 @@ export interface HerdrAppProviderDeps {
   /** Installs or checks OpenRig's mods in this app home; never replaces a mod the person changed. `ok: false` only when a
    *  needed mod is missing and could not be installed; a folder left as the person's is a note, and the view opens. */
   ensureMods(): Promise<{ ok: true; notes?: string[] } | { ok: false; error: string }>;
+  /** Called when this provider starts owned-view work (an open about to start viewers, a close): prepares what only
+   *  that work needs (the viewers folder, the hc events watcher). A status, preview or listing never calls it. */
+  ownWork?(): void;
   /** Runs tmux (the viewer's own tmux and server args come first in argv). */
   runTmux?(argv: string[]): Promise<string>;
   /** A process's parent pid, or null (finds the tmux client a viewer runs). */
@@ -179,6 +182,7 @@ export class HerdrAppProvider implements TerminalProvider {
       const state = await this.deps.files.load();
       const view = state.views.find((v) => v.id === viewId);
       if (!view) return fail("view_not_found", `No Rig view ${viewId} in ${this.deps.files.appHome}.`);
+      this.deps.ownWork?.();
       const notes = await this.remove(state, [viewId], []);
       return { provider: HERDR_APP_PROVIDER, ok: true, opened: [], absent: [], degraded: [], pages: 0, notes };
     });
@@ -270,7 +274,8 @@ export class HerdrAppProvider implements TerminalProvider {
         { absent: view.absent, degraded: view.degraded, notes });
     }
 
-    // 1. Journal first.
+    // 1. Journal first (owned-view work starts here).
+    this.deps.ownWork?.();
     const name = view.viewDescriptor?.name ?? view.spaceLabel ?? view.id;
     const created: ViewRecord[] = view.pages.map((page, index) => {
       const id = `rv-${this.nonce()}`;
