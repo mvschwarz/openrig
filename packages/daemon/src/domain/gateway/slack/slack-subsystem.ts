@@ -299,6 +299,9 @@ function deadLetterBacklogFields(
 
 /** Build the production Slack gateway wire from config + secrets. Never throws on a missing
  *  configuration — that is an honest inert wire, not a boot failure. */
+/** How long after the connector starts a recovered message waits for its seat to become reachable. */
+const RECOVERY_SEAT_GRACE_MS = 10 * 60 * 1000;
+
 export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const log = opts.log ?? (() => {});
   const cfg = loadConfig(opts.home);
@@ -1267,9 +1270,15 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   if (inboundReady || outboundReady) {
     const inboundSeen = new SeenStore(path.join(stateDir(opts.home), "slack-inbound-seen.jsonl"));
     const registry: RegistrySurface = registrySurface;
+    const builtAt = Date.now();
     const built = (router = new InboundRouter({
       queue: ports,
       seen: inboundSeen,
+      // After a restart, recovery reads Slack within seconds of the socket connecting, often before the seats' tmux
+      // bindings are back; a row created then has its wake fail and nothing retries it. A recovered message waits while
+      // its seat has no transport, for a grace period after start, so a seat that never returns can't hold recovery.
+      destinationReady: (destination) => Date.now() - builtAt > RECOVERY_SEAT_GRACE_MS
+        || opts.queueRepo.classifyDestinationOf(destination).class !== "unroutable",
       deadLetter: dead,
       destination: cfg.inboundDestination,
       reactions: cfg.reactions === "off" ? "off" : "route",

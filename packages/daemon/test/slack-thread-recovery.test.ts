@@ -41,7 +41,8 @@ function fixture() {
     resolveChannelDestination: channel => (channel === "C2" ? "c2-seat@test" : null) });
   const routed: string[] = [];
   const resolveHumanReply = vi.fn(async () => "resolved" as const);
-  const deps: InboundDeps = { queue: makeQueuePorts(repo), seen, deadLetter: dead, destination: "owner@test",
+  const unbound = new Set<string>();
+  const deps: InboundDeps = { destinationReady: destination => !unbound.has(destination), queue: makeQueuePorts(repo), seen, deadLetter: dead, destination: "owner@test",
     resolveSender: user => user === "U1" ? { admitted: true, source: "human-fixture@external" } : { admitted: false, teaching: "register" },
     resolveRoute: ev => { routed.push(`${ev.channel}:${ev.ts}`); return route(ev); },
     resolveHumanReply };
@@ -87,7 +88,9 @@ function fixture() {
   const rows = () => repo.list({ limit: 500 });
   return { db, files, seen, dead, map, router, deps, routed, resolveHumanReply, history, replies, queries, recovery, track, reply, message,
     calls, rows, time: (ms: number) => { now = ms; }, advance: (ms: number) => { now += ms; },
-    respond: (fn?: typeof respond) => { respond = fn; }, down: (v: boolean) => { queueDown = v; } };
+    respond: (fn?: typeof respond) => { respond = fn; }, down: (v: boolean) => { queueDown = v; },
+    /** A seat with no terminal transport yet, as before its tmux binding is restored after a restart. */
+    unbind: (seat: string) => { unbound.add(seat); }, bind: (seat: string) => { unbound.delete(seat); } };
 }
 
 it.each(["open", "closed"])("a missed reply in a %s decision thread lands once as a late reply and never answers the decision", async state => {
@@ -406,4 +409,82 @@ it.each(["thread reply", "broadcast reply in a newly covered channel"])("a recov
   expect(f.rows()).toHaveLength(1);
   expect(f.resolveHumanReply).not.toHaveBeenCalled();
   expect(f.rows()[0]!.body).toContain("It was not applied as an answer to q-decision");
+});
+
+it("a recovered reply for a seat not yet reachable after boot waits, without a row or advancing coverage, and lands once the seat is back", async () => {
+  const f = fixture();
+  f.track(ROOT, "asker@test");
+  f.replies[`C1:${ROOT}`] = [f.reply(50, ROOT, { text: "Late reply" })];
+  f.unbind("asker@test");
+  const r = f.recovery();
+
+  await r.run();
+
+  expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(0);
+  expect(f.dead.readAll()).toHaveLength(0);
+  expect(r.status().threads).toMatchObject({ incomplete: { "destination-unready": 1 } });
+  expect(JSON.parse(f.files.get("/s/thread-coverage")!)[`C1:${ROOT}`].coveredThrough).toBe(ROOT);
+
+  f.bind("asker@test"); f.time(at(130));
+  await r.run();
+
+  expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(1);
+  expect(f.resolveHumanReply).not.toHaveBeenCalled();
+});
+
+it("a recovered channel message for a seat not yet reachable waits, while a live message still lands", async () => {
+  const f = fixture();
+  f.deps.destination = "owner@test";
+  f.unbind("owner@test");
+  const r = f.recovery();
+  f.history.C1 = [f.message(108)]; f.time(at(120));
+
+  await r.run();
+  expect(f.rows()).toHaveLength(0);
+  expect(r.status()).toMatchObject({ state: "incomplete", reason: "destination-unready" });
+
+  await handleEnvelope({ type: "events_api", payload: { event: f.message(119) } }, () => {}, f.router);
+  expect(f.rows()).toHaveLength(1); // live delivery is unchanged
+
+  f.bind("owner@test"); f.time(at(140));
+  await r.run();
+  expect(f.rows()).toHaveLength(2);
+});
+
+it("while a recovered reply waits for its seat, recovery runs again soon instead of at the next five-minute pass", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const f = fixture();
+    f.track(ROOT, "asker@test");
+    f.replies[`C1:${ROOT}`] = [f.reply(50, ROOT)];
+    f.unbind("asker@test");
+    const r = f.recovery();
+    await r.run();
+    expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(0);
+
+    f.bind("asker@test"); f.time(at(140));
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(1);
+  } finally { vi.useRealTimers(); }
+});
+
+it("a dead-lettered recovered reply retried while its seat is unreachable stays owed, and lands once the seat is back", async () => {
+  const f = fixture();
+  f.track(ROOT, "asker@test");
+  f.replies[`C1:${ROOT}`] = [f.reply(50, ROOT)];
+  const r = f.recovery();
+  f.down(true);
+  await r.run();
+  expect(f.dead.readAll()).toHaveLength(1);
+
+  f.down(false); f.unbind("asker@test");
+  await f.router.retryDeadLetters();
+  expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(0);
+  expect(f.dead.readAll()).toHaveLength(1);
+
+  f.bind("asker@test");
+  await f.router.retryDeadLetters();
+  expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(1);
+  expect(f.dead.readAll()).toHaveLength(0);
 });

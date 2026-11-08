@@ -435,6 +435,11 @@ marked late, and never answers a decision, even one still open: the seat reads i
 recovered broadcast reply does the same in every channel except the default channel of the machine
 that holds the Socket Mode connection, where it behaves as before; a relayed machine's default
 channel counts as newly covered. A dead-lettered recovered reply keeps that mark when it's retried.
+A recovered message whose seat can't be woken yet, as just after a restart before its tmux binding
+is back, waits: no row is made and the checkpoint stays before it, and recovery tries again every
+30 seconds until the seat is back. It waits at most ten minutes after the connector starts; after
+that it lands as before, and a wake that fails is left to the stuck-work sweep. Live messages never
+wait.
 They use the same sender admission, routing, attachment handling, fixed identity
 and dead-letter path as live messages. A durable dead letter is custody of a
 failed delivery, not successful delivery.

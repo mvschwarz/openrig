@@ -163,6 +163,8 @@ export class ChannelRecovery implements RecoverySource {
       if (landed.reason === "inflight" || landed.reason === "inactive") {
         this.state = "incomplete"; this.reason = "landing-in-progress"; return "done";
       }
+      // Its seat can't be woken yet: keep coverage before this message, so a later pass lands it.
+      if (landed.reason === "destination-unready") { this.state = "incomplete"; this.reason = "destination-unready"; return "done"; }
       if (landed.disposition === "accepted") this.accepted++;
       if (landed.disposition === "dead-lettered") this.deadLettered++;
     }

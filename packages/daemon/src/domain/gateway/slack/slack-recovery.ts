@@ -43,6 +43,8 @@ interface SlackRecoveryOptions {
    *  only once the hub has relayed it here (adoptRelayed), from that moment, and across restarts. A machine nothing is
    *  relayed to never reads history. */
   relayed?: boolean;
+  /** While a recovered message waits for its seat to become reachable, run again after this long (default 30 s). */
+  unreadyRetryMs?: number;
 }
 
 interface TrackedSource { source: ThreadRecovery; mapping: string }
@@ -55,6 +57,7 @@ export class SlackRecovery {
   private readonly backoff = new MethodBackoff();
   private readonly now: () => number;
   private pass?: Promise<void>;
+  private unreadyRetry?: ReturnType<typeof setTimeout>;
   private stopped = false;
   private lastChannel: string | undefined;
   private lastThread: string | undefined;
@@ -96,6 +99,7 @@ export class SlackRecovery {
 
   stop(): void {
     this.stopped = true;
+    if (this.unreadyRetry) clearTimeout(this.unreadyRetry);
     for (const channel of this.channels) channel.stop();
   }
 
@@ -103,10 +107,20 @@ export class SlackRecovery {
     if (this.pass) return this.pass;
     if (this.stopped || !this.opts.token) return Promise.resolve();
     if (!this.initialized) this.initialize();
-    const pass = this.scan();
+    const pass = this.scan().then(() => this.retryWhileUnready());
     this.pass = pass;
     void pass.finally(() => { if (this.pass === pass) this.pass = undefined; });
     return pass;
+  }
+
+  /** A recovered message is waiting for its seat (just after a restart, before its binding is back): try again soon rather
+   *  than at the next five-minute pass, so it lands shortly after the seat does. */
+  private retryWhileUnready(): void {
+    const waiting = this.channels.some((c) => c.status().reason === "destination-unready")
+      || [...this.threads.values()].some((t) => t.source.reason === "destination-unready");
+    if (!waiting || this.stopped || this.unreadyRetry) return;
+    this.unreadyRetry = setTimeout(() => { this.unreadyRetry = undefined; void this.run().catch(() => {}); }, this.opts.unreadyRetryMs ?? 30_000);
+    this.unreadyRetry.unref?.();
   }
 
   /** On a relayed machine, the configured channels the hub has relayed here (saved, so a restart keeps them). */

@@ -227,6 +227,10 @@ export interface InboundDeps {
   forward?: { hostFor: (channel: string | undefined) => string | null; send: EnvelopeForwarder };
   /** Envelopes whose forward failed, with the host they were for; retried with the dead-letters. */
   forwardDeadLetter?: DeadLetterStore<{ host: string; envelope: SocketEnvelope }>;
+  /** Whether a destination can be woken now. A message recovered after a gap waits (no row, not seen, coverage held)
+   *  while its seat has no transport yet, as just after a restart, so its wake doesn't fail and strand it. Live
+   *  messages never wait. Absent: always ready. */
+  destinationReady?: (destination: string) => boolean;
   log?: (msg: string) => void;
 }
 
@@ -315,7 +319,7 @@ export class InboundRouter {
   private async attemptLand(ev: SlackEvent, isCurrent: () => boolean = () => true): Promise<{
     landed: boolean;
     qitemId?: string;
-    reason?: "dup" | "inflight" | "inactive" | "create_failed" | "resolve_failed" | "unregistered";
+    reason?: "dup" | "inflight" | "inactive" | "create_failed" | "resolve_failed" | "unregistered" | "destination-unready";
     correlationQitemId?: string;
     replyResolution?: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable";
   }> {
@@ -334,6 +338,11 @@ export class InboundRouter {
     }
     // Admitted as a shared channel (an unregistered customer): correspondence by construction, never an answer.
     const asChannel = who.sharedChannel?.asChannel === true;
+    // S10 — deterministic route (thread map) when wired; static destination otherwise.
+    const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
+    if (ev.recoveredAfterGap && this.deps.destinationReady && !this.deps.destinationReady(route.destination)) {
+      return { landed: false, reason: "destination-unready" };
+    }
     this.inflight.add(eventId);
     try {
       // OPR.0.5.6.2 — transfer the human's files BEFORE composing the row so the
@@ -365,8 +374,6 @@ export class InboundRouter {
         }
       }
       if (!isCurrent()) return { landed: false, reason: "inactive" };
-      // S10 — deterministic route (thread map) when wired; static destination otherwise.
-      const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
       const { summary, body: incomingBody, attachmentsChars } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
@@ -506,7 +513,7 @@ export class InboundRouter {
       this.deps.deadLetter.append(ev, attempts + 1);
       this.deps.log?.(`dead-lettered ts=${ev.ts} (attempt ${attempts + 1})`);
     }
-    const disposition = r.landed ? "accepted" : r.reason === "unregistered" ? "refused" : (r.reason === "dup" || r.reason === "inflight" || r.reason === "inactive") ? "ignored" : "dead-lettered";
+    const disposition = r.landed ? "accepted" : r.reason === "unregistered" ? "refused" : (r.reason === "dup" || r.reason === "inflight" || r.reason === "inactive" || r.reason === "destination-unready") ? "ignored" : "dead-lettered";
     return { landed: r.landed, qitemId: r.qitemId, disposition, reason: r.reason, correlationQitemId: r.correlationQitemId, replyResolution: r.replyResolution };
   }
 
@@ -1021,6 +1028,7 @@ export class InboundRouter {
       if (r.landed) landed++;
       else if (r.reason === "create_failed" || r.reason === "resolve_failed") stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 });
       else if (r.reason === "inflight") stillFailing.push(e); // owner has not proved durable landing yet
+      else if (r.reason === "destination-unready") stillFailing.push(e); // its seat isn't back yet: still owed, not a failed attempt
     }
     if (!this.deps.deadLetter.replaceBatch(entries, stillFailing)) { // atomic; newer appends stay owed
       this.deps.log?.("dead-letter file couldn't be read again: left as it was for the next retry pass");
