@@ -8,7 +8,7 @@
 //   its props. So what the strip must remember (the cell per view, the child last shown, the revision it was shown
 //   with) lives in <app home>/openrig/strip.json. A reload with a new revision and the same shown child is a rewrite:
 //   nothing moves. The same revision is a restart: the shown view gets its remembered cell back.
-// - Keys: `rig-strip.left|right|up|down` (bound in keys.json section `layout:rig` by `rig herdr install --keys`) move the
+// - Keys: `rig-strip.left|right|up|down`, when the person binds them (keys.json section `layout:rig`), move the
 //   keyboard between a view's live cells; pad and ended cells are skipped.
 // - Acknowledgement: OpenRig stamps each write with a revision. When this strip renders a revision, its own shown
 //   layout carries that write, so it records the revision and the terminals the shown layout still references in

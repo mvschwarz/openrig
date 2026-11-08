@@ -11,7 +11,6 @@ Nothing here needs a desktop display or SSH: the view opens in the herdr-app win
 
 ```sh
 rig herdr install            # OpenRig's mods: rig-strip, rig-cell-header, rig-pad, rig-ended
-rig herdr install --keys     # optional: alt-arrows move between a view's cells
 ```
 
 - The mods go to `<app home>/mods/rig-*`. The app home is herdr-app's own: `HERDR_APP_HOME`, else
@@ -19,12 +18,12 @@ rig herdr install --keys     # optional: alt-arrows move between a view's cells
 - OpenRig owns only the files it ships there (recorded in `<app home>/openrig/mods.json`). An update replaces those
   and nothing else in the folder. If you changed one of them, the install says so and leaves the mod as it is. Mods you
   install yourself, from any source, are never touched.
-- `--keys` adds a `layout:rig` section to `keys.json`. Keys already bound there, in `terminal` (which wins while a
-  cell has focus) or in `global` are left alone and named. herdr-app's own `global` defaults for these keys
-  (`pane.go` on alt-left/right, `agent.prev`/`agent.next` on alt-up/down) are the exception: in the Rig layout the
-  cell keys replace them, and they keep working on your other layouts. herdr-app then treats `keys.json` as yours: new default
-  shortcuts in later releases are not added to it automatically. `rig herdr install --keys --remove` takes OpenRig's
-  bindings out again; your file before the change is kept at `<app home>/openrig/keys.json.before-openrig`.
+- To move between a view's cells from the keyboard, bind the strip's actions in `keys.json`, section `layout:rig`
+  (your agent can add it, as for any herdr-app key):
+  `"layout:rig": { "alt-left": "rig-strip.left", "alt-right": "rig-strip.right", "alt-up": "rig-strip.up", "alt-down": "rig-strip.down" }`.
+  In the Rig layout these replace herdr-app's `global` defaults for the same keys (`pane.go`, `agent.prev`/`agent.next`),
+  which keep working on your other layouts. A key bound in `terminal` wins while a cell has focus, so pick keys that
+  aren't bound there. Once you edit `keys.json`, herdr-app treats it as yours and stops adding new default shortcuts.
 - Opening a view installs missing mods and updates OpenRig's own by itself. It never replaces a mod you changed: that
   folder stays as it is, the view opens anyway, and the open's notes name the folder and why. Only a mod a view needs
   that is missing and can't be installed stops an open.
@@ -87,7 +86,6 @@ All under `<app home>/openrig/`:
 | `mods.json` | The files OpenRig shipped to `mods/rig-*`, so an update replaces only those. |
 | `ack.json` | Written by the strip: the last layout revision herdr-app shows and the terminals it references. A viewer ends only once this shows its cell is gone. |
 | `strip.json` | Written by the strip: the cell you were last in per view, and the view shown. herdr-app gives a mod new storage whenever its props change, which is every OpenRig write, so this is kept as a file. |
-| `keys.json.before-openrig` | Your `keys.json` before `rig herdr install --keys`. |
 
 ## Close a view
 

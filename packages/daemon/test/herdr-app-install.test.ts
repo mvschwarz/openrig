@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describeModInstall, installRigKeys, installRigMods, RIG_MODS, SHIPPED_MODS_DIR } from "../src/domain/terminal/herdr-app-install.js";
+import { describeModInstall, installRigMods, RIG_MODS, SHIPPED_MODS_DIR } from "../src/domain/terminal/herdr-app-install.js";
 
 let home: string;
 beforeEach(() => { home = mkdtempSync(join(tmpdir(), "herdr-app-install-")); });
@@ -154,75 +154,6 @@ describe("installRigMods", () => {
       expect(freshName).toMatchObject({ ok: true, updated: [...RIG_MODS], refused: [] });
       expect(readFileSync(join(home, "mods", "rig-strip", "fresh.js"), "utf8")).toBe("// brand new");
     });
-  });
-});
-
-describe("installRigKeys (opt-in, reversible)", () => {
-  const keys = (value: unknown) => writeFileSync(join(home, "keys.json"), `${JSON.stringify(value, null, 2)}\n`);
-  const read = () => JSON.parse(readFileSync(join(home, "keys.json"), "utf8")) as Record<string, Record<string, unknown>>;
-
-  it("needs herdr-app's own keys.json and never creates one (that would drop the person's defaults)", async () => {
-    const result = await installRigKeys(home);
-    expect(result).toMatchObject({ ok: false, changed: [] });
-    expect(result.message).toContain("Start herdr-app once");
-    expect(() => readFileSync(join(home, "keys.json"))).toThrow();
-  });
-
-  it("binds alt-arrows in layout:rig, keeps every other binding, backs up the file, and says what it costs", async () => {
-    keys({ global: { "ctrl-shift-t": "tab.new" }, terminal: { "ctrl-shift-c": "terminal.copy" } });
-    const original = readFileSync(join(home, "keys.json"), "utf8");
-    const result = await installRigKeys(home);
-    expect(result).toMatchObject({ ok: true, changed: ["alt-left", "alt-right", "alt-up", "alt-down"], conflicts: [] });
-    expect(read()).toEqual({
-      global: { "ctrl-shift-t": "tab.new" }, terminal: { "ctrl-shift-c": "terminal.copy" },
-      "layout:rig": { "alt-left": "rig-strip.left", "alt-right": "rig-strip.right", "alt-up": "rig-strip.up", "alt-down": "rig-strip.down" },
-    });
-    expect(readFileSync(result.backup!, "utf8")).toBe(original);
-    expect(result.message).toContain("treats keys.json as yours");
-  });
-
-  it("binds over herdr-app's own shipped global defaults for these keys, and says what the Rig layout replaces (QA A4)", async () => {
-    // herdr-app 0.1.13 defaults/keys.json, as a fresh home has it.
-    keys({ global: { "alt-left": "pane.go:left", "alt-right": "pane.go:right", "alt-up": "agent.prev", "alt-down": "agent.next", "ctrl-shift-t": "tab.new" } });
-    const result = await installRigKeys(home);
-    expect(result).toMatchObject({ ok: true, changed: ["alt-left", "alt-right", "alt-up", "alt-down"], conflicts: [] });
-    expect(read().global).toMatchObject({ "alt-up": "agent.prev", "alt-down": "agent.next" }); // kept for every other layout
-    expect(result.message).toContain("replace herdr-app's defaults alt-left (pane.go:left)");
-    // A person's own global binding on one of them still wins.
-    keys({ global: { "alt-left": "pane.go:left", "alt-up": "space.prev" } });
-    const mine = await installRigKeys(home);
-    expect(mine.conflicts.map((c) => c.key)).toEqual(["alt-up"]);
-  });
-
-  it("leaves conflicting keys alone and names why: a binding in layout:rig, in terminal (wins over a cell), or in global", async () => {
-    keys({ terminal: { "alt-left": "send:\u001bb" }, global: { "alt-up": "space.prev" }, "layout:rig": { "alt-down": "layout.reset" } });
-    const result = await installRigKeys(home);
-    expect(result.ok).toBe(false);
-    expect(result.changed).toEqual(["alt-right"]);
-    expect(result.conflicts.map((c) => c.key)).toEqual(["alt-left", "alt-up", "alt-down"]);
-    expect(read()["layout:rig"]).toEqual({ "alt-down": "layout.reset", "alt-right": "rig-strip.right" });
-  });
-
-  it("--remove takes away only OpenRig's bindings, and removes the section when nothing else is in it", async () => {
-    keys({ global: { "ctrl-shift-t": "tab.new" }, "layout:rig": { "ctrl-x": "layout.reset" } });
-    await installRigKeys(home);
-    const removed = await installRigKeys(home, { remove: true });
-    expect(removed).toMatchObject({ ok: true, changed: ["alt-left", "alt-right", "alt-up", "alt-down"] });
-    expect(read()).toEqual({ global: { "ctrl-shift-t": "tab.new" }, "layout:rig": { "ctrl-x": "layout.reset" } });
-    keys({ global: {} });
-    await installRigKeys(home);
-    await installRigKeys(home, { remove: true });
-    expect(read()).toEqual({ global: {} });
-  });
-
-  it("leaves an unreadable or non-object keys.json untouched", async () => {
-    for (const bad of ["{ not json", "null", "[]", "42", "\"scalar\""]) {
-      writeFileSync(join(home, "keys.json"), bad);
-      const res = await installRigKeys(home);
-      expect(res.ok).toBe(false);
-      expect(res.message).toContain("is not valid JSON");
-      expect(readFileSync(join(home, "keys.json"), "utf8")).toBe(bad);
-    }
   });
 });
 

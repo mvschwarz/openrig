@@ -347,9 +347,9 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig herdr` | — | — |
-| `rig herdr install` | — | `--app-home <dir>`<br>`--keys`<br>`--remove`<br>`--json` |
+| `rig herdr install` | — | `--app-home <dir>`<br>`--json` |
 
-Installs OpenRig's herdr-app mods (and, with `--keys`, its cell navigation keys); see
+Installs OpenRig's herdr-app mods; see
 [herdr-app](../reference/herdr-app.md).
 
 ### host
