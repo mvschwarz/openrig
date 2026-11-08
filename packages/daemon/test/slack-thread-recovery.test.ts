@@ -422,6 +422,7 @@ it("a recovered reply for a seat not yet reachable after boot waits, without a r
 
   expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(0);
   expect(f.dead.readAll()).toHaveLength(0);
+  expect(f.seen.load().size).toBe(0);
   expect(r.status().threads).toMatchObject({ incomplete: { "destination-unready": 1 } });
   expect(JSON.parse(f.files.get("/s/thread-coverage")!)[`C1:${ROOT}`].coveredThrough).toBe(ROOT);
 
@@ -441,6 +442,8 @@ it("a recovered channel message for a seat not yet reachable waits, while a live
 
   await r.run();
   expect(f.rows()).toHaveLength(0);
+  expect(f.dead.readAll()).toHaveLength(0);
+  expect(f.seen.load().size).toBe(0);
   expect(r.status()).toMatchObject({ state: "incomplete", reason: "destination-unready" });
 
   await handleEnvelope({ type: "events_api", payload: { event: f.message(119) } }, () => {}, f.router);

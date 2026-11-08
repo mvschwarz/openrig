@@ -100,6 +100,8 @@ export class ChannelRecovery implements RecoverySource {
     this.coverage = next; // publish only after the atomic write succeeds
   }
 
+  /** Read and land one page of channel history. Coverage advances only past messages that landed or were settled; a
+   *  message still landing or waiting for its seat ends the pass incomplete, with coverage held before it. */
   private async page(budget: RecoveryBudget, backoff: MethodBackoff): Promise<"more" | "done"> {
     if (backoff.blocked(HISTORY, this.now())) { this.state = "backoff"; this.reason = "rate-limited"; return "done"; }
     if (this.coverage!.nextRetryAt && this.coverage!.nextRetryAt > this.now()) { this.state = "backoff"; return "done"; }

@@ -314,7 +314,9 @@ export class InboundRouter {
    * Core landing attempt — NO dead-letter side effect. Dedup by ts (in-flight +
    * durable seen). `reason` distinguishes a dedup skip from a genuine create
    * failure so callers dead-letter ONLY real failures. On success, marks seen
-   * (durable qitem exists → safe).
+   * (durable qitem exists → safe). A message recovered after a gap whose seat
+   * can't be woken yet returns "destination-unready" before any row or seen
+   * mark, so a later pass lands it.
    */
   private async attemptLand(ev: SlackEvent, isCurrent: () => boolean = () => true): Promise<{
     landed: boolean;
@@ -992,6 +994,8 @@ export class InboundRouter {
     return { retried: own.retried + forwarded.retried, landed: own.landed + forwarded.landed };
   }
 
+  /** Retry this machine's own dead-lettered events. A real create failure counts an attempt; one still in flight, or
+   *  waiting for its seat ("destination-unready"), stays owed at the same count. */
   private async retryOwnDeadLetters(): Promise<{ retried: number; landed: number }> {
     const entries = this.deps.deadLetter.readAll();
     if (entries.length === 0) return this.retryActionDeadLetters();

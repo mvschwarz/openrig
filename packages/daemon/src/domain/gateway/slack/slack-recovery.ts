@@ -97,12 +97,14 @@ export class SlackRecovery {
     } catch { /* an unreadable checkpoint file is never replaced; the channel keeps waiting */ }
   }
 
+  /** Stop recovering: no further passes, and a pending soon-retry for a waiting message is cancelled. */
   stop(): void {
     this.stopped = true;
     if (this.unreadyRetry) clearTimeout(this.unreadyRetry);
     for (const channel of this.channels) channel.stop();
   }
 
+  /** Run one recovery pass (or join the one in progress), then schedule a soon-retry if a message waits for its seat. */
   run(): Promise<void> {
     if (this.pass) return this.pass;
     if (this.stopped || !this.opts.token) return Promise.resolve();

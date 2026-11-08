@@ -297,11 +297,11 @@ function deadLetterBacklogFields(
   return { deadLetterBacklog: records, deadLetterBacklogState: "ok" };
 }
 
-/** Build the production Slack gateway wire from config + secrets. Never throws on a missing
- *  configuration — that is an honest inert wire, not a boot failure. */
 /** How long after the connector starts a recovered message waits for its seat to become reachable. */
 const RECOVERY_SEAT_GRACE_MS = 10 * 60 * 1000;
 
+/** Build the production Slack gateway wire from config + secrets. Never throws on a missing
+ *  configuration — that is an honest inert wire, not a boot failure. */
 export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const log = opts.log ?? (() => {});
   const cfg = loadConfig(opts.home);
