@@ -89,8 +89,15 @@ describe("refocus trace work roots (#2693)", () => {
 describe("refocus hook forwards the daemon's catalogued work roots (#2693)", () => {
   const HOOK = resolve(HERE, "../assets/plugins/openrig-core/hooks/scripts/refocus.cjs");
 
-  /** Runs the shipped hook with a stub `rig` whose `queue whoami` names a node in project-b. */
-  function fireHook(sendWorkRoots: boolean) {
+  // The hook gives each lookup, the python3 trace included, a 2 s cap by default. A loaded CI runner can take longer
+  // than that to run python3 (#2744 and #2751 failed so), so these runs select the documented largest budget, which
+  // gives each lookup up to about 23 s, and allow the test time to match.
+  const HOOK_BUDGET_MS = "52000";
+  const HOOK_TEST_TIMEOUT_MS = 60_000;
+
+  /** Runs the shipped hook with a stub `rig` whose `queue whoami` names a node in project-b; `slowPythonSeconds`
+   *  puts a python3 that waits that long first on the hook's PATH, as a slow runner would. */
+  function fireHook(sendWorkRoots: boolean, slowPythonSeconds = 0) {
     const w = world();
     const workRoots = sendWorkRoots ? [w.projectB] : undefined;
     const bin = join(root!, "bin");
@@ -106,6 +113,9 @@ if [ "$1 $2" = "queue whoami" ]; then printf '%s' "$RIG_QUEUE_WHOAMI_STDOUT"; ex
 if [ "$1 $2" = "config --json" ]; then printf '{}'; exit 0; fi
 exit 1
 `, { mode: 0o755 });
+    if (slowPythonSeconds > 0) {
+      writeFileSync(join(bin, "python3"), `#!/bin/sh\nsleep ${slowPythonSeconds}\nPATH=/usr/bin:/bin exec python3 "$@"\n`, { mode: 0o755 });
+    }
     const home = join(root!, "home");
     mkdirSync(home, { recursive: true });
     const result = spawnSync(process.execPath, [HOOK, "--runtime", "claude"], {
@@ -113,7 +123,7 @@ exit 1
       encoding: "utf8",
       env: {
         PATH: `${bin}:/usr/bin:/bin`, HOME: home, OPENRIG_HOME: home, OPENRIG_SESSION_NAME: "builder@demo",
-        OPENRIG_WORKSPACE_ROOT: w.workspace, OPENRIG_REFOCUS_NOW: "1", OPENRIG_REFOCUS_TREES: "work",
+        OPENRIG_WORKSPACE_ROOT: w.workspace, OPENRIG_REFOCUS_NOW: "1", OPENRIG_REFOCUS_TREES: "work", OPENRIG_REFOCUS_BUDGET_MS: HOOK_BUDGET_MS,
         OPENRIG_REFOCUS_WORK_PACKET: "0", OPENRIG_REFOCUS_CONTENT_REF: "", OPENRIG_REFOCUS_CONTENT_FILE: "",
         RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify(whoami),
       },
@@ -127,10 +137,16 @@ exit 1
     expect(out).toContain(`root: ${w.projectB}`);
     expect(out).toContain("intent: mission one");
     expect(out).not.toContain("outside configured root");
-  });
+  }, HOOK_TEST_TIMEOUT_MS);
 
   it("still reports the gap when the daemon names no work roots (an older daemon)", () => {
     const { out } = fireHook(false);
     expect(out).toContain("outside configured root");
-  });
+  }, HOOK_TEST_TIMEOUT_MS);
+
+  it("still traces when python3 is slower than the default 2 s lookup cap, as on a loaded runner", () => {
+    const { w, out } = fireHook(true, 3);
+    expect(out).not.toContain("ETIMEDOUT");
+    expect(out).toContain(`root: ${w.projectB}`);
+  }, HOOK_TEST_TIMEOUT_MS);
 });
