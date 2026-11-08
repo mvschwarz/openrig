@@ -159,6 +159,8 @@ const AUTO_UNPARK_WAKE_TAG = "queue:auto-unpark:blocker";
  *  handoff: it keeps that source when it's replayed later. Send, broadcast, queue create and the cross-host forward never
  *  set it from a request; the trusted local outbox recorder (/api/queue/outbox/record) accepts caller tags by design. */
 const WAKE_TRIGGER_OPENRIG_TAG = "queue:wake-trigger:openrig";
+/** The wake telling a claimer that a cross-host handoff overrode its claim (#2631): it's about a row closed by design. */
+const CLAIM_OVERRIDDEN_WAKE_PREFIX = `${WAKE_INTENT_PREFIX}claim-overridden-`;
 /** On a wake intent whose ring a hosted member's trigger accepted: recovery doesn't ring that intent again. */
 const HOSTED_WAKE_ACCEPTED_TAG = "queue:hosted-wake-accepted";
 
@@ -1224,6 +1226,10 @@ export class QueueRepository {
 
   private currentWakeIntent(entry: QueueWakeFacts): boolean {
     const row = entry.auditPointer ? this.db.prepare("SELECT state, destination_session FROM queue_items WHERE qitem_id=?").get(entry.auditPointer) as { state: string; destination_session: string } | undefined : undefined;
+    // That notice stays current while the row stays closed; every other wake, while its row waits on its destination.
+    if (entry.outboxId.startsWith(CLAIM_OVERRIDDEN_WAKE_PREFIX)) {
+      return row !== undefined && isTerminalState(row.state) && row.destination_session === entry.destinationSession;
+    }
     if (row?.state !== "pending" || row.destination_session !== entry.destinationSession) return false;
     const prefix = `${WAKE_INTENT_PREFIX}blocker-`;
     if (!entry.outboxId.startsWith(prefix)) return true;
@@ -2787,6 +2793,11 @@ export class QueueRepository {
     transitionNote?: string;
     /** The sender's recorded provenance, as the local handoff records it. Null only for an in-process caller. */
     identityProvenance?: string | null;
+    /** The source's claim as the caller read it before forwarding. A claim made since then is overridden by this close,
+     *  which still closes, because the successor already exists, and records the override and wakes the claimer (#2631). */
+    claimedAtBeforeForward?: string | null;
+    /** The successor the forward created, for that wake: its plain id, never the host-qualified key (BR-1). */
+    successorQitemId?: string;
   }): { item: QueueItem; absorbed: boolean } {
     const source = this.getById(input.qitemId);
     if (!source) {
@@ -2812,6 +2823,9 @@ export class QueueRepository {
 
     const ts = new Date().toISOString();
     const events: Array<import("./types.js").RigEvent> = [];
+    const overriddenClaim = input.claimedAtBeforeForward !== undefined && source.claimedAt != null
+      && source.claimedAt !== input.claimedAtBeforeForward ? source.claimedAt : null;
+    let overrideWake: string | null = null;
 
     const txn = this.db.transaction(() => {
       this.db
@@ -2826,18 +2840,39 @@ export class QueueRepository {
         )
         .run(input.terminalState, ts, input.toSession, input.closureTarget, input.qitemId);
 
-      this.transitionLog.append({
+      const note = input.transitionNote ?? `cross-host handoff to ${input.toSession}`;
+      const closeTransition = this.transitionLog.append({
         qitemId: input.qitemId,
         state: input.terminalState,
         actorSession: input.fromSession,
         // BR-1: the minted note carries the TWO-PART toSession only — the
         // host-qualified successor key is allowed in closure_target and nowhere
         // else, and transition_note is a durable carrier.
-        transitionNote: input.transitionNote ?? `cross-host handoff to ${input.toSession}`,
+        transitionNote: overriddenClaim
+          ? `${note} (this overrode ${source.destinationSession}'s claim made at ${overriddenClaim}, while the handoff was forwarded)`
+          : note,
         closureReason: "handed_off_to",
         closureTarget: input.closureTarget,
         identityProvenance: input.identityProvenance ?? null,
       });
+      if (overriddenClaim && source.destinationSession !== input.fromSession) {
+        const successor = input.successorQitemId ? ` as ${input.successorQitemId}` : "";
+        try {
+          overrideWake = this.db.transaction(() => this.recordWakeIntent({
+            outboxId: `${CLAIM_OVERRIDDEN_WAKE_PREFIX}${closeTransition.transitionId}`,
+            auditPointer: input.qitemId,
+            qitemId: input.qitemId,
+            fromSession: input.fromSession,
+            toSession: source.destinationSession,
+            identityProvenance: sideEffectProvenance(input.identityProvenance),
+            bareBody: `${input.qitemId} was handed off to ${input.toSession}${successor} while you claimed it, so your claim is superseded and that seat has the work. Stop work on ${input.qitemId}; to carry on with it, coordinate with ${input.toSession}.`,
+            tags: [WAKE_TRIGGER_OPENRIG_TAG],
+          }))();
+        } catch (err) {
+          // As a handoff's own wake: a full held-message quota doesn't undo a close whose successor already exists.
+          if ((err as { code?: string }).code !== "retained_quota_full") throw err;
+        }
+      }
 
       // OPR.0.5.8.1 S1b — third member of the handoff family, same bypass.
       this.retireParkGeneratedTimer(input.qitemId, `park_ended:${input.terminalState}`);
@@ -2872,6 +2907,7 @@ export class QueueRepository {
     for (const e of events) {
       this.eventBus.notifySubscribers(e as PersistedEvent);
     }
+    if (overrideWake) this.deliverWakeIntentAfterCommit(overrideWake);
 
     return { item: this.getByIdOrThrow(input.qitemId), absorbed: false };
   }

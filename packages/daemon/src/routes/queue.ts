@@ -496,6 +496,8 @@ export function queueRoutes(): Hono {
         terminalState,
         transitionNote: body.transitionNote,
         identityProvenance: body.identityProvenance ?? null,
+        claimedAtBeforeForward: source.claimedAt ?? null,
+        successorQitemId: successorId,
       });
     } catch (err) {
       return errorResponse(c, err);
