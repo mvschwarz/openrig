@@ -411,6 +411,8 @@ export interface ThreadCoverage {
 export class ThreadCoverageStore {
   constructor(private readonly file: string, private readonly fsops: StateFsOps = nodeStateFs) {}
 
+  /** Every saved thread checkpoint, or none if the file doesn't exist yet. Throws on a malformed file or checkpoint, so a
+   *  bad file is never overwritten. */
   read(): Record<string, ThreadCoverage> {
     const raw = readOptional(this.file, this.fsops);
     if (raw === undefined) return {};

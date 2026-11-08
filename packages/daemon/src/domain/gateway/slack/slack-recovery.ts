@@ -178,6 +178,8 @@ export class SlackRecovery {
     }
   }
 
+  /** The threads this pass scans, in the order it scans them. Refreshes the tracked set from the seat map (a thread keeps its
+   *  source while its mapping is unchanged), then keeps only the threads that are due and sorts them by `threadOrder`. */
   private trackedThreadSources(): ThreadRecovery[] {
     if (!this.opts.trackedThreads || !this.opts.token) return [];
     let stored: Record<string, ThreadCoverage>;

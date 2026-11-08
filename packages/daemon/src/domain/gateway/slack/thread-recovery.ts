@@ -85,6 +85,9 @@ export class ThreadRecovery implements RecoverySource {
     this.coverage = next; // publish only after the atomic write succeeds
   }
 
+  /** One conversations.replies call over the pending interval (opening one up to five seconds ago if none is open), routing
+   *  each reply it returns. "more" when the interval has replies left past this page; "done" when it is covered, or the
+   *  thread is backing off, out of budget, not found or the page couldn't be trusted (each recorded in state and reason). */
   private async page(budget: RecoveryBudget, backoff: MethodBackoff): Promise<"more" | "done"> {
     const now = this.opts.now();
     if (backoff.blocked(REPLIES, now)) { this.state = "backoff"; this.reason = "rate-limited"; return "done"; }
