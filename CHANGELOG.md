@@ -11,16 +11,19 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 ## [0.7.11]
 
 OpenRig 0.7.11 is a patch for people running their own agent teams, cut from
-main `220e27a9`. Its biggest change: an ordinary send or work notice now goes
+main `b40bc71c`. Its biggest change: an ordinary send or work notice now goes
 into a person's typed draft by default instead of being refused (see Behaviour
 that changed). A person can now work with their team from their own coding
 agent through the new `openrig` plugin or from an ACP app such as Zed or T3
 Code, and, as an experiment that's off by default, answer the team's questions
 from an assistant connected through a grant service. A prepared managed compaction waits for an idle moment instead
-of asking again, and a restore stopped at a prompt clears itself. There are
-fixes across the queue, workflows, launch and speed under load, many
-contributed or reported by people using OpenRig. The OpenShell worker's cleanup
-still fails against OpenShell 0.1.6: see Known limits.
+of asking again, and a restore stopped at a prompt clears itself. On Linux, a
+daemon run as a systemd user service no longer takes its seats down when its
+unit stops or restarts, and terminal tiles show whole lines at any width. There
+are fixes across the queue, workflows, launch and speed under load, many
+contributed or reported by people using OpenRig. The OpenShell worker's
+maintained cleanup now works on OpenShell 0.1.6, but the worker still isn't end
+to end: see Known limits.
 
 ### Before you upgrade
 
@@ -35,6 +38,10 @@ still fails against OpenShell 0.1.6: see Known limits.
   npm install -g @openrig/cli@0.7.11
   rig daemon stop && rig daemon start
   ```
+- **Linux, with the daemon run as a systemd user service:** the seats move into
+  their own scope only when their tmux server next starts fresh. Until then the
+  server stays in the daemon's unit, so stopping or restarting that unit still
+  takes the seats down, as before. ([#2749](https://github.com/mvschwarz/openrig/pull/2749))
 - **The openrig-core plugin moves from 0.1.26 to 0.1.27.**
   Its activity relay and refocus hooks changed, as did the refocusing,
   openrig-user and openrig-skills skills. Replaced files are kept under
@@ -87,6 +94,10 @@ still fails against OpenShell 0.1.6: see Known limits.
 - **A restore stopped at a prompt clears itself** (such as Claude's resume
   selection) once the seat runs the conversation it was restoring, using the
   check `rig seat clear-attention` runs. The docs cover the manual route. ([#2711](https://github.com/mvschwarz/openrig/pull/2711), [#2674](https://github.com/mvschwarz/openrig/pull/2674))
+- **A queue wake refused at a prompt no longer goes in right after "Compacted"**
+  while the compaction still owes its turn boundary and restore request. It
+  goes in at the seat's next idle moment after that step clears, as a recovered
+  notification. ([#2666](https://github.com/mvschwarz/openrig/pull/2666))
 - **A Codex helper inside a Claude seat** (such as `codex exec` from its Bash
   tool) no longer becomes the seat's resume token, so a restart resumes the
   Claude conversation instead of failing with `no_conversation_found`. ([#2740](https://github.com/mvschwarz/openrig/pull/2740))
@@ -173,6 +184,16 @@ still fails against OpenShell 0.1.6: see Known limits.
 
 ### Launch, install and setup
 
+- **On Linux, a daemon run as a systemd user service starts the seats' tmux
+  server in its own user scope** (`openrig-tmux-<id>.scope`, with
+  `OOMPolicy=continue` from systemd 253), so stopping or restarting the
+  daemon's unit no longer ends the seats, and their memory no longer counts
+  against it. A daemon started from a login session, or a failed `systemd-run`,
+  starts the server as before with one log line giving the reason; macOS and
+  Windows are unchanged. ([#2749](https://github.com/mvschwarz/openrig/pull/2749))
+- **A Claude seat whose launch passes `--settings` JSON written with spaces**
+  (such as `{"env": {…}}` from a proxy alias) can be verified again: OpenRig
+  reads the value whole, so it finds the seat's conversation. ([#2665](https://github.com/mvschwarz/openrig/pull/2665))
 - **A Claude launcher script that execs the native installer's symlink**
   becomes ready after a launch or rebuild, and `--no-chrome` is recognised. ([#2751](https://github.com/mvschwarz/openrig/pull/2751))
 - **`launch_wrapper`,** an argv prefix whose launcher prepares the environment
@@ -191,6 +212,11 @@ still fails against OpenShell 0.1.6: see Known limits.
 
 ### Terminals and views
 
+- **Tiles show whole lines at any width without resizing the seat.** A tile
+  reads its seat's screen about once a second instead of attaching, so a tile
+  narrower than the seat no longer shows only its left part. A writable tile
+  attaches when someone types or pastes and goes back to showing after 30
+  seconds without a key; a read-only tile only shows. ([#2757](https://github.com/mvschwarz/openrig/pull/2757))
 - **Herdr follow views** work on macOS too (protocol 22), open a labelled
   snapshot where live following isn't supported, and show a cleaner strip. ([#2663](https://github.com/mvschwarz/openrig/pull/2663), [#2706](https://github.com/mvschwarz/openrig/pull/2706))
 - **Closing the herdr-core terminal that started OpenRig** no longer ends the
@@ -240,6 +266,12 @@ main ([#2736](https://github.com/mvschwarz/openrig/pull/2736)), a neutral TUI de
   `rig compact` over it reads `already_in_progress`. ([#2698](https://github.com/mvschwarz/openrig/pull/2698), [#2716](https://github.com/mvschwarz/openrig/pull/2716))
 - **The daemon and seats no longer inherit `HC_SCOPE`, `HC_TERMINAL_ID` or
   `HC_TERMINAL_SOCKET`;** one already running keeps them until restarted. ([#2737](https://github.com/mvschwarz/openrig/pull/2737))
+- **On Linux, the seats' tmux server runs in its own systemd user scope** when
+  the daemon is a user service (above): the daemon unit's stop, restart and
+  memory accounting no longer cover the seats. ([#2749](https://github.com/mvschwarz/openrig/pull/2749))
+- **Terminal tiles don't attach to show a seat:** a detach shows the seat again
+  instead of closing the tile, and a tile that can't read its seat ends with
+  tmux's own error. ([#2757](https://github.com/mvschwarz/openrig/pull/2757))
 - **Also:** each sender keeps one live held message per seat; daemon start
   doesn't re-send a failed wake to a seat with no receiver; restores record
   `restore.outcome_reconciled` themselves; `rig terminal open --follow` returns
@@ -261,19 +293,22 @@ main ([#2736](https://github.com/mvschwarz/openrig/pull/2736)), a neutral TUI de
 
 ### Known limits
 
-- **OpenShell:** the CA fix holds on OpenShell 0.1.6; the maintained cleanup
-  (`delete-owned`) still fails against OpenShell 0.1.6, because 0.1.6 doesn't
-  mount a workspace volume for a custom image, until a fix and its native run
-  land; recreate and restore haven't run. Never give the guest the daemon's
-  main API port (normally 7433). After a same-generation reconciled launch,
-  run `rig environment connect` yourself.
+- **OpenShell:** on OpenShell 0.1.6 the maintained cleanup (`delete-owned`)
+  now works for a custom image, and recreate and an exact resume passed in our
+  native run. A restored guest still receives its startup text again, so strict
+  recall after a restore isn't met, and the worker isn't end to end. The CA fix
+  holds on 0.1.6. Never give the guest the daemon's main API port (normally
+  7433). After a same-generation reconciled launch, run
+  `rig environment connect` yourself. ([#2755](https://github.com/mvschwarz/openrig/pull/2755))
 - **Drafts:** detection isn't complete. Under `refuse`, an unreadable input box
   lets the send go ahead, so an undetected draft goes with the message; under
   `deliver`, a result may not mention a draft it joined. ([#2645](https://github.com/mvschwarz/openrig/pull/2645), [#2653](https://github.com/mvschwarz/openrig/pull/2653))
 - **A post-compaction step can still hold** when the box reads as typed, under
   draft-aware delivery or the typing guard, or after a lost `/compact`. Run
   `rig compact <seat> --cancel`, then send a restore request naming the newest
-  restore map, marker and packet. ([#2575](https://github.com/mvschwarz/openrig/issues/2575))
+  restore map, marker and packet. A queue wake refused at a prompt now waits for
+  that step, but recovery at daemon start and a new handoff's wake don't check
+  for it yet. ([#2575](https://github.com/mvschwarz/openrig/issues/2575), [#2666](https://github.com/mvschwarz/openrig/pull/2666))
 - **Draft-aware delivery to Claude:** a message held as `draft_input_unknown`
   still isn't retried. Whether managed compaction now gets past the banner
   (`target_activity_unknown`) wasn't retested. ([#2605](https://github.com/mvschwarz/openrig/issues/2605))
@@ -292,6 +327,9 @@ main ([#2736](https://github.com/mvschwarz/openrig/pull/2736)), a neutral TUI de
   its receiver claims it. **Relay:** "Accepted by bridge" means the bridge has
   it, not the person, and a failed send replays only at a restart. ([#2735](https://github.com/mvschwarz/openrig/pull/2735), [#2624](https://github.com/mvschwarz/openrig/pull/2624))
 - **Event retention** can't be undone, and the database file doesn't shrink. ([#2699](https://github.com/mvschwarz/openrig/pull/2699))
+- **Terminal tiles** each run one tmux command a second while showing: 8 tiles
+  used about 6–8% of one core on an Apple Silicon Mac mini, against about 0.2%
+  for 0.7.10's attached tiles. ([#2757](https://github.com/mvschwarz/openrig/pull/2757))
 - **Claude `launch_wrapper`** hasn't run with zsh, on macOS arm64 or with a real
   installed Claude; an alias or shell function named `claude` fails closed. ([#2746](https://github.com/mvschwarz/openrig/pull/2746))
 - **Going back to 0.7.10:** besides the migrations, an older permission hook
@@ -326,7 +364,7 @@ main ([#2736](https://github.com/mvschwarz/openrig/pull/2736)), a neutral TUI de
 
 Thanks to @billbenetti, @seanmcn, @smota, @Aummadour, @dajiaohuang, @w4rc0n,
 @Mohsintl, @twotnguyen, @ziadeh and @Nikhi00718 for merged contributions.
-Thanks to @billbenetti for the reports behind [#2752](https://github.com/mvschwarz/openrig/pull/2752), [#2660](https://github.com/mvschwarz/openrig/pull/2660) and [#2738](https://github.com/mvschwarz/openrig/pull/2738), to
+Thanks to @billbenetti for the reports behind [#2752](https://github.com/mvschwarz/openrig/pull/2752), [#2660](https://github.com/mvschwarz/openrig/pull/2660), [#2738](https://github.com/mvschwarz/openrig/pull/2738), [#2749](https://github.com/mvschwarz/openrig/pull/2749), [#2666](https://github.com/mvschwarz/openrig/pull/2666) and [#2665](https://github.com/mvschwarz/openrig/pull/2665), to
 @pr0xc3nt4ur1 for the report behind [#2740](https://github.com/mvschwarz/openrig/pull/2740) and [#2743](https://github.com/mvschwarz/openrig/pull/2743), to @oneandonlydean for
 the process chain behind [#2751](https://github.com/mvschwarz/openrig/pull/2751), and to @niklasbaldi for the report and cause
 behind [#2654](https://github.com/mvschwarz/openrig/pull/2654).

@@ -243,7 +243,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   wait for a phrase like “show me my agents”; the same command brings their agents back later. No
   YAML, herdr when installed or plain tmux. The layout follows the terminal's width: on a narrow
   one the operator gets the first tab; on a wide one the dashboard and operator sit side by side
-  and the advisor gets its own tab. A `kernel` view the person saved still wins. Inside herdr it
+  and the advisor gets its own tab. A `kernel` view the person saved still wins.
+  Tiles show their seat's screen without attaching, so whole lines show at any tile width; a
+  writable tile attaches when someone types or pastes and goes back to showing after 30 seconds
+  without a key. Inside herdr it
   opens a focused `openrig kernel` space. It opens where the caller is: Terminal gets a window and
   Ghostty a tab; from Claude Desktop, iTerm or VS Code on a Mac it opens a new Ghostty or Terminal
   window, and only then say that clicking macOS's Allow is fine. Herdr is visible only in a
@@ -749,6 +752,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   Stop distinguishes process/listener exit from a clean asynchronous drain: inspect the matching
   `daemon-shutdown.json` and log when completion is incomplete or unverified. No target is a
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
+  On Linux, when the daemon runs as a systemd user service, the seats' tmux server starts in its
+  own user scope, so stopping or restarting the daemon's unit keeps the seats; otherwise it starts
+  as before, with one log line giving the reason.
   Startup brings back a kernel that this start found down (what a reboot leaves). A kernel that
   was already down before this start stays down: `rig start` and `rig daemon start
   --wait-for-kernel` say so, and `rig up kernel --existing` brings it back.
@@ -1412,9 +1418,11 @@ your circumstances is configuration, and the ones that are not, another agent ca
   stop them without killing the rig.
 - **`rig environment`** — not `rig env`: places a worker seat in an NVIDIA OpenShell sandbox and returns
   verified result files (`setup`, `create` or `attach`, `export`; reference in the packaged
-  `daemon/assets/openshell/README.md`). In 0.7.8's release testing the worker never became usable;
-  0.7.10 fixes in the source the two problems that stopped it in 0.7.9, but it hasn't run end to
-  end. Read the installed version's release notes before relying on it.
+  `daemon/assets/openshell/README.md`). In 0.7.8's release testing the worker never became usable.
+  In 0.7.11, on OpenShell 0.1.6, the maintained cleanup works for a custom image, and recreate
+  and an exact resume passed in native testing; a restored guest still receives its startup text
+  again, and the worker isn't end to end. Read the installed version's release notes before
+  relying on it.
 - **`rig setup`** — what OpenRig would change about this machine, shown before it touches anything.
   It installs herdr by default on macOS and Linux (`--no-herdr` declines; if the install fails,
   views fall back to plain tmux) and on a Mac offers Ghostty once (`--ghostty` / `--no-ghostty`).

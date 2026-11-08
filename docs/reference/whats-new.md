@@ -5,8 +5,10 @@ OpenRig 0.7.11 sends ordinary messages and work notices into a person's typed
 draft by default instead of refusing them, lets a person reach the team from
 their own coding agent (the `openrig` plugin) or an ACP app (`rig acp serve`),
 holds a prepared managed compaction until the seat is idle, and clears a
-restore that stopped at a prompt. It adds five database migrations. The
-OpenShell worker's cleanup still fails against OpenShell 0.1.6. If you upgraded
+restore that stopped at a prompt. On Linux, a daemon run as a systemd user
+service keeps its seats when its unit restarts. It adds five database
+migrations. On OpenShell 0.1.6 the worker's maintained cleanup now works, but
+the worker still isn't end to end. If you upgraded
 from 0.7.9 or earlier, also read "What changed in OpenRig 0.7.10" below, and
 from 0.7.8 or earlier, "What changed in OpenRig 0.7.9" too. For the full
 capability map, read `rig context get onboarding-width/public-what-you-can-do.md`.
@@ -32,6 +34,9 @@ still be the previous copy until startup.
   openrig-user and openrig-skills skills. Managed refresh preserves replaced
   files under `$OPENRIG_HOME/backups/managed-refresh/<id>/`; reapply local edits
   you still need from the preserved copy.
+- **Linux, with the daemon as a systemd user service:** the seats move into
+  their own scope only when their tmux server next starts fresh; until then,
+  stopping or restarting the daemon's unit still takes them down.
 - **Tell the person sends now join their drafts** (below). To keep the refusal,
   run `rig config set transport.draft_delivery refuse`; it applies from the
   next send, with no restart.
@@ -80,6 +85,9 @@ still be the previous copy until startup.
   `already_in_progress`; `--cancel` disarms it. It ends on a context dip, a
   conversation change, a stale map (`prepared_map_stale`: 15 points of growth or
   2 hours) or a map that stops reading ready.
+- **A queue wake refused at a prompt** no longer goes in right after
+  "Compacted" while the compaction still owes its turn boundary and restore
+  request; it goes in at the next idle moment after that step clears.
 - **A full restore stopped at a prompt clears itself** once the seat runs the
   conversation it was restoring. If a seat still reads `attention_required`, run
   `rig seat clear-attention <seat>`, with `--reason` after a partial restore or
@@ -122,10 +130,11 @@ still be the previous copy until startup.
 
 ## OpenShell workers
 
-The CA fix holds on OpenShell 0.1.6; the maintained cleanup (`delete-owned`)
-still fails against OpenShell 0.1.6, because 0.1.6 doesn't mount a workspace
-volume for a custom image, until a fix and its native run land; recreate and
-restore haven't run. "Never grant the guest access to the daemon's main API
+On OpenShell 0.1.6 the maintained cleanup (`delete-owned`) now works for a
+custom image, and recreate and an exact resume passed in our native run. A
+restored guest still receives its startup text again, so strict recall after a
+restore isn't met, and the worker isn't end to end. The CA fix holds on 0.1.6.
+"Never grant the guest access to the daemon's main API
 port (normally 7433)."
 
 ## Other changes to act on
@@ -153,6 +162,16 @@ port (normally 7433)."
   Codex seats; `rig provider switch --seat <pi seat> --account-home <dir>`
   switches a Pi seat's account (`--dry-run` first); `rig config set` says when
   an environment variable masks the saved value.
+- **Linux seats:** when the daemon runs as a systemd user service, the seats'
+  tmux server starts in its own user scope (`openrig-tmux-<id>.scope`), so the
+  daemon's unit can stop or restart without ending them. Otherwise the server
+  starts as before, with one log line giving the reason.
+- **Terminal tiles** show whole lines at any width without resizing the seat: a
+  tile reads its seat about once a second, a writable tile attaches when someone
+  types and goes back to showing after 30 seconds without a key, and a detach
+  shows the seat again instead of closing the tile.
+- **A Claude seat launched with `--settings` JSON written with spaces** can be
+  verified again.
 - **`view.changed` is no longer stored,** and `/api/events` no longer sends it.
 - **Old history-only events can be pruned, if you choose to.** `retention.events_days` (default `0`, which keeps every
   event) turns on a pass in the retention sweep (at daemon start and daily) that deletes `view.changed`,
@@ -179,13 +198,17 @@ port (normally 7433)."
 
 ## Limits to keep in view
 
-- **OpenShell:** cleanup, recreate and restore (above).
+- **OpenShell:** a restored guest gets its startup text again, strict recall
+  isn't met, and the worker isn't end to end (above).
 - **Drafts:** detection isn't complete. Under `refuse`, an unreadable input box
   lets the send go ahead; under `deliver`, a result may not mention a draft.
 - **A post-compaction step can still hold** when the box reads as typed, under
   draft-aware delivery or the typing guard, or after a lost `/compact`. Run
   `rig compact <seat> --cancel`, then send a restore request naming the newest
-  restore map, marker and packet.
+  restore map, marker and packet. A refused queue wake now waits for that step,
+  but recovery at daemon start and a new handoff's wake don't check yet.
+- **Terminal tiles** each run one tmux command a second while showing (8 tiles
+  used about 6–8% of one core on an Apple Silicon Mac mini).
 - **A message held as `draft_input_unknown`** isn't retried, and whether
   managed compaction gets past the update banner wasn't retested.
 - **Claude provider switch:** the "probe pane returned to a shell" failure in
