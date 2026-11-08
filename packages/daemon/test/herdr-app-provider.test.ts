@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HerdrAppProvider, UNKNOWN_START_TTL_MS } from "../src/domain/terminal/herdr-app-provider.js";
 import { HerdrAppClientFiles } from "../src/domain/terminal/herdr-app-state.js";
+import { describeModInstall, installRigMods } from "../src/domain/terminal/herdr-app-install.js";
 import { referencedTerminals, type LayoutNode } from "../src/domain/terminal/herdr-app-layout.js";
 import type { AppReply, HcResult, HcRunner } from "../src/domain/terminal/herdr-app-transport.js";
 import type { ComposedPane, ComposedView } from "../src/domain/terminal/terminal-provider.js";
@@ -125,7 +126,7 @@ let world: World;
 let files: HerdrAppClientFiles;
 let provider: HerdrAppProvider;
 
-function makeProvider(opts: { ackTimeoutMs?: number; core?: { session: string; socket?: string }; ensureMods?: () => Promise<{ ok: true } | { ok: false; error: string }> } = {}) {
+function makeProvider(opts: { ackTimeoutMs?: number; core?: { session: string; socket?: string }; ensureMods?: () => Promise<{ ok: true; notes?: string[] } | { ok: false; error: string }> } = {}) {
   files = new HerdrAppClientFiles(join(home, "app"), join(home, "journal"));
   const realWrite = files.writeRig.bind(files);
   files.writeRig = async (tree) => {
@@ -271,7 +272,26 @@ describe("HerdrAppProvider.openView", () => {
     expect(readFileSync(files.rigPath, "utf8")).toBe("{\"id\":\"mine\"}\n");
   });
 
-  it("when ensureMods refuses, openView fails with herdr_app_mods before any hc run or layout write, while closeView and reconcile on an earlier view still work", async () => {
+  it("a mod folder the person changed doesn't block the open: it stays as it is, the other mods install, and the open's notes say why", async () => {
+    const appHome = join(home, "app");
+    mkdirSync(join(appHome, "mods", "rig-pad"), { recursive: true });
+    writeFileSync(join(appHome, "mods", "rig-pad", "main.js"), "// the person's own rig-pad");
+    // Wired as startup wires it: the real installer.
+    makeProvider({
+      ensureMods: async () => {
+        const installed = await installRigMods(appHome);
+        if (!installed.ok) return { ok: false, error: describeModInstall(installed) };
+        return { ok: true, ...(installed.refused.length || installed.error ? { notes: [describeModInstall(installed)] } : {}) };
+      },
+    });
+    const result = await provider.openView(composed([pane("dev.build@demo")]));
+    expect(result).toMatchObject({ ok: true, opened: ["dev.build@demo"] });
+    expect(result.notes?.[0]).toMatch(/kept rig-pad as they are\. .*rig-pad isn't the copy OpenRig installed/);
+    expect(readFileSync(join(appHome, "mods", "rig-pad", "main.js"), "utf8")).toBe("// the person's own rig-pad");
+    expect(existsSync(join(appHome, "mods", "rig-strip", "main.js"))).toBe(true);
+  });
+
+  it("only a needed mod that is missing stops an open, before any hc run or layout write; closeView and reconcile on an earlier view still work", async () => {
     const opened = await provider.openView(composed([pane("dev.build@demo")]));
     expect(opened.ok).toBe(true);
     const viewId = opened.space!.id;
@@ -279,41 +299,14 @@ describe("HerdrAppProvider.openView", () => {
     const writesBefore = world.log.filter((e) => e.startsWith("write:")).length;
 
     makeProvider({
-      ensureMods: async () => ({
-        ok: false,
-        error: "OpenRig's herdr-app mods were not installed: /app/mods/rig-pad isn't the copy OpenRig installed; it was left as it is.",
-      }),
+      ensureMods: async () => ({ ok: false, error: "OpenRig's herdr-app mods rig-pad are missing and could not be installed. OpenRig's rig-pad mod is missing from /shipped; reinstall OpenRig." }),
     });
-
     const refused = await provider.openView(composed([pane("dev.qa@demo")]));
     expect(refused).toMatchObject({ ok: false, code: "herdr_app_mods" });
-    expect(refused.error).toMatch(/Nothing was started\. Move or rename the folder named above \(or remove it\) and run `rig herdr install`\.$/);
+    expect(refused.error).toBe("OpenRig's herdr-app mods rig-pad are missing and could not be installed. OpenRig's rig-pad mod is missing from /shipped; reinstall OpenRig. Nothing was started.");
     expect(world.runs).toBe(runsBefore);
     expect(world.log.filter((e) => e.startsWith("write:")).length).toBe(writesBefore);
 
-    // When the installer's collision message already ends with `rig herdr install`, it is not repeated
-    makeProvider({
-      ensureMods: async () => ({
-        ok: false,
-        error: "OpenRig's herdr-app mods were not installed: /app/mods/rig-pad/custom.js exists and is not part of OpenRig's mod; it was left as it is. Rename or remove it and run `rig herdr install` again.",
-      }),
-    });
-    const refusedDup = await provider.openView(composed([pane("dev.qa@demo")]));
-    expect(refusedDup.error?.match(/rig herdr install/g)).toHaveLength(1);
-    expect(refusedDup.error).not.toContain("Move or rename the folder named above");
-    expect(refusedDup.error).toContain("Nothing was started.");
-
-    // When a shipped mod folder is missing, openView does not tell the user to remove their folder
-    makeProvider({
-      ensureMods: async () => ({
-        ok: false,
-        error: "OpenRig's rig-pad mod is missing from /shipped; reinstall OpenRig.",
-      }),
-    });
-    const refusedMissing = await provider.openView(composed([pane("dev.qa@demo")]));
-    expect(refusedMissing.error).toBe("OpenRig's rig-pad mod is missing from /shipped; reinstall OpenRig. Nothing was started.");
-
-    // Reconcile and closeView on the earlier view still succeed despite the mod refusal
     expect(await provider.reconcile()).toEqual([]);
     const closed = await provider.closeView(viewId);
     expect(closed.ok).toBe(true);

@@ -9,9 +9,10 @@
 //   before and no longer ships. Anything else in the folder (a personal subfolder, dotfile, symlink, herdr-app's own
 //   jsconfig.json) is never read, moved or deleted;
 // - if one of OpenRig's files was changed, or its name is now a link or a folder, the mod is the person's: the install
-//   says which and changes nothing.
+//   says which and leaves that folder as it is. The other mods are still installed or updated, and a view still opens
+//   with the person's folder in place; only a mod that is missing and can't be installed stops an open.
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export const SHIPPED_MODS_DIR = path.resolve(import.meta.dirname, "../../../assets/herdr-app/mods");
@@ -60,9 +61,12 @@ async function writeFileAtomic(file: string, text: string): Promise<void> {
 }
 
 export interface ModInstallResult {
+  /** Every mod a Rig view needs is in the app home (installed, current, or the person's own folder). */
   ok: boolean;
-  /** Shipped mods missing from OpenRig's install: what to do. Nothing was changed. */
+  /** Shipped mods missing from OpenRig's own install: what to do. Those mods were not installed. */
   error?: string;
+  /** Mods a Rig view needs that are not in the app home and could not be installed. */
+  missing: string[];
   /** The folder the mods came from. */
   from?: string;
   installed: string[];
@@ -84,12 +88,13 @@ export async function installRigMods(appHome: string, opts: { shippedDir?: strin
     const parsed = JSON.parse(await readFile(manifestPath, "utf8")) as unknown;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) manifest = parsed as Record<string, unknown>;
   } catch { /* first install */ }
-  const result: ModInstallResult = { ok: true, from: shippedDir, installed: [], updated: [], unchanged: [], refused: [] };
+  const result: ModInstallResult = { ok: true, from: shippedDir, missing: [], installed: [], updated: [], unchanged: [], refused: [] };
   const plan: { name: string; files: Map<string, string>; dest: string; kind: "installed" | "updated"; drop: string[] }[] = [];
   for (const name of names) {
     const shipped = await shippedFiles(path.join(shippedDir, name)).catch(() => null);
     if (!shipped?.size) {
-      return { ok: false, error: `OpenRig's ${name} mod is missing from ${shippedDir}; reinstall OpenRig.`, installed: [], updated: [], unchanged: [], refused: [] };
+      result.error = `${result.error ? `${result.error} ` : ""}OpenRig's ${name} mod is missing from ${shippedDir}; reinstall OpenRig.`;
+      continue;
     }
     const dest = path.join(appHome, "mods", name);
     // A linked mod folder (a dotfiles copy, say) is never written through: an update would land in the link's target.
@@ -128,8 +133,7 @@ export async function installRigMods(appHome: string, opts: { shippedDir?: strin
     }
     plan.push({ name, files: shipped, dest, kind: "updated", drop: recorded.files.filter((f) => !shipped.has(f) && present.has(f)) });
   }
-  if (result.refused.length) { result.ok = false; return result; }
-  if (opts.check) { result.ok = plan.length === 0; return result; }
+  if (opts.check) { result.ok = plan.length === 0 && !result.refused.length && !result.error; return result; }
   await mkdir(path.dirname(manifestPath), { recursive: true });
   for (const item of plan) {
     if (item.kind === "installed") {
@@ -152,15 +156,18 @@ export async function installRigMods(appHome: string, opts: { shippedDir?: strin
     manifest[name] = { hash: folderHash(shipped), files: [...shipped.keys()].sort() };
   }
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  // A refused folder is the person's and stays; a mod with no folder at all (or a link to nothing) is missing.
+  for (const name of names) if (!await stat(path.join(appHome, "mods", name)).then(() => true, () => false)) result.missing.push(name);
+  result.ok = result.missing.length === 0;
   return result;
 }
 
 export function describeModInstall(r: ModInstallResult): string {
-  if (r.error) return r.error;
-  if (r.refused.length) return `OpenRig's herdr-app mods were not installed: ${r.refused.map((x) => x.reason).join(" ")}`;
+  const why = [r.error, ...r.refused.map((x) => x.reason)].filter(Boolean).join(" ");
+  if (r.missing.length) return `OpenRig's herdr-app mods ${r.missing.join(", ")} are missing and could not be installed.${why ? ` ${why}` : ""}`;
   const parts = [r.installed.length ? `installed ${r.installed.join(", ")}` : "", r.updated.length ? `updated ${r.updated.join(", ")}` : "",
-    r.unchanged.length ? `${r.unchanged.length} already current` : ""].filter(Boolean);
-  return `OpenRig's herdr-app mods: ${parts.join("; ")}.`;
+    r.unchanged.length ? `${r.unchanged.length} already current` : "", r.refused.length ? `kept ${r.refused.map((x) => x.name).join(", ")} as they are` : ""].filter(Boolean);
+  return `OpenRig's herdr-app mods: ${parts.join("; ")}.${why ? ` ${why}` : ""}`;
 }
 
 /** The keys that move the keyboard between a Rig view's cells, in keys.json section `layout:rig`. */

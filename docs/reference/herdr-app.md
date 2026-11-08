@@ -25,7 +25,9 @@ rig herdr install --keys     # optional: alt-arrows move between a view's cells
   cell keys replace them, and they keep working on your other layouts. herdr-app then treats `keys.json` as yours: new default
   shortcuts in later releases are not added to it automatically. `rig herdr install --keys --remove` takes OpenRig's
   bindings out again; your file before the change is kept at `<app home>/openrig/keys.json.before-openrig`.
-- Opening a view installs missing mods by itself. It never replaces a mod you changed.
+- Opening a view installs missing mods and updates OpenRig's own by itself. It never replaces a mod you changed: that
+  folder stays as it is, the view opens anyway, and the open's notes name the folder and why. Only a mod a view needs
+  that is missing and can't be installed stops an open.
 
 ## Open a view
 

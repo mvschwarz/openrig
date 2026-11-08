@@ -2219,7 +2219,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           viewerCwd: nodePath.join(herdrAppDir, "viewers"),
           ensureMods: async () => {
             const installed = await installRigMods(key);
-            return installed.ok ? { ok: true } : { ok: false, error: describeModInstall(installed) };
+            if (!installed.ok) return { ok: false, error: describeModInstall(installed) };
+            // A folder the person changed stays theirs and the view opens with it; the open says so.
+            return { ok: true, ...(installed.refused.length || installed.error ? { notes: [describeModInstall(installed)] } : {}) };
           },
           runTmux: execTmux,
         });

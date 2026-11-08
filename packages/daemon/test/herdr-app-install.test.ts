@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installRigKeys, installRigMods, RIG_MODS, SHIPPED_MODS_DIR } from "../src/domain/terminal/herdr-app-install.js";
+import { describeModInstall, installRigKeys, installRigMods, RIG_MODS, SHIPPED_MODS_DIR } from "../src/domain/terminal/herdr-app-install.js";
 
 let home: string;
 beforeEach(() => { home = mkdtempSync(join(tmpdir(), "herdr-app-install-")); });
@@ -56,16 +56,17 @@ describe("installRigMods", () => {
     expect(readFileSync(join(home, "mods", "rig-pad", "mine.js"), "utf8")).toBe("// the person's");
   });
 
-  it("refuses when one of OpenRig's file names is now a link or a folder, or one of its files was changed", async () => {
+  it("leaves a mod whose file is now a link or a folder, or was changed, as it is, and still updates the others", async () => {
     await installRigMods(home, { shippedDir: shipped("v1") });
     rmSync(join(home, "mods", "rig-strip", "main.js"));
     symlinkSync("/etc/hostname", join(home, "mods", "rig-strip", "main.js"));
     writeFileSync(join(home, "mods", "rig-ended", "mod.json"), "{\"place\":\"left\"}");
     const result = await installRigMods(home, { shippedDir: shipped("v2") });
-    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ ok: true, missing: [], updated: ["rig-cell-header", "rig-pad"] });
     expect(result.refused.map((r) => r.name).sort()).toEqual(["rig-ended", "rig-strip"]);
     expect(readlinkSync(join(home, "mods", "rig-strip", "main.js"))).toBe("/etc/hostname");
-    expect(readFileSync(join(home, "mods", "rig-pad", "main.js"), "utf8")).toBe("// v1 rig-pad"); // nothing installed that run
+    expect(readFileSync(join(home, "mods", "rig-ended", "mod.json"), "utf8")).toBe("{\"place\":\"left\"}");
+    expect(readFileSync(join(home, "mods", "rig-pad", "main.js"), "utf8")).toBe("// v2 rig-pad");
   });
 
   it("never writes through a mod folder that is a link, even to an unchanged copy of OpenRig's files", async () => {
@@ -74,19 +75,41 @@ describe("installRigMods", () => {
     renameSync(join(home, "mods", "rig-strip"), dotfiles);
     symlinkSync(dotfiles, join(home, "mods", "rig-strip"));
     const result = await installRigMods(home, { shippedDir: shipped("v2") });
-    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ ok: true, missing: [] });
     expect(result.refused).toEqual([expect.objectContaining({ name: "rig-strip", reason: expect.stringContaining("is a link") })]);
     expect(readFileSync(join(dotfiles, "main.js"), "utf8")).toBe("// v1 rig-strip");
   });
 
-  it("never replaces a mod folder someone made or changed, and installs nothing else that run", async () => {
+  it("never replaces a mod folder someone made or changed, and installs the others", async () => {
     mkdirSync(join(home, "mods", "rig-pad"), { recursive: true });
     writeFileSync(join(home, "mods", "rig-pad", "main.js"), "// the person's own rig-pad");
     const result = await installRigMods(home);
-    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ ok: true, missing: [], installed: ["rig-strip", "rig-cell-header", "rig-ended"] });
     expect(result.refused).toEqual([expect.objectContaining({ name: "rig-pad", reason: expect.stringContaining("left as it is") })]);
     expect(readFileSync(join(home, "mods", "rig-pad", "main.js"), "utf8")).toBe("// the person's own rig-pad");
-    expect(readdirSync(join(home, "mods"))).toEqual(["rig-pad"]);
+    expect(readdirSync(join(home, "mods")).sort()).toEqual([...RIG_MODS].sort());
+    expect(describeModInstall(result)).toMatch(/^OpenRig's herdr-app mods: installed rig-strip, rig-cell-header, rig-ended; kept rig-pad as they are\. .*rig-pad isn't the copy OpenRig installed/);
+  });
+
+  it("reports a needed mod that is missing and could not be installed (not shipped, or a link to nothing)", async () => {
+    const v1 = shipped("v1");
+    rmSync(join(v1, "rig-pad"), { recursive: true });
+    mkdirSync(join(home, "mods"), { recursive: true });
+    symlinkSync(join(home, "nowhere"), join(home, "mods", "rig-ended"));
+    const result = await installRigMods(home, { shippedDir: v1 });
+    expect(result.ok).toBe(false);
+    expect(result.missing.sort()).toEqual(["rig-ended", "rig-pad"]);
+    expect(result.installed).toEqual(["rig-strip", "rig-cell-header"]);
+    expect(describeModInstall(result)).toMatch(/^OpenRig's herdr-app mods rig-(pad|ended), rig-(pad|ended) are missing and could not be installed\. .*rig-pad mod is missing from .*is a link/);
+  });
+
+  it("opens with a mod the person already has even when OpenRig's own copy of it is missing", async () => {
+    await installRigMods(home, { shippedDir: shipped("v1") });
+    const v2 = shipped("v2");
+    rmSync(join(v2, "rig-pad"), { recursive: true });
+    const result = await installRigMods(home, { shippedDir: v2 });
+    expect(result).toMatchObject({ ok: true, missing: [], error: expect.stringContaining("rig-pad mod is missing") });
+    expect(readFileSync(join(home, "mods", "rig-pad", "main.js"), "utf8")).toBe("// v1 rig-pad");
   });
 
   it("check mode reports what would change without writing", async () => {
@@ -101,7 +124,7 @@ describe("installRigMods", () => {
       writeFileSync(join(home, "mods", "rig-strip", "extra.js"), "// the person's extra.js");
       const v2 = shipped("v2", { "extra.js": "// openrig's extra.js" });
       const result = await installRigMods(home, { shippedDir: v2 });
-      expect(result.ok).toBe(false);
+      expect(result).toMatchObject({ ok: true, missing: [], updated: ["rig-cell-header", "rig-pad", "rig-ended"] });
       expect(result.refused).toEqual([
         expect.objectContaining({
           name: "rig-strip",
@@ -109,10 +132,12 @@ describe("installRigMods", () => {
         }),
       ]);
       expect(readFileSync(join(home, "mods", "rig-strip", "extra.js"), "utf8")).toBe("// the person's extra.js");
-      for (const name of RIG_MODS) {
-        expect(readFileSync(join(home, "mods", name, "main.js"), "utf8")).toBe(`// v1 ${name}`);
-      }
-      expect(readFileSync(join(home, "openrig", "mods.json"), "utf8")).toBe(manifestBefore);
+      expect(readFileSync(join(home, "mods", "rig-strip", "main.js"), "utf8")).toBe("// v1 rig-strip");
+      expect(readFileSync(join(home, "mods", "rig-pad", "main.js"), "utf8")).toBe("// v2 rig-pad");
+      // rig-strip's record still describes the copy OpenRig installed there (v1).
+      const before = JSON.parse(manifestBefore) as Record<string, unknown>;
+      const after = JSON.parse(readFileSync(join(home, "openrig", "mods.json"), "utf8")) as Record<string, unknown>;
+      expect(after["rig-strip"]).toEqual(before["rig-strip"]);
     });
 
     it("adopts a newly shipped file name when the existing file on disk has identical bytes, or when nobody has that name", async () => {
@@ -271,7 +296,7 @@ describe("installRigMods: scope and coexistence", () => {
     expect(readFileSync(join(home, "openrig", "config.json"), "utf8")).toBe(legacyConfig);
   });
 
-  it("returns ok:false with an error (without throwing or writing) when a shipped mod folder is missing", async () => {
+  it("returns ok:false with the missing mod and an error (without throwing) when a shipped mod folder is missing", async () => {
     const incomplete = join(home, "incomplete-shipped");
     for (const name of RIG_MODS.filter((n) => n !== "rig-pad")) {
       mkdirSync(join(incomplete, name), { recursive: true });
@@ -281,16 +306,18 @@ describe("installRigMods: scope and coexistence", () => {
     const res = await installRigMods(home, { shippedDir: incomplete });
     expect(res).toEqual({
       ok: false,
+      from: incomplete,
       error: `OpenRig's rig-pad mod is missing from ${incomplete}; reinstall OpenRig.`,
-      installed: [],
+      missing: ["rig-pad"],
+      installed: ["rig-strip", "rig-cell-header", "rig-ended"],
       updated: [],
       unchanged: [],
       refused: [],
     });
-    expect(existsSync(join(home, "mods"))).toBe(false);
+    expect(existsSync(join(home, "mods", "rig-pad"))).toBe(false);
   });
 
-  it("treats a malformed manifest entry for one of OpenRig's mods as unrecorded (refusing without throwing) and preserves unrelated manifest keys", async () => {
+  it("treats a malformed manifest entry for one of OpenRig's mods as unrecorded (keeping that folder without throwing) and preserves unrelated manifest keys", async () => {
     mkdirSync(join(home, "mods", "rig-strip"), { recursive: true });
     writeFileSync(join(home, "mods", "rig-strip", "main.js"), "// unrecorded rig-strip");
     mkdirSync(join(home, "openrig"), { recursive: true });
@@ -300,7 +327,7 @@ describe("installRigMods: scope and coexistence", () => {
     }));
 
     const refused = await installRigMods(home);
-    expect(refused.ok).toBe(false);
+    expect(refused).toMatchObject({ ok: true, missing: [], installed: ["rig-cell-header", "rig-pad", "rig-ended"] });
     expect(refused.refused).toEqual([
       expect.objectContaining({
         name: "rig-strip",
@@ -311,7 +338,7 @@ describe("installRigMods: scope and coexistence", () => {
     // After the person removes their conflicting folder, a later install succeeds and keeps the unrelated top-level key
     rmSync(join(home, "mods", "rig-strip"), { recursive: true, force: true });
     const installed = await installRigMods(home);
-    expect(installed).toMatchObject({ ok: true, installed: [...RIG_MODS] });
+    expect(installed).toMatchObject({ ok: true, installed: ["rig-strip"], unchanged: ["rig-cell-header", "rig-pad", "rig-ended"] });
     const manifestAfter = JSON.parse(readFileSync(join(home, "openrig", "mods.json"), "utf8")) as Record<string, unknown>;
     expect(manifestAfter.mods).toEqual(["my-mod", "custom-panel"]);
   });

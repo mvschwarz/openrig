@@ -53,8 +53,9 @@ export interface HerdrAppProviderDeps {
   daemonInstance: string;
   /** OpenRig's own folder the viewers start in. */
   viewerCwd: string;
-  /** Installs or checks OpenRig's mods in this app home; never replaces a mod the person changed. */
-  ensureMods(): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Installs or checks OpenRig's mods in this app home; never replaces a mod the person changed. `ok: false` only when a
+   *  needed mod is missing and could not be installed; a folder left as the person's is a note, and the view opens. */
+  ensureMods(): Promise<{ ok: true; notes?: string[] } | { ok: false; error: string }>;
   /** Runs tmux (the viewer's own tmux and server args come first in argv). */
   runTmux?(argv: string[]): Promise<string>;
   /** A process's parent pid, or null (finds the tmux client a viewer runs). */
@@ -227,17 +228,12 @@ export class HerdrAppProvider implements TerminalProvider {
     const mods = await this.deps.ensureMods();
     if (!mods.ok) {
       const base = mods.error.trimEnd();
-      const parts = [base];
-      if (!base.includes("Nothing was started.")) parts.push("Nothing was started.");
-      if (base.startsWith("OpenRig's herdr-app mods were not installed:") && !base.includes("rig herdr install")) {
-        parts.push("Move or rename the folder named above (or remove it) and run `rig herdr install`.");
-      }
-      return fail("herdr_app_mods", parts.join(" "), { absent: view.absent, degraded: view.degraded });
+      return fail("herdr_app_mods", base.includes("Nothing was started.") ? base : `${base} Nothing was started.`, { absent: view.absent, degraded: view.degraded });
     }
     const state = await files.load();
     const owned = await files.rigOwnership(state);
     if (!owned.ours) return fail("rig_layout_not_owned", owned.reason, { absent: view.absent, degraded: view.degraded });
-    const notes = await this.reconcileState(state);
+    const notes = [...(mods.notes ?? []), ...await this.reconcileState(state)];
     const shown = (status.value as { layout?: unknown }).layout;
     state.base ??= typeof shown === "string" && shown !== RIG_LAYOUT ? shown : "main";
     if (!view.pages.length) return fail("nothing_to_open", "No attachable seats in this view; nothing was started.", { absent: view.absent, degraded: view.degraded });
