@@ -210,7 +210,9 @@ app that starts the agent from the ACP registry passes no arguments, so that's h
   question from a seat the work reached is named in the chat with where to answer it, because it could be another
   chat's. Your choice is recorded as your answer, as a click in Slack would be, and the seat that asked gets it.
   Dismissing it, or cancelling the turn, records nothing: the question stays open in the TUI and Slack, and no further
-  question opens after a cancel. A question that wants an answer in words is shown with where to answer it.
+  question opens after a cancel. A question that ends unanswered here (dismissed, cancelled, closed with the work, or
+  one the app couldn't show) is named in the chat as still open, as well as on its card. A question that wants an
+  answer in words is shown with where to answer it.
 - **Sessions are kept in the queue:** the app can list your earlier sessions (`session/list`) and reopen one
   (`session/load`). Reopening replays each prompt, its work, the questions the team asked you during it with your
   answers, and the reply, as they stand now. Nothing is asked again on reopening: a question still open comes up in
