@@ -126,7 +126,12 @@ After a restore, rig up exits 0 only when the rig came back whole (rigResult
 fully_restored). It exits 1 when it didn't (partially_restored, failed or
 not_attempted), including when every seat is running but some started fresh
 without their conversation, or came back with a guidance or restore gap. With
---json, read rigResult and each nodes[].status to tell these apart.
+--json, read rigResult and each node's status, noConversation, guidanceGaps and
+restoreGaps to tell these apart: a seat with a gap keeps its own status, such as
+resumed, and a fresh seat marked noConversation (a terminal seat) lost nothing.
+A refused request exits 1 for a conflict (HTTP 409, such as a rig still running
+or a restore not attempted) and 2 for any other refusal (400, 404 or 500, such
+as no rig by that name or a failed boot).
 `);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
