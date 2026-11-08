@@ -185,7 +185,8 @@ an open FYI, or a closed ask is not that receipt. The rig-wide reads and their l
 - **`POST /api/workflow/instantiate`** requires `specPath`, `rootObjective` and `createdBySession`, and takes
   `entryOwnerSession`, `targetRig` and `scope` (see [Project workspace](project-workspace.md) for `scope`).
   Success is 201 with `instance`, `spec`, `entryQitemId` and `entryOwnerSession`, any `advisories`, and
-  `scopeIgnored` when a scope wasn't applied.
+  `scopeIgnored` when a scope wasn't applied. The instance keeps `rootObjective`, which every instance read returns
+  (`/api/workflow/list`, `/api/workflow/<id>` and its `trace`). An instance started before it was kept reads `null`.
 - **`GET /api/provider/usage`** returns `{ hostUsage }`, this host's usage rows (`host: "local"`, a `provider`
   and a `state`). A Claude row's `windows` are the seats' status-line readings, one entry per reading, each with
   its `window`, `usedPercent`, `resetsAt`, `asOf` and `seatSession`. A Codex row has `windows: []`. Treating the
