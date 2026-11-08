@@ -12,8 +12,8 @@ const normalize = (text: string): string => text.replace(/\s+/g, "");
 // so a mode-bar line is also known by its leading marker.
 const VIM_MODE_PREFIX = /^-- INSERT --\s*/;
 const MODE_BAR_START = /^(?:⏵⏵|⏸)(?:\s|$)/;
-// The suffix is a circle glyph and an effort level, e.g. `◐ medium` or `● high`; arbitrary text is not one.
-const PASTE_HINT = /^paste again to expand(?:\s{2,}[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort)?$/;
+// Only a known effort hint or installed-update notice may share the paste-hint row.
+const PASTE_HINT = /^paste again to expand(?:\s{2,}(?:[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort|✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))))?$/;
 export const isClaudePasteHint = (line: string): boolean => PASTE_HINT.test(line.replace(VIM_MODE_PREFIX, ""));
 export const isComposerFooter = (line: string): boolean => {
   const bar = line.replace(VIM_MODE_PREFIX, "");
