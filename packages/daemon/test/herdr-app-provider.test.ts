@@ -290,6 +290,8 @@ describe("HerdrAppProvider.openView", () => {
       world.render(files);
       await until(() => switches().length > 0);
       expect(switches()).toEqual([["/usr/bin/tmux", "-L", "openrig", "switch-client", "-c", "/dev/pts/9", "-t", "=dev.build@demo", "-r"]]);
+      // The grant is journalled right after the handover.
+      for (let i = 0; i < 100 && (await viewers())[0]!.writable !== "granted"; i++) await new Promise((r) => setTimeout(r, 10));
       expect((await viewers()).map((v) => v.writable)).toEqual(["granted", undefined]); // the read-only pane never is
       expect(world.log.some((e) => e.startsWith("do:layout.select"))).toBe(false);
       void result;
