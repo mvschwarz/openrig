@@ -162,6 +162,8 @@ export function createTerminalRouter(tmux: TmuxAdapter, opts: TerminalRouterOpti
   return new Proxy(tmux, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
+      // The adapter's own fields (exec functions, maps) are state, not verbs: return them as they are.
+      if (Object.prototype.hasOwnProperty.call(target, prop)) return value;
       if (typeof prop === "string" && typeof value === "function" && MERGED_READS.has(prop) && opts.herdr?.hasSeats?.()) {
         const herdr = opts.herdr;
         return (...args: unknown[]) => mergedRead(prop,

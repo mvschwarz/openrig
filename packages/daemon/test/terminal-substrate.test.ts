@@ -8,15 +8,16 @@ import { seatTerminalSubstrate } from "../src/domain/terminal-substrate-host.js"
 import { createTerminalRouter, SubstrateResolver } from "../src/adapters/terminal-router.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
+/** Like a real adapter, the verbs live on the prototype (the router passes an adapter's own fields through). */
 function fakeTmux() {
-  return {
+  return Object.create({
     sendText: vi.fn(async () => ({ ok: true as const })),
     capturePaneContent: vi.fn(async () => "tmux screen"),
     probeSession: vi.fn(async () => ({ state: "present" as const })),
     createSession: vi.fn(async () => ({ ok: true as const })),
     listSessions: vi.fn(async () => [{ name: "s", windows: 1, created: "", attached: false }]),
     deliveryGuard: undefined as unknown,
-  };
+  });
 }
 
 function seatDb() {
@@ -117,7 +118,7 @@ describe("terminal router", () => {
   it("dispatches a Herdr seat to the Herdr adapter and shares the delivery guard", async () => {
     const { db } = seatDb();
     const tmux = fakeTmux();
-    const herdr = { ...fakeTmux(), sendText: vi.fn(async () => ({ ok: true as const })) };
+    const herdr = Object.create({ sendText: vi.fn(async () => ({ ok: true as const })) });
     const router = createTerminalRouter(tmux as unknown as TmuxAdapter, { resolver: new SubstrateResolver(db), herdr: herdr as unknown as TmuxAdapter });
     await router.sendText("dev-new@mixed", "hi");
     expect(herdr.sendText).toHaveBeenCalledWith("dev-new@mixed", "hi");

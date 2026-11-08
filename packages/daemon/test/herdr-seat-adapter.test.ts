@@ -139,7 +139,7 @@ describe("HerdrSeatAdapter", () => {
     const { db, adapter, herdr, bind } = setup();
     await adapter.createSession("dev-solo@hr");
     bind("dev-solo@hr", "w1:p1");
-    const tmux = { listSessions: async () => [{ name: "tmux-seat", windows: 1, created: "", attached: false }] } as unknown as TmuxAdapter;
+    const tmux = Object.create({ listSessions: async () => [{ name: "tmux-seat", windows: 1, created: "", attached: false }] }) as TmuxAdapter;
     const router = createTerminalRouter(tmux, { resolver: new SubstrateResolver(db), herdr: adapter });
     expect((await router.listSessions()).map(s => s.name)).toEqual(["tmux-seat", "dev-solo@hr"]);
     herdr.setDown(true);
