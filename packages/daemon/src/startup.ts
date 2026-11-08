@@ -2204,6 +2204,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         for (const provider of herdrAppProviders.values()) void provider.reconcile().catch(() => {});
       },
     });
+    // A seat's tmux session replaced (handover, fresh launch, restart): a viewer of it attaches again with a new tmux
+    // client, which gets the keyboard back if the person had it.
+    const unsubscribeHerdrAppRegrant = eventBus.subscribe((event) => {
+      if (event.type !== "seat.handover_completed" && event.type !== "seat.fresh_launched" && event.type !== "node.startup_ready") return;
+      for (const provider of herdrAppProviders.values()) provider.regrantSoon();
+    });
+    void unsubscribeHerdrAppRegrant;
     const resolveHerdrAppProvider = (target: { appHome?: string }) => {
       const appHome = target.appHome ? target.appHome : resolveHerdrAppHome(process.env);
       if (!nodePath.isAbsolute(appHome) || appHome.includes("\0")) return null;

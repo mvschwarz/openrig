@@ -61,7 +61,8 @@ What an open does, in order:
    layout file is never written. A `rig.json` OpenRig didn't write is never overwritten.
 3. The Rig layout is shown, the view is selected once herdr-app confirms it shows the new file, and the keyboard
    goes to the first live cell. Only then do local interactive seats' viewers become writable. A local viewer in a view
-   herdr-app hasn't confirmed stays read-only.
+   herdr-app hasn't confirmed stays read-only until herdr-app shows it (OpenRig keeps watching for up to 10 minutes);
+   then it becomes writable, and the view isn't selected for you.
 
 Other layouts and other herdr-app windows don't show Rig views. Each window (app home) has its own.
 
@@ -73,6 +74,8 @@ Other layouts and other herdr-app windows don't show Rig views. Each window (app
 - **Your tabs** gives the keyboard back to your own pane.
 - OpenRig's own rewrites (another view opening or closing, a cell ending) never move the keyboard, whether you are in
   a view or in your tabs.
+- A writable viewer stays writable when its seat's session is replaced (a handover, a fresh launch, a restart): the
+  viewer attaches to the new session, and OpenRig hands that viewer's own tmux client the keyboard again.
 
 ## What OpenRig keeps in the app home
 

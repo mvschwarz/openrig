@@ -61,6 +61,11 @@ export interface HerdrAppProviderDeps {
   /** A process's parent pid, or null (finds the tmux client a viewer runs). */
   parentPid?(pid: number): Promise<number | null>;
   ackTimeoutMs?: number;
+  /** How long a view not confirmed by the open keeps waiting for the app to show it, to make it writable then. */
+  lateAckMs?: number;
+  latePollMs?: number;
+  /** When to look for a viewer's new tmux client after its agent's session was replaced. */
+  regrantDelaysMs?: number[];
   nonce?(): string;
   now?(): Date;
 }
@@ -89,8 +94,27 @@ export class HerdrAppProvider implements TerminalProvider {
   readonly name = HERDR_APP_PROVIDER;
   readonly panesPerPage = 16;
   private queue: Promise<unknown> = Promise.resolve();
+  private stopped = false;
+  /** OpenRig's own timers (late acknowledgement, regrant): each wakes its sleeper early on stop. */
+  private readonly timers = new Map<ReturnType<typeof setTimeout>, () => void>();
 
   constructor(private readonly deps: HerdrAppProviderDeps) {}
+
+  /** Ends this provider's own waits and timers (daemon shutdown). Viewers and files are left as they are. */
+  stop(): void {
+    this.stopped = true;
+    for (const [timer, wake] of this.timers) { clearTimeout(timer); wake(); }
+    this.timers.clear();
+  }
+
+  private sleep(ms: number): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { this.timers.delete(timer); resolve(); }, ms);
+      timer.unref?.();
+      this.timers.set(timer, resolve);
+    });
+  }
 
   get appHome(): string { return this.deps.files.appHome; }
 
@@ -255,6 +279,7 @@ export class HerdrAppProvider implements TerminalProvider {
           const cell = cellFor(id, pane, nonce, null);
           return { cellId: cell.id, seat: pane.seat, label: pane.label, ...(pane.runtime ? { runtime: pane.runtime } : {}),
             nonce, argv: viewerArgv(pane, nonce), readOnly: pane.readOnly, attach: pane.attachArgv ? "local" as const : "remote" as const,
+            ...(pane.attachArgv && !pane.readOnly ? { writable: "pending" as const } : {}),
             terminal: null, state: "planned" as const };
         }),
       };
@@ -290,6 +315,7 @@ export class HerdrAppProvider implements TerminalProvider {
 
     // 4. Reveal: the person asked for this view.
     notes.push(...await this.reveal(created, written.revision));
+    await files.save(state);
     // Viewers this write released (kept from an earlier failed rewrite) end now, once the app shows it.
     if (state.pendingEnds.length) notes.push(...await this.endPending(state));
     return {
@@ -357,6 +383,8 @@ export class HerdrAppProvider implements TerminalProvider {
       if (switched.kind !== "ok") notes.push(`Showing OpenRig's Rig layout: ${describe(switched)}.`);
     }
     if (!await awaitApplied(this.deps.files, revision, [], { timeoutMs: this.deps.ackTimeoutMs ?? 8_000 })) {
+      // It may still be shown later: its interactive viewers become writable then.
+      this.watchLateAck(pages.flatMap((page) => page.viewers).filter((v) => v.writable === "pending").map((v) => v.cellId));
       notes.push(`herdr-app has not confirmed showing this view yet. It is written to the Rig layout and appears there; its viewers stay read-only until it is shown. If this window is attached to a different herdr-core than the daemon's (${describeCore(this.deps.hc)}), the viewers never appear here; start the daemon with that core's HC_SESSION/HC_SOCKET.`);
       return notes;
     }
@@ -369,8 +397,64 @@ export class HerdrAppProvider implements TerminalProvider {
       if (viewer.attach === "remote" || viewer.readOnly || viewer.state !== "live" || !viewer.terminal) continue;
       const writable = await this.makeWritable(viewer);
       if (writable) notes.push(writable);
+      else viewer.writable = "granted";
     }
     return notes;
+  }
+
+  /** After an open that the app didn't confirm in time: when the app shows these cells' viewers (an acknowledgement of
+   *  that write or a later one lists their terminals), they become writable. No select: the person may be elsewhere. */
+  private watchLateAck(cells: string[]): void {
+    if (!cells.length) return;
+    let waiting = cells;
+    const deadline = Date.now() + (this.deps.lateAckMs ?? 10 * 60 * 1000);
+    void (async () => {
+      while (!this.stopped && waiting.length) {
+        const ack = await this.deps.files.readAck().catch(() => null);
+        if (ack) waiting = await this.serial(() => this.grantShown(waiting, ack.terminals));
+        if (!waiting.length || Date.now() >= deadline) return;
+        await this.sleep(this.deps.latePollMs ?? 500);
+      }
+    })().catch(() => {});
+  }
+
+  /** Grants the keyboard to pending viewers in `cells` the app now shows. Returns the cells still waiting. */
+  private async grantShown(cells: readonly string[], shown: readonly string[]): Promise<string[]> {
+    if (this.stopped) return [];
+    const state = await this.deps.files.load();
+    const viewers = state.views.flatMap((v) => v.viewers).filter((v) => cells.includes(v.cellId) && v.writable === "pending");
+    const waiting: string[] = [];
+    let changed = false;
+    for (const viewer of viewers) {
+      if (viewer.state !== "live" || !viewer.terminal) continue;
+      if (!shown.includes(viewer.terminal)) { waiting.push(viewer.cellId); continue; }
+      if (!await this.makeWritable(viewer)) { viewer.writable = "granted"; changed = true; }
+    }
+    if (changed) await this.deps.files.save(state);
+    return waiting;
+  }
+
+  /** A seat's tmux session was replaced (handover, restart): the viewer's tile attaches again with a new, read-only
+   *  client. Look for it a few times and hand it the keyboard again, if the person had it. */
+  regrantSoon(): void {
+    for (const delay of this.deps.regrantDelaysMs ?? [2_000, 6_000, 15_000]) {
+      void this.sleep(delay).then(() => (this.stopped ? [] : this.regrant())).catch(() => {});
+    }
+  }
+
+  /** Hands the keyboard back to every granted viewer's current tmux client (only its own, identified client). */
+  regrant(): Promise<string[]> {
+    return this.serial(async () => {
+      if (this.stopped) return [];
+      const state = await this.deps.files.load();
+      const notes: string[] = [];
+      for (const viewer of state.views.flatMap((v) => v.viewers)) {
+        if (viewer.writable !== "granted" || viewer.attach !== "local" || viewer.readOnly || viewer.state !== "live" || !viewer.terminal) continue;
+        const note = await this.makeWritable(viewer);
+        if (note) notes.push(note);
+      }
+      return notes;
+    });
   }
 
   /** The explicit reveal hands this viewer's tmux client the keyboard (`switch-client -r` toggles read-only). */

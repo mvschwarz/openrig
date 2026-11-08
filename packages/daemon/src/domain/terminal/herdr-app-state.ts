@@ -24,6 +24,9 @@ export interface ViewerRecord {
   argv: string[];
   /** Interactive local panes become writable at an explicit reveal; read-only panes never do. */
   readOnly: boolean;
+  /** Interactive local panes only. pending: not shown yet, so still read-only; granted: the person has seen it, so its own
+   *  tmux client gets the keyboard, again whenever that client is replaced (a handover or restart of the same agent). */
+  writable?: "pending" | "granted";
   /** Local seats attach via openrig-tile and hand over the keyboard on reveal; remote seats run their own ssh command. */
   attach: "local" | "remote";
   terminal: string | null;
