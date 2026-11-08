@@ -897,6 +897,8 @@ export class ClaudeCompactionEnforcer {
     const attempt = this.pendingPreCompactPrep.get(input.sessionName);
     if (input.runtime !== "claude-code" || attempt?.mode !== "automatic" || attempt.status !== "waiting"
       || attempt.delivery === "pending") return { triggered: false, reason: "no_pending_stage" };
+    const threshold = this.settingsStore.resolveClaudeCompactionPolicy().thresholdPercent;
+    if (!isValidThresholdPercent(threshold)) return { triggered: false, reason: "invalid_policy" };
     const otherConversation = !!attempt.sessionId && !!input.sessionId && attempt.sessionId !== input.sessionId;
     // Another conversation, known on both sides, ends an armed or held map, as on the fresh path, also one whose map isn't
     // complete yet: a later sample whose conversation reads unknown must not compact with it.
@@ -905,8 +907,6 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, reason: "preparation_stopped" };
     }
     if (!this.mapReady(attempt)) return { triggered: false, reason: "no_pending_stage" };
-    const threshold = this.settingsStore.resolveClaudeCompactionPolicy().thresholdPercent;
-    if (!isValidThresholdPercent(threshold)) return { triggered: false, reason: "invalid_policy" };
     const dropped = lastUsedPercentage != null && lastUsedPercentage < threshold;
     if (dropped && !attempt.compactInFlight) {
       // A held map ends, as on a fresh dip. An attempt not held keeps its deadline (and a later fresh sample above may
