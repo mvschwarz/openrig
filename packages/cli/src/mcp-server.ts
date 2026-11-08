@@ -1592,8 +1592,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
             + "items (owned or mine) need this app's seat; reply to the team's questions as a message or a new task naming the "
             + "question's qitemId. To act as this app's address on the team, such as cursor@my-team, the server needs "
             + "OPENRIG_SESSION_NAME: in Claude Code, set the plugin's OpenRig seat; in Codex, pass it with --env on codex mcp add. "
-            + "VS Code, Copilot CLI and Cursor can't give a plugin's server a value, so start the app from a shell where "
-            + "OPENRIG_SESSION_NAME is set, or use your own rig mcp serve --front-door server that sets it instead of the plugin's.";
+            + "VS Code, Copilot CLI and Cursor can't give a plugin's server a value: add your own rig mcp serve --front-door "
+            + "server with OPENRIG_SESSION_NAME in its env and turn the plugin's openrig server off (in VS Code, give yours "
+            + "another name, such as openrig-seat). Starting the app from a shell with it set lasts only for that launch.";
           const none = { ok: true, seat: null, caller, unknownSender, ...(options.unfilledSeat ? { unfilledSeat: options.unfilledSeat } : {}), message };
           return { content: [{ type: "text" as const, text: JSON.stringify(none) }], structuredContent: none };
         }

@@ -74,8 +74,9 @@ Install the plugin from this folder with the app's own install-from-folder step.
 from Source**; in Cursor, copy the folder to `~/.cursor/plugins/local/openrig` and reload. The app starts one `openrig`
 server, `rig mcp serve --front-door`, from the root `mcp.json`, and should load the skill.
 
-- **No seat:** these apps can't set a seat for a plugin's server, so it starts with none. The exception is an app started
-  from a shell where `OPENRIG_SESSION_NAME` (or the older `RIGGED_SESSION_NAME`) is set: its server acts as that seat.
+- **No seat:** these apps can't set a seat for a plugin's server, so it starts with none. An app started from a shell
+  where `OPENRIG_SESSION_NAME` (or the older `RIGGED_SESSION_NAME`) is set passes it on, but only for that launch: on
+  macOS, reopening the app from the Dock drops it, and an already running VS Code keeps its own environment.
   - **What goes through without one:** messages (`rig_send`), new tasks (`rig_queue_create`) and chat
     (`rig_chatroom_send`) reach the team as an unknown sender, `unknown-mcp-` and eight hex digits, one per server. Each
     opens with a note saying why there's no seat and what the app's MCP client says it is. There's no return address,
@@ -85,13 +86,21 @@ server, `rig mcp serve --front-door`, from the root `mcp.json`, and should load 
     recording an answer to the team's questions. Listing the questions sent to you (`rig_queue_list` with `owned` or
     `mine`) needs the seat too. Set one to get the team's questions and replies.
   - Environment export needs an HTTP work grant, which a plugin's local server never has.
-- **One `openrig` server:** if something else in the app already provides an MCP server named `openrig` with your seat,
-  use that one or the plugin's, not both.
+- **To give the app a seat,** add your own MCP server that runs `rig mcp serve --front-door` with
+  `OPENRIG_SESSION_NAME=<address>` in its environment, and turn the plugin's `openrig` server off, so the app runs one
+  OpenRig server. The plugin's skill stays installed. Verified on VS Code 1.145 and Cursor 3.27, where the team's
+  questions then reach you and your answers are recorded, across a reopen:
+  - **VS Code:** add it to your user `mcp.json` under a name other than `openrig`, such as `openrig-seat`, and disable
+    the plugin's `openrig` in **MCP: List Servers**. Two servers named `openrig` are hard to tell apart, and starting
+    one can stop the other.
+  - **Cursor:** add it to `.cursor/mcp.json` (the project's or your user one), turn it on, and disable
+    **openrig · Plugin** in **Customize → MCPs**.
+  - **Copilot CLI:** add it the CLI's own way and turn the plugin's server off; not yet verified.
 
 ## What it doesn't do
 
 - It adds no panel to the app, and nothing wakes your chat when the team finishes: ask your agent to check.
 - Everyone using the app on this machine acts as the seat it names.
 - It reaches a team on this machine.
-- **Outside Claude Code and Codex,** until a seat is set, it hands the team work only as an unknown sender with no return
-  address, and it can't record answers to the team's questions: see "No seat" above.
+- **Outside Claude Code and Codex,** until you give the app a seat, it hands the team work only as an unknown sender
+  with no return address, and it can't record answers to the team's questions: see "No seat" above for how.
