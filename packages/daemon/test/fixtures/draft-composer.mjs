@@ -4,7 +4,7 @@ import { writeFileSync, renameSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import stringWidth from "string-width";
 
-const [runtime, stateFile] = process.argv.slice(2);
+const [runtime, stateFile, footerVariant] = process.argv.slice(2);
 let input = "", pending = "", pasting = false, cursor = 0, ghost = false;
 const submissions = [];
 const decoder = new StringDecoder("utf8");
@@ -21,6 +21,11 @@ function render() {
   if (runtime === "claude" && ghost) {
     rows[rows.length - 1] = "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
     rows.push("✘ Auto-update failed: no write permission to npm prefix · Run claude doctor");
+  }
+  if (runtime === "claude" && footerVariant === "update-banner") {
+    const banner = "✔ Update installed · Restart to update";
+    rows[rows.length - 1] = input ? `paste again to expand  ${banner}` : "⏵⏵ accept edits on (shift+tab to cycle)";
+    if (!input) rows.push(banner);
   }
   const beforeCursor = input.slice(0, cursor).split("\n");
   process.stdout.write(`\x1b[2J\x1b[H${rows.join("\r\n")}\x1b[${start + beforeCursor.length};${3 + stringWidth(beforeCursor.at(-1))}H`);

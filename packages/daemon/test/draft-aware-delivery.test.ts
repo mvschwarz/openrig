@@ -347,6 +347,44 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("delivered");
   });
 
+  // Constructed footer transition: U3 retained no immediate pre-Enter snapshot.
+  // Exercise the real transport/guard path, not just the empty-composer parser.
+  it.each(["✔ Update installed · Restart to update", "✔ Update installed · Restart to apply", "✔ Update installed · /restart to apply"])(
+    "submits one owned paste when its hint shares the footer with %s", async banner => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      const text = "first line\nsecond line\nlast line";
+      vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+        const staged = f.bodies.a === text;
+        const snapshot = frame(staged ? "[Pasted text #1 +2 lines]" : f.bodies.a ?? "");
+        snapshot.screen = snapshot.screen.replace("? for shortcuts\n",
+          staged ? `paste again to expand  ${banner}\n`
+            : `⏵⏵ accept edits on (shift+tab to cycle)\n${banner}\n`);
+        return snapshot;
+      });
+      const result = await f.send("update-banner-paste", text, { verify: false });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+      expect(f.submissions).toEqual([text]);
+      expect(f.bodies.a).toBe("");
+      expect(f.writes.filter(write => write.startsWith("paste:"))).toHaveLength(1);
+      expect(f.writes.filter(write => write.startsWith("keys:"))).toHaveLength(1);
+    });
+
+  it.each(["✔ Update installed · Restart to update now", "Update installed · Restart to update", "✔ Update downloaded · Restart to update"])(
+    "does not submit an owned paste under an unrecognized footer suffix %s", async suffix => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      const text = "first line\nsecond line\nlast line";
+      vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+        const snapshot = frame(f.bodies.a ?? "");
+        snapshot.screen = snapshot.screen.replace("? for shortcuts\n", f.bodies.a === text
+          ? `paste again to expand  ${suffix}\n`
+          : "⏵⏵ accept edits on (shift+tab to cycle)\n");
+        return snapshot;
+      });
+      expect(await f.send("unknown-paste-footer", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+      expect(f.submissions).toEqual([]);
+      expect(f.bodies.a).toBe(text);
+    });
+
   it.each(Array.from({ length: nativePaste.afterSamples }, (_, i) => i + 1))("submits its retained native paste across the footer change (sample %i)", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const text = Array.from({ length: 71 }, (_, i) => `delivery line ${i}`).join("\n");
