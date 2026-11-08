@@ -247,15 +247,17 @@ export class HerdrViewer {
       }
       const process = body(await this.run(["pane", "process-info", "--pane", current.pane_id]));
       const info = process.process_info as { foreground_processes?: Array<{ argv?: unknown }> } | undefined;
-      // The foreground tmux client carries the exact server/session argv. The
-      // shared attach wrapper may be its parent; no mutable title/agent label.
+      // The tile's own script (attach.sh execs it) carries the exact server/session argv, and stays in the foreground
+      // while it views the seat and while it attaches. Kept tiles from earlier releases may show only their foreground
+      // tmux client, with the same exact argv. No mutable title/agent label.
       const argv = entry.argv;
       const server = argv.slice(6); // tileAttachArgv: sh,-c,script,name,session,tmux,...server
-      // Recognize legacy ignore-size writable clients as well as current sizing attaches.
+      // Recognize legacy ignore-size writable clients as well as sizing attaches.
       const flags = entry.readOnly ? [["-r"]] : [["-f", "ignore-size"], []];
       const targetName = argv[4]!;
       const verified = info?.foreground_processes?.some(p => {
         const actual = p.argv;
+        if (Array.isArray(actual) && actual.length === argv.length && argv.every((word, index) => actual[index] === word)) return true;
         return Array.isArray(actual) && flags.some(flag => {
           const expected = [argv[5]!, ...server, "attach", ...flag, "-t"];
           return expected.every((word, index) => actual[index] === word)

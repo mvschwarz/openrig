@@ -4,7 +4,7 @@ import { shellQuote } from "../src/adapters/shell-quote.js";
 // exits at once must not be reported as opened. The shell parsing below is real; no terminal
 // provider, tmux server or ssh server is claimed, and the herdr replies are fakes.
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -17,16 +17,28 @@ import type { ComposedPane, ComposedView, OpenViewResult, TerminalProvider } fro
 const local = (seat: string, readOnly = false): ViewMemberInput => ({ seat, label: seat, tmuxSession: seat, host: null, readOnly, alive: true });
 
 describe("#707 local tiles run the tmux the daemon resolves", () => {
-  it("a provider PATH without tmux fails the bare command; the resolved path attaches, keeping -r", () => {
+  it("a provider PATH without tmux fails the bare command; the resolved path views the seat, and neither mode attaches untyped", () => {
     const root = mkdtempSync(join(tmpdir(), "openrig-707-"));
-    const narrow = join(root, "provider-path"); // the provider's PATH: no tmux here
+    const narrow = join(root, "provider-path"); // the provider's PATH: system tools, no tmux
     const elsewhere = join(root, "elsewhere"); // where the daemon found tmux
     mkdirSync(narrow);
     mkdirSync(elsewhere);
+    for (const tool of ["cat", "date", "dd", "mktemp", "rm", "sed", "sleep", "stty", "tty"]) {
+      symlinkSync(execFileSync("/bin/sh", ["-c", `command -v ${tool}`], { encoding: "utf8" }).trim(), join(narrow, tool));
+    }
     const tmux = join(elsewhere, "tmux");
-    writeFileSync(tmux, '#!/bin/sh\ncase $1 in display-message) target=$4; target=${target#=}; printf "7 session-id:%s\\n" "${target%:}";; show-environment) exit 1;; list-clients) printf "%s\\n" $OPR_CLIENTS;; attach) printf "%s\\n" "$@" > "$OPR_ARGS";; esac\n', { mode: 0o700 });
-    const argsFile = join(root, "args");
-    const env = { PATH: narrow, OPR_ARGS: argsFile, OPR_CLIENTS: "" };
+    // One read of the activity time and the screen (one tmux call), then the seat reads as gone; the call records how
+    // the screen was read.
+    writeFileSync(tmux, `#!/bin/sh
+case $1 in
+display-message) case $5 in "#{window_activity}") [ -e "$OPR_SEEN" ] && exit 0; : > "$OPR_SEEN"; date +%s; shift 6; printf "%s\\n" "$@" > "$OPR_ARGS"; printf "SCREEN\\n";; *) target=$4; target=\${target#=}; printf "7 session-id:%s\\n" "\${target%:}";; esac;;
+show-environment) exit 1;;
+capture-pane) printf "%s\\n" "$@" > "$OPR_ARGS"; printf "SCREEN\\n";;
+*) printf "%s\\n" "$@" >> "$OPR_OTHER";;
+esac
+`, { mode: 0o700 });
+    const argsFile = join(root, "args"), seen = join(root, "seen"), other = join(root, "other");
+    const env = { PATH: narrow, OPR_ARGS: argsFile, OPR_SEEN: seen, OPR_OTHER: other };
     try {
       for (const readOnly of [false, true]) {
         const bare = composeView("v", [local("seat'a", readOnly)], { resolveHost: () => null });
@@ -34,11 +46,12 @@ describe("#707 local tiles run the tmux the daemon resolves", () => {
         expect(spawnSync("/bin/sh", ["-c", bare.opened[0]!.paneCommand], { env }).status).toBe(127);
 
         const resolved = composeView("v", [local("seat'a", readOnly)], { resolveHost: () => null, localTmux: tmux });
-        // A writable tile sizes its session even when an older sizing client is still attached.
-        for (const clients of ["", "attached,ignore-size,read-only attached,focused", "attached,ignore-size"]) {
-          execFileSync("/bin/sh", ["-c", resolved.opened[0]!.paneCommand], { env: { ...env, OPR_CLIENTS: clients } });
-          expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(["attach", ...(readOnly ? ["-r"] : []), "-t", "session-id"]);
-        }
+        rmSync(seen, { force: true });
+        const out = execFileSync("/bin/sh", ["-c", resolved.opened[0]!.paneCommand], { env, encoding: "utf8" });
+        expect(out).toContain("SCREEN");
+        expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(["capture-pane", "-p", "-e", "-t", "session-id"]);
+        // Nobody typed, so nothing attached or typed into the seat.
+        expect(existsSync(other)).toBe(false);
         expect(resolved.opened[0]!.readOnly).toBe(readOnly);
       }
     } finally {
