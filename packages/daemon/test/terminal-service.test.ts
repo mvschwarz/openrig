@@ -101,7 +101,7 @@ describe("SSH tiles follow the viewing instance's effective server mode", () => 
         expect(command).toMatch(/^ssh -t 'fixture' /);
         expect(command).toContain("OPENRIG_NODE_ID");
         // A read-only tile only views its seat: it never attaches.
-        expect(command).toContain('open() { t=$1; shift; view "$t" "" "$@"; };');
+        expect(command).toContain('open() { t=$1; shift; stty -echo -isig 2>/dev/null; view "$t" "" "$@"; };');
         expect(command).not.toMatch(/attach -r|while use/);
         expect(command).toContain("No replacement for $target; reopen the view with rig terminal open.");
         expect(command).not.toContain("rig terminal attach");
@@ -240,7 +240,7 @@ describe("TerminalService — view resolution + one-shape result", () => {
     const res = await svc.openView({ view });
     expect(res.ok).toBe(true);
     expect(herdr.lastView?.opened.every((p) => p.readOnly === true)).toBe(true);
-    expect(herdr.lastView?.opened[0]?.paneCommand).toContain('open() { t=$1; shift; view "$t" "" "$@"; };');
+    expect(herdr.lastView?.opened[0]?.paneCommand).toContain('open() { t=$1; shift; stty -echo -isig 2>/dev/null; view "$t" "" "$@"; };');
     expect(herdr.lastView?.opened[0]?.paneCommand).not.toMatch(/attach -r|while use/);
     expect(res.notes?.join("\n") ?? "").not.toMatch(/lead pane|Can you see the team/);
   });

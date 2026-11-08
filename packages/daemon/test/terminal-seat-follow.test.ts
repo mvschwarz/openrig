@@ -98,6 +98,56 @@ it.skipIf(process.platform === "win32").each(["identity", "removed", "unmanaged"
   });
 });
 
+// A restarted server numbers its sessions afresh, so the seat's old session id can belong to another seat.
+it.skipIf(process.platform === "win32").each([["seat-other", true], ["seat", true], ["seat-other", false]])("never shows or types into another seat that holds the old session id on a restarted server, named %s (managed: %s)", async (name, managed) => {
+  await fixture(async ({ socket, seats, viewer }) => {
+    await seats(["new-session", "-d", "-s", "seat", ...(managed ? ["-e", "OPENRIG_NODE_ID=original"] : []), "printf 'ORIGINAL\\n'; exec cat"]);
+    const command = tileAttachArgv("tmux", ["-S", socket], "seat", false, 2).map(shellQuote).join(" ");
+    await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
+    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
+    const id = await seats(["display-message", "-p", "-t", "=seat:", "#{session_id}"]);
+    await seats(["kill-server"]);
+    await seats(["-f", "/dev/null", "new-session", "-d", "-s", "anchor", "sleep 60", ";",
+      "new-session", "-d", "-s", name, "-e", "OPENRIG_NODE_ID=DIFFERENT", "printf 'OTHER-SEAT\\n'; exec cat"]);
+    expect(await seats(["display-message", "-p", "-t", id, "#{session_name}"])).toBe(name);
+    await viewer(["send-keys", "-t", "=view:", "-l", "KEY-FOR-ORIGINAL"]);
+    await until(async () => (await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])) === "1");
+    expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("OTHER-SEAT");
+    expect(await seats(["capture-pane", "-p", "-t", `=${name}:`])).not.toContain("KEY-FOR-ORIGINAL");
+    expect(await seats(["list-clients", "-F", "#{session_name}"])).toBe("");
+  });
+});
+
+// With no key typed, only the view's own reads can tell the seat changed.
+it.skipIf(process.platform === "win32").each([false, true])("a read-only tile stops showing a restarted server's session that another seat now holds (managed: %s)", async managed => {
+  await fixture(async ({ socket, seats, viewer }) => {
+    await seats(["new-session", "-d", "-s", "seat", ...(managed ? ["-e", "OPENRIG_NODE_ID=original"] : []), "printf 'ORIGINAL\\n'; exec cat"]);
+    const command = tileAttachArgv("tmux", ["-S", socket], "seat", true, 2).map(shellQuote).join(" ");
+    await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
+    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
+    const id = await seats(["display-message", "-p", "-t", "=seat:", "#{session_id}"]);
+    await seats(["kill-server"]);
+    await seats(["-f", "/dev/null", "new-session", "-d", "-s", "anchor", "sleep 60", ";",
+      "new-session", "-d", "-s", "seat-other", "-e", "OPENRIG_NODE_ID=DIFFERENT", "printf 'OTHER-SEAT\\n'; exec cat"]);
+    expect(await seats(["display-message", "-p", "-t", id, "#{session_name}"])).toBe("seat-other");
+    await new Promise(r => setTimeout(r, 2500));
+    expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("OTHER-SEAT");
+    await until(async () => (await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])) === "1");
+  });
+});
+
+it.skipIf(process.platform === "win32")("stops showing a session whose seat identity changed in place", async () => {
+  await fixture(async ({ socket, seats, viewer }) => {
+    await seats(["new-session", "-d", "-s", "seat", "-e", "OPENRIG_NODE_ID=original", "printf 'ORIGINAL\\n'; exec cat"]);
+    const command = tileAttachArgv("tmux", ["-S", socket], "seat", false, 2).map(shellQuote).join(" ");
+    await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
+    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
+    await seats(["set-environment", "-t", "=seat", "OPENRIG_NODE_ID", "DIFFERENT", ";", "send-keys", "-t", "=seat:", "-l", "OTHER-SEAT"]);
+    await until(async () => (await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])) === "1");
+    expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("OTHER-SEAT");
+  });
+});
+
 it.skipIf(process.platform === "win32")("a detach returns a tile someone typed in to viewing its seat", async () => {
   await fixture(async ({ socket, seats, viewer }) => {
     await seats(["new-session", "-d", "-s", "seat", "-e", "OPENRIG_NODE_ID=original", "printf 'ORIGINAL\\n'; exec cat"]);

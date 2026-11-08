@@ -328,9 +328,13 @@ after tmux records new activity, and lets the tile's own terminal wrap each
 line. A tile narrower than the agent's window still shows whole lines, and
 showing a seat never changes its size. A rule drawn across the window is cut to
 the tile's width. A read-only tile only shows the seat. In a writable tile, the
-first key you press goes to the seat and the tile attaches, sizing the window
+first thing you type or paste attaches the tile and goes through tmux as it
+would in any attached client: a paste arrives as one paste, and tmux's prefix
+works (prefix then `[` to scroll back, for example). The tile sizes the window
 while you use it, as any client you type in does; after 30 seconds without a
-key it detaches and shows the seat again. The printed manual attach commands
+key it detaches and shows the seat again. A tile that's only showing has no
+scrollback of its own. If the seat's tmux server restarts, a tile shows the
+seat again only when the same managed seat returns. The printed manual attach commands
 keep `-f ignore-size`. Observers of a Herdr terminal do not themselves resize
 it; a controlling browser can. No cross-version resize guarantee is implied.
 

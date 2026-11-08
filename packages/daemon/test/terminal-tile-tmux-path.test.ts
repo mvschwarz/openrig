@@ -31,7 +31,7 @@ describe("#707 local tiles run the tmux the daemon resolves", () => {
     // the screen was read.
     writeFileSync(tmux, `#!/bin/sh
 case $1 in
-display-message) case $5 in "#{window_activity}") [ -e "$OPR_SEEN" ] && exit 0; : > "$OPR_SEEN"; date +%s; shift 6; printf "%s\\n" "$@" > "$OPR_ARGS"; printf "SCREEN\\n";; *) target=$4; target=\${target#=}; printf "7 session-id:%s\\n" "\${target%:}";; esac;;
+display-message) case $5 in "#{pid} #{window_activity}") [ -e "$OPR_SEEN" ] && exit 0; : > "$OPR_SEEN"; printf "7 %s\\n" "$(date +%s)"; shift 6; printf "%s\\n" "$@" > "$OPR_ARGS"; printf "SCREEN\\n";; *) target=$4; target=\${target#=}; printf "7 session-id:%s\\n" "\${target%:}";; esac;;
 show-environment) exit 1;;
 capture-pane) printf "%s\\n" "$@" > "$OPR_ARGS"; printf "SCREEN\\n";;
 *) printf "%s\\n" "$@" >> "$OPR_OTHER";;
@@ -43,16 +43,45 @@ esac
       for (const readOnly of [false, true]) {
         const bare = composeView("v", [local("seat'a", readOnly)], { resolveHost: () => null });
         // The reported failure: `sh: tmux: command not found`, exit 127.
-        expect(spawnSync("/bin/sh", ["-c", bare.opened[0]!.paneCommand], { env }).status).toBe(127);
+        // A tile that never ends fails here rather than hanging the run.
+        expect(spawnSync("/bin/sh", ["-c", bare.opened[0]!.paneCommand], { env, timeout: 10000 }).status).toBe(127);
 
         const resolved = composeView("v", [local("seat'a", readOnly)], { resolveHost: () => null, localTmux: tmux });
         rmSync(seen, { force: true });
-        const out = execFileSync("/bin/sh", ["-c", resolved.opened[0]!.paneCommand], { env, encoding: "utf8" });
+        const out = execFileSync("/bin/sh", ["-c", resolved.opened[0]!.paneCommand], { env, encoding: "utf8", timeout: 10000 });
         expect(out).toContain("SCREEN");
         expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(["capture-pane", "-p", "-e", "-t", "session-id"]);
         // Nobody typed, so nothing attached or typed into the seat.
         expect(existsSync(other)).toBe(false);
         expect(resolved.opened[0]!.readOnly).toBe(readOnly);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a managed tile with no sleep on the provider's PATH ends rather than rereading its seat without pause", () => {
+    const root = mkdtempSync(join(tmpdir(), "openrig-nosleep-"));
+    const narrow = join(root, "provider-path"); // system tools, but neither sleep nor tmux
+    mkdirSync(narrow);
+    for (const tool of ["cat", "date", "dd", "mktemp", "od", "rm", "sed", "stty", "tail", "tty"]) {
+      symlinkSync(execFileSync("/bin/sh", ["-c", `command -v ${tool}`], { encoding: "utf8" }).trim(), join(narrow, tool));
+    }
+    const tmux = join(root, "tmux");
+    // A managed seat that stays readable and keeps its identity.
+    writeFileSync(tmux, `#!/bin/sh
+case $1 in
+display-message) case $5 in "#{pid} #{window_activity}") printf "7 1\\nOPENRIG_NODE_ID=n1\\nSCREEN\\n";; *) target=$4; target=\${target#=}; printf "7 session-id:%s\\n" "\${target%:}";; esac;;
+show-environment) printf "OPENRIG_NODE_ID=n1\\n";;
+esac
+`, { mode: 0o700 });
+    try {
+      for (const readOnly of [false, true]) {
+        const view = composeView("v", [local("seat", readOnly)], { resolveHost: () => null, localTmux: tmux });
+        const result = spawnSync("/bin/sh", ["-c", view.opened[0]!.paneCommand], { env: { PATH: narrow }, encoding: "utf8", timeout: 10000 });
+        expect(result.signal).toBeNull();
+        expect(result.status).toBe(1);
+        expect(result.stdout).toContain("SCREEN");
       }
     } finally {
       rmSync(root, { recursive: true, force: true });

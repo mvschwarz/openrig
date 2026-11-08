@@ -19,6 +19,7 @@ describe.skipIf(!available)("a tile views its seat without sizing it, and attach
       readOnlyAlone: { window: "160x20" },
       readOnlyBesideAnother: { window: "160x20" },
       writable: { used: "40x30" },
+      firstInput: { bytes: 103 },
     });
   }, 60000);
 });

@@ -244,12 +244,14 @@ describe("owned Herdr viewer", () => {
   });
   it("a writable tile attaches, sizing, only from its one typing path; a read-only tile never attaches; recovery still attaches", () => {
     const rw = tileAttachArgv("tmux", [], "a@team", false)[2]!;
-    expect(rw.match(/attach -t/g)).toEqual(['attach -t']);
-    expect(rw).toContain('"$@" attach -t "$t";');
+    // Both attaches are the typing path's: a plain one, and one that carries the first keys.
+    expect(rw.match(/attach -t/g)).toEqual(['attach -t', 'attach -t']);
+    expect(rw).toContain('then go "$@"; else "$@" attach -t "$t"; fi;');
+    expect(rw).toContain('go() { set -- "$@" attach -t "$t";');
     expect(rw.match(/open "/g)).toHaveLength(4);
     expect(rw).not.toContain("ignore-size");
     const ro = tileAttachArgv("tmux", [], "a@team", true)[2]!;
-    expect(ro).toContain('open() { t=$1; shift; view "$t" "" "$@"; };');
+    expect(ro).toContain('open() { t=$1; shift; stty -echo -isig 2>/dev/null; view "$t" "" "$@"; };');
     expect(ro).not.toMatch(/attach -r|while use/);
     expect(ro).not.toContain("pick");
     const f = fixture(); expect(f.target.recoveryCommand).toContain("attach -t");
