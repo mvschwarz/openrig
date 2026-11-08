@@ -824,10 +824,10 @@ login. A source account override or Claude token is cleared only at commit;
 credentials are never converted between runtimes. Pi-to-Pi account changes keep
 Pi settings, but cross-runtime switches resolve settings afresh for the target.
 
-A configured `launch_wrapper` carries between Pi and Codex, and from Codex to
-Claude Code. It must support the target executable and preserve its credential
-environment. A wrapped Pi seat cannot switch to Claude Code; set
-`launch_wrapper: []` in the authored spec and re-apply it first.
+A configured `launch_wrapper` carries across runtime switches among Pi, Codex
+and Claude Code. It must support each successor executable and preserve that
+runtime's credential environment. A wrapped Pi seat cannot switch to Claude
+Code; set `launch_wrapper: []` in the authored spec and re-apply it first.
 
 The new runtime takes over before the old one stops. Its successor starts beside
 the current occupant, reads a handover (the seat's recap, its open rows and the
