@@ -1,7 +1,7 @@
 import type { TerminalActor, TerminalPolicyStore } from "./terminal-policy.js";
 import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
-import { CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type SendResult } from "./session-transport.js";
+import { CAPTURE_READABLE_BUDGET_MS, SEND_READINESS_FRESHNESS_MS, type SessionTransport, type SendResult } from "./session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
 import { postCompactExtraSetting } from "./managed-restore-read-access.js";
 import * as fs from "node:fs";
@@ -718,7 +718,8 @@ export class ClaudeCompactionEnforcer {
     this.now = opts?.now ?? (() => Date.now());
     this.sleep = opts?.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
     this.postCompactSendWaitMs = opts?.postCompactSendWaitMs ?? POST_COMPACT_SEND_WAIT_MS_DEFAULT;
-    this.compactSendIdleWaitMs = opts?.compactSendIdleWaitMs ?? 1000;
+    // A fresh preparation hook can veto even a visibly idle pane for the full send-readiness window.
+    this.compactSendIdleWaitMs = opts?.compactSendIdleWaitMs ?? SEND_READINESS_FRESHNESS_MS;
     this.restartRecoveryWindowMs = opts?.restartRecoveryWindowMs ?? RESTART_RECOVERY_WINDOW_MS_DEFAULT;
     this.daemonInstance = opts?.daemonInstance ?? DAEMON_PROCESS_ID;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
