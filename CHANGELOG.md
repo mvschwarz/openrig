@@ -335,6 +335,9 @@ main ([#2736](https://github.com/mvschwarz/openrig/pull/2736)), a neutral TUI de
   its receiver claims it. **Relay:** "Accepted by bridge" means the bridge has
   it, not the person, and a failed send replays only at a restart. ([#2735](https://github.com/mvschwarz/openrig/pull/2735), [#2624](https://github.com/mvschwarz/openrig/pull/2624))
 - **Event retention** can't be undone, and the database file doesn't shrink. ([#2699](https://github.com/mvschwarz/openrig/pull/2699))
+- **`keep_saved` skills:** a skill whose source changes between `rig down` and
+  the restore comes back missing, named in the restore's warnings; an edited seat
+  copy is kept. ([#2626](https://github.com/mvschwarz/openrig/pull/2626))
 - **Terminal tiles** each run one tmux command a second while showing: 8 tiles
   used about 6–8% of one core on an Apple Silicon Mac mini, against about 0.2%
   for 0.7.10's attached tiles. ([#2757](https://github.com/mvschwarz/openrig/pull/2757))

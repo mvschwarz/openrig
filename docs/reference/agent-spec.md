@@ -459,8 +459,10 @@ skills:
 
 An unknown `on_restore` value produces an advisory and uses `keep_saved`; it does not invalidate the spec.
 
-A restore keeps the skills a seat was launched with. With `keep_saved`, it puts back the saved copy and never takes
-today's bytes from the source. With `follow_source`, before the seat's session starts, the restore reads the seat's agent
+A restore keeps the skills a seat was launched with where it can. With `keep_saved`, it puts back a missing copy only
+while its recorded source still has the saved bytes, and never takes today's bytes from the source: if `rig down`
+removed an unchanged copy and the source has changed since, the skill stays missing and the restore names it in its
+warnings. With `follow_source`, before the seat's session starts, the restore reads the seat's agent
 spec as it is now, using the saved launch recipe and rig folder, and:
 
 - replaces the seat's copy with the source folder as it is now, and records it, so `rig down` removes it and the next

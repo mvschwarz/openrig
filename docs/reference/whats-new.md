@@ -211,6 +211,9 @@ port (normally 7433)."
   `rig compact <seat> --cancel`, then send a restore request naming the newest
   restore map, marker and packet. A refused queue wake now waits for that step,
   but recovery at daemon start and a new handoff's wake don't check yet.
+- **`keep_saved` skills:** a skill whose source changes between `rig down` and
+  the restore comes back missing, named in the restore's warnings; an edited seat
+  copy is kept.
 - **Terminal tiles** each run one tmux command a second while showing (8 tiles
   used about 6–8% of one core on an Apple Silicon Mac mini).
 - **A message held as `draft_input_unknown`** isn't retried, and whether
