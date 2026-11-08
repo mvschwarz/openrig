@@ -156,6 +156,22 @@ describe("ContextUsageStore", () => {
     expect(usage.reason).toBe("parse_error");
   });
 
+  // #2682: the first sample of a new conversation (after /clear) can carry no percentage yet. It stays unknown, but keeps
+  // the conversation it names, so a held compaction for the previous conversation can tell it changed.
+  it("an unknown sample without a percentage keeps the conversation the sidecar names", () => {
+    const usage = store.normalizeSample({
+      session_id: "conversation-two", session_name: "dev-impl@rig", transcript_path: "/tmp/t.jsonl",
+      sampled_at: new Date().toISOString(), context_window: { used_percentage: null, remaining_percentage: null },
+    } as any);
+    // the session name goes with the conversation, so the name guards (resume-token discovery, the session_mismatch
+    // of getForNode) still apply to an unknown row that names a conversation
+    expect(usage).toMatchObject({
+      availability: "unknown", reason: "parse_error", usedPercentage: null, fresh: false, sessionId: "conversation-two",
+      sessionName: "dev-impl@rig",
+    });
+    expect(store.normalizeSample({ session_id: 42 } as any).sessionId).toBeNull();
+  });
+
   // T4: Stale sample -> fresh=false but values retained
   it("stale sample has fresh=false but retains persisted values", () => {
     const stale = {

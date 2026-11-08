@@ -72,12 +72,12 @@ describe("context observations retain their compaction target", () => {
     usage(name, 90);
     return { rig, node, session, name };
   }
-  function usage(name: string, percentage: number, sampledAt = new Date().toISOString()) {
+  function usage(name: string, percentage: number | null, sampledAt = new Date().toISOString(), sessionId = "native-fixture") {
     const dir = join(home, "state", "context-usage");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${name}.json`), JSON.stringify({
-      session_name: name, session_id: "native-fixture", sampled_at: sampledAt,
-      context_window: { used_percentage: percentage, remaining_percentage: 100 - percentage,
+      session_name: name, session_id: sessionId, sampled_at: sampledAt,
+      context_window: { used_percentage: percentage, remaining_percentage: percentage === null ? null : 100 - percentage,
         total_input_tokens: 1000, total_output_tokens: 100, context_window_size: 200000 },
     }));
   }
@@ -354,5 +354,60 @@ describe("context observations retain their compaction target", () => {
     await poller.pollOnce();
     expect(send).toHaveBeenCalledTimes(3);
     expect(send.mock.calls[2]?.[1]).toContain("OpenRig post-compaction turn boundary.");
+  });
+
+  // #2682: the monitor's drain for a stale or unknown sample carries the seat's newest usage and conversation, so a held
+  // map whose context dropped (or whose conversation changed) while no fresh sample came never compacts.
+  describe("a held map and the newest sample at the drain (#2682)", () => {
+    const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+    const compacts = () => send.mock.calls.filter(args => String(args[1]).startsWith("/compact"));
+    /** An automatic attempt whose map is complete and whose /compact found a draft in the box: it is held. */
+    async function held() {
+      const { name } = seed("writer@fixture", "ready");
+      const poller = monitor(async () => ({ ready: true }));
+      await poller.pollOnce();
+      const prep = enforcer.getPreparationState(name)!;
+      expect(prep).toMatchObject({ status: "waiting" });
+      writeFileSync(`${prep.mapPath}.tmp`, `# Fixture restore map\n${prep.marker}\n`);
+      send.mockImplementationOnce(async () => ({ ok: false, reason: "draft_input_busy", sent: false }));
+      await poller.pollOnce();
+      expect(enforcer.getPreparationState(name)).toMatchObject({ status: "waiting", prepared: true });
+      expect(compacts()).toHaveLength(1);
+      return { name, poller, prep };
+    }
+
+    it.each([
+      { label: "an old known sample at 20%", percentage: 20, sessionId: "native-fixture", lastUsedPercentage: 20 },
+      { label: "an old known sample from another conversation", percentage: 90, sessionId: "native-other", lastUsedPercentage: 90 },
+    ])("$label: the drain gets the sample's usage and conversation, and no /compact goes", async ({ percentage, sessionId, lastUsedPercentage }) => {
+      const { name, poller, prep } = await held();
+      const drain = vi.spyOn(enforcer, "drainPendingPreparedCompact");
+      usage(name, percentage, minutesAgo(20), sessionId);
+      await poller.pollOnce();
+      expect(drain).toHaveBeenCalledWith(expect.objectContaining({ sessionName: name, lastUsedPercentage, sessionId }));
+      expect(compacts()).toHaveLength(1);
+      expect(enforcer.getPreparationState(name)).toMatchObject({
+        attemptId: prep.attemptId, status: "stopped", reason: "below_threshold_while_prepared",
+      });
+    });
+
+    it("the first sample after a /clear, with no percentage yet, still names the new conversation: no /compact goes", async () => {
+      const { name, poller, prep } = await held();
+      const drain = vi.spyOn(enforcer, "drainPendingPreparedCompact");
+      usage(name, null, minutesAgo(0), "native-after-clear");
+      await poller.pollOnce();
+      expect(drain).toHaveBeenCalledWith(expect.objectContaining({ lastUsedPercentage: null, sessionId: "native-after-clear" }));
+      expect(compacts()).toHaveLength(1);
+      expect(enforcer.getPreparationState(name)).toMatchObject({
+        attemptId: prep.attemptId, status: "stopped", reason: "below_threshold_while_prepared",
+      });
+    });
+
+    it("an old known sample still above, in the same conversation, lets the held /compact go", async () => {
+      const { name, poller } = await held();
+      usage(name, 90, minutesAgo(20));
+      await poller.pollOnce();
+      expect(compacts()).toHaveLength(2);
+    });
   });
 });

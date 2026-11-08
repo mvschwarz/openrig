@@ -888,8 +888,16 @@ version, from checking the environment to a useful report to the OpenRig team.
   may write. A daemon restart picks a managed compaction up where it stopped: an owed restore step
   resumes, a `/compact` that may have been sent is never sent again, and `rig compact --state`
   shows anything stranded or owed. A map finished during automatic preparation stays armed for the next idle moment
-  through the next retry interval; `--state` shows `idleDeadlineAt`. In either mode, expiry reads
-  `map_complete_seat_never_idle` when the map is finished, or `preparation_incomplete` when it is not.
+  through the next retry interval; `--state` shows `idleDeadlineAt`. If its `/compact` is refused before input (a
+  draft in the box, a pane in a tmux mode) or the seat never goes idle in that time, the automatic attempt is held:
+  `--state` shows `prepared`, `preparedAt` and `preparedReason`, and `/compact` goes in at the next idle moment with an
+  empty box, with the same map and no new preparation prompt. A held attempt stops on a fresh sample below the threshold
+  or from another conversation (`below_threshold_while_prepared`), once usage has risen 15 points since its request or
+  two hours after its map was ready (`prepared_map_stale`), or when its map no longer reads ready
+  (`preparation_incomplete`). After an attempt
+  stops with its request delivered, the next automatic request for the same conversation waits for an idle seat, also
+  across a daemon restart, for up to the restart-recovery window (6 hours by default) after that attempt stopped. Manual expiry reads
+  `map_complete_seat_never_idle` when the map is finished; in either mode, `preparation_incomplete` when it is not.
   `rig seat status` shows an owed restore stage and its last
   delivery result, and repeated delivery failures open one queue item for the seat's orchestrator, or a
   person when it has none.

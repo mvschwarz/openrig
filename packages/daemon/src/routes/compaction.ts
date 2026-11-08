@@ -220,6 +220,8 @@ function manualReasonMessage(sessionName: string, reason: string): string {
       return `Refused: '${sessionName}' is at an interactive prompt; the pre-compact prep could not be sent safely.`;
     case "target_activity_unknown":
       return `Refused: '${sessionName}' activity could not be determined; failing closed so /compact cannot land on a prompt.`;
+    case "already_in_progress":
+      return `'${sessionName}' already has a managed compaction under way (an automatic attempt may be held with a completed map until an idle moment with an empty box). See it with rig compact ${shellQuote(sessionName)} --state; rig compact ${shellQuote(sessionName)} --cancel ends it before a new request.`;
     case "wait_for_idle_timeout":
       return `Prep was sent to '${sessionName}' but it did not go idle in time, so /compact was NOT sent. Retry once the prep turn completes.`;
     default:
