@@ -573,7 +573,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     db,
     socketForNewSeats: () => (new ContextPackSettingsStore().resolveOne("terminal.herdr_socket").value as string) || defaultHerdrSeatSocket(),
   });
-  setDaemonSubstrateLookup((session) => substrateResolver.forTarget(session).kind);
+  // Process-wide (one daemon per process in production). A lookup whose DB has closed answers tmux, the behaviour
+  // before substrates, so a later daemon in the same process (tests) never reads a closed database.
+  setDaemonSubstrateLookup((session) => (db.open ? substrateResolver.forTarget(session).kind : "tmux"));
   const tmuxAdapter = createTerminalRouter(
     new TmuxAdapter(opts?.tmuxExec ?? (process.platform === "win32" ? execCommand : execTmuxCommand), undefined, argvExec, tmuxSelection?.executionArgs),
     {

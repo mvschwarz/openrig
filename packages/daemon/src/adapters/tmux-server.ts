@@ -91,11 +91,16 @@ export function setDaemonSubstrateLookup(lookup: ((session: string) => string) |
   daemonSubstrateOf = lookup;
 }
 
+/** The recorded lookup's answer; "tmux" when none is recorded or it can't answer (e.g. its daemon's DB is closed). */
+function substrateOf(session: string): string {
+  try { return daemonSubstrateOf?.(session) ?? "tmux"; } catch { return "tmux"; }
+}
+
 /** The attach COMMAND for a caller that runs or types it (cmux surfaces, layouts): null for a seat that isn't on tmux,
  *  so no prose hint ever reaches a shell (S3). Display callers use tmuxAttachCommand. */
 export function tmuxAttachExecCommand(session: string): string | null {
   const bare = session.replace(/^'(.*)'$/, "$1");
-  if ((daemonSubstrateOf?.(bare) ?? "tmux") !== "tmux") return null;
+  if (substrateOf(bare) !== "tmux") return null;
   return `${tmuxOnDaemonServer()} attach -t ${session}`;
 }
 
@@ -103,7 +108,7 @@ export function tmuxAttachExecCommand(session: string): string | null {
  *  terminal substrate gets where to find it instead: a tmux attach by its name could reach an unrelated session. */
 export function tmuxAttachCommand(session: string): string {
   const bare = session.replace(/^'(.*)'$/, "$1");
-  const substrate = daemonSubstrateOf?.(bare) ?? "tmux";
+  const substrate = substrateOf(bare);
   if (substrate === "herdr") return `(Herdr seat: open Herdr and select the workspace "${bare}")`;
   if (substrate !== "tmux") return `(seat on terminal substrate "${substrate}": not attachable with tmux)`;
   return `${tmuxOnDaemonServer()} attach -t ${session}`;
