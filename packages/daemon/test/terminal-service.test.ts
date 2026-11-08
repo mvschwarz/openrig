@@ -172,6 +172,13 @@ describe("TerminalService — view resolution + one-shape result", () => {
     }
   });
 
+  it("stop() also stops herdr-app's own watcher and timers (daemon shutdown)", async () => {
+    const { deps } = makeDeps();
+    let stopped = 0;
+    await new TerminalService({ ...deps, stopHerdrApp: () => { stopped++; } }).stop();
+    expect(stopped).toBe(1);
+  });
+
   it("opens a rig NAME as an interactive derived view (read-write panes)", async () => {
     const { deps, herdr } = makeDeps();
     const svc = new TerminalService(deps);

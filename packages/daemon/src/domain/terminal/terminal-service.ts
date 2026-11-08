@@ -135,6 +135,8 @@ export interface TerminalServiceDeps {
   /** Resolve an explicit session without altering the default provider instance. */
   resolveSessionProvider?(name: string, session: string): TerminalProvider | null;
   /** The herdr-app provider for one client (app home); null when this daemon can't serve herdr-app. */
+  /** Daemon shutdown: stops herdr-app's own watcher and timers. */
+  stopHerdrApp?(): void;
   resolveHerdrAppProvider?(target: HerdrAppTarget): (TerminalProvider & { closeView(viewId: string): Promise<OpenViewResult>; appHome: string }) | null;
   /** The saved-views store (read paths only from this service). */
   viewsStore: Pick<TerminalViewsStore, "get" | "list">;
@@ -205,7 +207,7 @@ export class TerminalService {
       (selector, controls) => this.renderFollowing(selector, controls));
   }
 
-  async stop(): Promise<void> { this.unsubscribeScope?.(); await this.following?.stop(); }
+  async stop(): Promise<void> { this.unsubscribeScope?.(); this.deps.stopHerdrApp?.(); await this.following?.stop(); }
 
   async followView(req: OpenViewRequest & FollowControls): Promise<OpenViewResult> {
     if (!this.following) return errorResult("herdr", "follow_unavailable", "This daemon has no event-driven terminal following service.");

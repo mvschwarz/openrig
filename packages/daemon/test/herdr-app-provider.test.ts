@@ -777,7 +777,7 @@ describe("HerdrAppProvider: every viewer it starts is ended or still tracked", (
   });
 });
 
-describe("startup wiring (createHerdrAppProviders): passive lookups", () => {
+describe("startup wiring (createHerdrAppProviders): passive lookups, views recovered after a restart, stop", () => {
   type FakeChild = import("node:events").EventEmitter & { stdout: import("node:events").EventEmitter; unref(): void; kill(): void; killed: boolean; exitCode: number | null; signalCode: string | null; args: string[] };
   let spawned: FakeChild[];
   let spawnFn: typeof import("node:child_process").spawn;
@@ -810,6 +810,7 @@ describe("startup wiring (createHerdrAppProviders): passive lookups", () => {
 
   it("a status, a listing and a refused open start no hc events and create no viewers folder", async () => {
     const herdrApp = await create();
+    await herdrApp.recovered;
     const provider = herdrApp.resolve({})!;
     const status = await provider.status(); // no window answers at this app home
     expect(status.available).toBe(false);
@@ -818,6 +819,54 @@ describe("startup wiring (createHerdrAppProviders): passive lookups", () => {
     expect(spawned).toEqual([]);
     expect(existsSync(join(herdrAppDir, "viewers"))).toBe(false);
     expect(hcCalls).toEqual([]);
+    herdrApp.stop();
   });
 
+  it("after a restart, a recorded view gets its owner back: the watcher starts and a viewer that ended outside OpenRig is rewritten", async () => {
+    const appHome = join(home, "app");
+    const journal = new HerdrAppClientFiles(appHome, join(herdrAppDir, "clients"));
+    await journal.save({ appHome, base: "main", revision: null, writtenSha: null, pendingEnds: [], views: [{
+      id: "rv-1", name: "demo", source: { view: "rig:demo", page: 0 }, createdAt: "2026-11-07T00:00:00.000Z",
+      viewers: [{ cellId: "c-1", seat: "dev.build@demo", label: "dev.build · S1", nonce: "n1", argv: ["/bin/sh"], readOnly: false,
+        attach: "local", writable: "granted", terminal: "t5", state: "live" }],
+    }] });
+    const herdrApp = await create();
+    await herdrApp.recovered;
+    expect(spawned.map((c) => c.args)).toEqual([["events", "--json", "--label", "openrig.daemon=inst1"]]);
+    expect(existsSync(join(herdrAppDir, "viewers"))).toBe(true);
+    const viewer = (await journal.load()).views[0]!.viewers[0]!;
+    expect(viewer).toMatchObject({ state: "ended", terminal: null });
+    const rig = readFileSync(journal.rigPath, "utf8");
+    expect(rig).toContain("rv-1");
+    expect(rig).not.toContain("\"t5\"");
+    herdrApp.stop();
+  });
+
+  it("a journal with nothing left to own starts nothing", async () => {
+    const appHome = join(home, "app");
+    await new HerdrAppClientFiles(appHome, join(herdrAppDir, "clients")).save({ appHome, base: "main", revision: null, writtenSha: null, pendingEnds: [], views: [] });
+    const herdrApp = await create();
+    await herdrApp.recovered;
+    expect(spawned).toEqual([]);
+    herdrApp.stop();
+  });
+
+  it("stop() ends only OpenRig's own watcher child, and nothing restarts it", async () => {
+    const appHome = join(home, "app");
+    await new HerdrAppClientFiles(appHome, join(herdrAppDir, "clients")).save({ appHome, base: "main", revision: null, writtenSha: null, pendingEnds: [], views: [{
+      id: "rv-1", name: "demo", source: { view: "rig:demo", page: 0 }, createdAt: "2026-11-07T00:00:00.000Z",
+      viewers: [{ cellId: "c-1", seat: "dev.build@demo", label: "dev.build · S1", nonce: "n1", argv: ["/bin/sh"], readOnly: false, attach: "local", terminal: "t5", state: "live" }],
+    }] });
+    const herdrApp = await create();
+    await herdrApp.recovered;
+    expect(spawned).toHaveLength(1);
+    herdrApp.stop();
+    expect(spawned[0]!.killed).toBe(true);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(spawned).toHaveLength(1); // the exit after stop() schedules no retry
+    // A later owned-work request after shutdown starts nothing either.
+    herdrApp.resolve({})!.closeView("rv-1").catch(() => {});
+    await new Promise((r) => setTimeout(r, 30));
+    expect(spawned).toHaveLength(1);
+  });
 });

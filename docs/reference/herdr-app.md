@@ -101,7 +101,9 @@ record, its labels and its exact command all match) are ended. Seats are never t
 running and named in the result.
 
 If a viewer ends some other way (killed outside OpenRig, herdr-core restarted), OpenRig rewrites its cell as an
-ended cell straight away.
+ended cell straight away. Views OpenRig recorded keep that owner across a daemon restart: when the daemon starts, it
+reconciles each app home it has views in (a viewer that ended while it was down is rewritten then) and finishes any
+pending ends. Stopping the daemon ends only its own `hc events` watcher and timers; viewers and views stay.
 
 ## Which herdr-core
 
@@ -117,7 +119,8 @@ when a window has not acknowledged a write also name the daemon's core (`HC_SESS
 visible straight away.
 
 A status or a preview only reads: it starts no herdr-core process and creates nothing. OpenRig watches herdr-core's
-events (`hc events`) and creates its viewers folder only when it opens or closes a view.
+events (`hc events`) and creates its viewers folder only when it opens or closes a view, or when it starts with views
+already recorded.
 
 ## Limits
 
