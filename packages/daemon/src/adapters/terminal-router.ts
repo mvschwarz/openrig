@@ -58,8 +58,10 @@ export class SubstrateResolver {
 
   constructor(private readonly db: Database.Database, private readonly ttlMs = 500, private readonly now = () => Date.now()) {}
 
+  /** Drop the cached substrate map so the next lookup reloads it. */
   invalidate(): void { this.cache = null; }
 
+  /** The cached map of non-tmux seats' names and nodes, reloaded after the TTL. */
   private load() {
     const t = this.now();
     if (this.cache && t - this.cache.at < this.ttlMs) return this.cache;
@@ -122,6 +124,7 @@ export class SubstrateResolver {
   }
 }
 
+/** The session names a node can be addressed by before a binding exists: legacy and canonical pod-aware forms. */
 function canonicalNames(row: SubstrateRow): string[] {
   const out = [deriveSessionName(row.rig_name, row.logical_id)];
   const dot = row.logical_id.indexOf(".");
@@ -137,6 +140,7 @@ export interface TerminalRouterOptions {
 
 const MERGED_READS = new Set(["listSessions", "readAllPaneProcesses", "readAllSessionWindows", "readAllSessionWindowActivity"]);
 
+/** Merge a tmux whole-server read with the Herdr side's (arrays concatenate, maps merge; a null tmux map stays null). */
 async function mergedRead(method: string, tmuxCall: () => Promise<unknown>, herdrCall: () => Promise<unknown>): Promise<unknown> {
   const [fromTmux, fromHerdr] = await Promise.all([tmuxCall(), herdrCall()]);
   if (Array.isArray(fromTmux) || Array.isArray(fromHerdr)) return [...((fromTmux as unknown[]) ?? []), ...((fromHerdr as unknown[]) ?? [])];
@@ -173,6 +177,7 @@ export function createTerminalRouter(tmux: TmuxAdapter, opts: TerminalRouterOpti
   const receiverOf = (_target: string): TmuxAdapter => self;
 
   const proxy = new Proxy(tmux, {
+    /** Route a method call to the target seat's substrate (or pass state through). */
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
       // The adapter's own fields (exec functions, maps) are state, not verbs: return them as they are.
@@ -224,6 +229,7 @@ export function createTerminalRouter(tmux: TmuxAdapter, opts: TerminalRouterOpti
         return (fn as (...a: unknown[]) => unknown).apply(herdr, args);
       };
     },
+    /** Set a property, sharing the delivery guard and launch environment with the Herdr adapter. */
     set(target, prop, value, receiver) {
       // The delivery guard and launch environment are shared, so leases and composer checks stay single-sourced.
       // Order matters: the guard keeps ONE input-inspection callback, attached by the adapter whose setter runs last.

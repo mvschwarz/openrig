@@ -243,3 +243,29 @@ describe("HerdrSeatAdapter should-fix items (S1-S4, size)", () => {
     expect(await adapter.sendText("dev-solo@hr", "x")).toEqual({ ok: true }); // by name it is unambiguous
   });
 });
+
+describe("CodeRabbit follow-ups on PR #2785", () => {
+  it("re-baselines a seat whose reading an outage dropped, without a screen change", async () => {
+    let t = 2_000_000;
+    const { adapter, herdr, bind } = setup({ now: () => t });
+    await adapter.createSession("dev-solo@hr");
+    bind("dev-solo@hr", "w1:p1");
+    await adapter.readAllSessionWindowActivity();
+    herdr.setDown(true);
+    expect(await adapter.readAllSessionWindowActivity()).toEqual(new Map()); // unknown during the outage
+    herdr.setDown(false); t += 10_000;
+    expect(await adapter.readAllSessionWindowActivity()).toEqual(new Map([["dev-solo@hr", 2010]])); // same screen, re-baselined
+  });
+
+  it("after a restart before the binding was backfilled, a bulk read still includes the seat (durable record)", async () => {
+    const { db, herdr, bind } = setup();
+    const first = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/A.sock", rpcFor: () => herdr.rpc });
+    await first.createSession("dev-solo@hr");
+    bind("dev-solo@hr", "w1:p1"); // binding written without herdr_workspace / herdr_socket
+    const sockets: string[] = [];
+    const restarted = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/B.sock", rpcFor: (s) => { sockets.push(s); return herdr.rpc; } });
+    // A whole-server read comes first, before any per-seat call could backfill the binding.
+    expect((await restarted.listSessions()).map(x => x.name)).toEqual(["dev-solo@hr"]);
+    expect(sockets).toEqual(["/sandbox/A.sock"]);
+  });
+});

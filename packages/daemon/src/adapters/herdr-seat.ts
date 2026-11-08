@@ -105,6 +105,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     }
   }
 
+  /** Whether Herdr itself answered that the target doesn't exist (positive absence, not a transport failure). */
   private static notFound(error: unknown): boolean {
     return error instanceof HerdrRpcError && !!error.code && /not_found$/.test(error.code);
   }
@@ -177,6 +178,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     return matches[0] ?? null;
   }
 
+  /** The panes of a workspace; empty when Herdr says the workspace is gone, throws on transport failure. */
   private async panesOf(socket: string, workspaceId: string): Promise<HerdrPaneInfo[]> {
     try {
       return (await this.call<{ panes: HerdrPaneInfo[] }>(socket, "pane.list", { workspace_id: workspaceId })).panes ?? [];
@@ -212,9 +214,12 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     `).all() as Array<{ session: string; workspace: string | null; socket: string | null }>;
     const out = new Map<string, Map<string, string>>();
     for (const row of rows) {
+      // Binding columns first, then this process's memory, then the durable creation record (a restart before the
+      // binding was backfilled), and only then the endpoint for new seats.
       const made = this.created.get(row.session);
-      const workspace = row.workspace ?? made?.workspace;
-      const socket = row.socket ?? made?.socket ?? this.deps.socketForNewSeats();
+      const durable = !row.workspace || !row.socket ? this.durableSeat(row.session) : null;
+      const workspace = row.workspace ?? made?.workspace ?? durable?.workspace ?? undefined;
+      const socket = row.socket ?? made?.socket ?? durable?.socket ?? this.deps.socketForNewSeats();
       if (!workspace) continue;
       if (!out.has(socket)) out.set(socket, new Map());
       out.get(socket)!.set(workspace, row.session);
@@ -222,6 +227,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     return out;
   }
 
+  /** Whether any Herdr seat is known to this DB or was created by this process (gates merged reads). */
   hasSeats(): boolean { return this.knownWorkspaces().size > 0 || this.created.size > 0; }
 
   // --- Server and sessions ------------------------------------------------------------------------
@@ -232,6 +238,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     catch (error) { return { ok: false, code: "tmux_unavailable", message: `Herdr is not reachable at ${socket}: ${(error as Error).message}` }; }
   }
 
+  /** present / absent / transport_unavailable for a seat's workspace; absent only on positive absence. */
   override async probeSession(name: string): Promise<SessionProbe> {
     const seat = this.seat(name);
     if (!seat) return { state: "absent" };
@@ -239,6 +246,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     catch (error) { return { state: "transport_unavailable", cause: (error as Error).message }; }
   }
 
+  /** Whether the seat's workspace is present. */
   override async hasSession(name: string): Promise<boolean> {
     return (await this.probeSession(name)).state === "present";
   }
@@ -277,6 +285,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     return out;
   }
 
+  /** One logical window per Herdr workspace, for callers that ask tmux for windows. */
   override async listWindows(sessionName: string): Promise<TmuxWindow[]> {
     const seat = this.seat(sessionName);
     const ws = seat ? await this.workspaceOf(seat) : null;
@@ -296,6 +305,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     return out;
   }
 
+  /** Shell pid and foreground command for every pane of the DB-known Herdr seats. */
   override async readAllPaneProcesses(): Promise<Map<string, { pid: number | null; command: string | null; dead?: boolean }> | null> {
     const out = new Map<string, { pid: number | null; command: string | null }>();
     for (const [socket, workspaces] of this.knownWorkspaces()) {
@@ -321,6 +331,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   private readonly lastActivity = new Map<string, number>();
   private readonly agentStatuses = new Map<string, string>();
 
+  /** Sample each DB-known seat's visible screen and update its last-activity time on a change. */
   private async sampleRevisions(): Promise<void> {
     const now = Math.floor(this.clock() / 1000);
     for (const [socket, workspaces] of this.knownWorkspaces()) {
@@ -340,9 +351,9 @@ export class HerdrSeatAdapter extends TmuxAdapter {
           const print = createHash("sha1").update(screen).digest("hex");
           const seen = this.fingerprints.get(pane);
           this.fingerprints.set(pane, print);
-          // First sight records a baseline, so a quiet seat reads idle once the silence window passes instead of
-          // unknown forever (S1); a later change moves it.
-          if (seen === undefined ? !this.lastActivity.has(session) : seen !== print) this.lastActivity.set(session, now);
+          // A seat with no reading (first sight, or after an outage dropped it) gets a baseline, so a quiet seat reads
+          // idle once the silence window passes instead of unknown forever (S1); a later screen change moves it.
+          if (!this.lastActivity.has(session) || (seen !== undefined && seen !== print)) this.lastActivity.set(session, now);
         }
       } catch {
         // This endpoint is unreachable: its seats read unknown until it answers again.
@@ -351,16 +362,19 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     }
   }
 
+  /** Last-activity times (epoch seconds) for Herdr seats, from screen samples. */
   override async readAllSessionWindowActivity(): Promise<Map<string, number> | null> {
     await this.sampleRevisions();
     return new Map(this.lastActivity);
   }
 
+  /** The same activity readings in the window-hint shape transcript rotation reads. */
   override async readAllSessionWindows(): Promise<Map<string, { activity: number; size: string }> | null> {
     await this.sampleRevisions();
     return new Map([...this.lastActivity].map(([session, activity]) => [session, { activity, size: "" }]));
   }
 
+  /** The last sampled activity time for one seat, or null when there is no reading. */
   override async readPaneLastActivity(paneId: string): Promise<number | null> {
     const session = this.seat(paneId)?.session;
     return session ? this.lastActivity.get(session) ?? null : null;
@@ -369,6 +383,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   /** Herdr's own last-read agent status for a seat (evidence only in the MVP; hooks still arbitrate). */
   lastAgentStatus(sessionName: string): string | null { return this.agentStatuses.get(sessionName) ?? null; }
 
+  /** Create the seat's Herdr workspace, labelled with its session name, and record its ids and env. */
   override async createSession(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
     if (this.deliveryGuard && (!env?.OPENRIG_NODE_ID || !this.deliveryGuard.ownsLifecycle(env.OPENRIG_NODE_ID))) {
       return { ok: false, code: "guard_lease_required", message: "Managed launch requires a lifecycle lease before terminal creation." };
@@ -451,6 +466,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     }
   }
 
+  /** Send tmux key names as Herdr logical keys (printable keys as text); unknown names are refused. */
   protected override async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {
     const mapped: Array<{ key: string } | { text: string }> = [];
     for (const key of keys) {
@@ -471,6 +487,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     }
   }
 
+  /** Map an error from a write to a TmuxResult, keeping stated codes and positive absence. */
   private writeRefusal(error: unknown): TmuxResult {
     if (error instanceof HerdrSeatError) return { ok: false, code: error.resultCode, message: error.message };
     if (HerdrSeatAdapter.notFound(error)) return { ok: false, code: "session_not_found", message: (error as Error).message };
@@ -493,18 +510,22 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     }
   }
 
+  /** The last `lines` lines of the seat's pane, from Herdr's recent output. */
   override async capturePaneContent(paneId: string, lines = 20, opts?: { escapeSequences?: boolean; joinWrappedLines?: boolean }): Promise<string | null> {
     return this.read(paneId, opts?.joinWrappedLines ? "recent_unwrapped" : "recent", lines, opts?.escapeSequences === true);
   }
 
+  /** The seat's currently visible screen. */
   override async capturePaneScreen(paneId: string, opts?: { escapeSequences?: boolean }): Promise<string | null> {
     return this.read(paneId, "visible", null, opts?.escapeSequences === true);
   }
 
+  /** Up to 10,000 recent lines of the seat's pane. */
   override async capturePaneHistory(paneTarget: string): Promise<string | null> {
     return this.read(paneTarget, "recent", 10_000, false);
   }
 
+  /** Recent history in the history/all shape; Herdr has no separate visible-only part. */
   override async capturePaneHistoryParts(paneTarget: string): Promise<{ history: string; all: string } | null> {
     const all = await this.read(paneTarget, "recent", 10_000, false);
     return all === null ? null : { history: all, all };
@@ -515,19 +536,23 @@ export class HerdrSeatAdapter extends TmuxAdapter {
 
   /** Herdr reports no cursor position, so the composer can't be proven; callers treat null as unknown. */
   override async getPaneCursorPosition(): Promise<TmuxCursorPosition | null> { return null; }
+  /** Always null: Herdr exposes no cursor position, so the composer can't be proven. */
   override async captureComposerSnapshot(): Promise<ComposerSnapshot | null> { return null; }
 
+  /** Herdr's process info for a pane, or null when it can't be read. */
   private async processInfo(socket: string, pane: string): Promise<{ shell_pid?: number; foreground_processes?: Array<{ pid: number; name: string }> } | null> {
     try {
       return (await this.call<{ process_info: { shell_pid?: number; foreground_processes?: Array<{ pid: number; name: string }> } }>(socket, "pane.process_info", { pane_id: pane })).process_info;
     } catch { return null; }
   }
 
+  /** The pane's shell pid. */
   override async getPanePid(paneId: string): Promise<number | null> {
     const found = await this.paneFor(paneId).catch(() => null);
     return found ? (await this.processInfo(found.socket, found.pane))?.shell_pid ?? null : null;
   }
 
+  /** The name of the pane's foreground process. */
   override async getPaneCommand(paneId: string): Promise<string | null> {
     const found = await this.paneFor(paneId).catch(() => null);
     return found ? (await this.processInfo(found.socket, found.pane))?.foreground_processes?.at(-1)?.name ?? null : null;
@@ -539,9 +564,13 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     catch (error) { return error instanceof HerdrSeatError && error.resultCode === "session_not_found"; }
   }
 
+  /** Always false: Herdr panes have no tmux copy mode. */
   override async isPaneInMode(): Promise<boolean | null> { return false; }
+  /** No-op: there is no copy mode to cancel. */
   override async cancelPaneMode(): Promise<TmuxResult> { return { ok: true }; }
+  /** The daemon's shell, used where tmux would report its default-shell option. */
   override async getDefaultShell(): Promise<string | null> { return process.env["SHELL"] || "/bin/sh"; }
+  /** No-op: Herdr owns its layout. */
   override async resizeWindow(): Promise<TmuxResult> { return { ok: true }; }
 
   /** Herdr's own lifecycle reading for the agent in a seat's pane (idle | working | blocked | done | unknown). */
@@ -561,34 +590,42 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`).run(session, kind, key, value);
   }
 
+  /** Read one stored session value (env, env presence, option or seat record). */
   private readMeta(session: string, kind: "env" | "env_present" | "option" | "seat", key: string): string | undefined {
     const row = this.deps.db.prepare("SELECT value FROM herdr_session_meta WHERE session_name = ? AND kind = ? AND key = ?")
       .get(session.replace(/^=/, ""), kind, key) as { value: string } | undefined;
     return row?.value;
   }
 
+  /** A stored session-environment value; only identity values are stored by value. */
   override async getSessionEnv(session: string, key: string): Promise<string | undefined> { return this.readMeta(session, "env", key); }
+  /** Store a session-environment value (identity keys by value, others as presence only). */
   override async setSessionEnv(session: string, key: string, value: string): Promise<void> {
     const s = session.replace(/^=/, "");
     if (READ_BACK_ENV.has(key)) this.writeMeta(s, "env", key, value);
     else this.writeMeta(s, "env_present", key, value.trim() ? "1" : "0");
   }
+  /** Forget a session-environment value. */
   override async unsetSessionEnv(session: string, key: string): Promise<void> {
     this.deps.db.prepare("DELETE FROM herdr_session_meta WHERE session_name = ? AND kind IN ('env', 'env_present') AND key = ?").run(session.replace(/^=/, ""), key);
   }
+  /** Whether a session-environment name has a non-blank value (by value or by presence). */
   override async hasSessionEnv(sessionName: string, varName: string): Promise<boolean | null> {
     const value = this.readMeta(sessionName, "env", varName);
     if (value !== undefined) return value.trim().length > 0;
     const present = this.readMeta(sessionName, "env_present", varName);
     return present === "1";
   }
+  /** hasSessionEnv for several names. */
   override async hasSessionEnvBatch(sessionName: string, varNames: readonly string[]): Promise<Record<string, boolean | null>> {
     return Object.fromEntries(await Promise.all(varNames.map(async n => [n, await this.hasSessionEnv(sessionName, n)] as const)));
   }
+  /** Store a session option (Herdr has no tmux options; kept in the DB). */
   override async setSessionOption(sessionName: string, key: string, value: string): Promise<TmuxResult> {
     this.writeMeta(sessionName.replace(/^=/, ""), "option", key, value);
     return { ok: true };
   }
+  /** A stored session option, or null. */
   override async getSessionOption(sessionName: string, key: string): Promise<string | null> {
     return this.readMeta(sessionName, "option", key) ?? null;
   }
@@ -598,6 +635,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   // through capturePaneContent and so works for Herdr seats through the router. pipe-pane is only the web terminal's
   // live stream (TerminalSessionBroker), a view outside the MVP: refused, so it never waits on a stream that won't come.
   override async startPipePane(): Promise<TmuxResult> { return this.unsupported("pipe-pane (the web terminal live view; open the seat in Herdr)"); }
+  /** No-op: pipe-pane is never started on a Herdr seat. */
   override async stopPipePane(): Promise<TmuxResult> { return { ok: true }; }
 
   // --- Verbs Herdr has no counterpart for (explicit refusals, R1) ---------------------------------
@@ -605,19 +643,34 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   private unsupported(what: string): TmuxResult {
     return { ok: false, code: "herdr_unsupported", message: `This seat runs on Herdr, which has no ${what}; nothing was done.` };
   }
+  /** Refused: Herdr has no respawn-pane, so restart-in-place isn't available. */
   override async respawnPane(): Promise<TmuxResult> { return this.unsupported("respawn-pane (restart in place)"); }
+  /** Refused: Herdr has no remain-on-exit. */
   override async setRemainOnExit(): Promise<TmuxResult> { return this.unsupported("remain-on-exit"); }
+  /** Refused: no pane signal through Herdr. */
   override async signalPaneProcess(): Promise<TmuxResult> { return this.unsupported("pane signal"); }
+  /** Refused: runtime switch isn't supported on Herdr seats. */
   override async swapRuntimeSwitchPanes(): Promise<TmuxResult> { return this.unsupported("pane swap for a runtime switch"); }
+  /** Refused: runtime switch isn't supported on Herdr seats. */
   override async adoptRuntimeSwitchStaging(): Promise<TmuxResult> { return this.unsupported("staging adoption for a runtime switch"); }
+  /** Refused: runtime switch isn't supported on Herdr seats. */
   override async setRuntimeSwitchEnvironment(): Promise<TmuxResult> { return this.unsupported("runtime-switch environment"); }
+  /** Refused: probe sessions stay on tmux. */
   override async createProbeSession(): Promise<TmuxResult> { return this.unsupported("probe session"); }
+  /** Refused: Herdr has no tmux clients to switch. */
   override async switchClient(): Promise<TmuxResult> { return this.unsupported("switch-client"); }
+  /** Refused: Herdr has no tmux window options. */
   override async setWindowOption(): Promise<TmuxResult> { return this.unsupported("window option"); }
+  /** Refused: Herdr has no tmux window options. */
   override async restoreWindowOption(): Promise<TmuxResult> { return this.unsupported("window option"); }
+  /** Refused: Herdr has no tmux pane options. */
   override async restorePaneOption(): Promise<TmuxResult> { return this.unsupported("pane option"); }
+  /** Undefined: Herdr has no tmux window options. */
   override async getWindowLocalOption(): Promise<string | null | undefined> { return undefined; }
+  /** Undefined: Herdr has no tmux pane options. */
   override async getPaneLocalOption(): Promise<string | null | undefined> { return undefined; }
+  /** Null: Herdr has no tmux window user options. */
   override async readWindow(): Promise<{ id: string; userOption: string } | null> { return null; }
+  /** Empty: Herdr has no tmux clients. */
   override async listClients(): Promise<[]> { return []; }
 }

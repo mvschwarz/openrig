@@ -87,6 +87,7 @@ function tmuxOnDaemonServer(): string {
 /** The daemon's lookup of a seat's terminal substrate, recorded once at startup (absent: every seat is tmux). */
 let daemonSubstrateOf: ((session: string) => string) | null = null;
 
+/** Record (or clear, with null) the daemon's seat-substrate lookup that the attach helpers consult. */
 export function setDaemonSubstrateLookup(lookup: ((session: string) => string) | null): void {
   daemonSubstrateOf = lookup;
 }
