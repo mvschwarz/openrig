@@ -287,6 +287,13 @@ function renderTrace() {
   }
   // With an explicit start, the evidence supplies only held and next work.
   if (explicitStart && evidence) args.push("--work-candidates", "-");
+  // Catalogued project roots the daemon knows, so work in a project outside workspace.root
+  // traces to its own root instead of failing as "outside configured root" (#2693).
+  if (trees !== "topology") {
+    for (const workRoot of whoami?.answer?.workRoots ?? []) {
+      if (typeof workRoot === "string" && workRoot) args.push("--work-root", workRoot);
+    }
+  }
   const env = traceEnv(trees);
   const timeout = lookupTimeout(contentReserveMs());
   const result = timeout <= MIN_LOOKUP_MS

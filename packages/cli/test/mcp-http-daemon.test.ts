@@ -132,6 +132,22 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     await expect(startMcpHttpServer({ daemonUrl, host: "0.0.0.0", port: 0, tokenFile })).rejects.toBeInstanceOf(McpHttpConfigError);
   });
 
+  it("with no grants and no seat, every request writes as the process's one unknown sender, and a same-id retry matches", async () => {
+    delete process.env.OPENRIG_SESSION_NAME;
+    const served = await listen();
+    const local = await connect(served.url);
+    // Each request gets its own server here, so a label minted per server would differ on every call below.
+    const label = (await local("rig_whoami")).structured.unknownSender as string;
+    expect(label).toMatch(/^unknown-mcp-[0-9a-f]{8}$/);
+    for (const body of ["first", "second"]) expect((await local("rig_queue_create", { destination: "impl@team", body })).isError).toBe(false);
+    const retry = { qitemId: "qitem-20261107000000-unknownretry", destination: "impl@team", body: "once" };
+    expect((await local("rig_queue_create", retry)).isError).toBe(false);
+    const again = await local("rig_queue_create", retry);
+    expect(again.isError, again.text).toBe(false);
+    expect(rows()).toBe(3);
+    expect((db.prepare("SELECT DISTINCT source_session AS s FROM queue_items").all() as Array<{ s: string }>).map((row) => row.s)).toEqual([label]);
+  });
+
   it("with grants, refuses a missing or invalid credential on loopback, never as the env's seat", async () => {
     await grant("alice");
     const served = await listen();

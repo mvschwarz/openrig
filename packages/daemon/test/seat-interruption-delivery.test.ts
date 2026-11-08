@@ -89,12 +89,13 @@ describe("the level table through the real delivery path", () => {
     const outcome = (r: { outcome?: string; status?: string }) => (r.outcome === "retained" || r.status === "retained" ? "held" : "typed");
     const parkWake = outcome(await f.watchdog({ targetSession: seat, message: "Wake timer fired for parked qitem q-1" }, parkTimer as never));
     const agent = outcome(await f.transport.send(seat, "From: peer@test — please review", { actorSession: "peer@test" }));
-    const urgentResult = await f.transport.send(seat, "From: peer@test — the build is red", { actorSession: "peer@test", urgent: { by: "peer@test" } });
+    // From another sender: a seat holds one message per sender (#2430), and this table is about each kind of input.
+    const urgentResult = await f.transport.send(seat, "From: lead@test — the build is red", { actorSession: "lead@test", urgent: { by: "lead@test" } });
     expect({ parkWake, agent, urgent: outcome(urgentResult) }).toEqual(expected);
-    expect(urgentResult.urgent).toEqual({ by: "peer@test" });
+    expect(urgentResult.urgent).toEqual({ by: "lead@test" });
     // What typed shows who marked it urgent; what's held is readable, urgent ones marked as such.
-    if (expected.urgent === "typed") expect(f.typed.at(-1)).toContain("Urgent (marked by peer@test):");
-    if (expected.urgent === "held") expect(f.held().find((h) => h.urgency === "urgent")?.body).toContain("Urgent (marked by peer@test):");
+    if (expected.urgent === "typed") expect(f.typed.at(-1)).toContain("Urgent (marked by lead@test):");
+    if (expected.urgent === "held") expect(f.held().find((h) => h.urgency === "urgent")?.body).toContain("Urgent (marked by lead@test):");
     expect(f.held()).toHaveLength(Object.values(expected).filter((v) => v === "held").length);
   });
 
@@ -333,7 +334,7 @@ describe("a combined wake's released members are each typed at most once in a dr
 });
 
 describe("a returned result and its resume", () => {
-  it("at urgent-only, both routine: the arrival and the waiter's resume are both held, each its own readable record", async () => {
+  it("at urgent-only, both routine: the arrival and the waiter's resume are both held and readable, one record per sender naming the other", async () => {
     const f = fixture();
     const waiter = await f.queue.create({ sourceSession: "peer@test", destinationSession: seat, body: "Ship after the review", nudge: false });
     const blocker = await f.queue.create({ sourceSession: seat, destinationSession: "peer@test", body: "Review it", nudge: false });
@@ -343,7 +344,13 @@ describe("a returned result and its resume", () => {
     await vi.waitFor(() => expect(f.queue.getById(waiter.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
     await vi.waitFor(() => expect(f.queue.getById(returned.created.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
     expect(f.typed).toEqual([]);
-    const held = f.held().map((h) => h.body).join("\n");
+    // Both wakes come from peer@test, so the newer one holds the seat's record for that sender and names the other (#2430).
+    const outbox = new OutboxHandler(f.db);
+    const top = f.held();
+    expect(top).toHaveLength(1);
+    const coalesced = outbox.coalescedInto(top[0]!.outboxId);
+    expect(coalesced).toHaveLength(1);
+    const held = [top[0]!.body, outbox.getById(coalesced[0]!)!.body].join("\n");
     expect(held).toContain(returned.created.qitemId);
     expect(held).toContain(`parked qitem ${waiter.qitemId} is pending`);
   });

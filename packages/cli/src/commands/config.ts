@@ -11,7 +11,7 @@ function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting
 }
 
 // These settings remain boot-only; capture interval/line settings reload live.
-const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "daemon.db_conflict", "db.path", "terminal.tmux_server"];
+const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "daemon.db_conflict", "daemon.seat_poll_interval_ms", "db.path", "terminal.tmux_server"];
 const BOOT_ONLY_PREFIXES = ["transcripts.enabled", "transcripts.path"];
 
 function isBootOnlyKey(key: string): boolean {
@@ -55,7 +55,7 @@ Examples:
   rig config init-workspace                  # scaffold a repo-ready project workspace
 
 Keys:
-  daemon.*               port, host
+  daemon.*               port, host, seat_poll_interval_ms (startup-only seat-pollers cadence, 1000–2000; default 1000)
   db.path
   transcripts.*          enabled, path, lines, poll_interval_seconds
                          (lines/poll_interval set scrollback CAPTURE depth + cadence.
@@ -103,6 +103,10 @@ Keys:
                            an unreadable registry does not suppress eligibility; delivery still needs a ready route)
   retention.*            enabled, transitions_days, watchdog_days,
                          watchdog_keep_per_job, batch_size
+  retention.events_days  delete the history-only event types (views, snapshots, watchdog firings, queue events) older
+                         than N days; 0 keeps them (default). Removed events no longer replay from /api/events, leave
+                         the telemetry export, the log and the feed, and can't be brought back. Read at the next sweep
+                         (daily and at daemon start)
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
   launch.codex_login_shell  defer to Codex's own login-shell setting in managed Codex seats (default off)
                          Off adds allow_login_shell=false: tool commands inherit the seat's environment, so plain rig
@@ -130,11 +134,13 @@ Keys:
   usage.pi_openrouter_charge  with usage.pi_cost_facts on, Pi seats look up OpenRouter's actual charge for their requests, shown beside the estimate (default off; changes take effect when a Pi seat next launches or resumes; earlier outcomes stay visible)
   transport.verify_input_box  with --verify, a send to a Claude Code or Codex seat (also queue wakes) reads verified only when the seat was proven idle before the paste and its input box showed the exact text before Enter and was empty after it, on the same pane process; a busy or unknown seat, and anything else, reads unconfirmed, not failed. Reporting only (default off)
   transport.local_user_guard  on a Mac, the CLI refuses a local daemon whose reported user, checked with ps, isn't yours; an explicit OPENRIG_URL skips the check. A mitigation for reaching the wrong daemon, not authentication (default off)
-  transport.draft_delivery  deliver (default): a rig send or work notice to a seat whose prompt holds a person's draft goes through: the message is pasted at the current cursor into the draft (normally its end), then Enter is sent to submit the combined input, and the send's result says whether that was confirmed. OpenRig can't read every prompt layout: where it doesn't detect the draft, the result doesn't mention it, and refuse doesn't stop the send. refuse: such a send is refused, and a work notice retried once the prompt is clear, where OpenRig detects the draft. Either way, menus and permission prompts are refused, a per-seat typing guard still holds, managed compaction waits for an empty prompt, and a send with --wait-for-idle still waits
+  transport.draft_delivery  deliver (default): a rig send or work notice to a seat whose prompt holds a person's draft goes through: the message is pasted at the current cursor into the draft (normally its end), then Enter is sent to submit the combined input, and the send's result says whether that was confirmed. OpenRig can't read every prompt layout: where it doesn't detect the draft, the result doesn't mention it, and refuse doesn't stop the send. refuse: such a send is refused, and a work notice retried once the prompt is clear, where OpenRig detects the draft. A draft found only by reading the input box may leave that retry waiting for the seat's next activity change or the stuck sweep, rather than the moment the draft clears. Either way, menus and permission prompts are refused, a per-seat typing guard still holds, managed compaction waits for an empty prompt, and a send with --wait-for-idle still waits
   decisions.enabled      typed decisions (OpenRouter + Jev) for the consumers in decisions.consumers, with OPENROUTER_API_KEY from the
                          rig process that runs them; off makes no provider calls (default off). rig project decisions status shows the state
   decisions.consumers    comma-separated consumers that may call (supported: stream; default none). An unknown name makes no calls
   decisions.template_dir absolute folder of <name>.yaml templates that replace the shipped ones (default empty: shipped templates only)
+  acp.to                 the seat (member@rig) that receives tasks from rig acp serve when it isn't given --to, as when an ACP app
+                         starts it from the ACP registry (default empty: none, so nothing is sent until one is set)
 
 Precedence: CLI flag > environment variable > config file > default`)
     .action((opts: { json?: boolean; withSource?: boolean }) => {

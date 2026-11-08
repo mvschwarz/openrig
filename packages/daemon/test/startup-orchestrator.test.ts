@@ -2919,7 +2919,7 @@ describe("StartupOrchestrator", () => {
       }
     }
 
-    it.each(["pi", "codex"] as const)("reads current DB launch_wrapper for %s fresh, resume, fork and rebuild, overriding stale binding", async runtime => {
+    it.each(["pi", "codex", "claude-code"] as const)("reads current DB launch_wrapper for %s fresh and fork launches, overriding stale bindings after clear", async runtime => {
       ensureLaunchWrapperColumn();
       const rig = rigRepo.createRig("wrapper-rig");
       const parentNode = rigRepo.addNode(rig.id, "parent", { runtime, launchWrapper: ["parent-wrapper", "--"] });
@@ -2969,21 +2969,21 @@ describe("StartupOrchestrator", () => {
       expect("launchWrapper" in (observedBindings.at(-1) ?? {})).toBe(false);
     });
 
-    it.each([
+    it.each(["pi", "codex", "claude-code"].flatMap(runtime => [
       ["non-canonical empty array", "[]"],
       ["corrupt JSON", "{not-json"],
       ["relative executable", '["./relative-wrapper","--"]'],
       ["newline in arg", '["valid-wrapper","bad\\narg"]'],
-    ])("fails closed at permission_selection before projection or launch when stored launch_wrapper is %s", async (_label, badStored) => {
+    ].map(([label, badStored]) => [runtime, label, badStored] as const)))("fails closed at permission_selection before projection or launch when stored %s launch_wrapper is %s", async (runtime, _label, badStored) => {
       ensureLaunchWrapperColumn();
       const rig = rigRepo.createRig("bad-wrapper-rig");
-      const node = rigRepo.addNode(rig.id, "impl", { runtime: "codex" });
+      const node = rigRepo.addNode(rig.id, "impl", { runtime });
       const session = sessionRegistry.registerSession(node.id, "r01-bad");
       sessionRegistry.updateStatus(session.id, "running");
 
       db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(badStored, node.id);
 
-      const adapter = mockAdapter({ runtime: "codex" });
+      const adapter = mockAdapter({ runtime });
       const orch = createOrchestrator();
       const result = await orch.startNode(makeInput(
         { rigId: rig.id, nodeId: node.id, sessionId: session.id },

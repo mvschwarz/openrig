@@ -13,6 +13,8 @@ import type {
   WorkflowFrontierBinding,
   WorkflowInstance,
   WorkflowInstanceStatus,
+  WorkflowSpec,
+  StartedWorkflowSpec,
 } from "./workflow-types.js";
 
 interface InstanceRow {
@@ -44,6 +46,11 @@ interface InstanceRow {
   lifecycle_binding_json?: string | null;
   /** Migration 110 — optional at the row layer: legacy fixtures map to null (unscoped). */
   scope_json?: string | null;
+  /** Migration 152 (#2607): the spec the instance started with and its file; null for older instances. */
+  spec_source_path?: string | null;
+  spec_json?: string | null;
+  /** Migration 154 (#2730): the root objective it was started with; null for older instances. */
+  root_objective?: string | null;
 }
 
 /** Defensive column probe (the detectQueueColumn house pattern) —
@@ -78,6 +85,11 @@ export interface CreateWorkflowInstanceInput {
   boundRig?: string | null;
   /** Already-normalized scope (workflow-scope.ts); null/absent = unscoped. */
   scope?: WorkflowScope | null;
+  /** #2607: the spec this instance runs and its file, kept with it so another file's expansion of the same id and
+   *  version can't change it. */
+  startedSpec?: StartedWorkflowSpec;
+  /** #2730: what the run is for, as `--root-objective` gave it. */
+  rootObjective?: string;
   lifecycle?: {
     operationKey: string;
     compiledInputDigest: string;
@@ -102,6 +114,8 @@ export class WorkflowInstanceStore {
   private readonly hasBoundRigColumn: boolean;
   private readonly hasLifecycleColumns: boolean;
   private readonly hasScopeColumn: boolean;
+  private readonly hasSpecColumn: boolean;
+  private readonly hasRootObjectiveColumn: boolean;
   private readonly hasFrontierBindingsTable: boolean;
   private readonly hasFailureOccurrencesTable: boolean;
 
@@ -114,6 +128,8 @@ export class WorkflowInstanceStore {
     this.hasBoundRigColumn = detectInstanceColumn(db, "bound_rig");
     this.hasLifecycleColumns = detectInstanceColumn(db, "lifecycle_operation_key");
     this.hasScopeColumn = detectInstanceColumn(db, "scope_json");
+    this.hasSpecColumn = detectInstanceColumn(db, "spec_json");
+    this.hasRootObjectiveColumn = detectInstanceColumn(db, "root_objective");
     this.hasFrontierBindingsTable = tableExists(db, "workflow_frontier_bindings");
     this.hasFailureOccurrencesTable = tableExists(db, "workflow_failure_occurrences");
   }
@@ -136,6 +152,10 @@ export class WorkflowInstanceStore {
     }
     const scopeCol = this.hasScopeColumn ? ", scope_json" : "";
     const scopeVal = this.hasScopeColumn ? ", ?" : "";
+    const specCol = this.hasSpecColumn ? ", spec_source_path, spec_json" : "";
+    const specVal = this.hasSpecColumn ? ", ?, ?" : "";
+    const objectiveCol = this.hasRootObjectiveColumn ? ", root_objective" : "";
+    const objectiveVal = this.hasRootObjectiveColumn ? ", ?" : "";
     const params: unknown[] = [
       instanceId,
       input.workflowName,
@@ -154,12 +174,14 @@ export class WorkflowInstanceStore {
       );
     }
     if (this.hasScopeColumn) params.push(input.scope ? JSON.stringify(input.scope) : null);
+    if (this.hasSpecColumn) params.push(input.startedSpec?.sourcePath ?? null, input.startedSpec ? JSON.stringify(input.startedSpec.spec) : null);
+    if (this.hasRootObjectiveColumn) params.push(input.rootObjective ?? null);
     this.db
       .prepare(
         `INSERT INTO workflow_instances (
            instance_id, workflow_name, workflow_version, created_by_session,
-           created_at, status, current_frontier_json, current_step_id, hop_count${boundRigCol}${lifecycleCols}${scopeCol}
-         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0${boundRigVal}${lifecycleVals}${scopeVal})`,
+           created_at, status, current_frontier_json, current_step_id, hop_count${boundRigCol}${lifecycleCols}${scopeCol}${specCol}${objectiveCol}
+         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0${boundRigVal}${lifecycleVals}${scopeVal}${specVal}${objectiveVal})`,
       )
       .run(...(params as never[]));
     return this.getByIdOrThrow(instanceId);
@@ -194,7 +216,9 @@ export class WorkflowInstanceStore {
 
   /** Caller wraps cache/binding/receipt/event in one transaction. No packet or trail is rewritten. */
   reviseLifecycle(instanceId: string, expectedVersion: number, workflowVersion: string, digest: string, binding: Record<string, unknown>): void {
-    const result = this.db.prepare("UPDATE workflow_instances SET workflow_version = ?, compiled_input_digest = ?, lifecycle_binding_json = ?, version = version + 1 WHERE instance_id = ? AND version = ?")
+    // A revised lifecycle runs its new generated version, which the cache never overwrites with other bytes.
+    const clearSpec = this.hasSpecColumn ? ", spec_source_path = NULL, spec_json = NULL" : "";
+    const result = this.db.prepare(`UPDATE workflow_instances SET workflow_version = ?, compiled_input_digest = ?, lifecycle_binding_json = ?${clearSpec}, version = version + 1 WHERE instance_id = ? AND version = ?`)
       .run(workflowVersion, digest, JSON.stringify(binding), instanceId, expectedVersion);
     if (result.changes !== 1) throw new WorkflowInstanceError("instance_version_conflict", "Instance progressed during revision; inspect it again.", { instanceId, expectedVersion });
   }
@@ -454,6 +478,10 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
       ? (JSON.parse(row.lifecycle_binding_json) as Record<string, unknown>)
       : null,
     scope: row.scope_json ? (JSON.parse(row.scope_json) as WorkflowScope) : null,
+    startedSpec: row.spec_json && row.spec_source_path
+      ? { sourcePath: row.spec_source_path, spec: JSON.parse(row.spec_json) as WorkflowSpec }
+      : null,
+    rootObjective: row.root_objective ?? null,
   };
 }
 

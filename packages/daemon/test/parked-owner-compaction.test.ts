@@ -156,3 +156,24 @@ it("startup reads pending stages from the same late-bound compaction enforcer us
   expect(source).toMatch(/hasPendingPostCompactStage:\s*\(sessionName\)\s*=>\s*deps\.compactionEnforcer\?\.hasPendingPostCompactStage\(sessionName\)\s*\?\?\s*false/);
   expect(source).toContain("deps.compactionEnforcer = compactionEnforcer;");
 });
+
+it("#2661 (c): postCompactStageOwedSince is the /compact's clock while a stage is owed, and null before and after", async () => {
+  const f = await fixture();
+  expect(f.e.postCompactStageOwedSince(seat)).toBeNull();
+  await f.compact();
+  const owed = f.e.postCompactStageOwedSince(seat);
+  expect(typeof owed).toBe("number");
+  for (const _stage of ["compacting", "compacted", "restoring"]) {
+    await f.tick(); // the clock moves; the anchor does not
+    expect(f.e.postCompactStageOwedSince(seat)).toBe(owed);
+    expect(await f.drain()).toEqual({ triggered: true });
+  }
+  expect(f.e.hasPendingPostCompactStage(seat)).toBe(false);
+  expect(f.e.postCompactStageOwedSince(seat)).toBeNull();
+});
+
+it("#2661 (c): startup gives the queue pickup and the execution view the same late-bound enforcer's restore clock", () => {
+  const source = readFileSync(new URL("../src/startup.ts", import.meta.url), "utf8");
+  expect(source).toMatch(/queueRepoInstance\.attachCompactionReader\(\(session\) => \{\s*const since = deps\.compactionEnforcer\?\.postCompactStageOwedSince\(physicalSessionName\(db, session\)\);/);
+  expect(source).toMatch(/compactionOwedSince: \(session\) => \{\s*const since = deps\.compactionEnforcer\?\.postCompactStageOwedSince\(physicalSessionName\(db, session\)\);/);
+});

@@ -98,13 +98,21 @@ it('submits managed /compact when readable redraw settling exceeds the ordinary 
  expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
  expect(compacts(f)).toHaveLength(1);
 });
-it.each(['incomplete-map','completed-map','cancel-after-compact'] as const)('persists the computed end reason for %s',async end=>{
+it('holds a completed map past its deadline instead of ending it (#2682), and persists the hold',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);f.e.reconcilePreparations();
+ const state=f.e.getPreparationState(seat)!;
+ expect(state).toMatchObject({status:'waiting',prepared:true,preparedReason:'map_complete_seat_never_idle'});
+ const record=JSON.parse(readFileSync(join(dirname(state.mapPath),COMPACTION_RECORD_FILE),'utf8'));
+ expect(record).toMatchObject({phase:'preparing',prepared:true,preparedReason:'map_complete_seat_never_idle'});expect(record.reason).toBeUndefined();
+});
+it.each(['incomplete-map','cancel-after-compact'] as const)('persists the computed end reason for %s',async end=>{
  const f=fixture();await f.e.maybeAutoCompact(input);
  if(end!=='incomplete-map')stageMap(f);
  if(end==='cancel-after-compact'){await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);f.e.cancelPreparation(seat);}
- else{f.advance(AUTO_PREP_WAIT_MS_DEFAULT+(end==='completed-map'?AUTO_RETRY_AFTER_STOP_MS_DEFAULT:0)+1);f.e.reconcilePreparations();}
+ else{f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);f.e.reconcilePreparations();}
  const state=f.e.getPreparationState(seat)!;
- const reason=end==='incomplete-map'?'preparation_incomplete':end==='completed-map'?'map_complete_seat_never_idle':'compaction_cancelled';
+ const reason=end==='incomplete-map'?'preparation_incomplete':'compaction_cancelled';
  expect(state).toMatchObject({status:'stopped',reason});
  const record=JSON.parse(readFileSync(join(dirname(state.mapPath),COMPACTION_RECORD_FILE),'utf8'));
  expect(record.phase).toBe('ended');expect(record.reason).toBe(reason);

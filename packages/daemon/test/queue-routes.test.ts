@@ -2458,9 +2458,11 @@ describe("queue routes", () => {
 
       const response = await app.request("/api/queue/whoami?session=bob@r");
       expect(response.status).toBe(200);
-      const body = await response.json() as { currentWork: { workNodePath: string } | null; currentWorkBasis: string };
+      const body = await response.json() as { currentWork: { workNodePath: string } | null; currentWorkBasis: string; workRoots: string[] };
       expect(body.currentWork?.workNodePath).toBe(path.join(temporaryWorkspace, "alpha", "work-items", "release", "slices", "01-work"));
       expect(body.currentWorkBasis).toContain("one typed in-progress work node");
+      // The refocus hook passes these to the trace, so work in a catalogued project traces to its own root (#2693).
+      expect(body.workRoots).toEqual([path.join(temporaryWorkspace, "alpha"), path.join(temporaryWorkspace, "beta")]);
 
       const withCandidates = await app.request("/api/queue/whoami?session=bob@r&candidates=1");
       const candidateBody = await withCandidates.json() as { workCandidates: { candidates: Array<{ workNodePath: string | null }> } };

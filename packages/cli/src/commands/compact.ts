@@ -55,8 +55,20 @@ manual request. Cancel an active preparation before retrying or using --skip-map
 Automatic preparation allows 25 minutes from prep delivery for the map. A completed
 map stays armed for idle through the next retry interval (10 minutes by default),
 without another preparation prompt; --state includes idleDeadlineAt. A completed
-map that never reaches idle reports map_complete_seat_never_idle; an unfinished
-map reports preparation_incomplete. Manual requests still share one 180-second budget.
+automatic map whose /compact is refused before input (a draft in the box, the pane in
+a tmux mode) or that never reaches idle in that time is held instead: --state shows
+prepared with preparedAt and preparedReason, and /compact goes in at the next idle
+moment with an empty box, with the same map and no new preparation prompt. A held
+attempt stops on a fresh sample below the threshold or from another conversation
+(below_threshold_while_prepared), once usage has risen 15 points since its request
+or two hours after its map was ready (prepared_map_stale), or when its map no longer
+reads ready (preparation_incomplete).
+After an attempt stops with its request delivered, the next automatic request for the
+same conversation waits for an idle seat, across a daemon restart too, for up to the
+restart-recovery window (6 hours by default) after that attempt stopped. An unfinished
+map reports preparation_incomplete. Manual requests still
+share one 180-second budget and stop as before; while an attempt is held, a manual
+request reads already_in_progress until --cancel.
 Stopped attempts may retry automatically after the cooldown; cancellation does not.
 Cancellation disarms future input; it cannot undo a command already submitted. Raw provider /compact and normal messages are unchanged.`);
 

@@ -63,6 +63,33 @@ delivery has been attempted, it cannot be replayed by `continue`, including
 after a daemon restart: inspect `rig seat status <seat>` and the native pane
 before deciding how to recover an uncertain delivery.
 
+## After a restored seat's prompt
+
+A restore that stops at a prompt, such as Claude's resume selection, records the
+seat's restore outcome as `attention_required`. `rig seat continue` doesn't change
+that record: it only delivers pending startup context. While the record stands, it
+alone keeps the seat's lifecycle at `attention_required`, even with startup `ready`:
+`rig ps --nodes` shows LIFECYCLE `att`, `needsAttention` is true, and the seat counts
+in the rig's `attentionCount` and the TUI's attention totals.
+
+After a full restore of a Claude or Codex seat, answering the prompt is enough. When
+the seat's activity next turns to running or idle, or when the whole restore completes
+after the seat already reads running or idle, the daemon checks the live seat: its tmux
+session is alive, and the pane runs the agent resuming the conversation the seat
+records. When the check passes, the restore outcome becomes `operator_recovered`, so
+the restore no longer makes the seat need attention. When it fails, the restore outcome
+stays and the seat still needs attention, which is true when the pane runs another
+conversation. A check that started before a newer restore of the seat doesn't settle
+the newer outcome.
+
+`rig seat clear-attention <seat>` runs the same check on demand. When it fails, the
+command says which check failed, and `--reason` doesn't bypass it. If
+the seat records the wrong conversation and you know the right one, set it with
+`rig seat set-resume-token <seat> --token-stdin --reason <text>`, then run
+`clear-attention` again. After a restore of only some seats, or a community
+harness's assisted startup, `--reason "<what you saw>"` can acknowledge the
+outcome instead.
+
 ## Two Categories of Startup
 
 Everything an agent receives at boot time falls into one of two categories:
@@ -394,7 +421,7 @@ running seat only through the action in the last column.
 | Reasoning effort | `rig seat set-effort` | `rig seat effort <seat>`: requested, saved, sent at launch, and what the session recorded, which is not verified until it takes a turn | Its next managed continuation; nothing restarts |
 | Permissions | `rig seat set-permissions` (`--mode`, `--rules`, or for Codex `--codex-permissions` or `--codex-profile`), shown by `rig seat status` | What it launched with; a status read doesn't prove the running process enforces the selection | Its next managed launch or resume ([per-seat permission mode](getting-started.md#per-seat-permission-mode)) |
 | Working directory | `rig seat set-cwd`, shown by `rig seat status` as **Working directory for future launches** | The directory it started in | `rig seat launch --fresh --stop` (a blank conversation) or `rig handover --source rebuild` (durable context); [details](#change-an-existing-seats-working-directory) |
-| Launch wrapper (`launch_wrapper`) | Member `launch_wrapper` in `rig.yaml` (`pi` and `codex` only; `launch_wrapper: []` clears, omitting retains on existing-seat apply; surfaced as `launchWrapper` in `rig ps --nodes --json` when set; no live `rig seat` edit verb) | The literal wrapper argv that prefixes the resolved Codex entry (preserving TTY stdio) or the resolved Pi child executable inside OpenRig's host runner (preserving RPC pipes and runner lifecycle) when that session launched; a configured prefix is not proof of isolation, tooling, memory or governance | Supported spec create/recreate/apply flow, then the seat's next managed launch, resume, restore or handover (fails closed on missing/unexecutable wrapper, or for Codex non-POSIX pane/missing session identity, retrying long Pi commands via host runner with wrapper flags preserved; never falls back to bare child launch; [details](rig-spec.md#launch-wrapper-runtime-pi-and-codex)) |
+| Launch wrapper (`launch_wrapper`) | Member `launch_wrapper` in `rig.yaml` (`pi`, `codex` and `claude-code` only; `launch_wrapper: []` clears, omitting retains on existing-seat apply; surfaced as `launchWrapper` in `rig ps --nodes --json` when set; no live `rig seat` edit verb) | The literal wrapper argv that prefixes the resolved Codex entry or Claude executable (preserving TTY stdio) or the resolved Pi child executable inside OpenRig's host runner (preserving RPC pipes and runner lifecycle) when that session launched; a configured prefix is not proof of isolation, tooling, memory or governance | Supported spec create/recreate/apply flow, then the seat's next managed launch, resume, restore or handover (fails closed when wrapper support is unavailable; never falls back to bare child launch; [details](rig-spec.md#launch-wrapper-runtime-pi-and-codex)) |
 | Startup files and skills | The spec's startup files, skills and actions | What its conversation read when it started; editing a file afterwards doesn't reach it | A fresh launch or a handover delivers them again; for the running seat, send or walk the change (`rig walk <seat> --through <files>`) |
 | Tools (MCP servers, plugins) | Selected fragments, merged into the harness's own config (`.mcp.json` for Claude, `config.toml` for Codex) | Unknown to OpenRig: registered isn't active, Claude asks before it uses a new server, and no OpenRig command reports which tools a running harness loaded | Check in the harness itself (Claude Code's `/mcp`); a running session may need a restart to pick up newly written config ([runtime config disclosure](#runtime-config-disclosure)) |
 

@@ -4,6 +4,8 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { CmuxAdapter } from "../src/adapters/cmux.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
+import type { TmuxControlStatus } from "../src/adapters/tmux-control.js";
+import { setDaemonTmuxControl } from "../src/adapters/tmux-server.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 describe("Adapter routes", () => {
@@ -27,6 +29,24 @@ describe("Adapter routes", () => {
     const body = await res.json();
     expect(body).toHaveLength(1);
     expect(body[0].name).toBe("my-session");
+  });
+
+  it("#161 GET /api/adapters/tmux/control -> whether control mode was asked for and what the server allows", async () => {
+    const { app } = createTestApp(db, {});
+    try {
+      setDaemonTmuxControl({ requested: false });
+      expect(await (await app.request("/api/adapters/tmux/control")).json()).toEqual({ requested: false, state: "off" });
+
+      let status: TmuxControlStatus = { state: "undecided" };
+      setDaemonTmuxControl({ requested: true, status: () => status });
+      expect(await (await app.request("/api/adapters/tmux/control")).json()).toEqual({ requested: true, state: "undecided" });
+      status = { state: "off", serverVersion: "3.4" };
+      const res = await app.request("/api/adapters/tmux/control");
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ requested: true, state: "off", serverVersion: "3.4" });
+    } finally {
+      setDaemonTmuxControl({ requested: false });
+    }
   });
 
   it("GET /api/adapters/cmux/status after connect() -> capabilities", async () => {

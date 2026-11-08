@@ -13,8 +13,11 @@ export interface TopologyEventStatus {
 type TopologyEventListener = (event: TopologyEvent, rawData: string) => void;
 type TopologyStatusListener = (status: TopologyEventStatus) => void;
 
-const GLOBAL_EVENTS_URL = "/api/events";
 const MAX_REPLAY_EVENTS = 100;
+// The first connection asks only for the newest MAX_REPLAY_EVENTS stored events, the most this hub keeps for a late
+// subscriber, instead of the whole log. On a reconnect EventSource sends Last-Event-ID, and the daemon then replays
+// every event after it, whatever `replay` says, so nothing is lost across a drop.
+const GLOBAL_EVENTS_URL = `/api/events?replay=${MAX_REPLAY_EVENTS}`;
 
 interface CachedTopologyEvent {
   event: TopologyEvent;

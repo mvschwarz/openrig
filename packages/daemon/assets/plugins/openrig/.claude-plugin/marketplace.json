@@ -1,0 +1,15 @@
+{
+  "name": "openrig-app",
+  "description": "The OpenRig plugin, installed from your OpenRig package: work with your OpenRig team from this app.",
+  "owner": {
+    "name": "Mike Schwarz",
+    "url": "https://github.com/mvschwarz"
+  },
+  "plugins": [
+    {
+      "name": "openrig",
+      "source": "./",
+      "description": "Work with your OpenRig team from your coding agent: hand it work, follow that work, answer its questions and read what it returns."
+    }
+  ]
+}

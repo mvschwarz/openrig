@@ -42,9 +42,10 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
   function fakeDeps(opts: {
     post?: { status: number; body: unknown };
     poll: Array<{ status: number; body: unknown }>;
-  }): DoctorDeps & { postCalls: () => number } {
+  }): DoctorDeps & { postCalls: () => number; posted: unknown[] } {
     let polls = 0;
     let posts = 0;
+    const posted: unknown[] = [];
     return {
       run: async () => ({ ok: true, stdout: "", stderr: "", exitCode: 0 }) as never,
       httpGet: async () => {
@@ -52,13 +53,15 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
         polls += 1;
         return { status: r.status, body: JSON.stringify(r.body) };
       },
-      httpPost: async () => {
+      httpPost: async (_url, body) => {
         posts += 1;
+        posted.push(body);
         const r = opts.post ?? { status: 200, body: { pairId: "p-1", code: "424242", approvalQitemId: "qitem-1" } };
         return { status: r.status, body: JSON.stringify(r.body) };
       },
       tcpProbe: async () => "open" as const,
       postCalls: () => posts,
+      posted,
     };
   }
 
@@ -91,6 +94,33 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
     expect(yaml).toContain("id: vps-a");
     expect(yaml).toContain(`bearer_file: ${tokenPath}`);
     expect(yaml).not.toContain("issued-bearer");
+  }, 15_000);
+
+  it("--timeout reaches the target, which keeps the request open that long", async () => {
+    const deps = fakeDeps({ poll: [{ status: 200, body: { status: "denied" } }] });
+    await capture(() => run(deps, ["pair", "http://vps-a:7433", "--timeout", "3600"]));
+    expect(deps.posted).toEqual([expect.objectContaining({ timeoutMs: 3_600_000 })]);
+  }, 15_000);
+
+  it("a one-second wait sees an approval that is already there: the first poll comes before the target's deadline", async () => {
+    // A stand-in target that honours the posted lifetime: approved inside it, expired after it.
+    let postedAt = 0;
+    let lifeMs = 0;
+    const deps: DoctorDeps = {
+      run: async () => ({ ok: true, stdout: "", stderr: "", exitCode: 0 }) as never,
+      tcpProbe: async () => "open" as const,
+      httpPost: async (_url, body) => {
+        postedAt = Date.now();
+        lifeMs = (body as { timeoutMs: number }).timeoutMs;
+        return { status: 200, body: JSON.stringify({ pairId: "p-1", code: "424242", approvalQitemId: "qitem-1" }) };
+      },
+      httpGet: async () => ({ status: 200, body: JSON.stringify(Date.now() - postedAt > lifeMs ? { status: "expired" } : { status: "approved", token: "issued-bearer" }) }),
+    };
+    const { out, err, exitCode } = await capture(() => run(deps, ["pair", "vps-a:7433", "--id", "vps-a", "--timeout", "1"]));
+    expect(lifeMs).toBe(1000);
+    expect(err).toEqual([]);
+    expect(exitCode).toBeUndefined();
+    expect(out.join("\n")).toContain("Paired. Host 'vps-a' registered");
   }, 15_000);
 
   it("denied: loud error, exit 1, NOTHING persists", async () => {

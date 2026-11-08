@@ -10,6 +10,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
+import { WorkflowInstanceStore } from "../src/domain/workflow-instance-store.js";
 import { inspectGraph, reviseGraph, recoverGraphOperation } from "../src/domain/workflow-reconciliation.js";
 import { buildExecutionView } from "../src/domain/execution-view.js";
 import { workflowRoutes } from "../src/routes/workflow.js";
@@ -88,8 +89,11 @@ describe("one preserved running graph and recoverable revision decision", () => 
     steps().push({ id: "inspect", actor_role: "owner", depends_on: ["build"], allowed_exits: ["handoff"], objective: "Inspect new condition" });
     steps().find(s => s.id === "finish").depends_on = ["inspect"]; save();
     const before = unchanged();
+    expect(new WorkflowInstanceStore(db).getByIdOrThrow(run.instanceId).startedSpec?.spec.steps.map(s => s.id)).not.toContain("inspect");
     const revision = reviseGraph(db, bus, apply(run.instanceId));
     expect(revision.replayed).toBe(false);
+    // The run now runs its revised version from the cache, so it no longer keeps the spec it started with (#2607).
+    expect(new WorkflowInstanceStore(db).getByIdOrThrow(run.instanceId).startedSpec).toBeNull();
     expect(unchanged()).toEqual(before);
     await queue.update({ qitemId: child.qitemId, actorSession: "worker@rig", state: "done", closureReason: "no-follow-on", transitionNote: "Child delivered" });
     await runtime.project({ instanceId: run.instanceId, currentPacketId: run.currentFrontier[0]!, actorSession: "owner@rig", exit: "handoff" });

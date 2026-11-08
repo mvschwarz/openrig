@@ -71,9 +71,11 @@ for a well-formed but unaccepted Host. It cannot pass a malformed Host or a refu
 
 ## Event streams
 
-All three are server-sent events (`text/event-stream`):
+All of them are server-sent events (`text/event-stream`):
 
-- **`GET /api/events`**: the daemon's event log. `?rigId=` limits it to one rig. Each event carries `id: <seq>`.
+- **`GET /api/events`**: the daemon's event log, stored events only. `?rigId=` limits it to one rig. Each event
+  carries `id: <seq>`. `view.changed` is not stored, so it does not appear here, live or replayed; `view.changed`
+  rows stored by older versions still replay until an events retention (a separate change) removes them.
   Without `Last-Event-ID`, `?replay=<n>` first sends the newest `n` stored events (`0`: none, live events only);
   `?replay=all`, no `replay`, or any other value sends the whole log first. A `Last-Event-ID` header (what
   `EventSource` sends when it reconnects) sends the events after that id instead, whatever `replay` says.
@@ -81,6 +83,9 @@ All three are server-sent events (`text/event-stream`):
 - **`GET /api/activity/events`**: live only, no replay or ids. Each message is named after its event type:
   `seat.activity_changed`, `seat.rung_health`, `proof.judged` or `proof.sources_changed`. It tells a view to read
   again; it carries no derived state.
+- **`GET /api/views/sse`** (alias `/api/views/watch`) and **`GET /api/views/<viewName>/sse`**: `view.changed`, live
+  only. Its `id:` is the `seq` of the stored event that caused it, so it can repeat across views and is not a replay
+  cursor.
 - **`GET /api/queue/sse`** (alias `/api/queue/watch`): live only, with `id: <seq>`, for `queue.created`,
   `queue.handed_off`, `queue.claimed`, `queue.unclaimed`, `qitem.fallback_routed`, `qitem.closure_overdue`,
   `inbox.absorbed` and `inbox.denied`.
@@ -180,7 +185,8 @@ an open FYI, or a closed ask is not that receipt. The rig-wide reads and their l
 - **`POST /api/workflow/instantiate`** requires `specPath`, `rootObjective` and `createdBySession`, and takes
   `entryOwnerSession`, `targetRig` and `scope` (see [Project workspace](project-workspace.md) for `scope`).
   Success is 201 with `instance`, `spec`, `entryQitemId` and `entryOwnerSession`, any `advisories`, and
-  `scopeIgnored` when a scope wasn't applied.
+  `scopeIgnored` when a scope wasn't applied. The instance keeps `rootObjective`, which every instance read returns
+  (`/api/workflow/list`, `/api/workflow/<id>` and its `trace`). An instance started before it was kept reads `null`.
 - **`GET /api/provider/usage`** returns `{ hostUsage }`, this host's usage rows (`host: "local"`, a `provider`
   and a `state`). A Claude row's `windows` are the seats' status-line readings, one entry per reading, each with
   its `window`, `usedPercent`, `resetsAt`, `asOf` and `seatSession`. A Codex row has `windows: []`. Treating the

@@ -1632,6 +1632,8 @@ export class SeatLifecycleService {
     if (!launch.ok) {
       return { ok: false, code: "launch_failed", message: launch.message, warnings: viewWarnings };
     }
+    // #2426: the launch's own notes (such as what became of openrig-core's earlier skill copies) reach the result.
+    const launchWarnings = launch.warnings ?? [];
     const observedGeneration = this.sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null;
     const generation = observedGeneration && observedGeneration !== retiringGeneration
       ? observedGeneration
@@ -1652,8 +1654,8 @@ export class SeatLifecycleService {
         errors: ["new occupant generation was not persisted"],
       });
       return compensation === "zero"
-        ? { ok: false, code: "startup_failed", status: "failed", warnings: viewWarnings, message: "Fresh launch could not persist a new occupant generation; the new session was rolled back." }
-        : { ok: false, code: "attention_required", status: "attention_required", warnings: viewWarnings, message: "Fresh launch could not persist a new occupant generation and the new process could not be confirmed stopped; the seat requires attention.", sessionName: canonicalSessionName, sessionId: launch.session.id };
+        ? { ok: false, code: "startup_failed", status: "failed", warnings: [...launchWarnings, ...viewWarnings], message: "Fresh launch could not persist a new occupant generation; the new session was rolled back." }
+        : { ok: false, code: "attention_required", status: "attention_required", warnings: [...launchWarnings, ...viewWarnings], message: "Fresh launch could not persist a new occupant generation and the new process could not be confirmed stopped; the seat requires attention.", sessionName: canonicalSessionName, sessionId: launch.session.id };
     }
     this.activityOracle?.declareOccupantSwap(node.id, generation);
 
@@ -1683,7 +1685,8 @@ export class SeatLifecycleService {
       allowFreshFallback: false,
     });
 
-    const warnings = viewWarnings.length ? [...(startupResult.warnings ?? []), ...viewWarnings] : startupResult.warnings;
+    const warnings = launchWarnings.length || viewWarnings.length
+      ? [...launchWarnings, ...(startupResult.warnings ?? []), ...viewWarnings] : startupResult.warnings;
 
     if (!startupResult.ok && startupResult.startupStatus === "failed") {
       const compensation = await this.compensateFailedFreshLaunch({

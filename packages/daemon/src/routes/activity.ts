@@ -328,10 +328,12 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     || body.eventFamily !== undefined)) return c.json({ ok: true });
 
   // Slice 16: a runtime switch's staged successor (before commit) and retired predecessor (after) don't speak for the
-  // seat. The staged successor's native identity is kept on the switch record, which the commit applies.
+  // seat. The staged successor's native identity is kept on the switch record, which the commit applies; a helper of
+  // another runtime the successor starts before then shares its generation, and its id isn't kept (#2702).
   const switchRole = runtimeSwitchActivityRole(store.db, stringOrNull(body.sessionName), stringOrNull(body.generation));
   if (switchRole) {
-    if (switchRole.role === "staged_successor" && body.eventFamily === "session_identity" && typeof body.sessionId === "string") {
+    if (switchRole.role === "staged_successor" && body.eventFamily === "session_identity" && typeof body.sessionId === "string"
+      && !reportedByAnotherRuntime(body)) {
       store.db.prepare(`UPDATE seat_runtime_switches SET successor_resume_type = ?, successor_resume_token = ?,
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND committed_at IS NULL`)
         .run(stringOrNull(body.runtime), body.sessionId, switchRole.id);
@@ -523,6 +525,14 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
         });
       }
     }
+    // #2702: a report from another runtime started inside the seat (reportedByAnotherRuntime) names a conversation the
+    // seat can't resume. It neither moves the seat's resume target nor is published as its identity.
+    if (reportedByAnotherRuntime(body)) {
+      return c.json({
+        ok: true, sessionId, provenance: "hook", tokenPersisted: false, code: "transcript_not_this_session",
+        detail: "This report's transcript belongs to another runtime started inside the seat, so the seat keeps its resume target.",
+      });
+    }
     // #2341: a reserved occupant generation is registered only when its launch or handover commits. Until then, and
     // after a failed handover, its Claude hooks don't move the seat's resume target, which stays the registered
     // occupant's conversation. An absent generation, no current tenure or an unreadable ledger keep today's write.
@@ -585,6 +595,9 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     }
     return c.json({ ok: true, oriented: "verified", nodeId: result.nodeId, challengeId: result.challengeId });
   }
+
+  // #2702: a turn, stop or notification from another runtime started inside the seat is that harness's, not the seat's.
+  if (reportedByAnotherRuntime(body)) return c.json({ ok: true, ignored: "transcript_not_this_session" });
 
   // All tools in this actor's batch have resolved. An individual PostToolUse can belong to a parallel tool,
   // and a subagent's batch says nothing about the main session's permission. Only the current occupant can
@@ -1031,4 +1044,26 @@ activityRoutes.get("/parked", (c) => {
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+/** Whether a hook's transcript path is the Claude conversation file for `sessionId` (`…/<session id>.jsonl`, the file
+ *  `claude --resume <session id>` reads), in either path spelling. */
+function namesClaudeTranscript(transcriptPath: unknown, sessionId: string): boolean {
+  return typeof transcriptPath === "string" && transcriptPath.split(/[\\/]/).pop() === `${sessionId}.jsonl`;
+}
+
+/** #2702: whether a relay's report came from another runtime started inside the seat, which inherited the seat's
+ *  environment and so posts as the seat: a Codex helper a Claude seat started, or a Claude a Codex seat started.
+ *  - A claude-code report is the seat's only when it names a Claude Code transcript, `<session id>.jsonl`, the file
+ *    `claude --resume` reads; a Codex helper names a rollout file or null.
+ *  - A codex report is another runtime's only on positive evidence of Claude Code: the relay saw Claude Code's marker,
+ *    CLAUDE_PROJECT_DIR (claudeHook), and the transcript is `<session id>.jsonl`. A Codex seat's own process doesn't
+ *    carry that marker, whatever its rollout file is named (Codex keeps a legacy or supplied name on resume), so its
+ *    report still counts unless that process inherited the marker.
+ *  A report without transcriptPathPresent (an older relay) or without a session id counts as the seat's, as before. */
+function reportedByAnotherRuntime(body: Record<string, unknown>): boolean {
+  if (body.transcriptPathPresent !== true || typeof body.sessionId !== "string") return false;
+  const claudeTranscript = namesClaudeTranscript(body.transcriptPath, body.sessionId);
+  if (body.runtime === "claude-code") return !claudeTranscript;
+  return body.runtime === "codex" && body.claudeHook === true && claudeTranscript;
 }

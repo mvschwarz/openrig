@@ -1044,7 +1044,7 @@ describe("RigGraph SSE integration", () => {
 
     // Fire shared topology event message.
     act(() => {
-      const es = instances.find((i) => i.url === "/api/events")!;
+      const es = instances.find((i) => i.url === "/api/events?replay=100")!;
       es.simulateMessage('{"type":"node.added","rigId":"rig-1"}');
     });
 
@@ -1074,7 +1074,7 @@ describe("RigGraph SSE integration", () => {
 
     // Fire shared topology event message to trigger refetch.
     act(() => {
-      const es = instances.find((i) => i.url === "/api/events")!;
+      const es = instances.find((i) => i.url === "/api/events?replay=100")!;
       es.simulateMessage('{"type":"node.added","rigId":"rig-1"}');
     });
 
@@ -1093,7 +1093,7 @@ describe("RigGraph SSE integration", () => {
     await waitFor(() => expect(instances.length).toBeGreaterThan(0));
 
     act(() => {
-      instances.find((i) => i.url === "/api/events")!.simulateError();
+      instances.find((i) => i.url === "/api/events?replay=100")!.simulateError();
     });
 
     await waitFor(() => {
@@ -1111,7 +1111,7 @@ describe("RigGraph SSE integration", () => {
 
     // Error
     act(() => {
-      instances.find((i) => i.url === "/api/events")!.simulateError();
+      instances.find((i) => i.url === "/api/events?replay=100")!.simulateError();
     });
 
     await waitFor(() => {
@@ -1123,7 +1123,7 @@ describe("RigGraph SSE integration", () => {
 
     // Reconnect (open event)
     act(() => {
-      instances.find((i) => i.url === "/api/events")!.simulateOpen();
+      instances.find((i) => i.url === "/api/events?replay=100")!.simulateOpen();
     });
 
     await waitFor(() => {

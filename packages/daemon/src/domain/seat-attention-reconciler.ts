@@ -410,6 +410,42 @@ export class SeatAttentionReconciler {
     this.deps = deps;
   }
 
+  /** Each session's last activity state seen by `onSeatActivity`. */
+  private readonly lastActivity = new Map<string, string | undefined>();
+
+  /** A seat a full restore stopped at a prompt (a resume-selection picker) keeps that outcome, and needs attention,
+   *  until the strict reconciler proves the resume (#2622). Its activity turning to running or idle is when the person
+   *  may have answered, so the reconciler runs then, once per such change. Its own proof decides. A failed check leaves
+   *  the outcome uncleared, appending no reconciliation and emitting no refusal (unlike clearAttention's), though the
+   *  check still records the identity evidence it reads. Returns whether the outcome was reconciled. */
+  async onSeatActivity(sessionName: string, state: string | undefined): Promise<boolean> {
+    const previous = this.lastActivity.get(sessionName);
+    this.lastActivity.set(sessionName, state);
+    if ((state !== "running" && state !== "idle") || state === previous) return false;
+    return this.reconcileRestored(sessionName);
+  }
+
+  /** A seat can answer its prompt and settle while the rest of the rig still restores, before its outcome exists, and
+   *  then report no further change. When a full restore completes, check each of the rig's seats last read running or
+   *  idle, once, the same way. Returns how many outcomes were reconciled. */
+  async onRestoreCompleted(rigId: string): Promise<number> {
+    const checks = [...this.lastActivity]
+      .filter(([, state]) => state === "running" || state === "idle")
+      .map(([sessionName]) => this.reconcileRestored(sessionName, rigId));
+    return (await Promise.all(checks)).filter(Boolean).length;
+  }
+
+  private async reconcileRestored(sessionName: string, rigId?: string): Promise<boolean> {
+    const reconcile = this.deps.reconcileRestoreOutcome;
+    const session = reconcile ? this.findLatestSessionByName(sessionName) : null;
+    if (!reconcile || !session || (rigId !== undefined && session.rigId !== rigId)) return false;
+    const derived = this.getDerivedAttentionOutcome(session);
+    // Subset restores and an assisted startup's own outcome keep their established paths.
+    if (derived?.source !== "restore.completed" || derived.assistedStartupAttemptId !== undefined) return false;
+    const restored = await reconcile(session.rigId, session.nodeId).catch(() => null);
+    return restored?.ok === true;
+  }
+
   async clearAttention(
     sessionName: string,
     opts?: { reason?: string },
@@ -833,9 +869,16 @@ export class SeatAttentionReconciler {
   private getDerivedAttentionOutcome(session: { id: string; nodeId: string; rigId: string; sessionStatus: string; runtime: string | null; communityHarness: string | null }): DerivedAttentionOutcome | null {
     if (!this.deps.db) return null;
 
-    const rows = this.deps.db.prepare(
-      "SELECT seq, type, payload FROM events WHERE rig_id = ? AND type IN ('restore.started', 'restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled') ORDER BY seq DESC"
-    ).all(session.rigId) as { seq: number; type: string; payload: string }[];
+    // Shaped as in the inventory's buildRestoreOutcomeMap: the outcomes through their partial index, and starts (NULL
+    // node_id) through the node/type index, so this doesn't scan the rig's event history on each activity change.
+    const rows = this.deps.db.prepare(`
+      SELECT seq, type, payload FROM events
+        WHERE type IN ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled') AND rig_id = ?
+      UNION ALL
+      SELECT seq, type, payload FROM events
+        WHERE node_id IS NULL AND type = 'restore.started' AND +rig_id = ?
+      ORDER BY seq DESC
+    `).all(session.rigId, session.rigId) as { seq: number; type: string; payload: string }[];
     // As in the inventory projection: an attempt that started before the
     // node's ready fresh launch describes the retired occupant.
     const fence = readReadyFreshLaunchFences(this.deps.db, session.rigId).get(session.nodeId);

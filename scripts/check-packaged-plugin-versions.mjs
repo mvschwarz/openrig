@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const directory = path => assert.ok(lstatSync(path).isDirectory(), `${path}: expected a directory, not a link`);
-const manifests = ['.claude-plugin/plugin.json', '.codex-plugin/plugin.json'];
+// An Agent Plugins 1.0 root plugin.json, and Cursor's .cursor-plugin/plugin.json, when a plugin ships them, are
+// manifests apps install from too.
+const manifests = ['.claude-plugin/plugin.json', '.codex-plugin/plugin.json', '.cursor-plugin/plugin.json', 'plugin.json'];
 export const lastRelease = JSON.parse(readFileSync(new URL('./fixtures/packaged-plugins-last-release.json', import.meta.url)));
 
 export function snapshotPlugins(packageDir) {

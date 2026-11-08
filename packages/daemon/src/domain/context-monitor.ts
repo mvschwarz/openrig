@@ -191,8 +191,11 @@ export class ContextMonitor {
         });
         return;
       }
+      // The newest sample, however old: a held map whose context has since dropped, or whose conversation changed, never
+      // compacts (#2682).
       const prepared = await this.compactionEnforcer.drainPendingPreparedCompact?.({
         nodeId: session.node_id, sessionName: session.session_name, cwd: session.cwd, runtime: session.runtime,
+        lastUsedPercentage: usage?.availability === "known" ? usage.usedPercentage : null, sessionId: usage?.sessionId ?? null,
         isObservationCurrent: () => this.isCurrentSession(session),
       });
       if (prepared && (prepared.triggered || prepared.reason !== "no_pending_stage")) return;

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { TmuxAdapter, type ArgvExecFn } from "../src/adapters/tmux.js";
 
 function memFs() {
@@ -25,7 +25,11 @@ function argvAdapter(seen: string[][], impl?: (argv: string[]) => string) {
 }
 
 describe("tmux argv exec path", () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
   it("createSession preserves cwd/env in a private config", async () => {
+    // Without a user runtime directory no systemd user scope is tried (#2710), so the create starts a missing server itself.
+    vi.stubEnv("XDG_RUNTIME_DIR", undefined);
     const seen: string[][] = [];
     const files = memFs();
     const exec = vi.fn(async () => { throw new Error("argv only"); });

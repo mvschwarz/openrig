@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { getOpenRigHome } from "../openrig-compat.js";
-import type { ReconcileSkillLoadoutResult, SkillLoadout, SkillLoadoutLocation, SkillRuntime } from "./skill-catalog.js";
+import { retireDirectPluginCopies, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillLoadoutLocation, type SkillRuntime } from "./skill-catalog.js";
 import { parseSkillFrontmatter } from "./skill-discovery.js";
 import { MANAGED_BLOCK_APPEND_SEPARATOR, hasEditedManagedBlock, managedBlockText } from "./managed-blocks.js";
 
@@ -514,6 +514,70 @@ export function recordSeatSkillFollowing(skillsRoot: string, id: string, source:
     following[id] = { source: nodePath.resolve(source) };
   }
   writeProjections(root, { ...record, following });
+}
+
+/**
+ * #2426: before a Claude seat that loads the vendored openrig-core itself starts, retire the copies of that plugin's
+ * skills its storage still holds from launches before #2433, so the seat loads each skill once. Only OpenRig's own
+ * unchanged copies go, with their loadout records, and only when no projection record here also names them (a restore
+ * replays those records, so such a copy isn't the loadout's alone). Everything else stays and is named. Never refuses a
+ * launch: a failure is named and the seat starts as it is. `namesKept: false` leaves the kept copies unnamed, for a caller
+ * whose own reconciliation decides what becomes of them next and names what it keeps.
+ */
+export function retireSeatCoreSkillCopies(paths: SeatSkillPaths, coreDir: string, opts: { namesKept?: boolean } = {}): string[] {
+  let result: ReturnType<typeof retireDirectPluginCopies>;
+  try {
+    result = retireDirectPluginCopies({ runtime: "claude-code", location: seatSkillLocation(paths), pluginRoot: coreDir,
+      otherRecord: projectionRecordOf(paths) });
+  } catch (err) {
+    return [`Seat skills: openrig-core's copies were left as they are: ${(err as Error).message}`];
+  }
+  const notes: string[] = [];
+  if (result.removed.length > 0) {
+    notes.push(`Seat skills: removed ${result.removed.length === 1 ? "OpenRig's copy" : `${result.removed.length} OpenRig copies`} of openrig-core's ${result.removed.join(", ")}, which this seat now loads from the plugin itself`);
+  }
+  if (opts.namesKept !== false) {
+    for (const copy of result.kept) notes.push(`Seat skills: kept ${copy.target}, though openrig-core also supplies ${copy.id}: ${copy.reason}`);
+  }
+  for (const error of result.errors) notes.push(`Seat skills: openrig-core's copies were left as they are: ${error.message}`);
+  return notes;
+}
+
+/** #2426: whether the seat's projection record also names a skill folder: a file OpenRig recorded writing under it, or the
+ *  skill following its source. Read strictly, unlike readProjections: a record that exists but can't be read names
+ *  every folder, since what it holds is unknown. */
+function projectionRecordOf(paths: SeatSkillPaths): (id: string, target: string) => string | undefined {
+  let record: ProjectionRecord;
+  try {
+    record = JSON.parse(fs.readFileSync(paths.projectionsPath, "utf8")) as ProjectionRecord;
+    if (!record || typeof record.files !== "object" || !record.files) throw new Error("it holds no file record");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return () => undefined;
+    const unknown = `${paths.projectionsPath} can't be read (${(err as Error).message}), so OpenRig can't tell whether it also records this copy`;
+    return () => unknown;
+  }
+  const files = Object.keys(record.files).map((file) => nodePath.resolve(file));
+  const following = record.following && typeof record.following === "object" ? record.following : {};
+  return (id, target) => {
+    const folder = nodePath.resolve(target);
+    if (Object.hasOwn(following, id)) return `it's also recorded as following its source in ${paths.projectionsPath}`;
+    return files.some((file) => file === folder || file.startsWith(folder + nodePath.sep))
+      ? `it's also recorded as a projection in ${paths.projectionsPath}` : undefined;
+  };
+}
+
+/** retireSeatCoreSkillCopies for a node's own storage, when it has one. */
+export function retireSeatCoreSkillCopiesForNode(
+  db: { prepare(sql: string): { get(...params: unknown[]): unknown } },
+  nodeId: string,
+  coreDir: string,
+): string[] {
+  try {
+    const paths = seatSkillPathsForNode(db, nodeId);
+    return paths && paths.skillsRoot === nodePath.join(paths.pluginDir, "skills") ? retireSeatCoreSkillCopies(paths, coreDir) : [];
+  } catch (err) {
+    return [`Seat skills: openrig-core's copies were left as they are: ${(err as Error).message}`];
+  }
 }
 
 /** Best-effort policy bookkeeping for a no-op skill; never make an unchanged copy fail launch. */

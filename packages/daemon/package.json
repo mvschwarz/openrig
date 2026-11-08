@@ -87,6 +87,10 @@
       "types": "./dist/local-reading-surface.d.ts",
       "import": "./dist/local-reading-surface.js"
     },
+    "./learned-host-bindings": {
+      "types": "./dist/learned-host-bindings-surface.d.ts",
+      "import": "./dist/learned-host-bindings-surface.js"
+    },
     "./codex-auth": {
       "types": "./dist/codex-auth-surface.d.ts",
       "import": "./dist/codex-auth-surface.js"

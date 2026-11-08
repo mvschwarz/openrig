@@ -159,6 +159,10 @@ const AUTO_UNPARK_WAKE_TAG = "queue:auto-unpark:blocker";
  *  handoff: it keeps that source when it's replayed later. Send, broadcast, queue create and the cross-host forward never
  *  set it from a request; the trusted local outbox recorder (/api/queue/outbox/record) accepts caller tags by design. */
 const WAKE_TRIGGER_OPENRIG_TAG = "queue:wake-trigger:openrig";
+/** The wake telling a claimer that a cross-host handoff overrode its claim (#2631): it's about a row closed by design. */
+const CLAIM_OVERRIDDEN_WAKE_PREFIX = `${WAKE_INTENT_PREFIX}claim-overridden-`;
+/** The first id after every such wake's, so a range on the outbox's primary key finds them all and nothing else. */
+const CLAIM_OVERRIDDEN_WAKE_END = `${WAKE_INTENT_PREFIX}claim-overridden.`;
 /** On a wake intent whose ring a hosted member's trigger accepted: recovery doesn't ring that intent again. */
 const HOSTED_WAKE_ACCEPTED_TAG = "queue:hosted-wake-accepted";
 
@@ -745,6 +749,7 @@ export function hasLinkedSuccessor(
   sourceQitemId: string,
   target: string,
 ): boolean {
+  if (successorScope?.db === db && successorScope.covers(sourceQitemId)) return successorScope.has(sourceQitemId, target);
   const successor = db
     .prepare(
       `SELECT 1 FROM queue_items s
@@ -759,6 +764,57 @@ export function hasLinkedSuccessor(
     )
     .get(target, target, sourceQitemId, sourceQitemId, sourceQitemId);
   return Boolean(successor);
+}
+
+/** The linked-successor index lent to hasLinkedSuccessor by createLinkedSuccessorLookup's run(), for one synchronous call. */
+let successorScope: { db: Database.Database; covers: (source: string) => boolean; has: (source: string, target: string) => boolean } | null = null;
+
+/** hasLinkedSuccessor for a whole set of sources in one read, for a pass that asks it once per row (the stuck sweep's
+ *  custody loop, and the handoff advisory of each row it reads). The read keeps the per-row query's own predicates: a
+ *  successor is a row whose handed_off_from is the source, or whose chain_of_record is valid JSON with the source among
+ *  its json_each values (compared as `value IN (...)` compares, like `value = ?`: a number or a nested value never
+ *  equals a text id); has() then checks qitem_id or destination_session against the target and that the successor is
+ *  not the source itself. A snapshot from its first has() until invalidate(): the caller invalidates it whenever other
+ *  code could have run. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn
+ *  for a covered source; any other source keeps the per-row query. */
+export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemIds: readonly string[]): {
+  has: (sourceQitemId: string, target: string) => boolean;
+  run: <T>(fn: () => T) => T;
+  invalidate: () => void;
+} {
+  const sources = new Set(sourceQitemIds);
+  let bySource: Map<string, Array<{ qitemId: string; destination: string | null }>> | null = null;
+  const build = () => {
+    const map = new Map<string, Array<{ qitemId: string; destination: string | null }>>();
+    const ids = JSON.stringify([...sources]);
+    const rows = db.prepare(
+      `SELECT s.qitem_id, s.destination_session, s.handed_off_from AS source FROM queue_items s
+        WHERE s.handed_off_from IN (SELECT value FROM json_each(?))
+       UNION
+       SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
+        WHERE s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
+          AND j.value IN (SELECT value FROM json_each(?))`,
+    ).all(ids, ids) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
+    for (const r of rows) {
+      const list = map.get(r.source);
+      const entry = { qitemId: r.qitem_id, destination: r.destination_session };
+      if (list) list.push(entry); else map.set(r.source, [entry]);
+    }
+    return map;
+  };
+  const has = (sourceQitemId: string, target: string): boolean => (bySource ??= build()).get(sourceQitemId)?.some(
+    (s) => s.qitemId !== sourceQitemId && (s.qitemId === target || s.destination === target)) ?? false;
+  const own = { db, covers: (source: string) => sources.has(source), has };
+  return {
+    has,
+    run: (fn) => {
+      if (successorScope?.db === db) return fn();
+      const previous = successorScope;
+      successorScope = own;
+      try { return fn(); } finally { successorScope = previous; }
+    },
+    invalidate: () => { bySource = null; },
+  };
 }
 
 /** PL-007 — defensive column probe. Older test fixtures bypass the
@@ -803,8 +859,9 @@ export type CompactQueueItem = Omit<QueueItem, (typeof COMPACT_ELIDED_FIELDS)[nu
   fieldsElided: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
 };
 
-type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean };
-type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean };
+/** `qitemId` narrows either finder to one row, so a caller can ask again whether that row still qualifies. */
+type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean; qitemId?: string };
+type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string };
 
 function compactRow(item: QueueItem): CompactQueueItem {
   const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
@@ -1171,6 +1228,18 @@ export class QueueRepository {
 
   private currentWakeIntent(entry: QueueWakeFacts): boolean {
     const row = entry.auditPointer ? this.db.prepare("SELECT state, destination_session FROM queue_items WHERE qitem_id=?").get(entry.auditPointer) as { state: string; destination_session: string } | undefined : undefined;
+    // That notice stays current while the row stays closed by the close that made it; every other wake, while its row
+    // waits on its destination. A reopen and another close end it: its text names the earlier successor.
+    if (entry.outboxId.startsWith(CLAIM_OVERRIDDEN_WAKE_PREFIX)) {
+      if (row === undefined || !isTerminalState(row.state) || row.destination_session !== entry.destinationSession) return false;
+      const closed = TERMINAL_QUEUE_STATES.map(() => "?").join(",");
+      const close = this.db.prepare(`SELECT transition_id FROM (
+        SELECT transition_id, state, LAG(state) OVER (ORDER BY transition_id) AS previous_state
+        FROM queue_transitions WHERE qitem_id=?)
+        WHERE state IN (${closed}) AND (previous_state IS NULL OR previous_state NOT IN (${closed})) ORDER BY transition_id DESC LIMIT 1`)
+        .get(entry.auditPointer, ...TERMINAL_QUEUE_STATES, ...TERMINAL_QUEUE_STATES) as { transition_id: number } | undefined;
+      return Number(entry.outboxId.slice(CLAIM_OVERRIDDEN_WAKE_PREFIX.length)) === close?.transition_id;
+    }
     if (row?.state !== "pending" || row.destination_session !== entry.destinationSession) return false;
     const prefix = `${WAKE_INTENT_PREFIX}blocker-`;
     if (!entry.outboxId.startsWith(prefix)) return true;
@@ -1375,7 +1444,9 @@ export class QueueRepository {
       // Draft-aware wakes remain pending until the transport owns their bounded
       // retry. Manual retention is deliberately never drained.
       const draftTarget = this.transport?.draftAwareTarget?.(input.toSession);
-      if (draftTarget) this.outbox.assertRetentionCapacity(draftTarget.nodeId, frozenEnvelope);
+      // The same rule as a held message (#2430): the sender's own held messages there count as room, since this wake
+      // coalesces them if it settles as held.
+      if (draftTarget) this.outbox.assertRetentionCapacity(draftTarget.nodeId, frozenEnvelope, input.fromSession, [input.outboxId]);
       this.outbox.record(record);
       const binding = this.transport?.deliveryTarget?.(input.toSession);
       if (binding) this.db.prepare("UPDATE outbox_entries SET guard_binding=? WHERE outbox_id=? AND guard_binding IS NULL")
@@ -1682,9 +1753,10 @@ export class QueueRepository {
     tally.failed += this.db.prepare(`UPDATE outbox_entries AS o SET delivery_state = 'failed',
       tags = json_insert(COALESCE(tags, '[]'), '$[#]', 'queue:wake-superseded')
       WHERE delivery_state = 'pending' AND rowid <= ? AND substr(outbox_id, 1, ?) = ?
+        AND substr(outbox_id, 1, ?) != ?
         AND NOT EXISTS (SELECT 1 FROM queue_items q WHERE q.qitem_id = o.audit_pointer
           AND q.state = 'pending' AND q.destination_session = o.destination_session)`)
-      .run(horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX).changes;
+      .run(horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, CLAIM_OVERRIDDEN_WAKE_PREFIX.length, CLAIM_OVERRIDDEN_WAKE_PREFIX).changes;
     // A stop also refuses every later claim inside a delivery: coalesced peers and members it releases for their own send.
     // So does a missing receiver, for a notification already tried. One never tried still gets its attempt, so its row
     // records why it didn't land.
@@ -1697,11 +1769,12 @@ export class QueueRepository {
     let cursor = 0;
     for (;;) {
       const pending = this.db.prepare(`SELECT o.rowid AS id, o.outbox_id FROM outbox_entries o
-        JOIN queue_items q ON q.qitem_id = o.audit_pointer AND q.state = 'pending'
+        JOIN queue_items q ON q.qitem_id = o.audit_pointer AND (q.state = 'pending' OR substr(o.outbox_id, 1, ?) = ?)
           AND q.destination_session = o.destination_session
         WHERE o.rowid > ? AND o.rowid <= ? AND substr(o.outbox_id, 1, ?) = ?
           AND o.delivery_state IN ('pending','failed','indeterminate') ORDER BY o.rowid LIMIT ?`)
-        .all(cursor, horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
+        .all(CLAIM_OVERRIDDEN_WAKE_PREFIX.length, CLAIM_OVERRIDDEN_WAKE_PREFIX, cursor, horizon, WAKE_INTENT_PREFIX.length,
+          WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
       if (pending.length === 0) break;
       for (const intent of pending) {
         if (opts?.stopRequested?.()) return result();
@@ -1793,13 +1866,22 @@ export class QueueRepository {
     const eligible = (entry: OutboxEntry): boolean => {
       if (entry.deliveryState !== "failed" || !entry.auditPointer) return false;
       const current = this.getById(entry.auditPointer), refusal = current?.lastNudgeWireResult;
-      return current?.state === "pending" && addresses.includes(current.destinationSession)
+      const notice = entry.outboxId.startsWith(CLAIM_OVERRIDDEN_WAKE_PREFIX);
+      return (current?.state === "pending" || notice) && addresses.includes(current?.destinationSession ?? "")
         && (refusal === "failed:target_needs_input" || (refusal?.startsWith("failed:Refused:") === true && refusal.includes("interactive prompt")));
     };
+    const seats = addresses.map(() => "?").join(",");
+    const refused = (q: string) => `(${q}last_nudge_result LIKE 'failed:Refused:%interactive prompt%' OR ${q}last_nudge_result = 'failed:target_needs_input')`;
+    // A closed row is here only for a failed override notice, found from the notice by its id range, so this never
+    // reads the host's other failed history.
     const rows = this.db.prepare(`SELECT qitem_id, destination_session, source_session, last_nudge_result
-      FROM queue_items WHERE state = 'pending' AND destination_session IN (${addresses.map(() => "?").join(",")})
-        AND (last_nudge_result LIKE 'failed:Refused:%interactive prompt%' OR last_nudge_result = 'failed:target_needs_input')`)
-      .all(...addresses) as Array<{ qitem_id: string; destination_session: string; source_session: string }>;
+      FROM queue_items WHERE state = 'pending' AND destination_session IN (${seats}) AND ${refused("")}
+      UNION
+      SELECT q.qitem_id, q.destination_session, q.source_session, q.last_nudge_result
+      FROM outbox_entries o JOIN queue_items q ON q.qitem_id = o.audit_pointer AND q.destination_session = o.destination_session
+      WHERE o.outbox_id >= ? AND o.outbox_id < ? AND +o.delivery_state = 'failed' AND +o.destination_session IN (${seats})
+        AND ${refused("q.")}`)
+      .all(...addresses, CLAIM_OVERRIDDEN_WAKE_PREFIX, CLAIM_OVERRIDDEN_WAKE_END, ...addresses) as Array<{ qitem_id: string; destination_session: string; source_session: string }>;
     const attempted = new Set<string>();
     // Reserve the whole selection before awaiting: a correlated send can include several rows.
     // Its refusal stays durable, but must not re-arm this same clear-triggered pass.
@@ -2732,6 +2814,11 @@ export class QueueRepository {
     transitionNote?: string;
     /** The sender's recorded provenance, as the local handoff records it. Null only for an in-process caller. */
     identityProvenance?: string | null;
+    /** The source's claim as the caller read it before forwarding. A claim made since then is overridden by this close,
+     *  which still closes, because the successor already exists, and records the override and wakes the claimer (#2631). */
+    claimedAtBeforeForward?: string | null;
+    /** The successor the forward created, for that wake: its plain id, never the host-qualified key (BR-1). */
+    successorQitemId?: string;
   }): { item: QueueItem; absorbed: boolean } {
     const source = this.getById(input.qitemId);
     if (!source) {
@@ -2757,6 +2844,9 @@ export class QueueRepository {
 
     const ts = new Date().toISOString();
     const events: Array<import("./types.js").RigEvent> = [];
+    const overriddenClaim = input.claimedAtBeforeForward !== undefined && source.claimedAt != null
+      && source.claimedAt !== input.claimedAtBeforeForward ? source.claimedAt : null;
+    let overrideWake: string | null = null;
 
     const txn = this.db.transaction(() => {
       this.db
@@ -2771,18 +2861,40 @@ export class QueueRepository {
         )
         .run(input.terminalState, ts, input.toSession, input.closureTarget, input.qitemId);
 
-      this.transitionLog.append({
+      const note = input.transitionNote ?? `cross-host handoff to ${input.toSession}`;
+      const closeTransition = this.transitionLog.append({
         qitemId: input.qitemId,
         state: input.terminalState,
         actorSession: input.fromSession,
         // BR-1: the minted note carries the TWO-PART toSession only — the
         // host-qualified successor key is allowed in closure_target and nowhere
         // else, and transition_note is a durable carrier.
-        transitionNote: input.transitionNote ?? `cross-host handoff to ${input.toSession}`,
+        transitionNote: overriddenClaim
+          ? `${note} (this overrode ${source.destinationSession}'s claim made at ${overriddenClaim}, while the handoff was forwarded)`
+          : note,
         closureReason: "handed_off_to",
         closureTarget: input.closureTarget,
         identityProvenance: input.identityProvenance ?? null,
       });
+      if (overriddenClaim && source.destinationSession !== input.fromSession) {
+        const successor = input.successorQitemId ? ` as ${input.successorQitemId}` : "";
+        try {
+          overrideWake = this.db.transaction(() => this.recordWakeIntent({
+            outboxId: `${CLAIM_OVERRIDDEN_WAKE_PREFIX}${closeTransition.transitionId}`,
+            auditPointer: input.qitemId,
+            qitemId: input.qitemId,
+            fromSession: input.fromSession,
+            toSession: source.destinationSession,
+            identityProvenance: sideEffectProvenance(input.identityProvenance),
+            bareBody: `${input.qitemId} was handed off to ${input.toSession}${successor} while you claimed it, so your claim is superseded and that seat has the work. Stop work on ${input.qitemId}; to carry on with it, coordinate with ${input.toSession}.`,
+            tags: [WAKE_TRIGGER_OPENRIG_TAG],
+          }))();
+        } catch (err) {
+          // As a handoff's own wake: a full held-message quota doesn't undo a close whose successor already exists.
+          if ((err as { code?: string }).code !== "retained_quota_full") throw err;
+          this.recordNudgeAttempt(input.qitemId, `${WAKE_NOT_RETAINED}${(err as Error).message}`);
+        }
+      }
 
       // OPR.0.5.8.1 S1b — third member of the handoff family, same bypass.
       this.retireParkGeneratedTimer(input.qitemId, `park_ended:${input.terminalState}`);
@@ -2817,6 +2929,7 @@ export class QueueRepository {
     for (const e of events) {
       this.eventBus.notifySubscribers(e as PersistedEvent);
     }
+    if (overrideWake) this.deliverWakeIntentAfterCommit(overrideWake);
 
     return { item: this.getByIdOrThrow(input.qitemId), absorbed: false };
   }
@@ -4648,6 +4761,10 @@ export class QueueRepository {
     const cutoff = opts?.now ?? new Date().toISOString();
     const conditions = ["state = 'in-progress'", "closure_required_at IS NOT NULL", "closure_required_at <= ?"];
     const params: unknown[] = [cutoff];
+    if (opts?.qitemId !== undefined) {
+      conditions.push("qitem_id = ?");
+      params.push(opts.qitemId);
+    }
     if (opts?.rig) {
       const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
       conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
@@ -4752,6 +4869,10 @@ export class QueueRepository {
                           OR receipt.transition_note LIKE 'relay-owner-notification-transport-failed %')))`,
     ];
     const params: unknown[] = [];
+    if (opts?.qitemId !== undefined) {
+      conditions.push("qitem_id = ?");
+      params.push(opts.qitemId);
+    }
     if (opts?.rig) {
       const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
       conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
@@ -5341,6 +5462,15 @@ export class QueueRepository {
   private activityReader?: WaitingActivityReader;
   attachActivityReader(reader: WaitingActivityReader): void { this.activityReader = reader; }
 
+  /** #2661 (c): since when (ISO) the daemon owes a seat its managed post-compaction stages, or null. */
+  private compactionReader?: (session: string) => string | null;
+  attachCompactionReader(reader: (session: string) => string | null): void { this.compactionReader = reader; }
+
+  compactionOwedSince(session: string | null | undefined): string | null {
+    if (!session) return null;
+    try { return this.compactionReader?.(session) ?? null; } catch { return null; }
+  }
+
   private workflowGuidance?: (packetId: string) => string[];
   attachWorkflowGuidance(reader: (packetId: string) => string[]): void { this.workflowGuidance = reader; }
 
@@ -5454,6 +5584,8 @@ export class QueueRepository {
       activity: activity?.activity,
       needsInput: activity?.needsInput.count,
       needsInputReason: activity?.needsInput.reason,
+      backgroundWork: activity?.backgroundWork ?? null,
+      compactionOwedSince: this.compactionOwedSince(row.destination_session),
       claimedAt: row.claimed_at,
       lastHeartbeat: row.last_heartbeat,
       postClaimMotionCount: 0, // this reader supplies the current meaningful timestamp

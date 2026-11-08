@@ -101,7 +101,7 @@ describe("SettingsStore (User Settings v0)", () => {
 
   it("SETTINGS_VALID_KEYS matches the documented settings key set", () => {
     expect([...SETTINGS_VALID_KEYS]).toEqual([
-      "daemon.port", "daemon.host", "daemon.db_conflict",
+      "daemon.port", "daemon.host", "daemon.db_conflict", "daemon.seat_poll_interval_ms",
       // OPR.0.4.6.MH1 FR-1/FR-4 — host-selection pointer + own-host name.
       "host.selected",
       "host.name",
@@ -189,11 +189,13 @@ describe("SettingsStore (User Settings v0)", () => {
       "decisions.enabled",
       "decisions.consumers",
       "decisions.template_dir",
+      "acp.to",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
       "retention.enabled",
       "retention.transitions_days",
       "retention.watchdog_days",
       "retention.usage_samples_days", // 51-08 A2 (plan-lock rev-1): the PM-ruled 14d telemetry window
+      "retention.events_days", // the history-only event types of events
       "retention.watchdog_keep_per_job",
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",
@@ -263,6 +265,25 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(store.resolveOne("provider.selected")).toMatchObject({ value: "claude,codex", source: "file" });
     for (const raw of ["gemini", "both", "claude,", "Claude", "claude codex"]) {
       expect(() => store.set("provider.selected", raw)).toThrow(/provider\.selected/);
+    }
+  });
+
+  it("retention.events_days defaults to 0 (keep), resolves file then env, accepts 0 and refuses negative or non-integer values", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 0, source: "default" });
+    store.set("retention.events_days", "3");
+    expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 3, source: "file" });
+    expect(JSON.parse(readFileSync(configPath, "utf-8")).retention.eventsDays).toBe(3);
+    process.env.OPENRIG_RETENTION_EVENTS_DAYS = "5";
+    try {
+      expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 5, source: "env" });
+    } finally {
+      delete process.env.OPENRIG_RETENTION_EVENTS_DAYS;
+    }
+    store.set("retention.events_days", "0");
+    expect(store.resolveOne("retention.events_days")).toMatchObject({ value: 0, source: "file" });
+    for (const raw of ["-3", "2.5", "3days"]) {
+      expect(() => store.set("retention.events_days", raw)).toThrow(/retention\.events_days/);
     }
   });
 

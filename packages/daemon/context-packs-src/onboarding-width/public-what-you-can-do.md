@@ -10,8 +10,8 @@ already does it, or two verbs crossed already answer it. **You cannot look up a 
 not know exists.** So the point of what follows is not skill. It is recognition: that when a task
 lands, something rhymes, and you go check instead of building.
 
-Ninety-one top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.7.9`). This marker describes the pack's teaching, not publication or live
+Ninety-two top-level verbs ship (capability canon refreshed through
+`capability-delta-v0.7.10`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
 `rig context get reference/whats-new.md`.
@@ -56,7 +56,12 @@ one command away. Your memory of the fleet is a claim about the past.
   and whether the thing you did an hour ago actually landed. Before a relaunch, it shows what the
   seat's next fresh managed launch will ask for, labelled planned rather than observed: the native
   permission argument, where each part comes from, what OpenRig adds and the commands that change
-  it, plus the seat's terminal policy.
+  it, plus the seat's terminal policy. **When a Claude seat seems stuck on a permission prompt, read
+  this before capturing panes:** with openrig-core 0.1.26's `PermissionRequest` hook it shows the
+  latest observed permission request (time, actor and a fixed command descriptor that hides the
+  arguments) and Claude's bounded suggested rules, which can contain paths, patterns or sensitive
+  values. It's evidence, not an applied permission: it applies and approves nothing, and it's held
+  in memory for five minutes and lost on a daemon restart (`docs/reference/seat-delivery.md`).
 - **`rig view list` / `rig view show <lens>`** — named lenses over coordination state: use
   `view show escalations` for owner attention, `view show pickup` for claimed-row state, and
   `view show execution` for done/now/next and current authored planning guidance with its
@@ -96,7 +101,9 @@ one command away. Your memory of the fleet is a claim about the past.
   With no evidence that reads unknown, never idle.
 - **`rig telemetry events` / `transitions` / `tenures <node-id>`** — past events, queue
   transitions and a seat's occupants, one bounded page at a time with gaps reported. Reach for it
-  before querying the database yourself.
+  before querying the database yourself. If `retention.events_days` is set (default `0` keeps
+  everything), the history-only event types (views, snapshots, watchdog firings, queue events) older
+  than that are pruned, and an older window reports them as a `retained_sequence_gap`.
 - **Check the exit code.** Many commands used to print nothing and exit 0 when a daemon read
   failed; now they exit 1 or 2. Empty output from a failed read is not empty state.
 
@@ -141,8 +148,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   holds only a suggestion, or typed text beside one. Don't use it to type over a half-written box:
   to reach a seat with something that can't wait, use `--urgent` where its typing-guard level lets
   urgent input through.
-  A send to a pane in tmux copy or view mode leaves the mode once and delivers; a pane that can't
-  leave is refused with `pane_in_mode`. With `transport.verify_input_box` on (off by default),
+  A send or wake to a pane in a tmux mode leaves every mode first and delivers, including a
+  chooser, customize or clock mode a person has open; a pane that can't leave is refused with
+  `pane_in_mode`, and the refusal names why. With `transport.verify_input_box` on (off by default),
   `--verify` to Claude Code or Codex reads verified only when the text was seen in the input box
   and the box was empty after Enter; it only reports.
 - **`rig broadcast`** — one fact to everyone at once, rather than relaying it N times and getting
@@ -200,6 +208,20 @@ unseen — which makes messages the one delivery channel that never gets skipped
   judge and close. Each permission request is a row to `--permissions-to` (default: you). The guide
   is `docs/reference/acp-agents.md` in the source repo, and `docs/reference/a2a-agents.md` covers
   A2A agents.
+- **`rig exec run <row> --harness claude|codex`** — a finite task for Claude Code or Codex without
+  building a seat: the same single turn through that harness's ACP adapter, run by a detached
+  connector that outlives the command, so closing the terminal or leaving `--wait` doesn't stop it.
+  Install the adapters first (`@agentclientprotocol/claude-agent-acp` 0.101.0 and
+  `@agentclientprotocol/codex-acp` 2.5.0); `rig exec harnesses` shows the versions found, and
+  `--plan` starts nothing. **The row stays the custody record:** it gets the same notes as `rig acp
+  run`, each permission request is a row to `--permissions-to`, and the outcome is the agent's
+  report, so accepting the work stays with the row's custodian. One run per row: running it again
+  returns that run, and `--again` starts another turn once it has ended. `rig exec status
+  <runId|row>` reads it; a connector that died without an outcome reads `interrupted`, outcome
+  unknown. **`rig exec cancel <runId>`** (not `rig acp cancel`) asks the agent to stop its turn;
+  the acknowledgement isn't a settled shutdown and says nothing about further spend. It hasn't run
+  with a real adapter yet, and concurrent runs, long tasks and recovery across a reboot aren't
+  covered. `rig acp run` stays the synchronous form, in your terminal, for any ACP agent.
 - **`rig terminal open <view>`** — open a desktop terminal with live agent tiles; a window is the
   default. **Opening `rig terminal open saved:kernel --window` is the step after install or start**:
   say you're opening it, run it on the daemon's desktop, then tell the person where it opened. Don't
@@ -790,6 +812,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   ID is verified.
   Managed Codex launches turn off Codex's startup update check, so no update notice stops them;
   updating Codex is the operator's job.
+  Managed Codex seats run tool commands in a non-login shell, so plain `rig` works however OpenRig
+  was installed (with a Codex that supports `allow_login_shell`); setup that lives only in login or
+  rc files, and shell functions and aliases, may be missing there. `rig config set
+  launch.codex_login_shell true` defers to Codex's own setting at each seat's next launch.
 - **`rig seat set-model` / `stop` / `clean`** — persist the model for later managed resumes, stop
   exactly one live seat (ending its session and any work in progress), or clear a dead seat's
   stale binding. A stop is recorded, so the rig doesn't read `degraded` for that seat, and a rig
@@ -875,9 +901,17 @@ version, from checking the environment to a useful report to the OpenRig team.
   kept short enough to run as a command and is sent only to an idle seat; its own result reads
   `submitted, unconfirmed` (it reached the seat, not proof compaction ran), `uncertain` (not
   replayed) or `not sent`, so confirm by effect. Before each paste (preparation prompt, `/compact`,
-  restore prompt) it checks the input box and holds that step while the box holds typed,
-  unreadable or changed input, so a draft needs no typing guard to protect it; the check is a read just before the paste,
-  not a lock. An idle Claude seat under the installed-update notice still reads idle, so it needs no
+  then the turn boundary, restore request and audit) it checks the input box, so a draft needs no
+  typing guard to protect it. Typed, unreadable or changed input holds the preparation prompt and
+  `/compact`. After `/compact`, a box that reads typed still holds the step, so a typed draft left
+  there holds the restore until it's cleared or you take over; but after two idle polls in a row
+  that can't read the box, the next poll sends the step, recorded as delivered over a box OpenRig
+  couldn't read (never as empty), so a draft OpenRig can't recognise there may receive the restore
+  text. The step after a `/compact` whose result was lost, and a seat whose draft-aware delivery or
+  typing guard holds OpenRig's input, still hold. To take over a held restore, run `rig compact
+  <seat> --cancel`, then send a restore request naming the newest restore map, the restore marker
+  and its packet; a step already being pasted can still land. The check is a read just before the
+  paste, not a lock. An idle Claude seat under the installed-update notice still reads idle, so it needs no
   hand compaction for that. Claude seats that select `openrig-core` load its
   hooks; a seat can give a slow refocus more time with `OPENRIG_REFOCUS_BUDGET_MS` (4500 to 52000).
   The refocus work packet stays off by default for Claude Code and Codex;
@@ -886,10 +920,19 @@ version, from checking the environment to a useful report to the OpenRig team.
   may write. A daemon restart picks a managed compaction up where it stopped: an owed restore step
   resumes, a `/compact` that may have been sent is never sent again, and `rig compact --state`
   shows anything stranded or owed. A map finished during automatic preparation stays armed for the next idle moment
-  through the next retry interval; `--state` shows `idleDeadlineAt`. In either mode, expiry reads
-  `map_complete_seat_never_idle` when the map is finished, or `preparation_incomplete` when it is not.
+  through the next retry interval; `--state` shows `idleDeadlineAt`. If its `/compact` is refused before input (a
+  draft in the box, a pane in a tmux mode) or the seat never goes idle in that time, the automatic attempt is held:
+  `--state` shows `prepared`, `preparedAt` and `preparedReason`, and `/compact` goes in at the next idle moment with an
+  empty box, with the same map and no new preparation prompt. A held attempt stops on a fresh sample below the threshold
+  or from another conversation (`below_threshold_while_prepared`), once usage has risen 15 points since its request or
+  two hours after its map was ready (`prepared_map_stale`), or when its map no longer reads ready
+  (`preparation_incomplete`). After an attempt
+  stops with its request delivered, the next automatic request for the same conversation waits for an idle seat, also
+  across a daemon restart, for up to the restart-recovery window (6 hours by default) after that attempt stopped. Manual expiry reads
+  `map_complete_seat_never_idle` when the map is finished; in either mode, `preparation_incomplete` when it is not.
   `rig seat status` shows an owed restore stage and its last
-  delivery result, and repeated delivery failures open one queue item for the seat's orchestrator, or a
+  delivery result, including a step that went in over an unreadable box, and repeated delivery
+  failures open one queue item for the seat's orchestrator, or a
   person when it has none.
 - **Codex seats get `openrig-core` too: its refocus after a compaction and its skills, with no
   first-launch review stop.** OpenRig installs the plugin into Codex on boot and on a fresh launch.
@@ -1057,6 +1100,14 @@ working arrangement becomes something someone else can instantiate.
   baseline, and at launch the runner says whether the seat has a stored sign-in or provider key
   (advisory; launch continues). A provider key reaches a Pi seat only when its name is in
   `recovery.provider_auth_env_allowlist`; `MINIMAX_API_KEY` serves `minimax/<id>` models.
+- **`rig agent validate <agent.yaml>`** — check an agent spec before you relaunch from it; that it
+  launched doesn't make it right. It and every launch (`rig up`, a restore, a first-start retry)
+  print `agent spec advisory` lines, which never make a spec invalid: an unknown key under a
+  profile's `uses`, or a single value where `uses.<category>` takes a list. That single value is
+  read as a one-item list and resolves like one, so **a member whose profile selects a resource
+  that isn't available fails that member's resolution** ("not found in resource pool"), as the
+  list form does; it isn't only a warning. A native resume that continues a saved conversation
+  shows no advisories.
 - **`rig context trace --pod <pod>`** — walk the context chain through instance → rig → pod → seat
   when the pod altitude matters.
 - **`rig specs show` / `preview` / `add` / `sync` / `rename` / `remove`** — where a spec lives,
@@ -1332,8 +1383,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
   stop them without killing the rig.
 - **`rig environment`** — not `rig env`: places a worker seat in an NVIDIA OpenShell sandbox and returns
   verified result files (`setup`, `create` or `attach`, `export`; reference in the packaged
-  `daemon/assets/openshell/README.md`). In 0.7.8's release testing the worker never became usable, so
-  read the installed version's release notes before relying on it.
+  `daemon/assets/openshell/README.md`). In 0.7.8's release testing the worker never became usable;
+  0.7.10 fixes in the source the two problems that stopped it in 0.7.9, but it hasn't run end to
+  end. Read the installed version's release notes before relying on it.
 - **`rig setup`** — what OpenRig would change about this machine, shown before it touches anything.
   It installs herdr by default on macOS and Linux (`--no-herdr` declines; if the install fails,
   views fall back to plain tmux) and on a Mac offers Ghostty once (`--ghostty` / `--no-ghostty`).
@@ -1521,6 +1573,6 @@ deliberate writing.
 
 **`rig --help`**, then `rig <verb> --help`.
 
-Ninety-one verbs ship, and this page named most of them once. **You will not remember which — you
+Ninety-two verbs ship, and this page named most of them once. **You will not remember which — you
 are meant to remember only that the list is long enough to be worth reading before you build
 anything.** The question is never *how do I write this*; it is **does this already exist**.

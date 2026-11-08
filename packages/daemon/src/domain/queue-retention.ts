@@ -87,7 +87,31 @@ export const RETENTION_DEFAULTS = {
   batchSize: 500,
   /** safety cap on batches per table per sweep (defense-in-depth vs a runaway loop) */
   maxBatchesPerTable: 10_000,
+  /** delete events of the prunable types (below) older than this many days; 0 keeps them (pruning is opt-in) */
+  eventsRetentionDays: 0,
+  /** primary-key rows (seq) one events statement may cover: the per-statement work bound */
+  eventsWindow: 1_000,
+  /** pause between two events windows, after the event-loop yield */
+  eventsPauseMs: 5,
 } as const;
+
+/**
+ * The event types the events pass may delete. An allowlist, never age alone: the events table also holds
+ * STATE that readers fold from (node startup and proof, restore outcomes, held, handover, agent activity),
+ * and a blind age cut would break restore and startup proof. Every type here is history only: no SQL
+ * reader filters on it, and none is written with a node id, so the "last N for this node" readers never
+ * see them. The legacy view type is listed so rows written before it became transient age out too.
+ */
+export const PRUNABLE_EVENT_TYPES = [
+  "view.changed",
+  "snapshot.created",
+  "watchdog.evaluation_fired",
+  "queue.created",
+  "queue.updated",
+  "queue.claimed",
+  "queue.unclaimed",
+  "queue.handed_off",
+] as const;
 
 export interface RetentionOptions {
   /** injected clock (ISO-8601); deterministic for VM seeding */
@@ -101,6 +125,13 @@ export interface RetentionOptions {
   streamMaxItems?: number;
   batchSize?: number;
   maxBatchesPerTable?: number;
+  eventsRetentionDays?: number;
+  eventsWindow?: number;
+  eventsPauseMs?: number;
+  /** the events pass's yield between windows; injectable so a test can count it */
+  eventsYield?: () => Promise<void>;
+  /** called once per events statement with its seq bounds (lo, hi]; for tests and measurement */
+  onEventsWindow?: (window: { lo: number; hi: number; deleted: number }) => void;
 }
 
 /** ISO cutoff = now minus `days`. Pure; derived from the injected `nowIso` so
@@ -111,6 +142,13 @@ function cutoffIso(nowIso: string, days: number): string {
     throw new Error(`queue-retention: invalid nowIso ${JSON.stringify(nowIso)}`);
   }
   return new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+/** The events cutoff in SQLite's own text format (`YYYY-MM-DD HH:MM:SS`, what `datetime('now')` writes into
+ *  events.created_at). Comparing that column to an ISO `…T…Z` string would be wrong for up to a day, because
+ *  ' ' sorts before 'T'. */
+export function eventsCutoffSql(nowIso: string, days: number): string {
+  return cutoffIso(nowIso, days).slice(0, 19).replace("T", " ");
 }
 
 /** Cooperative yield between bounded batches so a large prune cannot starve the
@@ -364,6 +402,116 @@ export function pruneStreamItems(
   return { deletedRows: deleted };
 }
 
+export interface EventsPruneResult {
+  /** events rows deleted by this pass */
+  deletedRows: number;
+  /** statements run (one per seq window) */
+  batches: number;
+  /** the low-water seq persisted after the pass (every row at or below it has been checked), or null when none is stored */
+  lowWater: number | null;
+}
+
+/** The lowest and highest seq, each read from one end of the primary key (a combined MIN/MAX would scan the log). */
+export function eventsSeqBounds(db: Database.Database): { lo: number; hi: number } | null {
+  const lo = db.prepare("SELECT seq FROM events ORDER BY seq ASC LIMIT 1").get() as { seq: number } | undefined;
+  const hi = db.prepare("SELECT seq FROM events ORDER BY seq DESC LIMIT 1").get() as { seq: number } | undefined;
+  return lo && hi ? { lo: lo.seq, hi: hi.seq } : null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * The events pass, opt-in: with `eventsRetentionDays` > 0 (0, the default, keeps every event), delete the
+ * PRUNABLE_EVENT_TYPES rows older than that many days, one bounded seq
+ * window per statement. Each statement reads at most `eventsWindow` primary-key rows, whether or not it finds
+ * anything to delete, so a range of state rows that are kept forever never makes one statement long. Between
+ * windows it yields to the event loop and pauses briefly. Every row's age is checked on its own: created_at is not
+ * assumed to rise with seq, so a row dated in the future (or one written after the clock stepped back) never hides
+ * older rows from the pass.
+ *
+ * The window cursor starts at a low-water mark (events_retention_marks, migration 153): every seq at or below it
+ * has been checked. The mark never passes a prunable row that was kept for being too new, so such a row is checked
+ * again and goes once it ages; in practice the mark sits where the retained history begins. A sweep that hits its
+ * batch cap stores where it stopped (resume_seq), and the next sweep continues from there instead of from the mark,
+ * so a kept row (one dated in the future, say) never holds the pass to the first maxBatchesPerTable windows above
+ * it; once a pass reaches the newest row the resume point is cleared, and the next pass starts again at the mark.
+ * The mark records the allowlist it was made with; a different allowlist starts again from the oldest row. The newest row is never deleted, so the log's highest seq never moves backwards. No
+ * checkpoint is forced: SQLite's automatic checkpoint runs as usual. The file does not shrink: freed pages are
+ * reused; giving them back to the disk is an offline VACUUM with the daemon stopped.
+ */
+export async function pruneEvents(db: Database.Database, opts: RetentionOptions): Promise<EventsPruneResult> {
+  const days = opts.eventsRetentionDays ?? RETENTION_DEFAULTS.eventsRetentionDays;
+  // Opt-in: 0 (the default) keeps every event and leaves the mark alone.
+  if (!(days > 0)) return { deletedRows: 0, batches: 0, lowWater: null };
+  const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('events', 'events_retention_marks')").all() as Array<{ name: string }>).map((r) => r.name));
+  if (!tables.has("events")) return { deletedRows: 0, batches: 0, lowWater: null };
+  const persistMark = tables.has("events_retention_marks");
+  const window = opts.eventsWindow ?? RETENTION_DEFAULTS.eventsWindow;
+  const pauseMs = opts.eventsPauseMs ?? RETENTION_DEFAULTS.eventsPauseMs;
+  const maxBatches = opts.maxBatchesPerTable ?? RETENTION_DEFAULTS.maxBatchesPerTable;
+  const pause = opts.eventsYield ?? (async () => {
+    await yieldToLoop();
+    if (pauseMs > 0) await sleep(pauseMs);
+  });
+  const typesKey = PRUNABLE_EVENT_TYPES.join(",");
+  const mark = persistMark
+    ? db.prepare("SELECT low_water_seq AS seq, resume_seq AS resume, prunable_types AS types FROM events_retention_marks WHERE id = 1").get() as { seq: number; resume: number | null; types: string } | undefined
+    : undefined;
+  const validMark = mark && mark.types === typesKey ? mark.seq : null;
+  const bounds = eventsSeqBounds(db);
+  if (!bounds) return { deletedRows: 0, batches: 0, lowWater: validMark };
+
+  const cutoffSql = eventsCutoffSql(opts.nowIso, days);
+  // Up to the row before the newest: the newest stays, whatever its age.
+  const last = bounds.hi - 1;
+  // The previous sweep hit its batch cap above a kept row: continue where it stopped, keeping the mark below that row.
+  const resume = validMark !== null && mark!.resume !== null && mark!.resume > validMark && mark!.resume < last ? mark!.resume : null;
+  let lo = Math.max(resume ?? validMark ?? 0, bounds.lo - 1);
+  const placeholders = PRUNABLE_EVENT_TYPES.map(() => "?").join(", ");
+  const deleteWindow = db.prepare(
+    `DELETE FROM events
+      WHERE seq IN (
+        SELECT seq FROM events
+         WHERE seq > ? AND seq <= ?
+           AND type IN (${placeholders})
+           AND created_at < ?
+      )`,
+  );
+  // After the delete, a prunable row left in the window was kept for being too new: the mark stops below it.
+  const keptYoung = db.prepare(`SELECT MIN(seq) AS seq FROM events WHERE seq > ? AND seq <= ? AND type IN (${placeholders})`);
+  const saveMark = persistMark
+    ? db.prepare(
+      `INSERT INTO events_retention_marks (id, low_water_seq, resume_seq, prunable_types, updated_at) VALUES (1, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET low_water_seq = excluded.low_water_seq, resume_seq = excluded.resume_seq,
+         prunable_types = excluded.prunable_types, updated_at = excluded.updated_at`,
+    )
+    : null;
+
+  let deletedRows = 0;
+  let batches = 0;
+  let cap: number | null = resume !== null ? validMark : null;
+  let lowWater = validMark;
+  while (lo < last && batches < maxBatches) {
+    const hi = Math.min(lo + window, last);
+    const deleted = deleteWindow.run(lo, hi, ...PRUNABLE_EVENT_TYPES, cutoffSql).changes;
+    if (cap === null) {
+      const young = (keptYoung.get(lo, hi, ...PRUNABLE_EVENT_TYPES) as { seq: number | null }).seq;
+      if (young !== null) cap = young - 1;
+    }
+    lowWater = cap ?? hi;
+    // The resume point is cleared once the pass reaches the newest row: the next pass starts again at the mark.
+    saveMark?.run(lowWater, hi >= last ? null : hi, typesKey, opts.nowIso);
+    opts.onEventsWindow?.({ lo, hi, deleted });
+    deletedRows += deleted;
+    batches++;
+    lo = hi;
+    await pause();
+  }
+  return { deletedRows, batches, lowWater: persistMark ? lowWater : null };
+}
+
 export interface RetentionSweepSummary {
   archivedQitems: number;
   archivedRows: number;
@@ -374,6 +522,12 @@ export interface RetentionSweepSummary {
   watchdogBatches: number;
   usageSamplesBatches: number;
   streamBatches: number;
+  /** events rows deleted (PRUNABLE_EVENT_TYPES older than eventsRetentionDays) */
+  eventsDeleted: number;
+  /** events statements run, one per seq window */
+  eventsBatches: number;
+  /** the events low-water seq persisted after the pass (null when none is stored) */
+  eventsLowWater: number | null;
 }
 
 /**
@@ -397,6 +551,9 @@ export async function runQueueRetentionSweep(
     watchdogBatches: 0,
     usageSamplesBatches: 0,
     streamBatches: 0,
+    eventsDeleted: 0,
+    eventsBatches: 0,
+    eventsLowWater: null,
   };
 
   for (let i = 0; i < maxBatches; i++) {
@@ -431,6 +588,11 @@ export async function runQueueRetentionSweep(
     summary.streamBatches++;
     await yieldToLoop();
   }
+
+  const events = await pruneEvents(db, opts);
+  summary.eventsDeleted = events.deletedRows;
+  summary.eventsBatches = events.batches;
+  summary.eventsLowWater = events.lowWater;
 
   return summary;
 }

@@ -375,7 +375,8 @@ describe("watchdog positive no-input outcomes", () => {
     const f = fixture();
     await f.hold();
     const target = resolveGuardTarget(f.db, seat)!;
-    for (let i = 0; i < 100; i++) f.outbox.retain({ outboxId: `held-${i}`, senderSession: seat, destinationSession: seat, body: "held" }, target);
+    // Distinct senders fill the quota: a seat holds one message per sender (#2430).
+    for (let i = 0; i < 100; i++) f.outbox.retain({ outboxId: `held-${i}`, senderSession: `filler-${i}@test`, destinationSession: seat, body: "held" }, target);
     const jobs = new WatchdogJobsRepository(f.db);
     const history = new WatchdogHistoryLog(f.db);
     const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: history, eventBus: new EventBus(f.db), deliver: f.deliver });
@@ -421,7 +422,8 @@ describe("blocked parked-owner no-input recovery on the real repository", () => 
     if (kind === "quota") {
       await f.hold();
       const target = resolveGuardTarget(f.db, seat)!;
-      for (let i = 0; i < 100; i++) f.outbox.retain({ outboxId: `blocked-held-${i}`, senderSession: seat, destinationSession: seat, body: "held" }, target);
+      // Distinct senders fill the quota: a seat holds one message per sender (#2430).
+      for (let i = 0; i < 100; i++) f.outbox.retain({ outboxId: `blocked-held-${i}`, senderSession: `filler-${i}@test`, destinationSession: seat, body: "held" }, target);
     } else f.db.prepare("UPDATE nodes SET runtime='terminal' WHERE id='a'").run();
     const { repo, jobs, history } = scheduled(f);
     const row = await repo.create({ sourceSession: "orch@test", destinationSession: seat, body: "Current obligation", nudge: false });

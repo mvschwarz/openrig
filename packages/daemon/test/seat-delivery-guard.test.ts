@@ -104,11 +104,12 @@ describe("delivery pause and durable custody", () => {
   });
   it("rolls back rejected staging but retains committed overflow members with original bodies", () => {
     const { db, targets, outbox } = fixture();
-    for(let i=0;i<100;i++) outbox.retain({ outboxId: `h${i}`, senderSession: "s", destinationSession:"a", body:`body${i}` },targets.a!);
+    // Distinct senders fill the quota: a seat holds one message per sender (#2430).
+    for(let i=0;i<100;i++) outbox.retain({ outboxId: `h${i}`, senderSession: `s${i}`, destinationSession:"a", body:`body${i}` },targets.a!);
     const next={outboxId:"next",senderSession:"s",destinationSession:"a",body:"new"};
     expect(() => db.transaction(() => { outbox.retain(next,targets.a!); })()).toThrow("quota");
     expect(outbox.getById("next")).toBeNull();
-    for(const id of ["committed1","committed2"]) { outbox.record({...next,outboxId:id,body:id});outbox.claimForDelivery(id);outbox.retain({...next,outboxId:id,body:id},targets.a!,true); }
+    for(const id of ["committed1","committed2"]) { outbox.record({...next,outboxId:id,body:id});outbox.claimForDelivery(id);outbox.retain({...next,outboxId:id,body:id},targets.a!,true,{sameSend:["committed1","committed2"]}); }
     expect(outbox.heldForNode("a",100).total).toBe(102);expect(outbox.heldForNode("a",100).truncated).toBe(true);
     expect(outbox.getById("committed2")!.body).toBe("committed2");
     outbox.retire("h0","person","ack");outbox.retire("h1","person","ack");outbox.retire("h2","person","ack");
@@ -263,7 +264,8 @@ describe("real queue transaction and retained delivery",()=>{
     const f=queueFixture();
     try {
       await f.guard.set("a",true,"person","draft");
-      for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:"sender@test",destinationSession:"worker@test",body:"held"},f.guard.target("a"));
+      // Other senders fill the quota; the creator holds nothing there, so its wake has no room (#2430).
+      for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:`filler-${i}@test`,destinationSession:"worker@test",body:"held"},f.guard.target("a"));
       const row=await f.repo.create({sourceSession:"sender@test",destinationSession:"worker@test",body:"keep this task"});
       expect(f.repo.getById(row.qitemId)!.body).toBe("keep this task");
       expect(row.lastNudgeResult).toMatch(/^failed:.*quota/i);
@@ -286,7 +288,7 @@ describe("real queue transaction and retained delivery",()=>{
   it("a handoff to a seat whose held quota is full still moves the work, its wake recorded as not retained",async()=>{
     const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
     await f.guard.set("a",true,"person","draft");
-    for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:"sender@test",destinationSession:"worker@test",body:"held"},f.guard.target("a"));
+    for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:`filler-${i}@test`,destinationSession:"worker@test",body:"held"},f.guard.target("a"));
     const {closed,created}=await f.repo.handoff({qitemId:source.qitemId,fromSession:"relay@test",toSession:"worker@test"});
     expect(f.repo.getById(closed.qitemId)!.state).toBe("handed-off");
     expect(f.repo.getById(created.qitemId)).toMatchObject({state:"pending",destinationSession:"worker@test",body:"work",
@@ -298,13 +300,25 @@ describe("real queue transaction and retained delivery",()=>{
   it("a mission control handoff to a seat whose held quota is full moves the work too, as a queue handoff does",async()=>{
     const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
     await f.guard.set("a",true,"person","draft");
-    for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:"sender@test",destinationSession:"worker@test",body:"held"},f.guard.target("a"));
+    for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:`filler-${i}@test`,destinationSession:"worker@test",body:"held"},f.guard.target("a"));
     const contract=new MissionControlWriteContract({db:f.db,eventBus:f.bus,queueRepo:f.repo,actionLog:new MissionControlActionLog(f.db)});
     const result=await contract.act({verb:"handoff",qitemId:source.qitemId,actorSession:"human@test",destinationSession:"worker@test"});
     expect(f.repo.getById(source.qitemId)!.state).toBe("handed-off");
     expect(f.repo.getById(result.createdQitemId!)).toMatchObject({state:"pending",destinationSession:"worker@test",body:"work",
       lastNudgeResult:expect.stringMatching(/^failed:wake not retained: Held-message quota is full/)});
     expect(f.outbox.heldForNode("a").total).toBe(100);f.db.close();
+  });
+  it("a queue notification to a seat at a full quota takes the place of its sender's held message there (#2430)",async()=>{
+    const f=queueFixture();await f.guard.set("a",true,"person","draft");
+    f.outbox.retain({outboxId:"older",senderSession:"sender@test",destinationSession:"worker@test",body:"older wake"},f.guard.target("a"));
+    for(let i=1;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:`filler-${i}@test`,destinationSession:"worker@test",body:"held"},f.guard.target("a"));
+    const row=await f.repo.create({sourceSession:"sender@test",destinationSession:"worker@test",body:"new work"});
+    const id=`wake-intent-${row.qitemId}`;
+    expect(f.repo.getById(row.qitemId)!.lastNudgeResult).not.toMatch(/^failed/);
+    expect(f.outbox.getById(id)!.deliveryState).toBe("retained");
+    expect(f.outbox.coalescedInto(id)).toEqual(["older"]);
+    expect(f.outbox.getById("older")).toMatchObject({deliveryState:"retired",retiredBy:"outbox@system",body:"older wake"});
+    expect(f.outbox.heldForNode("a").total).toBe(100);expect(f.writes).toEqual([]);f.db.close();
   });
   it("handoff retains one audited intent without duplicate transport record or delivered label",async()=>{
     const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
@@ -323,7 +337,7 @@ describe("real queue transaction and retained delivery",()=>{
   });
   it("postcommit activation retains exact staged intent beyond quota, without fictional rollback",async()=>{
     const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
-    for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:"sender@test",destinationSession:"worker@test",body:"held"},f.guard.target("a"));
+    for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:`filler-${i}@test`,destinationSession:"worker@test",body:"held"},f.guard.target("a"));
     let activation:Promise<unknown>|undefined;
     const off=f.bus.subscribe(event=>{if(event.type==="queue.handed_off") activation=f.guard.set("a",true,"person","postcommit");});
     const {created,closed}=await f.repo.handoff({qitemId:source.qitemId,fromSession:"relay@test",toSession:"worker@test"});

@@ -1,11 +1,11 @@
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, onTestFinished } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess } from "../src/mcp-server.js";
-import { DaemonClient, DaemonConnectionError, type DaemonResponse } from "../src/client.js";
+import { createMcpServer, dropUnfilledSeat, mintUnknownSender, FRONT_DOOR_WORKFLOW, FRONT_DOOR_WORKFLOW_VERSION, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess, type UnfilledSeat } from "../src/mcp-server.js";
+import { DaemonClient, DaemonConnectionError, senderIdentityHeaders, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
   get?: (path: string) => Promise<DaemonResponse>;
@@ -24,9 +24,9 @@ describe("MCP Server", () => {
   let daemonClient: DaemonClient;
   let cleanup: () => Promise<void>;
 
-  async function setup(clientOverrides?: Parameters<typeof mockClient>[0]) {
+  async function setup(clientOverrides?: Parameters<typeof mockClient>[0], serverOptions?: Parameters<typeof createMcpServer>[1]) {
     daemonClient = mockClient(clientOverrides);
-    const server = createMcpServer(daemonClient);
+    const server = createMcpServer(daemonClient, serverOptions);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
     mcpClient = new Client({ name: "test-client", version: "1.0.0" });
@@ -325,6 +325,271 @@ describe("MCP Server", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("rig_artifact_read returns a code-result manifest's exact pair as codeResult, and every other file as before", async () => {
+    const base = "a".repeat(40), revision = "b".repeat(40);
+    const manifest = JSON.stringify({ kind: "openrig.code-result/v1", repo: "/work/app", base, revision, paths: ["src/a.ts"], branch: "feature/x" });
+    const files: Record<string, string> = { "result.json": manifest, "report.md": "# Report\n", "loose.json": JSON.stringify({ kind: "openrig.code-result/v1", repo: "/work/app", base: "main", revision }) };
+    const getFn = vi.fn(async (p: string) => {
+      const item = /^\/api\/queue\/(q-[a-z]+)$/.exec(p);
+      if (item) return { status: 200, data: { qitemId: item[1], state: "done", evidenceRef: `/shared/proof/${({ "q-code": "result.json", "q-text": "report.md", "q-loose": "loose.json" } as Record<string, string>)[item[1]!]}` } };
+      if (p === "/api/files/roots") return { status: 200, data: { roots: [{ name: "proof", path: "/shared/proof" }] } };
+      const read = /^\/api\/files\/read\?root=proof&path=(.+)$/.exec(p);
+      if (read) { const name = decodeURIComponent(read[1]!); return { status: 200, data: { root: "proof", path: name, content: files[name], size: files[name]!.length } }; }
+      return { status: 404, data: {} };
+    });
+    await setup({ get: getFn });
+    const code = await mcpClient.callTool({ name: "rig_artifact_read", arguments: { qitemId: "q-code" } });
+    expect(code.structuredContent).toMatchObject({ available: true, text: manifest,
+      codeResult: { repo: "/work/app", base, revision, paths: ["src/a.ts"], branch: "feature/x" } });
+    // A manifest whose base is a branch isn't exact: it says why, and gives no pair.
+    const loose = await mcpClient.callTool({ name: "rig_artifact_read", arguments: { qitemId: "q-loose" } });
+    expect(loose.structuredContent).toMatchObject({ available: true, codeResultIssue: expect.stringContaining("base must be a full commit id") });
+    expect(loose.structuredContent).not.toHaveProperty("codeResult");
+    const text = await mcpClient.callTool({ name: "rig_artifact_read", arguments: { qitemId: "q-text" } });
+    expect(text.structuredContent).toMatchObject({ available: true, text: "# Report\n" });
+    expect(text.structuredContent).not.toHaveProperty("codeResult");
+    expect(text.structuredContent).not.toHaveProperty("codeResultIssue");
+    await cleanup();
+  });
+
+  it("a front door gets front-door instructions, not the member workflow, and its declared seat with no session reads as itself", async () => {
+    try {
+      vi.stubEnv("OPENRIG_SESSION_NAME", "claude-app@my-rig");
+      vi.stubEnv("RIGGED_SESSION_NAME", "");
+      vi.stubEnv("OPENRIG_TARGET_REPO", "");
+      vi.stubEnv("RIGGED_TARGET_REPO", "");
+      // A hosted address has no session, so whoami answers 404; the rig itself exists.
+      const getFn = vi.fn(async (p: string) => p.startsWith("/api/whoami") ? { status: 404, data: { error: "session not found" } }
+        : p.startsWith("/api/rigs/summary") ? { status: 200, data: [{ id: "rig-1", name: "my-rig", archivedAt: null }] } : { status: 404, data: {} });
+      await setup({ get: getFn }, { frontDoor: true });
+      const instructions = mcpClient.getInstructions() ?? "";
+      expect(FRONT_DOOR_WORKFLOW).toContain(`(${FRONT_DOOR_WORKFLOW_VERSION})`);
+      expect(instructions).toContain(FRONT_DOOR_WORKFLOW);
+      // The person's harm first: nothing tells this agent to work its inbox without asking.
+      expect(instructions).not.toContain(MEMBER_WORKFLOW);
+      expect(instructions).not.toContain("without asking whether you may");
+      for (const part of ["the person's to answer", "record only what the person tells you", "Never choose an answer for them", "exactly what the person typed in resolution, with no label"]) expect(FRONT_DOOR_WORKFLOW).toContain(part);
+      // An agent told to say the words are the person's wrapped them as `The person's answer: "…"`, so the stored answer wasn't what they typed.
+      expect(FRONT_DOOR_WORKFLOW).not.toContain("saying they're the person's");
+      const front = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
+      expect(front.isError).toBeFalsy();
+      expect(front.structuredContent).toMatchObject({ ok: true, seat: "claude-app@my-rig", rig: "my-rig", session: null,
+        caller: { authenticated: false, identity: "declared" } });
+      await cleanup();
+
+      // Without --front-door, the same server is a member: the member workflow, and whoami's 404 as today.
+      await setup({ get: getFn });
+      expect(mcpClient.getInstructions() ?? "").toContain(MEMBER_WORKFLOW);
+      expect((await mcpClient.callTool({ name: "rig_whoami", arguments: {} })).isError).toBe(true);
+      await cleanup();
+
+      // A front door whose rig isn't here is a misconfiguration, still answered with the 404.
+      vi.stubEnv("OPENRIG_SESSION_NAME", "claude-app@no-such-rig");
+      await setup({ get: getFn }, { frontDoor: true });
+      expect((await mcpClient.callTool({ name: "rig_whoami", arguments: {} })).isError).toBe(true);
+      await cleanup();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("an empty or unfilled seat, as an app that doesn't fill in its settings passes it, is no seat: never the placeholder or an inherited seat", async () => {
+    // What an app hands the server when it doesn't substitute its plugin settings, and what stays a seat.
+    const cases: Array<[NodeJS.ProcessEnv, UnfilledSeat | undefined]> = [
+      [{ OPENRIG_SESSION_NAME: "${user_config.seat}" }, { variable: "OPENRIG_SESSION_NAME", value: "${user_config.seat}" }],
+      [{ OPENRIG_SESSION_NAME: "${input:seat}" }, { variable: "OPENRIG_SESSION_NAME", value: "${input:seat}" }],
+      [{ OPENRIG_SESSION_NAME: "$SEAT" }, { variable: "OPENRIG_SESSION_NAME", value: "$SEAT" }],
+      // An empty seat doesn't fall back to one inherited under the legacy name.
+      [{ OPENRIG_SESSION_NAME: "", RIGGED_SESSION_NAME: "dev-impl@my-rig" }, { variable: "OPENRIG_SESSION_NAME", value: "" }],
+      [{ RIGGED_SESSION_NAME: "${user_config.seat}" }, { variable: "RIGGED_SESSION_NAME", value: "${user_config.seat}" }],
+      [{ OPENRIG_SESSION_NAME: "claude-app@my-rig" }, undefined],
+      [{ RIGGED_SESSION_NAME: "claude-app@my-rig" }, undefined],
+      [{}, undefined],
+    ];
+    for (const [given, dropped] of cases) {
+      const env = { ...given };
+      expect(dropUnfilledSeat(env), JSON.stringify(given)).toEqual(dropped);
+      expect(env, JSON.stringify(given)).toEqual(dropped ? {} : given);
+    }
+
+    try {
+      vi.stubEnv("OPENRIG_SESSION_NAME", "${user_config.seat}");
+      vi.stubEnv("RIGGED_SESSION_NAME", "");
+      const unfilledSeat = dropUnfilledSeat()!;
+      // No request carries the placeholder as its sender, and whoami asks no daemon about it.
+      expect(senderIdentityHeaders()).toEqual({});
+      const quietGet = vi.fn(async () => ({ status: 200, data: {} }));
+      await setup({ get: quietGet }, { frontDoor: true, unfilledSeat });
+      const whoami = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
+      expect(whoami.isError).toBeFalsy();
+      expect(whoami.structuredContent).toMatchObject({ ok: true, seat: null, caller: { authenticated: false },
+        unfilledSeat: { variable: "OPENRIG_SESSION_NAME", value: "${user_config.seat}" } });
+      const message = (whoami.structuredContent as { message: string }).message;
+      expect(message).toContain("OPENRIG_SESSION_NAME is \"${user_config.seat}\", a placeholder the app didn't fill in");
+      expect(message).toContain("such as cursor@my-team");
+      // An app that can't give a plugin's server a value is told what it can do, never only "set it in the env".
+      expect(message).toContain("VS Code, Copilot CLI and Cursor can't give a plugin's server a value: add your own rig mcp serve --front-door server");
+      expect(message).toContain("lasts only for that launch");
+      expect(quietGet).not.toHaveBeenCalled();
+      const owned = await mcpClient.callTool({ name: "rig_queue_list", arguments: { owned: true } });
+      expect(owned.isError).toBe(true);
+      const ownedText = (owned.content as Array<{ text: string }>)[0]!.text;
+      expect(ownedText).toContain("rig_whoami says how to give it one");
+      expect(ownedText).not.toContain("in its env");
+      expect(quietGet).not.toHaveBeenCalled();
+      await cleanup();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  describe("with no seat, messages, new tasks and chat go through as an unknown sender", () => {
+    const UNKNOWN = /^unknown-mcp-[0-9a-f]{8}$/;
+    const post = () => vi.fn(async (route: string, body?: unknown) => route === "/api/queue/create"
+      ? { status: 201, data: { qitemId: (body as { qitemId: string }).qitemId, state: "pending" } }
+      : route.startsWith("/api/rigs?") || route === "/api/rigs" ? { status: 200, data: [] } : { status: 200, data: { ok: true } });
+    const sent = (fn: ReturnType<typeof post>, route: string) =>
+      fn.mock.calls.filter(([path]) => path === route).map(([, body]) => body as Record<string, unknown>);
+    const seatless = async (unfilled: string, fn: ReturnType<typeof post>, get?: (path: string) => Promise<DaemonResponse>,
+      extra: Parameters<typeof createMcpServer>[1] = {}) => {
+      vi.stubEnv("OPENRIG_SESSION_NAME", unfilled);
+      vi.stubEnv("RIGGED_SESSION_NAME", "dev-impl@my-rig");
+      const unfilledSeat = dropUnfilledSeat()!;
+      await setup({ post: fn, ...(get ? { get } : {}) }, { frontDoor: true, unfilledSeat, ...extra });
+      const whoami = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
+      return (whoami.structuredContent as { unknownSender: string }).unknownSender;
+    };
+
+    it("a new task reaches its destination from this server's unknown sender, with a note on what's known and its id to follow", async () => {
+      try {
+        const fn = post();
+        const label = await seatless("${user_config.seat}", fn);
+        expect(label).toMatch(UNKNOWN);
+        // No request carries the placeholder or the inherited legacy seat: there's no sender header at all.
+        expect(senderIdentityHeaders()).toEqual({});
+
+        const result = await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "lead@my-team", body: "Check the build." } });
+        expect(result.isError).toBeFalsy();
+        const [create] = sent(fn, "/api/queue/create");
+        expect(create).toMatchObject({ destinationSession: "lead@my-team", sourceSession: label });
+        expect(create!.body).toBe(`[Unknown sender ${label}: this app has no OpenRig seat (OPENRIG_SESSION_NAME is "\${user_config.seat}", a placeholder the app didn't fill in).`
+          + ` Its MCP client says it is "test-client 1.0.0". There's no return address: it follows this by its task id.]\n\nCheck the build.`);
+        expect(JSON.stringify(create)).not.toContain("dev-impl@my-rig");
+        const qitemId = create!.qitemId as string;
+        expect(result.structuredContent).toMatchObject({ qitemId, unknownSender: { label,
+          followUp: `No return address: read this task with rig_queue_show and qitemId ${qitemId}.` } });
+        await cleanup();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("a message says so in its text and stays unsigned; a chat message declares the unknown sender", async () => {
+      try {
+        const fn = post();
+        const get = vi.fn(async (route: string) => route.startsWith("/api/rigs")
+          ? { status: 200, data: [{ id: "rig-1", name: "my-team" }] } : { status: 200, data: {} });
+        const label = await seatless("", fn, get);
+        await mcpClient.callTool({ name: "rig_send", arguments: { session: "lead@my-team", text: "Is the build green?" } });
+        const [send] = sent(fn, "/api/transport/send");
+        expect(send!.text).toBe(`[Unknown sender ${label}: this app has no OpenRig seat (OPENRIG_SESSION_NAME is empty).`
+          + ` Its MCP client says it is "test-client 1.0.0". There's no return address.]\nIs the build green?`);
+        expect(send).not.toHaveProperty("sender");
+        expect(send).not.toHaveProperty("actorSession");
+
+        await mcpClient.callTool({ name: "rig_chatroom_send", arguments: { rigName: "my-team", body: "Hello team" } });
+        const chat = fn.mock.calls.find(([path]) => /\/chat\/send$/.test(path))?.[1] as Record<string, unknown> | undefined;
+        expect(chat).toMatchObject({ sender: label });
+        expect(String(chat?.body)).toMatch(/^\[Unknown sender unknown-mcp-[0-9a-f]{8}: .* There's no return address\.\]\nHello team$/);
+        await cleanup();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("two seatless servers are two unknown senders, and the writes that need an author still carry none", async () => {
+      try {
+        const first = await seatless("${user_config.seat}", post());
+        await cleanup();
+        const fn = post();
+        const second = await seatless("${user_config.seat}", fn);
+        // Never one shared label: a delegated decision compares the asker with the decider, so two apps must not match.
+        expect(first).toMatch(UNKNOWN);
+        expect(second).toMatch(UNKNOWN);
+        expect(second).not.toBe(first);
+
+        for (const [name, args] of [
+          ["rig_queue_claim", { qitemId: "qitem-a" }],
+          ["rig_queue_update", { qitemId: "qitem-a", state: "done", closureReason: "no-follow-on", resolution: "done" }],
+          ["rig_queue_handoff", { qitemId: "qitem-a", to: "lead@my-team", body: "next" }],
+          ["rig_queue_unclaim", { qitemId: "qitem-a" }],
+          ["rig_queue_decide", { qitemId: "qitem-a", applicationId: "app-1", choices: [{ chosen: "yes" }], reason: "because", reversible: true }],
+        ] as const) {
+          fn.mockClear();
+          await mcpClient.callTool({ name, arguments: args as unknown as Record<string, unknown> });
+          // Each tool reached the daemon, so the check below isn't vacuous.
+          expect(fn.mock.calls.length, name).toBeGreaterThan(0);
+          for (const [, body] of fn.mock.calls) {
+            const text = JSON.stringify(body ?? {});
+            expect(text, name).not.toContain("unknown-mcp-");
+            expect(text, name).not.toMatch(/"(sourceSession|actorSession|fromSession|destinationSession|actor|sender)":/);
+          }
+        }
+        await cleanup();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("servers given their process's unknown sender all write as it, as HTTP's per-request servers do", async () => {
+      try {
+        const shared = mintUnknownSender();
+        expect(shared).toMatch(UNKNOWN);
+        const bodies: unknown[] = [];
+        for (const request of [1, 2]) {
+          const fn = post();
+          expect(await seatless("${user_config.seat}", fn, undefined, { unknownSender: shared }), `request ${request}`).toBe(shared);
+          await mcpClient.callTool({ name: "rig_queue_create", arguments: { qitemId: "qitem-retry", destination: "lead@my-team", body: "Check the build." } });
+          const [create] = sent(fn, "/api/queue/create");
+          expect(create, `request ${request}`).toMatchObject({ qitemId: "qitem-retry", sourceSession: shared });
+          bodies.push(create!.body);
+          await cleanup();
+        }
+        // A retry with the same id carries the same source and body, so the daemon's id-reuse check matches it.
+        expect(bodies[1]).toBe(bodies[0]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("a seat, from the environment or a grant, keeps its own identity: no unknown sender and no note", async () => {
+      try {
+        vi.stubEnv("OPENRIG_SESSION_NAME", "claude-app@my-rig");
+        const fn = post();
+        await setup({ post: fn });
+        await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "lead@my-team", body: "Check the build." } });
+        const [fromEnv] = sent(fn, "/api/queue/create");
+        expect(fromEnv).not.toHaveProperty("sourceSession");
+        expect(fromEnv!.body).toBe("Check the build.");
+        expect(senderIdentityHeaders()).toEqual({ "X-OpenRig-Session": "claude-app@my-rig" });
+        await cleanup();
+
+        vi.stubEnv("OPENRIG_SESSION_NAME", "");
+        dropUnfilledSeat();
+        const granted = post();
+        const grant: McpAccess = { principal: "grant-1", owner: false, rigs: ["my-team"], roots: [], workspace: false };
+        await setup({ post: granted, get: vi.fn(async () => ({ status: 200, data: [] })) }, { seat: "hosted@my-team", access: grant });
+        await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "lead@my-team", body: "Check the build." } });
+        const [fromGrant] = sent(granted, "/api/queue/create");
+        expect(fromGrant).not.toHaveProperty("sourceSession");
+        expect(fromGrant!.body).toBe("Check the build.");
+        await cleanup();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   it("the queue tools return structured content; every error a tool returns carries one shape and keeps its old text", async () => {
@@ -843,6 +1108,9 @@ describe("MCP Server", () => {
   });
 
   it("rig_send with waitForIdleSeconds extends request timeout", async () => {
+    // A seated server: with no seat the text would open with the unknown-sender note.
+    vi.stubEnv("OPENRIG_SESSION_NAME", "desk@my-rig");
+    onTestFinished(() => { vi.unstubAllEnvs(); });
     const postFn = vi.fn(async () => ({
       status: 200,
       data: { ok: true, sessionName: "dev-impl@my-rig" },
@@ -983,6 +1251,9 @@ describe("MCP Server", () => {
   });
 
   it("the chatroom tools take a rig id as well as a name; watch reads one topic, sender and page size; send ignores an old sender argument", async () => {
+    // A seated server: the header names the sender, so the body carries none.
+    vi.stubEnv("OPENRIG_SESSION_NAME", "desk@my-rig");
+    onTestFinished(() => { vi.unstubAllEnvs(); });
     const getFn = vi.fn(async (path: string) => {
       if (path.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "01RIG", name: "my-rig", nodeCount: 2 }] };
       return { status: 200, data: [] };
@@ -1044,6 +1315,9 @@ describe("MCP Server", () => {
     const text = (result: Awaited<ReturnType<Client["callTool"]>>) => (result.content as Array<{ text: string }>)[0]!.text;
 
     it("rig_queue_create posts the task with a minted request id and no body sender", async () => {
+      // A seated server: the header names the sender (with no seat, the unknown sender is declared in the body instead).
+      vi.stubEnv("OPENRIG_SESSION_NAME", "desk@my-rig");
+      onTestFinished(() => { vi.unstubAllEnvs(); });
       const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
       await setup({ post: postFn });
       const result = await mcpClient.callTool({ name: "rig_queue_create", arguments: { destination: "impl@team", body: "Do X", summary: "X", tags: ["mission:m"] } });

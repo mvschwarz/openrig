@@ -17,10 +17,69 @@ import { sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "./s
 import { hookPrecedes } from "./agent-activity-store.js";
 import type { SeatStructuralActivityService } from "./seat-structural-activity-service.js";
 import { DEFAULT_STRUCTURAL_STALE_MS } from "./seat-structural-activity-service.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
- *  1Hz polling gives at-most ~1s freshness lag on the cached observation. */
+ *  1Hz polling gives at-most ~1s freshness lag on the cached observation (a slower cadence from
+ *  daemon.seat_poll_interval_ms adds to that lag and to the idle debounce, which counts ticks). */
 export const DEFAULT_POLL_INTERVAL_MS = 1000;
+/** daemon.seat_poll_interval_ms only slows the pollers down: below the default it would cost more CPU, not less. */
+export const MIN_SEAT_POLL_INTERVAL_MS = DEFAULT_POLL_INTERVAL_MS;
+/** The ceiling of daemon.seat_poll_interval_ms (the settings store's bound too). The structural observation and the proofs read from it (the Codex
+ *  working frame, node inventory, the idle-at-prompt fallback) expire after DEFAULT_STRUCTURAL_STALE_MS (5000 ms).
+ *  The sampler can hold a working-frame proof for about two intervals before the next one replaces it, so
+ *  2 x ceiling must stay below that expiry, with the rest as margin for event-loop lag. Separately, the single-flight
+ *  guard skips a tick that lands while a sweep runs, and the working-frame proof expires 5 s after the capture that
+ *  produced it, so a slower cadence leaves less room for slow tmux, not more: at 2000 ms a structural sweep slower
+ *  than about 2 s (about 3 s at the default) can let a working Codex seat briefly read idle. */
+export const MAX_SEAT_POLL_INTERVAL_MS = 2000;
+/** The setting behind the cadence: `daemon.seat_poll_interval_ms`, mapped from OPENRIG_SEAT_POLL_INTERVAL_MS. */
+export const SEAT_POLL_INTERVAL_KEY = "daemon.seat_poll_interval_ms";
+type ReadSeatPollSetting = () => { value: unknown; source?: string };
+/** The cadence of the seat-activity and structural-activity pollers, from the typed setting
+ *  `daemon.seat_poll_interval_ms` (config.json, or OPENRIG_SEAT_POLL_INTERVAL_MS; `rig config` shows it with its
+ *  source). STARTUP-ONLY: read once when the daemon starts; changing it takes a daemon restart. Each tick both read
+ *  tmux for the running seats (the sampler in one batch when it can, the structural poller by listing the windows and
+ *  capturing panes); on a large fleet those spawned tmux clients are a large share of the daemon's CPU, and a slower
+ *  cadence trades activity freshness for that load. Unset keeps the 1 s default. The settings store validates the
+ *  value: `rig config set` refuses one outside MIN..MAX, and an env value outside it is dropped with a warning on
+ *  stderr (the default is used). A value that still reaches here outside MIN..MAX (a hand-edited config.json the store
+ *  could not check) keeps the default, with a warning. */
+export function resolveSeatPollIntervalMs(
+  read: ReadSeatPollSetting = () => new SettingsStore().resolveOne(SEAT_POLL_INTERVAL_KEY as never),
+  warn: (message: string) => void = (message) => console.warn(message),
+): number {
+  let setting: { value: unknown; source?: string };
+  try {
+    setting = read();
+  } catch (err) {
+    warn(`[seat-activity] ${SEAT_POLL_INTERVAL_KEY} could not be read (${err instanceof Error ? err.message : String(err)});`
+      + ` using ${DEFAULT_POLL_INTERVAL_MS} ms`);
+    return DEFAULT_POLL_INTERVAL_MS;
+  }
+  const ms = Number(setting.value);
+  if (!Number.isSafeInteger(ms) || ms < MIN_SEAT_POLL_INTERVAL_MS || ms > MAX_SEAT_POLL_INTERVAL_MS) {
+    warn(`[seat-activity] ${SEAT_POLL_INTERVAL_KEY}=${JSON.stringify(setting.value)} is not a whole number of milliseconds`
+      + ` in ${MIN_SEAT_POLL_INTERVAL_MS}..${MAX_SEAT_POLL_INTERVAL_MS}; using ${DEFAULT_POLL_INTERVAL_MS} ms`);
+    return DEFAULT_POLL_INTERVAL_MS;
+  }
+  return ms;
+}
+/** Starts both seat pollers on the cadence of `daemon.seat_poll_interval_ms` (read once, here) and returns it. */
+export function startSeatPollers(
+  pollers: {
+    activity?: { start(db: Database.Database, intervalMs?: number): void };
+    structural?: { start(db: Database.Database, intervalMs?: number): void };
+  },
+  db: Database.Database,
+  read?: ReadSeatPollSetting,
+  warn?: (message: string) => void,
+): number {
+  const ms = resolveSeatPollIntervalMs(read, warn);
+  pollers.activity?.start(db, ms);
+  pollers.structural?.start(db, ms);
+  return ms;
+}
 /** Allow automatic review to settle before checking the visible human prompt. */
 export const PERMISSION_REQUEST_GRACE_MS = 3_000;
 
@@ -530,6 +589,7 @@ export class SeatActivityService {
       activity: "unknown",
       needsInput: { count: 0, reason: null },
       needsInputEvidence: null,
+      backgroundWork: null, // a new occupant never inherits the old one's shell
       decidedBy: null,
       seq: seat.arbitrated.seq + 1, // the swap IS a visible event
       changedAt: at,
@@ -616,6 +676,7 @@ export class SeatActivityService {
           activity: "unknown",
           needsInput: { count: 0, reason: null },
           needsInputEvidence: null,
+          backgroundWork: null,
           decidedBy: null,
           seq: 0,
           changedAt: this.now().toISOString(),
@@ -872,6 +933,13 @@ export class SeatActivityService {
       this.permissionPromptChanged?.(seat.sessionName, Boolean(confirmedCount), seat.inventory!.runtime);
     }
     const needsInputEvidence = permissionTracked ? seat.permissionEvidence : decider ? { rung: decider.rung, observedAt: decider.observedAt } : null;
+    // #2661 (b): the latest self-report says a background shell outlives the turn. Kept beside activity (never an
+    // ActivityValue), anchored at the first observation of this shell so a consumer's grace cannot slide, and left
+    // out of `changed`: it moves no seq, wakes no waiter and restarts no waiting grace.
+    const backgroundWork = nextActivity === "idle-at-prompt" && selfEv?.backgroundWork
+      && this.rungTrust(seat, "self-report") === "authoritative"
+      ? { rung: selfEv.rung, observedAt: seat.arbitrated.backgroundWork?.observedAt ?? selfEv.observedAt }
+      : null;
 
     // Which rung answers is part of the answer: default zero → observed zero changes what
     // consumers may conclude, so it advances seq and pushes like a count change.
@@ -884,6 +952,7 @@ export class SeatActivityService {
       activity: nextActivity,
       needsInput,
       needsInputEvidence,
+      backgroundWork,
       decidedBy,
       seq: changed ? seat.arbitrated.seq + 1 : seat.arbitrated.seq,
       changedAt: changed ? this.now().toISOString() : seat.arbitrated.changedAt,

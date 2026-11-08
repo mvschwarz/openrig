@@ -15,7 +15,7 @@ import {
 export interface RiggedConfig {
   specs: { builtinsVisible: boolean };
   launch: { nonInterruptive: boolean; codexLoginShell: boolean };
-  daemon: { port: number; host: string; dbConflict?: "warn" | "stop" };
+  daemon: { port: number; host: string; dbConflict?: "warn" | "stop"; seatPollIntervalMs?: number };
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer.
   // OPR.0.4.6.MH1 FR-4 — the own-host display name (default "localhost").
   host: { selected: string; name: string };
@@ -209,6 +209,8 @@ export interface RiggedConfig {
     consumers: string;
     templateDir: string;
   };
+  // rig acp serve's receiver when --to isn't given (an ACP registry launch has no args). Lockstep with the daemon twin.
+  acp: { to: string };
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (twin of the daemon
   // settings-store): enabled + the four bounded numeric tunables.
   retention: {
@@ -218,6 +220,7 @@ export interface RiggedConfig {
     watchdogKeepPerJob: number;
     streamDays: number;
     streamMaxItems: number;
+    eventsDays: number;
     batchSize: number;
   };
   // S04 (OPR.0.5.5.4) — pickup-receipt stall threshold (twin of the daemon settings-store).
@@ -270,7 +273,7 @@ const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigP
 
 const DEFAULTS = {
   launch: { nonInterruptive: false, codexLoginShell: false },
-  daemon: { port: 7433, host: "127.0.0.1", dbConflict: "warn" },
+  daemon: { port: 7433, host: "127.0.0.1", dbConflict: "warn", seatPollIntervalMs: 1000 },
   // OPR.0.4.6.MH1 FR-1 — "local" ≡ no remote selection (LOCAL_HOST_ID).
   // FR-4 — own-host display name; default "localhost" (PRD-named).
   host: { selected: "local", name: "localhost" },
@@ -397,6 +400,8 @@ const DEFAULTS = {
     consumers: "",
     templateDir: "",
   },
+  // No ACP receiver: rig acp serve needs --to until one is set.
+  acp: { to: "" },
   // Issue #1856 — stream intake default queue.worker; read live by the stream intake coordinator.
   stream: {
     intake: "queue.worker",
@@ -409,6 +414,7 @@ const DEFAULTS = {
     watchdogKeepPerJob: 50,
     streamDays: 30,
     streamMaxItems: 20000,
+    eventsDays: 0,
     batchSize: 500,
   },
   // S04 — pickup-receipt stall threshold default (twin of daemon getDefaultValue).
@@ -428,6 +434,8 @@ export const VALID_KEYS = [
   "daemon.port",
   "daemon.host",
   "daemon.db_conflict",
+  // #2687: the seat pollers' cadence; startup-only (read once when the daemon starts). Twin of the daemon key.
+  "daemon.seat_poll_interval_ms",
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer (the
   // kubectl current-context shape). ONE static key, lockstep with the
   // daemon settings-store twin (parity test pins both). Registry-
@@ -544,6 +552,8 @@ export const VALID_KEYS = [
   "decisions.enabled",
   "decisions.consumers",
   "decisions.template_dir",
+  // rig acp serve's receiver when --to isn't given; lockstep with the daemon twin.
+  "acp.to",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
   // lockstep with the daemon settings-store SETTINGS_VALID_KEYS.
   "retention.enabled",
@@ -553,6 +563,8 @@ export const VALID_KEYS = [
   // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
   "retention.stream_days",
   "retention.stream_max_items",
+  // The history-only event types of `events` older than N days, 0 (default) keeps them; lockstep with the daemon twin.
+  "retention.events_days",
   "stream.intake",
   "retention.batch_size",
   // S04 — pickup-receipt stall threshold; lockstep with the daemon settings-store twin.
@@ -584,6 +596,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "workflow.exception_routing": { primary: "OPENRIG_WORKFLOW_EXCEPTION_ROUTING" },
   "daemon.host": { primary: "OPENRIG_HOST", legacy: "RIGGED_HOST" },
   "daemon.db_conflict": { primary: "OPENRIG_DAEMON_DB_CONFLICT" },
+  "daemon.seat_poll_interval_ms": { primary: "OPENRIG_SEAT_POLL_INTERVAL_MS" },
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
   "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
   "transcripts.path": { primary: "OPENRIG_TRANSCRIPTS_PATH", legacy: "RIGGED_TRANSCRIPTS_PATH" },
@@ -665,6 +678,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "decisions.enabled": { primary: "OPENRIG_DECISIONS_ENABLED" },
   "decisions.consumers": { primary: "OPENRIG_DECISIONS_CONSUMERS" },
   "decisions.template_dir": { primary: "OPENRIG_DECISIONS_TEMPLATE_DIR" },
+  "acp.to": { primary: "OPENRIG_ACP_TO" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -672,6 +686,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.stream_days": { primary: "OPENRIG_RETENTION_STREAM_DAYS" },
   "retention.stream_max_items": { primary: "OPENRIG_RETENTION_STREAM_MAX_ITEMS" },
+  "retention.events_days": { primary: "OPENRIG_RETENTION_EVENTS_DAYS" },
   "stream.intake": { primary: "OPENRIG_STREAM_INTAKE" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
   "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
@@ -695,6 +710,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "workflow.exception_routing": ["workflow", "exceptionRouting"],
   "daemon.host": ["daemon", "host"],
   "daemon.db_conflict": ["daemon", "dbConflict"],
+  "daemon.seat_poll_interval_ms": ["daemon", "seatPollIntervalMs"],
   "db.path": ["db", "path"],
   "transcripts.enabled": ["transcripts", "enabled"],
   "transcripts.path": ["transcripts", "path"],
@@ -768,12 +784,14 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "decisions.enabled": ["decisions", "enabled"],
   "decisions.consumers": ["decisions", "consumers"],
   "decisions.template_dir": ["decisions", "templateDir"],
+  "acp.to": ["acp", "to"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.stream_days": ["retention", "streamDays"],
   "retention.stream_max_items": ["retention", "streamMaxItems"],
+  "retention.events_days": ["retention", "eventsDays"],
   "stream.intake": ["stream", "intake"],
   "retention.batch_size": ["retention", "batchSize"],
   "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
@@ -989,6 +1007,13 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "daemon.db_conflict": (raw) => {
     if (raw !== "warn" && raw !== "stop") throw new Error("daemon.db_conflict must be warn or stop");
   },
+  "daemon.seat_poll_interval_ms": (raw, value) => {
+    // Startup-only: the seat pollers read it once when the daemon starts. Only slower than the 1 s default, up to the
+    // ceiling the structural observation's expiry allows (seat-activity-service.ts MAX_SEAT_POLL_INTERVAL_MS).
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1000 || value > 2000) {
+      throw new Error("Invalid daemon.seat_poll_interval_ms: must be a whole number of milliseconds in [1000, 2000]");
+    }
+  },
   "transport.draft_delivery": (raw) => {
     if (raw !== "refuse" && raw !== "deliver") throw new Error(`Invalid value for transport.draft_delivery: must be "refuse" or "deliver", got "${raw}"`);
   },
@@ -1147,6 +1172,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for stream.intake: must be "queue.worker", a canonical session (<seat>@<rig>), or "off", got "${raw}"`);
     }
   },
+  // 0 (the default) keeps these events; a positive day count turns their pruning on.
+  "retention.events_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
+      throw new Error(`Invalid value for retention.events_days: must be an integer >= 0 (0 keeps the events), got "${raw}"`);
+    }
+  },
   "retention.batch_size": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.batch_size: must be an integer >= 1, got "${raw}"`);
@@ -1165,6 +1196,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "decisions.template_dir": (_raw, value) => {
     if (typeof value !== "string" || (value !== "" && (!isAbsolute(value) || value.includes("\0")))) {
       throw new Error("Invalid decisions.template_dir: use an absolute path, or an empty string for the shipped templates only");
+    }
+  },
+  // rig acp serve's receiver when --to isn't given: a team seat, member@rig, or empty for none.
+  "acp.to": (_raw, value) => {
+    if (typeof value !== "string" || (value !== "" && !/^[^@\s]+@[^@\s]+$/.test(value))) {
+      throw new Error("Invalid acp.to: use the seat that receives your ACP tasks as member@rig, or an empty string for none");
     }
   },
 };
@@ -1263,6 +1300,7 @@ export class ConfigStore {
         port: v("daemon.port") as number,
         host: v("daemon.host") as string,
         dbConflict: v("daemon.db_conflict") as "warn" | "stop",
+        seatPollIntervalMs: v("daemon.seat_poll_interval_ms") as number,
       },
       host: {
         selected: v("host.selected") as string,
@@ -1402,6 +1440,7 @@ export class ConfigStore {
         consumers: v("decisions.consumers") as string,
         templateDir: v("decisions.template_dir") as string,
       },
+      acp: { to: v("acp.to") as string },
       retention: {
         enabled: v("retention.enabled") as boolean,
         transitionsDays: v("retention.transitions_days") as number,
@@ -1409,6 +1448,7 @@ export class ConfigStore {
         watchdogKeepPerJob: v("retention.watchdog_keep_per_job") as number,
         streamDays: v("retention.stream_days") as number,
         streamMaxItems: v("retention.stream_max_items") as number,
+        eventsDays: v("retention.events_days") as number,
         batchSize: v("retention.batch_size") as number,
       },
       queue: {

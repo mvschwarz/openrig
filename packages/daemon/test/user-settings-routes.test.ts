@@ -91,7 +91,7 @@ describe("config routes (User Settings v0)", () => {
     // + 1 OPR.0.4.6.02 (terminal.status_bar)
     // + 5 OPR.0.4.6.FS-1 W2 (retention.enabled / transitions_days / watchdog_days /
     //   watchdog_keep_per_job / batch_size — the CLI-settable queue-retention knobs;
-    //   + retention.usage_samples_days, 51-08 A2)
+    //   + retention.usage_samples_days, 51-08 A2; + retention.events_days)
     // + 2 OPR.0.5.1 W2c (policies.idle_gate_qitem.scan_interval_seconds /
     //   active_wake_interval_seconds)
     // + 2 B6 founder ruling (policies.idle_gate_qitem.auto_register /
@@ -135,9 +135,13 @@ describe("config routes (User Settings v0)", () => {
     // + 1 stream.intake (issue #1856 queue intake routing; default queue.worker).
     // + 1 launch.codex_login_shell (defer to Codex's own login-shell setting; default off).
     // + 1 transport.draft_delivery (whether ordinary sends reach a seat whose prompt holds a draft; default deliver).
-    expect(Object.keys(body.settings).length).toBe(97);
+    // + 1 acp.to (the ACP agent's receiver; default empty).
+    // + 1 daemon.seat_poll_interval_ms (#2687 the seat pollers' cadence; startup-only, default 1000).
+    // + 1 retention.events_days (the history-only event types of events; default 0 = keep).
+    expect(Object.keys(body.settings).length).toBe(100);
     expect(body.settings["launch.codex_login_shell"]).toMatchObject({ value: false, source: "default", defaultValue: false });
     expect(body.settings["transport.draft_delivery"]).toMatchObject({ value: "deliver", source: "default", defaultValue: "deliver" });
+    expect(body.settings["retention.events_days"]).toMatchObject({ value: 0, source: "default", defaultValue: 0 });
     expect(body.settings["specs.builtins_visible"]).toMatchObject({ value: true, source: "default", defaultValue: true });
     expect(body.settings["stream.intake"]).toMatchObject({ value: "queue.worker", source: "default", defaultValue: "queue.worker" });
     expect(body.settings["retention.stream_days"]).toMatchObject({ value: 30, source: "default", defaultValue: 30 });
@@ -185,6 +189,29 @@ describe("config routes (User Settings v0)", () => {
     const body = await res.json() as { value: string; source: string };
     expect(body.value).toBe("/custom/ws");
     expect(body.source).toBe("file");
+  });
+
+  it("GET /api/config/retention.events_days shows the default 0, POST 3 keeps 3 and POST 0 keeps 0", async () => {
+    const app = buildApp();
+    const before = await app.request("/api/config/retention.events_days");
+    expect(before.status).toBe(200);
+    expect(await before.json()).toMatchObject({ value: 0, source: "default" });
+    const res = await app.request("/api/config/retention.events_days", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: "3" }),
+    });
+    expect(res.status).toBe(200);
+    const after = await app.request("/api/config/retention.events_days");
+    expect(await after.json()).toMatchObject({ value: 3, source: "file" });
+    expect(JSON.parse(readFileSync(configPath, "utf-8")).retention.eventsDays).toBe(3);
+    const zero = await app.request("/api/config/retention.events_days", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: "0" }),
+    });
+    expect(zero.status).toBe(200);
+    expect(await (await app.request("/api/config/retention.events_days")).json()).toMatchObject({ value: 0, source: "file" });
   });
 
   it("GET /api/config rebases persisted legacy workspace defaults", async () => {
