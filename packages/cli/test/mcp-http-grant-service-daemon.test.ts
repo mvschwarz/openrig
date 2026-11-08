@@ -491,6 +491,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     });
     const LAYOUT = { id: "layout", question: "Which layout?", options: [{ id: "a", label: "Cards" }, { id: "b", label: "List" }] };
     const SHIP = { id: "ship", question: "Ship it this week?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] };
+    const COLOR = { id: "color", question: "Which accent color?", options: [{ id: "red", label: "Red" }, { id: "teal", label: "Teal" }] };
     const ask = (destinationSession: string, questions: unknown[] | null = [LAYOUT]) => repo.create({ sourceSession: "lead@team-a", destinationSession,
       summary: "Pick a layout", body: "Which layout should the landing page use?", evidenceRef: "/proof/layout.md", humanIntent: "decision", ...(questions ? { humanQuestions: questions } : {}), nudge: false } as never) as unknown as Promise<{ qitemId: string }>;
     const replies = (qitemId: string) => (db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE destination_session = 'lead@team-a' AND tags LIKE '%human-answer%' AND body LIKE ?")
@@ -681,9 +682,14 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(stopped.structured.message).toContain("Recorded: layout. Unknown whether ship was recorded.");
       expect(repo.getById(both.qitemId)).toMatchObject({ state: "pending", humanAnswers: { layout: "a" } });
       broken = undefined;
-      // The identical retry continues after its own first step: only the second is recorded now, and the asker hears once.
-      const finished = await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices });
-      expect(finished.structured).toMatchObject({ ok: true, outcome: "answered" });
+      // The identical retry confirms its own first step and stops there: the rest goes in a new answer to the question as
+      // it is now, which the asker hears once.
+      const retried = await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices });
+      expect(retried.structured).toMatchObject({ ok: false, code: "question_changed", recorded: ["layout"], notRecorded: ["ship"] });
+      expect(audit(both.qitemId)).toHaveLength(1);
+      const now = (await asPerson("rig_question_list")).structured.items.find((entry: any) => entry.qitemId === both.qitemId);
+      expect(now.answered).toEqual({ layout: "a" });
+      expect((await asPerson("rig_question_answer", { qitemId: both.qitemId, revision: now.revision, choices: [{ questionId: "ship", optionId: "no" }] })).structured).toMatchObject({ ok: true, outcome: "answered" });
       expect(repo.getById(both.qitemId)!.humanAnswers).toEqual({ layout: "a", ship: "no" });
       expect(audit(both.qitemId)).toHaveLength(2);
       expect(replies(both.qitemId)).toBe(1);
@@ -732,7 +738,8 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
         return undefined;
       };
       const stopped = await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices });
-      expect(stopped.structured).toMatchObject({ ok: false, code: "not_waiting_on_person", recorded: ["layout"], notRecorded: ["ship"] });
+      expect(stopped.structured).toMatchObject({ ok: false, code: "question_changed", recorded: ["layout"], notRecorded: ["ship"] });
+      expect(stopped.structured).not.toHaveProperty("current");
       expect(repo.getById(both.qitemId)).toMatchObject({ state: "pending", destinationSession: "ana@external", humanAnswers: { layout: "a" } });
       expect(audit(both.qitemId)).toHaveLength(1);
     });
@@ -755,7 +762,10 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(unknown.structured.message).toContain("Send the same call again");
       expect(unknown.structured.message).not.toContain("Nothing was recorded");
       broken = undefined;
-      expect((await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices })).structured).toMatchObject({ ok: true, outcome: "answered" });
+      // The same call confirms what was recorded (the unanswered send never reached the daemon), and the rest is a new answer.
+      expect((await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices })).structured).toMatchObject({ code: "question_changed", recorded: ["layout"], notRecorded: ["ship"] });
+      const rest = (await asPerson("rig_question_list")).structured.items.find((entry: any) => entry.qitemId === both.qitemId);
+      expect((await asPerson("rig_question_answer", { qitemId: both.qitemId, revision: rest.revision, choices: [{ questionId: "ship", optionId: "yes" }] })).structured).toMatchObject({ ok: true, outcome: "answered" });
       expect(repo.getById(both.qitemId)!.humanAnswers).toEqual({ layout: "b", ship: "yes" });
       expect(audit(both.qitemId)).toHaveLength(2);
       expect(replies(both.qitemId)).toBe(1);
@@ -769,6 +779,45 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(first.structured).toMatchObject({ ok: false, recorded: [], indeterminate: "layout" });
       expect(first.structured.message).not.toContain("Nothing was recorded");
       broken = undefined;
+    });
+
+    it("never lets a stale retry overwrite a newer answer: given through Steering's path or recorded with no action", async () => {
+      register(PERSON, true);
+      register("ana", false);
+      answer = () => [200, grantFor(PERSON)];
+      const asPerson = await connect((await listen()).url);
+      const choices = [{ questionId: "layout", optionId: "a" }, { questionId: "ship", optionId: "no" }, { questionId: "color", optionId: "red" }];
+      const failSecondSend = () => {
+        let posts = 0;
+        broken = (req) => req.method === "POST" && new URL(req.url).pathname === "/api/mission-control/action" && ++posts === 2
+          ? new Response(JSON.stringify({ error: "invalid_request", message: "refused this once" }), { status: 400, headers: { "Content-Type": "application/json" } }) : undefined;
+      };
+      const firstTry = async (qitemId: string) => {
+        const revision = (await asPerson("rig_question_list")).structured.items.find((entry: any) => entry.qitemId === qitemId).revision;
+        failSecondSend();
+        expect((await asPerson("rig_question_answer", { qitemId, revision, choices })).structured).toMatchObject({ recorded: ["layout"], notRecorded: ["ship", "color"] });
+        broken = undefined;
+        return revision;
+      };
+
+      // Ana answers ship through Steering's own path (an audited action) before the retry.
+      const audited = await ask(`${PERSON}@external`, [LAYOUT, SHIP, COLOR]);
+      const auditedRevision = await firstTry(audited.qitemId);
+      const ana = await fetch(`${daemonUrl}/api/mission-control/action`, { method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "ana@external" },
+        body: JSON.stringify({ verb: "answer", qitemId: audited.qitemId, questionId: "ship", optionId: "yes" }) });
+      expect(ana.status).toBe(200);
+      expect((await asPerson("rig_question_answer", { qitemId: audited.qitemId, revision: auditedRevision, choices })).structured).toMatchObject({ ok: false, code: "question_changed" });
+      expect(repo.getById(audited.qitemId)).toMatchObject({ state: "pending", humanAnswers: { layout: "a", ship: "yes" } });
+
+      // Ana's ship is recorded with no action at all (Slack's writer) before the retry: the retry confirms its own layout
+      // and stops, so yes stays.
+      const silent = await ask(`${PERSON}@external`, [LAYOUT, SHIP, COLOR]);
+      const silentRevision = await firstTry(silent.qitemId);
+      expect(repo.recordHumanAnswer({ qitemId: silent.qitemId, actorSession: "ana@external", questionId: "ship", optionId: "yes" } as never)).toMatchObject({ status: "recorded" });
+      const retried = await asPerson("rig_question_answer", { qitemId: silent.qitemId, revision: silentRevision, choices });
+      expect(retried.structured).toMatchObject({ ok: false, code: "question_changed", recorded: ["layout"], notRecorded: ["ship", "color"] });
+      expect(repo.getById(silent.qitemId)).toMatchObject({ state: "pending", humanAnswers: { layout: "a", ship: "yes" } });
+      expect(audit(silent.qitemId)).toHaveLength(1);
     });
 
     it("leaves out a park that moved to someone else between Steering's view and the read of its row, and never answers it", async () => {

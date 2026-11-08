@@ -1999,21 +1999,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           const indeterminate = unknown ? label(steps[at]!) : null;
           const notRecorded = steps.slice(unknown ? at + 1 : at).map(label);
           const said = [
-            recorded.length ? `Recorded: ${recorded.join(", ")}.` : unknown ? "" : "Nothing was recorded.",
+            recorded.length ? `Recorded: ${recorded.join(", ")}.` : unknown ? "" : "This call recorded nothing.",
             indeterminate ? `Unknown whether ${indeterminate} was recorded.` : "",
             notRecorded.length && (recorded.length || unknown) ? `Not recorded: ${notRecorded.join(", ")}.` : "",
-            unknown ? "Send the same call again to confirm or finish it." : "",
+            unknown ? "Send the same call again to confirm what was recorded." : "",
           ].filter(Boolean).join(" ");
           const partial = recorded.length || unknown ? { recorded, ...(indeterminate ? { indeterminate } : {}), notRecorded } : {};
           return refuse(code, `${why} ${said}`.trim(), { ...partial, ...extra });
-        };
-        /** Before a step after one this call didn't commit itself (one recorded earlier, confirmed from the record), the
-         *  question must still be this person's and open: a reroute leaves no action of its own, so the record alone can't
-         *  say. Its revision is the one the next step is sent with, so any later change is refused. */
-        const stillTheirs = async (): Promise<string | null> => {
-          const again = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
-          const now = (again.status < 400 ? again.data ?? {} : {}) as Record<string, any>;
-          return entry && stillListed(entry, now) && typeof now.decisionRevision === "string" ? now.decisionRevision : null;
         };
         let expected = revision;
         let next = 0;
@@ -2040,7 +2032,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           } else {
             const failure = (res.data ?? {}) as Record<string, any>;
             // This submission's own step is the last action on the question (its result was lost, or a later step failed):
-            // it's recorded, and the answer carries on after it. Any other change is refused.
+            // it's recorded. Any other change is refused.
             const own = failure.error === "decision_revision_changed" ? ownStep(failure.lastAction?.auditNotes?.operationId) : null;
             if (own !== null && own >= next) {
               confirmed = true;
@@ -2060,10 +2052,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
               return stopped(refused.code ?? "request_failed", refused.message ?? "The answer stopped.", next, res.status >= 500);
             }
           }
+          // A retry never resumes after a part it confirms: since that part was recorded the question may have moved, or
+          // someone may have answered the rest (a Slack click leaves no action to see). The rest goes in a new answer to
+          // the question as it is now.
           if (confirmed && next < steps.length) {
-            const current = await stillTheirs();
-            if (current === null) return stopped("not_waiting_on_person", "The question moved to someone else or closed after this answer's recorded steps.", next, false);
-            expected = current;
+            return stopped("question_changed", "This answer's earlier parts were already recorded, so the rest wasn't sent. Read the question again with rig_question_list and submit the rest as a new answer.", next, false);
           }
         }
         // The receipt says only what this call knows: what was submitted and what the daemon answered it, never a fresh read

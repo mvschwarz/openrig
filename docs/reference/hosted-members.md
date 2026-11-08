@@ -164,10 +164,12 @@ unusable `person` withholds only these two tools while the grant's other tools k
   - `already-recorded`, for an identical retry whose submission is already on the question, recognised by its operation id
     (never by an equal answer). That includes a settled ask or a park that's back at work;
   - `question_changed`, with the current question, when someone else changed it since the revision the person saw;
-  - a retry of a submission that stopped partway records only the parts not yet recorded. Before it goes on, it checks
-    that the question is still the person's and open, and if it moved or closed, it stops with what was recorded;
+  - a retry of a submission that stopped partway confirms the parts already recorded and stops there (`question_changed`,
+    with `recorded` and `notRecorded`). The rest goes in a new answer to the question as `rig_question_list` shows it now,
+    so a stale retry never overwrites an answer someone gave in the meantime, including one recorded with no action (a
+    Slack click);
   - a refusal partway names which parts were recorded (`recorded`, `notRecorded`). A send that got no answer, or a server
-    error, leaves that part `indeterminate`: send the same call again to confirm or finish it;
+    error, leaves that part `indeterminate`: send the same call again to confirm what was recorded;
   - `not_waiting_on_person`, when it was answered or closed, or isn't theirs;
   - `person_not_registered`, when the grant's person isn't registered on this instance. While no one is registered, Steering
     shows every request, so nothing is answered for anyone.
