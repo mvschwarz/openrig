@@ -190,10 +190,65 @@ describe("installRigKeys (opt-in, reversible)", () => {
     expect(read()).toEqual({ global: {} });
   });
 
-  it("leaves an unreadable keys.json untouched", async () => {
-    writeFileSync(join(home, "keys.json"), "{ not json");
-    expect((await installRigKeys(home)).ok).toBe(false);
-    expect(readFileSync(join(home, "keys.json"), "utf8")).toBe("{ not json");
+  it("leaves an unreadable or non-object keys.json untouched", async () => {
+    for (const bad of ["{ not json", "null", "[]", "42", "\"scalar\""]) {
+      writeFileSync(join(home, "keys.json"), bad);
+      const res = await installRigKeys(home);
+      expect(res.ok).toBe(false);
+      expect(res.message).toContain("is not valid JSON");
+      expect(readFileSync(join(home, "keys.json"), "utf8")).toBe(bad);
+    }
+  });
+});
+
+describe("shipped rig-strip mod: strip.json root validation", () => {
+  function loadRigStripClass(readTextFile: (path: string) => Promise<string>) {
+    const src = readFileSync(join(SHIPPED_MODS_DIR, "rig-strip", "main.js"), "utf8")
+      .replace(/^import\s+.*$/gm, "")
+      .replace(/export\s+default\s+class\s+RigStrip\s+extends\s+View/, "return class RigStrip extends View");
+    class View {}
+    const factory = new Function(
+      "View",
+      "appHome",
+      "readTextFile",
+      "nextCommand",
+      src,
+    ) as (
+      V: typeof View,
+      appHome: () => string,
+      readText: (path: string) => Promise<string>,
+      nextCmd: () => Promise<string>,
+    ) => new () => {
+      saved: string | null;
+      state: Record<string, unknown>;
+      loaded?: boolean;
+      init(_p: unknown, cx: { notify(): void; spawn(fn: (cx: unknown) => Promise<void>): void }): void;
+    };
+    return factory(View, () => home, readTextFile, () => new Promise<string>(() => {}));
+  }
+
+  it("rejects non-object strip.json roots (null, array, scalar) and still finishes init with a plain state object", async () => {
+    for (const raw of ["null", "[]", "42", "\"text\""]) {
+      const RigStrip = loadRigStripClass(async () => raw);
+      const strip = new RigStrip();
+      let notified = 0;
+      strip.init({}, { notify: () => { notified++; }, spawn: () => {} });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(strip.loaded).toBe(true);
+      expect(strip.saved).toBeNull();
+      expect(Array.isArray(strip.state)).toBe(false);
+      expect(strip.state).toEqual({ cells: {} });
+      expect(notified).toBe(1);
+    }
+
+    const validJson = JSON.stringify({ cells: { "rv-1": "t1" }, shown: "rv-1" });
+    const RigStrip = loadRigStripClass(async () => validJson);
+    const strip = new RigStrip();
+    strip.init({}, { notify: () => {}, spawn: () => {} });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(strip.loaded).toBe(true);
+    expect(strip.saved).toBe(validJson);
+    expect(strip.state).toEqual({ cells: { "rv-1": "t1" }, shown: "rv-1" });
   });
 });
 

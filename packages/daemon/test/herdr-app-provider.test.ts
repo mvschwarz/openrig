@@ -614,4 +614,73 @@ describe("HerdrAppProvider: every viewer it starts is ended or still tracked", (
     expect(afterCrashReconcile.views).toEqual([]);
     expect(afterCrashReconcile.pendingEnds).toEqual([]);
   });
+
+  it("rejects non-object journal roots without overwriting the journal, and treats corrupt or non-object base layouts as missing", async () => {
+    const { dirname } = await import("node:path");
+    mkdirSync(dirname(files.journalPath), { recursive: true });
+    for (const nonObject of ["null", "[]", "42", "\"scalar\""]) {
+      writeFileSync(files.journalPath, nonObject);
+      await expect(files.load()).rejects.toThrow("is not a journal object");
+      expect(readFileSync(files.journalPath, "utf8")).toBe(nonObject);
+    }
+    rmSync(files.journalPath, { force: true });
+
+    for (const badLayout of ["{ not json", "null", "[]", "42", "\"scalar\""]) {
+      writeFileSync(files.layoutPath("main"), badLayout);
+      expect(await files.readLayout("main")).toBeNull();
+      const opened = await provider.openView(composed([pane("dev.build@demo")]));
+      expect(opened).toMatchObject({ ok: false, code: "base_layout_missing" });
+    }
+  });
+
+  it("watchHerdrApp retries after a child spawn error (e.g. ENOENT) and ignores stale child exit events", async () => {
+    const { EventEmitter } = await import("node:events");
+    const { createHerdrAppWatcher } = await import("../src/startup.js");
+
+    type FakeChild = InstanceType<typeof EventEmitter> & {
+      stdout: InstanceType<typeof EventEmitter>;
+      unref: () => void;
+    };
+    const spawned: FakeChild[] = [];
+    const spawnFn = (() => {
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new EventEmitter(),
+        unref: () => {},
+      });
+      spawned.push(child);
+      return child as unknown as import("node:child_process").ChildProcess;
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    let reconciled = 0;
+    const watch = createHerdrAppWatcher({
+      daemonInstance: "inst1",
+      env: {},
+      reconcileAll: () => { reconciled++; },
+      spawnFn,
+      retryMs: 15,
+    });
+
+    watch();
+    expect(spawned).toHaveLength(1);
+    // Calling watch() while a child is active is a no-op.
+    watch();
+    expect(spawned).toHaveLength(1);
+
+    // Emit a spawn error (Node emits 'error' without 'exit' on ENOENT): must clear herdrAppEvents and retry.
+    const first = spawned[0]!;
+    first.emit("error", Object.assign(new Error("spawn hc ENOENT"), { code: "ENOENT" }));
+    await new Promise((r) => setTimeout(r, 35));
+    expect(spawned).toHaveLength(2);
+
+    // A late 'exit' from the stale first child must not clear or replace the active second child.
+    first.emit("exit", 1, null);
+    watch();
+    expect(spawned).toHaveLength(2);
+
+    // Data on the active second child triggers debounced reconcileAll.
+    const second = spawned[1]!;
+    second.stdout.emit("data", Buffer.from("{}\n"));
+    await new Promise((r) => setTimeout(r, 230));
+    expect(reconciled).toBe(1);
+  });
 });

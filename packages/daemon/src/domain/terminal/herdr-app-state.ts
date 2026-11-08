@@ -89,7 +89,11 @@ export class HerdrAppClientFiles {
     const text = await readText(this.journalPath);
     const empty: ClientState = { appHome: path.resolve(this.appHome), base: null, views: [], revision: null, writtenSha: null, pendingEnds: [] };
     if (!text) return empty;
-    const parsed = JSON.parse(text) as Partial<ClientState>;
+    const raw: unknown = JSON.parse(text);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error(`${this.journalPath} is not a journal object; OpenRig did not use or overwrite it.`);
+    }
+    const parsed = raw as Partial<ClientState>;
     const now = new Date().toISOString();
     const views = (parsed.views ?? []).map((v) => ({
       ...v,
@@ -108,7 +112,13 @@ export class HerdrAppClientFiles {
 
   async readLayout(name: string): Promise<LayoutNode | null> {
     const text = await readText(this.layoutPath(name));
-    return text === null ? null : JSON.parse(text) as LayoutNode;
+    if (text === null) return null;
+    try {
+      const tree: unknown = JSON.parse(text);
+      return tree && typeof tree === "object" && !Array.isArray(tree) ? tree as LayoutNode : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Whose `layouts/rig.json` is it? */

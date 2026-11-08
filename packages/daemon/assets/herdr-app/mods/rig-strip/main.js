@@ -37,7 +37,12 @@ export default class RigStrip extends View {
   init(_p, cx) {
     const path = `${appHome()}/openrig/strip.json`;
     readTextFile(path)
-      .then((text) => { this.saved = text; this.state = JSON.parse(text); })
+      .then((text) => {
+        const state = JSON.parse(text);
+        if (!state || typeof state !== "object" || Array.isArray(state)) throw new Error("strip.json root is not an object");
+        this.saved = text;
+        this.state = state;
+      })
       .catch(() => { this.saved = null; this.state = {}; })
       .finally(() => { this.state ??= {}; this.state.cells ??= {}; this.loaded = true; cx.notify(); });
     cx.spawn(async (cx) => {

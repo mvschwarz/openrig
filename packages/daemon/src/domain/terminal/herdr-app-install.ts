@@ -201,7 +201,11 @@ export async function installRigKeys(appHome: string, opts: { remove?: boolean; 
     return { ok: false, changed: [], conflicts: [], message: `${file} doesn't exist yet. Start herdr-app once (it writes its default keys), then run this again.` };
   }
   let keys: Record<string, Record<string, unknown>>;
-  try { keys = JSON.parse(text) as Record<string, Record<string, unknown>>; } catch (e) {
+  try {
+    const raw: unknown = JSON.parse(text);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("the root is not an object");
+    keys = raw as Record<string, Record<string, unknown>>;
+  } catch (e) {
     return { ok: false, changed: [], conflicts: [], message: `${file} is not valid JSON (${(e as Error).message}); it was not changed.` };
   }
   const wanted = opts.keys ?? DEFAULT_RIG_KEYS;

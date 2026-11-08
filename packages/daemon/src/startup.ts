@@ -2197,24 +2197,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const herdrAppHcEnv = hcEnv();
     const herdrAppHc = createHcRunner({ env: herdrAppHcEnv });
     const herdrAppProviders = new Map<string, InstanceType<typeof HerdrAppProvider>>();
-    let herdrAppEvents: import("node:child_process").ChildProcess | null = null;
-    let herdrAppReconcile: ReturnType<typeof setTimeout> | null = null;
-    const watchHerdrApp = () => {
-      if (herdrAppEvents) return;
-      const child = spawn("hc", ["events", "--json", "--label", `openrig.daemon=${herdrAppInstance}`], { stdio: ["ignore", "pipe", "ignore"], env: herdrAppHcEnv });
-      herdrAppEvents = child;
-      child.stdout?.on("data", () => {
-        if (herdrAppReconcile) return;
-        herdrAppReconcile = setTimeout(() => {
-          herdrAppReconcile = null;
-          for (const provider of herdrAppProviders.values()) void provider.reconcile().catch(() => {});
-        }, 200);
-        herdrAppReconcile.unref?.();
-      });
-      child.on("error", () => {});
-      child.on("exit", () => { herdrAppEvents = null; setTimeout(watchHerdrApp, 5_000).unref?.(); });
-      child.unref();
-    };
+    const watchHerdrApp = createHerdrAppWatcher({
+      daemonInstance: herdrAppInstance,
+      env: herdrAppHcEnv,
+      reconcileAll: () => {
+        for (const provider of herdrAppProviders.values()) void provider.reconcile().catch(() => {});
+      },
+    });
     const resolveHerdrAppProvider = (target: { appHome?: string }) => {
       const appHome = target.appHome ? target.appHome : resolveHerdrAppHome(process.env);
       if (!nodePath.isAbsolute(appHome) || appHome.includes("\0")) return null;
@@ -2882,4 +2871,40 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 
   return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket, wakeRecovery };
+}
+
+/** Watch `hc events` for this daemon's viewer terminals, retrying after exit or a spawn error. */
+export function createHerdrAppWatcher(opts: {
+  daemonInstance: string;
+  env: NodeJS.ProcessEnv;
+  reconcileAll: () => void;
+  spawnFn?: typeof spawn;
+  retryMs?: number;
+}): () => void {
+  const spawnChild = opts.spawnFn ?? spawn;
+  const retryMs = opts.retryMs ?? 5_000;
+  let herdrAppEvents: import("node:child_process").ChildProcess | null = null;
+  let herdrAppReconcile: ReturnType<typeof setTimeout> | null = null;
+  const watchHerdrApp = () => {
+    if (herdrAppEvents) return;
+    const child = spawnChild("hc", ["events", "--json", "--label", `openrig.daemon=${opts.daemonInstance}`], { stdio: ["ignore", "pipe", "ignore"], env: opts.env });
+    herdrAppEvents = child;
+    child.stdout?.on("data", () => {
+      if (herdrAppReconcile) return;
+      herdrAppReconcile = setTimeout(() => {
+        herdrAppReconcile = null;
+        opts.reconcileAll();
+      }, 200);
+      herdrAppReconcile.unref?.();
+    });
+    const restart = () => {
+      if (herdrAppEvents !== child) return;
+      herdrAppEvents = null;
+      setTimeout(watchHerdrApp, retryMs).unref?.();
+    };
+    child.on("error", restart);
+    child.on("exit", restart);
+    child.unref();
+  };
+  return watchHerdrApp;
 }

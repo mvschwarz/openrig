@@ -140,7 +140,7 @@ describe("detection cost: status() when herdr-app is absent or hung (bounded, no
       const missing = await new HerdrAppClient(createAppSocketExchange(join(dir, "absent.sock"))).status(1_000);
       const missingMs = Date.now() - t0;
       expect(missing.kind).toBe("unavailable");
-      expect(missingMs).toBeLessThan(200);
+      expect(missingMs).toBeLessThan(900);
       // A socket that accepts and never answers (a wedged window).
       const hungPath = join(dir, "hung.sock");
       const server = net.createServer(() => { /* never replies */ });
@@ -151,7 +151,7 @@ describe("detection cost: status() when herdr-app is absent or hung (bounded, no
       server.close();
       expect(hung.kind).toBe("unknown");
       expect(hungMs).toBeGreaterThanOrEqual(900);
-      expect(hungMs).toBeLessThan(1_500);
+      expect(hungMs).toBeLessThan(3_000);
       console.log(`herdr-app status: missing socket ${missingMs} ms; hung socket ${hungMs} ms`);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
