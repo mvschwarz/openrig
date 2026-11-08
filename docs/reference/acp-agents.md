@@ -222,7 +222,8 @@ app that starts the agent from the ACP registry passes no arguments, so that's h
 registered person, or the one chosen with `rig gateway default <id>` when there are several (the address is
 `<id>@external`). The app's sign-in step, "OpenRig on this machine", checks
 that the daemon answers and that you resolve to an address; until then, signing in and new sessions fail with the
-reason and the fix. The agent talks only to the daemon on this computer, so start it first (`rig daemon start`).
+reason and the fix. The agent talks to the same daemon as `rig` on this computer: the local one, so start it first
+(`rig daemon start`), unless `OPENRIG_URL` names another.
 The team's questions reach you only as a registered person: an `<id>@external` address needs
 `rig gateway human add <id> --display-name "<your name>" --delivery-class <A|B|C|D>` first. Until then, the app says
 so at your first prompt, and your work is still sent.
