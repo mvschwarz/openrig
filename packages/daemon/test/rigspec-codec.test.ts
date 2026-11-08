@@ -358,7 +358,7 @@ describe("LegacyRigSpecCodec", () => {
     expect(normalized.nodes[0]!.effort).toBe("high");
   });
 
-  it("legacy node launch_wrapper round-trips non-empty argv on pi and codex, retains explicit [], and omits absent", () => {
+  it("legacy node launch_wrapper round-trips non-empty argv on Pi, Codex and Claude, retains explicit [], and omits absent", () => {
     const piArgv = ["mtn", "sandbox", "exec", "", "--flag='quoted $VAR ;'", "--"];
     const codexArgv = ["/usr/local/bin/codex-wrap", "--seat", "qa", "--"];
     const legacyWithWrapper: LegacyRigSpec = {
@@ -400,6 +400,13 @@ describe("LegacyRigSpecCodec", () => {
     const clearNormalized = LegacyRigSpecSchema.normalize(clearParsed);
     expect(clearNormalized.nodes[0]!.launchWrapper).toEqual([]);
     expect(clearNormalized.nodes[1]!.launchWrapper).toEqual([]);
+
+    const claudeArgv = ["/usr/local/bin/claude-wrap", "--seat", "claude", "--"];
+    const claudeYaml = LegacyRigSpecCodec.serialize({ schemaVersion: 1, name: "legacy-claude-wrapper", version: "1.0.0",
+      nodes: [{ id: "claude-worker", runtime: "claude-code", cwd: "/workspace", launchWrapper: claudeArgv }], edges: [] });
+    const claudeParsed = LegacyRigSpecCodec.parse(claudeYaml);
+    expect(LegacyRigSpecSchema.validate(claudeParsed)).toEqual({ valid: true, errors: [] });
+    expect(LegacyRigSpecSchema.normalize(claudeParsed).nodes[0]!.launchWrapper).toEqual(claudeArgv);
 
     const defaultYaml = LegacyRigSpecCodec.serialize({
       schemaVersion: 1,

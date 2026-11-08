@@ -38,6 +38,8 @@ const NOT_SELECTED = {
   CLAUDE_CODE_USE_BEDROCK: "1",
   ANTHROPIC_BASE_URL: "https://anthropic.example.test",
   OPENAI_BASE_URL: "https://openai.example.test",
+  HC_SESSION: "default",
+  HC_SOCKET: "/run/hc.sock",
 };
 
 function parseEnv(text: string, separator: string): Record<string, string> {
@@ -111,9 +113,17 @@ describe.runIf(process.platform === "linux")("seat environment from a daemon sta
       // A server the daemon started has none of the parent session's identity either.
       if (server === "daemon") expect(Object.keys(global).filter((k) => k in PARENT_SESSION)).toEqual([]);
 
+      // The daemon itself was started without the herdr-core terminal's scope, though `rig daemon start` had it,
+      // while keeping HC_SESSION and HC_SOCKET: herdr-core reads the environment a process started with, which
+      // deleting from process.env doesn't change.
+      const health = await (await fetch(`${daemon.baseUrl}/healthz`)).json() as { pid: number };
+      const daemonEnv = environOf(String(health.pid));
+      expect([daemonEnv["HC_SCOPE"], daemonEnv["HC_TERMINAL_ID"], daemonEnv["HC_TERMINAL_SOCKET"]]).toEqual([undefined, undefined, undefined]);
+      expect(daemonEnv).toMatchObject({ HC_SESSION: "default", HC_SOCKET: "/run/hc.sock" });
+
       if (server === "existing") {
-        // Owner state is untouched: the server's global environment and the
-        // pre-existing session keep exactly what they had.
+        // Owner state is untouched: a tmux server already started inside a scoped terminal keeps the global
+        // environment and pre-existing sessions it started with.
         expect(global).toMatchObject(PARENT_SESSION);
         const anchor = panes.find(([session]) => session === "owner-anchor");
         expect(anchor).toBeTruthy();

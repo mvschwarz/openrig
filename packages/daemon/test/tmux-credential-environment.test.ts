@@ -56,6 +56,25 @@ it("a private-file write failure never falls back to credential-bearing argv", a
   expect(calls.some(arg => Object.values(credentials).some(value => arg.includes(value)))).toBe(false);
 });
 
+it("a scoped launch drops a herdr-core terminal's scope from the policy env, keeps HC_SOCKET, and the seat's own HC_SESSION wins", async () => {
+  const writes = new Map<string, string>();
+  const respond = async (args: string[]) => (args.some(arg => arg.includes("default-shell")) ? "/bin/bash" : "");
+  const a = new TmuxAdapter(command => respond([command]), {
+    writeFile: async (p: string, content: string) => { writes.set(p, content); }, unlink: async () => {}, tmpName: () => "/tmp/synthetic-scope", bufferName: () => "unused",
+  }, respond);
+  a.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: {
+    PATH: "/bin", HC_SCOPE: "s-7", HC_TERMINAL_ID: "t7", HC_TERMINAL_SOCKET: "/run/t.sock", HC_SESSION: "parent-core", HC_SOCKET: "/run/hc.sock",
+  } });
+  const plan = await (a as unknown as { scopedLaunchCommand(env: Record<string, string>, command: string): Promise<string[] | null> })
+    .scopedLaunchCommand({ OPENRIG_NODE_ID: "synthetic-node", HC_SESSION: "seat-core" }, "/bin/sh");
+  expect(plan).not.toBeNull();
+  const file = writes.get("/tmp/synthetic-scope")!;
+  for (const name of ["HC_SCOPE", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET"]) expect(file).not.toContain(`export ${name}=`);
+  expect(file).toContain(`export HC_SESSION=${shellQuote("seat-core")}`);
+  expect(file).not.toContain("parent-core");
+  expect(file).toContain(`export HC_SOCKET=${shellQuote("/run/hc.sock")}`);
+});
+
 describe.skipIf(process.platform === "win32")("owned tmux credential delivery (no provider)", () => {
   it.each(["inherited", "scoped", "fallback"] as const)("%s: fresh and respawned panes receive exact credentials and public env", async mode => {
     const home = mkdtempSync(path.join(tmpdir(), "tmux private env ")), socket = path.join(home, "owned.sock"), output = path.join(home, "observed");

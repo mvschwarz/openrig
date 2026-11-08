@@ -208,8 +208,8 @@ export function demoSnapshot(): FleetSnapshot {
     // host-down is composed BESIDE the items (never projected into the item shape)
     hostsDown: [{ hostId: "remote-host", status: "unreachable", error: "read timed out" }],
     stream: [
-      { tsEmitted: "2026-08-02T10:00:00.000Z", sourceSession: "dev50-guard@v-openrig-build", body: "gate cleared: slice-11 spike verdict PASS" },
-      { tsEmitted: "2026-08-02T10:05:00.000Z", sourceSession: "orch-lead@v-openrig-build", body: "provider re-auth completed on mm2" },
+      { tsEmitted: "2026-08-02T10:00:00.000Z", sourceSession: "dev50-guard@openrig-build", body: "gate cleared: slice-11 spike verdict PASS" },
+      { tsEmitted: "2026-08-02T10:05:00.000Z", sourceSession: "dev50-planner@openrig-build", body: "provider re-auth completed on remote-host" },
     ],
     readErrors: [],
   };

@@ -81,7 +81,8 @@ export type ReconcileNodeResult =
         | "process_lineage_mismatch"
         | "fg_process_not_runtime"
         | "resume_token_not_used"
-        | "pane_not_usable";
+        | "pane_not_usable"
+        | "proof_superseded";
       detail: string;
       probe?: NativeResumeProbeEvidence;
       attemptId?: number;
@@ -2526,9 +2527,10 @@ export class RestoreOrchestrator {
       const guardedTail = beforeNative || claudeExecutable ? [...tail, ...Array(Math.max(0, 7 - tail.length)).fill(undefined), beforeNative,
         ...(claudeExecutable ? [claudeExecutable] : [])] : tail;
       const mcpTail = claudeMcp === undefined ? guardedTail : [...guardedTail, ...Array(Math.max(0, 9 - guardedTail.length)).fill(undefined), claudeMcp];
+      const wrappedTail = launchWrapper?.length ? [...mcpTail, ...Array(Math.max(0, 10 - mcpTail.length)).fill(undefined), launchWrapper] : mcpTail;
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId,
-        ...(mcpTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp]));
+        ...(wrappedTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, launchWrapper?: readonly string[]]));
       if (result.ok) {
         // OPR.0.7.0.9: the resumed conversation's own start, as on the pod-aware path.
         const promptNote = launch.additions?.appendSystemPromptFile && nodeId && resumeToken ? systemPromptPendingNoteForNode(this.db, nodeId, resumeToken) : undefined;
@@ -2796,24 +2798,33 @@ export class RestoreOrchestrator {
       return { ok: false, code: "pane_not_usable", probe: evidence, attemptId, detail: `Pane state is ${probe.status} (${probe.code}); reconciliation requires resumed.` };
     }
 
-    // All four preconditions hold. Append (never mutate) the audit event.
-    this.eventBus.emit({
-      type: "restore.outcome_reconciled",
-      rigId,
-      nodeId,
-      attemptId,
-      from: fromStatus,
-      to: "operator_recovered",
-      evidence: { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" },
-    });
+    // The checks above awaited native reads. A restore that started since, or a changed binding or expected token,
+    // makes this proof one for an older subject, so it can't settle the current outcome.
+    const latestStart = this.db.prepare(
+      "SELECT seq FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1"
+    ).get(rigId) as { seq: number } | undefined;
+    const latestBinding = this.db.prepare(
+      "SELECT tmux_session FROM bindings WHERE node_id = ?"
+    ).get(nodeId) as { tmux_session: string | null } | undefined;
+    const latestSession = this.db.prepare(
+      "SELECT session_name, resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(nodeId) as { session_name: string; resume_token: string | null } | undefined;
+    if (latestStart?.seq !== attemptId || latestBinding?.tmux_session !== sessionName
+      || latestSession?.session_name !== sessionName || latestSession.resume_token !== expectedResumeToken) {
+      return { ok: false, code: "proof_superseded", attemptId, detail: "A newer restore attempt, binding or resume token was recorded while the live seat was checked, so this proof doesn't settle the current outcome." };
+    }
 
-    return {
-      ok: true,
-      attemptId,
-      from: fromStatus,
-      to: "operator_recovered",
-      evidence: { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" },
-    };
+    const evidence = { tmux: true, fgProcess, resumeTokenUsed: true, paneState: "usable" as const };
+    // A check that overlapped this one may have settled the attempt already: one receipt is enough.
+    const settledMeanwhile = !priorReconciliation && this.db.prepare(
+      "SELECT 1 FROM events WHERE rig_id = ? AND node_id = ? AND type = 'restore.outcome_reconciled' AND json_extract(payload, '$.attemptId') = ? LIMIT 1",
+    ).get(rigId, nodeId, attemptId);
+    // All four preconditions hold. Append (never mutate) the audit event.
+    if (!settledMeanwhile) {
+      this.eventBus.emit({ type: "restore.outcome_reconciled", rigId, nodeId, attemptId, from: fromStatus, to: "operator_recovered", evidence });
+    }
+
+    return { ok: true, attemptId, from: fromStatus, to: "operator_recovered", evidence };
   }
 
   private writeCheckpointFile(cwd: string, checkpoint: Checkpoint): boolean {

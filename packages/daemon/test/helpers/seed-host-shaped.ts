@@ -197,3 +197,69 @@ export function seedHostShaped(db: Database.Database): HostShape {
 
   return { activeRigIds, archivedRigIds, allRigIds: [...activeRigIds, ...archivedRigIds], nodeByRig, allNodeIds, sessionNameByNode };
 }
+
+// ── Daily variant for the events-retention measurement ─────────────────────────────────────────────────────
+// seedHostShaped writes every event with one created_at, so nothing in it ever ages. seedHostShapedDaily spreads
+// a host's daily event mix over N days instead, so an age-based prune has something to cut. The daily vector is
+// one real day of a busy host (161,034 events, 64% view.changed), plus a few queue.unclaimed, which that day did
+// not happen to have. queue.* rows carry no node id, as the daemon writes them. Deterministic: no Date.now and no
+// Math.random; created_at is spaced evenly inside each day, and the types are interleaved in seq order.
+export const DAILY_EVENT_TYPE_VECTOR: ReadonlyArray<readonly [string, number]> = [
+  ["view.changed", 103614], ["agent.activity", 17691], ["queue.updated", 10716], ["seat.activity_changed", 10639],
+  ["queue.created", 6984], ["queue.claimed", 2315], ["watchdog.evaluation_skipped", 2256], ["snapshot.created", 1709],
+  ["watchdog.evaluation_fired", 1604], ["queue.handed_off", 1470], ["mission_control.action_executed", 491],
+  ["agent.session_identity", 243], ["stream.emitted", 167], ["node.launched", 147], ["node.startup_pending", 147],
+  ["node.startup_ready", 147], ["session.stopped", 145], ["node.startup_proof_skipped", 143], ["seat.fresh_launched", 138],
+  ["workflow.step_closed", 108], ["workflow.next_qitem_projected", 103], ["queue.unclaimed", 20], ["node.added", 5],
+  ["restore.subset_completed", 4], ["workflow.instantiated", 3],
+];
+
+const DAILY_NODE_SCOPED = new Set([
+  "agent.activity", "seat.activity_changed", "agent.session_identity", "node.launched", "node.startup_pending",
+  "node.startup_ready", "node.startup_proof_skipped", "node.added", "session.stopped", "seat.fresh_launched",
+]);
+
+export interface DailySeedOptions {
+  /** how many days of history, ending the day before `nowIso` (default 30) */
+  days?: number;
+  /** the injected clock; the newest day ends at this instant */
+  nowIso: string;
+  /** multiply every daily count by this (default 1; a smaller value seeds a lighter copy) */
+  scale?: number;
+  /** nodes the node-scoped types rotate over (default 75) */
+  nodes?: number;
+}
+
+/** Seed `days` days of the daily vector into `events`, one transaction per day. Returns the rows written. */
+export function seedHostShapedDaily(db: Database.Database, opts: DailySeedOptions): number {
+  const days = opts.days ?? 30;
+  const scale = opts.scale ?? 1;
+  const nodes = opts.nodes ?? 75;
+  const now = new Date(opts.nowIso).getTime();
+  if (Number.isNaN(now)) throw new Error(`seedHostShapedDaily: invalid nowIso ${opts.nowIso}`);
+  const vector = DAILY_EVENT_TYPE_VECTOR.map(([type, n]) => [type, Math.max(1, Math.round(n * scale))] as const);
+  const perDay = vector.reduce((n, [, c]) => n + c, 0);
+  const insert = db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, ?, '{}', ?)");
+  const sqlTime = (ms: number) => new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+  let written = 0;
+  for (let d = days; d >= 1; d--) {
+    const dayStart = now - d * 86_400_000;
+    const left = vector.map(([, c]) => c);
+    db.transaction(() => {
+      // Interleave: each pass writes one row of every type that still has rows left today.
+      let i = 0;
+      while (i < perDay) {
+        for (let t = 0; t < vector.length; t++) {
+          if (left[t] === 0) continue;
+          left[t]!--;
+          const type = vector[t]![0];
+          const node = DAILY_NODE_SCOPED.has(type) ? `node-${(i % nodes).toString().padStart(3, "0")}` : null;
+          insert.run("rig-daily", node, type, sqlTime(dayStart + Math.floor((i * 86_400_000) / perDay)));
+          i++;
+        }
+      }
+    })();
+    written += perDay;
+  }
+  return written;
+}

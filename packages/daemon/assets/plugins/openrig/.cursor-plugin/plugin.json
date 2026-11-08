@@ -1,0 +1,6 @@
+{
+  "name": "openrig",
+  "version": "0.1.0",
+  "description": "Work with your OpenRig team from your coding agent: hand it work, follow that work, answer its questions and read what it returns.",
+  "logo": "assets/logo.svg"
+}

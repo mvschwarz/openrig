@@ -5,7 +5,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { ensureSeatSkillPlugin, seatSkillLocation, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { reconcileSkillLoadout, resolvePluginSkills } from "../src/domain/skill-catalog.js";
 import { prepareSeatLaunchAdditions, systemPromptPendingNote } from "../src/domain/seat-launch-additions.js";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -28,6 +29,9 @@ import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-obse
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { DefaultOccupantInvalidator, type OccupantInvalidator } from "../src/domain/occupant-invalidator.js";
 import { managedBlockText } from "../src/domain/managed-blocks.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 
 describe("SeatHandoverService", () => {
   let db: Database.Database;
@@ -111,7 +115,7 @@ describe("SeatHandoverService", () => {
     return { runtime: "codex", launchHarness, checkReady } as unknown as RuntimeAdapter;
   }
 
-  function newService(adapter: TmuxAdapter = tmux(), occupantInvalidator: OccupantInvalidator = { invalidateRetiringOccupant }): SeatHandoverService {
+  function newService(adapter: TmuxAdapter = tmux(), occupantInvalidator: OccupantInvalidator = { invalidateRetiringOccupant }, runtime = "codex"): SeatHandoverService {
     return new SeatHandoverService({
       codexPermissions: { currentCodexPermissions },
       db,
@@ -122,7 +126,7 @@ describe("SeatHandoverService", () => {
       tmuxAdapter: adapter,
       now: () => new Date("2026-04-24T18:30:00.000Z"),
       newSuccessorId: () => "01SUCCID0",
-      runtimeAdapters: { codex: codexAdapter() },
+      runtimeAdapters: { [runtime]: { ...codexAdapter(), runtime } },
       contextUsageStore: { readSidecar } as never,
       resumeTokenCapturer: { captureCodexThreadId } as never,
       ...(claudeProcessStartedAt ? { claudeProcessStartedAt } : {}),
@@ -1072,6 +1076,137 @@ describe("SeatHandoverService", () => {
     expect(sleeps).toContain(200);
   });
 
+  it.each([
+    ...[
+    ...(["fresh", "rebuild"] as const).flatMap(source =>
+      (["clear", "staged", "unreadable", "edited", "unrelated"] as const).map(screen => ({ source, screen, held: false }))),
+    ...(["clear", "staged", "edited", "unreadable"] as const).map(screen => ({ source: "rebuild" as const, screen, held: true })),
+    ...(["retry-failed", "retry-failed-staged-message", "send-failed", "submit-failed"] as const)
+      .map(screen => ({ source: "rebuild" as const, screen, held: false })),
+    ].map(row => ({ ...row, continuityPresent: true })),
+    { source: "rebuild" as const, screen: "staged" as const, held: false, continuityPresent: false },
+  ])("#1544 $source packet submission with $screen composer evidence (held=$held, continuity=$continuityPresent)", async ({ source, screen, held, continuityPresent }) => {
+    const { node } = seedSeat({ runtime: "claude-code" });
+    db.exec(outboxEntriesSchema.sql);
+    db.exec(seatDeliveryGuardSchema.sql);
+    const outbox = new OutboxHandler(db);
+    if (held) outbox.retain({ outboxId: "held-rebuild", senderSession: "orch-lead@seat-rig",
+      destinationSession: "dev-impl@seat-rig", body: "Retain this work without replaying it." },
+    { nodeId: node.id, session: "dev-impl@seat-rig", occupant: null, pane: null });
+    const heldBefore = outbox.getById("held-rebuild");
+    const notice = "1 held message was kept for this seat and not delivered: read it with rig seat held-messages dev-impl@seat-rig.";
+    const bindingBefore = sessionRegistry.getBindingForNode(node.id);
+    const sleeps: number[] = [];
+    const reads: Array<string | null> = [];
+    let packet = "";
+    let enters = 0;
+    if (!continuityPresent) hasSession.mockResolvedValue(false);
+    const frame = (text: string) => `Claude Code v2.1.303\n${text.split("\n").map((line, i) => `${i === 0 ? "❯" : " "} ${line}`).join("\n")}\n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)`;
+    const visible = () => screen === "unreadable" ? null : frame(screen === "clear" ? ""
+      : ["staged", "retry-failed", "retry-failed-staged-message"].includes(screen) ? packet : screen === "edited" ? `${packet}\nEdited by the operator.` : "Unrelated operator draft.");
+    capturePaneScreen.mockImplementation(async () => {
+      if (!packet) return "predecessor screen tail";
+      const pane = visible();
+      reads.push(pane);
+      if (reads.length > 8) throw new Error("fixture exceeded the finite submission observation budget");
+      return pane;
+    });
+    sendText.mockImplementation(async (_session: string, text: string) => {
+      if (!packet) packet = text;
+      return screen === "send-failed" ? { ok: false, message: "synthetic initial delivery failure" } : { ok: true };
+    });
+    sendKeys.mockImplementation(async (_session: string, keys: string[]) => {
+      if (packet && keys.includes("Enter")) enters++;
+      if (screen === "submit-failed" && enters === 1) return { ok: false, message: "synthetic initial submit failure" };
+      if (screen === "retry-failed-staged-message" && enters === 2) return { ok: false, message: "the prompt still looked staged in the input box" };
+      return screen === "retry-failed" && enters === 2
+        ? { ok: false, message: "synthetic retry delivery failure" } : { ok: true };
+    });
+    launchHarness.mockResolvedValue({ ok: true, resumeToken: "22222222-2222-4222-8222-222222222222", resumeType: "claude_id" });
+    const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+      tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
+      now: () => new Date("2026-04-24T18:30:00.000Z"), newSuccessorId: () => "01SUCCID0",
+      contextUsageStore: { readSidecar } as never, predecessorRecapResolver: resolvePredecessorRecap as never,
+      rebuildPrimingResolver: () => ({ artifacts: [{ address: "/fixture-seat/RECAP.md", label: "authored recap" }] }),
+      rebuildArtifactExists: () => true, readinessTimeoutMs: 50, sleep: async ms => { sleeps.push(ms); },
+    });
+    const result = await handover.handover({ seatRef: "dev-impl@seat-rig", source, reason: "submission evidence" });
+    const bindingAfter = sessionRegistry.getBindingForNode(node.id);
+    const candidates = db.prepare("SELECT status,claimed_node_id FROM discovered_sessions").all();
+    const completed = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed'").all() as Array<{ payload: string }>;
+    console.info("ISSUE1544_SUBMISSION", JSON.stringify({ source, screen, held, continuityPresent, result, enters, sleeps, reads,
+      sent: sendText.mock.calls, keys: sendKeys.mock.calls, heldBefore, heldAfter: outbox.getById("held-rebuild"),
+      visibleAfter: visible(), bindingBefore, bindingAfter, candidates, completed: completed.map(row => JSON.parse(row.payload)) }));
+    expect(packet).toContain(source === "rebuild" ? "# Seat rebuild handover" : "OpenRig seat handover");
+    const typedNotice = held && screen === "clear";
+    expect(sendText.mock.calls).toEqual(typedNotice
+      ? [["dev-impl@seat-rig", packet], ["dev-impl@seat-rig", notice]] : [["dev-impl@seat-rig", packet]]);
+    if (held) {
+      expect(heldBefore).toMatchObject({ body: "Retain this work without replaying it.", deliveryState: "retained", deliveredAt: null });
+      expect(outbox.getById("held-rebuild")).toEqual(heldBefore);
+      expect.soft(result).toMatchObject({ ok: true, result: { warnings: [notice] } });
+    }
+    if (screen === "send-failed") expect(sleeps).toEqual([]);
+    else expect(sleeps[0]).toBe(200);
+    expect(killSession).not.toHaveBeenCalled();
+    expect.soft(result.ok && result.result.sideEffects.startupContextDelivered,
+      "delivery requires a clear composer, not only successful paste and Enter").toBe(screen === "clear");
+    if ((screen === "staged" && source === "fresh") || ["retry-failed", "retry-failed-staged-message", "send-failed", "submit-failed"].includes(screen)) {
+      expect.soft(result, "fresh staged packets and real transport errors still fail delivery").toMatchObject({ ok: false, code: "context_delivery_failed" });
+      expect.soft(bindingAfter).toEqual(bindingBefore);
+      expect.soft(candidates).toEqual([expect.objectContaining({ status: "vanished", claimed_node_id: null })]);
+      expect.soft(completed).toEqual([]);
+      expect.soft(enters).toBe(screen === "send-failed" ? 0 : screen === "submit-failed" ? 1 : 2);
+      expect(hasSession).not.toHaveBeenCalled();
+      if (screen === "retry-failed-staged-message") {
+        expect(result).toMatchObject({ ok: false, message: expect.stringContaining("the prompt still looked staged in the input box") });
+      }
+      if (screen === "retry-failed") {
+        expect(result).toMatchObject({ ok: false, message: expect.stringContaining("synthetic retry delivery failure") });
+        expect(sendKeys.mock.calls).toEqual(Array.from({ length: 2 }, () => ["dev-impl@seat-rig", ["Enter"]]));
+        if (!result.ok) {
+          expect.soft(result.guidance).toContain("may still process the priming packet");
+          expect.soft(result.guidance).toMatch(/inspect the successor.*resolve.*before.*attempt/i);
+          expect.soft(result.guidance).toContain("binding is unchanged");
+          expect.soft(result.guidance).toContain("re-wakeable from its provider session file");
+        }
+      }
+      return;
+    }
+    if (screen === "staged") {
+      expect.soft(enters).toBe(2);
+      expect.soft(hasSession, "staged screen evidence must still reach ordinary continuity verification").toHaveBeenCalledTimes(1);
+      if (!continuityPresent) {
+        expect.soft(result).toMatchObject({ ok: false, code: "successor_tmux_absent" });
+        expect.soft(bindingAfter).toEqual(bindingBefore);
+        expect.soft(candidates).toEqual([expect.objectContaining({ status: "vanished", claimed_node_id: null })]);
+        expect.soft(completed).toEqual([]);
+        return;
+      }
+      const restorePacket = { status: "unconfirmed", reason: "the prompt still looked staged in the input box" };
+      expect.soft(result, "a running rebuild successor completes unconfirmed after normal continuity checks").toMatchObject({
+        ok: true, result: { restorePacket, sideEffects: { startupContextDelivered: false } },
+      });
+      expect.soft(bindingAfter).toMatchObject({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9" });
+      expect.soft(candidates).toEqual([expect.objectContaining({ status: "claimed", claimed_node_id: node.id })]);
+      expect.soft(completed.map(row => JSON.parse(row.payload))).toEqual([expect.objectContaining({ restorePacket })]);
+      return;
+    }
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+    if (!result.ok) return;
+    expect(bindingAfter).toMatchObject({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9" });
+    expect(candidates).toEqual([expect.objectContaining({ status: "claimed", claimed_node_id: node.id })]);
+    expect(completed).toHaveLength(1);
+    expect(enters, "only confirmed submission permits the held notice's Enter").toBe(typedNotice ? 2 : 1);
+    expect(sendKeys.mock.calls).toEqual(Array.from({ length: typedNotice ? 2 : 1 }, () => ["dev-impl@seat-rig", ["Enter"]]));
+    if (screen === "clear") expect(result.result.restorePacket).toBeUndefined();
+    else {
+      const reason = screen === "unreadable" ? "the input box could not be observed" : "the input box did not clearly show the prompt as submitted";
+      expect.soft(result.result.restorePacket).toEqual({ status: "unconfirmed", reason });
+      expect.soft(JSON.parse(completed[0]!.payload).restorePacket).toEqual({ status: "unconfirmed", reason });
+    }
+  });
+
   it("recap leg (B16): the resolver runs BEFORE the successor launches (the successor overwrites the name-keyed sidecar)", async () => {
     seedSeat({ runtime: "codex" });
     resolvePredecessorRecap.mockReturnValue({ recap: [{ role: "user", content: "pre-launch read" }], recordPath: "/p/a.jsonl" });
@@ -1745,6 +1880,62 @@ describe("SeatHandoverService", () => {
     }
   });
 
+  it("#2426: a Claude seat that loads openrig-core itself drops OpenRig's earlier copies of its skills once its predecessor has exited, before its successor starts, and names them", async () => {
+    const saved = process.env["OPENRIG_HOME"];
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "handover-core-copies-"));
+    process.env["OPENRIG_HOME"] = home;
+    try {
+      // The vendored core, which the seat's saved selection loads directly, and the copies a launch before #2433 left.
+      const core = path.join(home, "plugins", "openrig-core");
+      fs.mkdirSync(path.join(core, ".claude-plugin"), { recursive: true });
+      fs.writeFileSync(path.join(core, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "openrig-core", version: "0.7.9" }));
+      for (const id of ["alpha", "edited"]) {
+        fs.mkdirSync(path.join(core, "skills", id), { recursive: true });
+        fs.writeFileSync(path.join(core, "skills", id, "SKILL.md"), `---\nname: ${id}\ndescription: The ${id} skill.\n---\n\nUse it.\n`);
+      }
+      const { rig, node } = seedSeat({ runtime: "claude-code" });
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'claude-code')")
+        .run(node.id, JSON.stringify([{ category: "plugin", absolutePath: core }]));
+      const paths = seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "claude-code" });
+      ensureSeatSkillPlugin(paths);
+      const old = reconcileSkillLoadout({
+        loadout: { catalogRoot: home, catalogRevision: null, catalogDigest: null, projectSelectionDeclared: false, projectSelection: [],
+          entries: resolvePluginSkills({ pluginId: "openrig-core", pluginRoot: core, runtime: "claude-code" }).entries },
+        runtime: "claude-code", cwd: paths.root, apply: true, topologyOwner: "dev-impl@seat-rig", location: seatSkillLocation(paths),
+      });
+      expect(old.errors).toEqual([]);
+      fs.writeFileSync(path.join(paths.skillsRoot, "edited", "SKILL.md"), "My own notes.\n");
+      const alpha = path.join(paths.skillsRoot, "alpha");
+      // Nothing is removed under the running predecessor; the successor's harness starts without the copy.
+      const presentWhenSignalled: boolean[] = [];
+      signalPaneProcess.mockImplementation(async () => { presentWhenSignalled.push(fs.existsSync(alpha)); return { ok: true }; });
+      const presentAtLaunch: boolean[] = [];
+      launchHarness.mockImplementation(async () => { presentAtLaunch.push(fs.existsSync(alpha)); return { ok: true, resumeToken: "claude-successor-tok", resumeType: "claude_id" }; });
+      capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
+      const claude = new SeatHandoverService({
+        db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux(),
+        now: () => new Date("2026-04-24T18:30:00.000Z"), newSuccessorId: () => "01SUCCID0",
+        runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
+        contextUsageStore: { readSidecar } as never, resumeTokenCapturer: { captureCodexThreadId } as never,
+        claudeProcessStartedAt: async () => "2026-04-24T18:29:59.000Z",
+        occupantInvalidator: { invalidateRetiringOccupant }, activityOracle: { declareOccupantSwap },
+        predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 50, sleep: async () => {},
+      });
+      const result = await claude.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh", operator: "orch-lead@seat-rig" });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      expect(presentWhenSignalled[0]).toBe(true);
+      expect(presentAtLaunch).toEqual([false]);
+      expect("result" in result ? result.result.warnings : undefined).toEqual(expect.arrayContaining([
+        "Seat skills: removed OpenRig's copy of openrig-core's alpha, which this seat now loads from the plugin itself",
+        `Seat skills: kept ${path.join(paths.skillsRoot, "edited")}, though openrig-core also supplies edited: it was changed after OpenRig wrote it`,
+      ]));
+      expect(fs.readFileSync(path.join(paths.skillsRoot, "edited", "SKILL.md"), "utf8")).toBe("My own notes.\n");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("a seat's declared env (its rig's, with the member's over it) reaches the successor's pane — the REAL lookupNode→createSuccessor→respawn path", async () => {
     const { rig, node } = seedSeat({ runtime: "codex" });
     rigRepo.setRigEnv(rig.id, { SHARED: "from-rig", RIG_ONLY: "rig" });
@@ -1764,8 +1955,14 @@ describe("SeatHandoverService", () => {
     expect((launchHarness.mock.calls[0]![0] as { effort?: string }).effort).toBe("high");
   });
 
-  it("carries the seat's persisted launch_wrapper onto the handover successor binding", async () => {
-    const { node } = seedSeat({ runtime: "codex" });
+  it.each(["codex", "claude-code"])("carries the %s seat's persisted launch_wrapper onto the handover successor binding", async runtime => {
+    const { node } = seedSeat({ runtime });
+    if (runtime === "claude-code") {
+      launchHarness.mockImplementation(async () => ({ ok: true, resumeToken: "claude-successor-tok", resumeType: "claude_id" }));
+      capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
+      claudeProcessStartedAt = async () => "2026-04-24T18:29:59.000Z";
+    }
+    service = newService(undefined, undefined, runtime);
     rigRepo.setNodeLaunchWrapper(node.id, ["rtk", "--handover"]);
     const result = await service.handover({
       seatRef: "dev-impl@seat-rig",

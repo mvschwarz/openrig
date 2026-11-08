@@ -344,7 +344,7 @@ describe("Activity Feed", () => {
 
     await waitFor(() => {
       expect(instances).toHaveLength(1);
-      expect(instances[0]!.url).toBe("/api/events");
+      expect(instances[0]!.url).toBe("/api/events?replay=100");
     });
   });
 

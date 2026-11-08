@@ -18,6 +18,7 @@ describe("CONFIG presentation core (shared navigation not yet integrated)", () =
     expect(read.entries.every((e) => CONFIG_CATEGORIES.some((c) => c.id === configCategory(e)))).toBe(true);
     expect(configEntries(read, "all")).toHaveLength(read.entries.length);
     expect(configEntries(read, "all", "retry interval").map((e) => e.key)).toEqual(["queue.wake_retry_interval_seconds"]);
+    expect(configEntries(read, "all", "event history").map((e) => e.key)).toEqual(["retention.events_days"]);
     expect(configEntries(read, "all", "future.owner_setting")).toHaveLength(1);
     expect(configEntries(read, "slack").map((e) => e.key)).toEqual(["slack.enabled"]);
     expect(configEntries(read, "context").some((e) => e.group === "health")).toBe(true);

@@ -172,4 +172,4 @@ echo "Daemon docs:     $(find "$CLI_DIR/daemon/docs" -type f 2>/dev/null | wc -l
 echo "UI dist:         $(find "$CLI_DIR/ui/dist" -type f | wc -l | tr -d ' ') files"
 echo "TUI dist:        $(find "$CLI_DIR/tui/dist" -type f | wc -l | tr -d ' ') files"
 echo ""
-echo "Ready to publish: cd packages/cli && npm publish --access public"
+echo "Next: npm run pack:release -- <directory> packs the CLI and the ACP launcher at one version, with their hashes."

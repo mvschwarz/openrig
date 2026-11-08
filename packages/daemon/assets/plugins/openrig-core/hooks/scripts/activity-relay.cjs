@@ -46,6 +46,24 @@ function firstString(...values) {
   return null;
 }
 
+// #2702: the conversation this event belongs to. A harness started inside a seat (a Codex helper a Claude seat runs, or
+// a Claude a Codex seat runs) inherits the seat's environment and so posts as the seat; the daemon tells it apart by
+// whether the transcript is the seat's runtime's own. Whether the runtime sent transcript_path is kept apart from its
+// value, as on session identity (#1524). claudeHook is whether CLAUDE_PROJECT_DIR is set: the marker Claude Code gives
+// its hook commands, and also the LSP, status line and MCP processes it starts. Neither Codex nor OpenRig sets it, so
+// it's evidence that a Claude Code process ran this, not proof. Only whether it is set is sent.
+// A Claude permission request's report keeps its fixed field list (below).
+function conversationFields(providerPayload, env) {
+  const sessionId = firstString(providerPayload.session_id, providerPayload.sessionId);
+  const transcriptPathPresent = Object.prototype.hasOwnProperty.call(providerPayload, "transcript_path");
+  return {
+    ...(sessionId ? { sessionId } : {}),
+    transcriptPathPresent,
+    ...(transcriptPathPresent ? { transcriptPath: providerPayload.transcript_path } : {}),
+    claudeHook: firstString(env.CLAUDE_PROJECT_DIR) !== null,
+  };
+}
+
 // The route this run reports by, so the daemon can count one event once per route: "plugin" for the plugin's hook
 // (started with --from-plugin), "managed" for the settings or managed hook copy.
 function buildOpenRigPayload(providerPayload, env = process.env, now = () => new Date(), argv = process.argv) {
@@ -111,6 +129,7 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
     turnId: firstString(providerPayload.turn_id, providerPayload.turnId),
     occurredAt: now().toISOString(),
     relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed",
+    ...conversationFields(providerPayload, env),
   };
 }
 
@@ -219,6 +238,7 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
     sessionId,
     transcriptPathPresent,
     ...(transcriptPathPresent ? { transcriptPath: providerPayload.transcript_path } : {}),
+    claudeHook: firstString(env.CLAUDE_PROJECT_DIR) !== null,
     occurredAt: now().toISOString(),
   };
 }

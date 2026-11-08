@@ -53,6 +53,21 @@ describe("cursor-bound composer input", () => {
     expect(inspectComposerInput(frame, "codex").state).toBe("unknown");
   });
 
+  // #2605: Claude 2.1.319 prints "✔ Update installed · Restart to update" on its own row under the footer in a narrow
+  // pane. The draft-aware guard read every idle prompt there as unknown and held each wake as draft_input_unknown.
+  it("reads the input under Claude's own-row Restart to update banner, and nothing like it (#2605)", () => {
+    const banner = (body: string, row = "✔ Update installed · Restart to update") => {
+      const frame = claude(body);
+      frame.screen = frame.screen.replace("? for shortcuts\n", `? for shortcuts\n${row}\n`);
+      return frame;
+    };
+    expect(inspectComposerInput(banner(""), "claude-code").state).toBe("empty");
+    expect(inspectComposerInput(banner("a real draft"), "claude-code").state).toBe("text");
+    for (const nearMiss of ["✔ Update installed · Restart to update now", "Update installed · Restart to update", "✔ Update downloaded · Restart to update"]) {
+      expect(inspectComposerInput(banner("", nearMiss), "claude-code")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+    }
+  });
+
   it("keeps nested prompt examples inside the current draft, including when its head is clipped", () => {
     const body = "intro\n────────────────────\n❯ \n────────────────────\n? for shortcuts\n────────────────────\n❯ ";
     const snapshot = claude(body, { x: 4, y: 8 });

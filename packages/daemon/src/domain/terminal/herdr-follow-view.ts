@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
-import { HerdrViewer, ViewerCreateNotDispatchedError, findAttributedViewerPanes, readHerdrViewerBody as body, parseHerdrViewerPane as pane,
+import { HerdrViewer, ViewerCreateNotDispatchedError, findAttributedViewerPanes, sameHerdrPath, readHerdrViewerBody as body, parseHerdrViewerPane as pane,
   type HerdrViewerRun, type InspectViewerSeat, type ViewerKey, type ViewerMapping, type ViewerPane } from "./herdr-viewer.js";
 import { DEFAULT_FOLLOW_POLICY, planFollowingTiles, type FollowControls, type FollowPolicy, type FollowTile, type FollowingStatus } from "./terminal-follow-policy.js";
 import type { ComposedPane, ComposedView, OpenViewResult } from "./terminal-provider.js";
@@ -14,6 +14,7 @@ interface Tile extends FollowTile { member: ViewerKey; target: ComposedPane; vie
 interface Canvas {
   version: 1; cwd: string; phase: "creating" | "created" | "starting";
   pane?: ViewerPane; policy: FollowPolicy; tiles: Tile[]; events: string[];
+  stripConfirmed?: boolean;
   closing?: string;
   viewerFailures?: Record<string, { target: string; reason: string }>;
 }
@@ -56,6 +57,12 @@ export class HerdrFollowView {
       following: { id, enabled: controls.enabled, state: status, maxTiles: state?.policy.maxTiles ?? DEFAULT_FOLLOW_POLICY.maxTiles,
         tiles: state?.tiles.map(({ key, seat, departedAt }) => ({ key, seat, departedAt })) ?? [], events: state?.events ?? [], overflow: [], ...(nextAt ? { nextAt } : {}) },
     });
+    const unsupported = (reason: string): OpenViewResult => {
+      if (state) throw new Error(`${reason} Keeping the existing canvas.`);
+      const answer = result(false, "disabled", reason);
+      answer.code = "follow_unsupported"; answer.following!.enabled = false;
+      return answer;
+    };
     const save = () => {
       mkdirSync(root, { recursive: true, mode: 0o700 });
       const temporary = `${file}.${randomUUID()}.tmp`;
@@ -78,7 +85,7 @@ export class HerdrFollowView {
       try {
         const saved = JSON.parse(readFileSync(file, "utf8")) as Canvas;
         if (saved.version !== 1 || !saved.policy || !Array.isArray(saved.tiles) || !Array.isArray(saved.events)
-          || saved.cwd !== path.join(root, "strip")) throw new Error("Following provenance is unreadable; it was preserved.");
+          || !sameHerdrPath(saved.cwd, path.join(root, "strip"))) throw new Error("Following provenance is unreadable; it was preserved.");
         state = saved;
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       if (!controls.enabled) return result(true, "disabled"); // Keep the fixed canvas exactly as it is.
@@ -87,22 +94,24 @@ export class HerdrFollowView {
         if (state) { notice(message); save(); }
         return result(false, "retained", message);
       }
-      if ((this.deps.platform ?? process.platform) !== "linux") throw new Error("Following is qualified on Linux Herdr 0.9.5/protocol 22 only.");
+      if (!["linux", "darwin"].includes(this.deps.platform ?? process.platform)) return unsupported("Live following supports Linux and macOS with Herdr protocol 22.");
       const status = body(await this.deps.run(["status", "server", "--json"]));
-      if (status.version !== "0.9.5" || status.protocol !== 22 || status.running !== true || status.socket !== this.deps.socketPath) {
-        throw new Error("The qualified provider endpoint is unconfirmed; keeping the previous view.");
+      if (status.running !== true || !sameHerdrPath(status.socket, this.deps.socketPath)) {
+        throw new Error("Herdr protocol 22 or the selected endpoint is unconfirmed; keeping the previous view.");
       }
+      if (status.protocol !== 22) return unsupported("Live following requires Herdr protocol 22 and confirmed pane/process replies.");
       if (!await stillCurrent()) throw new Error("Task membership changed before reconciliation; keeping the previous view.");
       if (!state) {
         state = { version: 1, cwd: path.join(root, "strip"), phase: "creating", policy: { ...DEFAULT_FOLLOW_POLICY, ...(view.task.kind === "slice" || view.task.kind === "mission" ? { maxTiles: 4 } : {}), pins: [], suppressed: {} },
-          tiles: [], events: [`Following ${view.task.name}. Opening a tile can change an agent's terminal size.`] };
+          stripConfirmed: false, tiles: [], events: [`Following ${view.task.name}. Opening a tile can change an agent's terminal size.`] };
         mkdirSync(state.cwd, { recursive: true, mode: 0o700 }); save();
         // Persist first. An uncertain response is enumerated on the next call,
         // never interpreted as permission for another workspace.
         const reply = body(await this.deps.run(["workspace", "create", "--cwd", state.cwd,
           "--label", view.task.name, "--no-focus"]));
         const made = pane(reply.root_pane);
-        if (!made || made.cwd !== state.cwd) throw new Error("Workspace creation returned no attributable pane/terminal pair.");
+        if (!made) throw new Error("Workspace creation returned no pane/terminal identity.");
+        // A successful creation reply binds these IDs even if the rc already ran cd.
         state.pane = made; state.phase = "created"; save();
       }
       if (!state.pane) {
@@ -116,7 +125,7 @@ export class HerdrFollowView {
         if (!current || current.pane_id !== (isStored ? expected.pane_id : expected.paneId)
           || current.terminal_id !== (isStored ? expected.terminal_id : expected.terminalId)
           || current.workspace_id !== (isStored ? expected.workspace_id : expected.workspaceId)
-          || (isStored && current.cwd !== expected.cwd) || typeof current.focused !== "boolean") {
+          || typeof current.focused !== "boolean") {
           throw new Error("Provider generation or pane attribution changed; keeping the previous view.");
         }
         return current;
@@ -124,20 +133,26 @@ export class HerdrFollowView {
       await currentPane(state.pane);
       if (state.phase === "created") {
         state.phase = "starting"; save();
-        await this.deps.run(["pane", "run", state.pane.pane_id, `/usr/bin/tail -n 30 -F ${quote(log)}`]);
+        await this.deps.run(["pane", "run", state.pane.pane_id, `printf '\\033[2J\\033[3J\\033[H'; exec /usr/bin/tail -n 30 -F ${quote(log)}`]);
       }
       let stripReady = false;
-      // Bounded process-start observation, not steady membership polling.
-      for (let attempt = 0; attempt < 6; attempt++) {
+      // A first login shell can take seconds. Observe its single dispatched run
+      // for a bounded startup window, never steady membership polling.
+      const stripDeadline = Date.now() + (state.stripConfirmed === false ? 10000 : 0);
+      while (true) {
         const strip = body(await this.deps.run(["pane", "process-info", "--pane", state.pane.pane_id]));
         const processes = (strip.process_info as { foreground_processes?: Array<{ argv?: string[] }> } | undefined)?.foreground_processes;
         stripReady = processes?.some(p => JSON.stringify(p.argv) === JSON.stringify(["/usr/bin/tail", "-n", "30", "-F", log])) ?? false;
         if (stripReady) break;
-        await new Promise(resolve => setTimeout(resolve, 50));
+        const remaining = stripDeadline - Date.now();
+        if (remaining <= 0) break;
+        await new Promise(resolve => setTimeout(resolve, Math.min(250, remaining)));
       }
       if (!stripReady) {
         throw new Error("The explanation strip process is unconfirmed; pane run was not repeated.");
       }
+      await currentPane(state.pane); // Reconfirm generation after a slow shell start.
+      if (!state.stripConfirmed) { state.stripConfirmed = true; save(); }
       const members = view.task.members.map(m => ({ key: keyOf(m.key.hostId, m.key.nodeId), seat: m.seat }));
       for (const key of Object.keys(state.viewerFailures ?? {})) {
         if (!members.some(member => member.key === key) && !state.tiles.some(tile => tile.key === key)) delete state.viewerFailures![key];

@@ -24,13 +24,24 @@ import { SettingsStore } from "./user-settings/settings-store.js";
 
 export const PICKUP_STALL_THRESHOLD_KEY = "queue.pickup_stall_threshold_minutes";
 export const DEFAULT_PICKUP_STALL_THRESHOLD_MINUTES = 3;
+/** #2661 (b): how long a live background shell (the owner's turn is over, a shell it started still runs) counts as
+ *  life past the stall threshold. A ceiling, so a forgotten shell still surfaces: CI watches, test suites and mutation
+ *  runs seen in the field took 20-65 min. */
+export const BACKGROUND_SHELL_GRACE_MINUTES = 60;
+/** #2661 (c): how long a pending managed post-compaction restore (the daemon owns the seat's recovery) counts as life
+ *  past the stall threshold. A ceiling, so a restore that never comes still surfaces. */
+export const COMPACTION_RESTORE_GRACE_MINUTES = 20;
 
 export interface PickupReceipt {
   state: "unclaimed" | "working" | "needs-input" | "stalled-after-claim" | "parked" | "terminal";
-  /** Present when waiting for input, stalled or terminal: the named evidence replacing the manual cross-surface join. */
+  /** Present when waiting for input, stalled or terminal, or working on a named grace (a background shell, a pending
+   *  restore): the named evidence replacing the manual cross-surface join. */
   evidence?: string;
   /** needs-input only: the stall evidence this claim would read without the input wait. */
   stall?: string;
+  /** #2661: working only on a bounded grace (a background shell, a pending managed restore), not on activity or queue
+   *  motion. The sweep keeps an already open stall recovery open on it: a grace stops new detection, never resolves. */
+  grace?: "background-shell" | "restore-pending";
 }
 
 /** The closed states. The waiting view already reports every state outside
@@ -61,8 +72,14 @@ export interface PickupFacts {
   activity?: string;
   needsInput?: number;
   needsInputReason?: string | null;
+  /** #2661 (b): the owner is idle at the prompt with a live background shell, first seen at observedAt. */
+  backgroundWork?: { observedAt: string } | null;
+  /** #2661 (c): the daemon owes the owner its managed post-compaction stages since this time (ISO). */
+  compactionOwedSince?: string | null;
   now?: Date;
   thresholdMinutes?: number;
+  backgroundShellGraceMinutes?: number;
+  compactionRestoreGraceMinutes?: number;
 }
 
 /** The ONE derivation rule — every projection surface (rowToItem, the pickup view lens, the
@@ -98,13 +115,37 @@ function deriveClaimPickup(facts: PickupFacts): PickupReceipt {
   const anchor = Math.max(claimedMs, Date.parse(facts.lastMeaningfulAt ?? facts.claimedAt), heartbeatAfterClaim ? Date.parse(facts.lastHeartbeat!) : claimedMs);
   const ageMs = now.getTime() - anchor;
   if (ageMs <= thresholdMs) return { state: "working" };
+  // #2661: two signals the daemon owns are life past the threshold, each up to its ceiling. A pending input keeps
+  // today's needs-input reading (derivePickup), so neither applies with one.
+  // (b) a background shell: its window is counted from the claim's own anchor (the same one the stall uses), never from
+  //     the current shell's start, so a shell that never ends, or one restarted each turn, cannot hold a claim forever.
+  // (c) a pending managed restore: counted from when the daemon began owing it (one bounded episode it owns).
+  const past: string[] = [];
+  if (!facts.needsInput) {
+    for (const g of [
+      { on: !!facts.backgroundWork, sinceMs: anchor, grace: "background-shell" as const,
+        ceiling: facts.backgroundShellGraceMinutes ?? BACKGROUND_SHELL_GRACE_MINUTES,
+        live: (m: number) => `owner idle at prompt with a live background shell; no queue change for ${m} min`,
+        over: (m: number, c: number) => `background shell live, past its ${c} min ceiling (${m} min since the claim's last queue change)` },
+      { on: !!facts.compactionOwedSince, sinceMs: facts.compactionOwedSince ? Date.parse(facts.compactionOwedSince) : NaN,
+        grace: "restore-pending" as const,
+        ceiling: facts.compactionRestoreGraceMinutes ?? COMPACTION_RESTORE_GRACE_MINUTES,
+        live: (m: number) => `managed post-compaction restore owed for ${m} min`,
+        over: (m: number, c: number) => `managed restore owed ${m} min, past its ${c} min ceiling` },
+    ]) {
+      if (!g.on || !Number.isFinite(g.sinceMs)) continue;
+      const m = Math.max(0, Math.floor((now.getTime() - g.sinceMs) / 60_000));
+      if (now.getTime() - g.sinceMs <= g.ceiling * 60_000) {
+        return { state: "working", evidence: `${g.live(m)} (grace ${g.ceiling} min)`, grace: g.grace };
+      }
+      past.push(g.over(m, g.ceiling));
+    }
+  }
   const minutes = Math.floor(ageMs / 60_000);
-  return {
-    state: "stalled-after-claim",
-    evidence: facts.lastMeaningfulAt === undefined
-      ? `claimed ${minutes} min ago, zero substantive transitions since`
-      : `no meaningful queue change for ${minutes} min; owner activity ${facts.activity ?? "unknown"} (queue age does not prove idle)`,
-  };
+  const base = facts.lastMeaningfulAt === undefined
+    ? `claimed ${minutes} min ago, zero substantive transitions since`
+    : `no meaningful queue change for ${minutes} min; owner activity ${facts.activity ?? "unknown"} (queue age does not prove idle)`;
+  return { state: "stalled-after-claim", evidence: [base, ...past].join("; ") };
 }
 
 /** S02 INPUT CONTRACT — the finding shape the standing sweep consumes (routed to the claimant

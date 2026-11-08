@@ -124,6 +124,30 @@ describe("a Claude launched through a #! wrapper script", () => {
   });
 });
 
+// #2341, reported on 0.7.9: the seat's `claude` is a #! launcher that adds --no-chrome and execs the native installer's
+// `claude` symlink, so the pane's shell runs the versioned binary directly, with argv[0] the symlink and OS name claude.
+describe("a Claude a #! launcher exec'd through the native installer's symlink", () => {
+  const launcher = { executable: "/home/user/.openrig/provider-bin/claude-max2/claude", executableIsScript: true };
+  const linked = (args: string): NativeProcessRow[] => [
+    { pid: 100, ppid: 1, pgid: 100, tpgid: 102, executableName: "bash", command: "-bash", startedAt },
+    { pid: 102, ppid: 100, pgid: 102, tpgid: 102, executableName: "claude", startedAt,
+      executablePath: "/home/user/.local/share/claude/versions/2.1.319", command: `${wrapper} --no-chrome ${args}` },
+  ];
+
+  it("resumes ready, recording the process the launch proved", async () => {
+    const { adapter, binding, set } = seat(launcher);
+    set(linked(`--permission-mode auto --resume ${token} --name ${name}`));
+    expect(await adapter.launchHarness(binding, { name, resumeToken: token })).toMatchObject({
+      ok: true, resumeToken: token, launchedProcess: { pid: 102, startedAt } });
+  });
+
+  it("does not resume on a wrong conversation", async () => {
+    const { adapter, binding, set } = seat(launcher);
+    set(linked(`--permission-mode auto --resume other --name ${name}`));
+    expect(await adapter.launchHarness(binding, { name, resumeToken: token })).toMatchObject({ ok: false, recovery: "attention_required" });
+  });
+});
+
 describe("a Claude launched from a native binary", () => {
   it("keeps the exact-path rule: a process whose path differs from the frozen one is not proved", async () => {
     const { adapter, binding } = seat({ executable: wrapper, executableIsScript: false });

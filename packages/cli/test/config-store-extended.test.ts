@@ -121,7 +121,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
 
   it("VALID_KEYS includes legacy, user-settings, ui.preview, recovery, agents, feed, and transcript-rotation keys", () => {
     const expected = [
-      "daemon.port", "daemon.host", "daemon.db_conflict",
+      "daemon.port", "daemon.host", "daemon.db_conflict", "daemon.seat_poll_interval_ms",
       // OPR.0.4.6.MH1 FR-1/FR-4 — host-selection pointer + own-host name.
       "host.selected",
       "host.name",
@@ -202,10 +202,12 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "usage.pi_openrouter_charge",
       "transport.verify_input_box",
       "transport.local_user_guard",
+      "transport.draft_delivery",
       // Slice 22 (OPR.0.7.2.22) — typed decisions, off by default.
       "decisions.enabled",
       "decisions.consumers",
       "decisions.template_dir",
+      "acp.to",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
       "retention.enabled",
       "retention.transitions_days",
@@ -213,6 +215,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "retention.watchdog_keep_per_job",
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",
+      "retention.events_days", // the history-only event types of events
       "stream.intake",
       "retention.batch_size",
       "queue.pickup_stall_threshold_minutes",
@@ -329,11 +332,11 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
   it("transport.verify_input_box defaults off, resolves its env twin, and appears in the resolved config", () => {
     const store = new ConfigStore(configPath);
     expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: false, source: "default", defaultValue: false });
-    expect(store.resolve().transport).toEqual({ verifyInputBox: false, localUserGuard: false });
+    expect(store.resolve().transport).toEqual({ verifyInputBox: false, localUserGuard: false, draftDelivery: "deliver" });
     try {
       process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX = "1";
       expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: true, source: "env" });
-      expect(store.resolve().transport).toEqual({ verifyInputBox: true, localUserGuard: false });
+      expect(store.resolve().transport).toEqual({ verifyInputBox: true, localUserGuard: false, draftDelivery: "deliver" });
     } finally {
       delete process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX;
     }
@@ -401,6 +404,29 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(() => store.reset("health.context_pressure.critical_percent"))
       .toThrow(/config-file pair: warning \(99\).*critical \(99\).*each process resolves configuration/);
     expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
+  it("rig config set retention.events_days 3 succeeds and rig config get returns 3", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const oldExitCode = process.exitCode;
+    try {
+      process.exitCode = undefined;
+      await configCommand(configPath, { probeDaemonRunning: async () => false })
+        .parseAsync(["node", "rig", "set", "retention.events_days", "3"]);
+      expect(process.exitCode).toBeUndefined();
+      expect(error).not.toHaveBeenCalled();
+      log.mockClear();
+      await configCommand(configPath, { probeDaemonRunning: async () => false })
+        .parseAsync(["node", "rig", "get", "retention.events_days"]);
+      expect(process.exitCode).toBeUndefined();
+      expect(log.mock.calls.flat().join(" ")).toMatch(/\b3\b/);
+      expect(new ConfigStore(configPath).get("retention.events_days")).toBe(3);
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+      process.exitCode = oldExitCode;
+    }
   });
 
   it("shows the file-pair explanation through the config command", async () => {
@@ -499,6 +525,21 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
         expect(() => store.set(key, raw), `${key} must reject ${raw}`)
           .toThrow(/positive integer/i);
       }
+    }
+  });
+
+  it("retention.events_days: set 3 then get 3, default 0 (keep), 0 accepted, negative and non-integer refused", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("retention.events_days")).toBe(0);
+    expect(store.resolve().retention.eventsDays).toBe(0);
+    store.set("retention.events_days", "3");
+    expect(store.get("retention.events_days")).toBe(3);
+    expect(store.resolve().retention.eventsDays).toBe(3);
+    expect(JSON.parse(readFileSync(configPath, "utf-8")).retention.eventsDays).toBe(3);
+    store.set("retention.events_days", "0");
+    expect(store.get("retention.events_days")).toBe(0);
+    for (const raw of ["-1", "1.5"]) {
+      expect(() => store.set("retention.events_days", raw)).toThrow();
     }
   });
 

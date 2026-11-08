@@ -7,6 +7,10 @@ without daemon-internal knowledge.
 This subtree is part of the wider [OpenRig Instance Layout](instance-layout.md).
 The instance initializer delegates these exact workspace bytes to this owner.
 
+To inspect or read an exact reconstruction under a selected work home, use
+[`rig context reconstruction`](reconstructions.md). It shares catalog and work-home
+resolution with `context work-install` and performs no installation or projection.
+
 ## Default Shape
 
 `rig config init-workspace` creates the default workspace at

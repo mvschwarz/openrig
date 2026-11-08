@@ -8,7 +8,59 @@ import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, sla
 import { sharedChannelAddresses } from "./gateway/participants.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
-import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, type RecentQueueTransitionScope } from "./queue-transition-log.js";
+import {
+  QueueTransitionLog,
+  RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
+  RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
+  formatRelayOwnerNotificationAccepted,
+  formatRelayOwnerNotificationTransportFailed,
+  parseRelayOwnerNotificationAccepted,
+  parseRelayOwnerNotificationTransportFailed,
+  type FormatRelayOwnerNotificationAcceptedInput,
+  type FormatRelayOwnerNotificationTransportFailedInput,
+  type OwnerNotificationLevel,
+  type QueueTransition,
+  type RecentQueueTransitionScope,
+  type RelayOwnerNotificationReceipt,
+  type RelayOwnerNotificationTransportFailure,
+} from "./queue-transition-log.js";
+
+export {
+  RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
+  RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
+  formatRelayOwnerNotificationAccepted,
+  formatRelayOwnerNotificationTransportFailed,
+  parseRelayOwnerNotificationAccepted,
+  parseRelayOwnerNotificationTransportFailed,
+  type FormatRelayOwnerNotificationAcceptedInput,
+  type FormatRelayOwnerNotificationTransportFailedInput,
+  type RelayOwnerNotificationReceipt,
+  type RelayOwnerNotificationTransportFailure,
+};
+
+export type HumanIntent = "decision" | "update";
+
+export const MC_OPERATION_TAG_PREFIX = "mc-operation:" as const;
+
+export function mcOperationTag(operation: string): string {
+  return `${MC_OPERATION_TAG_PREFIX}${operation}`;
+}
+
+export interface DecisionRevisionOptions {
+  excludeOperationReply?: string | null;
+}
+
+export interface RecordRelayOwnerNotificationAcceptedInput extends FormatRelayOwnerNotificationAcceptedInput {
+  qitemId: string;
+  actorSession?: string;
+  closeUpdate?: boolean;
+  humanIntent?: HumanIntent | null;
+}
+
+export interface RecordRelayOwnerNotificationTransportFailedInput extends FormatRelayOwnerNotificationTransportFailedInput {
+  qitemId: string;
+  actorSession?: string;
+}
 import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
 import { physicalSessionName } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
@@ -107,6 +159,10 @@ const AUTO_UNPARK_WAKE_TAG = "queue:auto-unpark:blocker";
  *  handoff: it keeps that source when it's replayed later. Send, broadcast, queue create and the cross-host forward never
  *  set it from a request; the trusted local outbox recorder (/api/queue/outbox/record) accepts caller tags by design. */
 const WAKE_TRIGGER_OPENRIG_TAG = "queue:wake-trigger:openrig";
+/** The wake telling a claimer that a cross-host handoff overrode its claim (#2631): it's about a row closed by design. */
+const CLAIM_OVERRIDDEN_WAKE_PREFIX = `${WAKE_INTENT_PREFIX}claim-overridden-`;
+/** The first id after every such wake's, so a range on the outbox's primary key finds them all and nothing else. */
+const CLAIM_OVERRIDDEN_WAKE_END = `${WAKE_INTENT_PREFIX}claim-overridden.`;
 /** On a wake intent whose ring a hosted member's trigger accepted: recovery doesn't ring that intent again. */
 const HOSTED_WAKE_ACCEPTED_TAG = "queue:hosted-wake-accepted";
 
@@ -210,10 +266,10 @@ export interface QueueItem {
   priority: QueuePriority;
   tier: string | null;
   /** OPR.0.5.6.14 — the delivery LEDGER verdict for gateway-routed rows
-   *  (posted / transport-failed / never-posted), derived from the row's own
+   *  (posted / accepted / transport-failed / never-posted), derived from the row's own
    *  transitions. Pane-bound rows carry null — the field never lies about a
    *  class it does not govern. Populated on getById and findUndelivered. */
-  deliveryOutcome?: "posted" | "transport-failed" | "never-posted" | null;
+  deliveryOutcome?: "posted" | "accepted" | "transport-failed" | "never-posted" | null;
   /** The undelivered surface's class for ledger-derived entries (the route
    *  prefers this over the nudge-literal regex when present). */
   deliveryFailureClass?: string;
@@ -693,6 +749,7 @@ export function hasLinkedSuccessor(
   sourceQitemId: string,
   target: string,
 ): boolean {
+  if (successorScope?.db === db && successorScope.covers(sourceQitemId)) return successorScope.has(sourceQitemId, target);
   const successor = db
     .prepare(
       `SELECT 1 FROM queue_items s
@@ -707,6 +764,57 @@ export function hasLinkedSuccessor(
     )
     .get(target, target, sourceQitemId, sourceQitemId, sourceQitemId);
   return Boolean(successor);
+}
+
+/** The linked-successor index lent to hasLinkedSuccessor by createLinkedSuccessorLookup's run(), for one synchronous call. */
+let successorScope: { db: Database.Database; covers: (source: string) => boolean; has: (source: string, target: string) => boolean } | null = null;
+
+/** hasLinkedSuccessor for a whole set of sources in one read, for a pass that asks it once per row (the stuck sweep's
+ *  custody loop, and the handoff advisory of each row it reads). The read keeps the per-row query's own predicates: a
+ *  successor is a row whose handed_off_from is the source, or whose chain_of_record is valid JSON with the source among
+ *  its json_each values (compared as `value IN (...)` compares, like `value = ?`: a number or a nested value never
+ *  equals a text id); has() then checks qitem_id or destination_session against the target and that the successor is
+ *  not the source itself. A snapshot from its first has() until invalidate(): the caller invalidates it whenever other
+ *  code could have run. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn
+ *  for a covered source; any other source keeps the per-row query. */
+export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemIds: readonly string[]): {
+  has: (sourceQitemId: string, target: string) => boolean;
+  run: <T>(fn: () => T) => T;
+  invalidate: () => void;
+} {
+  const sources = new Set(sourceQitemIds);
+  let bySource: Map<string, Array<{ qitemId: string; destination: string | null }>> | null = null;
+  const build = () => {
+    const map = new Map<string, Array<{ qitemId: string; destination: string | null }>>();
+    const ids = JSON.stringify([...sources]);
+    const rows = db.prepare(
+      `SELECT s.qitem_id, s.destination_session, s.handed_off_from AS source FROM queue_items s
+        WHERE s.handed_off_from IN (SELECT value FROM json_each(?))
+       UNION
+       SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
+        WHERE s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
+          AND j.value IN (SELECT value FROM json_each(?))`,
+    ).all(ids, ids) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
+    for (const r of rows) {
+      const list = map.get(r.source);
+      const entry = { qitemId: r.qitem_id, destination: r.destination_session };
+      if (list) list.push(entry); else map.set(r.source, [entry]);
+    }
+    return map;
+  };
+  const has = (sourceQitemId: string, target: string): boolean => (bySource ??= build()).get(sourceQitemId)?.some(
+    (s) => s.qitemId !== sourceQitemId && (s.qitemId === target || s.destination === target)) ?? false;
+  const own = { db, covers: (source: string) => sources.has(source), has };
+  return {
+    has,
+    run: (fn) => {
+      if (successorScope?.db === db) return fn();
+      const previous = successorScope;
+      successorScope = own;
+      try { return fn(); } finally { successorScope = previous; }
+    },
+    invalidate: () => { bySource = null; },
+  };
 }
 
 /** PL-007 — defensive column probe. Older test fixtures bypass the
@@ -751,8 +859,9 @@ export type CompactQueueItem = Omit<QueueItem, (typeof COMPACT_ELIDED_FIELDS)[nu
   fieldsElided: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
 };
 
-type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean };
-type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean };
+/** `qitemId` narrows either finder to one row, so a caller can ask again whether that row still qualifies. */
+type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean; qitemId?: string };
+type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string };
 
 function compactRow(item: QueueItem): CompactQueueItem {
   const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
@@ -1123,6 +1232,18 @@ export class QueueRepository {
 
   private currentWakeIntent(entry: QueueWakeFacts): boolean {
     const row = entry.auditPointer ? this.db.prepare("SELECT state, destination_session FROM queue_items WHERE qitem_id=?").get(entry.auditPointer) as { state: string; destination_session: string } | undefined : undefined;
+    // That notice stays current while the row stays closed by the close that made it; every other wake, while its row
+    // waits on its destination. A reopen and another close end it: its text names the earlier successor.
+    if (entry.outboxId.startsWith(CLAIM_OVERRIDDEN_WAKE_PREFIX)) {
+      if (row === undefined || !isTerminalState(row.state) || row.destination_session !== entry.destinationSession) return false;
+      const closed = TERMINAL_QUEUE_STATES.map(() => "?").join(",");
+      const close = this.db.prepare(`SELECT transition_id FROM (
+        SELECT transition_id, state, LAG(state) OVER (ORDER BY transition_id) AS previous_state
+        FROM queue_transitions WHERE qitem_id=?)
+        WHERE state IN (${closed}) AND (previous_state IS NULL OR previous_state NOT IN (${closed})) ORDER BY transition_id DESC LIMIT 1`)
+        .get(entry.auditPointer, ...TERMINAL_QUEUE_STATES, ...TERMINAL_QUEUE_STATES) as { transition_id: number } | undefined;
+      return Number(entry.outboxId.slice(CLAIM_OVERRIDDEN_WAKE_PREFIX.length)) === close?.transition_id;
+    }
     if (row?.state !== "pending" || row.destination_session !== entry.destinationSession) return false;
     const prefix = `${WAKE_INTENT_PREFIX}blocker-`;
     if (!entry.outboxId.startsWith(prefix)) return true;
@@ -1210,10 +1331,15 @@ export class QueueRepository {
       // A person's Slack message routed to a person is already in Slack: as it arrived, it's on Steering and the TUI and
       // isn't echoed back. A later park of it on a person is a new ask, classified (and posted) on that update.
       if (input.gatewayInbound) return { kind: "human-required", level: "RECORD" };
-      // The person's Slack subscription decides: `every-ask` (the default) posts every ask (ALERT); `urgent-only` posts only
-      // one marked --alert, and a plain ask lands on Steering and the TUI (RECORD: below the posting dial, so no post is owed).
+      // Slack subscription filters only apply when Slack is the primary connector. When a person's primary connector
+      // is relay (or by default when no Slack subscription restricts it), plain asks post by default (`every-ask`),
+      // so ordinary relay asks post (ALERT) independently of any retained Slack-specific subscription.
       const person = people.find((entity) => entity.address === destinationHuman);
-      const posts = input.humanAlert === true || slackSubscriptionFor(person).preset === "every-ask";
+      const primaryBinding = person?.connectorBindings.find((b) => b.role === "primary");
+      const posts = input.humanAlert === true
+        || (primaryBinding?.kind === "relay"
+          ? true
+          : slackSubscriptionFor(person).preset === "every-ask");
       return input.humanIntent === "update"
         ? { kind: "human-update", level: "NOTICE" }
         : { kind: "human-required", level: posts ? "ALERT" : "RECORD" };
@@ -1322,7 +1448,9 @@ export class QueueRepository {
       // Draft-aware wakes remain pending until the transport owns their bounded
       // retry. Manual retention is deliberately never drained.
       const draftTarget = this.transport?.draftAwareTarget?.(input.toSession);
-      if (draftTarget) this.outbox.assertRetentionCapacity(draftTarget.nodeId, frozenEnvelope);
+      // The same rule as a held message (#2430): the sender's own held messages there count as room, since this wake
+      // coalesces them if it settles as held.
+      if (draftTarget) this.outbox.assertRetentionCapacity(draftTarget.nodeId, frozenEnvelope, input.fromSession, [input.outboxId]);
       this.outbox.record(record);
       const binding = this.transport?.deliveryTarget?.(input.toSession);
       if (binding) this.db.prepare("UPDATE outbox_entries SET guard_binding=? WHERE outbox_id=? AND guard_binding IS NULL")
@@ -1629,9 +1757,10 @@ export class QueueRepository {
     tally.failed += this.db.prepare(`UPDATE outbox_entries AS o SET delivery_state = 'failed',
       tags = json_insert(COALESCE(tags, '[]'), '$[#]', 'queue:wake-superseded')
       WHERE delivery_state = 'pending' AND rowid <= ? AND substr(outbox_id, 1, ?) = ?
+        AND substr(outbox_id, 1, ?) != ?
         AND NOT EXISTS (SELECT 1 FROM queue_items q WHERE q.qitem_id = o.audit_pointer
           AND q.state = 'pending' AND q.destination_session = o.destination_session)`)
-      .run(horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX).changes;
+      .run(horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, CLAIM_OVERRIDDEN_WAKE_PREFIX.length, CLAIM_OVERRIDDEN_WAKE_PREFIX).changes;
     // A stop also refuses every later claim inside a delivery: coalesced peers and members it releases for their own send.
     // So does a missing receiver, for a notification already tried. One never tried still gets its attempt, so its row
     // records why it didn't land.
@@ -1644,11 +1773,12 @@ export class QueueRepository {
     let cursor = 0;
     for (;;) {
       const pending = this.db.prepare(`SELECT o.rowid AS id, o.outbox_id FROM outbox_entries o
-        JOIN queue_items q ON q.qitem_id = o.audit_pointer AND q.state = 'pending'
+        JOIN queue_items q ON q.qitem_id = o.audit_pointer AND (q.state = 'pending' OR substr(o.outbox_id, 1, ?) = ?)
           AND q.destination_session = o.destination_session
         WHERE o.rowid > ? AND o.rowid <= ? AND substr(o.outbox_id, 1, ?) = ?
           AND o.delivery_state IN ('pending','failed','indeterminate') ORDER BY o.rowid LIMIT ?`)
-        .all(cursor, horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
+        .all(CLAIM_OVERRIDDEN_WAKE_PREFIX.length, CLAIM_OVERRIDDEN_WAKE_PREFIX, cursor, horizon, WAKE_INTENT_PREFIX.length,
+          WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
       if (pending.length === 0) break;
       for (const intent of pending) {
         if (opts?.stopRequested?.()) return result();
@@ -1743,13 +1873,22 @@ export class QueueRepository {
     const eligible = (entry: OutboxEntry): boolean => {
       if (entry.deliveryState !== "failed" || !entry.auditPointer) return false;
       const current = this.getById(entry.auditPointer), refusal = current?.lastNudgeWireResult;
-      return current?.state === "pending" && addresses.includes(current.destinationSession)
+      const notice = entry.outboxId.startsWith(CLAIM_OVERRIDDEN_WAKE_PREFIX);
+      return (current?.state === "pending" || notice) && addresses.includes(current?.destinationSession ?? "")
         && (refusal === "failed:target_needs_input" || (refusal?.startsWith("failed:Refused:") === true && refusal.includes("interactive prompt")));
     };
+    const seats = addresses.map(() => "?").join(",");
+    const refused = (q: string) => `(${q}last_nudge_result LIKE 'failed:Refused:%interactive prompt%' OR ${q}last_nudge_result = 'failed:target_needs_input')`;
+    // A closed row is here only for a failed override notice, found from the notice by its id range, so this never
+    // reads the host's other failed history.
     const rows = this.db.prepare(`SELECT qitem_id, destination_session, source_session, last_nudge_result
-      FROM queue_items WHERE state = 'pending' AND destination_session IN (${addresses.map(() => "?").join(",")})
-        AND (last_nudge_result LIKE 'failed:Refused:%interactive prompt%' OR last_nudge_result = 'failed:target_needs_input')`)
-      .all(...addresses) as Array<{ qitem_id: string; destination_session: string; source_session: string }>;
+      FROM queue_items WHERE state = 'pending' AND destination_session IN (${seats}) AND ${refused("")}
+      UNION
+      SELECT q.qitem_id, q.destination_session, q.source_session, q.last_nudge_result
+      FROM outbox_entries o JOIN queue_items q ON q.qitem_id = o.audit_pointer AND q.destination_session = o.destination_session
+      WHERE o.outbox_id >= ? AND o.outbox_id < ? AND +o.delivery_state = 'failed' AND +o.destination_session IN (${seats})
+        AND ${refused("q.")}`)
+      .all(...addresses, CLAIM_OVERRIDDEN_WAKE_PREFIX, CLAIM_OVERRIDDEN_WAKE_END, ...addresses) as Array<{ qitem_id: string; destination_session: string; source_session: string }>;
     const attempted = new Set<string>();
     // Reserve the whole selection before awaiting: a correlated send can include several rows.
     // Its refusal stays durable, but must not re-arm this same clear-triggered pass.
@@ -2682,6 +2821,11 @@ export class QueueRepository {
     transitionNote?: string;
     /** The sender's recorded provenance, as the local handoff records it. Null only for an in-process caller. */
     identityProvenance?: string | null;
+    /** The source's claim as the caller read it before forwarding. A claim made since then is overridden by this close,
+     *  which still closes, because the successor already exists, and records the override and wakes the claimer (#2631). */
+    claimedAtBeforeForward?: string | null;
+    /** The successor the forward created, for that wake: its plain id, never the host-qualified key (BR-1). */
+    successorQitemId?: string;
   }): { item: QueueItem; absorbed: boolean } {
     const source = this.getById(input.qitemId);
     if (!source) {
@@ -2707,6 +2851,9 @@ export class QueueRepository {
 
     const ts = new Date().toISOString();
     const events: Array<import("./types.js").RigEvent> = [];
+    const overriddenClaim = input.claimedAtBeforeForward !== undefined && source.claimedAt != null
+      && source.claimedAt !== input.claimedAtBeforeForward ? source.claimedAt : null;
+    let overrideWake: string | null = null;
 
     const txn = this.db.transaction(() => {
       this.db
@@ -2721,18 +2868,40 @@ export class QueueRepository {
         )
         .run(input.terminalState, ts, input.toSession, input.closureTarget, input.qitemId);
 
-      this.transitionLog.append({
+      const note = input.transitionNote ?? `cross-host handoff to ${input.toSession}`;
+      const closeTransition = this.transitionLog.append({
         qitemId: input.qitemId,
         state: input.terminalState,
         actorSession: input.fromSession,
         // BR-1: the minted note carries the TWO-PART toSession only — the
         // host-qualified successor key is allowed in closure_target and nowhere
         // else, and transition_note is a durable carrier.
-        transitionNote: input.transitionNote ?? `cross-host handoff to ${input.toSession}`,
+        transitionNote: overriddenClaim
+          ? `${note} (this overrode ${source.destinationSession}'s claim made at ${overriddenClaim}, while the handoff was forwarded)`
+          : note,
         closureReason: "handed_off_to",
         closureTarget: input.closureTarget,
         identityProvenance: input.identityProvenance ?? null,
       });
+      if (overriddenClaim && source.destinationSession !== input.fromSession) {
+        const successor = input.successorQitemId ? ` as ${input.successorQitemId}` : "";
+        try {
+          overrideWake = this.db.transaction(() => this.recordWakeIntent({
+            outboxId: `${CLAIM_OVERRIDDEN_WAKE_PREFIX}${closeTransition.transitionId}`,
+            auditPointer: input.qitemId,
+            qitemId: input.qitemId,
+            fromSession: input.fromSession,
+            toSession: source.destinationSession,
+            identityProvenance: sideEffectProvenance(input.identityProvenance),
+            bareBody: `${input.qitemId} was handed off to ${input.toSession}${successor} while you claimed it, so your claim is superseded and that seat has the work. Stop work on ${input.qitemId}; to carry on with it, coordinate with ${input.toSession}.`,
+            tags: [WAKE_TRIGGER_OPENRIG_TAG],
+          }))();
+        } catch (err) {
+          // As a handoff's own wake: a full held-message quota doesn't undo a close whose successor already exists.
+          if ((err as { code?: string }).code !== "retained_quota_full") throw err;
+          this.recordNudgeAttempt(input.qitemId, `${WAKE_NOT_RETAINED}${(err as Error).message}`);
+        }
+      }
 
       // OPR.0.5.8.1 S1b — third member of the handoff family, same bypass.
       this.retireParkGeneratedTimer(input.qitemId, `park_ended:${input.terminalState}`);
@@ -2767,6 +2936,7 @@ export class QueueRepository {
     for (const e of events) {
       this.eventBus.notifySubscribers(e as PersistedEvent);
     }
+    if (overrideWake) this.deliverWakeIntentAfterCommit(overrideWake);
 
     return { item: this.getByIdOrThrow(input.qitemId), absorbed: false };
   }
@@ -3915,7 +4085,9 @@ export class QueueRepository {
       return this.closeDirectAsk(item, input.actorSession, input.decision, input.primaryUser === true);
     })();
     if (!result) return false;
-    for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
+    for (const event of result.persistedEvents) {
+      if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
+    }
     return mine;
   }
 
@@ -4038,10 +4210,24 @@ export class QueueRepository {
   /** The opaque revision of what a person decides on (#2446): the question (body, intent, questions) and its decision state
    *  (open, blocked or terminal; who it's addressed to or parked on; its answers, a decision made for them, the current park,
    *  and the replies returned). A label, a wake, a claim or a note on a park doesn't change it; a new park does, on any blocker. */
-  decisionRevision(item: QueueItem): string {
+  decisionRevision(item: QueueItem, opts?: DecisionRevisionOptions): string {
     const phase = item.state === "blocked" ? "blocked" : item.state === "pending" || item.state === "in-progress" ? "open" : item.state;
-    const replies = this.hasReplyToColumn ? (this.db.prepare("SELECT qitem_id FROM queue_items WHERE reply_to = ? ORDER BY ts_created, rowid")
-      .all(item.qitemId) as Array<{ qitem_id: string }>).map((row) => row.qitem_id) : [];
+    const excludeOp =
+      typeof opts?.excludeOperationReply === "string" && opts.excludeOperationReply.length > 0
+        ? mcOperationTag(opts.excludeOperationReply)
+        : null;
+    const replies = this.hasReplyToColumn
+      ? (excludeOp
+          ? (this.db
+              .prepare(
+                "SELECT qitem_id FROM queue_items WHERE reply_to = ? AND NOT (tags IS NOT NULL AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)) ORDER BY ts_created, rowid",
+              )
+              .all(item.qitemId, excludeOp) as Array<{ qitem_id: string }>)
+          : (this.db
+              .prepare("SELECT qitem_id FROM queue_items WHERE reply_to = ? ORDER BY ts_created, rowid")
+              .all(item.qitemId) as Array<{ qitem_id: string }>)
+        ).map((row) => row.qitem_id)
+      : [];
     // The park this is: the transition into blocked from another state (a later blocked-to-blocked note stays this park).
     const transitions = item.state === "blocked" ? this.transitionLog.listForQitem(item.qitemId) : [];
     let parkEntry: number | null = null;
@@ -4051,6 +4237,92 @@ export class QueueRepository {
     const decision = [item.body, item.humanIntent ?? null, item.humanQuestions ?? null, phase, item.destinationSession, item.blockedOn,
       item.humanAnswers ?? null, item.delegatedDecision ?? null, this.currentHumanRequiredEpisode(item.qitemId)?.key ?? null, parkEntry, replies];
     return `dr1-${createHash("sha256").update(JSON.stringify(decision)).digest("hex").slice(0, 24)}`;
+  }
+
+  listRelayOwnerNotificationReceipts(qitemId: string): RelayOwnerNotificationReceipt[] {
+    return this.transitionLog.listRelayOwnerNotificationReceipts(qitemId);
+  }
+
+  getRelayOwnerNotificationReceipt(qitemId: string, notificationKey?: string): RelayOwnerNotificationReceipt | null {
+    return this.transitionLog.getRelayOwnerNotificationReceipt(qitemId, notificationKey);
+  }
+
+  hasRelayOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
+    return this.transitionLog.hasRelayOwnerNotificationReceipt(qitemId, notificationKey);
+  }
+
+  findRelayOwnerNotificationReceiptByReplyRef(
+    replyRef: string,
+  ): (RelayOwnerNotificationReceipt & { qitemId: string }) | null {
+    return this.transitionLog.findRelayOwnerNotificationReceiptByReplyRef(replyRef);
+  }
+
+  recordRelayOwnerNotificationTransportFailed(input: RecordRelayOwnerNotificationTransportFailedInput): QueueItem {
+    const current = this.getByIdOrThrow(input.qitemId);
+    const key = typeof input.notificationKey === "string" && input.notificationKey.trim().length > 0
+      ? input.notificationKey.trim()
+      : input.qitemId;
+    const normalizedConnectorRef =
+      typeof input.connectorRef === "string" && input.connectorRef.trim().length > 0
+        ? input.connectorRef.trim()
+        : null;
+    const previousFailure = this.transitionLog
+      .listForQitem(input.qitemId)
+      .filter(
+        (transition) =>
+          (transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ") ||
+            transition.transitionNote?.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `)) &&
+          transition.transitionNote.split(/\s+/).includes(`notification_key=${key}`),
+      )
+      .at(-1);
+    if (previousFailure?.transitionNote?.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `)) {
+      const parsedPrevious = parseRelayOwnerNotificationTransportFailed(previousFailure.transitionNote);
+      if (parsedPrevious && parsedPrevious.connectorRef === normalizedConnectorRef) {
+        return current;
+      }
+    }
+    const note = formatRelayOwnerNotificationTransportFailed({
+      notificationKey: key,
+      connectorRef: normalizedConnectorRef,
+      failureClass: input.failureClass,
+      detail: input.detail,
+    });
+    return this.update({
+      qitemId: input.qitemId,
+      actorSession: input.actorSession ?? "daemon@kernel",
+      transitionNote: note,
+    });
+  }
+
+  recordRelayOwnerNotificationAccepted(input: RecordRelayOwnerNotificationAcceptedInput): QueueItem {
+    const current = this.getByIdOrThrow(input.qitemId);
+    const isUpdate =
+      current.humanIntent === "update" &&
+      current.state !== "blocked" &&
+      !current.blockedOn &&
+      this.isPersonAddress(current.destinationSession);
+    const shouldCloseUpdate = isUpdate && input.closeUpdate !== false && isBlockerLive(current.state);
+    if (this.transitionLog.hasRelayOwnerNotificationReceipt(input.qitemId, input.notificationKey)) {
+      if (shouldCloseUpdate) {
+        return this.update({
+          qitemId: input.qitemId,
+          actorSession: input.actorSession ?? "daemon@kernel",
+          state: "done",
+          closureReason: "no-follow-on",
+        });
+      }
+      return current;
+    }
+    const note = formatRelayOwnerNotificationAccepted({
+      ...input,
+      revision: input.revision ?? this.decisionRevision(current),
+    });
+    return this.update({
+      qitemId: input.qitemId,
+      actorSession: input.actorSession ?? "daemon@kernel",
+      ...(shouldCloseUpdate ? { state: "done", closureReason: "no-follow-on" } : {}),
+      transitionNote: note,
+    });
   }
 
   currentHumanRequiredEpisode(qitemId: string): { key: string; receipt: ReturnType<QueueTransitionLog["getOwnerNotificationReceipt"]> } | null {
@@ -4167,7 +4439,7 @@ export class QueueRepository {
     return {
       ...item,
       deliveryOutcome: ledger?.outcome ?? null,
-      ...(ledger && ledger.outcome !== "posted" ? { deliveryFailureDetail: ledger.detail } : {}),
+      ...(ledger && ledger.outcome !== "posted" && ledger.outcome !== "accepted" ? { deliveryFailureDetail: ledger.detail } : {}),
       ...(item.replyTo ? { replyToFallback: this.replyToFallbackFor(item.qitemId) } : {}),
     };
   }
@@ -4320,7 +4592,7 @@ export class QueueRepository {
       return {
         ...item,
         deliveryOutcome: ledger?.outcome ?? null,
-        ...(ledger && ledger.outcome !== "posted" ? { deliveryFailureDetail: ledger.detail } : {}),
+        ...(ledger && ledger.outcome !== "posted" && ledger.outcome !== "accepted" ? { deliveryFailureDetail: ledger.detail } : {}),
       };
     });
     return opts?.compact ? items.map(compactRow) : items;
@@ -4357,7 +4629,7 @@ export class QueueRepository {
    */
   /** Delivered informational records remain queryable after closure. Receipt filtering
    * happens before LIMIT; no prose/tier classifier and no second event store. */
-  listDeliveredHumanUpdates(opts: { limit?: number } = {}): Array<QueueItem & { deliveredAt: string; deliveryReceipt: string }> {
+  listDeliveredHumanUpdates(opts: { limit?: number } = {}): Array<QueueItem & { deliveredAt: string; deliveryReceipt: string; deliveryOutcome: "posted" | "accepted" }> {
     if (!this.hasHumanIntentColumn) return [];
     const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(101, Math.floor(opts.limit!))) : 20;
     const receipts = `SELECT qitem_id, ts, transition_note FROM queue_transitions` +
@@ -4366,10 +4638,20 @@ export class QueueRepository {
       SELECT q.*, r.ts AS delivered_at, r.transition_note AS delivery_receipt
       FROM queue_items q JOIN (${receipts}) r ON r.qitem_id = q.qitem_id
       WHERE q.human_intent = 'update' AND is_human_seat_session(q.destination_session) = 1
-        AND r.transition_note LIKE 'slack-owner-notification-posted %'
+        AND (r.transition_note LIKE 'slack-owner-notification-posted %' OR r.transition_note LIKE 'relay-owner-notification-accepted %')
       ORDER BY r.ts DESC, q.qitem_id DESC LIMIT ?
     `).all(limit) as Array<QueueItemRow & { delivered_at: string; delivery_receipt: string }>;
-    return rows.map((row) => ({ ...this.rowToItem(row), deliveredAt: row.delivered_at, deliveryReceipt: row.delivery_receipt }));
+    return rows.map((row) => {
+      const deliveryOutcome: "posted" | "accepted" = row.delivery_receipt.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `)
+        ? "accepted"
+        : "posted";
+      return {
+        ...this.rowToItem(row),
+        deliveryOutcome,
+        deliveredAt: row.delivered_at,
+        deliveryReceipt: row.delivery_receipt,
+      };
+    });
   }
 
   /** Current explicit human FYIs; delivery receipts are not required for local visibility.
@@ -4486,6 +4768,10 @@ export class QueueRepository {
     const cutoff = opts?.now ?? new Date().toISOString();
     const conditions = ["state = 'in-progress'", "closure_required_at IS NOT NULL", "closure_required_at <= ?"];
     const params: unknown[] = [cutoff];
+    if (opts?.qitemId !== undefined) {
+      conditions.push("qitem_id = ?");
+      params.push(opts.qitemId);
+    }
     if (opts?.rig) {
       const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
       conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
@@ -4585,9 +4871,15 @@ export class QueueRepository {
          OR EXISTS (SELECT 1 FROM queue_transitions receipt
                       WHERE receipt.qitem_id = queue_items.qitem_id
                         AND (receipt.transition_note LIKE 'slack-owner-notification-posted %'
-                          OR receipt.transition_note LIKE 'slack-owner-notification-transport-failed %')))`,
+                          OR receipt.transition_note LIKE 'relay-owner-notification-accepted %'
+                          OR receipt.transition_note LIKE 'slack-owner-notification-transport-failed %'
+                          OR receipt.transition_note LIKE 'relay-owner-notification-transport-failed %')))`,
     ];
     const params: unknown[] = [];
+    if (opts?.qitemId !== undefined) {
+      conditions.push("qitem_id = ?");
+      params.push(opts.qitemId);
+    }
     if (opts?.rig) {
       const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
       conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
@@ -4600,7 +4892,7 @@ export class QueueRepository {
     for (const r of rows) {
       const item = this.rowToItem(r, !opts?.compact);
       const ledger = this.deliveryOutcomeFor(item.qitemId);
-      if (ledger?.outcome === "posted") continue; // the receipt wins, always
+      if (ledger?.outcome === "posted" || ledger?.outcome === "accepted") continue; // the receipt wins, always
       if (ledger?.outcome === "transport-failed") {
         out.push({
           ...item,
@@ -4768,23 +5060,34 @@ export class QueueRepository {
    *  transitions are same-row but keyed by qitemId:OWNER-transitionId; an old
    *  posted receipt cannot mask a later human park. Legacy pre-OWNER or literal
    *  external rows retain their row-scoped fallback. */
-  deliveryOutcomeFor(qitemId: string): { outcome: "posted" | "transport-failed" | "never-posted"; detail: string } | null {
+  deliveryOutcomeFor(qitemId: string): { outcome: "posted" | "accepted" | "transport-failed" | "never-posted"; detail: string } | null {
     const ledger = this.deliveryLedger(qitemId);
     return ledger ? { outcome: ledger.outcome, detail: ledger.detail } : null;
   }
 
-  /** #514 — true only when this row's CURRENT human-notification episode (OWNER history addressed
-   *  to a registered human, aliases included) has a POSTED receipt. Legacy rows with no OWNER
+  /** OPR.0.5.6.14 + #514 — true when the row's CURRENT ask episode (create-time pending ask
+   *  to a registered human, aliases included) has a POSTED or ACCEPTED receipt. Legacy rows with no OWNER
    *  history, inactive episodes, never-posted and transport-failed all read false. Same derivation
    *  as deliveryOutcomeFor; it reads row fields, never the waiting view. */
   humanNotificationPostedThisEpisode(qitemId: string, listed?: ListedLedger): boolean {
-    if (!this.hasQueueTransitionsTable) return false;
+    return this.humanNotificationDeliveryThisEpisode(qitemId, listed) !== null;
+  }
+
+  private humanNotificationDeliveryThisEpisode(qitemId: string, listed?: ListedLedger): "posted" | "accepted" | null {
+    if (!this.hasQueueTransitionsTable) return null;
     const owners = listed?.owners ?? this.transitionLog.ownerNotificationsForQitems([qitemId]).get(qitemId) ?? [];
     const owner = this.currentAskNotification(qitemId, owners);
-    if (!owner) return false;
+    if (!owner) return null;
     // The ledger's episode exists only when the destination resolves to a registered human (aliases included).
     const ledger = listed ? listed.ledger : this.deliveryLedger(qitemId, owners);
-    return ledger !== null && ledger.outcome === "posted" && ledger.episode?.notificationKey === `${qitemId}:${owner.transitionId}`;
+    if (
+      ledger !== null &&
+      (ledger.outcome === "posted" || ledger.outcome === "accepted") &&
+      ledger.episode?.notificationKey === `${qitemId}:${owner.transitionId}`
+    ) {
+      return ledger.outcome;
+    }
+    return null;
   }
 
   /** The ask's own notification while it still binds its recipient. Only that notification does: create writes it in
@@ -4867,7 +5170,9 @@ export class QueueRepository {
     this.receiptNotesStatement ??= this.db.prepare(
       `SELECT qitem_id, transition_note FROM queue_transitions
         WHERE qitem_id IN (SELECT value FROM json_each(?)) AND (transition_note LIKE 'slack-owner-notification-posted %'
-                             OR transition_note LIKE 'slack-owner-notification-transport-failed %')
+                             OR transition_note LIKE 'relay-owner-notification-accepted %'
+                             OR transition_note LIKE 'slack-owner-notification-transport-failed %'
+                             OR transition_note LIKE 'relay-owner-notification-transport-failed %')
         ORDER BY transition_id DESC`,
     );
     const notes = new Map<string, string[]>();
@@ -4886,7 +5191,13 @@ export class QueueRepository {
       : notes;
     const posted = currentNotes.find((note) => note.startsWith("slack-owner-notification-posted "));
     if (posted) return { outcome: "posted", detail: posted, episode };
-    const failed = currentNotes.find((note) => note.startsWith("slack-owner-notification-transport-failed "));
+    const accepted = currentNotes.find((note) => note.startsWith("relay-owner-notification-accepted "));
+    if (accepted) return { outcome: "accepted", detail: accepted, episode };
+    const failed = currentNotes.find(
+      (note) =>
+        note.startsWith("slack-owner-notification-transport-failed ") ||
+        note.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `),
+    );
     if (failed) return { outcome: "transport-failed", detail: failed, episode };
     if (episode?.quiet) return null;
     const startedAt = episode?.startedAt ?? item.tsCreated;
@@ -5158,6 +5469,15 @@ export class QueueRepository {
   private activityReader?: WaitingActivityReader;
   attachActivityReader(reader: WaitingActivityReader): void { this.activityReader = reader; }
 
+  /** #2661 (c): since when (ISO) the daemon owes a seat its managed post-compaction stages, or null. */
+  private compactionReader?: (session: string) => string | null;
+  attachCompactionReader(reader: (session: string) => string | null): void { this.compactionReader = reader; }
+
+  compactionOwedSince(session: string | null | undefined): string | null {
+    if (!session) return null;
+    try { return this.compactionReader?.(session) ?? null; } catch { return null; }
+  }
+
   private workflowGuidance?: (packetId: string) => string[];
   attachWorkflowGuidance(reader: (packetId: string) => string[]): void { this.workflowGuidance = reader; }
 
@@ -5184,7 +5504,8 @@ export class QueueRepository {
     if (view && ["pending", "in-progress"].includes(view.state)) {
       // #514 — the unclaimed sweep skips a pending ask already posted to its human in the current
       // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
-      const posted = view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId, listed);
+      const episodeDelivery = view.state === "pending" ? this.humanNotificationDeliveryThisEpisode(qitemId, listed) : null;
+      const posted = episodeDelivery !== null;
       const onSteering = !posted && view.state === "pending" && this.humanAskWithoutAlert(qitemId, listed);
       const row = view.state === "pending" && !onSteering
         ? this.db.prepare(`SELECT state, ${this.hasHumanIntentColumn ? "human_intent" : "NULL AS human_intent"}, destination_session, last_nudge_result FROM queue_items WHERE qitem_id = ?`).get(qitemId) as { state: QueueItem["state"]; human_intent: QueueItem["humanIntent"]; destination_session: string; last_nudge_result: string | null } | undefined
@@ -5195,13 +5516,14 @@ export class QueueRepository {
         && this.isLocalHumanDecisionWithoutGateway({ state: row.state, humanIntent: row.human_intent, destinationSession: row.destination_session, lastNudgeResult: row.last_nudge_result });
       const awaitingHuman = posted || onSteering || localOnly;
       if (awaitingHuman || humanUpdate) {
+        const deliveryPhrase = episodeDelivery === "accepted" ? "accepted by the bridge" : "posted to the human";
         view.nextBackstop = { owner: view.owner, mechanism: localOnly ? "local attention feed (no registered human gateway)" : onSteering
           ? "none (on Steering for the human, with no Slack alert; awaiting their decision)"
           : humanUpdate
             ? posted
-              ? "none (posted to the human; informational correspondence requires no claim)"
+              ? `none (${deliveryPhrase}; informational correspondence requires no claim)`
               : "none (informational correspondence to the human; no claim required)"
-            : "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
+            : `none (${deliveryPhrase}; awaiting their decision)`, dueAt: null, intervalSeconds: null };
       }
       // Quiet hours: a held ask is owned by its window's release job until it posts.
       const quiet = awaitingHuman ? null : quietCustodyBackstop(view.owner, quietHoldCustody(this.db, qitemId));
@@ -5269,6 +5591,8 @@ export class QueueRepository {
       activity: activity?.activity,
       needsInput: activity?.needsInput.count,
       needsInputReason: activity?.needsInput.reason,
+      backgroundWork: activity?.backgroundWork ?? null,
+      compactionOwedSince: this.compactionOwedSince(row.destination_session),
       claimedAt: row.claimed_at,
       lastHeartbeat: row.last_heartbeat,
       postClaimMotionCount: 0, // this reader supplies the current meaningful timestamp
@@ -5324,7 +5648,7 @@ export class QueueRepository {
 /** The row fields a delivery ledger reads, as rowToItem presents them. */
 type LedgerItem = Pick<QueueItem, "qitemId" | "state" | "blockedOn" | "destinationSession" | "tsCreated" | "lastNudgeResult">;
 
-type DeliveryLedger = { outcome: "posted" | "transport-failed" | "never-posted"; detail: string; episode: { notificationKey: string; startedAt: string } | null };
+type DeliveryLedger = { outcome: "posted" | "accepted" | "transport-failed" | "never-posted"; detail: string; episode: { notificationKey: string; startedAt: string } | null };
 
 /** A listed row's owner notifications (newest first) and its delivery ledger, read once for the whole listing. */
 type ListedLedger = { owners: QueueTransition[]; ledger: DeliveryLedger | null };

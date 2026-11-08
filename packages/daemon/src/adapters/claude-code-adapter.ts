@@ -302,7 +302,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       try { this.claudeManagedLaunch!.assertAccountHome(binding.nodeId, accountHome, binding.accountHome ? binding.accountToken ?? null : undefined); }
       catch (error) { return { ok: false, error: (error as Error).message }; }
     }
-    const claudeCommand = binding.claudeExecutable ? `exec ${shellQuote(binding.claudeExecutable)}` : "claude";
     this.autoLaunches.delete(binding.nodeId);
     opts = { ...opts, ...(opts.forkSource ? { forkSource: { ...opts.forkSource } } : {}) };
     if (!binding.tmuxSession) {
@@ -322,12 +321,20 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         if (!this.claudeManagedLaunch) await unresolvedClaudePermissionModes();
         managed = await this.claudeManagedLaunch!.prepare({ nodeId: binding.nodeId, cwd: binding.cwd,
           ...(binding.claudeExecutable ? { executable: binding.claudeExecutable } : {}),
+          ...(binding.launchWrapper?.length ? { launchWrapper: binding.launchWrapper } : {}),
           session: binding.tmuxSession, pane: binding.tmuxPane, generation: binding.launchGeneration,
           ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome, accountToken: binding.accountHome === null ? binding.accountToken : binding.accountToken ?? null } : {}),
           ...(binding.runtimeSwitchFrom ? { runtimeSwitch: { fromRuntime: binding.runtimeSwitchFrom.runtime, session: binding.runtimeSwitchFrom.session,
             pane: binding.runtimeSwitchFrom.pane, generation: binding.runtimeSwitchFrom.generation } } : {}) }, binding.permissionMode);
       } catch (error) { return { ok: false, error: (error as Error).message }; }
     }
+    let wrapperPrefix = "";
+    if (!managed && binding.claudeExecutable && binding.launchWrapper?.length) {
+      if (!this.seatLaunchEnvironment) return { ok: false, error: "launch_wrapper support unavailable; no agent started." };
+      try { wrapperPrefix = this.seatLaunchEnvironment.resolveLaunchWrapper(binding.launchWrapper).map(shellQuote).join(" ") + " "; }
+      catch { return { ok: false, error: "launch_wrapper unavailable; no agent started." }; }
+    }
+    const claudeCommand = binding.claudeExecutable ? `exec ${wrapperPrefix}${shellQuote(binding.claudeExecutable)}` : "claude";
     // A seat's own subscription token: the managed launch carries it; the classic launch gets its step in the staged
     // subshell. Subscription-token fallback is reported; an unusable API key refuses the launch.
     let seatToken: ReturnType<ClaudeManagedLaunch["seatTokenLaunch"]> = null;
@@ -346,13 +353,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const beforeManagedInput = opts.beforeNativeDispatch ? () => { assertSelected?.(); managed?.assertCurrent?.(); } : managed?.assertCurrent;
     const sendClassic = async (cmd: string) => {
       if (!this.seatLaunchEnvironment) {
+        if (binding.launchWrapper?.length) return { ok: false as const, message: "launch_wrapper support unavailable; no agent started." };
         if (seatToken?.ref.kind === "api-key") return { ok: false as const, code: "api_key_unavailable", message: "This launch cannot apply the selected API key; no Claude process started." };
         if (seatToken) tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "this launch path can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "this launch path can't run the token step"));
         if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude input" };
         return assertSelected ? this.tmux.sendText(session, cmd, assertSelected) : this.tmux.sendText(session, cmd);
       }
       const staged = await this.seatLaunchEnvironment.command(session, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration,
-        runtime: this.runtime, ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome } : {}), ...(seatToken ? { claudeTokenStep: seatToken.step } : {}) });
+        runtime: this.runtime, ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome } : {}),
+        ...(binding.launchWrapper?.length ? { launchWrapper: binding.launchWrapper } : {}), ...(binding.claudeExecutable && binding.launchWrapper?.length ? { claudeShellLookup: false as const } : {}), ...(seatToken ? { claudeTokenStep: seatToken.step } : {}) });
       if (seatToken && !staged.includes(seatToken.step)) {
         if (seatToken.ref.kind === "api-key") return { ok: false as const, code: "api_key_unavailable", message: "This pane cannot apply the selected API key; no Claude process started." };
         tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "the seat's pane shell can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "the seat's pane shell can't run the token step"));
@@ -1400,7 +1409,8 @@ const defaultSelfReportRead: ClaudeSelfReportRead = {
 
 /** Read the freshest self-report for `sessionName` as ladder evidence, or null.
  *  Mapping: busy→working; idle→idle-at-prompt; shell→idle-at-prompt (turn over, a
- *  background shell lives — the omnigent-proven mapping); waiting→needs-input (a dialog
+ *  background shell lives — the omnigent-proven mapping) plus backgroundWork, kept so the
+ *  pickup and the parked watchdog can tell it from a plain idle (#2661); waiting→needs-input (a dialog
  *  owns input; Claude's internal `waiting` ≠ omnigent's — the collision both codebases
  *  warn about, kept OUT of the activity enum). */
 export function readClaudeSelfReportEvidence(input: {
@@ -1439,8 +1449,9 @@ export function readClaudeSelfReportEvidence(input: {
       case "busy":
         return { ...base, activity: "working" };
       case "idle":
-      case "shell":
         return { ...base, activity: "idle-at-prompt" };
+      case "shell":
+        return { ...base, activity: "idle-at-prompt", backgroundWork: true };
       case "waiting":
         return { ...base, needsInput: { count: 1, reason: "dialog owns input" } };
       default:

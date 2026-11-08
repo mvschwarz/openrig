@@ -42,7 +42,7 @@ import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
-import { setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
+import { setDaemonTmuxControl, setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
 import { selectTmuxServer, type TmuxServerMode } from "./domain/tmux-server-selection.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execArgvCommand, execCommand, execTmuxCommand } from "./adapters/tmux-exec.js";
@@ -118,7 +118,7 @@ import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
 import { observeClaudePaneStartedAt } from "./domain/native-process-lineage.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
-import { probeSessionActivity, SessionTransport, inspectComposerInput } from "./domain/session-transport.js";
+import { probeSessionActivity, SessionTransport, inspectComposerInput, draftDeliveryAllows, readDraftDeliverySetting } from "./domain/session-transport.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { hookOrPaneActivity, nodeExecutorConfirmedStopped } from "./domain/node-inventory.js";
 import { HistoryQuery } from "./domain/history-query.js";
@@ -211,6 +211,7 @@ import { managedBlockRecords } from "./domain/managed-block-records.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
+  getOpenRigHome,
   readOpenRigEnv,
 } from "./openrig-compat.js";
 
@@ -555,8 +556,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     ?? (opts?.tmuxExec || (process.env.OPENRIG_TMUX_SHELL === "1" && process.platform !== "win32") ? undefined : execArgvCommand);
   // OPENRIG_TMUX_CONTROL=1 drives the real tmux through one control-mode client (tmux-control.ts); by default a client
   // is spawned per command. An injected exec is the test's own, and psmux has no control mode.
-  const argvExec = spawnedArgvExec === execArgvCommand && process.platform !== "win32" && process.env.OPENRIG_TMUX_CONTROL === "1"
-    ? tmuxControlExec(execArgvCommand, { serverArgs: tmuxSelection?.executionArgs }) : spawnedArgvExec;
+  const controlExec = spawnedArgvExec === execArgvCommand && process.platform !== "win32" && process.env.OPENRIG_TMUX_CONTROL === "1"
+    ? tmuxControlExec(execArgvCommand, { serverArgs: tmuxSelection?.executionArgs }) : undefined;
+  const argvExec = controlExec ?? spawnedArgvExec;
+  // What `rig doctor` reads of it (GET /api/adapters/tmux/control): asked for, and what the server allows.
+  setDaemonTmuxControl({ requested: process.env.OPENRIG_TMUX_CONTROL === "1", ...(controlExec ? { status: controlExec.status } : {}) });
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? (process.platform === "win32" ? execCommand : execTmuxCommand), undefined, argvExec, tmuxSelection?.executionArgs);
   // Inherit keeps the native execution environment; attachment metadata still names
   // its server for a new terminal. Isolated execution and attachment share a fixed socket.
@@ -610,6 +614,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // real liveness for hook-less / stale-hook / turn-boundary seats WITHOUT a per-request capture storm.
   // A confirmed prompt clearing recovers its refused queue wakes immediately, using the same
   // hook/pane resolution as status. No new captures, timer or delivery admission path.
+  // The same reading lets a seat a full restore stopped at a prompt be reconciled once it resumes (#2622); set once
+  // the attention reconciler exists, so a reading before then waits for the next change.
+  let restoredSeatActivity: ((sessionName: string, state: string | undefined) => void) | undefined;
   const retryPromptWakes = (sessionName: string) => {
     const runtime = sessionRegistry.findResumeContextByName(sessionName)?.runtime;
     const structural = seatStructuralActivityService.getStructuralActivity(sessionName);
@@ -617,6 +624,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime)?.activity.state;
     void queueRepoInstance.retryPromptWakesOnClear(sessionName, state, structural?.state === "attention")
       .catch(error => console.warn(`Prompt-clear wake recovery: ${error instanceof Error ? error.name : typeof error}`));
+    restoredSeatActivity?.(sessionName, state);
   };
   seatStructuralActivityService.attachActivityChanged(retryPromptWakes);
   eventBus.subscribe(event => { if (event.type === "agent.activity") retryPromptWakes(event.sessionName); });
@@ -1469,6 +1477,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       return transport.capture(session, opts);
     },
   });
+  restoredSeatActivity = (sessionName, state) => {
+    void seatAttentionReconciler.onSeatActivity(sessionName, state)
+      .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
+  };
+  eventBus.subscribe(event => {
+    if (event.type !== "restore.completed") return;
+    void seatAttentionReconciler.onRestoreCompleted(event.rigId)
+      .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
+  });
 
   // Capture compatibility before the spec-library initializer creates the primary directory.
   const userSpecLibraryRoot = getDefaultOpenRigPath("specs");
@@ -1584,6 +1601,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         verifyInputBox: () => {
           try { return new ContextPackSettingsStore().resolveOne("transport.verify_input_box").value === true; } catch { return false; }
         },
+        // transport.draft_delivery, read on every ordinary Claude Code or Codex send: only a readable refuse opts out.
+        deliverOverDraft: () => draftDeliveryAllows(() =>
+          readDraftDeliverySetting(() => new ContextPackSettingsStore().resolveOne("transport.draft_delivery").value)),
       });
       // PL-004 Phase A revision (R1): wire QueueRepository's wake-path so
       // create / handoff / handoff-and-complete nudge by default.
@@ -1830,8 +1850,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       workflowExceptionEnsurer = makeEnsureStuckExceptionItem({
         db,
         queueRepo: queueRepoForWorkflow,
-        resolveRoute: (name, version, cls, boundRig) =>
-          workflowRuntime!.resolveExceptionRouteFor(name, version, cls, boundRig),
+        resolveRoute: (name, version, cls, boundRig, instanceId) =>
+          workflowRuntime!.resolveExceptionRouteFor(name, version, cls, boundRig, instanceId),
         humanFallbackSeat: resolveWorkflowHumanDestination,
         log: (line) => console.log(line),
       });
@@ -2058,6 +2078,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // surface (rig ps, node inventory, parked-query) consumes — never
       // sessions.status, never the parallel AgentActivityStore ingest.
       seatActivity: seatActivityService,
+      // #2661 (c): the pickup's restore grace, read late like every other enforcer consumer
+      compactionOwedSince: (session) => {
+        const since = deps.compactionEnforcer?.postCompactStageOwedSince(physicalSessionName(db, session));
+        return since == null ? null : new Date(since).toISOString();
+      },
     });
     const { SliceIndexer } = await import("./domain/slices/slice-indexer.js");
     const { SliceDetailProjector } = await import("./domain/slices/slice-detail-projector.js");
@@ -2308,6 +2333,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // A confirmed-missing session reads unknown, as in the node inventory: its last Stop
       // or pane sample can't stand for a seat that no longer exists.
       return node && !nodeExecutorConfirmedStopped(db, node.node_id) ? seatActivityService.getSeatState(node.node_id) : null;
+    });
+    // #2661 (c): a seat whose managed restore the daemon still owes is not stalled within its grace (queue-pickup.ts).
+    queueRepoInstance.attachCompactionReader((session) => {
+      const since = deps.compactionEnforcer?.postCompactStageOwedSince(physicalSessionName(db, session));
+      return since == null ? null : new Date(since).toISOString();
     });
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       jobsRepo: watchdogJobsRepoInstance,
@@ -2766,18 +2796,28 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // no drivers) — `rig slack status` names what is missing.
   const { GatewaySubsystem } = await import("./domain/gateway/gateway-subsystem.js");
   const { buildSlackGatewayWire, makeHumanReplyResolver } = await import("./domain/gateway/slack/slack-subsystem.js");
+  const { createRelayInboundHandler } = await import("./domain/gateway/relay-inbound.js");
+  const effectiveOpenRigHome = getOpenRigHome();
   const gatewaySubsystem = new GatewaySubsystem({
-    home: OPENRIG_HOME,
+    home: effectiveOpenRigHome,
     wire: () => buildSlackGatewayWire({
-      home: OPENRIG_HOME,
+      home: effectiveOpenRigHome,
       queueRepo: queueRepoInstance,
-      resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract, OPENRIG_HOME),
+      resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract, effectiveOpenRigHome),
       log: (m) => console.log(`[gateway] ${m}`),
     }),
     log: (m) => console.log(`[gateway] ${m}`),
   });
   gatewaySubsystem.start();
   deps.gatewaySubsystem = gatewaySubsystem;
+  if (deps.missionControlWriteContract) {
+    deps.relayInboundHandler = createRelayInboundHandler({
+      home: effectiveOpenRigHome,
+      queueRepo: queueRepoInstance,
+      missionControlWriteContract: deps.missionControlWriteContract,
+      missionControlActionLog: deps.missionControlActionLog,
+    });
+  }
   // OPR.0.5.6.1 — bind the delivery policies' late gateway ref.
   lateGatewayDispatch.fn = (op, ref, payload, opts) => gatewaySubsystem.dispatch(op, ref, payload, opts);
 

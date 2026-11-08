@@ -34,6 +34,7 @@ import {
 import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
 import type { ProviderService } from "./domain/provider/provider-service.js";
 import { SettingsStore } from "./domain/user-settings/settings-store.js";
+import { startSeatPollers } from "./domain/seat-activity-service.js";
 import {
   ensureOpenRigInstance,
   formatInstanceInitializationConflicts,
@@ -116,7 +117,8 @@ export function startPeriodicSnapshotScheduler(deps: {
 
 /** OPR.0.4.6.FS-1 W2 — start the queue-retention maintenance sweep (arch D3): a
  *  boot sweep + a daily tick that archives aged terminal `queue_transitions`
- *  (never-delete) and prunes `watchdog_history`, both in bounded batches with
+ *  (never-delete) and prunes `watchdog_history`, `usage_samples`, stream items and
+ *  the history-only event types of `events`, all in bounded batches with
  *  event-loop yields. Reads the `retention.*` settings (baked defaults via
  *  RETENTION_DEFAULTS). Fire-and-forget with error logging — a sweep failure must
  *  never crash the daemon. Returns the daily interval handle (cleared on
@@ -143,6 +145,7 @@ export function startQueueRetentionScheduler(deps: {
       streamRetentionDays: num("retention.stream_days", RETENTION_DEFAULTS.streamRetentionDays),
       streamMaxItems: num("retention.stream_max_items", RETENTION_DEFAULTS.streamMaxItems),
       batchSize: num("retention.batch_size", RETENTION_DEFAULTS.batchSize),
+      eventsRetentionDays: num("retention.events_days", RETENTION_DEFAULTS.eventsRetentionDays),
     }).catch((err: unknown) => {
       console.error(`[queue-retention] sweep error: ${err instanceof Error ? err.message : String(err)}`);
     });
@@ -170,12 +173,26 @@ export function startStuckSweepScheduler(deps: {
   const status = createStuckSweepStatus();
   deps.stuckSweepStatus = status; // healthz reads this snapshot
   const db = deps.rigRepo.db;
+  // A pass yields the event loop, so a tick could start a second pass over the first one (a pass longer than the
+  // interval): one pass at a time, and a tick that finds one still running is skipped.
+  let runningSince: string | null = null;
+  let skipped = 0;
   const runOnce = (): void => {
+    if (runningSince) {
+      // Never silent: a pass that hangs (an awaited send that never settles) shows up here on every tick.
+      skipped++;
+      status.pass({ runningSince, skippedTicks: skipped });
+      console.error(`[stuck-sweep] tick skipped: the pass started at ${runningSince} is still running (${skipped} tick(s) skipped)`);
+      return;
+    }
+    runningSince = new Date().toISOString();
+    skipped = 0;
+    status.pass({ runningSince, skippedTicks: 0 });
     // runStuckSweep never throws (failure is recorded loudly on the status surface);
     // the catch is the never-crash-the-daemon belt for the promise chain itself.
     void runStuckSweep({ db, queueRepo, status }).catch((err: unknown) => {
       console.error(`[stuck-sweep] scheduler error: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    }).finally(() => { runningSince = null; status.pass({ runningSince: null, skippedTicks: skipped }); });
   };
   runOnce(); // boot sweep (fire-and-forget)
   return setInterval(runOnce, resolveStuckSweepIntervalSeconds() * 1000);
@@ -368,9 +385,13 @@ export async function startServer(port?: number) {
         // Polls every running tmux-bound seat's window_activity timestamp so
         // PsProjectionService + node-inventory enrichment serve
         // fresh data on each request.
-        deps.seatActivityService?.start(deps.rigRepo.db);
-        // 5b82324b — the structural pane-activity cache, on the same 1Hz cadence.
-        deps.seatStructuralActivityService?.start(deps.rigRepo.db);
+        // 5b82324b — the structural pane-activity cache runs on the same cadence.
+        // daemon.seat_poll_interval_ms (OPENRIG_SEAT_POLL_INTERVAL_MS) slows both pollers down (default 1 s,
+        // unchanged); startup-only: read once here.
+        startSeatPollers(
+          { activity: deps.seatActivityService, structural: deps.seatStructuralActivityService },
+          deps.rigRepo.db,
+        );
         // OPR.0.4.3.19 — start the liveness identity reconciler (5s default).
         // Persists the per-seat pane PID/command verdict so node-inventory
         // gates the running/active projection on verified process identity.

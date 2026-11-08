@@ -934,6 +934,32 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("attemptResume hands a Claude seat's launch_wrapper to the Claude resume adapter as its last argument, and nothing for an unwrapped seat", async () => {
+    const claudeResume = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({ claude: { canResume: vi.fn(() => true), resume: claudeResume } as unknown as ClaudeResumeAdapter });
+    const rig = rigRepo.createRig("claude-wrapper-forward");
+    const wrapped = rigRepo.addNode(rig.id, "dev.wrapped", { runtime: "claude-code", cwd: "/work", launchWrapper: ["rtk", "--claude-wrap"] });
+    const plain = rigRepo.addNode(rig.id, "dev.plain", { runtime: "claude-code", cwd: "/work" });
+    await (orch as any).attemptResume(wrapped.id, "s-wrapped", "claude_id", "tok-1", "/work", null, "sonnet", "floor");
+    await (orch as any).attemptResume(plain.id, "s-plain", "claude_id", "tok-2", "/work", null, "sonnet", "floor");
+    const wrappedCall = claudeResume.mock.calls[0] as unknown[];
+    expect(wrappedCall[2]).toBe("tok-1");
+    expect(wrappedCall).toHaveLength(19); // 8 base arguments, then the tail up to claudeMcp (index 17); the wrapper is index 18
+    expect(wrappedCall[18]).toEqual(["rtk", "--claude-wrap"]);
+    expect((claudeResume.mock.calls[1] as unknown[]).every(arg => !Array.isArray(arg) || !arg.includes("rtk"))).toBe(true);
+  });
+
+  it("attemptResume fails closed before dispatching Claude when the stored launch_wrapper is corrupt", async () => {
+    const claudeResume = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({ claude: { canResume: vi.fn(() => true), resume: claudeResume } as unknown as ClaudeResumeAdapter });
+    const rig = rigRepo.createRig("claude-wrapper-corrupt");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/work", launchWrapper: ["rtk", "--"] });
+    db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("{corrupt-json", node.id);
+    const result = await (orch as any).attemptResume(node.id, "s", "claude_id", "tok", "/work", null, "sonnet", "floor");
+    expect(result).toMatchObject({ kind: "failed", message: expect.stringMatching(/^Permission selection:.*launch_wrapper/) });
+    expect(claudeResume).not.toHaveBeenCalled();
+  });
+
   it("attemptResume forwards effort to claude and codex resume adapters", async () => {
     const claudeResume = vi.fn(async () => ({ ok: true as const }));
     const codexResume = vi.fn(async () => ({ ok: true as const }));
@@ -5084,6 +5110,73 @@ describe("RestoreOrchestrator", () => {
       expect((await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId)).ok).toBe(true);
 
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
+    });
+
+    // #2622: the check awaits native reads, and an automatic one can overlap a restore or another check.
+    function pausedAtPaneRead(tmux: TmuxAdapter, readers = 1) {
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      let reached!: () => void;
+      const allReached = new Promise<void>((resolve) => { reached = resolve; });
+      let reading = 0;
+      vi.mocked(tmux.capturePaneContent).mockImplementation(async () => {
+        if (++reading === readers) reached();
+        await released;
+        return "Claude Code v2.1.89\n ❯ accept edits on";
+      });
+      return { allReached, release };
+    }
+    const receipts = () => db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all();
+
+    it.each([
+      ["nothing changed", () => {}, true],
+      ["a newer restore attempt ended at attention", (seeded: { rig: { id: string }; nodeId: string }) => {
+        eventBus.emit({ type: "restore.started", rigId: seeded.rig.id, snapshotId: "snap-newer" });
+        eventBus.emit({ type: "restore.completed", rigId: seeded.rig.id, snapshotId: "snap-newer", result: {
+          snapshotId: "snap-newer", preRestoreSnapshotId: null, rigResult: "partially_restored",
+          nodes: [{ nodeId: seeded.nodeId, logicalId: "worker", status: "attention_required" }], warnings: [],
+        } });
+      }, false],
+      ["the seat now records another conversation", (seeded: { nodeId: string }) => {
+        db.prepare("UPDATE sessions SET resume_token = 'tok-newer' WHERE node_id = ?").run(seeded.nodeId);
+      }, false],
+    ])("a check whose subject changed while it read the pane settles nothing: %s", async (_label, change, settles) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("claude");
+      const pane = pausedAtPaneRead(tmux);
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+
+      const check = orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      await pane.allReached;
+      change(seeded as never);
+      pane.release();
+      const result = await check;
+
+      expect(result.ok).toBe(settles);
+      if (!result.ok) expect(result.code).toBe("proof_superseded");
+      expect(receipts()).toHaveLength(settles ? 1 : 0);
+      if (!settles) {
+        const entry = getNodeInventory(db, seeded.rig.id).find((n) => n.nodeId === seeded.nodeId)!;
+        expect(entry.restoreOutcome).toBe("attention_required");
+      }
+    });
+
+    it("two checks that overlap both pass and append one receipt", async () => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("claude");
+      const pane = pausedAtPaneRead(tmux, 2);
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+
+      const checks = [orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId), orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId)];
+      await pane.allReached;
+      pane.release();
+
+      expect((await Promise.all(checks)).map((r) => r.ok)).toEqual([true, true]);
+      expect(receipts()).toHaveLength(1);
     });
   });
 

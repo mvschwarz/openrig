@@ -41,6 +41,8 @@ export interface InProcessWireOpts {
   /** The platform delivery seam. Until the relay cutover wires Slack, startup passes an
    *  honest unwired refusal — dispatches are retained durably, never silently dropped. */
   deliver: SubsystemDeliverFn;
+  /** Optional synchronous preparation seam run BEFORE durable enqueue so relay envelopes/refs are frozen once. */
+  prepare?: (decision: OutboundDecision) => OutboundDecision | void;
   /** Ops the delivery layer advertises. The shipped proof-9 rail holds in-process: an
    *  unadvertised op is refused, never attempted. Empty = nothing dispatchable yet. */
   ops?: string[];
@@ -72,6 +74,7 @@ export function buildInProcessWire(opts: InProcessWireOpts): GatewayWire {
   const dispatcher: GatewayDispatcher = new GatewayDispatcher({
     buffer,
     send: (decision) => { void deliverAndAck(decision); },
+    ...(opts.prepare ? { prepare: opts.prepare } : {}),
   });
   dispatcher.onCapability({
     kind: "capability",

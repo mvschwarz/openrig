@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -14,7 +14,7 @@ import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
 import { tileAttachArgv078, tileAttachArgv079 } from "../src/domain/terminal/earlier-tile-attach.js";
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const socket = "/tmp/follow-provider.sock";
 export function task(seats: string[], complete = true): ComposedView {
   const composed = composeView("qitem:task", seats.map(seat => ({ seat, label: seat, host: null, alive: true,
@@ -23,24 +23,27 @@ export function task(seats: string[], complete = true): ComposedView {
     members: seats.map(seat => ({ key: { hostId: "self", nodeId: seat }, seat, obligations: [{ qitemId: seat, state: "in-progress" }],
       availability: "available", viewerStatus: "not-provisioned" })) } };
 }
-function fixture() {
+function fixture(platform: NodeJS.Platform = "linux", status = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "following-test-")); roots.push(root);
   const panes = new Map<string, ViewerPane & { argv: string[] }>();
   const calls: string[][] = [], rpc: Array<{ method: string; params: unknown }> = [];
   const inputs = new Map<string, "empty" | "text" | "unknown">();
   const frames = new Map<string, ComposerSnapshot | null>();
   let transform = (view: ComposedView) => view;
+  let reportedCwd: string | null | undefined;
+  let changedCreateCwd = false, stripReadyAt = 0;
   let lateFocus: { seat: string; reads: number } | undefined;
   let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false, failedViewerRun = false, failedProcessRead = false;
   const run = async (args: string[]) => {
     calls.push(args);
     const command = args.slice(0, 2).join(" ");
-    if (command === "status server") return JSON.stringify({ version: "0.9.5", protocol: 22, running: true, socket });
+    if (command === "status server") return JSON.stringify({ version: "0.9.5", protocol: 22, running: true, socket, ...status });
     if (readsFailed) throw new Error("provider read failed");
     if (command === "workspace create" || command === "pane split") {
       const id = `p${calls.length}`;
       const made = { pane_id: id, workspace_id: "w1", terminal_id: `term-${id}`, cwd: args[args.indexOf("--cwd") + 1]!,
         focused: panes.size === 0, argv: ["/bin/bash"] };
+      if (changedCreateCwd) made.cwd = tmpdir();
       panes.set(id, made);
       if (lostCreate) { lostCreate = false; throw new Error("lost create response"); }
       return JSON.stringify({ result: { [command === "workspace create" ? "root_pane" : "pane"]: made } });
@@ -52,18 +55,22 @@ function fixture() {
     if (command === "pane list") return JSON.stringify({ result: { panes: [...panes.values()].filter(p => !hideViewers || !p.cwd.includes("/viewers/")) } });
     if (command === "pane get") {
       const selected = panes.get(args[2]!); if (!selected) throw new Error("missing pane");
-      return JSON.stringify({ result: { pane: selected } });
+      return JSON.stringify({ result: { pane: { ...selected, cwd: reportedCwd === null ? undefined : reportedCwd ?? selected.cwd } } });
     }
     if (command === "pane process-info" && failedProcessRead && panes.get(args[3]!)!.cwd.includes("/viewers/")) { failedProcessRead = false; throw new Error("first viewer inspection failed"); }
-    if (command === "pane process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: panes.get(args[3]!)!.argv }] } } });
+    if (command === "pane process-info") {
+      const argv = panes.get(args[3]!)!.argv;
+      return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: argv[0] === "/usr/bin/tail" && Date.now() < stripReadyAt ? ["/bin/zsh"] : argv }] } } });
+    }
     if (command === "pane run") {
       const selected = panes.get(args[2]!)!;
-      if (args[3]!.startsWith("/usr/bin/tail")) {
-        selected.argv = ["/usr/bin/tail", "-n", "30", "-F", path.join(selected.cwd, "..", "events.log")];
+      if (args[3]!.includes("/usr/bin/tail -n 30 -F ")) {
+        selected.argv = ["/usr/bin/tail", "-n", "30", "-F", args[3]!.match(/-F '([^']+)'$/)![1]!];
       } else {
         if (failedViewerRun) { failedViewerRun = false; throw new Error("first attach dispatch failed"); }
         // The shared composer produces one wrapper per actual seat.
-        const seat = ["a", "b", "c", "d"].find(s => args[3]!.includes(`'${s}'`))!;
+        const command = args[3]!.startsWith("/bin/sh ") ? readFileSync(args[3]!.slice(9, -1), "utf8") : args[3]!;
+        const seat = ["a", "b", "c", "d"].find(s => command.includes(`'${s}'`))!;
         selected.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`];
       }
       return "";
@@ -76,7 +83,7 @@ function fixture() {
     if (command === "pane report-metadata") return "";
     throw new Error(`Unexpected operation ${args}`);
   };
-  const create = () => new HerdrFollowView({ root, socketPath: socket, platform: "linux", run,
+  const create = () => new HerdrFollowView({ root, socketPath: socket, platform, run,
     now: () => clock, input: async target => {
       if (lateFocus?.seat === target.seat && ++lateFocus.reads === 2) {
         for (const selected of panes.values()) selected.focused = selected.argv.at(-1) === `$${target.seat}`;
@@ -98,7 +105,10 @@ function fixture() {
     return path.join(directory, readdirSync(directory).find(name => name.endsWith(".json"))!);
   };
   const exitViewer = (seat: string) => { [...panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!.argv = ["/bin/bash"]; };
-  return { follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
+  return { root, follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
+    reportCwd: (cwd: string | null) => { reportedCwd = cwd; },
+    changeCreateCwd: () => { changedCreateCwd = true; },
+    delayStrip: (ms: number) => { stripReadyAt = Date.now() + ms; },
     failViewerRun: () => { failedViewerRun = true; },
     failProcessRead: () => { failedProcessRead = true; },
     confirmViewer: (seat: string) => { const entry = JSON.parse(readFileSync(journal(), "utf8")).entries[JSON.stringify(["self", seat])]; panes.get(entry.pane.pane_id)!.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`]; },
@@ -111,6 +121,109 @@ function fixture() {
 }
 
 describe("stable task-following workspace", () => {
+  it("clears the owned strip's shell noise before replacing its shell with tail", async () => {
+    const f = fixture();
+    expect(await f.follow(["a"])).toMatchObject({ ok: true });
+    const command = f.calls.find(args => args[1] === "run" && args[3]?.includes("/usr/bin/tail"))![3]!;
+    expect(command).toContain("printf '\\033[2J\\033[3J\\033[H'; exec /usr/bin/tail");
+    expect(Buffer.byteLength(command)).toBeLessThan(1024);
+  });
+  it("checks a dead legacy strip once without restarting it or waiting for first startup", async () => {
+    vi.useFakeTimers(); const f = fixture();
+    expect(await f.follow(["a"])).toMatchObject({ ok: true });
+    const file = path.join(f.root, readdirSync(f.root)[0]!, "canvas.json");
+    const saved = JSON.parse(readFileSync(file, "utf8")); delete saved.stripConfirmed;
+    writeFileSync(file, JSON.stringify(saved));
+    const strip = [...f.panes.values()].find(p => p.argv[0] === "/usr/bin/tail")!;
+    strip.argv = ["/bin/zsh"]; f.calls.length = 0;
+    let settled = false;
+    const refreshed = f.create().follow("qitem:task", task(["a"]), { enabled: true }, async () => true).then(result => { settled = true; return result; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(true);
+    expect(await refreshed).toMatchObject({ ok: false, code: "follow_unconfirmed" });
+    expect(f.calls.filter(args => args[1] === "process-info" && args.at(-1) === strip.pane_id)).toHaveLength(1);
+    expect(f.calls.some(args => args[1] === "run")).toBe(false);
+  });
+  it("confirms a slow first strip without repeating its run", async () => {
+    vi.useFakeTimers(); const f = fixture("darwin"); f.delayStrip(6000);
+    const opened = f.follow(["a"]); await vi.advanceTimersByTimeAsync(7000);
+    expect(await opened).toMatchObject({ ok: true, opened: ["a"] });
+    expect(f.calls.filter(args => args[1] === "run" && args[3]?.includes("/usr/bin/tail"))).toHaveLength(1);
+  });
+  it("reads a previously confirmed strip that later ends as unconfirmed without waiting", async () => {
+    vi.useFakeTimers(); const f = fixture();
+    expect(await f.follow(["a"])).toMatchObject({ ok: true });
+    const strip = [...f.panes.values()].find(p => p.argv[0] === "/usr/bin/tail")!;
+    strip.argv = ["/bin/zsh"]; f.calls.length = 0;
+    let settled = false;
+    const refreshed = f.create().follow("qitem:task", task(["a"]), { enabled: true }, async () => true).then(result => { settled = true; return result; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(true);
+    expect(await refreshed).toMatchObject({ ok: false, code: "follow_unconfirmed" });
+    expect(f.calls.filter(args => args[1] === "process-info" && args.at(-1) === strip.pane_id)).toHaveLength(1);
+    expect(f.calls.some(args => args[1] === "run")).toBe(false);
+  });
+  it("bounds strip confirmation and reconciles a later start without another run", async () => {
+    vi.useFakeTimers(); const f = fixture("darwin"); f.delayStrip(20000);
+    const opened = f.follow(["a"]); await vi.advanceTimersByTimeAsync(11000);
+    expect(await opened).toMatchObject({ ok: false, code: "follow_unconfirmed" });
+    expect(JSON.parse(readFileSync(path.join(f.root, readdirSync(f.root)[0]!, "canvas.json"), "utf8")).stripConfirmed).toBe(false);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });
+    expect(f.calls.filter(args => args[1] === "run" && args[3]?.includes("/usr/bin/tail"))).toHaveLength(1);
+  });
+  it("keeps a canvas that changes generation during strip confirmation unconfirmed", async () => {
+    vi.useFakeTimers(); const f = fixture("darwin"); f.delayStrip(6000);
+    const opened = f.follow(["a"]); await vi.advanceTimersByTimeAsync(1000);
+    const strip = [...f.panes.values()].find(p => p.argv[0] === "/usr/bin/tail")!; strip.terminal_id = "replacement";
+    await vi.advanceTimersByTimeAsync(7000);
+    expect(await opened).toMatchObject({ ok: false, code: "follow_unconfirmed" });
+    expect(f.calls.some(args => args[1] === "split")).toBe(false);
+  });
+
+  it("keeps the received strip creation IDs even if its rc already changed cwd", async () => {
+    const f = fixture(); f.changeCreateCwd();
+    expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
+  });
+
+  it("refuses a new incompatible protocol before effects but keeps an existing canvas on a protocol change", async () => {
+    const unsupported = fixture("linux", { protocol: 23 });
+    expect(await unsupported.follow()).toMatchObject({ ok: false, code: "follow_unsupported", following: { enabled: false } });
+    expect(unsupported.calls.some(args => ["create", "split", "run", "close"].includes(args[1]!))).toBe(false);
+    const status = { protocol: 22 }, f = fixture("darwin", status);
+    expect(await f.follow(["a"])).toMatchObject({ ok: true }); status.protocol = 23;
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: false, code: "follow_unconfirmed", opened: ["a"] });
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
+  });
+
+  it.each([null, "/home/person"])("uses created IDs when the first live reply has cwd %s", async cwd => {
+    const f = fixture("darwin"); f.reportCwd(cwd);
+    expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+  });
+
+  it.each(["linux", "darwin"] as const)("follows membership changes on %s with protocol 22 independent of release label", async platform => {
+    const f = fixture(platform, { version: "0.9.6" });
+    expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    expect(f.calls.filter(args => args[1] === "create")).toHaveLength(1);
+  });
+
+  it("keeps a known strip pane through a directory change and owner handoff", async () => {
+    const f = fixture();
+    expect(await f.follow(["a"])).toMatchObject({ ok: true, opened: ["a"] });
+    const strip = [...f.panes.values()].find(p => p.cwd.endsWith("/strip"))!;
+    const identity = [strip.workspace_id, strip.pane_id, strip.terminal_id];
+    strip.cwd = tmpdir();
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    expect([strip.workspace_id, strip.pane_id, strip.terminal_id]).toEqual(identity);
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(1);
+    const effects = f.calls.filter(c => ["run", "split", "close"].includes(c[1]!)).length;
+    strip.terminal_id = "replacement-generation";
+    expect(await f.follow(["a", "b", "c"])).toMatchObject({ ok: false, code: "follow_unconfirmed" });
+    expect(f.calls.filter(c => ["run", "split", "close"].includes(c[1]!))).toHaveLength(effects);
+  });
   it("resumes a join paused before attach dispatch through its existing journal without changing drafts or focus", async () => {
     const f = fixture(); await f.follow(); f.inputs.set("b", "text"); f.focusSeat("b");
     const before = [...f.panes.values()].map(p => [p.pane_id, p.terminal_id]); const count = f.calls.length; let reads = 0;
@@ -370,24 +483,59 @@ describe("slice follower policy", () => {
 });
 
 
-function scopeCoreFixture(kind: "qitem" | "slice" | "mission") {
-  const f = fixture(), component = f.create();
-  let failed = false;
+function scopeCoreFixture(kind: "qitem" | "slice" | "mission", protocol = 22, loseSnapshotReply = false, incompleteSnapshot = false) {
+  const f = fixture("darwin", { protocol }), component = f.create();
+  const snapshots: ComposedView[] = [];
+  let failed = false, taskReads = 0;
   const callbacks = new Set<Parameters<EventBus["subscribe"]>[0]>();
   const snapshot = () => ({ task: { kind, id: "empty", ...(kind === "qitem" ? { qitemId: "empty" } : {}),
-    name: "Empty work", complete: true, issues: [], members: [] }, members: [] });
+    name: "Empty work", complete: !(incompleteSnapshot && ++taskReads > 1), issues: [], members: [] }, members: [] });
   const service = new TerminalService({ followingStatePath: path.join(roots.at(-1)!, "core-selectors.json"),
     eventBus: { subscribe: callback => { callbacks.add(callback); return () => { callbacks.delete(callback); }; } },
     resolveProvider: () => ({ name: "herdr", status: async () => ({ provider: "herdr", available: true, capabilities: {} }),
-      liveness: async () => ({ alive: true }), openView: async () => { throw new Error("No whole-view relayout"); },
+      liveness: async () => ({ alive: true }), openView: async view => {
+        if (protocol === 22) throw new Error("No whole-view relayout");
+        snapshots.push(view);
+        if (loseSnapshotReply) throw new Error("Lost snapshot reply");
+        return { provider: "herdr", ok: true, opened: [], absent: [], degraded: [], pages: 0 };
+      },
       followView: component.follow.bind(component) }),
     viewsStore: { list: () => [], get: () => null }, listRigSeats: () => null, listPodSeats: () => null,
     listRigNames: () => [], resolveHost: () => null, hasSession: () => true,
     resolveTaskView: snapshot, resolveScopeView: () => failed ? { code: "scope_not_found", error: "Slice was renamed; reopen the view under its current key." } : snapshot() });
-  return { ...f, service, selector: `${kind}:empty`, fail: () => {
+  return { ...f, service, snapshots, selector: `${kind}:empty`, fail: () => {
     failed = true; for (const callback of callbacks) callback({ type: "queue.updated" } as Parameters<typeof callback>[0]);
   } };
 }
+it("retires following before a snapshot with an uncertain reply", async () => {
+  const f = scopeCoreFixture("slice", 23, true);
+  try {
+    await expect(f.service.followView({ view: f.selector, provider: "herdr", enabled: true })).rejects.toThrow("Lost snapshot reply");
+    expect((await f.service.status()).following).toEqual([]);
+    f.fail(); await new Promise(resolve => setTimeout(resolve, 150));
+    expect(f.snapshots).toHaveLength(1);
+  } finally { await f.service.stop(); }
+});
+it("opens an unsupported initial follower as a labelled snapshot and stops following", async () => {
+  const f = scopeCoreFixture("slice", 23);
+  try {
+    const result = await f.service.followView({ view: f.selector, provider: "herdr", enabled: true });
+    expect(result).toMatchObject({ ok: true, viewDescriptor: { kind: "fixed" }, following: { enabled: false, state: "disabled" } });
+    expect(result.notes?.join(" ")).toContain("Snapshot");
+    expect(f.snapshots).toHaveLength(1); expect(f.snapshots[0]?.spaceLabel).toContain("Snapshot");
+    expect((await f.service.status()).following).toEqual([]);
+  } finally { await f.service.stop(); }
+});
+it("explains why an unsupported follower did not open a snapshot after membership became incomplete", async () => {
+  const f = scopeCoreFixture("qitem", 23, false, true);
+  try {
+    const result = await f.service.followView({ view: f.selector, provider: "herdr", enabled: true });
+    expect(result).toMatchObject({ ok: false, code: "follow_unsupported", following: { enabled: false } });
+    expect(result.error).toContain("No snapshot opened: task membership is incomplete");
+    expect(f.snapshots).toHaveLength(0);
+    expect((await f.service.status()).following).toEqual([]);
+  } finally { await f.service.stop(); }
+});
 it.each(["slice", "qitem"] as const)("reports a real empty %s provider result consistently through Core", async kind => {
   const f = scopeCoreFixture(kind);
   try {

@@ -363,6 +363,10 @@ over that token. Without it, the target's `POST /api/hosts/pair-request` answers
 registered person can approve (none, or several with no default; name one with
 `--human`) (`packages/daemon/src/routes/hosts.ts:167-186`).
 
+The request stays open on the target for as long as `--timeout` waits (600 seconds by default), and the person's
+approval says how long and until when, in UTC. A target older than this CLI ignores the timeout and keeps the request
+10 minutes.
+
 Registration makes a host visible in topology; remote FEED attention remains opt-in.
 The human-readable success output of `host add` and `host pair` now includes the FEED
 next step alongside the existing `host doctor` suggestion. For an HTTP entry named
@@ -487,16 +491,17 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue create` | — | `--source <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--body-context <ref>`<br>`--mission <id>`<br>`--slice <id>`<br>`--gate <role>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--expires-at <iso>`<br>`--id <qitemId>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--human-intent <intent>`<br>`--alert`<br>`--human-detail-file <path>`<br>`--reply-to <qitemId>`<br>`--human-questions-file <path>`<br>`--evidence-ref <path>`<br>`--host <id>`<br>`--no-nudge`<br>`--verify`<br>`--full`<br>`--json` |
 | `rig queue claim <qitemId>` | — | `--destination <session>`<br>`--full`<br>`--json` |
 | `rig queue unclaim <qitemId>` | — | `--destination <session>`<br>`--reason <text>`<br>`--full`<br>`--json` |
-| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--closure-required-at <iso>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--full`<br>`--json` |
-| `rig queue block <qitemId>` | — | `--on <blocker>` **required**<br>`--actor <session>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--continuation <text>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--full`<br>`--json` |
+| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--closure-required-at <iso>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--host <id>`<br>`--full`<br>`--json` |
+| `rig queue block <qitemId>` | — | `--on <blocker>` **required**<br>`--actor <session>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--continuation <text>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--host <id>`<br>`--full`<br>`--json` |
 | `rig queue resolve <qitemId>` | — | `--decision <text>` **required**<br>`--actor <session>`<br>`--bearer <token>`<br>`--no-notify`<br>`--json` |
 | `rig queue handoff <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
 | `rig queue handoff-and-complete <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
 | `rig queue whoami` | — | `--session <session>`<br>`--recent-limit <n>`<br>`--work-candidates`<br>`--json` |
 | `rig queue fallback <qitemId>` | — | `--destination <session>` **required**<br>`--reason <text>`<br>`--json` |
-| `rig queue show <qitemId>` | — | `--full`<br>`--json` |
-| `rig queue transitions <qitemId>` | — | `--json`<br>`--full` |
-| `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--limit <n>`<br>`--json` |
+| `rig queue show <qitemId>` | — | `--full`<br>`--json`<br>`--host <id>` |
+| `rig queue artifact <qitemId>` | — | `--root <name>`<br>`--json` |
+| `rig queue transitions <qitemId>` | — | `--json`<br>`--full`<br>`--host <id>` |
+| `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--limit <n>`<br>`--json`<br>`--host <id>` |
 | `rig queue overdue` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig queue undelivered` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig queue inbox-drop <destinationSession>` | — | `--sender <session>`<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <inboxId>`<br>`--json` |
@@ -600,9 +605,10 @@ Herdr session per request, including session-bound previews and window reuse.
 | `rig workflow specs` | — | `--json` |
 | `rig workflow guidance <instanceId>` | — | `--packet <id>`<br>`--component <id>`<br>`--full`<br>`--json` |
 | `rig workflow show <instanceId>` | — | `--json` |
-| `rig workflow trace <instanceId>` | — | `--json` |
+| `rig workflow trace <instanceId>` | — | `--full`<br>`--json` |
 | `rig workflow continue <instanceId>` | — | `--json` |
 | `rig workflow run <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--tags <tags>`<br>`--json` |
+| `rig workflow unregister [spec]` | — | `--prune-missing`<br>`--json` |
 | `rig workflow watch <instanceId>` | — | `--json` |
 | `rig workflow route <instanceId>` | — | `--to <session>` **required**<br>`--actor-session <session>` (only when the caller's session can't be derived)<br>`--packet <qitem-id>`<br>`--reason <text>`<br>`--json` |
 | `rig workflow resume <instanceId>` | — | `--actor-session <session>` (only when the caller's session can't be derived)<br>`--occurrence <failed-qitem-id>`<br>`--decision <text>`<br>`--json` |

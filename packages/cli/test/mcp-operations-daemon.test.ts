@@ -70,8 +70,8 @@ describe("MCP operation table against the daemon", () => {
     if (saved.session === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = saved.session;
   });
 
-  async function connect() {
-    const mcp = createMcpServer(new DaemonClient(url));
+  async function connect(options: Parameters<typeof createMcpServer>[1] = {}) {
+    const mcp = createMcpServer(new DaemonClient(url), options);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "operations", version: "1.0.0" });
     await mcp.connect(serverTransport);
@@ -89,12 +89,18 @@ describe("MCP operation table against the daemon", () => {
   it("names every registered tool once, with hints that match each tool's effect", async () => {
     const client = await connect();
     const { tools } = await client.listTools();
-    expect(MCP_OPERATIONS.map((op) => op.tool).sort()).toEqual(tools.map((tool) => tool.name).sort());
-    const hints = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
+    // A local caller is the owner and is offered every tool but the person tools, which need a person to act for.
+    expect(MCP_OPERATIONS.filter((op) => op.access !== "person").map((op) => op.tool).sort()).toEqual(tools.map((tool) => tool.name).sort());
+    // An external grant naming its person is offered those, from its question pair.
+    const asPerson = await connect({ seat: "cus-x-caller@team-a", access: { principal: "principal-example-02", owner: false, rigs: ["team-a"], roots: [], workspace: false,
+      external: { objects: { question: ["read", "answer"] }, person: "ada" } } });
+    const personTools = (await asPerson.listTools()).tools;
+    expect(personTools.map((tool) => tool.name).sort()).toEqual(MCP_OPERATIONS.filter((op) => op.access === "person").map((op) => op.tool).sort());
+    const hints = Object.fromEntries([...tools, ...personTools].map((tool) => [tool.name, tool.annotations]));
     for (const op of MCP_OPERATIONS) {
       expect(hints[op.tool], op.tool).toEqual(HINTS[op.effect]);
       // Every tool says who an authenticated HTTP caller must be to be offered it.
-      expect(["work", "workspace", "owner"], op.tool).toContain(op.access);
+      expect(["work", "workspace", "owner", "person"], op.tool).toContain(op.access);
     }
   });
 

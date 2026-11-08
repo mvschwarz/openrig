@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {Hono} from 'hono';
-import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT, RESTART_RECOVERY_WINDOW_MS_DEFAULT, buildPostCompactTurnBoundaryPrompt} from '../src/domain/claude-compaction-enforcer.js';
+import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, RESTART_RECOVERY_WINDOW_MS_DEFAULT, buildPostCompactTurnBoundaryPrompt} from '../src/domain/claude-compaction-enforcer.js';
 import {SessionTransport} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {compactionRoutes} from '../src/routes/compaction.js';
@@ -356,3 +356,322 @@ it('a restart retains a completed automatic map after its prep deadline and the 
  for(let i=0;i<4;i++)await staleTick(restarted);
  expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(audits(f)).toHaveLength(1);
 });
+it('#2682: a fresh below-threshold sample ends a held attempt; a restart does not bring it back, and a busy seat gets no fresh request until it is idle',async()=>{
+ const f=fixture();const e=f.daemon();
+ await e.maybeAutoCompact(high);completeMap(e);
+ f.hooks.busy=true;
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+11*60_000);e.reconcilePreparations();
+ const held=e.getPreparationState(seat)!;
+ expect(held).toMatchObject({status:'waiting',prepared:true,preparedReason:'map_complete_seat_never_idle'});
+ await e.maybeAutoCompact({...high,usedPercentage:30});
+ expect(e.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,status:'stopped',reason:'below_threshold_while_prepared'});
+ const record=JSON.parse(readFileSync(recordFile(e),'utf8'));
+ expect(record).toMatchObject({phase:'ended',reason:'below_threshold_while_prepared',delivery:'delivered',endedAt:expect.any(Number)});
+ expect(record.prepared).toBeUndefined();
+ f.hooks.busy=false;f.advance(60_000);
+ const restarted=f.daemon();
+ // The monitor's drain for an idle seat whose sample is stale: nothing is resumed, nothing is sent.
+ expect(await restarted.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code'})).toMatchObject({triggered:false,reason:'no_pending_stage'});
+ expect(restarted.getPreparationState(seat)).toBeNull();
+ // Past the retry cooldown, a busy seat is not asked again; once it is idle it gets one fresh request, never the old map.
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT);f.hooks.busy=true;
+ expect(await restarted.maybeAutoCompact(high)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(f)).toHaveLength(1);expect(restarted.getPreparationState(seat)).toBeNull();
+ f.hooks.busy=false;
+ expect(await restarted.maybeAutoCompact(high)).toEqual({triggered:true});
+ expect(prepPrompts(f)).toHaveLength(2);expect(compacts(f)).toHaveLength(0);
+ expect(restarted.getPreparationState(seat)!.attemptId).not.toBe(held.attemptId);
+});
+
+// #2682: a context drop while the daemon was down. The monitor's drain for a stale sample passes the seat's last known
+// usage and conversation; a held map whose context has since dropped, or whose conversation changed, never compacts.
+const hs={...high,sessionId:'conversation-one'};
+/** An automatic attempt held with its map complete on a busy seat, as the first daemon left it. */
+async function heldBy(f:F){
+ const e=f.daemon();await e.maybeAutoCompact(hs);completeMap(e);
+ f.hooks.busy=true;f.advance(AUTO_PREP_WAIT_MS_DEFAULT+11*60_000);e.reconcilePreparations();
+ const held=e.getPreparationState(seat)!;
+ expect(held).toMatchObject({status:'waiting',prepared:true});
+ return held;
+}
+const staleDrain=(e:ClaudeCompactionEnforcer,lastUsedPercentage:number,sessionId='conversation-one')=>
+ e.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code',lastUsedPercentage,sessionId});
+
+it('#2682 S1a: a restart between a fresh dip and the deadline: the stale drain sends no /compact, and the attempt is never held',async()=>{
+ const f=fixture();const e=f.daemon();await e.maybeAutoCompact(hs);const a=completeMap(e);
+ expect(await e.maybeAutoCompact({...hs,usedPercentage:30})).toEqual({triggered:false,reason:'below_threshold'});
+ expect(JSON.parse(readFileSync(recordFile(e),'utf8')).belowSince).toEqual(expect.any(Number));
+ f.advance(11*60_000);
+ const restarted=f.daemon();
+ // The seat is idle with an empty box; its newest sample (30%) is no longer fresh.
+ expect(await staleDrain(restarted,30)).toMatchObject({triggered:false});
+ expect(compacts(f)).toHaveLength(0);
+ f.hooks.busy=true;f.advance(AUTO_PREP_WAIT_MS_DEFAULT+AUTO_RETRY_AFTER_STOP_MS_DEFAULT);restarted.reconcilePreparations();
+ const state=restarted.getPreparationState(seat)!;
+ expect(state).toMatchObject({attemptId:a.attemptId,status:'stopped',reason:'map_complete_seat_never_idle'});
+ expect(state.prepared).toBeUndefined();
+ f.hooks.busy=false;await staleDrain(restarted,30);
+ expect(compacts(f)).toHaveLength(0);
+});
+
+it('#2682 S1b: a held attempt, a restart, and a stale sample below the threshold at the drain: it stops, with no /compact',async()=>{
+ const f=fixture();const held=await heldBy(f);
+ f.hooks.busy=false;f.advance(11*60_000);
+ const restarted=f.daemon();
+ expect(await staleDrain(restarted,20)).toMatchObject({triggered:false});
+ expect(restarted.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,status:'stopped',reason:'below_threshold_while_prepared'});
+ expect(compacts(f)).toHaveLength(0);
+ expect(JSON.parse(readFileSync(join(dirname(held.mapPath),'COMPACTION-STATE.json'),'utf8'))).toMatchObject({phase:'ended',reason:'below_threshold_while_prepared'});
+});
+
+it('#2682 S1c: a held attempt, a restart, and another conversation at the drain: it stops, with no /compact',async()=>{
+ const f=fixture();const held=await heldBy(f);
+ f.hooks.busy=false;f.advance(11*60_000);
+ const restarted=f.daemon();
+ expect(await staleDrain(restarted,90,'conversation-two')).toMatchObject({triggered:false});
+ expect(restarted.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,status:'stopped',reason:'below_threshold_while_prepared'});
+ expect(compacts(f)).toHaveLength(0);
+});
+
+it('#2682 S1d: a held attempt, a restart, and a stale sample still above with the same conversation: the /compact goes at the window',async()=>{
+ const f=fixture();const held=await heldBy(f);
+ f.hooks.busy=false;f.advance(11*60_000);
+ const restarted=f.daemon();
+ expect(await staleDrain(restarted,90)).toEqual({triggered:true});
+ expect(compacts(f)).toHaveLength(1);
+ expect(restarted.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,status:'compact-sent'});
+});
+
+it('#2682 S1e: a held attempt, a restart, and a stale sample 15 points above the map: it retires as stale, with no /compact; 14 above still sends',async()=>{
+ for(const [growth,sends] of [[15,false],[14,true]] as const){
+  const f=fixture();const held=await heldBy(f);
+  const mapAt=JSON.parse(readFileSync(join(dirname(held.mapPath),'COMPACTION-STATE.json'),'utf8')).mapUsedPercentage;
+  expect(mapAt).toEqual(expect.any(Number));
+  f.hooks.busy=false;f.advance(11*60_000);
+  const restarted=f.daemon();
+  const out=await staleDrain(restarted,mapAt+growth);
+  if(sends){expect(out).toEqual({triggered:true});expect(compacts(f)).toHaveLength(1);continue;}
+  expect(out).toMatchObject({triggered:false});
+  expect(restarted.getPreparationState(seat)).toMatchObject({attemptId:held.attemptId,status:'stopped',reason:'prepared_map_stale'});
+  expect(compacts(f)).toHaveLength(0);
+ }
+});
+
+it('#2682 S1f: an armed map not yet held, a stale sample of another conversation at the drain, then an unknown one: no /compact with the old map, in process or after a restart',async()=>{
+ for(const variant of ['in-process','restart'] as const){
+  const f=fixture();let e=f.daemon();
+  await e.maybeAutoCompact(hs);const a=completeMap(e);
+  expect(e.getPreparationState(seat),variant).toMatchObject({status:'waiting'});
+  expect(e.getPreparationState(seat)!.prepared,variant).toBeUndefined();
+  f.advance(60_000);
+  if(variant==='restart')e=f.daemon();
+  expect(await staleDrain(e,90,'conversation-two'),variant).toEqual({triggered:false,reason:'preparation_stopped'});
+  expect(e.getPreparationState(seat),variant).toMatchObject({attemptId:a.attemptId,status:'stopped',reason:'below_threshold_while_prepared'});
+  // The next sample names no conversation (unknown is not a mismatch): it must not reach the old map.
+  await e.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code',lastUsedPercentage:90});
+  expect(compacts(f),variant).toHaveLength(0);
+ }
+});
+
+/** An automatic attempt whose request was delivered and which ended with no map at its deadline, past the retry cooldown. */
+async function endedPastCooldown(f:F,e:ClaudeCompactionEnforcer){
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:true});
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);e.reconcilePreparations();
+ expect(e.getPreparationState(seat)).toMatchObject({status:'stopped',reason:'preparation_incomplete',delivery:'delivered'});
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);
+}
+
+it('#2682 S2: the ended-attempt idle gate reads a busy seat once and returns at once, without waiting inside the poll',async()=>{
+ const f=fixture();const e=f.daemon();await endedPastCooldown(f,e);
+ const wait=vi.spyOn(f.transport,'waitUntilIdle');
+ f.hooks.busy=true;const before=f.now();
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(f.now()-before).toBeLessThan(1000);
+ expect(wait).toHaveBeenCalledTimes(1);
+ expect(prepPrompts(f)).toHaveLength(1);
+ f.hooks.busy=false;
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:true});
+ expect(prepPrompts(f)).toHaveLength(2);
+});
+
+it('#2682 n2: a momentarily unknown occupant generation does not erase the ended attempt: the busy seat is still held off after',async()=>{
+ const f=fixture();const e=f.daemon();
+ await endedPastCooldown(f,e);
+ // Neither the occupant resolver nor the binding names the occupant for one poll.
+ f.hooks.busy=true;f.generation(null as unknown as string);
+ expect(await e.maybeAutoCompact(hs)).toMatchObject({triggered:false});
+ f.generation('generation-one');
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(f)).toHaveLength(1);
+});
+
+it('#2682 n3: a cancel after a submitted /compact leaves an ended record, and a restart does not hold a busy seat off for it',async()=>{
+ const f=fixture();const e=await compactedBy(f);e.cancelPreparation(seat);
+ expect(JSON.parse(readFileSync(recordFile(e),'utf8'))).toMatchObject({phase:'ended',delivery:'delivered'});
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);
+ const restarted=f.daemon();f.hooks.busy=true;
+ expect(await restarted.maybeAutoCompact(hs)).toEqual({triggered:true});
+ expect(prepPrompts(f)).toHaveLength(2);
+});
+
+it('#2682 P1: a fresh high sample from another conversation, in process or after a restart, or after a dip and a climb back, sends no /compact with the old map',async()=>{
+ const other={...high,sessionId:'conversation-two'};
+ for(const variant of ['armed','held','held-restart','dip-climb','dip-climb-restart'] as const){
+  const f=fixture();let e=f.daemon();
+  await e.maybeAutoCompact(hs);const a=completeMap(e);
+  if(variant.startsWith('dip-climb')){
+   expect(await e.maybeAutoCompact({...hs,usedPercentage:30})).toEqual({triggered:false,reason:'below_threshold'});
+   // Back above before the deadline, on a busy seat: no window for the /compact.
+   f.hooks.busy=true;await e.maybeAutoCompact(hs);
+   if(variant==='dip-climb-restart'){e=f.daemon();await e.maybeAutoCompact(hs);}
+   f.advance(AUTO_PREP_WAIT_MS_DEFAULT+11*60_000);e.reconcilePreparations();
+   // The attempt that dipped is never held, so its pre-dip map stops at the idle grace as before.
+   const state=e.getPreparationState(seat)!;
+   expect(state,variant).toMatchObject({attemptId:a.attemptId,status:'stopped',reason:'map_complete_seat_never_idle'});
+   expect(state.prepared,variant).toBeUndefined();
+   f.hooks.busy=false;await e.maybeAutoCompact(hs);await e.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code',lastUsedPercentage:90,sessionId:'conversation-one'});
+   expect(compacts(f),variant).toHaveLength(0);
+   continue;
+  }
+  if(variant!=='armed'){
+   f.hooks.busy=true;f.advance(AUTO_PREP_WAIT_MS_DEFAULT+11*60_000);e.reconcilePreparations();
+   expect(e.getPreparationState(seat),variant).toMatchObject({status:'waiting',prepared:true});
+   f.hooks.busy=false;f.advance(11*60_000);
+   if(variant==='held-restart')e=f.daemon();
+  }
+  // The /clear and its low sample were missed; the seat is idle with an empty box.
+  expect(await e.maybeAutoCompact(other),variant).toMatchObject({triggered:false});
+  expect(compacts(f),variant).toHaveLength(0);
+  expect(e.getPreparationState(seat),variant).toMatchObject({attemptId:a.attemptId,status:'stopped'});
+  // An unknown conversation is not a mismatch: on a fresh copy of the armed case, it compacts with the map as before.
+  if(variant==='armed'){
+   const g=fixture();const d=g.daemon();await d.maybeAutoCompact(hs);completeMap(d);
+   expect(await d.maybeAutoCompact({...high,sessionId:null})).toEqual({triggered:true});
+   expect(compacts(g)).toHaveLength(1);
+  }
+ }
+ // The low sample of the /clear seen, but from the new conversation: it ends the armed attempt too, so a later high sample
+ // whose conversation reads unknown never compacts with the old conversation's map.
+ {
+  const h=fixture();const c=h.daemon();await c.maybeAutoCompact(hs);const b=completeMap(c);
+  expect(await c.maybeAutoCompact({...other,usedPercentage:20})).toMatchObject({triggered:false});
+  expect(c.getPreparationState(seat)).toMatchObject({attemptId:b.attemptId,status:'stopped'});
+  await c.maybeAutoCompact({...high,sessionId:null});
+  expect(compacts(h)).toHaveLength(0);
+ }
+ // A request that never went out was made in no conversation: the attempt takes the sample's conversation, and a request
+ // and map made in the new one are kept, with one request and the /compact.
+ const g=fixture();const d=g.daemon();
+ vi.spyOn(g.transport,'send').mockResolvedValueOnce({ok:false,sent:false,reason:'mid_work'} as any);
+ expect(await d.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'send_failed'});
+ expect(d.getPreparationState(seat)).toMatchObject({status:'sending',delivery:'not_sent'});
+ expect(await d.maybeAutoCompact(other)).toEqual({triggered:true});
+ completeMap(d);
+ expect(await d.maybeAutoCompact(other)).toEqual({triggered:true});
+ expect(prepPrompts(g)).toHaveLength(1);
+ expect(compacts(g)).toHaveLength(1);
+});
+
+it('#2682 P2a: an ended attempt, an idle read, then a stale observation, then a busy seat: no fresh request on the busy poll',async()=>{
+ const f=fixture();const e=f.daemon();await endedPastCooldown(f,e);
+ expect(await e.maybeAutoCompact({...hs,isObservationCurrent:()=>false})).toEqual({triggered:false,reason:'stale_observation'});
+ f.hooks.busy=true;
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(f)).toHaveLength(1);
+});
+
+it('#2682 P2b: an ended attempt, an idle read, then a peer\'s turn before the send: the request waits for a real idle window, and goes once',async()=>{
+ const f=fixture();const e=f.daemon();await endedPastCooldown(f,e);
+ const read=f.transport.waitUntilIdle.bind(f.transport);
+ // A peer's message starts a turn right after the gate's idle read.
+ vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async(...args)=>{const r=await read(...args);f.hooks.busy=true;return r;});
+ expect(await e.maybeAutoCompact(hs)).toMatchObject({triggered:false});
+ expect(prepPrompts(f)).toHaveLength(1);
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(f)).toHaveLength(1);
+ f.hooks.busy=false;
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:true});
+ expect(prepPrompts(f)).toHaveLength(2);
+ f.hooks.busy=true;await e.maybeAutoCompact(hs);
+ expect(prepPrompts(f)).toHaveLength(2);
+ // A replacement that stops with its request never sent (each send found a turn begun) keeps the gate after a restart.
+ const g=fixture();const d=g.daemon();await endedPastCooldown(g,d);
+ const gateRead=g.transport.waitUntilIdle.bind(g.transport);
+ vi.spyOn(g.transport,'waitUntilIdle').mockImplementation(async(...args)=>{const r=await gateRead(...args);g.hooks.busy=true;return r;});
+ for(let i=0;i<3;i++){g.hooks.busy=false;await d.maybeAutoCompact(hs);}
+ expect(d.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'not_sent'});
+ expect(prepPrompts(g)).toHaveLength(1);
+ vi.mocked(g.transport.waitUntilIdle).mockRestore();
+ const restarted=g.daemon();g.hooks.busy=true;
+ expect(await restarted.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(g)).toHaveLength(1);
+});
+
+it('#2682: an ended attempt whose conversation reads unknown keeps its gate when the unsent replacement moves to another conversation: a busy seat gets no second request',async()=>{
+ const f=fixture();const e=f.daemon();
+ expect(await e.maybeAutoCompact(high)).toEqual({triggered:true});
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);e.reconcilePreparations();
+ expect(e.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'delivered'});
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);
+ vi.spyOn(f.transport,'send').mockResolvedValueOnce({ok:false,sent:false,reason:'mid_work'} as any);
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'send_failed'});
+ expect(e.getPreparationState(seat)).toMatchObject({status:'sending',delivery:'not_sent'});
+ await e.maybeAutoCompact({...high,usedPercentage:40,sessionId:'conversation-two'});
+ f.hooks.busy=true;
+ expect(await e.maybeAutoCompact({...high,sessionId:'conversation-two'})).toEqual({triggered:false,reason:'waiting_for_idle'});
+ expect(prepPrompts(f)).toHaveLength(1);
+});
+
+/** An ended attempt whose conversation reads unknown, then its replacement refused before its request went out, made in
+ *  conversation-one. */
+async function unsentReplacementAfterUnknownEnded(f:F){
+ const e=f.daemon();
+ expect(await e.maybeAutoCompact(high)).toEqual({triggered:true});
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);e.reconcilePreparations();
+ expect(e.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'delivered'});
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);
+ vi.spyOn(f.transport,'send').mockResolvedValueOnce({ok:false,sent:false,reason:'mid_work'} as any);
+ expect(await e.maybeAutoCompact(hs)).toEqual({triggered:false,reason:'send_failed'});
+ expect(e.getPreparationState(seat)).toMatchObject({status:'sending',delivery:'not_sent'});
+ return e;
+}
+
+for(const restart of ['before','after'] as const){
+ it(`#2682: a restart ${restart} the unsent replacement moves to another conversation keeps the gate of the ended attempt whose conversation reads unknown, as in memory: a busy seat in a third conversation gets no second request`,async()=>{
+  const f=fixture();let e=await unsentReplacementAfterUnknownEnded(f);
+  if(restart==='before')e=f.daemon();
+  await e.maybeAutoCompact({...high,usedPercentage:40,sessionId:'conversation-two'});
+  if(restart==='after')e=f.daemon();
+  f.hooks.busy=true;
+  expect(await e.maybeAutoCompact({...high,sessionId:'conversation-three'})).toEqual({triggered:false,reason:'waiting_for_idle'});
+  expect(prepPrompts(f)).toHaveLength(1);
+ });
+}
+
+it('#2682: a replacement that moved to another conversation and stopped with its request never sent keeps, after a restart, the gate of the ended attempt whose conversation reads unknown: a busy seat in a third conversation gets no request',async()=>{
+ const f=fixture();const e=await unsentReplacementAfterUnknownEnded(f);
+ await e.maybeAutoCompact({...high,usedPercentage:40,sessionId:'conversation-two'});
+ vi.spyOn(f.transport,'send').mockResolvedValue({ok:false,sent:false,reason:'mid_work'} as any);
+ for(let i=0;i<4&&e.getPreparationState(seat)?.status!=='stopped';i++)await e.maybeAutoCompact({...high,sessionId:'conversation-two'});
+ expect(e.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'not_sent'});
+ vi.mocked(f.transport.send).mockRestore();
+ const restarted=f.daemon();f.hooks.busy=true;
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);
+ await restarted.maybeAutoCompact({...high,sessionId:'conversation-three'});
+ expect(prepPrompts(f)).toHaveLength(1);
+});
+
+for(const otherUsage of [20,90,null] as (number|null)[]){
+ for(const next of ['stale','fresh'] as const){
+  it(`#2682: a stale sample of another known conversation (at ${otherUsage}) ends an automatic attempt whose request went out before its map is complete: a later ${next} sample whose conversation reads unknown never compacts with that map`,async()=>{
+   const f=fixture();const e=f.daemon();
+   expect(await e.maybeAutoCompact(hs)).toEqual({triggered:true});
+   expect(await e.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code',lastUsedPercentage:otherUsage,sessionId:'conversation-two'}))
+    .toEqual({triggered:false,reason:'preparation_stopped'});
+   completeMap(e);
+   if(next==='stale')await e.drainPendingPreparedCompact({sessionName:seat,runtime:'claude-code',lastUsedPercentage:90,sessionId:null});
+   else await e.maybeAutoCompact({...high,sessionId:null});
+   expect(compacts(f)).toHaveLength(0);
+  });
+ }
+}

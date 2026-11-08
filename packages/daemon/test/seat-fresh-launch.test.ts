@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
-import { seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { ensureSeatSkillPlugin, seatSkillLocation, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { reconcileSkillLoadout, resolvePluginSkills } from "../src/domain/skill-catalog.js";
 import { prepareSeatLaunchAdditions } from "../src/domain/seat-launch-additions.js";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -169,6 +170,47 @@ describe("SeatLifecycleService.launchFresh", () => {
     const seat = seedSeat({ clean: true });
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "first occupant" });
     expect(result.warnings?.some(warning => warning.includes("open terminal clients"))).not.toBe(true);
+  });
+
+  it("#2426: a fresh launch names what became of OpenRig's earlier copies of openrig-core's skills, a kept edited one included", async () => {
+    const saved = process.env["OPENRIG_HOME"];
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "fresh-core-copies-"));
+    process.env["OPENRIG_HOME"] = home;
+    try {
+      // The vendored core, which this seat's saved selection loads directly, and the copies a launch before #2433 left.
+      const core = path.join(home, "plugins", "openrig-core");
+      fs.mkdirSync(path.join(core, ".claude-plugin"), { recursive: true });
+      fs.writeFileSync(path.join(core, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "openrig-core", version: "0.7.9" }));
+      for (const id of ["alpha", "edited"]) {
+        fs.mkdirSync(path.join(core, "skills", id), { recursive: true });
+        fs.writeFileSync(path.join(core, "skills", id, "SKILL.md"), `---\nname: ${id}\ndescription: The ${id} skill.\n---\n\nUse it.\n`);
+      }
+      const seat = seedSeat();
+      const entries = JSON.parse((db.prepare("SELECT projection_entries_json FROM node_startup_context WHERE node_id = ?").get(seat.node.id) as { projection_entries_json: string }).projection_entries_json) as unknown[];
+      db.prepare("UPDATE node_startup_context SET projection_entries_json = ? WHERE node_id = ?")
+        .run(JSON.stringify([...entries, { ...startupEntry("skill", "openrig-core"), category: "plugin", absolutePath: core }]), seat.node.id);
+      const paths = seatSkillPaths({ rigId: seat.rig.id, logicalId: "dev.impl", runtime: "claude-code" });
+      ensureSeatSkillPlugin(paths);
+      const old = reconcileSkillLoadout({
+        loadout: { catalogRoot: home, catalogRevision: null, catalogDigest: null, projectSelectionDeclared: false, projectSelection: [],
+          entries: resolvePluginSkills({ pluginId: "openrig-core", pluginRoot: core, runtime: "claude-code" }).entries },
+        runtime: "claude-code", cwd: paths.root, apply: true, topologyOwner: seat.sessionName, location: seatSkillLocation(paths),
+      });
+      expect(old.errors).toEqual([]);
+      fs.writeFileSync(path.join(paths.skillsRoot, "edited", "SKILL.md"), "My own notes.\n");
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+      expect(result.ok).toBe(true);
+      expect(result.warnings).toEqual(expect.arrayContaining([
+        "Seat skills: removed OpenRig's copy of openrig-core's alpha, which this seat now loads from the plugin itself",
+        `Seat skills: kept ${path.join(paths.skillsRoot, "edited")}, though openrig-core also supplies edited: it was changed after OpenRig wrote it`,
+      ]));
+      expect(fs.existsSync(path.join(paths.skillsRoot, "alpha"))).toBe(false);
+      expect(fs.readFileSync(path.join(paths.skillsRoot, "edited", "SKILL.md"), "utf8")).toBe("My own notes.\n");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = saved;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it.each([true, false])("#729: retains warnings independently of fresh identity (verified=%s)", async verified => {

@@ -38,7 +38,7 @@ export interface Node {
   advisor?: string | null;
   /** Claude MCP loading for this seat; null/absent preserves the provider default. */
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp | null;
-  /** Optional argv prefix wrapping local built-in Pi/Codex launches; null/absent = none. */
+  /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches; null/absent = none. */
   launchWrapper?: string[] | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
@@ -350,7 +350,7 @@ export type RigEvent =
   // because its source file disappeared from the scanned workflows folder.
   // Provides a traceable audit-log entry for OQ-4 ("Remove cache row when
   // file disappears + audit-log entry. Clean Library + traceable.").
-  | { type: "workflow_spec.removed"; sourcePath: string; specId: string | null; specName: string | null; specVersion: string | null; reason: "file_disappeared" }
+  | { type: "workflow_spec.removed"; sourcePath: string; specId: string | null; specName: string | null; specVersion: string | null; reason: "file_disappeared" | "source_missing" | "unregistered" }
   // PL-005 Phase A: Mission Control / Queue Observability events.
   // Action audit + cross-CLI-version drift detection.
   | { type: "mission_control.action_executed"; actionId: string; actionVerb: string; qitemId: string | null; actorSession: string }
@@ -363,6 +363,9 @@ export type RigEvent =
 export type PersistedEvent = RigEvent & {
   seq: number;
   createdAt: string;
+  /** Set on an event delivered only in memory (EventBus.publishTransient): never stored, never replayed. Its `seq` is
+   *  the seq of the stored event that caused it, not a seq of its own. */
+  transient?: true;
 };
 
 // -- Composite types --
@@ -791,7 +794,7 @@ export interface NodeInventoryEntry {
   agentRef: string | null;
   profile: string | null;
   codexConfigProfile?: string | null;
-  /** Optional argv prefix wrapping local built-in Pi/Codex launches; null/absent = none. */
+  /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches; absent = none. */
   launchWrapper?: string[];
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF, or null when none is attached. */
   permissionPolicy?: string | null;
@@ -1141,7 +1144,7 @@ export interface LegacyRigSpecNode {
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
-  /** Optional argv prefix wrapping local built-in Pi/Codex launches (`[]` explicitly clears). */
+  /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
   cwd?: string;
   surfaceHint?: string;
@@ -1268,7 +1271,7 @@ export interface RigSpecPodMember {
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   /** A Codex member's own permission envelope; the seat's live record afterwards. */
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
-  /** Optional argv prefix wrapping local built-in Pi/Codex launches (`[]` explicitly clears). */
+  /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */

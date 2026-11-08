@@ -1,0 +1,193 @@
+{
+  "provenance": "Sanitized fixtures using the v0 helper test shape; IDs computed with Python json.dumps(sort_keys=True,separators=(comma,colon),ensure_ascii=False). No real work records.",
+  "sourceStore": "/example/original/reconstructions",
+  "base": {
+    "schema": "openrig.reconstruction/v0",
+    "kind": "base",
+    "subject": "work:example",
+    "author": "example:author",
+    "purpose": "Continue the selected example task",
+    "depth": "working",
+    "created_at": "2026-10-01T10:00:00+00:00",
+    "coverage": {
+      "included": [
+        "selected task"
+      ],
+      "excluded": [
+        "credentials"
+      ]
+    },
+    "unknowns": [
+      "No current runtime check"
+    ],
+    "items": [
+      {
+        "id": "decision",
+        "category": "decision",
+        "text": "Working understanding decision",
+        "observed_at": "2026-10-01T10:00:00+00:00",
+        "sources": [
+          "route"
+        ],
+        "depends_on": [
+          "dependency"
+        ]
+      },
+      {
+        "id": "dependency",
+        "category": "evidence",
+        "text": "Working understanding dependency",
+        "observed_at": "2026-10-01T10:00:00+00:00"
+      },
+      {
+        "id": "remove",
+        "category": "decision",
+        "text": "Working understanding remove",
+        "observed_at": "2026-10-01T10:00:00+00:00"
+      },
+      {
+        "id": "constraint",
+        "category": "constraint",
+        "text": "Working understanding constraint",
+        "observed_at": "2026-10-01T10:00:00+00:00"
+      },
+      {
+        "id": "gap",
+        "category": "gap",
+        "text": "Working understanding gap",
+        "observed_at": "2026-10-01T10:00:00+00:00"
+      },
+      {
+        "id": "authority",
+        "category": "authority",
+        "text": "Working understanding authority",
+        "observed_at": "2026-10-01T10:00:00+00:00"
+      },
+      {
+        "id": "tagged",
+        "category": "detail",
+        "text": "Working understanding tagged",
+        "observed_at": "2026-10-01T10:00:00+00:00",
+        "tags": [
+          "next"
+        ]
+      },
+      {
+        "id": "omitted",
+        "category": "detail",
+        "text": "Working understanding omitted",
+        "observed_at": "2026-10-01T10:00:00+00:00"
+      }
+    ],
+    "sources": [
+      {
+        "id": "route",
+        "address": "transcript:example:lines-1-5",
+        "observed_at": "2026-10-01T10:00:00+00:00"
+      },
+      {
+        "id": "uncited",
+        "address": "https://example.invalid/context",
+        "observed_at": null
+      }
+    ],
+    "discovery": [],
+    "id": "da27fa1f5276d29d1da0b3877cbc9344b25212b9e331a44e970963ae6a7af3f6"
+  },
+  "delta": {
+    "schema": "openrig.reconstruction/v0",
+    "kind": "delta",
+    "subject": "work:example",
+    "author": "example:author",
+    "purpose": "Continue the selected example task",
+    "depth": "working",
+    "created_at": "2026-10-01T10:00:00+00:00",
+    "parent": {
+      "store": "/example/original/reconstructions",
+      "revision": "da27fa1f5276d29d1da0b3877cbc9344b25212b9e331a44e970963ae6a7af3f6"
+    },
+    "upsert_items": [
+      {
+        "id": "decision",
+        "category": "decision",
+        "text": "A changed assessment based on new evidence",
+        "observed_at": "2026-10-27T23:00:00+00:00",
+        "sources": [
+          "route"
+        ],
+        "depends_on": [
+          "dependency"
+        ]
+      }
+    ],
+    "remove_items": [
+      "remove"
+    ],
+    "id": "36623c590a22ce12401132ae90f9aae29fa88c07f6ae76ebf182fa5ed701a7a1"
+  },
+  "other": {
+    "schema": "openrig.reconstruction/v0",
+    "kind": "base",
+    "subject": "seat:helper",
+    "author": "example:author",
+    "purpose": "Continue the selected example task",
+    "depth": "working",
+    "created_at": "2026-10-01T10:00:00+00:00",
+    "items": [
+      {
+        "id": "activity",
+        "category": "constraint",
+        "text": "Working understanding activity",
+        "observed_at": "2026-10-01T10:00:00+00:00"
+      }
+    ],
+    "sources": [],
+    "created_note": "Different observation dates are not an atomic capture",
+    "id": "d3dbba4b6dffe6aec89c7fc71be5f5ee07e231241ae3167b3a7e3d9bf1bc0fe3"
+  },
+  "composition": {
+    "schema": "openrig.reconstruction/v0",
+    "kind": "composition",
+    "subject": "group:example",
+    "author": "example:author",
+    "purpose": "Continue the selected example task",
+    "depth": "working",
+    "created_at": "2026-10-01T10:00:00+00:00",
+    "members": [
+      {
+        "store": "/example/original/reconstructions",
+        "revision": "36623c590a22ce12401132ae90f9aae29fa88c07f6ae76ebf182fa5ed701a7a1"
+      },
+      {
+        "store": "/example/original/reconstructions",
+        "revision": "d3dbba4b6dffe6aec89c7fc71be5f5ee07e231241ae3167b3a7e3d9bf1bc0fe3"
+      }
+    ],
+    "id": "abdca73469bd2e7c75443d2e7648757616f04c62e449d623a97a6ede49f28b28"
+  },
+  "canonicalVector": {
+    "value": {
+      "10": "ten",
+      "2": "two",
+      "é": "été",
+      "😀": "astral",
+      "": "bmp",
+      "__proto__": {
+        "safe": true
+      },
+      "control": "\b\n\t",
+      "ints": [
+        0,
+        -4,
+        9007199254740991
+      ],
+      "values": [
+        null,
+        false,
+        true
+      ]
+    },
+    "canonical": "{\"10\":\"ten\",\"2\":\"two\",\"__proto__\":{\"safe\":true},\"control\":\"\\b\\n\\t\",\"ints\":[0,-4,9007199254740991],\"values\":[null,false,true],\"é\":\"été\",\"\":\"bmp\",\"😀\":\"astral\"}",
+    "sha256": "9c3b2f8426bd1ed10bf2740a1a759e6f199431f9f862af0bce968c49be627b7d"
+  }
+}

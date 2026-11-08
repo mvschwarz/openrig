@@ -119,6 +119,7 @@ and nothing else is offered:
 | `queue`/`claim`, `queue`/`update` | `rig_queue_claim`, `rig_queue_update` |
 | `team`/`list` | `rig_team` |
 | `artifact`/`read` | `rig_artifact_read` |
+| `question`/`read`, `question`/`answer` | `rig_question_list`, `rig_question_answer`, only when the grant names its person (below) |
 
 - **One seat per connected assistant:** the service gives each connection its own seat and keeps it across that
   connection's reconnects. The seat must be one of the rig's nodes; a node created without a launch is enough. The caller
@@ -139,8 +140,44 @@ and nothing else is offered:
   - Reading or listing an item records nothing, and nothing wakes an assistant, so an item stays queued until its receiver
     claims it.
 
+### A person answering the team's questions through their assistant
+
+A grant can name the person who owns the connection: `person.entity_id`, their gateway entity id on this instance, so their
+address is `<entity_id>@external`. The service sends it only for a connection that person owns. With it and the `question`
+pair, the person's assistant can read the team's questions waiting on them and submit their answers, without opening
+Steering. The caller's seat is never taken for a person: without `person`, the `question` pair offers nothing, and an
+unusable `person` withholds only these two tools while the grant's other tools keep working.
+
+- **Register the person** on the instance, once: `rig gateway human add <entity_id> --display-name "<name>" --default`.
+  Without `--binding`, they're asked in the Feed and on Steering only. As the default person, today's asks addressed to no
+  registered person (such as `human@host`) are theirs too.
+- **`rig_question_list`** shows what Steering shows that person as answerable: an ask addressed to them, or a row parked on
+  them. Each comes with its options when it has any, and the `revision` an answer names. A question that moved to someone
+  else between Steering's view and the read of its row is left out.
+- **`rig_question_answer`** takes the question, the revision the person saw, and either the options they chose (one per
+  question) or exactly what they typed. It records through Steering's own write path (`answer` for an ask, `resolve` for a
+  park), as the person, so Steering shows the same answer and the asker's work continues once. The answer's audit names the
+  route it came by: the caller's seat, the grant's principal and the grant's id and version.
+- **What it says back:** a success names what was submitted (`submitted`), never a fresh read of the question's answers.
+  - `answered`;
+  - `recorded`, when parts of the question are still unanswered;
+  - `already-recorded`, for an identical retry whose submission is already on the question, recognised by its operation id
+    (never by an equal answer). That includes a settled ask or a park that's back at work;
+  - `question_changed`, with the current question, when someone else changed it since the revision the person saw;
+  - a retry of a submission that stopped partway confirms the parts already recorded and stops there (`question_changed`,
+    with `recorded` and `notRecorded`). The rest goes in a new answer to the question as `rig_question_list` shows it now,
+    so a stale retry never overwrites an answer someone gave in the meantime, including one recorded with no action (a
+    Slack click);
+  - a refusal partway names which parts were recorded (`recorded`, `notRecorded`). A send that got no answer, or a server
+    error, leaves that part `indeterminate`: send the same call again to confirm what was recorded;
+  - `not_waiting_on_person`, when it was answered or closed, or isn't theirs;
+  - `person_not_registered`, when the grant's person isn't registered on this instance. While no one is registered, Steering
+    shows every request, so nothing is answered for anyone.
+- **What it never does:** answer another person's question, reach a team-internal row, or record a decision of its own. A
+  delegated decision (`rig_queue_decide`) isn't offered to a grant-service caller.
+
 ## Limits today
 
 - **Webhook triggers only:** OpenRig rings a webhook. Email and other triggers aren't supported yet. A member without a trigger
   isn't rung, and its person is told instead.
-- **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one.
+- **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one, except through a grant service's grant that names its person, which records that person's own answers (above).

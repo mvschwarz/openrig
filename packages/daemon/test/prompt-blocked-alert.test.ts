@@ -1072,9 +1072,10 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   function reminder(outcomes: Array<"refused" | "sent">) {
     const { jobId } = new WatchdogJobsRepository(db).register({ policy: "periodic-reminder", targetSession: seat, intervalSeconds: 7200,
       specYaml: `policy: periodic-reminder\ntarget:\n  session: ${seat}\ninterval_seconds: 7200\nmessage: sweep\n`, registeredBySession: seat });
-    // Attempts are stamped in real time, in order, so a ladder tick's own records fall between them as they would.
+    // Distinct default timestamps order history; tests crossing a queue clear marker must supply event times.
     const log = new WatchdogHistoryLog(db); let last = 0;
-    const record = (outcome: "refused" | "sent", kind = "selection_prompt") => log.record({ jobId, evaluatedAt: new Date(last = Math.max(Date.now(), last + 1)).toISOString(), outcome,
+    const record = (outcome: "refused" | "sent", kind = "selection_prompt",
+      evaluatedAt = new Date(last = Math.max(Date.now(), last + 1)).toISOString()) => log.record({ jobId, evaluatedAt, outcome,
       deliveryTargetSession: seat, deliveryStatus: outcome === "sent" ? "ok" : "failed",
       evaluationNotes: outcome === "refused" ? { deliveryReason: `Refused: '${seat}' is at an interactive prompt (${kind}). No text was sent.` } : null });
     outcomes.forEach(outcome => record(outcome));
@@ -1122,20 +1123,29 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(wakes).toEqual(["lead@fixture"]);
   });
 
-  it("a prompt that clears and comes back between reminders raises a new alert after two new refusals", async () => {
-    const port = engine([]); const wakes: string[] = [];
-    const { record } = reminder(["refused", "refused"]);
-    await tick(port, toLead(wakes));
-    const [first] = alerts();
-    state = "clear"; await tick(port, toLead(wakes));
-    expect(alerts()).toEqual([]);
-    state = "blocked"; await tick(port, toLead(wakes));
-    record("refused"); await tick(port, toLead(wakes));
-    expect(alerts()).toEqual([]);
-    record("refused"); await tick(port, toLead(wakes));
-    expect(alerts()).toHaveLength(1);
-    expect(alerts()[0]?.qitemId).not.toBe(first!.qitemId);
-    expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+  it.each([-1, 0])("a prompt that clears and comes back between reminders raises a new alert after two new refusals (last old refusal at clear %i ms)", async lastOldOffset => {
+    const clearAt = Date.parse("2030-01-01T00:00:00Z");
+    const at = (offset: number) => new Date(clearAt + offset).toISOString();
+    vi.useFakeTimers({ toFake: ["Date"], now: clearAt - 3 });
+    try {
+      const port = engine([]); const wakes: string[] = [];
+      const { record } = reminder([]);
+      vi.setSystemTime(clearAt);
+      record("refused", "selection_prompt", at(-2));
+      record("refused", "selection_prompt", at(lastOldOffset));
+      await tick(port, toLead(wakes));
+      const [first] = alerts();
+      state = "clear"; await tick(port, toLead(wakes));
+      expect(alerts()).toEqual([]);
+      state = "blocked"; await tick(port, toLead(wakes));
+      vi.setSystemTime(clearAt + 1);
+      record("refused", "selection_prompt", at(1)); await tick(port, toLead(wakes));
+      expect(alerts()).toEqual([]);
+      record("refused", "selection_prompt", at(1)); await tick(port, toLead(wakes));
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]?.qitemId).not.toBe(first!.qitemId);
+      expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+    } finally { vi.useRealTimers(); }
   });
 
   it("another job's alert retiring while the prompt stays blocked doesn't restart an episode closed by hand", async () => {
@@ -1157,17 +1167,31 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   });
 
   it("a prompt alert routed to a fallback still records a cleared prompt, so the next blocked episode alerts", async () => {
-    const port = engine([]); const wakes: string[] = [];
-    const { record } = reminder(["sent", "refused", "refused"]);
-    await tick(port, toLead(wakes));
-    const [first] = alerts();
-    repo.routeToFallback(first!.qitemId, "backup@fixture", "lead removed");
-    state = "clear"; await tick(port, toLead(wakes));
-    expect(alerts()).toEqual([]);
-    state = "blocked"; record("refused"); record("refused");
-    await tick(port, toLead(wakes));
-    expect(alerts()).toHaveLength(1);
-    expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+    const clearAt = Date.parse("2030-01-01T00:00:00Z");
+    const at = (offset: number) => new Date(clearAt + offset).toISOString();
+    // Queue transitions use Date, not tick's injected now. History times describe the causal sequence explicitly.
+    vi.useFakeTimers({ toFake: ["Date"], now: clearAt - 4 });
+    try {
+      const port = engine([]); const wakes: string[] = [];
+      const { record } = reminder([]);
+      vi.setSystemTime(clearAt);
+      record("sent", "selection_prompt", at(-3));
+      record("refused", "selection_prompt", at(-2));
+      record("refused", "selection_prompt", at(-1));
+      await tick(port, toLead(wakes));
+      const first = alerts()[0]!;
+      repo.routeToFallback(first.qitemId, "backup@fixture", "lead removed");
+      state = "clear"; await tick(port, toLead(wakes));
+      expect(alerts()).toEqual([]);
+      state = "blocked"; vi.setSystemTime(clearAt + 1);
+      record("refused", "selection_prompt", at(1));
+      record("refused", "selection_prompt", at(1));
+      await tick(port, toLead(wakes));
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]!.qitemId).not.toBe(first.qitemId);
+      expect(repo.getById(first.qitemId)?.state).toBe("done");
+      expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
+    } finally { vi.useRealTimers(); }
   });
 
   it("a reminder that joins a seat's existing prompt alert is named on it, and nothing is sent again", async () => {

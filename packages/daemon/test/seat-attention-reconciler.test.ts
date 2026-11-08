@@ -13,7 +13,7 @@ import { makePromptStateReader } from "../src/domain/queue-wake-ladder.js";
 import { evidenceFromHookActivity } from "../src/routes/activity.js";
 import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
-import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { getNodeInventory, seatNeedsAttention } from "../src/domain/node-inventory.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
 describe("SeatAttentionReconciler", () => {
@@ -972,5 +972,115 @@ describe("SeatAttentionReconciler", () => {
 
     expect(result.ok).toBe(false);
     expect(result.code).toBe("not_in_attention");
+  });
+
+  // #2622: a full restore that stopped a seat at a prompt (a resume-selection picker) leaves its outcome
+  // attention_required until the strict reconciler proves the resume; nothing ran it but clear-attention.
+  describe("#2622 a restored seat's positive activity runs the strict reconciler once", () => {
+    function seedRestoredAtPrompt(rigName: string, sessionName: string): { rigId: string; nodeId: string } {
+      const rig = rigRepo.createRig(rigName);
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+      const session = sessionRegistry.registerSession(node.id, sessionName);
+      sessionRegistry.updateStartupStatus(session.id, "ready");
+      sessionRegistry.updateStatus(session.id, "running");
+      eventBus.emit({ type: "restore.started", rigId: rig.id, snapshotId: "snap-1" });
+      eventBus.emit({ type: "restore.completed", rigId: rig.id, snapshotId: "snap-1", result: {
+        snapshotId: "snap-1", preRestoreSnapshotId: "snap-0", rigResult: "partially_restored",
+        nodes: [{ nodeId: node.id, logicalId: "worker", status: "attention_required" }], warnings: [],
+      } } as any);
+      return { rigId: rig.id, nodeId: node.id };
+    }
+    const attention = (rigId: string, nodeId: string) => {
+      const entry = getNodeInventory(db, rigId).find((e) => e.nodeId === nodeId)!;
+      return { lifecycleState: entry.lifecycleState, needsAttention: seatNeedsAttention(entry, null) };
+    };
+    const eventCount = () => (db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n;
+
+    it("answered and resumed: its first positive activity reconciles the outcome, and the seat stops needing attention", async () => {
+      const { rigId, nodeId } = seedRestoredAtPrompt("r-2622-resumed", "worker@r-2622-resumed");
+      const checked = strictDerivedReconciler();
+      expect(attention(rigId, nodeId)).toEqual({ lifecycleState: "attention_required", needsAttention: true });
+
+      expect(await checked.onSeatActivity("worker@r-2622-resumed", "needs_input")).toBe(false);
+      expect(await checked.onSeatActivity("worker@r-2622-resumed", "running")).toBe(true);
+
+      const reconciled = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
+      expect(reconciled).toHaveLength(1);
+      expect(JSON.parse(reconciled[0]!.payload)).toMatchObject({ nodeId, from: "attention_required", to: "operator_recovered" });
+      expect(attention(rigId, nodeId).needsAttention).toBe(false);
+      expect(attention(rigId, nodeId).lifecycleState).not.toBe("attention_required");
+    });
+
+    it("a resumed pane whose lineage doesn't match stays in attention, and the failed check appends no reconciliation and emits no refusal", async () => {
+      const { rigId, nodeId } = seedRestoredAtPrompt("r-2622-other", "worker@r-2622-other");
+      const strict = vi.fn(async () => ({ ok: false as const, code: "resume_token_mismatch", detail: "The pane runs another conversation." }));
+      const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
+      const before = eventCount();
+
+      expect(await checked.onSeatActivity("worker@r-2622-other", "running")).toBe(false);
+
+      expect(strict).toHaveBeenCalledWith(rigId, nodeId);
+      expect(eventCount()).toBe(before);
+      expect(db.prepare("SELECT seq FROM events WHERE type IN ('seat.attention_clear_refused', 'restore.outcome_reconciled')").all()).toEqual([]);
+      expect(attention(rigId, nodeId)).toEqual({ lifecycleState: "attention_required", needsAttention: true });
+    });
+
+    it("runs once per positive transition, and never for a seat without a full-restore outcome", async () => {
+      seedRestoredAtPrompt("r-2622-bounded", "worker@r-2622-bounded");
+      const strict = vi.fn(async () => ({ ok: false as const, code: "pane_not_usable", detail: "Still at the picker." }));
+      const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
+      for (const state of ["running", "running", "needs_input", "unknown", undefined]) await checked.onSeatActivity("worker@r-2622-bounded", state);
+      expect(strict).toHaveBeenCalledTimes(1);
+      await checked.onSeatActivity("worker@r-2622-bounded", "idle");
+      expect(strict).toHaveBeenCalledTimes(2);
+
+      const rig = rigRepo.createRig("r-2622-plain");
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+      const session = sessionRegistry.registerSession(node.id, "worker@r-2622-plain");
+      sessionRegistry.updateStartupStatus(session.id, "ready");
+      sessionRegistry.updateStatus(session.id, "running");
+      expect(await checked.onSeatActivity("worker@r-2622-plain", "running")).toBe(false);
+      expect(strict).toHaveBeenCalledTimes(2);
+    });
+
+    it("a seat that settled before the whole restore completed is checked once at completion, and only in that rig", async () => {
+      const seat = (rigId: string, logicalId: string, sessionName: string) => {
+        const node = rigRepo.addNode(rigId, logicalId, { role: "worker", runtime: "claude-code" });
+        const session = sessionRegistry.registerSession(node.id, sessionName);
+        sessionRegistry.updateStartupStatus(session.id, "ready");
+        sessionRegistry.updateStatus(session.id, "running");
+        return node.id;
+      };
+      const complete = (rigId: string, nodes: Array<{ nodeId: string; logicalId: string }>) => eventBus.emit({
+        type: "restore.completed", rigId, snapshotId: "snap-1", result: {
+          snapshotId: "snap-1", preRestoreSnapshotId: "snap-0", rigResult: "partially_restored",
+          nodes: nodes.map((n) => ({ ...n, status: "attention_required" })), warnings: [],
+        } } as any);
+      const rig = rigRepo.createRig("r-2622-early");
+      const early = seat(rig.id, "early", "early@r-2622-early");
+      const waiting = seat(rig.id, "waiting", "waiting@r-2622-early");
+      const other = rigRepo.createRig("r-2622-elsewhere");
+      const elsewhere = seat(other.id, "worker", "worker@r-2622-elsewhere");
+      eventBus.emit({ type: "restore.started", rigId: rig.id, snapshotId: "snap-1" });
+      eventBus.emit({ type: "restore.started", rigId: other.id, snapshotId: "snap-1" });
+      const checked = strictDerivedReconciler();
+
+      // Answered and settled while the rest of the rig was still restoring: nothing to reconcile yet.
+      expect(await checked.onSeatActivity("early@r-2622-early", "idle")).toBe(false);
+      expect(await checked.onSeatActivity("waiting@r-2622-early", "needs_input")).toBe(false);
+      expect(await checked.onSeatActivity("worker@r-2622-elsewhere", "idle")).toBe(false);
+      complete(rig.id, [{ nodeId: early, logicalId: "early" }, { nodeId: waiting, logicalId: "waiting" }]);
+      complete(other.id, [{ nodeId: elsewhere, logicalId: "worker" }]);
+      expect(attention(rig.id, early).needsAttention).toBe(true);
+
+      expect(await checked.onRestoreCompleted(rig.id)).toBe(1);
+      expect(await checked.onRestoreCompleted(rig.id)).toBe(0);
+
+      const reconciled = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
+      expect(reconciled.map((row) => JSON.parse(row.payload).nodeId)).toEqual([early]);
+      expect(attention(rig.id, early).needsAttention).toBe(false);
+      expect(attention(rig.id, waiting).needsAttention).toBe(true);
+      expect(attention(other.id, elsewhere).needsAttention).toBe(true);
+    });
   });
 });

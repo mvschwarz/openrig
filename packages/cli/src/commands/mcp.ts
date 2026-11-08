@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
-import { createMcpServer } from "../mcp-server.js";
+import { createMcpServer, dropUnfilledSeat, unfilledSeatText, type UnfilledSeat } from "../mcp-server.js";
 import { addGrant, McpHttpConfigError, mcpTokenFilePath, readGrantServiceHeader, readGrants, revokeGrant, startMcpHttpServer } from "../mcp-http.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
@@ -28,9 +28,16 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
     .option("--task-destination <seat>", "With --http --grant-service: operator-configured local team seat for external requests that omit destination")
     .option("--oauth-resource <url>", "With --grant-service and --oauth-issuer: the public https URL clients reach this server as (its path ends in /mcp), for OAuth discovery")
     .option("--oauth-issuer <url>", "With --oauth-resource: the OAuth authorization server that issues the keys --grant-service checks")
+    .option("--front-door", "Serve a person's agent in their own app: it hands the team work and brings the team's questions to the person, instead of working its inbox as a member")
     .addHelpText("after", `
 Both MCP protocol revisions are served, over stdio and --http alike: clients on 2026-07-28 (which may start with
 server/discover) and clients that open with 2025's initialize handshake.
+
+An empty OPENRIG_SESSION_NAME, or one an app passed on unfilled (such as \${user_config.seat}), means no seat: the
+server acts as none, never as a seat named after the placeholder or one inherited as RIGGED_SESSION_NAME. With no
+seat, messages, new tasks and chat still go through as an unknown sender, each with a note on what is known (why there's
+no seat, and how the MCP client describes itself); a task is followed by its qitemId, since there's no return address.
+Claiming, updating, handing off or deciding a task needs a seat.
 
 With --http and no token file, the server stays on loopback and acts as OPENRIG_SESSION_NAME, declared and not
 authenticated, like stdio. Once a grant exists (rig mcp token add), every request needs its bearer credential, loopback
@@ -57,8 +64,10 @@ server that issues the keys --grant-service checks. GET /.well-known/oauth-prote
 with both, exactly as given, without a credential or a call to the grant service, and every 401 points there. Both must
 be https with no userinfo, query or fragment, written as a URL writes them (a lowercase host, no default port). /mcp
 stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
-    .action(async (opts: { port?: string; http?: boolean; bind?: string; grantService?: string; grantServiceHeaderFile?: string; taskDestination?: string; oauthResource?: string; oauthIssuer?: string }) => {
+    .action(async (opts: { port?: string; http?: boolean; bind?: string; grantService?: string; grantServiceHeaderFile?: string; taskDestination?: string; oauthResource?: string; oauthIssuer?: string; frontDoor?: boolean }) => {
       const deps = getDepsF();
+      const unfilledSeat = dropUnfilledSeat();
+      if (unfilledSeat) console.error(`rig mcp serve: ${unfilledSeatText(unfilledSeat)}; serving with no seat until it names this app's address on the team.`);
 
       let daemonUrl: string;
       if (opts.port) {
@@ -105,7 +114,7 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
         return;
       }
       if (opts.http) {
-        await serveHttp(daemonUrl, opts.bind ?? "127.0.0.1:7437", opts.grantService, opts.grantServiceHeaderFile, oauth, opts.taskDestination);
+        await serveHttp(daemonUrl, opts.bind ?? "127.0.0.1:7437", opts.grantService, opts.grantServiceHeaderFile, oauth, opts.taskDestination, opts.frontDoor === true, unfilledSeat);
         return;
       }
       const client = deps.clientFactory(daemonUrl);
@@ -115,7 +124,7 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
       process.once("SIGINT", finish);
       process.once("SIGTERM", finish);
       // Serves the protocol revision the client opens with: 2026-07-28 per request, or 2025's initialize handshake.
-      const served = serveStdio(() => createMcpServer(client), { onerror: (err) => console.error(`rig mcp serve: ${err.message}`) });
+      const served = serveStdio(() => createMcpServer(client, { frontDoor: opts.frontDoor === true, ...(unfilledSeat ? { unfilledSeat } : {}) }), { onerror: (err) => console.error(`rig mcp serve: ${err.message}`) });
       try {
         // EOF is a normal stdio disconnect, not an unresolved top-level await.
         if (process.stdin.readableEnded) finish();
@@ -182,7 +191,7 @@ stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
 }
 
 async function serveHttp(daemonUrl: string, bind: string, grantService?: string, grantServiceHeaderFile?: string,
-  oauth?: { resource: string; issuer: string }, taskDestination?: string): Promise<void> {
+  oauth?: { resource: string; issuer: string }, taskDestination?: string, frontDoor = false, unfilledSeat?: UnfilledSeat): Promise<void> {
   const match = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(bind);
   if (!match) {
     console.error(`--bind takes host:port (for example 127.0.0.1:7437 or [::1]:7437), not ${bind}`);
@@ -194,7 +203,8 @@ async function serveHttp(daemonUrl: string, bind: string, grantService?: string,
   let served;
   try {
     const header = grantServiceHeaderFile ? readGrantServiceHeader(grantServiceHeaderFile) : undefined;
-    served = await startMcpHttpServer({ daemonUrl, host, port: Number(match[2]), tokenFile, taskDestination,
+    served = await startMcpHttpServer({ daemonUrl, host, port: Number(match[2]), tokenFile, taskDestination, frontDoor,
+      ...(unfilledSeat ? { unfilledSeat } : {}),
       ...(grantService ? { grantService: { url: grantService, ...(header ? { header } : {}) } } : {}), ...(oauth ? { oauth } : {}) });
   } catch (err) {
     console.error(err instanceof McpHttpConfigError ? err.message : `Can't serve on ${bind}: ${(err as Error).message}`);

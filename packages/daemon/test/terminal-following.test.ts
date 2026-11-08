@@ -24,6 +24,15 @@ function fixture() {
   return { create, emit, render, unsubscribe };
 }
 describe("Core-event terminal following", () => {
+  it("does not reopen a fixed snapshot on subsequent Core events", async () => {
+    vi.useFakeTimers(); const f = fixture(), service = f.create();
+    f.render.mockImplementation(async () => { const result = answer(); result.following!.enabled = false; result.following!.state = "disabled"; return result; });
+    await service.open(selector, { enabled: true });
+    expect(service.list()).toEqual([]);
+    f.emit("queue.updated"); await vi.advanceTimersByTimeAsync(1000);
+    expect(f.render).toHaveBeenCalledTimes(1);
+  });
+
   it("coalesces membership events and never polls between events", async () => {
     vi.useFakeTimers(); const f = fixture(), service = f.create();
     await service.open(selector, { enabled: true });

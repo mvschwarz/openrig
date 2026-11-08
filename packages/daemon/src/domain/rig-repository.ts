@@ -653,7 +653,7 @@ export class RigRepository {
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
     if (opts?.launchWrapper !== undefined && opts.launchWrapper !== null) {
-      if (!isLaunchWrapperRuntime(opts.runtime)) throw new Error("launch_wrapper requires a pi or codex seat");
+      if (!isLaunchWrapperRuntime(opts.runtime)) throw new Error("launch_wrapper requires a pi, codex or claude-code seat");
       validateLaunchWrapper(opts.launchWrapper);
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
@@ -918,7 +918,7 @@ export class RigRepository {
     if (value !== null) {
       const existing = this.db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(nodeId) as { runtime: string | null } | undefined;
       if (existing && !isLaunchWrapperRuntime(existing.runtime)) {
-        throw new Error("launch_wrapper requires a pi or codex seat");
+        throw new Error("launch_wrapper requires a pi, codex or claude-code seat");
       }
     }
     return this.db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(stored, nodeId).changes > 0;
@@ -1174,7 +1174,7 @@ export class RigRepository {
   private rowToNode(row: NodeRow): Node {
     const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.id} launch_wrapper`);
     if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
-      throw new Error(`Seat ${row.id} launch_wrapper: only valid when runtime is "pi" or "codex"`);
+      throw new Error(`Seat ${row.id} launch_wrapper: only valid when runtime is "pi", "codex" or "claude-code"`);
     }
     return {
       id: row.id,
