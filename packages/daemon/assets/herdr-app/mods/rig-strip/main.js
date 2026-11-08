@@ -129,7 +129,8 @@ export default class RigStrip extends View {
     this.acking = true;
     const path = `${appHome()}/openrig/ack.json`;
     const record = JSON.stringify({ revision: p.revision, terminals: terminalsIn(shown), at: new Date().toISOString() }) + "\n";
-    readTextFile(path)
+    // A missing ack.json reads as null; any other read failure must not stop the acknowledgement either.
+    readTextFile(path).catch(() => null)
       .then((current) => writeTextFile(path, record, current))
       .then(() => { this.acked = p.revision; })
       .catch((e) => console.log(`rig-strip: could not record revision ${p.revision}: ${e}`))
