@@ -130,8 +130,8 @@ interface TurnQuestions {
   finished: boolean;
   /** The person cancelled the turn: no further question opens, though one the app is showing still settles. */
   cancelled: boolean;
-  /** Questions the app is still showing, by tool call id. */
-  outstanding: Set<string>;
+  /** Questions the app is still showing, by tool call id, each with how the chat names it. */
+  outstanding: Map<string, string>;
   tasks: Set<Promise<void>>;
 }
 type Update = Record<string, unknown>;
@@ -256,6 +256,12 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
 
   const update = (sessionId: string, body: Update) => peer.notify("session/update", { sessionId, update: body });
   const say = (sessionId: string, text: string) => update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+  /** A question the app showed ends unanswered: its card says so, and so does the chat, which every app shows, since an
+   *  app need not show a card's later text. */
+  const unanswered = (sessionId: string, toolCallId: string, named: string, why: string) => {
+    update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, content: textContent(`${why} The question is still open in the OpenRig TUI and Slack.`) });
+    say(sessionId, `\n\n${why} ${named} is still open in the OpenRig TUI and Slack.\n\n`);
+  };
   const newSessionId = () => `acps-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(4).toString("hex")}`;
 
   /** Each of the caller's prompts in a session, oldest first, by the rows tagged with its id. */
@@ -277,8 +283,9 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       const toolCallId = `${ask.qitemId}#${q.id}`;
       emit({ sessionUpdate: "tool_call", toolCallId, kind: "other", status: "pending", title: `${ask.sourceSession} asks: ${q.question}`, content: textContent(ask.body) });
       const label = (o: (typeof q.options)[number]) => (o.recommended ? `${o.label} (recommended)` : o.label);
+      const named = `${ask.sourceSession}'s question "${q.question}" (${ask.qitemId})`;
       let chosenId: string | undefined;
-      turn.outstanding.add(toolCallId);
+      turn.outstanding.set(toolCallId, named);
       try {
         if (asksForms) {
           // Each choice is offered as its label, the one form every app shows as choices: T3 Code 0.1.7 builds them only
@@ -301,7 +308,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
           chosenId = result?.outcome?.outcome === "selected" ? result.outcome.optionId : undefined;
         }
       } catch (error) {
-        emit({ sessionUpdate: "tool_call_update", toolCallId, content: textContent(`This app couldn't show the question (${(error as Error).message}). It's still open: answer it in the OpenRig TUI or Slack.`) });
+        if (!turn.finished) unanswered(sessionId, toolCallId, named, `This app couldn't show the question (${(error as Error).message}).`);
         return;
       } finally {
         turn.outstanding.delete(toolCallId);
@@ -310,7 +317,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       // Only one of the question's own options is recorded: the app's reply is checked again here.
       const chosen = q.options.find((o) => o.id === chosenId);
       if (!chosen) {
-        emit({ sessionUpdate: "tool_call_update", toolCallId, content: textContent("Not answered here. The question is still open in the OpenRig TUI and Slack.") });
+        unanswered(sessionId, toolCallId, named, "Not answered here.");
         return;
       }
       const recorded = await team.queue.answer(ask.qitemId, q.id, chosen.id).catch((error: Error) => ({ ok: false as const, reason: error.message }));
@@ -435,7 +442,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
     }
 
     let wake: () => void = () => {};
-    const questions: TurnQuestions = { finished: false, cancelled: false, outstanding: new Set(), tasks: new Set() };
+    const questions: TurnQuestions = { finished: false, cancelled: false, outstanding: new Map(), tasks: new Set() };
     session.turn = { cancel: () => { questions.cancelled = true; wake(); } };
     let root: string | undefined;
     try {
@@ -482,9 +489,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       const seen = new Set<string>();
       /** Close this turn's questions: any the app still shows are named as open elsewhere, then nothing more comes from them. */
       const finishQuestions = (why: string) => {
-        for (const toolCallId of questions.outstanding) {
-          update(session.id, { sessionUpdate: "tool_call_update", toolCallId, content: textContent(`${why} The question is still open in the OpenRig TUI and Slack.`) });
-        }
+        for (const [toolCallId, named] of questions.outstanding) unanswered(session.id, toolCallId, named, why);
         questions.finished = true;
       };
       for (;;) {

@@ -404,6 +404,7 @@ describe("rig acp serve", () => {
         tags: [`acp-session:${sessionId}`], humanQuestions: [{ id: "q1", question: "Which way?", options: [{ id: "a", label: "Left" }, { id: "b", label: "Right" }] }] });
       const said = await until(() => updates.find((u) => u.toolCallId === `qitem-form-${i}#q1` && u.sessionUpdate === "tool_call_update"), "the outcome");
       expect((said.content as Array<{ content: { text: string } }>)[0]!.content.text, JSON.stringify(reply)).toBe("Not answered here. The question is still open in the OpenRig TUI and Slack.");
+      expect(messages(updates), JSON.stringify(reply)).toContain(`\n\nNot answered here. former${i}@team's question "Which way?" (qitem-form-${i}) is still open in the OpenRig TUI and Slack.\n\n`);
       expect(db.prepare(`SELECT human_answers FROM queue_items WHERE qitem_id = 'qitem-form-${i}'`).get()).toEqual({ human_answers: null });
       client.notify("session/cancel", { sessionId });
       expect(await turn).toEqual({ stopReason: "cancelled" });
@@ -468,6 +469,10 @@ describe("rig acp serve", () => {
     const about = inbound.map((p, i) => ({ p, i })).filter(({ p }) => p.params?.update?.toolCallId === "qitem-ask-theme#q1");
     expect(about.at(-1)!.i).toBeLessThan(end);
     expect(about.at(-1)!.p.params.update.content[0].content.text).toBe("Not answered here. The question is still open in the OpenRig TUI and Slack.");
+    const said = inbound.map((p, i) => ({ p, i })).filter(({ p }) => p.params?.update?.sessionUpdate === "agent_message_chunk"
+      && p.params.update.content.text.includes(`asker3@team's question "Which theme?" (qitem-ask-theme) is still open`));
+    expect(said).toHaveLength(1);
+    expect(said[0]!.i).toBeLessThan(end);
     expect(updates.filter((u) => u.toolCallId === "qitem-ask-theme#q1")).toHaveLength(2);
     expect(db.prepare("SELECT human_answers FROM queue_items WHERE qitem_id = 'qitem-ask-theme'").get()).toEqual({ human_answers: null });
   });
@@ -542,6 +547,10 @@ describe("rig acp serve", () => {
     const about = inbound.map((p, i) => ({ p, i })).filter(({ p }) => p.params?.update?.toolCallId === "qitem-ask-venue#q1");
     expect(about.at(-1)!.i).toBeLessThan(end);
     expect(about.at(-1)!.p.params.update.content[0].content.text).toBe("The work closed before this was answered here. The question is still open in the OpenRig TUI and Slack.");
+    const said = inbound.findIndex((p) => p.params?.update?.sessionUpdate === "agent_message_chunk"
+      && p.params.update.content.text === `\n\nThe work closed before this was answered here. asker4@team's question "Which venue?" (qitem-ask-venue) is still open in the OpenRig TUI and Slack.\n\n`);
+    expect(said).toBeGreaterThan(-1);
+    expect(said).toBeLessThan(end);
     expect(db.prepare("SELECT human_answers FROM queue_items WHERE qitem_id = 'qitem-ask-venue'").get()).toEqual({ human_answers: null });
   });
 
@@ -560,7 +569,25 @@ describe("rig acp serve", () => {
     const dismissed = updates.filter((u) => u.toolCallId === "qitem-ask-name#q1").at(-1)!;
     expect(dismissed.status).toBeUndefined();
     expect((dismissed.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe("Not answered here. The question is still open in the OpenRig TUI and Slack.");
+    expect(messages(updates)).toContain(`\n\nNot answered here. asker2@team's question "Which name?" (qitem-ask-name) is still open in the OpenRig TUI and Slack.\n\n`);
     expect(db.prepare("SELECT state, human_answers FROM queue_items WHERE qitem_id = 'qitem-ask-name'").get()).toEqual({ state: "pending", human_answers: null });
+  });
+
+  it("a question the app can't show is named in the chat as still open, with why", async () => {
+    const { client, updates } = connect({}, "unshown@team");
+    client.onRequest("elicitation/create", async () => { throw new Error("form rejected"); });
+    const sessionId = await open(client, { elicitation: { form: {} } });
+    const turn = client.request("session/prompt", prompt(sessionId, "Pick a color"));
+    const task = await until(() => rowsTo("unshown@team")[0], "the work row");
+    await move("unshown@team", "/api/queue/create", { qitemId: "qitem-ask-color", destinationSession: CALLER, body: "Two colors", summary: "Color?", nudge: false,
+      tags: [`acp-session:${sessionId}`], humanQuestions: [{ id: "q1", question: "Which color?", options: [{ id: "r", label: "Red" }, { id: "g", label: "Green" }] }] });
+    const card = await until(() => updates.find((u) => u.toolCallId === "qitem-ask-color#q1" && u.sessionUpdate === "tool_call_update"), "the failure");
+    expect((card.content as Array<{ content: { text: string } }>)[0]!.content.text).toMatch(/^This app couldn't show the question \(.*form rejected.*\)\. The question is still open in the OpenRig TUI and Slack\.$/);
+    expect(messages(updates).some((m) => /^\n\nThis app couldn't show the question \(.*form rejected.*\)\. unshown@team's question "Which color\?" \(qitem-ask-color\) is still open in the OpenRig TUI and Slack\.\n\n$/.test(m))).toBe(true);
+    await move("unshown@team", `/api/queue/${task.qitem_id}/claim`, {});
+    await move("unshown@team", `/api/queue/${task.qitem_id}/update`, { state: "done", closureReason: "no-follow-on", resolution: "Picked red." });
+    expect(await turn).toEqual({ stopReason: "end_turn" });
+    expect(db.prepare("SELECT human_answers FROM queue_items WHERE qitem_id = 'qitem-ask-color'").get()).toEqual({ human_answers: null });
   });
 
   it("a session is listed and reopened from its rows: the prompt, its work and the reply replay, and a follow-up continues it", async () => {
