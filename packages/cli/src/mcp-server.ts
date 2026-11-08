@@ -1319,9 +1319,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       annotations: ADDITIVE,
     },
     async ({ destination, body, summary, tags, priority, tier, qitemId, revises, alert }) => {
-      // With a configured receiver, a refused destination says how to reach it, so the assistant retries instead of
-      // telling the person the connection lacks access. It never names the receiver.
-      const omitHint = options.taskDestination ? "Omit destination to reach the team's configured receiver." : undefined;
+      // The server's one receiver counts for this connection only when its grant reaches it. Then a refused destination
+      // says how to reach it, so the assistant retries instead of telling the person the connection lacks access. It
+      // never names the receiver.
+      const receiver = options.taskDestination && scope?.destination(options.taskDestination) ? options.taskDestination : undefined;
+      const omitHint = receiver ? "Omit destination to reach the team's configured receiver." : undefined;
       if (destination === undefined && access?.external) {
         destination = options.taskDestination;
         const unavailable = () => errorResult("The connected team's task receiver is unavailable. Ask the server operator to configure it.",
@@ -1335,10 +1337,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         } catch { return unavailable(); }
       } else if (destination !== undefined && access?.external && !destination.includes("@")) {
         // A person names their lead as their team shows it ("workshop-lead"), and the assistant passes that on. A name
-        // alone is the configured receiver when it is that seat's name, else a seat of this connection's one rig; never
-        // another rig's. It must be in scope and exist, or nothing is written.
+        // alone is the receiver this connection reaches when it is that seat's name, else a seat of this connection's one
+        // rig; never another rig's. It must be in scope and exist, or nothing is written.
         const named = destination;
-        const resolved = options.taskDestination?.split("@")[0] === named ? options.taskDestination
+        const resolved = receiver?.split("@")[0] === named ? receiver
           : access.rigs.length === 1 ? `${named}@${access.rigs[0]}` : undefined;
         let exists = false;
         if (resolved && scope?.destination(resolved)) {

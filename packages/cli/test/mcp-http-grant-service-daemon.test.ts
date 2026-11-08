@@ -245,6 +245,19 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     expect(rows()).toBe(1);
   });
 
+  it("a receiver outside this connection's grant neither captures a name alone nor gives the hint", async () => {
+    seat("team-a", "lead");
+    seat("team-b", "lead");
+    const { url } = await listen(undefined, "pod-lead@team-b");
+    const ask = await connect(url);
+    expect((await ask("rig_queue_create", { qitemId: "qitem-own-lead", destination: "pod-lead", body: "Do this directly" })).isError).toBe(false);
+    expect(repo.getById("qitem-own-lead")).toMatchObject({ destinationSession: "pod-lead@team-a" });
+    const refused = await ask("rig_queue_create", { destination: "my-lead", body: "Nobody" });
+    expect(refused.structured.code).toBe("out_of_scope");
+    expect(refused.structured.message).not.toContain("Omit destination");
+    expect(rows()).toBe(1);
+  });
+
   it("rechecks the grant and receiver after connection, with no write after removal or revocation", async () => {
     const receiver = seat("team-a", "lead");
     const { url } = await listen(undefined, "pod-lead@team-a");
