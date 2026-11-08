@@ -523,6 +523,17 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
         });
       }
     }
+    // #2702: a Claude Code hook names its own conversation's transcript, `<session id>.jsonl`, the file `claude --resume`
+    // reads. A claude-code report whose transcript is anything else (an explicit null, a Codex rollout) came from another
+    // runtime that inherited the seat's environment, such as a Codex helper the seat's Claude started, and its id isn't
+    // a conversation the seat can resume. It neither moves the seat's resume target nor is published as its identity. An
+    // absent key (an older relay) keeps today's write.
+    if (runtime === "claude-code" && body.transcriptPathPresent === true && !namesClaudeTranscript(body.transcriptPath, sessionId)) {
+      return c.json({
+        ok: true, sessionId, provenance: "hook", tokenPersisted: false, code: "transcript_not_this_session",
+        detail: "This report's transcript isn't the Claude conversation it names (another runtime started inside the seat), so the seat keeps its resume target.",
+      });
+    }
     // #2341: a reserved occupant generation is registered only when its launch or handover commits. Until then, and
     // after a failed handover, its Claude hooks don't move the seat's resume target, which stays the registered
     // occupant's conversation. An absent generation, no current tenure or an unreadable ledger keep today's write.
@@ -1031,4 +1042,10 @@ activityRoutes.get("/parked", (c) => {
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+/** Whether a hook's transcript path is the Claude conversation file for `sessionId` (`…/<session id>.jsonl`, the file
+ *  `claude --resume <session id>` reads), in either path spelling. */
+function namesClaudeTranscript(transcriptPath: unknown, sessionId: string): boolean {
+  return typeof transcriptPath === "string" && transcriptPath.split(/[\\/]/).pop() === `${sessionId}.jsonl`;
 }
