@@ -523,15 +523,12 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
         });
       }
     }
-    // #2702: a Claude Code hook names its own conversation's transcript, `<session id>.jsonl`, the file `claude --resume`
-    // reads. A claude-code report whose transcript is anything else (an explicit null, a Codex rollout) came from another
-    // runtime that inherited the seat's environment, such as a Codex helper the seat's Claude started, and its id isn't
-    // a conversation the seat can resume. It neither moves the seat's resume target nor is published as its identity. An
-    // absent key (an older relay) keeps today's write.
-    if (runtime === "claude-code" && body.transcriptPathPresent === true && !namesClaudeTranscript(body.transcriptPath, sessionId)) {
+    // #2702: a report from another runtime started inside the seat (reportedByAnotherRuntime) names a conversation the
+    // seat can't resume. It neither moves the seat's resume target nor is published as its identity.
+    if (reportedByAnotherRuntime(body)) {
       return c.json({
         ok: true, sessionId, provenance: "hook", tokenPersisted: false, code: "transcript_not_this_session",
-        detail: "This report's transcript isn't the Claude conversation it names (another runtime started inside the seat), so the seat keeps its resume target.",
+        detail: "This report's transcript belongs to another runtime started inside the seat, so the seat keeps its resume target.",
       });
     }
     // #2341: a reserved occupant generation is registered only when its launch or handover commits. Until then, and
@@ -596,6 +593,9 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     }
     return c.json({ ok: true, oriented: "verified", nodeId: result.nodeId, challengeId: result.challengeId });
   }
+
+  // #2702: a turn, stop or notification from another runtime started inside the seat is that harness's, not the seat's.
+  if (reportedByAnotherRuntime(body)) return c.json({ ok: true, ignored: "transcript_not_this_session" });
 
   // All tools in this actor's batch have resolved. An individual PostToolUse can belong to a parallel tool,
   // and a subagent's batch says nothing about the main session's permission. Only the current occupant can
@@ -1048,4 +1048,15 @@ function stringOrNull(value: unknown): string | null {
  *  `claude --resume <session id>` reads), in either path spelling. */
 function namesClaudeTranscript(transcriptPath: unknown, sessionId: string): boolean {
   return typeof transcriptPath === "string" && transcriptPath.split(/[\\/]/).pop() === `${sessionId}.jsonl`;
+}
+
+/** #2702: whether a relay's report came from another runtime started inside the seat, which inherited the seat's
+ *  environment and so posts as the seat: a Codex helper a Claude seat started, or a Claude a Codex seat started. Each
+ *  runtime names its own conversation's transcript. Claude Code's is `<session id>.jsonl`, the file `claude --resume`
+ *  reads. Codex's is a `rollout-…` file, or an explicit null for a thread it never persists, so it is never that. A
+ *  report without transcriptPathPresent (an older relay) or without a session id counts as the seat's, as before. */
+function reportedByAnotherRuntime(body: Record<string, unknown>): boolean {
+  if (body.transcriptPathPresent !== true || typeof body.sessionId !== "string") return false;
+  const claudeTranscript = namesClaudeTranscript(body.transcriptPath, body.sessionId);
+  return body.runtime === "claude-code" ? !claudeTranscript : body.runtime === "codex" && claudeTranscript;
 }
