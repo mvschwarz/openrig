@@ -587,7 +587,7 @@ rig provider switch --seat pi-worker@my-rig --to-account work \
 rig provider switch --seat pi-worker@my-rig --clear-account-home --reason "Return to configured login"
 ```
 
-When switching into Pi with `--clear-account-home`, OpenRig restores the seat's original Pi login if it had one.
+When switching into Pi with `--clear-account-home`, OpenRig restores the seat's original Pi login only if neither the member nor rig configures a Pi account home; a configured home takes precedence.
 
 Pi account changes work with or without `launch_wrapper`. The wrapper receives the successor's managed Pi directory;
 it must preserve the selected credentials if you want OpenRig's account choice to apply.
