@@ -85,6 +85,9 @@ still be the previous copy until startup.
   `already_in_progress`; `--cancel` disarms it. It ends on a context dip, a
   conversation change, a stale map (`prepared_map_stale`: 15 points of growth or
   2 hours) or a map that stops reading ready.
+- **The final `/compact` waits out the preparation's own fresh activity** (up
+  to about 23 s, against 9 s), so an idle seat that ran out of context compacts
+  instead of being refused; a busy seat can wait up to about 14 s longer.
 - **A queue wake refused at a prompt** no longer goes in right after
   "Compacted" while the compaction still owes its turn boundary and restore
   request; it goes in at the next idle moment after that step clears.

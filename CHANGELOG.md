@@ -91,6 +91,11 @@ to end: see Known limits.
   idle moment instead of asking the seat to prepare again about every 11
   minutes. `rig compact --state` shows the hold and `--cancel` disarms it. A
   busy seat isn't asked again after an ended attempt, across a restart too. ([#2698](https://github.com/mvschwarz/openrig/pull/2698), [#2716](https://github.com/mvschwarz/openrig/pull/2716))
+- **The final `/compact` waits out the preparation's own fresh activity:** its
+  guarded send now allows the 15-second hook freshness window plus the 8-second
+  capture budget (23 seconds, against 9), so a seat that's already idle, such
+  as one out of context, gets `/compact` instead of a refusal. A busy seat can
+  wait up to about 14 seconds longer; the attempt's deadline still limits it. ([#2764](https://github.com/mvschwarz/openrig/pull/2764))
 - **A restore stopped at a prompt clears itself** (such as Claude's resume
   selection) once the seat runs the conversation it was restoring, using the
   check `rig seat clear-attention` runs. The docs cover the manual route. ([#2711](https://github.com/mvschwarz/openrig/pull/2711), [#2674](https://github.com/mvschwarz/openrig/pull/2674))
