@@ -66,7 +66,7 @@ import { physicalSessionName } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { withRecoveryIndex } from "./queue-recovery.js";
-import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
+import { lastMeaningfulTransitionMany, meaningfulFor, readWaitingView, WaitingStatements, type WaitingView, type WaitingActivityReader, type WaitingReads } from "./queue-waiting.js";
 import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
@@ -4586,9 +4586,10 @@ export class QueueRepository {
       .all(...params) as QueueItemRow[];
     const owners = this.transitionLog.ownerNotificationsForQitems(rows.map((row) => row.qitem_id));
     const ledgers = this.deliveryOutcomesFor(rows, owners, true);
+    const reads = this.listingReads(rows, !opts?.compact);
     const items = rows.map((r) => {
       const ledger = ledgers.get(r.qitem_id);
-      const item = this.rowToItem(r, !opts?.compact, { owners: owners.get(r.qitem_id) ?? [], ledger: ledger ?? null });
+      const item = this.rowToItem(r, !opts?.compact, { owners: owners.get(r.qitem_id) ?? [], ledger: ledger ?? null, reads });
       return {
         ...item,
         deliveryOutcome: ledger?.outcome ?? null,
@@ -5498,9 +5499,27 @@ export class QueueRepository {
     try { return this.activityReader?.(session) ?? null; } catch { return null; }
   }
 
+  /** What a listing reads once for all its rows instead of once per row. includeWaiting: the rows' waiting views read
+   *  their qitem blockers' last meaningful transitions too. */
+  private listingReads(rows: QueueItemRow[], includeWaiting: boolean): ListingReads {
+    const ids = rows.map((r) => r.qitem_id);
+    if (includeWaiting) for (const r of rows) if (r.blocked_on?.startsWith("qitem-")) ids.push(r.blocked_on);
+    // Each owner's activity once per listing: a row and its waiting view (and every other row to that owner) read the
+    // same seat state. ownerActivity reads a failure as null, so one session's failure stays that session's.
+    const activities = new Map<string, ReturnType<WaitingActivityReader>>();
+    const activity = (session: string): ReturnType<WaitingActivityReader> => {
+      if (!activities.has(session)) activities.set(session, this.ownerActivity(session));
+      return activities.get(session) ?? null;
+    };
+    return { meaningful: lastMeaningfulTransitionMany(this.db, ids), statements: new WaitingStatements(this.db), activity };
+  }
+
   /** listed: the row's owner notifications and ledger, when a listing read them for all its rows. */
   waitingView(qitemId: string, listed?: ListedLedger): WaitingView | null {
-    const view = readWaitingView(this.db, qitemId, this.activityReader, target => this.acceptsDestination(target));
+    // The row in hand, when the listing passed it: its later re-reads below are served by it too.
+    const inHand = listed?.row && listed.row.qitem_id === qitemId ? listed.row : undefined;
+    const reads = listed?.reads && inHand ? { ...listed.reads, row: inHand } : listed?.reads;
+    const view = readWaitingView(this.db, qitemId, listed?.reads?.activity ?? this.activityReader, target => this.acceptsDestination(target), reads);
     if (view && ["pending", "in-progress"].includes(view.state)) {
       // #514 — the unclaimed sweep skips a pending ask already posted to its human in the current
       // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
@@ -5508,7 +5527,9 @@ export class QueueRepository {
       const posted = episodeDelivery !== null;
       const onSteering = !posted && view.state === "pending" && this.humanAskWithoutAlert(qitemId, listed);
       const row = view.state === "pending" && !onSteering
-        ? this.db.prepare(`SELECT state, ${this.hasHumanIntentColumn ? "human_intent" : "NULL AS human_intent"}, destination_session, last_nudge_result FROM queue_items WHERE qitem_id = ?`).get(qitemId) as { state: QueueItem["state"]; human_intent: QueueItem["humanIntent"]; destination_session: string; last_nudge_result: string | null } | undefined
+        ? inHand
+          ? { state: inHand.state as QueueItem["state"], human_intent: inHand.human_intent ?? null, destination_session: inHand.destination_session, last_nudge_result: inHand.last_nudge_result }
+          : this.db.prepare(`SELECT state, ${this.hasHumanIntentColumn ? "human_intent" : "NULL AS human_intent"}, destination_session, last_nudge_result FROM queue_items WHERE qitem_id = ?`).get(qitemId) as { state: QueueItem["state"]; human_intent: QueueItem["humanIntent"]; destination_session: string; last_nudge_result: string | null } | undefined
         : undefined;
       const humanUpdate = !!row && this.isRegisteredHumanUpdate({ state: row.state, humanIntent: row.human_intent, destinationSession: row.destination_session });
       const noticeOutcome = !posted && !onSteering ? (listed ? listed.ledger?.outcome : this.deliveryOutcomeFor(qitemId)?.outcome) : undefined;
@@ -5535,7 +5556,7 @@ export class QueueRepository {
       if (recovery && !localOnly) {
         if (!awaitingHuman && !humanUpdate) view.laterBackstop = { ...view.nextBackstop, note: "Conditional safety net; current delivery/recovery ownership is evaluated first." };
         view.nextBackstop = recovery;
-      } else if (!awaitingHuman && view.state === "pending" && (this.db.prepare("SELECT last_nudge_result FROM queue_items WHERE qitem_id = ?")
+      } else if (!awaitingHuman && view.state === "pending" && (inHand ?? this.db.prepare("SELECT last_nudge_result FROM queue_items WHERE qitem_id = ?")
         .get(qitemId) as { last_nudge_result: string | null } | undefined)?.last_nudge_result === "retained:typing_guard") {
         // Held at the seat on purpose: not stuck, and not picked up. Nothing replays it; reading or delivering it is a
         // deliberate step.
@@ -5582,9 +5603,11 @@ export class QueueRepository {
   private rowToItem(row: QueueItemRow, includeWaiting = true, listed?: ListedLedger): QueueItem {
     // S04 — derive the pickup receipt at the ONE shared projection point (list/show/overdue
     // all flow through here), so the park-vs-strand question is answered by the row face.
-    const meaningful = lastMeaningfulTransition(this.db, row.qitem_id);
-    const waiting = includeWaiting ? this.waitingView(row.qitem_id, listed) : null;
-    const activity = this.ownerActivity(row.destination_session);
+    const meaningful = meaningfulFor(this.db, row.qitem_id, listed?.reads);
+    // A listing's rows are its own SELECT *: the waiting view reads the row in hand instead of reading it again.
+    const waiting = includeWaiting ? this.waitingView(row.qitem_id, listed?.reads ? { ...listed, row } : listed) : null;
+    const listedActivity = listed?.reads?.activity;
+    const activity = listedActivity ? listedActivity(row.destination_session) : this.ownerActivity(row.destination_session);
     const pickup = derivePickup({
       state: row.state,
       lastMeaningfulAt: meaningful?.at,
@@ -5650,8 +5673,13 @@ type LedgerItem = Pick<QueueItem, "qitemId" | "state" | "blockedOn" | "destinati
 
 type DeliveryLedger = { outcome: "posted" | "accepted" | "transport-failed" | "never-posted"; detail: string; episode: { notificationKey: string; startedAt: string } | null };
 
-/** A listed row's owner notifications (newest first) and its delivery ledger, read once for the whole listing. */
-type ListedLedger = { owners: QueueTransition[]; ledger: DeliveryLedger | null };
+/** What a listing reads once for all its rows (see QueueRepository.listingReads): the waiting view's reads, and each
+ *  owner's activity, memoized for the listing. */
+type ListingReads = WaitingReads & { activity?: (session: string) => ReturnType<WaitingActivityReader> };
+
+/** A listed row's owner notifications (newest first) and its delivery ledger, read once for the whole listing, and the
+ *  listing's shared reads. */
+type ListedLedger = { owners: QueueTransition[]; ledger: DeliveryLedger | null; reads?: ListingReads; row?: QueueItemRow };
 
 function ledgerItem(row: LedgerRow): LedgerItem {
   return {
