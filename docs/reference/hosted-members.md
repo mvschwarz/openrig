@@ -129,6 +129,10 @@ and nothing else is offered:
   - It reads the items it sent and the items addressed to it from those seats, never the team's internal items.
   - With `queue`/`claim` and `queue`/`update`, it claims and closes only items addressed to its own seat that it can read,
     and waits (blocked) only on an item it names and can read. Its answers hide what reading the item hides.
+- **A first task without a seat address:** with `--task-destination <member@rig>` on the same `rig mcp serve`, a
+  `rig_queue_create` that leaves out `destination` goes to that receiver. The operator sets it; a caller can't. It must be
+  exactly one existing local node within that request's grant, or nothing is written. An explicit `destination` works as
+  before.
 - **Two assistants together:** a grant with `team`/`list` sees its rigs' seats with `rig_team`, and may address and hear from
   another connected assistant's seat. A grant without it never reaches a seat in the service's caller form
   (`cus-<id>-<connection>@<rig>`), so an existing connection keeps the reach it had.

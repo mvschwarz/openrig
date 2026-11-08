@@ -1367,8 +1367,8 @@ your circumstances is configuration, and the ones that are not, another agent ca
   tested with stubs, not real accounts, before 0.7.2: check a moved seat's account and conversation
   yourself after the first move.
 - **Move to an existing account home** with `rig provider switch --seat <seat> --to-account <name>
-  --account-home <dir>` (preview with `--dry-run`). It starts a fresh conversation with a handover
-  and retains the seat's address and work. `--clear-account-home` returns to configured defaults.
+  --account-home <dir> --reason "<why>"` (preview with `--dry-run`). It starts a fresh conversation with a handover
+  and retains the seat's address and work. `--clear-account-home --reason "<why>"` returns to configured defaults.
 - **Claude subscription/API-key switching resumes the same conversation and interrupts work:**
   `rig provider switch --seat <seat> --to-account api --api-key-file <abs>`; return with
   `--to-account plan --token-file <abs>`. The API-key path remains unqualified; verify the resulting

@@ -921,7 +921,9 @@ This requires a Claude Code version that supports `--advisor`. OpenRig never wri
 choose different Advisors. When Advisor is unset, no flag is emitted and Claude's
 own defaults/settings apply. Other runtimes ignore this field.
 
-### Launch wrapper (`runtime: pi` and `codex`)
+<a id="launch-wrapper-runtime-pi-and-codex"></a>
+
+### Launch wrapper (`runtime: pi`, `codex` and `claude-code`)
 
 Set `launch_wrapper` on a local built-in `pi`, `codex` or `claude-code` member to prefix its native executable and arguments with a literal argv vector:
 
