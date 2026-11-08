@@ -42,6 +42,25 @@ def configured_root(key, env_key):
     return Path(value).expanduser().resolve() if value else None
 
 
+def extra_work_roots(cli_roots):
+    """Roots beyond workspace.root that the work trace may ascend to: a catalogued project
+    can live outside workspace.root (#2693). Refocus-only, unlike OPENRIG_WORKSPACE_ROOT,
+    which the CLI config store also reads as workspace.root."""
+    values = list(cli_roots or [])
+    values += [part for part in (os.environ.get("OPENRIG_REFOCUS_WORK_ROOT") or "").split(os.pathsep) if part]
+    return [Path(value).expanduser().resolve() for value in values]
+
+
+def work_root_for(start, root, extra_roots):
+    """The deepest known root that contains start; workspace.root when none does, so a node
+    outside every known root still reports the same gap."""
+    if start is None or not extra_roots:
+        return root
+    start = Path(start).expanduser().resolve()
+    containing = [candidate for candidate in (root, *extra_roots) if under_root(start, candidate)]
+    return max(containing, key=lambda candidate: len(candidate.parts)) if containing else root
+
+
 def under_root(path, root):
     try:
         path.relative_to(root)
@@ -385,7 +404,7 @@ def render_held_and_next(evidence):
     return "\n".join(output)
 
 
-def render_candidates(evidence, root, depth, failures):
+def render_candidates(evidence, root, depth, failures, extra_roots=()):
     """The work section from labelled queue evidence. One direct, resolved tag is shown as the
     work with its source; anything less certain lists every candidate and asks the agent."""
     candidates = evidence.get("candidates") or []
@@ -396,7 +415,8 @@ def render_candidates(evidence, root, depth, failures):
         notes = [f"WORK FROM QUEUE EVIDENCE — {only.get('source')}. If this is stale, say what you are actually doing."]
         if not only.get("slice"):
             notes.append("no slice named")
-        traced = render_work(Path(only["workNodePath"]), root, depth, failures, packet=True)
+        start = Path(only["workNodePath"])
+        traced = render_work(start, work_root_for(start, root, extra_roots), depth, failures, packet=True)
         head, _, rest = traced.partition("\n")
         return "\n".join([head, *notes, rest])
 
@@ -503,6 +523,7 @@ def main():
     parser.add_argument("--depth", choices=("light", "full"), default=os.environ.get("OPENRIG_REFOCUS_DEPTH", "light"))
     parser.add_argument("--topology-start")
     parser.add_argument("--work-start")
+    parser.add_argument("--work-root", action="append", default=[], help="an extra root the work trace may ascend to, for a catalogued project outside workspace.root; repeatable (also OPENRIG_REFOCUS_WORK_ROOT, separated by the OS path separator)")
     parser.add_argument("--work-basis", help="the daemon's reason no current work node was named")
     parser.add_argument("--work-unknown", help="why the current work node could not be read")
     parser.add_argument("--unresolved-work-advisory", action="store_true", help="show unresolved typed work as an advisory with broad orientation")
@@ -534,6 +555,7 @@ def main():
         else:
             # Precedence: an explicit start wins; then the hook's daemon answer (basis or unknown);
             # only a standalone run with neither falls back to inferring from the working directory.
+            extra_roots = extra_work_roots(args.work_root)
             explicit = args.work_start or os.environ.get("OPENRIG_REFOCUS_WORK_NODE")
             evidence = None
             if args.work_candidates:
@@ -541,9 +563,9 @@ def main():
                 if error:
                     sections.append(gap(f"## WORK TRACE\nTRACE GAP — {error}"))
             if explicit:
-                sections.append(render_work(Path(explicit), root, args.depth, failures, packet=args.packet))
+                sections.append(render_work(Path(explicit), work_root_for(explicit, root, extra_roots), args.depth, failures, packet=args.packet))
             elif evidence is not None:
-                sections.append(render_candidates(evidence, root, args.depth, failures))
+                sections.append(render_candidates(evidence, root, args.depth, failures, extra_roots))
             elif args.work_candidates:
                 pass  # the unreadable-evidence gap above is the answer; never fall back to the root
             elif args.work_basis == NO_CURRENT_BATON_BASIS:

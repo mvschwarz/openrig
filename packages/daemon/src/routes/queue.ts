@@ -1007,6 +1007,9 @@ export function queueRoutes(): Hono {
     // catalog hint into a confident wrong-project answer.
     let catalogStatus: "missing" | "usable" | "unavailable" = "missing";
     let projectMissionsRoots = new Map<string, { root: string | null; error?: string }>();
+    // Healthy catalogued project roots, for the refocus trace: a project can live outside
+    // workspace.root, and the trace can only ascend to a root it knows (#2693).
+    let workRoots: string[] = [];
     let catalogPath: string | null = null;
     try {
       catalogPath = projectCatalogPaths(c).catalog;
@@ -1018,10 +1021,12 @@ export function queueRoutes(): Hono {
       const entries = readProjectCatalog(catalogPath);
       if (entries) {
         catalogStatus = "usable";
-        projectMissionsRoots = new Map(listProjects(c).projects.map((project) => [project.id, {
+        const projects = listProjects(c).projects;
+        projectMissionsRoots = new Map(projects.map((project) => [project.id, {
           root: project.error ? null : project.missionsRoot,
           error: project.error,
         }]));
+        workRoots = projects.filter((project) => !project.error).map((project) => project.root);
       }
     } catch {
       catalogStatus = "unavailable";
@@ -1082,11 +1087,11 @@ export function queueRoutes(): Hono {
         },
         missionsRoot,
       );
-      return c.json({ ...position, ...derived, ...choiceField, role,
+      return c.json({ ...position, ...derived, ...choiceField, role, workRoots,
         // heldAndNextTruncated stays for trace scripts that predate the per-list flags.
         workCandidates: { ...workCandidates, heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
-    return c.json({ ...position, ...derived, ...choiceField, role });
+    return c.json({ ...position, ...derived, ...choiceField, role, workRoots });
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.
