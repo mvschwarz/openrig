@@ -583,14 +583,16 @@ function unclaimedBacklogText(seat: string, rows: BacklogRow[], thresholdMinutes
   };
 }
 
-/** The rows a standing notice's body says it stands for; none when the line is missing or unreadable. */
-function backlogRowsOf(body: string): Set<string> {
+/** The rows a standing notice's body says it stands for, or null when the line is missing or unreadable: unknown, which is
+ *  never read as "none". */
+function backlogRowsOf(body: string): Set<string> | null {
   const line = body.split("\n").reverse().find((l) => l.startsWith(BACKLOG_ROWS_PREFIX));
+  if (!line) return null;
   try {
-    const ids = line ? JSON.parse(line.slice(BACKLOG_ROWS_PREFIX.length)) as unknown : [];
-    return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : []);
+    const ids = JSON.parse(line.slice(BACKLOG_ROWS_PREFIX.length)) as unknown;
+    return Array.isArray(ids) ? new Set(ids.filter((id): id is string => typeof id === "string")) : null;
   } catch {
-    return new Set();
+    return null;
   }
 }
 
@@ -1338,14 +1340,21 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         | undefined;
       if (last && ["pending", "in-progress", "blocked"].includes(last.state)) {
         const listedNow = new Set(rows.map((c) => c.row.qitemId));
-        const still = [...backlogRowsOf(last.body)].filter((id) => !listedNow.has(id)).flatMap((id): BacklogRow[] => {
+        const stoodFor = backlogRowsOf(last.body);
+        const still = [...(stoodFor ?? [])].filter((id) => !listedNow.has(id)).flatMap((id): BacklogRow[] => {
           const row = indexed(() => deps.queueRepo.getById(id));
-          // Gone, someone else's now, handled by its own finding this pass, or resolved at its source.
-          if (!row || row.destinationSession !== seat || candidateIds.has(id)
+          // Gone, someone else's now, resolved at its source, or held by a finding or recovery of its own: one actually
+          // written, so a create that failed this pass leaves the row here.
+          if (!row || row.destinationSession !== seat || recoveries.find(id)
             || deliveryResolutionEvidence(deps, "unclaimed-obligation", id, now)) return [];
           return [{ qitemId: id, since: pendingSince(deps.db, id) ?? row.tsCreated, from: row.sourceSession, summary: row.summary }];
         });
         const standsFor = [...rows.map(backlogRow), ...still];
+        // With its list unreadable, the notice may still stand for rows: it's left as it is, never closed.
+        if (standsFor.length === 0 && !stoodFor) {
+          findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: last.qitem_id, action: "refreshed" });
+          continue;
+        }
         if (standsFor.length === 0) {
           await deps.queueRepo.update({
             qitemId: last.qitem_id,
@@ -1376,8 +1385,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         return now_ && selfRoutedUnclaimed(now_) && now_.route === seat && !recoveries.find(now_.row.qitemId) ? [now_] : [];
       });
       if (current.length === 0) continue;
-      const covered = last ? backlogRowsOf(last.body) : new Set<string>();
-      if (last && !current.some((c) => !covered.has(c.row.qitemId) || evidenceIsNewer(c.evidenceAt, last.ts_updated))) continue;
+      // A closed notice whose list is unreadable holds back every row, each until it has newer evidence than the close.
+      const covered = last ? backlogRowsOf(last.body) : null;
+      if (last && !current.some((c) => (covered !== null && !covered.has(c.row.qitemId)) || evidenceIsNewer(c.evidenceAt, last.ts_updated))) continue;
       const text = unclaimedBacklogText(seat, current.map(backlogRow), ageMinutes, node);
       try {
         const created = await deps.queueRepo.create({

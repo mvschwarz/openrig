@@ -232,4 +232,63 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     expect(filed).toHaveLength(1);
     expect(filed[0]!.tags).toContain(`stuck-sweep:unclaimed-obligation:${row.qitemId}`);
   });
+
+  it("keeps the notice when a row's own finding at its new route couldn't be written", async () => {
+    const door = seat("front", "door.root", "root@front");
+    const row = await work("root@front");
+    await sweep();
+    const [notice] = findingsTo("root@front");
+    seat("ops", "watch.desk", "desk@ops");
+    rigs.addEdge(door.rig.id, door.node.id, "desk@ops", "escalates_to");
+    db.exec("CREATE TRIGGER fail_watcher_finding BEFORE INSERT ON queue_items WHEN NEW.destination_session = 'desk@ops' BEGIN SELECT RAISE(ABORT, 'finding write failed'); END");
+    const result = await sweep();
+    expect(result).toMatchObject({ outcome: "failed", error: expect.stringContaining("finding write failed") });
+    expect(findingsTo("desk@ops")).toHaveLength(0);
+    // Detecting the route isn't a finding there: the row stays in the notice until one is written.
+    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "pending" });
+    expect(queue.getById(notice!.qitemId)!.body).toContain(row.qitemId);
+  });
+
+  /** The notice's body without its list of rows, or with that list cut short, as an unreadable stored body would be. */
+  function breakRowList(qitemId: string, how: "missing" | "malformed") {
+    const prefix = "Every row this notice stands for: ";
+    const body = queue.getById(qitemId)!.body.split("\n").filter((line) => !line.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(how === "malformed" ? `${body}\n${prefix}[` : body, qitemId);
+  }
+
+  it.each(["missing", "malformed"] as const)("never closes a notice whose list of rows is %s", async (how) => {
+    seat("front", "door.root", "root@front");
+    await work("root@front", 90);
+    await sweep();
+    const [notice] = findingsTo("root@front");
+    breakRowList(notice!.qitemId, how);
+    await sweep(120);
+    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "pending" });
+  });
+
+  it("a closed notice whose list of rows is unreadable doesn't file again for the same rows", async () => {
+    seat("front", "door.root", "root@front");
+    await work("root@front", 90);
+    await sweep();
+    const [notice] = findingsTo("root@front");
+    queue.update({ qitemId: notice!.qitemId, actorSession: "root@front", state: "done", closureReason: "no-follow-on", transitionNote: "read" });
+    breakRowList(notice!.qitemId, "missing");
+    await sweep();
+    expect(findingsTo("root@front").filter(isOpen)).toHaveLength(0);
+  });
+
+  it("stands for every row past the 20 it lists: a row only counted keeps the notice open", async () => {
+    seat("front", "door.root", "root@front");
+    const rows: QueueItem[] = [];
+    for (let i = 0; i < 25; i++) rows.push(await work("root@front", 90));
+    await sweep();
+    const [notice] = findingsTo("root@front");
+    expect(notice!.body.split("\n").filter((line) => line.startsWith("- qitem-"))).toHaveLength(20);
+    const counted = rows.find((r) => !notice!.body.includes(`- ${r.qitemId}`))!;
+    for (const r of rows) if (r.qitemId !== counted.qitemId) queue.claim({ qitemId: r.qitemId, destinationSession: "root@front" });
+    await sweep(120);
+    const after = queue.getById(notice!.qitemId)!;
+    expect(after).toMatchObject({ state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (1 row)" });
+    expect(after.body).toContain(`- ${counted.qitemId}`);
+  });
 });
