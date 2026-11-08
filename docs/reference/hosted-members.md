@@ -148,7 +148,8 @@ pair, the person's assistant can read the team's questions waiting on them and s
 Steering. The caller's seat is never taken for a person: without `person`, the `question` pair offers nothing, and an
 unusable `person` withholds only these two tools while the grant's other tools keep working.
 
-- **Register the person** on the instance, once: `rig gateway human add <entity_id> --display-name "<name>" --default`.
+- **Register the person** on the instance, once:
+  `rig gateway human add <entity_id> --display-name "<name>" --delivery-class B --default`.
   Without `--binding`, they're asked in the Feed and on Steering only. As the default person, today's asks addressed to no
   registered person (such as `human@host`) are theirs too.
 - **`rig_question_list`** shows what Steering shows that person as answerable: an ask addressed to them, or a row parked on
