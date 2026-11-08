@@ -1201,6 +1201,21 @@ describe("live seat runtime switch", () => {
   });
 
   describe("launch_wrapper runtime-switch guard and carry", () => {
+    it("refuses a wrapped Pi-to-Claude switch in dry-run and execution before side effects", async () => {
+      db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(nodeId);
+      rigRepo.setNodeLaunchWrapper(nodeId, ["rtk", "--wrap"]);
+      const svc = service();
+      for (const dryRun of [true, false]) {
+        const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "try-claude", dryRun });
+        expect(result).toMatchObject({ ok: false, code: "runtime_switch_failed" });
+        expect((result as { message: string }).message).toMatch(/wrapped Pi seat to Claude Code/i);
+        expect(openSwitch()).toBeUndefined();
+        expect(fakeTmux.createSession).not.toHaveBeenCalled();
+        expect(nodeRow().runtime).toBe("pi");
+        expect(rigRepo.getRig(rigRepo.listRigs()[0]!.id)?.nodes[0]?.launchWrapper).toEqual(["rtk", "--wrap"]);
+      }
+    });
+
     it("accepts switching a wrapped Codex seat to Claude Code in the dry run, and the real switch hands the Claude successor the same wrapper", async () => {
       rigRepo.setNodeLaunchWrapper(nodeId, ["rtk", "--to-claude"]);
       // The dry run reports acceptance, as execution does, and changes nothing.

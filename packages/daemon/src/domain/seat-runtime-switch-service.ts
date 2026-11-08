@@ -253,6 +253,15 @@ export class SeatRuntimeSwitchService {
     if (node.runtime !== "codex" && node.runtime !== "claude-code" && node.runtime !== "pi") {
       return refuse("runtime_switch_unsupported", `${seatRef} runs ${node.runtime ?? "an unknown runtime"}; only Codex, Claude Code and Pi seats can change runtime.`);
     }
+    if (node.runtime === "pi" && target === "claude-code") {
+      try {
+        if (readSeatLaunchWrapper(db, node.id)?.length) {
+          return refuse("runtime_switch_failed", `${seatRef} has a launch_wrapper configured; switching a wrapped Pi seat to Claude Code is unsupported. Clear the wrapper and re-apply the rig spec first.`);
+        }
+      } catch (error) {
+        return refuse("runtime_switch_failed", (error as Error).message);
+      }
+    }
     if (target === "pi" && input.accountHome !== undefined) {
       try {
         const auth = nodePath.join(input.accountHome, "auth.json");
