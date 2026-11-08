@@ -18,7 +18,7 @@ exit=1
 /bin/sh: 1: systemd-run: not found
 exit=127
 ## the tmux server the daemon started today, and its cgroup
-pid=2723922 cmdline: tmux -D 
+pid=2723922 cmdline: tmux -D
 cgroup: 0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-cadeiras.slice/openrig-cadeiras.scope
 ## the daemon's cgroup
 0::/user.slice/user-1000.slice/user@1000.service/app.slice/openrig-daemon.service

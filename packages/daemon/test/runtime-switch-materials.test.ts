@@ -14,6 +14,9 @@ import { seatSkillsPointerStartupFile } from "../src/domain/rigspec-instantiator
 import type { ParsedStartupContext } from "../src/domain/seat-lifecycle-service.js";
 import type { Node } from "../src/domain/types.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
+import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
+import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
+import { piAccountSwitchStateRoot } from "../src/domain/pi-account-state.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { managedBlockText } from "../src/domain/managed-blocks.js";
 import { managedBlockRecords } from "../src/domain/managed-block-records.js";
@@ -109,6 +112,39 @@ describe("a runtime switch plans the successor from the seat's own agent spec", 
     expect(materials.settings.effort).toEqual({ value: "high", source: "agent_spec" });
     expect(materials.settings.advisor).toEqual({ value: null, source: "native_default" });
     expect(materials.dropped).toContainEqual({ setting: "model (agent spec, profile default, declared for claude-code)", value: "claude-opus-5-5" });
+  });
+
+  it.each(["codex", "claude-code"] as const)("prepares %s → Pi in isolated successor storage with target settings", async from => {
+    const node = seat(from, { model: "source-model" });
+    const materials = plan(node, from, "pi");
+    expect(materials.settings.model).toEqual({ value: null, source: "native_default" });
+    expect(materials.settings.effort).toEqual({ value: null, source: "native_default" });
+    expect(materials.firstTurn).toContain("- runtime: pi");
+    expect(materials.files.map(file => file.absolutePath)).not.toContain(seatSkillPaths({ rigId, logicalId: "dev.impl", runtime: from }, home).catalogPath);
+    const explicit = plan(node, from, "pi", { model: "provider/pi-model", effort: "medium" });
+    expect(explicit.settings.model).toEqual({ value: "provider/pi-model", source: "explicit" });
+    expect(explicit.settings.effort).toEqual({ value: "medium", source: "explicit" });
+    const base = nodePath.join(home, "state", "pi");
+    const canonical = "dev-impl@seat-rig";
+    const adapter = new PiRuntimeAdapter({ stateRoot: base, runnerEntryPath: "/unused-runner.js", tmux: {},
+      fsOps: { exists: existsSync, readFile: (p: string) => readFileSync(p, "utf8"), writeFile: writeFileSync,
+        mkdirp: (p: string) => mkdirSync(p, { recursive: true }), listFiles: readdirSync } } as never);
+    await materials.prepare({ nodeId: node.id, cwd: node.cwd, tmuxSession: "openrig-switch-staged", launchGeneration: "next",
+      runtimeSwitchFrom: { runtime: from, session: canonical, pane: "%0", generation: "old" }, ...materials.bindingAdditions() } as NodeBinding, adapter);
+    const target = piSeatPaths(piAccountSwitchStateRoot(base, "next"), canonical);
+    expect(readFileSync(nodePath.join(target.agentDir, "skills", "review", "SKILL.md"), "utf8")).toContain("# Review");
+    expect(existsSync(piSeatPaths(base, canonical).agentDir)).toBe(false);
+    expect(existsSync(nodePath.join(node.cwd!, ".claude"))).toBe(false);
+    expect(materials.notRun).toEqual(["/rename impl"]);
+  });
+
+  it.each(["codex", "claude-code"] as const)("Pi → %s resolves that runtime's spec and materials", to => {
+    const materials = plan(seat("pi", { model: "provider/pi-model" }), "pi", to);
+    expect(materials.settings.model).toEqual({ value: to === "codex" ? "gpt-5.5" : "claude-opus-5-5", source: "agent_spec" });
+    expect(materials.settings.effort.value).toBe(to === "codex" ? "high" : null);
+    expect(materials.firstTurn).toContain(`- runtime: ${to}`);
+    expect(materials.bindingAdditions().seatSkillsRoot).toBe(seatSkillPaths({ rigId, logicalId: "dev.impl", runtime: to }, home).skillsRoot);
+    expect(materials.dropped).toContainEqual({ setting: "model", value: "provider/pi-model" });
   });
 
   it("an explicit option wins over the spec", () => {
