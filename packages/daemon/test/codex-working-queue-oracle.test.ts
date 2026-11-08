@@ -30,7 +30,7 @@ it("keeps a visibly running Codex turn working when the window timestamp is quie
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("seatActivityService" as never, oracle as never);
-    c.set("queueRepo" as never, { list: () => [{ qitemId: "work", state: "in-progress", summary: "Work" }] } as never);
+    c.set("queueRepo" as never, { listOpenObligations: () => [{ qitemId: "work", state: "in-progress", summary: "Work" }] } as never);
     c.set("rigRepo" as never, { db: { prepare: (sql: string) => ({
       get: () => ({ id: "rig-1", name: "fixture" }),
       all: () => sql.includes("SELECT name FROM rigs") ? [] : [{ node_id: node, session_name: session }],
