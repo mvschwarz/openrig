@@ -11,6 +11,7 @@ import { ChannelCoverageStore, ThreadCoverageStore, SeenStore, DeadLetterStore, 
 import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
 import { ThreadSeatMap, formatPostedStamp } from "../src/domain/gateway/slack/thread-seat-map.js";
 import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-routing.js";
+import { RECOVERY_SEAT_GRACE_MS, recoveryDestinationReady } from "../src/domain/gateway/slack/slack-subsystem.js";
 
 const closes: (() => void)[] = [];
 afterEach(() => { for (const close of closes.splice(0)) close(); });
@@ -86,7 +87,7 @@ function fixture() {
     ({ type: "message", user: "U1", channel, text: `task ${seconds}`, ts: ts(seconds) });
   const calls = (method: string) => queries.filter(u => u.pathname.endsWith(method));
   const rows = () => repo.list({ limit: 500 });
-  return { db, files, seen, dead, map, router, deps, routed, resolveHumanReply, history, replies, queries, recovery, track, reply, message,
+  return { db, repo, clock: () => now, files, seen, dead, map, router, deps, routed, resolveHumanReply, history, replies, queries, recovery, track, reply, message,
     calls, rows, time: (ms: number) => { now = ms; }, advance: (ms: number) => { now += ms; },
     respond: (fn?: typeof respond) => { respond = fn; }, down: (v: boolean) => { queueDown = v; },
     /** A seat with no terminal transport yet, as before its tmux binding is restored after a restart. */
@@ -490,4 +491,71 @@ it("a dead-lettered recovered reply retried while its seat is unreachable stays 
   await f.router.retryDeadLetters();
   expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(1);
   expect(f.dead.readAll()).toHaveLength(0);
+});
+
+it("a recovered reply still waiting for its seat keeps retrying soon after a retry pass fails", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const f = fixture();
+    f.track(ROOT, "asker@test");
+    f.replies[`C1:${ROOT}`] = [f.reply(50, ROOT)];
+    f.unbind("asker@test");
+    const r = f.recovery();
+    await r.run();
+
+    vi.spyOn(f.map, "trackedForRecovery").mockImplementationOnce(() => { throw new Error("database is locked"); });
+    await vi.advanceTimersByTimeAsync(30_000); // this retry pass rejects before reaching the thread
+    expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(0);
+
+    f.bind("asker@test"); f.time(at(140));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(1);
+  } finally { vi.useRealTimers(); }
+});
+
+it("a Slack error on a retry pass doesn't end the soon-retry for a reply still waiting for its seat, and a rate limit delays it", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const f = fixture();
+    f.track(ROOT, "asker@test");
+    f.replies[`C1:${ROOT}`] = [f.reply(50, ROOT)];
+    f.unbind("asker@test");
+    const r = f.recovery();
+    await r.run();
+
+    let failures = 1;
+    f.respond(u => u.pathname.endsWith("conversations.replies") && failures-- > 0
+      ? new Response(null, { status: 429, headers: { "Retry-After": "60" } }) : undefined);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(r.status().threads).toMatchObject({ backoff: { "rate-limited": 1 } });
+
+    f.bind("asker@test"); f.advance(61_000);
+    await vi.advanceTimersByTimeAsync(30_000); // the rate limit holds the next retry past 30 s
+    expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(1);
+  } finally { vi.useRealTimers(); }
+});
+
+it("with the production readiness rule, a recovered reply for an unbound seat waits through the grace period, then lands", async () => {
+  const f = fixture();
+  f.deps.destinationReady = recoveryDestinationReady(destination => f.repo.classifyDestinationOf(destination), f.clock(), f.clock);
+  // The seat's node exists but its tmux binding isn't restored yet, as just after a restart.
+  f.db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("rig-test", "test");
+  f.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES (?, ?, ?, ?)").run("node-asker", "rig-test", "asker", "claude-code");
+  expect(f.repo.classifyDestinationOf("asker@test").class).toBe("unroutable");
+  f.track(ROOT, "asker@test");
+  f.replies[`C1:${ROOT}`] = [f.reply(50, ROOT)];
+  const r = f.recovery();
+
+  await r.run();
+  f.advance(RECOVERY_SEAT_GRACE_MS - 1000);
+  await r.run();
+  expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(0);
+  expect(f.dead.readAll()).toHaveLength(0);
+  expect(r.status().threads).toMatchObject({ incomplete: { "destination-unready": 1 } });
+
+  f.advance(2000);
+  await r.run();
+  expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(1);
 });
