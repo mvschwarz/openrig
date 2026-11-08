@@ -113,6 +113,110 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     );
   }
 
+  it.each([
+    { label: "project, mission and slice", scope: ["project:sample-app", "mission:qitem-sample-mission", "slice:queue-recovery"] },
+    { label: "unscoped source", scope: [] as string[] },
+  ])("#2758 newly created per-row recovery retains $label without copying unrelated tags", async ({ label, scope }) => {
+    const unrelated = ["gate:spec-review", "priority:rush", "note:project:unrelated"];
+    const row = await repo.create({
+      sourceSession: "sender@r", destinationSession: "worker@r", body: "scoped work",
+      tags: [...scope, ...unrelated], nudge: false,
+    });
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    expect(repo.getById(row.qitemId)!.pickup?.state).toBe("stalled-after-claim");
+
+    const first = await runSweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding).toBeDefined();
+    expect(first.result.findings).toContainEqual(expect.objectContaining({
+      kind: "stalled-after-claim", qitemId: row.qitemId, findingQitemId: finding!.qitemId, action: "created",
+    }));
+    expect(finding).toMatchObject({ sourceSession: "sender@r", destinationSession: "worker@r", state: "pending" });
+    expect(finding!.tags).toEqual(expect.arrayContaining([
+      "stuck-sweep-finding", `stuck-sweep:stalled-after-claim:${row.qitemId}`, `recovery-for:${row.qitemId}`,
+    ]));
+    for (const tag of unrelated) expect(finding!.tags).not.toContain(tag);
+    expect(finding!.tags).not.toContain(ESCALATION_HOP_TAG);
+    expect(repo.getById(row.qitemId)!.tags).toEqual([...scope, ...unrelated]);
+
+    const second = await runSweep();
+    expect(second.result.findings).toContainEqual(expect.objectContaining({
+      qitemId: row.qitemId, findingQitemId: finding!.qitemId, action: "refreshed",
+    }));
+    expect(await findingsFor(row.qitemId)).toEqual([expect.objectContaining({ qitemId: finding!.qitemId, state: "pending" })]);
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", transitionNote: "resumed scoped work" });
+    const progress = await runSweep();
+    expect(progress.result.findings).toContainEqual(expect.objectContaining({
+      qitemId: row.qitemId, findingQitemId: finding!.qitemId, action: "closed",
+    }));
+    expect(repo.getById(finding!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+    const actualScope = (finding!.tags ?? []).filter(tag => /^(project|mission|slice):/.test(tag));
+    console.log("ISSUE2758_SCOPE " + JSON.stringify({
+      label, source: row.qitemId, expectedScope: scope, actualScope, finding: finding!.qitemId,
+      findingTags: finding!.tags, destination: finding!.destinationSession,
+      second: second.result.findings, progress: progress.result.findings,
+      finalState: repo.getById(finding!.qitemId)!.state,
+    }));
+    expect(actualScope).toEqual(scope);
+  });
+
+  it("#2758 new recovery uses the current source scope after the sweep awaits another row's wake", async () => {
+    const beforeScope = ["project:before", "mission:qitem-before", "slice:before"];
+    const currentScope = ["project:current", "mission:qitem-current", "slice:current"];
+    const row = await repo.create({
+      sourceSession: "sender@r", destinationSession: "worker@r", body: "work with changing scope",
+      tags: beforeScope, nudge: false,
+    });
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    const wake = await repo.create({
+      sourceSession: "sender@r", destinationSession: "new-seat@r", body: "retry fixture wake", nudge: false,
+    });
+    setNudgeResult(wake.qitemId, "unroutable:no-pane", new Date(Date.now() - 10 * 60_000));
+    let listedScope: string[] | undefined;
+    const route = () => {
+      listedScope ??= repo.getById(row.qitemId)!.tags ?? [];
+      return null;
+    };
+    const classify = vi.spyOn(repo, "classifyDestinationOf").mockReturnValue({
+      class: "pane-bound",
+    } as ReturnType<typeof repo.classifyDestinationOf>);
+    // Only the external wake is fake; sweep selection, tag reads, creation and SQLite writes are real.
+    const deliver = vi.spyOn(repo, "deliverWakeForSuccessor").mockImplementation(async (id) => {
+      expect(id).toBe(wake.qitemId);
+      await Promise.resolve();
+      db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(currentScope), row.qitemId);
+      repo.recordNudgeAttempt(wake.qitemId, "ok");
+    });
+    try {
+      const first = await runSweep({ resolveOrchestrator: route });
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(listedScope, "the candidate was listed before the awaited scope update").toEqual(beforeScope);
+      expect(repo.getById(row.qitemId)!.tags).toEqual(currentScope);
+      const findings = await findingsFor(row.qitemId);
+      expect(findings).toHaveLength(1);
+      const finding = findings[0]!;
+      expect(first.result.findings).toContainEqual(expect.objectContaining({
+        kind: "stalled-after-claim", qitemId: row.qitemId, findingQitemId: finding.qitemId, action: "created",
+      }));
+      expect(finding).toMatchObject({ sourceSession: "sender@r", destinationSession: "worker@r", state: "pending" });
+      expect(finding.tags).toEqual(expect.arrayContaining([
+        "stuck-sweep-finding", `stuck-sweep:stalled-after-claim:${row.qitemId}`, `recovery-for:${row.qitemId}`,
+      ]));
+      for (const tag of beforeScope) expect(finding.tags).not.toContain(tag);
+      const actualScope = (finding.tags ?? []).filter(tag => /^(project|mission|slice):/.test(tag));
+      console.log("ISSUE2758_CURRENT_SCOPE " + JSON.stringify({
+        source: row.qitemId, listedScope, currentScope, actualScope,
+        finding: finding.qitemId, findingTags: finding.tags, destination: finding.destinationSession,
+      }));
+      expect(actualScope).toEqual(currentScope);
+    } finally {
+      deliver.mockRestore();
+      classify.mockRestore();
+    }
+  });
+
   it("updates the current reason of a retained recovery while preserving its original evidence", async () => {
     const row = await mkRow();
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
