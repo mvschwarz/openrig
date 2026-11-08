@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { observeClaudePaneProcess, verifyClaudePaneProcess, verifyClaudePaneRuntime, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { observeClaudeDelivery, observeClaudePaneProcess, verifyClaudePaneProcess, verifyClaudePaneRuntime, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 // A managed launch freezes the realpath of the first `claude` on the daemon's PATH. When that file is a
 // `#!` script that execs the real binary (a user's own ~/.local/bin/claude), the live process is the
@@ -32,6 +32,39 @@ it("proves a Claude that a #! wrapper script exec'd, by its OS executable path",
 it("accepts the versioned install layout when its OS name is the version and argv[0] is bare", async () => {
   const list = () => rows({ executableName: "2.1.302", executablePath: versioned, command: `claude --resume ${token}` });
   expect((await verifyClaudePaneProcess(input(list)))?.process.pid).toBe(12);
+});
+
+// #2341, reported on 0.7.9: the seat's `claude` is a #! launcher that execs the native installer's `claude` symlink. The
+// live process is the versioned binary: argv[0] is the symlink's path, the OS path is the versioned file, and the OS
+// name is `claude`, which the binary sets for itself. The pane's shell is its parent, since the launcher exec'd.
+const launcher = "/home/user/.openrig/provider-bin/claude-max2/claude";
+const linkedRows = (patch: Partial<NativeProcessRow> = {}): NativeProcessRow[] => [
+  { pid: 10, ppid: 1, pgid: 10, tpgid: 12, executableName: "bash", command: "-bash", startedAt },
+  { pid: 12, ppid: 10, pgid: 12, tpgid: 12, executableName: "claude", executablePath: versioned, startedAt,
+    command: `${wrapper} --no-chrome --permission-mode auto --session-id ${token} --name seat@rig`, ...patch },
+];
+
+it("proves a Claude a #! launcher exec'd through the native installer's symlink, by its versioned OS path", async () => {
+  const linked = input(() => linkedRows(), { selectedExecutable: launcher });
+  expect((await verifyClaudePaneProcess(linked))?.process.pid).toBe(12);
+  expect((await verifyClaudePaneRuntime(linked))?.process.pid).toBe(12);
+});
+
+it.each([
+  ["the launch's token missing", { command: `${wrapper} --no-chrome --permission-mode auto --name seat@rig` }],
+  ["an OS name other than claude or the version", { executableName: "node" }],
+  ["a versioned OS path outside the native installer's layout", { executablePath: "/home/user/claude/versions/2.1.302" }],
+])("keeps refusing that chain with %s", async (_name, patch) => {
+  expect(await verifyClaudePaneProcess(input(() => linkedRows(patch), { selectedExecutable: launcher }))).toBeNull();
+});
+
+it("a Claude started with --no-chrome still names its conversation to ordinary delivery", async () => {
+  const plain: NativeProcessRow[] = [
+    { pid: 10, ppid: 1, pgid: 10, tpgid: 12, executableName: "bash", command: "-bash", startedAt },
+    { pid: 12, ppid: 10, pgid: 12, tpgid: 12, executableName: "claude", command: `claude --no-chrome --resume ${token}`, startedAt },
+  ];
+  expect(await observeClaudeDelivery(input(() => plain, { selectedExecutable: undefined, scriptLaunch: undefined })))
+    .toMatchObject({ state: "verified" });
 });
 
 it("puts the OS executable path in the fingerprint, so a later check can match it", async () => {
