@@ -567,19 +567,22 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Every consumer takes this one adapter. The router sends each call to the target seat's terminal substrate; with
   // no seat on another substrate, every call reaches this TmuxAdapter unchanged (terminal-router.ts).
   const substrateResolver = new SubstrateResolver(db);
+  // Constructed always, connected only when a Herdr seat is used. Its endpoint for new seats is the
+  // terminal.herdr_socket setting, never an inherited HERDR_SOCKET_PATH; existing seats use their stored one.
+  const herdrSeatAdapter = new HerdrSeatAdapter({
+    db,
+    socketForNewSeats: () => (new ContextPackSettingsStore().resolveOne("terminal.herdr_socket").value as string) || defaultHerdrSeatSocket(),
+  });
   setDaemonSubstrateLookup((session) => substrateResolver.forTarget(session).kind);
   const tmuxAdapter = createTerminalRouter(
     new TmuxAdapter(opts?.tmuxExec ?? (process.platform === "win32" ? execCommand : execTmuxCommand), undefined, argvExec, tmuxSelection?.executionArgs),
     {
       resolver: substrateResolver,
-      // Constructed always, connected only when a Herdr seat is used. Its endpoint for new seats is the
-      // terminal.herdr_socket setting, never an inherited HERDR_SOCKET_PATH; existing seats use their stored one.
-      herdr: new HerdrSeatAdapter({
-        db,
-        socketForNewSeats: () => (new ContextPackSettingsStore().resolveOne("terminal.herdr_socket").value as string) || defaultHerdrSeatSocket(),
-      }),
+      herdr: herdrSeatAdapter,
     },
   );
+  // Herdr has no pipe-pane: seats whose transcript was being captured before a restart are read again from here.
+  herdrSeatAdapter.resumeTranscripts();
   // Inherit keeps the native execution environment; attachment metadata still names
   // its server for a new terminal. Isolated execution and attachment share a fixed socket.
   setDaemonTmuxServer(tmuxSelection?.serverArgs ?? (opts?.tmuxExec ? [] : tmuxServerArgs(process.env)), tmuxSelection);

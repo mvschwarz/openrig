@@ -13,6 +13,7 @@
 // seat was created on is stored in bindings.herdr_socket and used for every later call; new seats use the
 // `terminal.herdr_socket` setting. HERDR_SOCKET_PATH / HERDR_SESSION are never read here.
 import type Database from "better-sqlite3";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { TmuxAdapter, type SessionProbe, type TmuxCursorPosition, type TmuxPane, type TmuxResult, type TmuxSession, type TmuxWindow } from "./tmux.js";
@@ -52,6 +53,21 @@ export interface HerdrSeatAdapterDeps {
   socketForNewSeats: () => string;
   rpcFor?: (socketPath: string) => HerdrSocketRpc;
   timeoutMs?: number;
+  /** Transcript capture cadence; 0 disables the timer (tests call captureTranscripts directly). */
+  transcriptIntervalMs?: number;
+  appendFile?: (file: string, text: string) => void;
+  readFile?: (file: string) => string;
+  now?: () => number;
+}
+
+/** The longest k such that the last k lines of `prev` are the first k lines of `next`. */
+export function overlap(prev: readonly string[], next: readonly string[]): number {
+  for (let k = Math.min(prev.length, next.length); k > 0; k--) {
+    let same = true;
+    for (let i = 0; i < k; i++) if (prev[prev.length - k + i] !== next[i]) { same = false; break; }
+    if (same) return k;
+  }
+  return 0;
 }
 
 export class HerdrSeatAdapter extends TmuxAdapter {
@@ -60,12 +76,21 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   /** Seats created by this adapter whose binding may not carry the Herdr ids yet. */
   private readonly created = new Map<string, { workspace: string; pane: string; socket: string }>();
 
-  constructor(private readonly deps: HerdrSeatAdapterDeps) {
+  private readonly deps: Required<Pick<HerdrSeatAdapterDeps, "appendFile" | "readFile">> & HerdrSeatAdapterDeps;
+  private readonly clock: () => number;
+
+  constructor(deps: HerdrSeatAdapterDeps) {
     const refuse = async (cmd: string | string[]): Promise<string> => {
       const text = Array.isArray(cmd) ? cmd.join(" ") : cmd;
       throw new HerdrSeatError("herdr_unsupported", `This seat runs on Herdr, which has no equivalent of: ${text.slice(0, 120)}`);
     };
     super(refuse, undefined, refuse);
+    this.deps = {
+      ...deps,
+      appendFile: deps.appendFile ?? ((file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.appendFileSync(file, text); }),
+      readFile: deps.readFile ?? ((file) => fs.readFileSync(file, "utf8")),
+    };
+    this.clock = deps.now ?? (() => Date.now());
   }
 
   // --- Transport --------------------------------------------------------------------------------
@@ -250,10 +275,58 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     return out;
   }
 
-  /** Window activity comes from Herdr's event stream (M3); until then there is no reading. */
-  override async readAllSessionWindows(): Promise<Map<string, { activity: number; size: string }> | null> { return new Map(); }
-  override async readAllSessionWindowActivity(): Promise<Map<string, number> | null> { return new Map(); }
-  override async readPaneLastActivity(): Promise<number | null> { return null; }
+  // --- Activity: each pane's output revision, stamped with the daemon's receive time (S1) ----------
+  //
+  // Herdr pushes no event for plain output (pane.updated stays quiet; agent_status_changed only fires for a
+  // recognised agent), but every pane carries a revision that advances on output. A sample reads each DB-known
+  // seat's pane; a changed revision records "now" as that seat's last activity. A seat whose endpoint can't be read
+  // is left out of the map, which the activity poller reads as unknown, never idle or stale-active.
+
+  private readonly revisions = new Map<string, number>();
+  private readonly lastActivity = new Map<string, number>();
+  private readonly agentStatuses = new Map<string, string>();
+
+  private async sampleRevisions(): Promise<void> {
+    const now = Math.floor(this.clock() / 1000);
+    for (const [socket, workspaces] of this.knownWorkspaces()) {
+      try {
+        for (const [workspace, session] of workspaces) {
+          const pane = this.seat(session)?.pane ?? (await this.panesOf(socket, workspace))[0]?.pane_id;
+          if (!pane) { this.lastActivity.delete(session); continue; }
+          let info: HerdrPaneInfo;
+          try { info = (await this.call<{ pane: HerdrPaneInfo }>(socket, "pane.get", { pane_id: pane })).pane; }
+          catch (error) { if (HerdrSeatAdapter.notFound(error)) { this.lastActivity.delete(session); continue; } throw error; }
+          if (info.agent_status) this.agentStatuses.set(session, info.agent_status);
+          const rev = typeof info.revision === "number" ? info.revision : null;
+          if (rev === null) continue;
+          const seen = this.revisions.get(pane);
+          this.revisions.set(pane, rev);
+          if (seen !== undefined && seen !== rev) this.lastActivity.set(session, now);
+        }
+      } catch {
+        // This endpoint is unreachable: its seats read unknown until it answers again.
+        for (const session of workspaces.values()) this.lastActivity.delete(session);
+      }
+    }
+  }
+
+  override async readAllSessionWindowActivity(): Promise<Map<string, number> | null> {
+    await this.sampleRevisions();
+    return new Map(this.lastActivity);
+  }
+
+  override async readAllSessionWindows(): Promise<Map<string, { activity: number; size: string }> | null> {
+    await this.sampleRevisions();
+    return new Map([...this.lastActivity].map(([session, activity]) => [session, { activity, size: "" }]));
+  }
+
+  override async readPaneLastActivity(paneId: string): Promise<number | null> {
+    const session = this.seat(paneId)?.session;
+    return session ? this.lastActivity.get(session) ?? null : null;
+  }
+
+  /** Herdr's own last-read agent status for a seat (evidence only in the MVP; hooks still arbitrate). */
+  lastAgentStatus(sessionName: string): string | null { return this.agentStatuses.get(sessionName) ?? null; }
 
   override async createSession(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
     if (this.deliveryGuard && (!env?.OPENRIG_NODE_ID || !this.deliveryGuard.ownsLifecycle(env.OPENRIG_NODE_ID))) {
@@ -459,12 +532,81 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     return this.readMeta(sessionName, "option", key) ?? null;
   }
 
-  // --- Transcripts: replaced by revision reads in M3 ---------------------------------------------
+  // --- Transcripts: read on each revision change (Herdr has no pipe-pane) --------------------------
+  //
+  // Degraded by design: a read returns the last TRANSCRIPT_LINES lines, so output that scrolls past more than that
+  // between two reads is lost. Only complete lines are written (the last line of a read can still change), and a
+  // read is joined to what was written by its longest overlap, so a repeated read appends nothing.
 
-  override async startPipePane(): Promise<TmuxResult> {
-    return { ok: true, warnings: ["Herdr has no pipe-pane: this seat's transcript is captured by reading its pane on each output change (degraded under fast scrolling)."] };
+  private static readonly TRANSCRIPT_OPTION = "openrig.transcript_path";
+  private static readonly TRANSCRIPT_LINES = 400;
+  private transcriptTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly transcriptTail = new Map<string, string[]>();
+  private readonly transcriptRevision = new Map<string, number>();
+
+  override async startPipePane(sessionName: string, outputPath: string): Promise<TmuxResult> {
+    const session = sessionName.replace(/^=/, "").replace(/:$/, "");
+    this.writeMeta(session, "option", HerdrSeatAdapter.TRANSCRIPT_OPTION, outputPath);
+    this.ensureTranscriptTimer();
+    return { ok: true, warnings: ["Herdr has no pipe-pane: this seat's transcript is captured by reading its pane on each output change, and can miss lines under fast scrolling."] };
   }
-  override async stopPipePane(): Promise<TmuxResult> { return { ok: true }; }
+
+  override async stopPipePane(sessionName: string): Promise<TmuxResult> {
+    const session = sessionName.replace(/^=/, "").replace(/:$/, "");
+    this.deps.db.prepare("DELETE FROM herdr_session_meta WHERE session_name = ? AND kind = 'option' AND key = ?").run(session, HerdrSeatAdapter.TRANSCRIPT_OPTION);
+    this.transcriptTail.delete(session); this.transcriptRevision.delete(session);
+    return { ok: true };
+  }
+
+  /** Start capturing for seats registered before a daemon restart. Called by the daemon once at boot. */
+  resumeTranscripts(): void {
+    const any = this.deps.db.prepare("SELECT 1 FROM herdr_session_meta WHERE kind = 'option' AND key = ? LIMIT 1").get(HerdrSeatAdapter.TRANSCRIPT_OPTION);
+    if (any) this.ensureTranscriptTimer();
+  }
+
+  private ensureTranscriptTimer(): void {
+    if (this.transcriptTimer || this.deps.transcriptIntervalMs === 0) return;
+    this.transcriptTimer = setInterval(() => { void this.captureTranscripts(); }, this.deps.transcriptIntervalMs ?? 2000);
+    this.transcriptTimer.unref?.();
+  }
+
+  stopTranscripts(): void {
+    if (this.transcriptTimer) clearInterval(this.transcriptTimer);
+    this.transcriptTimer = null;
+  }
+
+  /** One capture pass over every seat with a transcript path. Exposed for tests. */
+  async captureTranscripts(): Promise<void> {
+    const rows = this.deps.db.prepare("SELECT session_name, value FROM herdr_session_meta WHERE kind = 'option' AND key = ?")
+      .all(HerdrSeatAdapter.TRANSCRIPT_OPTION) as Array<{ session_name: string; value: string }>;
+    for (const { session_name: session, value: file } of rows) {
+      try {
+        const found = await this.paneFor(session);
+        if (!found) continue;
+        const info = (await this.call<{ pane: HerdrPaneInfo }>(found.socket, "pane.get", { pane_id: found.pane })).pane;
+        if (typeof info.revision === "number" && this.transcriptRevision.get(session) === info.revision) continue;
+        const text = await this.read(session, "recent_unwrapped", HerdrSeatAdapter.TRANSCRIPT_LINES, false);
+        if (typeof info.revision === "number") this.transcriptRevision.set(session, info.revision);
+        if (text === null) continue;
+        const complete = text.split("\n");
+        complete.pop(); // the last line may still change
+        const prev = this.transcriptTail.get(session) ?? this.readFileTail(file, HerdrSeatAdapter.TRANSCRIPT_LINES);
+        const fresh = complete.slice(overlap(prev, complete));
+        if (fresh.length > 0) this.deps.appendFile(file, fresh.join("\n") + "\n");
+        this.transcriptTail.set(session, [...prev, ...fresh].slice(-HerdrSeatAdapter.TRANSCRIPT_LINES));
+      } catch {
+        /* this seat is unreachable now; try again on the next pass */
+      }
+    }
+  }
+
+  private readFileTail(file: string, lines: number): string[] {
+    try {
+      const all = this.deps.readFile(file).split("\n");
+      if (all.at(-1) === "") all.pop();
+      return all.slice(-lines);
+    } catch { return []; }
+  }
 
   // --- Verbs Herdr has no counterpart for (explicit refusals, R1) ---------------------------------
 

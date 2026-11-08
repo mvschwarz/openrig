@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { HerdrSeatAdapter } from "../src/adapters/herdr-seat.js";
+import { HerdrSeatAdapter, overlap } from "../src/adapters/herdr-seat.js";
 import { HerdrRpcError, type HerdrResult } from "../src/domain/terminal/herdr-transport.js";
 import { createTerminalRouter, SubstrateResolver } from "../src/adapters/terminal-router.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -9,6 +9,8 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 /** A minimal in-memory Herdr: workspaces with one pane each, the socket methods the seat adapter uses. */
 function fakeHerdr() {
   const workspaces = new Map<string, { label: string; panes: string[]; env: Record<string, string> }>();
+  const revision = new Map<string, number>();
+  const screen = new Map<string, string>();
   const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
   let next = 1;
   let down = false;
@@ -39,22 +41,28 @@ function fakeHerdr() {
       case "workspace.close": ws(p["workspace_id"]); workspaces.delete(String(p["workspace_id"])); return { type: "workspace_closed" };
       case "pane.list": { const w = ws(p["workspace_id"]); return { type: "pane_list", panes: w.panes.map(id => ({ pane_id: id, workspace_id: p["workspace_id"] })) }; }
       case "pane.send_text": case "pane.send_keys": paneWs(p["pane_id"]); return { type: "ok" };
-      case "pane.read": paneWs(p["pane_id"]); return { type: "pane_read", read: { text: `screen of ${p["pane_id"]}` } };
+      case "pane.read": paneWs(p["pane_id"]); return { type: "pane_read", read: { text: screen.get(String(p["pane_id"])) ?? `screen of ${p["pane_id"]}` } };
       case "pane.process_info": paneWs(p["pane_id"]); return { type: "pane_process_info", process_info: { shell_pid: 4242, foreground_processes: [{ pid: 4243, name: "claude" }] } };
-      case "pane.get": paneWs(p["pane_id"]); return { type: "pane_info", pane: { pane_id: p["pane_id"], agent_status: "idle" } };
+      case "pane.get": paneWs(p["pane_id"]); return { type: "pane_info", pane: { pane_id: p["pane_id"], agent_status: "idle", revision: revision.get(String(p["pane_id"])) ?? 0 } };
       default: throw new HerdrRpcError(`herdr error: unknown method ${req.method}`, "unknown_method");
     }
   };
-  return { rpc, workspaces, sent, setDown: (v: boolean) => { down = v; } };
+  const output = (pane: string, text: string) => { revision.set(pane, (revision.get(pane) ?? 0) + 1); screen.set(pane, text); };
+  return { rpc, workspaces, sent, output, setDown: (v: boolean) => { down = v; } };
 }
 
-function setup() {
+function setup(extra: { now?: () => number; files?: Map<string, string> } = {}) {
   const db = createFullTestDb();
   const repo = new RigRepository(db);
   const rig = repo.createRig("hr");
   const node = repo.addNode(rig.id, "dev.solo", { runtime: "terminal", terminalSubstrate: "herdr" });
   const herdr = fakeHerdr();
-  const adapter = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/herdr.sock", rpcFor: () => herdr.rpc });
+  const files = extra.files ?? new Map<string, string>();
+  const adapter = new HerdrSeatAdapter({
+    db, socketForNewSeats: () => "/sandbox/herdr.sock", rpcFor: () => herdr.rpc, transcriptIntervalMs: 0, now: extra.now,
+    appendFile: (f, t) => files.set(f, (files.get(f) ?? "") + t),
+    readFile: (f) => { const v = files.get(f); if (v === undefined) throw new Error("ENOENT"); return v; },
+  });
   const bind = (session: string, pane: string) =>
     db.prepare("INSERT INTO bindings (id, node_id, tmux_session, tmux_pane) VALUES (?, ?, ?, ?)").run(`b-${node.id}`, node.id, session, pane);
   return { db, repo, node, herdr, adapter, bind };
@@ -144,5 +152,58 @@ describe("HerdrSeatAdapter", () => {
     expect((await router.listSessions()).map(s => s.name)).toEqual(["tmux-seat", "dev-solo@hr"]);
     herdr.setDown(true);
     await expect(router.listSessions()).rejects.toBeTruthy();
+  });
+});
+
+describe("HerdrSeatAdapter activity and transcripts (M3)", () => {
+  it("S1: a revision change records the receive time; an unreachable endpoint reads unknown", async () => {
+    let t = 1_000_000;
+    const { adapter, herdr, bind } = setup({ now: () => t });
+    await adapter.createSession("dev-solo@hr");
+    bind("dev-solo@hr", "w1:p1");
+    expect(await adapter.readAllSessionWindowActivity()).toEqual(new Map()); // first sight: baseline only
+    t += 5_000; herdr.output("w1:p1", "a\n");
+    expect(await adapter.readAllSessionWindowActivity()).toEqual(new Map([["dev-solo@hr", 1005]]));
+    t += 5_000;
+    expect(await adapter.readAllSessionWindowActivity()).toEqual(new Map([["dev-solo@hr", 1005]])); // no change: keeps time
+    herdr.setDown(true);
+    expect(await adapter.readAllSessionWindowActivity()).toEqual(new Map()); // unknown, not idle
+    expect(adapter.lastAgentStatus("dev-solo@hr")).toBe("idle");
+  });
+
+  it("appends only new complete lines, joined by overlap, and nothing for a repeated read", async () => {
+    const files = new Map<string, string>();
+    const { adapter, herdr, bind } = setup({ files });
+    await adapter.createSession("dev-solo@hr");
+    bind("dev-solo@hr", "w1:p1");
+    await adapter.startPipePane("dev-solo@hr", "/t/seat.log");
+    herdr.output("w1:p1", "$ echo one\none\n$ ");
+    await adapter.captureTranscripts();
+    expect(files.get("/t/seat.log")).toBe("$ echo one\none\n");
+    await adapter.captureTranscripts(); // same revision: no read, no append
+    herdr.output("w1:p1", "$ echo one\none\n$ echo two\ntwo\n$ ");
+    await adapter.captureTranscripts();
+    expect(files.get("/t/seat.log")).toBe("$ echo one\none\n$ echo two\ntwo\n");
+    await adapter.stopPipePane("dev-solo@hr");
+    herdr.output("w1:p1", "three\nfour\n");
+    await adapter.captureTranscripts();
+    expect(files.get("/t/seat.log")).toBe("$ echo one\none\n$ echo two\ntwo\n");
+  });
+
+  it("after a restart, the file's tail is the overlap base, so nothing is written twice", async () => {
+    const files = new Map([["/t/seat.log", "x\ny\n"]]);
+    const { adapter, herdr, bind } = setup({ files });
+    await adapter.createSession("dev-solo@hr");
+    bind("dev-solo@hr", "w1:p1");
+    await adapter.startPipePane("dev-solo@hr", "/t/seat.log");
+    herdr.output("w1:p1", "x\ny\nz\n$ ");
+    await adapter.captureTranscripts();
+    expect(files.get("/t/seat.log")).toBe("x\ny\nz\n");
+  });
+
+  it("overlap() finds the longest suffix/prefix match", () => {
+    expect(overlap(["a", "b", "c"], ["b", "c", "d"])).toBe(2);
+    expect(overlap(["a"], ["b"])).toBe(0);
+    expect(overlap([], ["a"])).toBe(0);
   });
 });
