@@ -92,7 +92,7 @@ describe("MCP operation table against the daemon", () => {
     // A local caller is the owner and is offered every tool but the person tools, which need a person to act for.
     expect(MCP_OPERATIONS.filter((op) => op.access !== "person").map((op) => op.tool).sort()).toEqual(tools.map((tool) => tool.name).sort());
     // An external grant naming its person is offered those, from its question pair.
-    const asPerson = await connect({ seat: "cus-x-caller@team-a", access: { principal: "cus_x", owner: false, rigs: ["team-a"], roots: [], workspace: false,
+    const asPerson = await connect({ seat: "cus-x-caller@team-a", access: { principal: "principal-example-02", owner: false, rigs: ["team-a"], roots: [], workspace: false,
       external: { objects: { question: ["read", "answer"] }, person: "ada" } } });
     const personTools = (await asPerson.listTools()).tools;
     expect(personTools.map((tool) => tool.name).sort()).toEqual(MCP_OPERATIONS.filter((op) => op.access === "person").map((op) => op.tool).sort());

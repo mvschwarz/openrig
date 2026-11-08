@@ -486,7 +486,9 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(addHumanFragment({ entityId, class: "human", displayName: entityId, address: `${entityId}@external`, connectorBindings: [], prefs: { deliveryClass: "B" } } as never, home)).toMatchObject({ ok: true });
       if (asDefault) expect(setDefaultPerson(entityId, home)).toMatchObject({ ok: true });
     };
+    // A synthetic principal, so the route recorded beside an answer is plainly a fixture's.
     const grantFor = (entityId: string | null, actions = ["read", "answer"]) => active({
+      principal: { id: "principal-example-01", kind: "external_caller", label: "Example caller" },
       objects: { queue: ["create", "show", "list"], artifact: ["read"], question: actions }, ...(entityId ? { person: { entity_id: entityId } } : {}),
     });
     const LAYOUT = { id: "layout", question: "Which layout?", options: [{ id: "a", label: "Cards" }, { id: "b", label: "List" }] };
@@ -548,7 +550,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(replies(row.qitemId)).toBe(1);
       // Recorded as the person, with the assistant as the route it came by.
       expect(audit(row.qitemId)).toEqual([expect.objectContaining({ actor: `${PERSON}@external`, notes: expect.objectContaining({
-        route: "external-assistant", assistantSeat: CALLER, principal: "cus_VVMAexample01", grant: "8977f2dc0000aaaa1111bbbb", grantVersion: 6, person: `${PERSON}@external` }) })]);
+        route: "external-assistant", assistantSeat: CALLER, principal: "principal-example-01", grant: "8977f2dc0000aaaa1111bbbb", grantVersion: 6, person: `${PERSON}@external` }) })]);
       expect(await steering(PERSON)).not.toContain(`queue:${row.qitemId}`);
 
       // The same answer again (a retry after an uncertain result) is already recorded; a different one isn't taken.
