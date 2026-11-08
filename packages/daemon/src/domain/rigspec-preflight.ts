@@ -438,6 +438,8 @@ async function preflightMembers(
         const app = loadCommunityHarnessPreset(member.runtime);
         if (!app.ok) {
           errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}": ${app.kind === "missing" ? "it isn't built in, and " : ""}${app.message}`);
+        } else if (member.launchWrapper?.length && app.preset.runner && !app.preset.launchWrapper) {
+          errors.push(`${pod.id}.${member.id}: launch_wrapper unavailable; no agent started.`);
         }
       }
 
