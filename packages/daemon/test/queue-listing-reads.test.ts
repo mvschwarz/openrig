@@ -318,3 +318,62 @@ describe("a listed row's waiting view reads the row in hand instead of reading i
     expect(n).toBeGreaterThan(0);
   });
 });
+
+describe("show (getById) is the listing projection of one row", () => {
+  let repo: QueueRepository;
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-07T09:30:00.000Z"));
+    db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }) } as never);
+  });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); db.close(); });
+
+  /** getById as it read before: the per-row projection, then the delivery outcome read on its own. */
+  function getByIdPerRow(qitemId: string) {
+    const own = repo as unknown as { rowToItem: (row: unknown) => Record<string, unknown> };
+    const row = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(qitemId);
+    const item = own.rowToItem.call(repo, row);
+    const ledger = repo.deliveryOutcomeFor(qitemId);
+    return { ...item, deliveryOutcome: ledger?.outcome ?? null, ...(ledger && ledger.outcome !== "posted" && ledger.outcome !== "accepted" ? { deliveryFailureDetail: ledger.detail } : {}) };
+  }
+
+  it("answers what the per-row projection answered: pending, in-progress, blocked, parked, done and handed-off", async () => {
+    const make = (destinationSession: string, body: string) =>
+      repo.create({ sourceSession: "orch@r", destinationSession, body, nudge: false } as never).then((q) => q.qitemId);
+    const fresh = await make("worker@r", "fresh");
+    const claimed = await make("worker@r", "claimed");
+    repo.update({ qitemId: claimed, actorSession: "worker@r", state: "in-progress" } as never);
+    const blocker = await make("other@r", "the blocker");
+    const waiter = await make("worker@r", "waits");
+    repo.update({ qitemId: waiter, actorSession: "worker@r", state: "blocked", blockedOn: blocker, transitionNote: "continuation: wait" } as never);
+    const timed = await make("worker@r", "timer");
+    repo.update({ qitemId: timed, actorSession: "worker@r", state: "blocked", blockedOn: "external:ci", transitionNote: "continuation: CI",
+      wakeAfterSeconds: 600 } as never);
+    const done = await make("worker@r", "done");
+    repo.update({ qitemId: done, actorSession: "worker@r", state: "done", closureReason: "no-follow-on" } as never);
+    const passed = await make("worker@r", "passed on");
+    const { created: successor } = await repo.handoff({ qitemId: passed, fromSession: "worker@r", toSession: "next@r", nudge: false });
+    const ids = [fresh, claimed, blocker, waiter, timed, done, passed, successor.qitemId];
+    // Each state the face can show is here, so the comparison below covers it.
+    expect(ids.map((id) => repo.getById(id)?.state)).toEqual(
+      ["pending", "in-progress", "pending", "blocked", "blocked", "done", "handed-off", "pending"]);
+    expect(repo.getById(timed)?.pickup?.state).toBe("parked");
+    for (const id of ids) expect(repo.getById(id)).toEqual(getByIdPerRow(id));
+    expect(repo.getById("qitem-missing")).toBeNull();
+  });
+
+  it("reads the row's last meaningful transition once, not once for the pickup and once for the waiting view", async () => {
+    const q = (await repo.create({ sourceSession: "orch@r", destinationSession: "worker@r", body: "work", nudge: false } as never)).qitemId;
+    const prepare = db.prepare.bind(db);
+    let n = 0;
+    const spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("actor_session NOT IN ('watchdog@system'")) n++;
+      return prepare(sql);
+    }) as typeof db.prepare);
+    repo.getById(q);
+    spy.mockRestore();
+    expect(n).toBe(1);
+  });
+});
