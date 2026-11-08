@@ -25,26 +25,37 @@ export type NativeRuntime = "claude-code" | "codex";
 function tokens(command: string): string[] {
   // ps flattens argv: inline settings JSON retains its string delimiters.
   // A quote inside a name or filename is literal, not a shell span delimiter.
+  // A `--settings` or `--mcp-config` JSON value keeps the spaces between its members too, as in
+  // `{"env": {"A": "b"}}`: it stays one token until its braces balance. Braces inside its strings don't count, and
+  // a brace that opens any other option's value is literal (#2508).
   const result: string[] = [];
   let start = 0;
   let quote: string | null = null;
+  let depth = 0;
   const append = (end: number) => {
     if (start === end) return;
     const token = command.slice(start, end);
     result.push(token[0] === '"' && token.at(-1) === '"'
       ? token.slice(1, -1) : token);
   };
+  const structured = () => command.startsWith('"{', start) || command[start] === "{"
+    || command.startsWith("'{", start) || command.startsWith("--settings={", start)
+    || command.startsWith('--settings="', start) || command.startsWith("--mcp-config={", start)
+    || command.startsWith('--mcp-config="', start);
+  const jsonValue = () => command.startsWith("--settings={", start) || command.startsWith("--mcp-config={", start)
+    || (command[start] === "{" && (result.at(-1) === "--settings" || result.at(-1) === "--mcp-config"));
   for (let index = 0; index < command.length; index += 1) {
     const char = command[index]!;
     if (quote !== null) {
       if (quote === '"' && char === "\\") { index += 1; continue; }
       if (char === quote) quote = null;
-    } else if (char === '"' && (command.startsWith('"{', start) || command[start] === "{"
-      || command.startsWith("'{", start) || command.startsWith("--settings={", start)
-      || command.startsWith('--settings="', start) || command.startsWith("--mcp-config={", start)
-      || command.startsWith('--mcp-config="', start))) {
+    } else if (char === '"' && structured()) {
       quote = char;
-    } else if (/\s/.test(char)) {
+    } else if (char === "{" && jsonValue()) {
+      depth += 1;
+    } else if (char === "}" && depth > 0) {
+      depth -= 1;
+    } else if (/\s/.test(char) && depth === 0) {
       append(index);
       start = index + 1;
     }
