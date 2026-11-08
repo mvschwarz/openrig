@@ -426,6 +426,33 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(updates).toHaveLength(1);
   });
 
+  it("still skips a deleted original until restart when recording it as unavailable fails", async () => {
+    const item = await postAsk();
+    apiHook = (method) => method === "conversations.history" ? response({ ok: true, messages: [] }) : undefined;
+    const update = repo.update.bind(repo);
+    const spy = vi.spyOn(repo, "update").mockImplementation((input) => {
+      if (input.transitionNote?.startsWith("slack-ask-settle-unavailable ")) throw new Error("disk full");
+      return update(input);
+    });
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    await vi.waitFor(() => expect(logs.join("\n")).toContain("couldn't record"));
+    spy.mockRestore();
+    const reads = () => methods.filter((m) => m === "conversations.history").length;
+    expect(reads()).toBe(1);
+    expect(repo.listTransitions(item.qitemId).some((t) => t.transitionNote?.startsWith("slack-ask-settle-unavailable "))).toBe(false);
+
+    // Another queue change re-enqueues the ask; the in-memory note keeps it from being read again.
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", transitionNote: "Follow-up note." });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(reads()).toBe(1);
+
+    // Nothing durable was written, so a restart asks Slack once more and records it this time.
+    wire.stop(); start();
+    await vi.waitFor(() => expect(repo.listTransitions(item.qitemId).filter((t) => t.transitionNote?.startsWith("slack-ask-settle-unavailable "))).toHaveLength(1));
+    expect(reads()).toBe(2);
+    expect(methods).not.toContain("chat.update");
+  });
+
   it("keeps retrying after a restart when the failure isn't about the message itself", async () => {
     const item = await postAsk();
     apiHook = (method) => method === "conversations.history" ? response({ ok: false, error: "not_in_channel" }) : undefined;
