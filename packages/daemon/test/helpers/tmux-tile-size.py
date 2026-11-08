@@ -254,14 +254,39 @@ def writable_first_input(server):
     expected += b"x;\x1b[200~" + paste + b"\x1b[201~"
     server.wait_for(lambda: received(server) == expected, "a trailing ; before a paste reaches the seat")
     server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
-    # A key sequence goes by name, so the prefix applies to it: Ctrl-b PgUp scrolls back, and nothing reaches the seat.
-    os.write(tile[1], b"\x02\x1b[5~")
+    # An arrow as the first key reaches the agent as typed.
+    os.write(tile[1], b"\x1b[A")
+    expected += b"\x1b[A"
+    server.wait_for(lambda: received(server) == expected, "Up as the first key reaches the seat as Up")
+    server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
+    # The prefix, then PgUp as a person types them: tmux scrolls back, and nothing reaches the seat.
+    os.write(tile[1], b"\x02")
+    server.wait_for(lambda: server.client_ttys() == [tile[3]], "the prefix attaches the tile")
+    os.write(tile[1], b"\x1b[5~")
     server.wait_for(lambda: server.call("display-message", "-p", "-t", "seat:", "#{pane_in_mode}") == "1", "Ctrl-b PgUp opens copy mode")
     os.write(tile[1], b"q")
     server.wait_for(lambda: server.call("display-message", "-p", "-t", "seat:", "#{pane_in_mode}") == "0", "q leaves copy mode")
     time.sleep(0.3)
     assert received(server) == expected, "Ctrl-b PgUp must not type into the seat: " + repr(received(server)[len(expected):])
     return {"bytes": len(received(server))}
+
+
+def writable_big_paste(server):
+    tile = server.tile(writable, 40, 30)
+    server.wait_for(lambda: "\x1b[?2004h" in server.seen(tile), "the tile frames pastes while it shows")
+    # A paste of about 450 KB, framed as a terminal frames it, written as fast as the tile reads it.
+    data = b"\x1b[200~" + b"".join(b"line %06d of a long paste\r" % i for i in range(16000)) + b"\x1b[201~"
+    sent, deadline = 0, time.monotonic() + 90
+    while sent < len(data):
+        try:
+            sent += os.write(tile[1], data[sent:sent + 4096])
+        except BlockingIOError:
+            time.sleep(0.002)
+        server.drain()
+        assert time.monotonic() < deadline, "the tile must keep reading the paste"
+    server.wait_for(lambda: received(server) == data, "a paste over 256 KiB reaches the seat whole and framed", 90)
+    server.wait_for(lambda: server.client_ttys() == [], "the tile detaches when idle after the paste", 10)
+    return {"bytes": len(data)}
 
 
 def writable_first_input_window(server):
@@ -284,6 +309,9 @@ def writable_first_input_window(server):
 
 with tempfile.TemporaryDirectory(prefix="tile-size-") as temporary:
     root = os.path.realpath(temporary)
+    if sys.argv[4:] == ["big-paste"]:
+        print(json.dumps({"bigPaste": cell(root, "f", writable_big_paste, recorder)}))
+        sys.exit(0)
     result = {
         "readOnlyAlone": cell(root, "a", read_only_alone),
         "readOnlyBesideAnother": cell(root, "b", read_only_beside_another_client),
