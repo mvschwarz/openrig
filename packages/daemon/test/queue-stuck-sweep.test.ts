@@ -116,7 +116,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
   it.each([
     { label: "project, mission and slice", scope: ["project:sample-app", "mission:qitem-sample-mission", "slice:queue-recovery"] },
     { label: "unscoped source", scope: [] as string[] },
-  ])("#2758 newly created per-row recovery retains $label without copying unrelated tags", async ({ label, scope }) => {
+  ])("#2758 newly created per-row recovery retains $label without copying unrelated tags", async ({ scope }) => {
     const unrelated = ["gate:spec-review", "priority:rush", "note:project:unrelated"];
     const row = await repo.create({
       sourceSession: "sender@r", destinationSession: "worker@r", body: "scoped work",
@@ -152,12 +152,6 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     }));
     expect(repo.getById(finding!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
     const actualScope = (finding!.tags ?? []).filter(tag => /^(project|mission|slice):/.test(tag));
-    console.log("ISSUE2758_SCOPE " + JSON.stringify({
-      label, source: row.qitemId, expectedScope: scope, actualScope, finding: finding!.qitemId,
-      findingTags: finding!.tags, destination: finding!.destinationSession,
-      second: second.result.findings, progress: progress.result.findings,
-      finalState: repo.getById(finding!.qitemId)!.state,
-    }));
     expect(actualScope).toEqual(scope);
   });
 
@@ -206,10 +200,6 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       ]));
       for (const tag of beforeScope) expect(finding.tags).not.toContain(tag);
       const actualScope = (finding.tags ?? []).filter(tag => /^(project|mission|slice):/.test(tag));
-      console.log("ISSUE2758_CURRENT_SCOPE " + JSON.stringify({
-        source: row.qitemId, listedScope, currentScope, actualScope,
-        finding: finding.qitemId, findingTags: finding.tags, destination: finding.destinationSession,
-      }));
       expect(actualScope).toEqual(currentScope);
     } finally {
       deliver.mockRestore();
