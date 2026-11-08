@@ -319,6 +319,18 @@ function posixJoinArgv(argv: string[]): string {
   return argv.map((a) => (SHELL_SAFE.test(a) ? a : shellQuote(a))).join(" ");
 }
 
+/** The stderr a failed exec kept apart, or "" (a timeout, a spawn error). Never the message: it echoes the command. */
+function execStderrText(error: unknown): string {
+  const e = error as { execStderr?: unknown; stderr?: unknown };
+  return typeof e.execStderr === "string" && e.execStderr.trim() ? e.execStderr
+    : typeof e.stderr === "string" ? e.stderr : "";
+}
+
+/** systemd-run's own refusal of an option it does not have (before 254), read from its stderr only. */
+const NO_EXPAND_ENVIRONMENT = /(?:unrecognized|unknown) option[^\n]*--expand-environment/i;
+/** The user manager's refusal of OOMPolicy= for a scope (before 253), read from systemd-run's stderr only. */
+const NO_OOM_POLICY = /Cannot set property OOMPolicy|Unknown (?:property|assignment)[^\n]*OOMPolicy/i;
+
 /** What a failed exec said, on one line: its stderr when it kept one apart, else its message past the command. */
 function execFailureReason(error: unknown): string {
   const e = error as { execStderr?: unknown; stderr?: unknown; message?: unknown; code?: unknown };
@@ -736,10 +748,13 @@ export class TmuxAdapter {
         return true;
       } catch (error) {
         const reason = execFailureReason(error);
+        // Only systemd's own message on stderr drops an option: a timeout or an unknown failure echoes the whole
+        // command (options included) in its message, and must fall back with the reason, not retry without them.
+        const stderr = execStderrText(error);
         // systemd before 254 has no --expand-environment (and never expands): retry without it.
-        if (literal && /expand-environment/.test(reason)) { literal = false; dropped.push(reason); continue; }
+        if (literal && NO_EXPAND_ENVIRONMENT.test(stderr)) { literal = false; dropped.push(reason); continue; }
         // systemd before 253 has no OOMPolicy= for scopes: the scope is still worth having without it.
-        if (oomPolicy && /OOMPolicy/.test(reason)) { oomPolicy = false; dropped.push(reason); continue; }
+        if (oomPolicy && NO_OOM_POLICY.test(stderr)) { oomPolicy = false; dropped.push(reason); continue; }
         return fallback(reason);
       }
     }

@@ -127,6 +127,37 @@ describe("seat tmux server systemd user scope: edges (#2710)", () => {
     expect(warnings).toEqual([]);
   });
 
+  it("a systemd-run timeout (empty stderr, the command echoed in the message) falls back without dropping an option", async () => {
+    // The production exec (tmux-exec.ts) kills the client at 30 s: no stderr, and the message echoes the whole
+    // command, --expand-environment=no and OOMPolicy=continue included. Neither may be read as an unsupported option.
+    const h = host({
+      systemdRun: cmd => {
+        throw Object.assign(new Error(`tmux did not answer within 30 s and its client was ended; the write may still have happened. Check with rig capture before resending.\nCommand failed: /bin/sh -c ${cmd}\n`), {
+          killed: true, signal: "SIGKILL", code: null, stdout: "", stderr: "", execStderr: "",
+        });
+      },
+    });
+    expect(await h.adapter.startServer()).toEqual({ ok: true });
+    expect(h.systemdRuns()).toHaveLength(1);
+    expect(h.systemdRuns()[0]).toContain("--expand-environment=no");
+    expect(h.calls.filter(c => /^tmux (-S \S+ )?-D/.test(c))).toHaveLength(1);
+    expect(warnings.filter(w => w.includes("not in a systemd user scope"))).toHaveLength(1);
+    expect(warnings.find(w => w.includes("not in a systemd user scope"))).toContain("30 s");
+  });
+
+  it("an unknown systemd-run failure whose message names the options falls back with its reason, without a retry", async () => {
+    const h = host({
+      systemdRun: cmd => {
+        throw Object.assign(new Error(`Command failed: ${cmd}\nFailed to connect to bus: No medium found`), {
+          code: 1, execStderr: "Failed to connect to bus: No medium found\n",
+        });
+      },
+    });
+    expect(await h.adapter.startServer()).toEqual({ ok: true });
+    expect(h.systemdRuns()).toHaveLength(1);
+    expect(warnings.filter(w => w.includes("Failed to connect to bus"))).toHaveLength(1);
+  });
+
   it("a systemd that knows neither (before 253) still gets the scope, dropping one option per retry", async () => {
     const h = host({
       systemdRun: cmd => {
