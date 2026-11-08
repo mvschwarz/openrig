@@ -184,3 +184,17 @@ describe("terminal router: batched capture in a mixed rig (M4 finding)", () => {
     expect(tmuxBatch).toHaveBeenCalledWith(["dev-old@mixed"], 50, expect.any(Function));
   });
 });
+
+describe("S3: no prose attach hint reaches a caller that runs it", () => {
+  it("tmuxAttachExecCommand is null for a Herdr seat and the tmux command otherwise", async () => {
+    const { setDaemonSubstrateLookup, tmuxAttachExecCommand, tmuxAttachCommand } = await import("../src/adapters/tmux-server.js");
+    setDaemonSubstrateLookup((s) => (s === "dev-new@mixed" ? "herdr" : "tmux"));
+    try {
+      expect(tmuxAttachExecCommand("dev-new@mixed")).toBeNull();
+      expect(tmuxAttachCommand("dev-new@mixed")).toMatch(/Herdr seat/);
+      expect(tmuxAttachExecCommand("dev-old@mixed")).toMatch(/attach -t dev-old@mixed$/);
+    } finally {
+      setDaemonSubstrateLookup(null);
+    }
+  });
+});

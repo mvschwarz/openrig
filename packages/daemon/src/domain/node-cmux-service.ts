@@ -2,7 +2,7 @@ import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { CmuxAdapter, CmuxResult } from "../adapters/cmux.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import { tmuxAttachCommand } from "../adapters/tmux-server.js";
+import { tmuxAttachExecCommand } from "../adapters/tmux-server.js";
 
 export type OpenCmuxAction = "focused_existing" | "created_new" | "created_helper";
 
@@ -88,7 +88,11 @@ export class NodeCmuxService {
     // focused_existing without re-attaching.
     const isTmux = binding?.attachmentType === "tmux" && binding?.tmuxSession;
     if (isTmux) {
-      const sendResult = await this.cmuxAdapter.sendText(newSurfaceId, `${tmuxAttachCommand(sessionName)}\n`, wsResult.data);
+      const attach = tmuxAttachExecCommand(sessionName);
+      if (attach === null) {
+        return { ok: false, code: "herdr_unsupported", error: `${sessionName} runs in a Herdr workspace, not tmux: open it in Herdr (cmux can't attach it).` };
+      }
+      const sendResult = await this.cmuxAdapter.sendText(newSurfaceId, `${attach}\n`, wsResult.data);
       if (!sendResult.ok) return { ok: false, error: sendResult.message, code: sendResult.code };
       const focusResult = await this.cmuxAdapter.focusSurface(newSurfaceId, wsResult.data);
       if (!focusResult.ok) return { ok: false, error: focusResult.message, code: focusResult.code };

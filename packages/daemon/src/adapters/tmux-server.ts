@@ -91,6 +91,14 @@ export function setDaemonSubstrateLookup(lookup: ((session: string) => string) |
   daemonSubstrateOf = lookup;
 }
 
+/** The attach COMMAND for a caller that runs or types it (cmux surfaces, layouts): null for a seat that isn't on tmux,
+ *  so no prose hint ever reaches a shell (S3). Display callers use tmuxAttachCommand. */
+export function tmuxAttachExecCommand(session: string): string | null {
+  const bare = session.replace(/^'(.*)'$/, "$1");
+  if ((daemonSubstrateOf?.(bare) ?? "tmux") !== "tmux") return null;
+  return `${tmuxOnDaemonServer()} attach -t ${session}`;
+}
+
 /** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. A seat on another
  *  terminal substrate gets where to find it instead: a tmux attach by its name could reach an unrelated session. */
 export function tmuxAttachCommand(session: string): string {

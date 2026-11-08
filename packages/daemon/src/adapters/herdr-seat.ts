@@ -114,12 +114,14 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   /** The seat a target (session name or Herdr pane id) belongs to: its binding, else a seat this adapter created. */
   private seat(target: string): SeatRecord | null {
     const bare = target.replace(/^=/, "").replace(/:$/, "");
-    const row = this.deps.db.prepare(`
+    const rows = this.deps.db.prepare(`
       SELECT b.tmux_session AS session, b.tmux_pane AS pane, b.herdr_workspace AS workspace, b.herdr_socket AS socket
       FROM bindings b JOIN nodes n ON n.id = b.node_id
       WHERE n.terminal_substrate = 'herdr' AND (b.tmux_session = ? OR b.tmux_pane = ?)
-      LIMIT 1
-    `).get(bare, bare) as { session: string | null; pane: string | null; workspace: string | null; socket: string | null } | undefined;
+    `).all(bare, bare) as Array<{ session: string | null; pane: string | null; workspace: string | null; socket: string | null }>;
+    // Pane ids are unique only per Herdr server: the same id bound on two endpoints names no seat (S4).
+    if (rows.length > 1 && !rows.some(r => r.session === bare)) return null;
+    const row = rows.find(r => r.session === bare) ?? rows[0];
     const made = row?.session ? this.created.get(row.session) : this.created.get(bare)
       ?? [...this.created.entries()].find(([, v]) => v.pane === bare)?.[1];
     if (row && row.session) {
@@ -149,6 +151,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       AND session_name IN (SELECT session_name FROM herdr_session_meta WHERE kind = 'seat' AND (session_name = ? OR (key = 'pane' AND value = ?)))`)
       .all(target, target) as Array<{ session_name: string; key: string; value: string }>;
     if (rows.length === 0) return null;
+    if (new Set(rows.map(r => r.session_name)).size > 1) return null; // ambiguous pane id across seats (S4)
     const get = (k: string) => rows.find(r => r.key === k)?.value ?? null;
     const socket = get("socket");
     if (!socket) return null;
@@ -249,7 +252,29 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     const panes = await this.panesOf(seat.socket, ws.workspace_id);
     const bare = target.replace(/^=/, "").replace(/:$/, "");
     const shown = HERDR_PANE_ID.test(bare) ? panes.filter(p => p.pane_id === bare) : panes;
-    return shown.map((p, index) => ({ id: p.pane_id, index, cwd: p.cwd ?? "", width: 0, height: 0, active: p.focused ?? index === 0 }));
+    const sizes = shown.length > 0 ? await this.paneSizes(seat.socket, shown[0]!.pane_id) : new Map<string, { width: number; height: number }>();
+    return shown.map((p, index) => ({ id: p.pane_id, index, cwd: p.cwd ?? "", width: sizes.get(p.pane_id)?.width ?? 0,
+      height: sizes.get(p.pane_id)?.height ?? 0, active: p.focused ?? index === 0 }));
+  }
+
+  /** Pane sizes from Herdr's layout of the tab holding `pane` (cells). Best effort: an unreadable layout is 0x0. */
+  private async paneSizes(socket: string, pane: string): Promise<Map<string, { width: number; height: number }>> {
+    const out = new Map<string, { width: number; height: number }>();
+    try {
+      const layout = await this.call<Record<string, unknown>>(socket, "pane.layout", { pane_id: pane });
+      const visit = (node: unknown): void => {
+        if (!node || typeof node !== "object") return;
+        if (Array.isArray(node)) { node.forEach(visit); return; }
+        const obj = node as Record<string, unknown>;
+        const rect = obj["rect"] as { width?: unknown; height?: unknown } | undefined;
+        if (typeof obj["pane_id"] === "string" && rect && typeof rect.width === "number" && typeof rect.height === "number") {
+          out.set(obj["pane_id"], { width: rect.width, height: rect.height });
+        }
+        for (const value of Object.values(obj)) if (value && typeof value === "object") visit(value);
+      };
+      visit(layout);
+    } catch { /* sizes stay unknown */ }
+    return out;
   }
 
   override async listWindows(sessionName: string): Promise<TmuxWindow[]> {
@@ -315,7 +340,9 @@ export class HerdrSeatAdapter extends TmuxAdapter {
           const print = createHash("sha1").update(screen).digest("hex");
           const seen = this.fingerprints.get(pane);
           this.fingerprints.set(pane, print);
-          if (seen !== undefined && seen !== print) this.lastActivity.set(session, now);
+          // First sight records a baseline, so a quiet seat reads idle once the silence window passes instead of
+          // unknown forever (S1); a later change moves it.
+          if (seen === undefined ? !this.lastActivity.has(session) : seen !== print) this.lastActivity.set(session, now);
         }
       } catch {
         // This endpoint is unreachable: its seats read unknown until it answers again.
@@ -355,17 +382,25 @@ export class HerdrSeatAdapter extends TmuxAdapter {
         { label: name, ...(cwd ? { cwd } : {}), env: seatEnv, focus: false });
       const workspace = created.workspace?.workspace_id ?? created.root_pane.workspace_id;
       const pane = created.root_pane.pane_id;
-      this.created.set(name, { workspace, pane, socket });
-      for (const [key, value] of Object.entries({ workspace, pane, socket })) this.writeMeta(name, "seat", key, value);
-      // Only identity values OpenRig reads back are kept; any other variable (tokens, provider auth) is kept as
-      // presence only, never its value (F3).
-      for (const [key, value] of Object.entries(seatEnv)) {
-        if (READ_BACK_ENV.has(key)) this.writeMeta(name, "env", key, value);
-        else this.writeMeta(name, "env_present", key, value.trim() ? "1" : "0");
-      }
-      if (this.deliveryGuard && env?.OPENRIG_NODE_ID) {
-        this.deliveryGuard.noteFreshLifecyclePane(env.OPENRIG_NODE_ID, pane);
-        this.freshManaged.set(name, { nodeId: env.OPENRIG_NODE_ID, pane });
+      try {
+        this.created.set(name, { workspace, pane, socket });
+        for (const [key, value] of Object.entries({ workspace, pane, socket })) this.writeMeta(name, "seat", key, value);
+        // Only identity values OpenRig reads back are kept; any other variable (tokens, provider auth) is kept as
+        // presence only, never its value (F3).
+        for (const [key, value] of Object.entries(seatEnv)) {
+          if (READ_BACK_ENV.has(key)) this.writeMeta(name, "env", key, value);
+          else this.writeMeta(name, "env_present", key, value.trim() ? "1" : "0");
+        }
+        if (this.deliveryGuard && env?.OPENRIG_NODE_ID) {
+          this.deliveryGuard.noteFreshLifecyclePane(env.OPENRIG_NODE_ID, pane);
+          this.freshManaged.set(name, { nodeId: env.OPENRIG_NODE_ID, pane });
+        }
+      } catch (error) {
+        // Don't leave the workspace this call made behind: the next launch would refuse it as a duplicate (S2).
+        this.created.delete(name); this.freshManaged.delete(name);
+        try { this.deps.db.prepare("DELETE FROM herdr_session_meta WHERE session_name = ?").run(name); } catch { /* best effort */ }
+        try { await this.call(socket, "workspace.close", { workspace_id: workspace }); } catch { /* reported below */ }
+        return { ok: false, code: "session_not_created", message: `The Herdr workspace was created, but recording it failed, so it was closed again: ${(error as Error).message}` };
       }
       return { ok: true };
     } catch (error) {

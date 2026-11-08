@@ -43,6 +43,7 @@ function fakeHerdr() {
       case "pane.read": paneWs(p["pane_id"]); return { type: "pane_read", read: { text: screen.get(String(p["pane_id"])) ?? `screen of ${p["pane_id"]}` } };
       case "pane.process_info": paneWs(p["pane_id"]); return { type: "pane_process_info", process_info: { shell_pid: 4242, foreground_processes: [{ pid: 4243, name: "claude" }] } };
       // Like Herdr 0.9.5 (measured in the M4 sandbox): revision does NOT advance on output.
+      case "pane.layout": paneWs(p["pane_id"]); return { type: "pane_layout", layout: { panes: [{ pane_id: p["pane_id"], focused: true, rect: { x: 0, y: 0, width: 120, height: 40 } }] } };
       case "pane.get": paneWs(p["pane_id"]); return { type: "pane_info", pane: { pane_id: p["pane_id"], agent_status: "idle", revision: 1 } };
       default: throw new HerdrRpcError(`herdr error: unknown method ${req.method}`, "unknown_method");
     }
@@ -158,7 +159,8 @@ describe("HerdrSeatAdapter activity and transcripts (M3)", () => {
     const { adapter, herdr, bind } = setup({ now: () => t });
     await adapter.createSession("dev-solo@hr");
     bind("dev-solo@hr", "w1:p1");
-    expect(await adapter.readAllSessionWindowActivity()).toEqual(new Map()); // first sight: baseline only
+    // First sight records a baseline (S1): a quiet seat reads idle once the window passes, never unknown forever.
+    expect(await adapter.readAllSessionWindowActivity()).toEqual(new Map([["dev-solo@hr", 1000]]));
     t += 5_000; herdr.output("w1:p1", "a\n");
     expect(await adapter.readAllSessionWindowActivity()).toEqual(new Map([["dev-solo@hr", 1005]]));
     t += 5_000;
@@ -212,5 +214,32 @@ describe("HerdrSeatAdapter review fixes (F1-F5)", () => {
     herdr.workspaces.set("w3A", { label: "dev-solo@hr", panes: ["w3A:p2"], env: {} });
     db.prepare("INSERT INTO bindings (id, node_id, tmux_session, tmux_pane, herdr_workspace, herdr_socket) SELECT 'b1', id, 'dev-solo@hr', 'w3A:p2', 'w3A', '/sandbox/herdr.sock' FROM nodes").run();
     expect(await adapter.sendText("w3A:p2", "x")).toEqual({ ok: true });
+  });
+});
+
+describe("HerdrSeatAdapter should-fix items (S1-S4, size)", () => {
+  it("reports pane sizes from Herdr's layout", async () => {
+    const { adapter, bind } = setup();
+    await adapter.createSession("dev-solo@hr");
+    bind("dev-solo@hr", "w1:p1");
+    expect(await adapter.listPanes("dev-solo@hr")).toMatchObject([{ id: "w1:p1", width: 120, height: 40 }]);
+  });
+
+  it("S2: closes the workspace it made when recording the seat fails", async () => {
+    const { db, adapter, herdr } = setup();
+    db.exec("DROP TABLE herdr_session_meta"); // recording fails after workspace.create
+    expect(await adapter.createSession("dev-solo@hr")).toMatchObject({ ok: false, code: "session_not_created" });
+    expect(herdr.workspaces.size).toBe(0);
+  });
+
+  it("S4: a pane id bound on two endpoints is ambiguous and refused", async () => {
+    const { db, repo, adapter, herdr } = setup();
+    const rig2 = repo.createRig("hr2");
+    const other = repo.addNode(rig2.id, "dev.two", { runtime: "terminal", terminalSubstrate: "herdr" });
+    herdr.workspaces.set("w1", { label: "dev-solo@hr", panes: ["w1:p1"], env: {} });
+    db.prepare("INSERT INTO bindings (id, node_id, tmux_session, tmux_pane, herdr_workspace, herdr_socket) SELECT 'b1', id, 'dev-solo@hr', 'w1:p1', 'w1', '/a.sock' FROM nodes WHERE logical_id = 'dev.solo'").run();
+    db.prepare("INSERT INTO bindings (id, node_id, tmux_session, tmux_pane, herdr_workspace, herdr_socket) VALUES ('b2', ?, 'dev-two@hr2', 'w1:p1', 'w1', '/b.sock')").run(other.id);
+    expect(await adapter.sendText("w1:p1", "x")).toMatchObject({ ok: false, code: "guard_target_unknown" });
+    expect(await adapter.sendText("dev-solo@hr", "x")).toEqual({ ok: true }); // by name it is unambiguous
   });
 });
