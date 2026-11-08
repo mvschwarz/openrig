@@ -1992,53 +1992,88 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           return Number.isInteger(step) && step >= 0 && step < steps.length ? step : null;
         };
         const label = (step: Record<string, string>): string => step.questionId ?? "their words";
+        /** What this call knows when it stops at step `at`: the steps before it are recorded, `at` itself is unknown when
+         *  its send got no answer, and the rest weren't sent. Nothing is read back from the row. */
+        const stopped = (code: string, why: string, at: number, unknown: boolean, extra: Record<string, unknown> = {}): TextResult => {
+          const recorded = steps.slice(0, at).map(label);
+          const indeterminate = unknown ? label(steps[at]!) : null;
+          const notRecorded = steps.slice(unknown ? at + 1 : at).map(label);
+          const said = [
+            recorded.length ? `Recorded: ${recorded.join(", ")}.` : unknown ? "" : "Nothing was recorded.",
+            indeterminate ? `Unknown whether ${indeterminate} was recorded.` : "",
+            notRecorded.length && (recorded.length || unknown) ? `Not recorded: ${notRecorded.join(", ")}.` : "",
+            unknown ? "Send the same call again to confirm or finish it." : "",
+          ].filter(Boolean).join(" ");
+          const partial = recorded.length || unknown ? { recorded, ...(indeterminate ? { indeterminate } : {}), notRecorded } : {};
+          return refuse(code, `${why} ${said}`.trim(), { ...partial, ...extra });
+        };
+        /** Before a step after one this call didn't commit itself (one recorded earlier, confirmed from the record), the
+         *  question must still be this person's and open: a reroute leaves no action of its own, so the record alone can't
+         *  say. Its revision is the one the next step is sent with, so any later change is refused. */
+        const stillTheirs = async (): Promise<string | null> => {
+          const again = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
+          const now = (again.status < 400 ? again.data ?? {} : {}) as Record<string, any>;
+          return entry && stillListed(entry, now) && typeof now.decisionRevision === "string" ? now.decisionRevision : null;
+        };
         let expected = revision;
         let next = 0;
         let fresh = 0;
+        let last: Record<string, any> | null = null;
         while (next < steps.length) {
-          const res = await personClient.post<Record<string, any>>("/api/mission-control/action", {
-            verb, qitemId, ...steps[next], expectedRevision: expected, auditNotes: { operationId: `${operation}:${next}`, ...route },
-          });
+          let res: DaemonResponse<Record<string, any>>;
+          try {
+            res = await personClient.post<Record<string, any>>("/api/mission-control/action", {
+              verb, qitemId, ...steps[next], expectedRevision: expected, auditNotes: { operationId: `${operation}:${next}`, ...route },
+            });
+          } catch (err) {
+            // No answer from the daemon (a timeout, a body that isn't JSON): this step may or may not have landed.
+            const failed = caught(err).structuredContent as { code: string; message: string };
+            return stopped(failed.code, failed.message, next, true);
+          }
+          let confirmed = false;
           if (res.status < 400) {
-            if (res.data?.reconciled !== true) fresh += 1;
+            confirmed = res.data?.reconciled === true;
+            if (!confirmed) fresh += 1;
+            last = res.data ?? null;
             expected = typeof res.data?.decisionRevision === "string" ? res.data.decisionRevision : expected;
             next += 1;
-            continue;
+          } else {
+            const failure = (res.data ?? {}) as Record<string, any>;
+            // This submission's own step is the last action on the question (its result was lost, or a later step failed):
+            // it's recorded, and the answer carries on after it. Any other change is refused.
+            const own = failure.error === "decision_revision_changed" ? ownStep(failure.lastAction?.auditNotes?.operationId) : null;
+            if (own !== null && own >= next) {
+              confirmed = true;
+              next = own + 1;
+            } else {
+              if (!entry) return notWaiting();
+              if (failure.error === "decision_revision_changed") {
+                const still = await answerable();
+                const again = Array.isArray(still) ? still.find((candidate) => candidate.qitemId === qitemId) : undefined;
+                const view = again ? await questionView(again) : null;
+                return view
+                  ? stopped("question_changed", "The question changed since the revision the person saw. Show them the current question and ask again.", next, false, { current: view })
+                  : stopped("not_waiting_on_person", "The question was answered or closed by someone else.", next, false);
+              }
+              // A refusal from the daemon (4xx) records nothing; a server error (5xx) may have landed.
+              const refused = (mapResult(res).structuredContent ?? {}) as { code?: string; message?: string };
+              return stopped(refused.code ?? "request_failed", refused.message ?? "The answer stopped.", next, res.status >= 500);
+            }
           }
-          const failure = (res.data ?? {}) as Record<string, any>;
-          // This submission's own step is the last thing on the question (its result was lost, or a later step failed):
-          // carry on after it, from the revision it left. Any other change is refused.
-          const own = failure.error === "decision_revision_changed" ? ownStep(failure.lastAction?.auditNotes?.operationId) : null;
-          if (own !== null && own >= next && typeof failure.currentRevision === "string") {
-            next = own + 1;
-            expected = failure.currentRevision;
-            continue;
+          if (confirmed && next < steps.length) {
+            const current = await stillTheirs();
+            if (current === null) return stopped("not_waiting_on_person", "The question moved to someone else or closed after this answer's recorded steps.", next, false);
+            expected = current;
           }
-          if (!entry) return notWaiting();
-          const recorded = steps.slice(0, next).map(label);
-          const partial = next > 0 ? { recorded, notRecorded: steps.slice(next).map(label) } : {};
-          const said = next > 0 ? `Recorded: ${recorded.join(", ")}. Not recorded: ${steps.slice(next).map(label).join(", ")}.` : "Nothing was recorded.";
-          if (failure.error === "decision_revision_changed") {
-            const still = await answerable();
-            const again = Array.isArray(still) ? still.find((candidate) => candidate.qitemId === qitemId) : undefined;
-            const view = again ? await questionView(again) : null;
-            return view
-              ? refuse("question_changed", `The question changed since the revision the person saw. ${said} Show them the current question and ask again.`, { ...partial, current: view })
-              : refuse("not_waiting_on_person", `The question was answered or closed by someone else. ${said}`, partial);
-          }
-          const refused = mapResult(res);
-          if (next === 0) return refused;
-          const detail = (refused.structuredContent ?? {}) as Record<string, unknown>;
-          return refuse(typeof detail.code === "string" ? detail.code : "request_failed", `${typeof detail.message === "string" ? detail.message : "The answer stopped partway."} ${said}`, partial);
         }
-        const saved = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
-        const after = (saved.status < 400 ? saved.data ?? {} : {}) as Record<string, any>;
-        const open = verb === "answer" && after.state === "pending";
+        // The receipt says only what this call knows: what was submitted and what the daemon answered it, never a fresh read
+        // of the row, which may since belong to someone else.
+        const open = verb === "answer" && fresh > 0 && last?.answer?.outcome === "recorded";
         const outcome = fresh === 0 ? "already-recorded" : open ? "recorded" : "answered";
         const message = outcome === "already-recorded" ? "This answer was already recorded; nothing new was sent."
           : open ? "Recorded. The question still has parts the person hasn't answered."
             : `Recorded as ${personAddress}'s answer, given through this connection. The team's work continues.`;
-        return mapResult({ status: 200, data: { ok: true, outcome, qitemId, state: after.state ?? null, answered: after.humanAnswers ?? null, message } }, undefined, { structured: true });
+        return mapResult({ status: 200, data: { ok: true, outcome, qitemId, submitted: choices ?? { words }, message } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }

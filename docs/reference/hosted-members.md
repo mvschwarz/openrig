@@ -158,14 +158,16 @@ unusable `person` withholds only these two tools while the grant's other tools k
   question) or exactly what they typed. It records through Steering's own write path (`answer` for an ask, `resolve` for a
   park), as the person, so Steering shows the same answer and the asker's work continues once. The answer's audit names the
   route it came by: the caller's seat, the grant's principal and the grant's id and version.
-- **What it says back:**
+- **What it says back:** a success names what was submitted (`submitted`), never a fresh read of the question's answers.
   - `answered`;
   - `recorded`, when parts of the question are still unanswered;
   - `already-recorded`, for an identical retry whose submission is already on the question, recognised by its operation id
     (never by an equal answer). That includes a settled ask or a park that's back at work;
   - `question_changed`, with the current question, when someone else changed it since the revision the person saw;
-  - a retry of a submission that stopped partway records only the parts not yet recorded, and a refusal partway names
-    which parts were recorded (`recorded`, `notRecorded`);
+  - a retry of a submission that stopped partway records only the parts not yet recorded. Before it goes on, it checks
+    that the question is still the person's and open, and if it moved or closed, it stops with what was recorded;
+  - a refusal partway names which parts were recorded (`recorded`, `notRecorded`). A send that got no answer, or a server
+    error, leaves that part `indeterminate`: send the same call again to confirm or finish it;
   - `not_waiting_on_person`, when it was answered or closed, or isn't theirs;
   - `person_not_registered`, when the grant's person isn't registered on this instance. While no one is registered, Steering
     shows every request, so nothing is answered for anyone.

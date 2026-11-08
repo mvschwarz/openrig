@@ -542,7 +542,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(item.revision).toMatch(/^dr1-/);
 
       const answered = await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: item.revision, choices: [{ questionId: "layout", optionId: "b" }] });
-      expect(answered.structured).toMatchObject({ ok: true, outcome: "answered", state: "done", answered: { layout: "b" } });
+      expect(answered.structured).toMatchObject({ ok: true, outcome: "answered", submitted: [{ questionId: "layout", optionId: "b" }] });
       expect(repo.getById(row.qitemId)).toMatchObject({ state: "done", humanAnswers: { layout: "b" } });
       expect(replies(row.qitemId)).toBe(1);
       // Recorded as the person, with the assistant as the route it came by.
@@ -552,7 +552,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
 
       // The same answer again (a retry after an uncertain result) is already recorded; a different one isn't taken.
       const again = await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: item.revision, choices: [{ questionId: "layout", optionId: "b" }] });
-      expect(again.structured).toMatchObject({ ok: true, outcome: "already-recorded", state: "done", answered: { layout: "b" } });
+      expect(again.structured).toMatchObject({ ok: true, outcome: "already-recorded" });
       const changed = await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: item.revision, choices: [{ questionId: "layout", optionId: "a" }] });
       expect(changed.structured).toMatchObject({ ok: false, code: "not_waiting_on_person", state: "done", answered: { layout: "b" } });
       expect(replies(row.qitemId)).toBe(1);
@@ -566,7 +566,8 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       const both = await ask(`${PERSON}@external`, [LAYOUT, SHIP]);
       const revision = (await asPerson("rig_question_list")).structured.items[0].revision;
       const answered = await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices: [{ questionId: "layout", optionId: "a" }, { questionId: "ship", optionId: "no" }] });
-      expect(answered.structured).toMatchObject({ ok: true, outcome: "answered", answered: { layout: "a", ship: "no" } });
+      expect(answered.structured).toMatchObject({ ok: true, outcome: "answered" });
+      expect(repo.getById(both.qitemId)!.humanAnswers).toEqual({ layout: "a", ship: "no" });
       expect(replies(both.qitemId)).toBe(1);
 
       const typed = await ask(`${PERSON}@external`);
@@ -581,7 +582,8 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(listed).toMatchObject({ kind: "ask", answerWith: "words" });
       expect(listed.questions).toBeUndefined();
       expect((await asPerson("rig_question_answer", { qitemId: plain.qitemId, revision: listed.revision, choices: [{ questionId: "layout", optionId: "a" }] })).structured).toMatchObject({ code: "answer_shape" });
-      expect((await asPerson("rig_question_answer", { qitemId: plain.qitemId, revision: listed.revision, words: "Yes, go ahead" })).structured).toMatchObject({ ok: true, outcome: "answered", state: "done" });
+      expect((await asPerson("rig_question_answer", { qitemId: plain.qitemId, revision: listed.revision, words: "Yes, go ahead" })).structured).toMatchObject({ ok: true, outcome: "answered", submitted: { words: "Yes, go ahead" } });
+      expect(repo.getById(plain.qitemId)).toMatchObject({ state: "done" });
       expect(replies(plain.qitemId)).toBe(1);
     });
 
@@ -643,7 +645,8 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
 
       expect((await asPerson("rig_question_answer", { qitemId: work.qitemId, revision: parked.revision, choices: [{ questionId: "layout", optionId: "a" }] })).structured).toMatchObject({ code: "answer_shape" });
       const resolved = await asPerson("rig_question_answer", { qitemId: work.qitemId, revision: parked.revision, words: "Yes, ship them" });
-      expect(resolved.structured).toMatchObject({ ok: true, outcome: "answered", state: "in-progress" });
+      expect(resolved.structured).toMatchObject({ ok: true, outcome: "answered" });
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "in-progress" });
       expect(JSON.stringify(repo.listTransitions(work.qitemId))).toContain("Yes, ship them");
       // The park is back at work, its blocker cleared: an identical retry is confirmed from the record, nothing resent.
       expect((await asPerson("rig_question_answer", { qitemId: work.qitemId, revision: parked.revision, words: "Yes, ship them" })).structured).toMatchObject({ ok: true, outcome: "already-recorded" });
@@ -651,7 +654,8 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
 
       const legacyRevision = items.find((entry: any) => entry.qitemId === legacy.qitemId).revision;
       expect((await asPerson("rig_question_answer", { qitemId: legacy.qitemId, revision: legacyRevision, choices: [{ questionId: "layout", optionId: "a" }] })).structured)
-        .toMatchObject({ ok: true, outcome: "answered", answered: { layout: "a" } });
+        .toMatchObject({ ok: true, outcome: "answered" });
+      expect(repo.getById(legacy.qitemId)!.humanAnswers).toEqual({ layout: "a" });
       expect(audit(legacy.qitemId)[0]).toMatchObject({ actor: `${PERSON}@external` });
       // The legacy ask keeps human@host: an identical retry is still confirmed by its operation, and nothing is resent.
       expect((await asPerson("rig_question_answer", { qitemId: legacy.qitemId, revision: legacyRevision, choices: [{ questionId: "layout", optionId: "a" }] })).structured)
@@ -672,20 +676,26 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       broken = (req) => req.method === "POST" && new URL(req.url).pathname === "/api/mission-control/action" && ++posts === 2
         ? new Response(JSON.stringify({ error: "unavailable", message: "the daemon couldn't take it" }), { status: 503, headers: { "Content-Type": "application/json" } }) : undefined;
       const stopped = await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices });
-      expect(stopped.structured).toMatchObject({ ok: false, recorded: ["layout"], notRecorded: ["ship"] });
-      expect(stopped.structured.message).toContain("Recorded: layout. Not recorded: ship.");
+      // A server error on a send may have landed: that step is unknown, not "not recorded".
+      expect(stopped.structured).toMatchObject({ ok: false, recorded: ["layout"], indeterminate: "ship", notRecorded: [] });
+      expect(stopped.structured.message).toContain("Recorded: layout. Unknown whether ship was recorded.");
       expect(repo.getById(both.qitemId)).toMatchObject({ state: "pending", humanAnswers: { layout: "a" } });
       broken = undefined;
       // The identical retry continues after its own first step: only the second is recorded now, and the asker hears once.
       const finished = await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices });
-      expect(finished.structured).toMatchObject({ ok: true, outcome: "answered", answered: { layout: "a", ship: "no" } });
+      expect(finished.structured).toMatchObject({ ok: true, outcome: "answered" });
+      expect(repo.getById(both.qitemId)!.humanAnswers).toEqual({ layout: "a", ship: "no" });
       expect(audit(both.qitemId)).toHaveLength(2);
       expect(replies(both.qitemId)).toBe(1);
 
       // A one-of-two answer whose result was lost: its identical retry is already recorded, not a changed question.
       const half = await ask(`${PERSON}@external`, [LAYOUT, SHIP]);
       const halfRevision = (await asPerson("rig_question_list")).structured.items.find((entry: any) => entry.qitemId === half.qitemId).revision;
-      expect((await asPerson("rig_question_answer", { qitemId: half.qitemId, revision: halfRevision, choices: [{ questionId: "layout", optionId: "b" }] })).structured).toMatchObject({ ok: true, outcome: "recorded" });
+      const halfAnswer = await asPerson("rig_question_answer", { qitemId: half.qitemId, revision: halfRevision, choices: [{ questionId: "layout", optionId: "b" }] });
+      // The receipt carries only what this call submitted, never a fresh read of the row's answers.
+      expect(halfAnswer.structured).toEqual(expect.objectContaining({ ok: true, outcome: "recorded", submitted: [{ questionId: "layout", optionId: "b" }] }));
+      expect(halfAnswer.structured).not.toHaveProperty("answered");
+      expect(halfAnswer.structured).not.toHaveProperty("state");
       expect((await asPerson("rig_question_answer", { qitemId: half.qitemId, revision: halfRevision, choices: [{ questionId: "layout", optionId: "b" }] })).structured).toMatchObject({ ok: true, outcome: "already-recorded" });
       expect(audit(half.qitemId)).toHaveLength(1);
       // Another registered person answers the rest on Steering's path: the same retry is refused, and their answer isn't
@@ -698,6 +708,67 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(after.structured).toMatchObject({ ok: false, code: "not_waiting_on_person" });
       expect(audit(half.qitemId)).toHaveLength(2);
       expect(audit(half.qitemId)[1]).toMatchObject({ actor: "ana@external" });
+    });
+
+    it("stops a resumed answer when the question was rerouted after its recorded step: nothing lands on the new recipient's ask", async () => {
+      register(PERSON, true);
+      register("ana", false);
+      answer = () => [200, grantFor(PERSON)];
+      const asPerson = await connect((await listen()).url);
+      const both = await ask(`${PERSON}@external`, [LAYOUT, SHIP]);
+      const revision = (await asPerson("rig_question_list")).structured.items[0].revision;
+      const choices = [{ questionId: "layout", optionId: "a" }, { questionId: "ship", optionId: "no" }];
+      let posts = 0;
+      broken = (req) => req.method === "POST" && new URL(req.url).pathname === "/api/mission-control/action" && ++posts === 2
+        ? new Response(JSON.stringify({ error: "unavailable", message: "the daemon couldn't take it" }), { status: 503, headers: { "Content-Type": "application/json" } }) : undefined;
+      await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices });
+      // The retry passes the eligibility read; then, just before its first send, the ask is rerouted to Ana.
+      let rerouted = false;
+      broken = (req) => {
+        if (!rerouted && req.method === "POST" && new URL(req.url).pathname === "/api/mission-control/action") {
+          rerouted = true;
+          repo.routeToFallback(both.qitemId, "ana@external", "rerouted to Ana");
+        }
+        return undefined;
+      };
+      const stopped = await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices });
+      expect(stopped.structured).toMatchObject({ ok: false, code: "not_waiting_on_person", recorded: ["layout"], notRecorded: ["ship"] });
+      expect(repo.getById(both.qitemId)).toMatchObject({ state: "pending", destinationSession: "ana@external", humanAnswers: { layout: "a" } });
+      expect(audit(both.qitemId)).toHaveLength(1);
+    });
+
+    it("reports a send that got no answer as unknown, with what was recorded before it, and finishes on the same call", async () => {
+      register(PERSON, true);
+      answer = () => [200, grantFor(PERSON)];
+      const asPerson = await connect((await listen()).url);
+      const both = await ask(`${PERSON}@external`, [LAYOUT, SHIP]);
+      const revision = (await asPerson("rig_question_list")).structured.items[0].revision;
+      const choices = [{ questionId: "layout", optionId: "b" }, { questionId: "ship", optionId: "yes" }];
+      // The second send gets a body that isn't JSON, so the client throws.
+      let posts = 0;
+      broken = (req) => req.method === "POST" && new URL(req.url).pathname === "/api/mission-control/action" && ++posts === 2
+        ? new Response("upstream down", { status: 503, headers: { "Content-Type": "text/plain" } }) : undefined;
+      const unknown = await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices });
+      expect(unknown.structured).toMatchObject({ ok: false, recorded: ["layout"], indeterminate: "ship", notRecorded: [] });
+      expect(unknown.structured.message).toContain("Recorded: layout.");
+      expect(unknown.structured.message).toContain("Unknown whether ship was recorded.");
+      expect(unknown.structured.message).toContain("Send the same call again");
+      expect(unknown.structured.message).not.toContain("Nothing was recorded");
+      broken = undefined;
+      expect((await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices })).structured).toMatchObject({ ok: true, outcome: "answered" });
+      expect(repo.getById(both.qitemId)!.humanAnswers).toEqual({ layout: "b", ship: "yes" });
+      expect(audit(both.qitemId)).toHaveLength(2);
+      expect(replies(both.qitemId)).toBe(1);
+
+      // A first send with no answer says it's unknown, not that nothing was recorded.
+      const one = await ask(`${PERSON}@external`);
+      const oneRevision = (await asPerson("rig_question_list")).structured.items.find((entry: any) => entry.qitemId === one.qitemId).revision;
+      broken = (req) => req.method === "POST" && new URL(req.url).pathname === "/api/mission-control/action"
+        ? new Response("upstream down", { status: 503, headers: { "Content-Type": "text/plain" } }) : undefined;
+      const first = await asPerson("rig_question_answer", { qitemId: one.qitemId, revision: oneRevision, choices: [{ questionId: "layout", optionId: "a" }] });
+      expect(first.structured).toMatchObject({ ok: false, recorded: [], indeterminate: "layout" });
+      expect(first.structured.message).not.toContain("Nothing was recorded");
+      broken = undefined;
     });
 
     it("leaves out a park that moved to someone else between Steering's view and the read of its row, and never answers it", async () => {
