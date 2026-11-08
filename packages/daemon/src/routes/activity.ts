@@ -950,7 +950,7 @@ activityRoutes.get("/parked", (c) => {
     | undefined;
   const queueRepo = c.get("queueRepo" as never) as
     | {
-        list: (opts: { destinationSession?: string; state?: string[]; limit?: number }) => Array<{ qitemId: string; state: string; summary?: string | null }>;
+        listOpenObligations: (destinationSession: string, limit: number) => Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null }>;
         getParkWakeStatus: (qitemId: string) => import("../domain/queue-wake-repository.js").ParkWakeStatus | null;
         parkWakeServedByOwnReminder?: (qitemId: string) => boolean;
       }
@@ -967,10 +967,10 @@ activityRoutes.get("/parked", (c) => {
   const { diagnoseSeatParked, diagnoseRigParked, PARKED_OBLIGATION_LIMIT } = parkedQuery;
   const deps = {
     getSeatState: (id: string) => nodeExecutorConfirmedStopped(rigRepo.db, id) ? null : oracle.getSeatState(id),
+    // The obligation face only: the same rows, order and limit as a full list() of this destination's open states,
+    // without the per-row projections (pickup, waiting view, delivery ledger) the diagnosis never reads.
     listOpenObligations: (destination: string, limit: number) => ({
-      rows: queueRepo
-        .list({ destinationSession: destination, state: ["pending", "in-progress", "blocked"], limit })
-        .map((r) => ({ qitemId: r.qitemId, state: r.state as "pending" | "in-progress" | "blocked", summary: r.summary ?? null })),
+      rows: queueRepo.listOpenObligations(destination, limit),
       limit,
     }),
     getParkWake: (qitemId: string) => queueRepo.getParkWakeStatus(qitemId),
