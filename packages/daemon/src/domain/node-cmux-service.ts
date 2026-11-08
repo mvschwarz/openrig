@@ -63,6 +63,11 @@ export class NodeCmuxService {
       externalSessionName?: string | null;
     } | null | undefined,
   ): Promise<OpenCmuxResult> {
+    // A seat on another terminal substrate has no tmux session to attach: refuse before creating anything (m1).
+    const attachSession = binding?.tmuxSession ?? binding?.externalSessionName ?? logicalId;
+    if (binding?.attachmentType === "tmux" && binding?.tmuxSession && tmuxAttachExecCommand(attachSession) === null) {
+      return { ok: false, code: "herdr_unsupported", error: `${attachSession} runs in a Herdr workspace, not tmux: open it in Herdr (cmux can't attach it).` };
+    }
 
     // Resolve a workspace anchor for the new surface. OPR.0.4.1.31 part A —
     // node open-in-cmux previously anchored ONLY on currentWorkspace(), so when
@@ -89,7 +94,7 @@ export class NodeCmuxService {
     const isTmux = binding?.attachmentType === "tmux" && binding?.tmuxSession;
     if (isTmux) {
       const attach = tmuxAttachExecCommand(sessionName);
-      if (attach === null) {
+      if (attach === null) { // checked above; kept so no prose ever reaches the surface
         return { ok: false, code: "herdr_unsupported", error: `${sessionName} runs in a Herdr workspace, not tmux: open it in Herdr (cmux can't attach it).` };
       }
       const sendResult = await this.cmuxAdapter.sendText(newSurfaceId, `${attach}\n`, wsResult.data);
