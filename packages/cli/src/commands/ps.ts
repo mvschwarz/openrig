@@ -743,7 +743,8 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       runtime: n.runtime ?? null,
       ...(n.communityHarness ? { communityHarness: n.communityHarness } : {}),
       ...(n.launchWrapper?.length ? { launchWrapper: n.launchWrapper } : {}),
-      terminalSubstrate: n.terminalSubstrate ?? "tmux",
+      // Compact rows stay token-lean: tmux is the default and is left out.
+      ...(n.terminalSubstrate && n.terminalSubstrate !== "tmux" ? { terminalSubstrate: n.terminalSubstrate } : {}),
       ...(n.herdrAttachHint ? { herdrAttachHint: n.herdrAttachHint } : {}),
       model: n.model ?? null,
       // Compact tuple: [literal model, evidence source, native record time].

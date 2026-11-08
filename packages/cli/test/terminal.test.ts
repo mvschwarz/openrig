@@ -90,16 +90,27 @@ describe("rig terminal CLI", () => {
 
   it.each([false, true])("attaches using the daemon's effective server, preserving read-only=%s", async readOnly => {
     const serverArgs = ["-S", "/private/selected server.sock"];
-    const { deps, calls } = makeDeps({ routes: { "GET /api/terminal/status": {
-      status: 200, data: { tmux: { mode: "inherit", requestedMode: "isolated", migrationPending: true, serverArgs } },
+    const { deps, calls } = makeDeps({ routes: { "GET /api/terminal/status?seat=seat'quoted": {
+      status: 200, data: { tmux: { mode: "inherit", requestedMode: "isolated", migrationPending: true, serverArgs }, seatSubstrate: "tmux" },
     } } });
     deps.attachTmux = vi.fn(async () => 7);
     await createProgram({ terminalDeps: deps }).parseAsync([
       "node", "rig", "terminal", "attach", ...(readOnly ? ["--read-only"] : []), "--", "seat'quoted",
     ]);
     expect(deps.attachTmux).toHaveBeenCalledWith({ session: "seat'quoted", serverArgs, readOnly });
-    expect(calls).toEqual([{ method: "GET", path: "/api/terminal/status" }]);
+    expect(calls).toEqual([{ method: "GET", path: "/api/terminal/status?seat=seat'quoted" }]);
     expect(process.exitCode).toBe(7);
+  });
+
+  it("refuses a seat that runs in Herdr instead of attaching tmux to a same-name session", async () => {
+    const { deps } = makeDeps({ routes: { "GET /api/terminal/status?seat=dev-a%40r": {
+      status: 200, data: { tmux: { mode: "inherit", serverArgs: [] }, seatSubstrate: "herdr" },
+    } } });
+    deps.attachTmux = vi.fn(async () => 0);
+    await createProgram({ terminalDeps: deps }).parseAsync(["node", "rig", "terminal", "attach", "dev-a@r"]);
+    expect(deps.attachTmux).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("runs in a Herdr workspace"));
+    expect(process.exitCode).toBe(1);
   });
 
   it.each([
@@ -107,7 +118,7 @@ describe("rig terminal CLI", () => {
     { status: 200, data: {}, message: "cannot report its tmux server" },
     { status: 200, data: { tmux: { serverArgs: ["kill-server"] } }, message: "invalid tmux server options" },
   ])("reports unreadable or invalid server metadata without attaching: $message", async response => {
-    const { deps } = makeDeps({ routes: { "GET /api/terminal/status": response } });
+    const { deps } = makeDeps({ routes: { "GET /api/terminal/status?seat=seat": response } });
     deps.attachTmux = vi.fn(async () => 0);
     await createProgram({ terminalDeps: deps }).parseAsync(["node", "rig", "terminal", "attach", "seat"]);
     expect(deps.attachTmux).not.toHaveBeenCalled();
