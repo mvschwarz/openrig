@@ -19,6 +19,7 @@ import { memoizeScan, parseSkillFrontmatter, type ScanCache } from "./skill-disc
 
 const CATALOG_SCHEMA = "openrig.skill-catalog/v1";
 const MANIFEST_SCHEMA = "openrig.skill-loadout/v1";
+const CATALOG_GIT_TIMEOUT_MS = 5000;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_TOPOLOGY_OWNER = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -245,7 +246,7 @@ export function inspectSkillDirectory(root: string): { digest: string; files: Re
 function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<string>; committedName: (dir: string) => string | null } {
   let repoRoot: string;
   try {
-    repoRoot = execFileSync("git", ["-C", catalogRoot, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+    repoRoot = execFileSync("git", ["-C", catalogRoot, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: CATALOG_GIT_TIMEOUT_MS }).trim();
   } catch {
     throw new Error(`managed skill catalog is not inside a readable Git repository: ${catalogRoot}`);
   }
@@ -253,7 +254,7 @@ function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<strin
   const status = execFileSync(
     "git",
     ["-C", repoRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", rel || "."],
-    { encoding: "utf8" },
+    { encoding: "utf8", timeout: CATALOG_GIT_TIMEOUT_MS },
   );
   const dirtyDirs = new Set<string>();
   const fields = status.split("\0");
@@ -273,13 +274,14 @@ function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<strin
       dirtyDirs.add(inCatalog.slice(0, slash));
     }
   }
-  const revision = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const revision = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8", timeout: CATALOG_GIT_TIMEOUT_MS }).trim();
   // The frontmatter name of `dir`'s SKILL.md at HEAD: null when HEAD has none there, "" when it doesn't parse.
   const committedName = (dir: string): string | null => {
     let text: string;
     try {
       text = execFileSync("git", ["-C", repoRoot, "show", `${revision}:${rel ? `${rel}/` : ""}${dir}/SKILL.md`], {
         encoding: "utf8",
+        timeout: CATALOG_GIT_TIMEOUT_MS,
         stdio: ["ignore", "pipe", "ignore"],
       });
     } catch {
