@@ -356,7 +356,9 @@ accounting. Historical outbox receipts do not suppress a lone reminder or preven
 message tells its recipient that delivery may repeat after an unconfirmed attempt. Its job history records the
 current transport result; an unknown write is not proof that nothing arrived.
 
-The transport still protects approval/question prompts, human drafts and recipient identity. Scheduler timing,
+The transport still protects approval/question prompts and recipient identity. A person's typed draft is protected
+only when `transport.draft_delivery` is `refuse`: under the default, `deliver`, an ordinary send or work notice that
+meets a draft at a Claude Code or Codex prompt is pasted into it and the combined input is submitted. Scheduler timing,
 current parked-row eligibility and stop checks still apply. This changes message retries, not the idempotence of
 structured continuity actions such as creating a cutover baton.
 

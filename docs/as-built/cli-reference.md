@@ -25,7 +25,7 @@ below `rig` (including groups and the hidden `restore apply` command), and
 **1,304 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
-These are counts for that source snapshot, not a claim about a deployed release. The provider-switch and set-runtime rows include the later account-home options; those additions are not included in the snapshot counts. The `environment` section and the `host edit`, `host remove` and `terminal attach` rows were added later from source at `522d635c`, and aren't in the snapshot counts either. With `environment`, main registers 91 top-level commands.
+These are counts for that source snapshot, not a claim about a deployed release. The provider-switch and set-runtime rows include the later account-home options; those additions are not included in the snapshot counts. The `environment` section and the `host edit`, `host remove` and `terminal attach` rows were added later from source at `522d635c`, and aren't in the snapshot counts either. With `environment` and `exec`, main registers 92 top-level commands.
 
 ## Reading this reference
 
@@ -188,7 +188,7 @@ the sections that were not read are `null`.
 |---|---|---|
 | `rig gateway` | — | — |
 | `rig gateway human` | — | — |
-| `rig gateway human add <entityId>` | — | `--display-name <name>` **required**<br>`--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>` **required** (repeatable)<br>`--delivery-class <A\|B\|C\|D>` **required**<br>`--away`<br>`--replace`<br>`--reason <reason>`<br>`--actor <actor>`<br>`--organization <id>`<br>`--group <id>` (repeatable)<br>`--policy <text>`<br>`--policy-file <path>`<br>`--default` |
+| `rig gateway human add <entityId>` | — | `--display-name <name>` **required**<br>`--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>` (repeatable; without one, the person is reached in the Feed and Steering only)<br>`--delivery-class <A\|B\|C\|D>` **required**<br>`--away`<br>`--replace`<br>`--reason <reason>`<br>`--actor <actor>`<br>`--organization <id>`<br>`--group <id>` (repeatable)<br>`--policy <text>`<br>`--policy-file <path>`<br>`--default` |
 | `rig gateway human list` | — | `--json` |
 | `rig gateway human quiet` | — | — |
 | `rig gateway human quiet set <entityId>` | — | `--daily <window>`<br>`--until <time>`<br>`--tz <zone>`<br>`--actor <actor>`<br>`--json` |
@@ -406,7 +406,7 @@ do not establish connectivity to a live peer.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig mcp` | — | — |
-| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>` |
+| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>`<br>`--front-door`<br>`--task-destination <seat>` |
 | `rig mcp token` | — | — |
 | `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
 | `rig mcp token list` | — | `--json` |
