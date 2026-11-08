@@ -94,7 +94,8 @@ export interface TeamConnection {
 }
 
 export interface AcpAgentOptions {
-  /** Reaches the local daemon and resolves the caller; returns guidance when it can't. Called lazily, never at initialize. */
+  /** Reaches the daemon (`rig`'s: the local one, or OPENRIG_URL's) and resolves the caller; returns guidance when it can't.
+   *  Called lazily, never at initialize. */
   connect: () => Promise<TeamConnection | { error: string }>;
   version: string;
   pollMs: number;
@@ -344,7 +345,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       authMethods: [{
         id: AUTH_METHOD_ID,
         name: "OpenRig on this machine",
-        description: "Sends your work to your OpenRig team through the OpenRig daemon running on this computer, as you; this agent talks only to that daemon. Start it with `rig daemon start`.",
+        description: "Sends your work to your OpenRig team, as you, through the same OpenRig daemon as `rig` on this computer: the local one (start it with `rig daemon start`), unless OPENRIG_URL names another.",
       }],
       agentInfo: { name: "openrig", title: "OpenRig", version: options.version },
     };
@@ -483,7 +484,7 @@ export function serveAcpAgent(peer: JsonRpcPeer, options: AcpAgentOptions): void
       session.sent.push(sent);
       log(`session ${session.id}: sent ${root} to ${team.receiver}`);
 
-      // ponytail: polls the local daemon for the chain's rows, their transitions and the caller's open asks; the
+      // ponytail: polls the daemon for the chain's rows, their transitions and the caller's open asks; the
       // daemon's event stream is the upgrade path if a poll per open turn ever costs too much.
       const follower = new ChainFollower(team.queue, (u) => update(session.id, u), root);
       const seen = new Set<string>();

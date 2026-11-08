@@ -278,10 +278,10 @@ work carries on. A turn that ended doesn't mean the work was accepted: the reply
 Without --to, the receiver is the acp.to setting (rig config set acp.to <member@rig>), which is how an app that
 starts the agent from the ACP registry, with no arguments, reaches your team.
 
-It uses the OpenRig daemon on this computer, started with rig daemon start. The app's sign-in step ("OpenRig on this
-machine") checks that the daemon answers and that you resolve to an address: --as, OPENRIG_SESSION_NAME, or the
-default person: the only one registered (rig gateway human add <id> ...), or with several, the one chosen with
-rig gateway default <id>.
+It uses the same OpenRig daemon as rig: the one on this computer, started with rig daemon start, unless OPENRIG_URL
+names another. The app's sign-in step ("OpenRig on this machine") checks that the daemon answers and that you
+resolve to an address: --as, OPENRIG_SESSION_NAME, or the default person: the only one registered
+(rig gateway human add <id> ...), or with several, the one chosen with rig gateway default <id>.
 
 In Zed's settings.json:
   "agent_servers": { "OpenRig": { "type": "custom", "command": "rig", "args": ["acp", "serve", "--to", "lead@my-team"] } }

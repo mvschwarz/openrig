@@ -18,7 +18,7 @@ and warns on stderr if it finds another, so ACP apps and the ACP registry can la
   questions reach an `<id>@external` address only once it's registered.
 
 The app's sign-in step, "OpenRig on this machine", checks that the daemon answers and that it can tell who you are.
-This agent talks only to the OpenRig daemon on this computer.
+This agent talks to the same OpenRig daemon as `rig` on this computer: the local one, unless `OPENRIG_URL` names another.
 
 ## In an app, without the registry
 
