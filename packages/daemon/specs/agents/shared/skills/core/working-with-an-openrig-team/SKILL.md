@@ -79,7 +79,9 @@ behave; this skill is the loop around them.
      does not forward every shell environment variable to MCP servers by default, so if the team's OpenRig home isn't the
      default, add `--env OPENRIG_HOME=<that home>` too.
    - **Another app:** add an MCP server that runs `rig mcp serve --front-door` with `OPENRIG_SESSION_NAME` set to the
-     address.
+     address, and turn the plugin's `openrig` server off, so the app runs one. In VS Code, give yours another name, such
+     as `openrig-seat`; in Cursor, disable **openrig · Plugin**. Starting the app from a shell with the variable set lasts
+     only for that launch.
 
 ## What this doesn't do
 
