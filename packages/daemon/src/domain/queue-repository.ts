@@ -1226,9 +1226,17 @@ export class QueueRepository {
 
   private currentWakeIntent(entry: QueueWakeFacts): boolean {
     const row = entry.auditPointer ? this.db.prepare("SELECT state, destination_session FROM queue_items WHERE qitem_id=?").get(entry.auditPointer) as { state: string; destination_session: string } | undefined : undefined;
-    // That notice stays current while the row stays closed; every other wake, while its row waits on its destination.
+    // That notice stays current while the row stays closed by the close that made it; every other wake, while its row
+    // waits on its destination. A reopen and another close end it: its text names the earlier successor.
     if (entry.outboxId.startsWith(CLAIM_OVERRIDDEN_WAKE_PREFIX)) {
-      return row !== undefined && isTerminalState(row.state) && row.destination_session === entry.destinationSession;
+      if (row === undefined || !isTerminalState(row.state) || row.destination_session !== entry.destinationSession) return false;
+      const closed = TERMINAL_QUEUE_STATES.map(() => "?").join(",");
+      const close = this.db.prepare(`SELECT transition_id FROM (
+        SELECT transition_id, state, LAG(state) OVER (ORDER BY transition_id) AS previous_state
+        FROM queue_transitions WHERE qitem_id=?)
+        WHERE state IN (${closed}) AND (previous_state IS NULL OR previous_state NOT IN (${closed})) ORDER BY transition_id DESC LIMIT 1`)
+        .get(entry.auditPointer, ...TERMINAL_QUEUE_STATES, ...TERMINAL_QUEUE_STATES) as { transition_id: number } | undefined;
+      return Number(entry.outboxId.slice(CLAIM_OVERRIDDEN_WAKE_PREFIX.length)) === close?.transition_id;
     }
     if (row?.state !== "pending" || row.destination_session !== entry.destinationSession) return false;
     const prefix = `${WAKE_INTENT_PREFIX}blocker-`;
@@ -1743,9 +1751,10 @@ export class QueueRepository {
     tally.failed += this.db.prepare(`UPDATE outbox_entries AS o SET delivery_state = 'failed',
       tags = json_insert(COALESCE(tags, '[]'), '$[#]', 'queue:wake-superseded')
       WHERE delivery_state = 'pending' AND rowid <= ? AND substr(outbox_id, 1, ?) = ?
+        AND substr(outbox_id, 1, ?) != ?
         AND NOT EXISTS (SELECT 1 FROM queue_items q WHERE q.qitem_id = o.audit_pointer
           AND q.state = 'pending' AND q.destination_session = o.destination_session)`)
-      .run(horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX).changes;
+      .run(horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, CLAIM_OVERRIDDEN_WAKE_PREFIX.length, CLAIM_OVERRIDDEN_WAKE_PREFIX).changes;
     // A stop also refuses every later claim inside a delivery: coalesced peers and members it releases for their own send.
     // So does a missing receiver, for a notification already tried. One never tried still gets its attempt, so its row
     // records why it didn't land.
@@ -1758,11 +1767,12 @@ export class QueueRepository {
     let cursor = 0;
     for (;;) {
       const pending = this.db.prepare(`SELECT o.rowid AS id, o.outbox_id FROM outbox_entries o
-        JOIN queue_items q ON q.qitem_id = o.audit_pointer AND q.state = 'pending'
+        JOIN queue_items q ON q.qitem_id = o.audit_pointer AND (q.state = 'pending' OR substr(o.outbox_id, 1, ?) = ?)
           AND q.destination_session = o.destination_session
         WHERE o.rowid > ? AND o.rowid <= ? AND substr(o.outbox_id, 1, ?) = ?
           AND o.delivery_state IN ('pending','failed','indeterminate') ORDER BY o.rowid LIMIT ?`)
-        .all(cursor, horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
+        .all(CLAIM_OVERRIDDEN_WAKE_PREFIX.length, CLAIM_OVERRIDDEN_WAKE_PREFIX, cursor, horizon, WAKE_INTENT_PREFIX.length,
+          WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
       if (pending.length === 0) break;
       for (const intent of pending) {
         if (opts?.stopRequested?.()) return result();
@@ -1854,13 +1864,16 @@ export class QueueRepository {
     const eligible = (entry: OutboxEntry): boolean => {
       if (entry.deliveryState !== "failed" || !entry.auditPointer) return false;
       const current = this.getById(entry.auditPointer), refusal = current?.lastNudgeWireResult;
-      return current?.state === "pending" && addresses.includes(current.destinationSession)
+      const notice = entry.outboxId.startsWith(CLAIM_OVERRIDDEN_WAKE_PREFIX);
+      return (current?.state === "pending" || notice) && addresses.includes(current?.destinationSession ?? "")
         && (refusal === "failed:target_needs_input" || (refusal?.startsWith("failed:Refused:") === true && refusal.includes("interactive prompt")));
     };
     const rows = this.db.prepare(`SELECT qitem_id, destination_session, source_session, last_nudge_result
-      FROM queue_items WHERE state = 'pending' AND destination_session IN (${addresses.map(() => "?").join(",")})
+      FROM queue_items q WHERE (state = 'pending' OR EXISTS (SELECT 1 FROM outbox_entries o WHERE o.audit_pointer = q.qitem_id
+          AND substr(o.outbox_id, 1, ?) = ? AND o.delivery_state = 'failed'))
+        AND destination_session IN (${addresses.map(() => "?").join(",")})
         AND (last_nudge_result LIKE 'failed:Refused:%interactive prompt%' OR last_nudge_result = 'failed:target_needs_input')`)
-      .all(...addresses) as Array<{ qitem_id: string; destination_session: string; source_session: string }>;
+      .all(CLAIM_OVERRIDDEN_WAKE_PREFIX.length, CLAIM_OVERRIDDEN_WAKE_PREFIX, ...addresses) as Array<{ qitem_id: string; destination_session: string; source_session: string }>;
     const attempted = new Set<string>();
     // Reserve the whole selection before awaiting: a correlated send can include several rows.
     // Its refusal stays durable, but must not re-arm this same clear-triggered pass.
@@ -2871,6 +2884,7 @@ export class QueueRepository {
         } catch (err) {
           // As a handoff's own wake: a full held-message quota doesn't undo a close whose successor already exists.
           if ((err as { code?: string }).code !== "retained_quota_full") throw err;
+          this.recordNudgeAttempt(input.qitemId, `${WAKE_NOT_RETAINED}${(err as Error).message}`);
         }
       }
 
