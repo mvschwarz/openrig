@@ -66,20 +66,24 @@ before deciding how to recover an uncertain delivery.
 ## After a restored seat's prompt
 
 A restore that stops at a prompt, such as Claude's resume selection, records the
-seat's restore outcome as `attention_required`. Answering the prompt in the pane
-doesn't change that record, and neither does `rig seat continue`, which only
-delivers pending startup context. The seat's startup status can turn `ready` while
-the restore outcome stays `attention_required`, and that outcome alone keeps the
-seat's lifecycle at `attention_required`: `rig ps --nodes` shows LIFECYCLE `att`,
-`needsAttention` stays true, and the seat counts in the rig's `attentionCount` and
-the TUI's attention totals.
+seat's restore outcome as `attention_required`. `rig seat continue` doesn't change
+that record: it only delivers pending startup context. While the record stands, it
+alone keeps the seat's lifecycle at `attention_required`, even with startup `ready`:
+`rig ps --nodes` shows LIFECYCLE `att`, `needsAttention` is true, and the seat counts
+in the rig's `attentionCount` and the TUI's attention totals.
 
-Once the agent is up in its pane, run `rig seat clear-attention <seat>`. After a
-full restore of a Claude or Codex seat, it checks the live seat before clearing
-anything: its tmux session is alive, and the pane runs the agent resuming the
-conversation the seat records. When the check passes, the restore outcome becomes
-`operator_recovered`, so the restore no longer makes the seat need attention. When it
-fails, the command says which check failed, and `--reason` doesn't bypass it. If
+After a full restore of a Claude or Codex seat, answering the prompt is enough. When
+the seat's activity next turns to running or idle, or when the whole restore completes
+after the seat already reads running or idle, the daemon checks the live seat: its tmux
+session is alive, and the pane runs the agent resuming the conversation the seat
+records. When the check passes, the restore outcome becomes `operator_recovered`, so
+the restore no longer makes the seat need attention. When it fails, the restore outcome
+stays and the seat still needs attention, which is true when the pane runs another
+conversation. A check that started before a newer restore of the seat doesn't settle
+the newer outcome.
+
+`rig seat clear-attention <seat>` runs the same check on demand. When it fails, the
+command says which check failed, and `--reason` doesn't bypass it. If
 the seat records the wrong conversation and you know the right one, set it with
 `rig seat set-resume-token <seat> --token-stdin --reason <text>`, then run
 `clear-attention` again. After a restore of only some seats, or a community

@@ -612,6 +612,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // real liveness for hook-less / stale-hook / turn-boundary seats WITHOUT a per-request capture storm.
   // A confirmed prompt clearing recovers its refused queue wakes immediately, using the same
   // hook/pane resolution as status. No new captures, timer or delivery admission path.
+  // The same reading lets a seat a full restore stopped at a prompt be reconciled once it resumes (#2622); set once
+  // the attention reconciler exists, so a reading before then waits for the next change.
+  let restoredSeatActivity: ((sessionName: string, state: string | undefined) => void) | undefined;
   const retryPromptWakes = (sessionName: string) => {
     const runtime = sessionRegistry.findResumeContextByName(sessionName)?.runtime;
     const structural = seatStructuralActivityService.getStructuralActivity(sessionName);
@@ -619,6 +622,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime)?.activity.state;
     void queueRepoInstance.retryPromptWakesOnClear(sessionName, state, structural?.state === "attention")
       .catch(error => console.warn(`Prompt-clear wake recovery: ${error instanceof Error ? error.name : typeof error}`));
+    restoredSeatActivity?.(sessionName, state);
   };
   seatStructuralActivityService.attachActivityChanged(retryPromptWakes);
   eventBus.subscribe(event => { if (event.type === "agent.activity") retryPromptWakes(event.sessionName); });
@@ -1470,6 +1474,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       if (!transport) return { ok: false, sessionName: session, error: "transport_unavailable" };
       return transport.capture(session, opts);
     },
+  });
+  restoredSeatActivity = (sessionName, state) => {
+    void seatAttentionReconciler.onSeatActivity(sessionName, state)
+      .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
+  };
+  eventBus.subscribe(event => {
+    if (event.type !== "restore.completed") return;
+    void seatAttentionReconciler.onRestoreCompleted(event.rigId)
+      .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
   });
 
   // Capture compatibility before the spec-library initializer creates the primary directory.

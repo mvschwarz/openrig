@@ -5085,6 +5085,73 @@ describe("RestoreOrchestrator", () => {
 
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
     });
+
+    // #2622: the check awaits native reads, and an automatic one can overlap a restore or another check.
+    function pausedAtPaneRead(tmux: TmuxAdapter, readers = 1) {
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      let reached!: () => void;
+      const allReached = new Promise<void>((resolve) => { reached = resolve; });
+      let reading = 0;
+      vi.mocked(tmux.capturePaneContent).mockImplementation(async () => {
+        if (++reading === readers) reached();
+        await released;
+        return "Claude Code v2.1.89\n ❯ accept edits on";
+      });
+      return { allReached, release };
+    }
+    const receipts = () => db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all();
+
+    it.each([
+      ["nothing changed", () => {}, true],
+      ["a newer restore attempt ended at attention", (seeded: { rig: { id: string }; nodeId: string }) => {
+        eventBus.emit({ type: "restore.started", rigId: seeded.rig.id, snapshotId: "snap-newer" });
+        eventBus.emit({ type: "restore.completed", rigId: seeded.rig.id, snapshotId: "snap-newer", result: {
+          snapshotId: "snap-newer", preRestoreSnapshotId: null, rigResult: "partially_restored",
+          nodes: [{ nodeId: seeded.nodeId, logicalId: "worker", status: "attention_required" }], warnings: [],
+        } });
+      }, false],
+      ["the seat now records another conversation", (seeded: { nodeId: string }) => {
+        db.prepare("UPDATE sessions SET resume_token = 'tok-newer' WHERE node_id = ?").run(seeded.nodeId);
+      }, false],
+    ])("a check whose subject changed while it read the pane settles nothing: %s", async (_label, change, settles) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("claude");
+      const pane = pausedAtPaneRead(tmux);
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+
+      const check = orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      await pane.allReached;
+      change(seeded as never);
+      pane.release();
+      const result = await check;
+
+      expect(result.ok).toBe(settles);
+      if (!result.ok) expect(result.code).toBe("proof_superseded");
+      expect(receipts()).toHaveLength(settles ? 1 : 0);
+      if (!settles) {
+        const entry = getNodeInventory(db, seeded.rig.id).find((n) => n.nodeId === seeded.nodeId)!;
+        expect(entry.restoreOutcome).toBe("attention_required");
+      }
+    });
+
+    it("two checks that overlap both pass and append one receipt", async () => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("claude");
+      const pane = pausedAtPaneRead(tmux, 2);
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+
+      const checks = [orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId), orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId)];
+      await pane.allReached;
+      pane.release();
+
+      expect((await Promise.all(checks)).map((r) => r.ok)).toEqual([true, true]);
+      expect(receipts()).toHaveLength(1);
+    });
   });
 
   // === OPR.0.3.4.2 — zero-session regression guard (the headline) ===
