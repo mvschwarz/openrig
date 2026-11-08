@@ -1,5 +1,5 @@
 // OpenRig's Rig view strip: the header of the `rig-work` stack in OpenRig's Rig layout (layouts/rig.json).
-// Installed and updated by `rig herdr install`; OpenRig writes its props on every layout write.
+// Installed and updated by OpenRig when it opens a view; OpenRig writes its props on every layout write.
 //
 // - Pills: the person's tabs, then OpenRig's views. A click shows that stack child (layout.select).
 // - Entering a view (a click here, an explicit open, or a restart with one shown) focuses the cell the person was

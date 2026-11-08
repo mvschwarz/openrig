@@ -9,24 +9,21 @@ Nothing here needs a desktop display or SSH: the view opens in the herdr-app win
 
 ## Set up
 
-```sh
-rig herdr install            # OpenRig's mods: rig-strip, rig-cell-header, rig-pad, rig-ended
-```
+Nothing to install by hand: opening a view installs OpenRig's four mods (rig-strip, rig-cell-header, rig-pad,
+rig-ended) and updates them when OpenRig is updated.
 
 - The mods go to `<app home>/mods/rig-*`. The app home is herdr-app's own: `HERDR_APP_HOME`, else
-  `$XDG_CONFIG_HOME/herdr-app`, else `~/.config/herdr-app`. `--app-home <dir>` names another.
+  `$XDG_CONFIG_HOME/herdr-app`, else `~/.config/herdr-app`. `--app-home <dir>` on `rig terminal open` names another.
 - OpenRig owns only the files it ships there (recorded in `<app home>/openrig/mods.json`). An update replaces those
-  and nothing else in the folder. If you changed one of them, the install says so and leaves the mod as it is. Mods you
-  install yourself, from any source, are never touched.
+  and nothing else in the folder. Mods you install yourself, from any source, are never touched.
 - To move between a view's cells from the keyboard, bind the strip's actions in `keys.json`, section `layout:rig`
   (your agent can add it, as for any herdr-app key):
   `"layout:rig": { "alt-left": "rig-strip.left", "alt-right": "rig-strip.right", "alt-up": "rig-strip.up", "alt-down": "rig-strip.down" }`.
   In the Rig layout these replace herdr-app's `global` defaults for the same keys (`pane.go`, `agent.prev`/`agent.next`),
   which keep working on your other layouts. A key bound in `terminal` wins while a cell has focus, so pick keys that
   aren't bound there. Once you edit `keys.json`, herdr-app treats it as yours and stops adding new default shortcuts.
-- Opening a view installs missing mods and updates OpenRig's own by itself. It never replaces a mod you changed: that
-  folder stays as it is, the view opens anyway, and the open's notes name the folder and why. Only a mod a view needs
-  that is missing and can't be installed stops an open.
+- An open never replaces a mod you changed: that folder stays as it is, the view opens anyway, and the open's notes
+  name the folder and why. Only a mod a view needs that is missing and can't be installed stops an open.
 
 ## Open a view
 

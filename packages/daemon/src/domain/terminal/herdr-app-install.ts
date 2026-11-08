@@ -1,4 +1,4 @@
-// OpenRig's mods in a herdr-app home (`rig herdr install`, and on an open that finds them missing).
+// OpenRig's mods in a herdr-app home, installed or updated by each open.
 //
 // Four mods draw a Rig-layout view (the strip, cell headers, pad and ended cells); they ship in
 // packages/daemon/assets/herdr-app/mods and are copied to <app home>/mods/<name>. OpenRig owns only the files it
@@ -128,7 +128,7 @@ export async function installRigMods(appHome: string, opts: { shippedDir?: strin
     // A file this release newly ships (not recorded as OpenRig's) that is already there is the person's: never replace it.
     const collisions = [...shipped.keys()].filter((f) => !recorded.files.includes(f) && present.has(f) && present.get(f) !== shipped.get(f));
     if (collisions.length) {
-      result.refused.push({ name, reason: `${dest} already has ${collisions.join(", ")}, which this OpenRig release now ships as its own; it was left as it is. Rename or remove ${collisions.length > 1 ? "them" : "it"} and run \`rig herdr install\` again.` });
+      result.refused.push({ name, reason: `${dest} already has ${collisions.join(", ")}, which this OpenRig release now ships as its own; it was left as it is. Rename or remove ${collisions.length > 1 ? "them" : "it"} to let the next open install OpenRig's copy.` });
       continue;
     }
     plan.push({ name, files: shipped, dest, kind: "updated", drop: recorded.files.filter((f) => !shipped.has(f) && present.has(f)) });

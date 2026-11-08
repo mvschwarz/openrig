@@ -26,7 +26,12 @@ import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { resolveHerdrAppHome } from "@openrig/daemon/herdr-app";
+import { homedir } from "node:os";
+
+/** herdr-app's home, resolved the way herdr-app resolves it (as the TUI does). */
+function herdrAppHome(env: NodeJS.ProcessEnv): string {
+  return env["HERDR_APP_HOME"] || join(env["XDG_CONFIG_HOME"] || join(env["HOME"] || homedir(), ".config"), "herdr-app");
+}
 
 export interface TerminalDeps extends StatusDeps {
   windowDeps?: WindowDeps;
@@ -49,9 +54,9 @@ export function herdrAppClient(opts: { provider?: string; window?: boolean; appH
   const named = opts.provider?.trim();
   const exists = deps.socketExists ?? existsSync;
   const ambient = !named
-    && !!env["HC_TERMINAL_ID"] && !!env["HC_TERMINAL_SOCKET"] && exists(join(resolveHerdrAppHome(env), "herdr-app.sock"));
+    && !!env["HC_TERMINAL_ID"] && !!env["HC_TERMINAL_SOCKET"] && exists(join(herdrAppHome(env), "herdr-app.sock"));
   if (named !== "herdr-app" && !ambient) return null;
-  return { appHome: opts.appHome ? resolve(opts.appHome) : resolveHerdrAppHome(env), ambient };
+  return { appHome: opts.appHome ? resolve(opts.appHome) : herdrAppHome(env), ambient };
 }
 export interface FollowControls {
   enabled: boolean; maxTiles?: number; graceMs?: number; focusRetentionMs?: number;
@@ -277,7 +282,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
       const env = deps.env ?? process.env;
       await withClient(deps, async (client) => {
         const res = await client.post<OpenViewResult>("/api/terminal/close", { view, provider: "herdr-app",
-          herdrApp: { appHome: opts.appHome ? resolve(opts.appHome) : resolveHerdrAppHome(env) } }, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
+          herdrApp: { appHome: opts.appHome ? resolve(opts.appHome) : herdrAppHome(env) } }, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
         if (opts.json) { printResult(true, res.data, res.status); return; }
         console.log(res.data?.ok ? `Closed Rig view ${view}.` : `Not closed: ${res.data?.error ?? `HTTP ${res.status}`}`);
         for (const note of res.data?.notes ?? []) console.log(`  ${note}`);
@@ -298,7 +303,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
         let path = opts.provider
           ? `/api/terminal/status?provider=${encodeURIComponent(opts.provider)}`
           : "/api/terminal/status";
-        if (opts.provider === "herdr-app") path += `&appHome=${encodeURIComponent(opts.appHome ? resolve(opts.appHome) : resolveHerdrAppHome(deps.env ?? process.env))}`;
+        if (opts.provider === "herdr-app") path += `&appHome=${encodeURIComponent(opts.appHome ? resolve(opts.appHome) : herdrAppHome(deps.env ?? process.env))}`;
         const session = opts.session?.trim();
         if (session !== undefined) path += `${opts.provider ? "&" : "?"}session=${encodeURIComponent(session)}`;
         const res = await client.get<{ session?: string; error?: string }>(path);

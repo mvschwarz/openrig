@@ -342,16 +342,6 @@ the sections that were not read are `null`.
 |---|---|---|
 | `rig unarchive <rig>` | — | `--json` |
 
-### herdr
-
-| Invocation | Aliases | Declared options |
-|---|---|---|
-| `rig herdr` | — | — |
-| `rig herdr install` | — | `--app-home <dir>`<br>`--json` |
-
-Installs OpenRig's herdr-app mods; see
-[herdr-app](../reference/herdr-app.md).
-
 ### host
 
 | Invocation | Aliases | Declared options |

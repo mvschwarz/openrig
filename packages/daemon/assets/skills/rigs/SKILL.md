@@ -101,7 +101,7 @@ person needs in their project or home folder and name that path.
   the person can see; switching the shared TUI to `:terminals` does not open one. No and headless/SSH use are valid
   background outcomes. Provider-only `--provider herdr`, `--provider cmux` or `--provider rex` is for a provider that's
   already running, not the first desktop window, and each such open adds a new workspace. `--provider herdr-app` opens
-  the view in the herdr-app window you run it in (`rig herdr install` adds its mods first). Inside a herdr-app
+  the view in the herdr-app window you run it in (it adds OpenRig's mods there first). Inside a herdr-app
   terminal, plain `rig terminal open <view>` does the same when that window is answering. `--window` always asks for a
   new desktop window.
 - **If the window can't open, or over headless SSH:** say plainly that no visible terminal was opened, and ask the
