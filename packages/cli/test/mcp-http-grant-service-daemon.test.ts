@@ -213,6 +213,38 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     expect(rows()).toBe(0);
   });
 
+  it("a person who names their lead by its name alone reaches that seat of the connection's one rig", async () => {
+    seat("team-a", "lead");
+    const { url } = await listen();
+    const ask = await connect(url);
+    const sent = await ask("rig_queue_create", { qitemId: "qitem-bare-name", destination: "pod-lead", body: "Do this directly" });
+    expect(sent.isError).toBe(false);
+    expect(repo.getById("qitem-bare-name")).toMatchObject({ sourceSession: CALLER, destinationSession: "pod-lead@team-a" });
+    // A name that is no seat there, or the caller's own, writes nothing.
+    for (const name of ["my-lead", "cus-vvmaexample01-caller", ""]) {
+      expect((await ask("rig_queue_create", { destination: name, body: "Nobody" })).structured.code).toBe("out_of_scope");
+    }
+    expect(rows()).toBe(1);
+    const described = (await ask.catalog()).tools.find((tool) => tool.name === "rig_queue_create")?.inputSchema.properties?.destination as { description?: string };
+    expect(described.description).toContain("name alone");
+  });
+
+  it("with several rigs, a name alone reaches only the configured receiver of that name; a refusal says to omit destination, without naming it", async () => {
+    seat("team-a", "lead");
+    seat("team-a", "other"); // A seat of one of the rigs: with several, its name alone still doesn't pick that rig.
+    answer = () => [200, active({ rigs: ["team-a", "team-b"] })];
+    const { url } = await listen(undefined, "pod-lead@team-a");
+    const ask = await connect(url);
+    expect((await ask("rig_queue_create", { qitemId: "qitem-bare-receiver", destination: "pod-lead", body: "Do this directly" })).isError).toBe(false);
+    expect(repo.getById("qitem-bare-receiver")).toMatchObject({ destinationSession: "pod-lead@team-a" });
+    for (const destination of ["pod-other", "my-lead", "pod-lead@team-c"]) {
+      const refused = await ask("rig_queue_create", { destination, body: "Ambiguous or unknown" });
+      expect(refused.structured).toMatchObject({ code: "out_of_scope", message: expect.stringContaining("Omit destination to reach the team's configured receiver.") });
+      expect(refused.structured.message).not.toContain("pod-lead@team-a");
+    }
+    expect(rows()).toBe(1);
+  });
+
   it("rechecks the grant and receiver after connection, with no write after removal or revocation", async () => {
     const receiver = seat("team-a", "lead");
     const { url } = await listen(undefined, "pod-lead@team-a");
