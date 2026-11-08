@@ -1628,9 +1628,10 @@ rig mcp token list [--json]
 rig mcp token revoke <name>
 ```
 
-The 36 shipped tools fall into three groups. Over stdio, and over HTTP with no grants, every tool is offered. An HTTP
-grant offers the work tools; the workspace tools with `--workspace` or `--owner`; and the owner tools only with
-`--owner`, which offers every tool.
+The 38 shipped tools fall into four groups. Over stdio, and over HTTP with no grants, every tool but the person tools is
+offered. An HTTP grant offers the work tools; the workspace tools with `--workspace` or `--owner`; and the owner tools only
+with `--owner`, which offers every tool but the person tools. Only a grant service's grant that names its person offers
+the person tools.
 - **Work (19):** orientation, communication and the durable work loop.
   - `rig_whoami`: the seat the server acts as (rig, pod, peers, edges) and the `caller`: authenticated (an HTTP
     credential, with its principal) or declared (`OPENRIG_SESSION_NAME` where the server was configured, which nothing
@@ -1650,7 +1651,8 @@ grant offers the work tools; the workspace tools with `--workspace` or `--owner`
     roots (`OPENRIG_FILES_ALLOWLIST`), in windows (`offset`, `nextOffset`). Outside those roots it answers unavailable
     rather than reading a local path.
   - `rig_human_decision_room`, then `rig_queue_decide`: on your own pending ask to a person, read the decision room of
-    the mode they have on, and record a decision you made for them inside it. No tool writes a person's own answer.
+    the mode they have on, and record a decision you made for them inside it. Only the person tools record a person's own
+    answer, and only for the person a grant names.
 - **Workspace (4):** `rig_slices`, `rig_mission`, `rig_context_pack`, and `rig_context_get` (one context file or
   section, as `rig context get` reads it).
 - **Owner (13):** `rig_up`, `rig_down`, `rig_snapshot_create`, `rig_snapshot_list`, `rig_discover`, `rig_bind`,
@@ -1658,10 +1660,15 @@ grant offers the work tools; the workspace tools with `--workspace` or `--owner`
   of event metadata), and:
   - `rig_restore`, which starts a restore and returns its attempt;
   - `rig_restore_status`, that attempt's receipt.
+- **Person (2):** `rig_question_list` and `rig_question_answer`, offered only on a grant service's grant that names the
+  person who owns the connection (`person.entity_id`, with the `question` pair). They list the team's questions waiting on
+  that person, as Steering shows them, and record that person's own answer, given through the connection, with the verb
+  Steering uses. `docs/reference/hosted-members.md` has the contract.
 
 **Results:**
 - A structured result comes beside the text from the queue tools, `rig_whoami`, `rig_team`, the four workspace tools,
-  `rig_artifact_read`, `rig_human_decision_room` and `rig_restore_status`. The other tools answer in text.
+  `rig_artifact_read`, `rig_human_decision_room`, `rig_restore_status` and the person tools. The other tools answer in
+  text.
 - Every failure carries the same structured shape: `ok: false`, a `code` and a `message`.
 
 **Identity:**

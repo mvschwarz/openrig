@@ -18,8 +18,11 @@ import { migrate } from "../../daemon/src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
+import { MissionControlWriteContract } from "../../daemon/src/domain/mission-control/mission-control-write-contract.js";
+import { MissionControlActionLog } from "../../daemon/src/domain/mission-control/mission-control-action-log.js";
 import { setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
 import { addHumanFragment, loadHumanRegistry } from "../../daemon/src/domain/gateway/human-registry.js";
+import { setDefaultPerson } from "../../daemon/src/domain/gateway/participants.js";
 import { makeQueuePorts } from "../../daemon/src/domain/gateway/slack/queue-access.js";
 import { buildOutboundMessage } from "../../daemon/src/domain/gateway/slack/message.js";
 import { createHash } from "node:crypto";
@@ -68,8 +71,11 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-grant-shared-")));
     process.env.OPENRIG_HOME = home;
     process.env.OPENRIG_SESSION_NAME = "env-seat@elsewhere";
-    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
-    setup = createTestApp(db, { appDeps: { queueRepo: repo, filesAllowlist: [{ name: "proof", canonicalPath: shared }] } });
+    const bus = new EventBus(db);
+    repo = new QueueRepository(db, bus, { validateRig: () => true });
+    // Steering's own write path, so a person's answer through an assistant goes where Steering's does.
+    const missionControlWriteContract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+    setup = createTestApp(db, { appDeps: { queueRepo: repo, missionControlWriteContract, filesAllowlist: [{ name: "proof", canonicalPath: shared }] } });
     broken = undefined;
     const fetchRoute = (...args: Parameters<typeof setup.app.fetch>) => broken?.(args[0]) ?? setup.app.fetch(...args);
     daemon = await new Promise<ServerType>((resolve) => { const s = serve({ fetch: fetchRoute, port: 0, hostname: "127.0.0.1" }, () => resolve(s)); });
@@ -471,6 +477,169 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       .find((item) => item.qitemId === gated.structured.qitemId);
     expect(buildOutboundMessage(gatedAlert!, { sourceLabel: "test" }).text).toContain("THE REST OF MY MESSAGE");
     expect(repo.getById(gated.structured.qitemId)!.tags).toEqual(["project:acme", "workflow", "workflow:x", "instance:y"]);
+  });
+
+  describe("a person answering the team's questions from their assistant", () => {
+    /** The connection's owner, registered as the grant service provisions them: no connector, the default person. */
+    const PERSON = "cus-vvmaexample01";
+    const register = (entityId: string, asDefault: boolean) => {
+      expect(addHumanFragment({ entityId, class: "human", displayName: entityId, address: `${entityId}@external`, connectorBindings: [], prefs: { deliveryClass: "B" } } as never, home)).toMatchObject({ ok: true });
+      if (asDefault) expect(setDefaultPerson(entityId, home)).toMatchObject({ ok: true });
+    };
+    const grantFor = (entityId: string | null, actions = ["read", "answer"]) => active({
+      objects: { queue: ["create", "show", "list"], artifact: ["read"], question: actions }, ...(entityId ? { person: { entity_id: entityId } } : {}),
+    });
+    const LAYOUT = { id: "layout", question: "Which layout?", options: [{ id: "a", label: "Cards" }, { id: "b", label: "List" }] };
+    const SHIP = { id: "ship", question: "Ship it this week?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] };
+    const ask = (destinationSession: string, questions: unknown[] | null = [LAYOUT]) => repo.create({ sourceSession: "lead@team-a", destinationSession,
+      summary: "Pick a layout", body: "Which layout should the landing page use?", evidenceRef: "/proof/layout.md", humanIntent: "decision", ...(questions ? { humanQuestions: questions } : {}), nudge: false } as never) as unknown as Promise<{ qitemId: string }>;
+    const replies = (qitemId: string) => (db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE destination_session = 'lead@team-a' AND tags LIKE '%human-answer%' AND body LIKE ?")
+      .get(`%${qitemId}%`) as { n: number }).n;
+    const audit = (qitemId: string) => db.prepare("SELECT actor_session AS actor, audit_notes_json AS notes FROM mission_control_actions WHERE qitem_id = ? ORDER BY rowid")
+      .all(qitemId).map((row: any) => ({ actor: row.actor, notes: JSON.parse(row.notes ?? "{}") }));
+    const steering = async (view: string) => ((await (await fetch(`${daemonUrl}/api/attention?view=${view}`)).json()) as { items: Array<{ id: string }> }).items.map((item) => item.id);
+
+    it("is offered only on a grant that names a person, and its instructions say so in their first 512 characters", async () => {
+      register(PERSON, true);
+      answer = () => [200, grantFor(PERSON)];
+      const asPerson = await connect((await listen()).url);
+      expect(await asPerson.tools()).toEqual(expect.arrayContaining(["rig_question_list", "rig_question_answer"]));
+      const first = (asPerson.instructions() ?? "").split("\n")[0]!;
+      expect(first.length).toBeLessThanOrEqual(512);
+      for (const tool of ["rig_queue_create", "rig_queue_show", "rig_question_list", "rig_question_answer"]) expect(first).toContain(tool);
+      // The question pair without a person offers nothing: the caller's seat is never taken for a person.
+      answer = () => [200, grantFor(null)];
+      const noPerson = await connect((await listen()).url);
+      expect(await noPerson.tools()).not.toEqual(expect.arrayContaining(["rig_question_list"]));
+      expect((await noPerson.tools()).filter((tool) => tool.startsWith("rig_question_"))).toEqual([]);
+      const plain = (noPerson.instructions() ?? "").split("\n")[0]!;
+      expect(plain.length).toBeLessThanOrEqual(512);
+      expect(plain).toContain("reserved for a person");
+      // A person the service sends must be usable.
+      answer = () => [200, grantFor("Not An Id")];
+      expect((await post((await listen()).url, { Authorization: `Bearer ${KEY}` })).status).toBe(503);
+    });
+
+    it("records the person's choice as theirs, through this connection: the same in Steering, the asker woken once, and a repeat answered from the record", async () => {
+      register(PERSON, true);
+      answer = () => [200, grantFor(PERSON)];
+      const asPerson = await connect((await listen()).url);
+      const row = await ask(`${PERSON}@external`);
+      expect(await steering(PERSON)).toContain(`queue:${row.qitemId}`);
+      const listed = await asPerson("rig_question_list");
+      expect(listed.isError).toBe(false);
+      const item = listed.structured.items.find((entry: any) => entry.qitemId === row.qitemId);
+      expect(item).toMatchObject({ kind: "ask", from: "lead@team-a", summary: "Pick a layout", questions: [LAYOUT], answerWith: "choices or words" });
+      expect(item.revision).toMatch(/^dr1-/);
+
+      const answered = await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: item.revision, choices: [{ questionId: "layout", optionId: "b" }] });
+      expect(answered.structured).toMatchObject({ ok: true, outcome: "answered", state: "done", answered: { layout: "b" } });
+      expect(repo.getById(row.qitemId)).toMatchObject({ state: "done", humanAnswers: { layout: "b" } });
+      expect(replies(row.qitemId)).toBe(1);
+      // Recorded as the person, with the assistant as the route it came by.
+      expect(audit(row.qitemId)).toEqual([expect.objectContaining({ actor: `${PERSON}@external`, notes: expect.objectContaining({
+        route: "external-assistant", assistantSeat: CALLER, principal: "cus_VVMAexample01", grant: "8977f2dc0000aaaa1111bbbb", grantVersion: 6, person: `${PERSON}@external` }) })]);
+      expect(await steering(PERSON)).not.toContain(`queue:${row.qitemId}`);
+
+      // The same answer again (a retry after an uncertain result) is already recorded; a different one isn't taken.
+      const again = await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: item.revision, choices: [{ questionId: "layout", optionId: "b" }] });
+      expect(again.structured).toMatchObject({ ok: true, outcome: "already-recorded", state: "done", answered: { layout: "b" } });
+      const changed = await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: item.revision, choices: [{ questionId: "layout", optionId: "a" }] });
+      expect(changed.structured).toMatchObject({ ok: false, code: "not_waiting_on_person", state: "done", answered: { layout: "b" } });
+      expect(replies(row.qitemId)).toBe(1);
+      expect(audit(row.qitemId)).toHaveLength(1);
+    });
+
+    it("answers several questions in one call, and records the person's own words exactly", async () => {
+      register(PERSON, true);
+      answer = () => [200, grantFor(PERSON)];
+      const asPerson = await connect((await listen()).url);
+      const both = await ask(`${PERSON}@external`, [LAYOUT, SHIP]);
+      const revision = (await asPerson("rig_question_list")).structured.items[0].revision;
+      const answered = await asPerson("rig_question_answer", { qitemId: both.qitemId, revision, choices: [{ questionId: "layout", optionId: "a" }, { questionId: "ship", optionId: "no" }] });
+      expect(answered.structured).toMatchObject({ ok: true, outcome: "answered", answered: { layout: "a", ship: "no" } });
+      expect(replies(both.qitemId)).toBe(1);
+
+      const typed = await ask(`${PERSON}@external`);
+      const typedRevision = (await asPerson("rig_question_list")).structured.items[0].revision;
+      const words = "Cards, but keep the list view for admins";
+      expect((await asPerson("rig_question_answer", { qitemId: typed.qitemId, revision: typedRevision, words })).structured).toMatchObject({ ok: true, outcome: "answered" });
+      expect(JSON.stringify(repo.getById(typed.qitemId)!.humanAnswers)).toContain(JSON.stringify(words));
+
+      // An ask with no options (Steering's Approve) takes the person's words, never a choice.
+      const plain = await ask(`${PERSON}@external`, null);
+      const listed = (await asPerson("rig_question_list")).structured.items.find((entry: any) => entry.qitemId === plain.qitemId);
+      expect(listed).toMatchObject({ kind: "ask", answerWith: "words" });
+      expect(listed.questions).toBeUndefined();
+      expect((await asPerson("rig_question_answer", { qitemId: plain.qitemId, revision: listed.revision, choices: [{ questionId: "layout", optionId: "a" }] })).structured).toMatchObject({ code: "answer_shape" });
+      expect((await asPerson("rig_question_answer", { qitemId: plain.qitemId, revision: listed.revision, words: "Yes, go ahead" })).structured).toMatchObject({ ok: true, outcome: "answered", state: "done" });
+      expect(replies(plain.qitemId)).toBe(1);
+    });
+
+    it("records nothing on a changed question, and hands back the current one", async () => {
+      register(PERSON, true);
+      answer = () => [200, grantFor(PERSON)];
+      const asPerson = await connect((await listen()).url);
+      const row = await ask(`${PERSON}@external`);
+      const current = (await asPerson("rig_question_list")).structured.items[0];
+      const stale = await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: "dr1-000000000000000000000000", choices: [{ questionId: "layout", optionId: "a" }] });
+      expect(stale.structured).toMatchObject({ ok: false, code: "question_changed", current: { qitemId: row.qitemId, revision: current.revision } });
+      expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending" });
+      expect(audit(row.qitemId)).toEqual([]);
+      // A choice that isn't one of the question's options, or both shapes at once, is refused before anything is sent.
+      expect((await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: current.revision, choices: [{ questionId: "layout", optionId: "z" }] })).structured).toMatchObject({ code: "unknown_option" });
+      expect((await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: current.revision, words: "a", choices: [{ questionId: "layout", optionId: "a" }] })).structured).toMatchObject({ code: "answer_shape" });
+      expect(audit(row.qitemId)).toEqual([]);
+    });
+
+    it("never answers another person's question, a team-internal row, or anything for a person not registered here", async () => {
+      // Before anyone is registered, Steering's view shows every request; nothing is this connection's to answer.
+      answer = () => [200, grantFor(PERSON)];
+      const asPerson = await connect((await listen()).url);
+      const early = await ask("human@host");
+      expect((await asPerson("rig_question_list")).structured).toMatchObject({ ok: false, code: "person_not_registered" });
+      expect((await asPerson("rig_question_answer", { qitemId: early.qitemId, revision: "dr1-x", words: "yes" })).structured).toMatchObject({ code: "person_not_registered" });
+
+      register(PERSON, true);
+      register("ana", false);
+      const anas = await ask("ana@external");
+      const internal = await create("lead@team-a", "impl@team-a", "SECRET team-internal work");
+      expect((await asPerson("rig_question_list")).structured.items.map((entry: any) => entry.qitemId)).not.toContain(anas.qitemId);
+      for (const qitemId of [anas.qitemId, internal.qitemId]) {
+        const refused = await asPerson("rig_question_answer", { qitemId, revision: "dr1-x", words: "yes" });
+        expect(refused.structured).toMatchObject({ ok: false, code: "not_waiting_on_person" });
+        expect(refused.structured.state).toBeUndefined();
+        expect(refused.text).not.toContain("SECRET");
+      }
+      expect(repo.getById(anas.qitemId)).toMatchObject({ state: "pending" });
+      // A grant naming someone who isn't registered here reads and answers nothing.
+      answer = () => [200, grantFor("cus-nobody")];
+      const stranger = await connect((await listen()).url);
+      expect((await stranger("rig_question_list")).structured).toMatchObject({ code: "person_not_registered" });
+    });
+
+    it("unparks a row waiting on the person with their words, and shows them today's human@host asks as the default person", async () => {
+      register(PERSON, true);
+      answer = () => [200, grantFor(PERSON)];
+      const asPerson = await connect((await listen()).url);
+      const work = await create("lead@team-a", "impl@team-a", "Ship the release notes");
+      repo.update({ qitemId: work.qitemId, actorSession: "impl@team-a", state: "blocked", blockedOn: `${PERSON}@external`, summary: "Ship the notes as drafted?", evidenceRef: "/proof/notes.md", transitionNote: "asking the person" } as never);
+      const legacy = await ask("human@host");
+      const items = (await asPerson("rig_question_list")).structured.items;
+      const parked = items.find((entry: any) => entry.qitemId === work.qitemId);
+      expect(parked).toMatchObject({ kind: "parked", from: "impl@team-a", answerWith: "words" });
+      expect(items.map((entry: any) => entry.qitemId)).toContain(legacy.qitemId);
+
+      expect((await asPerson("rig_question_answer", { qitemId: work.qitemId, revision: parked.revision, choices: [{ questionId: "layout", optionId: "a" }] })).structured).toMatchObject({ code: "answer_shape" });
+      const resolved = await asPerson("rig_question_answer", { qitemId: work.qitemId, revision: parked.revision, words: "Yes, ship them" });
+      expect(resolved.structured).toMatchObject({ ok: true, outcome: "answered", state: "in-progress" });
+      expect(JSON.stringify(repo.listTransitions(work.qitemId))).toContain("Yes, ship them");
+
+      const legacyRevision = items.find((entry: any) => entry.qitemId === legacy.qitemId).revision;
+      expect((await asPerson("rig_question_answer", { qitemId: legacy.qitemId, revision: legacyRevision, choices: [{ questionId: "layout", optionId: "a" }] })).structured)
+        .toMatchObject({ ok: true, outcome: "answered", answered: { layout: "a" } });
+      expect(audit(legacy.qitemId)[0]).toMatchObject({ actor: `${PERSON}@external` });
+    });
   });
 
   it("reaches only the external caller's own items and the team's questions to it: never team-internal, another caller's, another rig's or a person's", async () => {

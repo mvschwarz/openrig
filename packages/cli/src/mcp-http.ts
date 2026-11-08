@@ -160,6 +160,8 @@ export const GRANT_SCHEMA = "openrig.grant/v1";
 const GRANT_KEY = /^[a-f0-9]{24}\.cus_[A-Za-z0-9]{8,64}\.[a-f0-9]{48}$/;
 /** An instance id as the grant service takes it. */
 const INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** A person's gateway entity id, as the daemon's registry takes it (ENTITY_ID_PATTERN): their address is <id>@external. */
+const PERSON_ENTITY_ID = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
 
 export type GrantServiceOptions = {
   /** The grant endpoint. It must be https, except on loopback. */
@@ -253,7 +255,7 @@ async function grantServiceCaller(service: GrantServiceOptions, url: URL, key: s
   if (body.status === "expired") return unauthenticated("This credential has expired.");
   // malformed (this server's request), unavailable, or anything else.
   if (body.status !== "active" || res.status !== 200) return unavailable(`HTTP ${res.status} answered status ${JSON.stringify(body.status)}`);
-  const { principal, grant, environment, seat, rigs, artifact_roots: roots, access_class: accessClass, objects } = body;
+  const { principal, grant, environment, seat, rigs, artifact_roots: roots, access_class: accessClass, objects, person } = body;
   const seatRig = typeof seat === "string" ? seat.split("@") : [];
   const problem = typeof principal?.id !== "string" || principal.id === "" ? "principal.id"
     : typeof grant?.id !== "string" || grant.id === "" ? "grant.id"
@@ -263,13 +265,17 @@ async function grantServiceCaller(service: GrantServiceOptions, url: URL, key: s
     : !strings(roots) ? "artifact_roots"
     : accessClass !== "work" ? "access_class"
     : !objects || typeof objects !== "object" || Array.isArray(objects) || !Object.values(objects).every(strings) ? "objects"
+    // The person who owns this connection, when the service vouches for one. Optional; one it sends must be usable.
+    : person !== undefined && person !== null && (typeof person?.entity_id !== "string" || !PERSON_ENTITY_ID.test(person.entity_id)) ? "person.entity_id"
     : grant.expires_at !== null && grant.expires_at !== undefined && !(Date.parse(grant.expires_at) > Date.now()) ? "expired" : null;
   if (problem === "expired") return unauthenticated("This credential has expired.");
   if (problem) return unavailable(`an active answer with an unusable ${problem}`);
   // The principal the daemon records beside this caller's rows. A version that isn't a finite number is left out (a v1
   // answer sends a number).
-  return { seat, access: { principal: principal.id, owner: false, rigs, roots, workspace: false, external: { objects } },
-    principal: { source: "grant-service", id: principal.id, grant: grant.id, ...(Number.isFinite(grant.version) ? { version: grant.version } : {}) } };
+  const version = Number.isFinite(grant.version) ? { version: grant.version as number } : {};
+  return { seat, access: { principal: principal.id, owner: false, rigs, roots, workspace: false,
+      external: { objects, grant: { id: grant.id, ...version }, ...(typeof person?.entity_id === "string" ? { person: person.entity_id } : {}) } },
+    principal: { source: "grant-service", id: principal.id, grant: grant.id, ...version } };
 }
 
 /** A node's seat name as the daemon derives it (deriveCanonicalFromEntry): {pod}-{member}@{rig}, the logical id split at
@@ -396,9 +402,12 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     const caller = (authInfo?.extra as { caller?: RequestCaller } | undefined)?.caller;
     // Never a default seat: a request reaches the handler only with its caller decided.
     if (!caller) throw new Error("a request reached the MCP handler without its caller");
+    // A grant that names its person gets a client acting as them, which records only their answers to the team.
+    const person = caller.access?.external?.person;
     return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access,
       taskDestination: opts.taskDestination, presenceFile: () => presenceFile, frontDoor: opts.frontDoor === true,
-      unknownSender, ...(opts.unfilledSeat ? { unfilledSeat: opts.unfilledSeat } : {}) });
+      unknownSender, ...(opts.unfilledSeat ? { unfilledSeat: opts.unfilledSeat } : {}),
+      ...(person ? { personClient: makeClient(opts.daemonUrl, `${person}@external`, caller.principal) } : {}) });
   });
   const serveMcp = toNodeHandler(mcpHandler);
   const bearer = (req: http.IncomingMessage): string | undefined => /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? "")?.[1];

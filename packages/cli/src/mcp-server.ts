@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { statSync } from "node:fs";
 import nodePath from "node:path";
 import type { ToolAnnotations } from "@modelcontextprotocol/server";
@@ -461,16 +461,19 @@ const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: tru
  *  communication with seats) reach a team within the caller's scope; workspace tools read the work tree and context when
  *  the caller's grant includes them; owner tools administer the instance (launch, stop, snapshot and restore, discover and
  *  bind, add seats, validate or inspect local files by path, the event log) and are offered only to an owner grant for now.
- *  A local caller (stdio, or HTTP with no auth configured) is the owner. */
-export type McpAccessClass = "work" | "workspace" | "owner";
+ *  A local caller (stdio, or HTTP with no auth configured) is the owner. Person tools act for the person an external grant
+ *  names (the team's questions to them) and are offered only to such a grant: no other caller, the owner included, has a
+ *  person to act for. */
+export type McpAccessClass = "work" | "workspace" | "owner" | "person";
 
 /** An authenticated HTTP caller: the seat it acts as comes with it (the DaemonClient built for it); this is what it may
  *  reach. A session is in scope when it is the caller's seat or a seat of one of its rigs; an item, when its source or
  *  destination is. An external grant (`external`) is narrower: see externalScope. */
 export type McpAccess = {
   principal: string; owner: boolean; rigs: readonly string[]; roots: readonly string[]; workspace: boolean;
-  /** An external caller's grant: the object/action pairs it names (openrig.grant/v1 `objects`). */
-  external?: { objects: Readonly<Record<string, readonly string[]>> };
+  /** An external caller's grant: the object/action pairs it names (openrig.grant/v1 `objects`), the grant it answered
+   *  with, and `person`, the gateway entity id of the person the grant service vouches owns this connection. */
+  external?: { objects: Readonly<Record<string, readonly string[]>>; grant?: { id: string; version?: number | string }; person?: string };
 };
 
 /** The tool each external object/action pair offers. A pair not listed here offers nothing. */
@@ -478,14 +481,19 @@ const EXTERNAL_TOOLS: Readonly<Record<string, Readonly<Record<string, string>>>>
   queue: { create: "rig_queue_create", show: "rig_queue_show", list: "rig_queue_list", claim: "rig_queue_claim", update: "rig_queue_update" },
   team: { list: "rig_team" },
   artifact: { read: "rig_artifact_read" },
+  question: { read: "rig_question_list", answer: "rig_question_answer" },
 };
 
-function externalTools(objects: Readonly<Record<string, readonly string[]>>): Set<string> {
+/** A person tool (access class `person`) acts for the person an external grant names, so a grant without a person isn't
+ *  offered it, whatever its objects say. The caller's seat is never taken for a person. */
+const personTool = (tool: string): boolean => MCP_OPERATIONS.some((op) => op.tool === tool && op.access === "person");
+
+function externalTools(external: NonNullable<McpAccess["external"]>): Set<string> {
   const tools = new Set<string>();
-  for (const [object, actions] of Object.entries(objects)) {
+  for (const [object, actions] of Object.entries(external.objects)) {
     for (const action of Array.isArray(actions) ? actions : []) {
       const tool = Object.hasOwn(EXTERNAL_TOOLS, object) && Object.hasOwn(EXTERNAL_TOOLS[object]!, action) ? EXTERNAL_TOOLS[object]![action] : undefined;
-      if (tool) tools.add(tool);
+      if (tool && (!personTool(tool) || external.person)) tools.add(tool);
     }
   }
   return tools;
@@ -528,6 +536,8 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_context_pack", routes: ["GET /api/context-packs/library/by-ref"], effect: "read", access: "workspace" },
   { tool: "rig_context_get", routes: ["GET /api/context-packs/library/resolve-address"], effect: "read", access: "workspace" },
   { tool: "rig_artifact_read", routes: ["GET /api/queue/:qitemId", "GET /api/files/roots", "GET /api/files/read"], effect: "read", access: "work" },
+  { tool: "rig_question_list", routes: ["GET /api/attention", "GET /api/queue/:qitemId"], effect: "read", access: "person" },
+  { tool: "rig_question_answer", routes: ["GET /api/attention", "GET /api/queue/:qitemId", "POST /api/mission-control/action"], effect: "destructive", access: "person" },
   { tool: "rig_human_decision_room", routes: ["GET /api/queue/:qitemId", "GET /api/gateway/human/:entityId/decision-room"], effect: "read", access: "work" },
   { tool: "rig_queue_decide", routes: ["POST /api/queue/:qitemId/delegated-decision"], effect: "destructive", access: "work" },
   { tool: "rig_queue_handoff", routes: ["POST /api/queue/:qitemId/handoff"], effect: "destructive", access: "work" },
@@ -570,11 +580,25 @@ export const FRONT_DOOR_WORKFLOW = [
   "Nothing wakes this conversation when the team finishes: check your work and your items when the person asks or comes back.",
 ].join(" ");
 const FRONT_DOOR_INSTRUCTIONS = [...SHARED_INSTRUCTIONS, FRONT_DOOR_WORKFLOW].join("\n");
-const EXTERNAL_INSTRUCTIONS = [
-  "This connection sends requests to an OpenRig team as the caller named by its grant. The daemon attributes requests to that caller. Use only the tools this connection offers.",
+// An external caller's first paragraph says what the connection is for, on its own: a client may show the model only the
+// start (ChatGPT asks that the first 512 characters stand alone). The paragraphs after it say how.
+const EXTERNAL_PURPOSE = "This connection links you to the person's OpenRig team, AI agents who do work for them. Give the team a task with rig_queue_create and keep its qitemId; read its progress and answer with rig_queue_show; list your requests with rig_queue_list; read files it attached with rig_artifact_read. The work carries on after this chat ends.";
+const EXTERNAL_HOW = [
+  "This connection acts as the caller its grant names, and the team records your requests as that caller's. Use only the tools this connection offers.",
   "To ask the connected team to do work, use rig_queue_create with the task in body. You may omit destination to use the receiver configured by the server operator. If no receiver is available, ask the operator to configure it; don't guess an address. An explicit destination still must be within this connection's grant.",
-  "Keep the returned qitemId and use rig_queue_show to read the result. Acceptance is not completed work. If a create times out, check that same qitemId before retrying and reuse it; never retry with a new id. Use revises for a requested revision of earlier work, preserving its lineage. rig_queue_list shows your own work, including an empty list before your first request.",
-  "Read returned files with rig_artifact_read, within the shared roots and items this connection may reach. A question reserved for a person is theirs to answer; don't answer on their behalf.",
+  "Acceptance is not completed work. If a create times out, check that same qitemId before retrying and reuse it; never retry with a new id. Use revises for a requested revision of earlier work, preserving its lineage. rig_queue_list shows your own work, including an empty list before your first request.",
+  "rig_artifact_read reads within the shared roots and items this connection may reach.",
+];
+const EXTERNAL_INSTRUCTIONS = [
+  `${EXTERNAL_PURPOSE} A question reserved for a person is theirs to answer: don't answer it on their behalf.`,
+  ...EXTERNAL_HOW,
+].join("\n");
+/** For a grant that names the person who owns the connection: the team's questions to them can be read and answered
+ *  here, with only what they say. */
+const EXTERNAL_PERSON_INSTRUCTIONS = [
+  `${EXTERNAL_PURPOSE} The team's questions to the person are in rig_question_list: submit only the answer they explicitly give you, with rig_question_answer, and never choose for them.`,
+  ...EXTERNAL_HOW,
+  "To answer one, show the person the question and its options as rig_question_list gives them. Then pass rig_question_answer its qitemId, the revision you showed, and either the options they chose or exactly what they typed, with no label or words of your own. If the question changed, show them the new one; if it was already answered or closed, say so. It's recorded as their answer, given through this connection. A question reserved for a person is theirs to answer, never yours.",
 ].join("\n");
 
 /** For an external grant that names claim and update: how it works the items addressed to it, messages included. */
@@ -584,8 +608,9 @@ const EXTERNAL_INBOX_INSTRUCTIONS = [...SHARED_INSTRUCTIONS,
 
 function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
   if (!access?.external) return frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
-  const tools = externalTools(access.external.objects);
-  return tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? EXTERNAL_INBOX_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
+  const tools = externalTools(access.external);
+  if (tools.has("rig_queue_claim") && tools.has("rig_queue_update")) return EXTERNAL_INBOX_INSTRUCTIONS;
+  return tools.has("rig_question_list") || tools.has("rig_question_answer") ? EXTERNAL_PERSON_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
 }
 
 /** A configured default must identify exactly one existing local node. No topology relationship, name convention
@@ -693,7 +718,9 @@ export function mintUnknownSender(): string {
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string } = {}): McpServer {
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string;
+  /** For an external grant that names a person: a client acting as that person, used only to record their answers. */
+  personClient?: DaemonClient } = {}): McpServer {
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
@@ -719,11 +746,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const accessClass = new Map(MCP_OPERATIONS.map((op) => [op.tool, op.access]));
   // A local caller (no access) is offered every tool; an authenticated one, its class's; an external caller, its
   // grant's pairs.
-  const external = access?.external ? externalTools(access.external.objects) : null;
+  const external = access?.external ? externalTools(access.external) : null;
   const offered = (tool: string): boolean => {
     if (external) return external.has(tool);
-    if (!access || access.owner) return true;
     const kind = accessClass.get(tool);
+    if (kind === "person") return false;
+    if (!access || access.owner) return true;
     return kind === "work" || (kind === "workspace" && access.workspace);
   };
   const scope = access && !access.owner ? scopeFor(access, seatOf) : null;
@@ -1816,6 +1844,171 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const plan = planItemArtifact(ref, roots, root);
         if ("unavailable" in plan) return unavailable(plan.unavailable);
         return await read("evidenceRef", plan.read.root, plan.read.path);
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // The person an external grant names: the connection's owner, as the grant service vouches. The team's questions to
+  // them are what Steering shows them as answerable, read from Steering's own view of them, and answered with the verb
+  // Steering would use, as them, through their own client. The caller's seat is only the route the answer came by.
+  const person = access?.external?.person;
+  const personAddress = person ? `${person}@external` : undefined;
+  type Answerable = { qitemId: string; verb: "answer" | "approve" | "resolve"; item: Record<string, any> };
+  const answerable = async (): Promise<Answerable[] | TextResult> => {
+    const res = await client.get(`/api/attention?view=${encodeURIComponent(person ?? "")}`);
+    if (res.status >= 400) return mapResult(res);
+    const data = (res.data ?? {}) as { items?: Array<Record<string, any>>; perspective?: { viewing?: unknown; basis?: unknown } };
+    // With no perspective for this person (they aren't registered, or no one is), Steering's view shows every request,
+    // so nothing is anyone's to answer here.
+    if (!person || data.perspective?.basis !== "chosen-here" || data.perspective.viewing !== personAddress) {
+      const message = `This connection's person (${personAddress ?? "none"}) isn't registered on this team, so no question can be read or answered for them here.`;
+      return errorResult(JSON.stringify({ ok: false, error: "person_not_registered", message }), "person_not_registered", message);
+    }
+    return (data.items ?? []).flatMap((item) => {
+      const qitemId = typeof item.id === "string" && item.id.startsWith("queue:") ? item.id.slice("queue:".length) : "";
+      const verb = item.answer?.verb;
+      return qitemId && (verb === "answer" || verb === "approve" || verb === "resolve") ? [{ qitemId, verb, item }] : [];
+    });
+  };
+  /** One question as Steering shows it to the person, with the revision their answer must name. */
+  const questionView = async (entry: Answerable): Promise<Record<string, unknown> | null> => {
+    const res = await client.get(`/api/queue/${encodeURIComponent(entry.qitemId)}`);
+    if (res.status >= 400) return null;
+    const row = (res.data ?? {}) as Record<string, any>;
+    const questions = Array.isArray(row.humanQuestions) && row.humanQuestions.length > 0 ? row.humanQuestions : null;
+    return {
+      qitemId: entry.qitemId,
+      kind: entry.verb === "resolve" ? "parked" : "ask",
+      from: entry.verb === "resolve" ? row.destinationSession : row.sourceSession,
+      summary: entry.item.summary,
+      body: row.body,
+      ...(row.humanDetail ? { detail: row.humanDetail } : {}),
+      ...(row.evidenceRef ? { evidenceRef: row.evidenceRef } : {}),
+      ...(questions ? { questions, answered: row.humanAnswers ?? {} } : {}),
+      answerWith: entry.verb === "answer" && questions ? "choices or words" : "words",
+      revision: row.decisionRevision,
+      askedAt: row.tsCreated,
+    };
+  };
+  const QUESTION_LIST_LIMIT = 25;
+
+  // 32a. rig_question_list — the team's questions to the person who owns this connection
+  if (offered("rig_question_list")) server.registerTool(
+    "rig_question_list",
+    {
+      description: "List the team's questions waiting on the person who owns this connection: what Steering shows them to answer. Each comes with its options when it has any, and the revision to name when you submit the person's answer with rig_question_answer.",
+      inputSchema: z.object({}),
+      annotations: READ_ONLY,
+    },
+    async () => {
+      try {
+        const found = await answerable();
+        if (!Array.isArray(found)) return found;
+        const items = (await Promise.all(found.slice(0, QUESTION_LIST_LIMIT).map(questionView))).filter((view) => view !== null);
+        return mapResult({ status: 200, data: { person: personAddress, items, ...(found.length > QUESTION_LIST_LIMIT ? { more: found.length - QUESTION_LIST_LIMIT } : {}) } }, undefined, { structured: true });
+      } catch (err) {
+        return caught(err);
+      }
+    },
+  );
+
+  // 32b. rig_question_answer — the person's own answer to one of those questions, given through this connection
+  if (offered("rig_question_answer")) server.registerTool(
+    "rig_question_answer",
+    {
+      description: "Submit the person's answer to a question rig_question_list showed them: only what they explicitly told you, never your own choice. Name the revision you showed them, and give either the options they chose (one per question) or exactly what they typed, with no label or words of your own. It's recorded as their answer, given through this connection, and the team's work continues.",
+      inputSchema: z.object({
+        qitemId: z.string().describe("The question's qitemId, from rig_question_list"),
+        revision: z.string().describe("The revision rig_question_list gave for the question you showed the person"),
+        choices: z.array(z.object({ questionId: z.string(), optionId: z.string() })).min(1).max(4).optional()
+          .describe("The options the person chose, one per question"),
+        words: z.string().min(1).optional().describe("Exactly what the person typed, when they answered in their own words"),
+      }),
+      annotations: DESTRUCTIVE,
+    },
+    async ({ qitemId, revision, choices, words }) => {
+      const refuse = (code: string, message: string, extra: Record<string, unknown> = {}): TextResult =>
+        errorResult(JSON.stringify({ ok: false, error: code, message, ...extra }), code, message, extra);
+      try {
+        if ((choices === undefined) === (words === undefined)) return refuse("answer_shape", "Give either the options the person chose or exactly what they typed, not both.");
+        if (!options.personClient) return refuse("person_unavailable", "This connection can't act for its person here.");
+        const found = await answerable();
+        if (!Array.isArray(found)) return found;
+        const entry = found.find((candidate) => candidate.qitemId === qitemId);
+        if (!entry) {
+          // What became of it is said only for a question that was addressed to, or parked on, this person.
+          const res = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
+          const row = res.status < 400 ? (res.data ?? {}) as Record<string, any> : null;
+          const theirs = row !== null && (row.destinationSession === personAddress || row.blockedOn === personAddress);
+          // A retry after an uncertain result: the person's closed question already holds exactly this answer.
+          const recorded = (row?.humanAnswers ?? {}) as Record<string, unknown>;
+          const same = choices ? choices.every(({ questionId, optionId }) => recorded[questionId] === optionId)
+            : Object.values(recorded).some((value) => (value as { kind?: unknown; text?: unknown } | null)?.kind === "typed-reply" && (value as { text?: unknown }).text === words);
+          if (theirs && row.state === "done" && same) {
+            return mapResult({ status: 200, data: { ok: true, outcome: "already-recorded", qitemId, state: row.state, answered: row.humanAnswers ?? null,
+              message: "This answer is already recorded for the person; nothing new was sent." } }, undefined, { structured: true });
+          }
+          return theirs
+            ? refuse("not_waiting_on_person", `That question isn't waiting on ${personAddress} any more: it's ${row.state}.`, { state: row.state, answered: row.humanAnswers ?? null })
+            : refuse("not_waiting_on_person", "That question isn't waiting on this connection's person: it was answered or closed, or it isn't theirs.");
+        }
+        const current = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
+        if (current.status >= 400) return mapResult(current);
+        const row = (current.data ?? {}) as Record<string, any>;
+        if (row.decisionRevision !== revision) {
+          return refuse("question_changed", "The question changed since that revision, so nothing was recorded. Show the person the current question and ask again.", { current: await questionView(entry) });
+        }
+        const questions: Array<{ id: string; options: Array<{ id: string }> }> = Array.isArray(row.humanQuestions) ? row.humanQuestions : [];
+        if (choices) {
+          if (entry.verb !== "answer" || questions.length === 0) return refuse("answer_shape", "This question takes the person's words, not options.");
+          const seen = new Set<string>();
+          for (const { questionId, optionId } of choices) {
+            const question = questions.find((q) => q.id === questionId);
+            if (!question || seen.has(questionId) || !question.options.some((option) => option.id === optionId)) {
+              return refuse("unknown_option", `${questionId}/${optionId} isn't one of this question's options (one choice per question).`, { questions });
+            }
+            seen.add(questionId);
+          }
+        }
+        // The route the answer came by, recorded beside it: never the person, and never the caller's own judgment.
+        const grant = access?.external?.grant;
+        const route = { route: "external-assistant", assistantSeat: seatOf(), principal: access?.principal, ...(grant ? { grant: grant.id, grantVersion: grant.version } : {}), person: personAddress };
+        // One operation per submission: a retry of the same answer to the same revision is answered from the record.
+        const operation = `assistant:${createHash("sha256").update(JSON.stringify([grant?.id ?? access?.principal, qitemId, revision, choices ?? null, words ?? null])).digest("hex").slice(0, 24)}`;
+        const steps: Array<Record<string, string>> = choices ? choices.map((choice) => ({ ...choice })) : [{ decision: words! }];
+        let expected = revision;
+        let reconciled = true;
+        for (const [index, step] of steps.entries()) {
+          const res = await options.personClient.post<Record<string, any>>("/api/mission-control/action", {
+            verb: entry.verb === "resolve" ? "resolve" : "answer", qitemId, ...step, expectedRevision: expected,
+            auditNotes: { operationId: `${operation}:${index}`, ...route },
+          });
+          if (res.status >= 400) {
+            const failure = (res.data ?? {}) as Record<string, any>;
+            const ours = typeof failure.lastAction?.auditNotes?.operationId === "string" && failure.lastAction.auditNotes.operationId.startsWith(`${operation}:`);
+            if (failure.error === "decision_revision_changed" && ours) break;
+            if (failure.error === "decision_revision_changed") {
+              const still = await answerable();
+              const again = Array.isArray(still) ? still.find((candidate) => candidate.qitemId === qitemId) : undefined;
+              return again
+                ? refuse("question_changed", "The question changed before the answer was recorded. Show the person the current question and ask again.", { current: await questionView(again) })
+                : refuse("not_waiting_on_person", "The question was answered or closed before this answer was recorded.", { state: failure.state, answered: failure.humanAnswers ?? null });
+            }
+            return mapResult(res);
+          }
+          reconciled = reconciled && res.data?.reconciled === true;
+          expected = typeof res.data?.decisionRevision === "string" ? res.data.decisionRevision : expected;
+        }
+        const saved = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
+        const after = (saved.status < 400 ? saved.data ?? {} : {}) as Record<string, any>;
+        const open = entry.verb !== "resolve" && after.state === "pending";
+        const outcome = reconciled ? "already-recorded" : open ? "recorded" : "answered";
+        const message = outcome === "already-recorded" ? "This answer was already recorded; nothing new was sent."
+          : open ? "Recorded. The question still has parts the person hasn't answered."
+            : `Recorded as ${personAddress}'s answer, given through this connection. The team's work continues.`;
+        return mapResult({ status: 200, data: { ok: true, outcome, qitemId, state: after.state ?? null, answered: after.humanAnswers ?? null, message } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
