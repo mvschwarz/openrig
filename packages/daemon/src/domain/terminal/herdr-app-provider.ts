@@ -23,6 +23,9 @@ import type { ComposedPane, ComposedView, OpenViewResult, ProviderLiveness, Prov
 
 export const HERDR_APP_PROVIDER = "herdr-app";
 
+/** Why a seat of a view herdr-app hasn't confirmed showing is degraded, not opened (`pane_unconfirmed`). */
+export const HERDR_APP_UNCONFIRMED_REASON = "herdr-app has not confirmed showing this view. It is in the Rig layout file, and its viewer runs; check the window before opening it again.";
+
 /** How long a viewer start with an unknown `hc run` outcome is polled before OpenRig stops tracking it. */
 export const UNKNOWN_START_TTL_MS = 10 * 60 * 1000;
 
@@ -314,14 +317,20 @@ export class HerdrAppProvider implements TerminalProvider {
     }
 
     // 4. Reveal: the person asked for this view.
-    notes.push(...await this.reveal(created, written.revision));
+    const revealed = await this.reveal(created, written.revision);
+    notes.push(...revealed.notes);
     await files.save(state);
     // Viewers this write released (kept from an earlier failed rewrite) end now, once the app shows it.
     if (state.pendingEnds.length) notes.push(...await this.endPending(state));
+    // `opened` is what the app is known to show (terminal-provider.ts); an unconfirmed view keeps its journal and
+    // viewers, and its seats are reported as unconfirmed, as the herdr adapter does. No retry, no rollback.
+    const seats = created.flatMap((v) => v.viewers.map((viewer) => viewer.seat));
+    const opened = revealed.confirmed ? seats : [];
+    const degraded = revealed.confirmed ? view.degraded
+      : [...view.degraded, ...seats.map((seat) => ({ seat, host: HERDR_APP_PROVIDER, code: "pane_unconfirmed" as const, reason: HERDR_APP_UNCONFIRMED_REASON }))];
     return {
-      provider: HERDR_APP_PROVIDER, ok: true,
-      opened: created.flatMap((v) => v.viewers.map((viewer) => viewer.seat)),
-      absent: view.absent, degraded: view.degraded, pages: created.length,
+      provider: HERDR_APP_PROVIDER, ok: opened.length > 0 || view.opened.length === 0,
+      opened, absent: view.absent, degraded, pages: created.length,
       space: { id: created[0]!.id, label: created[0]!.name },
       ...(notes.length ? { notes } : {}),
     };
@@ -373,7 +382,7 @@ export class HerdrAppProvider implements TerminalProvider {
 
   /** Shows the first page of this open; every page's interactive viewers get the keyboard, since the strip switches
    *  between pages without coming back to the daemon. */
-  private async reveal(pages: ViewRecord[], revision: string): Promise<string[]> {
+  private async reveal(pages: ViewRecord[], revision: string): Promise<{ notes: string[]; confirmed: boolean }> {
     const view = pages[0]!;
     const notes: string[] = [];
     const app = this.deps.app;
@@ -385,13 +394,13 @@ export class HerdrAppProvider implements TerminalProvider {
     if (!await awaitApplied(this.deps.files, revision, [], { timeoutMs: this.deps.ackTimeoutMs ?? 8_000 })) {
       // It may still be shown later: its interactive viewers become writable then.
       this.watchLateAck(pages.flatMap((page) => page.viewers).filter((v) => v.writable === "pending").map((v) => v.cellId));
-      notes.push(`herdr-app has not confirmed showing this view yet. It is written to the Rig layout and appears there; its viewers stay read-only until it is shown. If this window is attached to a different herdr-core than the daemon's (${describeCore(this.deps.hc)}), the viewers never appear here; start the daemon with that core's HC_SESSION/HC_SOCKET.`);
-      return notes;
+      notes.push(`herdr-app has not confirmed showing this view. It is written to the Rig layout file, but the window may not be showing it; its viewers stay read-only until it does, and become writable then. If this window is attached to a different herdr-core than the daemon's (${describeCore(this.deps.hc)}), the viewers never appear here; start the daemon with that core's HC_SESSION/HC_SOCKET.`);
+      return { notes, confirmed: false };
     }
     const selected = await app.do("layout.select", { stack: RIG_STACK, child: view.id });
     if (selected.kind !== "ok") {
       notes.push(`Selecting the view: ${describe(selected)}. It is in the Rig strip; its viewers stay read-only.`);
-      return notes;
+      return { notes, confirmed: true };
     }
     for (const viewer of pages.flatMap((page) => page.viewers)) {
       if (viewer.attach === "remote" || viewer.readOnly || viewer.state !== "live" || !viewer.terminal) continue;
@@ -399,7 +408,7 @@ export class HerdrAppProvider implements TerminalProvider {
       if (writable) notes.push(writable);
       else viewer.writable = "granted";
     }
-    return notes;
+    return { notes, confirmed: true };
   }
 
   /** After an open that the app didn't confirm in time: when the app shows these cells' viewers (an acknowledgement of

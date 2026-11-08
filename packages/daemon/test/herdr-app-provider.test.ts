@@ -252,13 +252,27 @@ describe("HerdrAppProvider.openView", () => {
     ]);
   });
 
-  it("when the app never shows the write, nothing is selected and every viewer stays read-only", async () => {
+  it("when the app never confirms the write, the open says so: nothing opened, every seat unconfirmed, viewers and journal kept, read-only", async () => {
     world.applies = false;
-    const result = await provider.openView(composed([pane("dev.build@demo")]));
-    expect(result.ok).toBe(true);
+    const result = await provider.openView(composed([pane("dev.build@demo"), pane("dev.qa@demo")]));
+    expect(result).toMatchObject({ ok: false, opened: [], pages: 1 });
+    expect(result.degraded).toEqual([
+      { seat: "dev.build@demo", host: "herdr-app", code: "pane_unconfirmed", reason: expect.stringContaining("has not confirmed showing this view") },
+      { seat: "dev.qa@demo", host: "herdr-app", code: "pane_unconfirmed", reason: expect.stringContaining("has not confirmed showing this view") },
+    ]);
+    expect(result.notes?.join(" ")).toContain("stay read-only until it does");
+    expect(result.notes?.join(" ")).not.toContain("appears there");
+    // No retry and no rollback: the viewers run and the journal keeps them.
+    expect(world.log.some((e) => e.startsWith("kill:"))).toBe(false);
+    expect(world.runs).toBe(2);
+    expect((await files.load()).views.flatMap((v) => v.viewers).map((v) => [v.seat, v.state])).toEqual([["dev.build@demo", "live"], ["dev.qa@demo", "live"]]);
     expect(world.log.some((e) => e.startsWith("do:layout.select"))).toBe(false);
     expect(world.tmuxCalls).toEqual([]);
-    expect(result.notes?.join(" ")).toContain("stay read-only");
+  });
+
+  it("a confirmed open lists every seat as opened and none as unconfirmed", async () => {
+    const result = await provider.openView(composed([pane("dev.build@demo")]));
+    expect(result).toMatchObject({ ok: true, opened: ["dev.build@demo"], degraded: [] });
   });
 
   describe("writable intent survives a late acknowledgement and a replaced tmux client", () => {
@@ -517,7 +531,7 @@ describe("HerdrAppProvider.status and core diagnostics", () => {
     world.failRun.clear();
     world.applies = false;
     const noAck = await provider.openView(composed([pane("dev.build@demo")]));
-    expect(noAck.ok).toBe(true);
+    expect(noAck).toMatchObject({ ok: false, opened: [] });
     expect(noAck.notes?.join(" ")).toContain('herdr-core session "herdr-app-sb" (socket /srv/core.sock)');
 
     // 4. status() survives a corrupt journal and reports pendingStarts: "unknown"

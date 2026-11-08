@@ -62,7 +62,8 @@ What an open does, in order:
 3. The Rig layout is shown, the view is selected once herdr-app confirms it shows the new file, and the keyboard
    goes to the first live cell. Only then do local interactive seats' viewers become writable. A local viewer in a view
    herdr-app hasn't confirmed stays read-only until herdr-app shows it (OpenRig keeps watching for up to 10 minutes);
-   then it becomes writable, and the view isn't selected for you.
+   then it becomes writable, and the view isn't selected for you. The open reports such a view's seats as unconfirmed,
+   not opened; its viewers keep running and it stays in the Rig layout.
 
 Other layouts and other herdr-app windows don't show Rig views. Each window (app home) has its own.
 
