@@ -562,11 +562,11 @@ const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
 
 /** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
  *  that works its inbox. The team's questions to it are the person's to answer. */
-export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v1";
+export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v2";
 export const FRONT_DOOR_WORKFLOW = [
   `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
   "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
-  "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and the person's words in resolution, saying they're the person's (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them, and don't claim an item you can't close with their words.",
+  "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and exactly what the person typed in resolution, with no label, quotation marks or words of your own (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them, and don't claim an item you can't close with their words.",
   "Nothing wakes this conversation when the team finishes: check your work and your items when the person asks or comes back.",
 ].join(" ");
 const FRONT_DOOR_INSTRUCTIONS = [...SHARED_INSTRUCTIONS, FRONT_DOOR_WORKFLOW].join("\n");
