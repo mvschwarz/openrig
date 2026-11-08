@@ -495,6 +495,13 @@ const ENV_SCRUB_EXACT = new Set([
   "TERM_PROGRAM",
   "TERM_PROGRAM_VERSION",
   "TERMINFO",
+  // The herdr-core terminal this command runs in (HERDR_CORE_TERMINAL_ENV_KEYS in the daemon's
+  // parent-session-env.ts). Core ends every process started with that terminal's HC_SCOPE when the
+  // terminal closes, and it reads the environment the process was started with, so the daemon must
+  // never be started with it: closing the terminal would end the daemon, its tmux server and every seat.
+  "HC_SCOPE",
+  "HC_TERMINAL_ID",
+  "HC_TERMINAL_SOCKET",
 ]);
 
 export function buildDaemonEnv(

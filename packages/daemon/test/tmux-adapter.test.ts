@@ -1421,17 +1421,18 @@ describe("TmuxAdapter", () => {
   // Seat-handover cutover (plan 411c43de): the successor RESUMES INTO THE SAME PANE via respawn-pane,
   // so native scrollback survives (predecessor history stays above the successor boot).
   describe("parent-session identity on a tmux server that already carries it", () => {
-    const POLLUTED = "CLAUDECODE=1\nCLAUDE_EFFORT=max\nHERDR_PANE_ID=p9\nCLAUDE_CODE_USE_BEDROCK=1\nPATH=/usr/bin\n-REMOVED\n";
+    const POLLUTED = "CLAUDECODE=1\nCLAUDE_EFFORT=max\nHERDR_PANE_ID=p9\nHC_SCOPE=s-9\nHC_SESSION=work\nCLAUDE_CODE_USE_BEDROCK=1\nPATH=/usr/bin\n-REMOVED\n";
     // new-session reports the pane it created (-P -F '#{pane_id}'); only that pane is restarted.
     const execWithGlobal = (global: string) =>
       vi.fn<ExecFn>(async (cmd: string) => (cmd === "tmux show-environment -g" ? global : cmd.startsWith("tmux new-session") ? "%9\n" : ""));
 
     it("createSession marks only the listed names removed for this session, keeps explicit seat values, and restarts the fresh pane", async () => {
       const exec = execWithGlobal(POLLUTED);
-      expect(await adapterFor(exec).createSession("dev-impl@rig", "/w", { HERDR_PANE_ID: "explicit" })).toEqual({ ok: true });
+      expect(await adapterFor(exec).createSession("dev-impl@rig", "/w", { HERDR_PANE_ID: "explicit", HC_SESSION: "seat-core" })).toEqual({ ok: true });
       expect(exec.mock.calls.map((c) => c[0]).slice(1)).toEqual([
         "tmux show-environment -g",
         "tmux set-environment -t =dev-impl@rig -r CLAUDECODE",
+        "tmux set-environment -t =dev-impl@rig -r HC_SCOPE",
         "tmux set-environment -t =dev-impl@rig -r CLAUDE_EFFORT",
         "tmux respawn-pane -k -t %9 -c /w",
       ]);
@@ -1460,6 +1461,7 @@ describe("TmuxAdapter", () => {
         "tmux show-environment -g",
         "tmux set-environment -t %3 -r CLAUDECODE",
         "tmux set-environment -t %3 -r HERDR_PANE_ID",
+        "tmux set-environment -t %3 -r HC_SCOPE",
         "tmux set-environment -t %3 -r CLAUDE_EFFORT",
         "tmux respawn-pane -t '%3' -e 'OPENRIG_NODE_ID=n' 'codex'",
       ]);

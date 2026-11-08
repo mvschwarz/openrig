@@ -1590,6 +1590,33 @@ describe("buildDaemonEnv", () => {
     expect(result["CMUX_WORKSPACE_ID"]).toBe("workspace:1");
   });
 
+  it("never starts the daemon with the herdr-core terminal it is run from, while keeping HC_SESSION and HC_SOCKET", () => {
+    const result = buildDaemonEnv(
+      {
+        HOME: "/srv/tester",
+        PATH: "/usr/bin",
+        HC_SCOPE: "s-7",
+        HC_TERMINAL_ID: "t7",
+        HC_TERMINAL_SOCKET: "/run/hc.sock",
+        HC_SESSION: "work",
+        HC_SOCKET: "/run/hc/work.sock",
+      },
+      { port: 7433, host: "127.0.0.1", db: "/tmp/test.db" },
+    );
+    expect([result["HC_SCOPE"], result["HC_TERMINAL_ID"], result["HC_TERMINAL_SOCKET"]]).toEqual([undefined, undefined, undefined]);
+    expect([result["HC_SESSION"], result["HC_SOCKET"]]).toEqual(["work", "/run/hc/work.sock"]);
+    expect(result["HOME"]).toBe("/srv/tester");
+  });
+
+  it("keeps explicit core selection and an operator's own HC_* when no terminal scope is present", () => {
+    const result = buildDaemonEnv(
+      { HOME: "/srv/tester", PATH: "/usr/bin", HC_SESSION: "work", HC_SOCKET: "/run/hc/work.sock" },
+      { port: 7433, host: "127.0.0.1", db: "/tmp/test.db" },
+    );
+    expect([result["HC_SESSION"], result["HC_SOCKET"]]).toEqual(["work", "/run/hc/work.sock"]);
+    expect(result["HC_SCOPE"]).toBeUndefined();
+  });
+
   it("explicit opts override inherited OPENRIG_* from base env", () => {
     const baseEnv: Record<string, string> = {
       HOME: "/Users/tester",
