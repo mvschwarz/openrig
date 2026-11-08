@@ -169,7 +169,7 @@ interface SeatHandoverMutationResult {
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string } };
-  /** The restore packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
+  /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
   restorePacket?: { status: "unconfirmed"; reason: string };
   /** #2456: the required startup files the successor started without, where a start would have failed. */
   startedWithoutRequired?: string[];
@@ -386,7 +386,8 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     const outcome = result.sourceOutcome;
     if (outcome.permissions) console.log(`Codex rebuild permissions: ${outcome.permissions.state}. ${outcome.permissions.detail}`);
     if (outcome.primedArtifacts.length > 0) {
-      console.log(`Rebuild primed from ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
+      const heading = result.restorePacket?.status === "unconfirmed" ? "Rebuild packet includes" : "Rebuild primed from";
+      console.log(`${heading} ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
       for (const artifact of outcome.primedArtifacts) console.log(`  - ${artifact.address} — ${artifact.label}`);
     }
     for (const gap of outcome.gaps) console.log(`  ! declared but missing on disk: ${gap}`);
@@ -405,8 +406,17 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.restorePacket?.status === "unconfirmed") {
     // The packet was pasted and Enter pressed: the successor may already be working on it, so don't send it again.
-    console.log(`The captured startup context (restore packet) was sent to the successor, but its submission is unconfirmed: ${result.restorePacket.reason}.`);
-    console.log("Check the successor's screen before sending the context again; it may already be working on it.");
+    if (result.source.mode === "rebuild") {
+      console.log(`The rebuild priming packet was sent to the successor, but its submission is unconfirmed: ${result.restorePacket.reason}.`);
+      if (result.restorePacket.reason === "the prompt still looked staged in the input box") {
+        console.log("Check the successor's current screen. Only if that exact packet is still staged, submit the existing packet once. Do not resend blindly or rerun the handover.");
+      } else {
+        console.log("Check the successor's screen before sending the priming packet again; it may already be working on it.");
+      }
+    } else {
+      console.log(`The captured startup context (restore packet) was sent to the successor, but its submission is unconfirmed: ${result.restorePacket.reason}.`);
+      console.log("Check the successor's screen before sending the context again; it may already be working on it.");
+    }
     console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.source.mode === "fork") {
     console.log("No packet delivery: fork context rides the native conversation itself.");
