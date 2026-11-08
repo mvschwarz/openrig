@@ -46,9 +46,9 @@ behave; this skill is the loop around them.
 - Questions about your work come to your seat: `rig_queue_list` with `owned` lists them.
 - Show the person the question and the team's draft, in their own words where the item gives them. Then ask for an answer.
 - Record only what the person actually tells you. Claim the item (`rig_queue_claim`), then close it with
-  `rig_queue_update`: `state` `done`, `closureReason` `no-follow-on`, and the person's answer in `resolution`, saying it's
-  theirs. Put only their words there: no notes, paths or summaries of your own. If the person isn't there to answer, leave
-  the item open and tell them it's waiting. Never choose an answer for them.
+  `rig_queue_update`: `state` `done`, `closureReason` `no-follow-on`, and exactly what the person typed in `resolution`,
+  nothing else: no label such as "The person's answer:", no quotation marks, and no notes, paths or summaries of your own.
+  If the person isn't there to answer, leave the item open and tell them it's waiting. Never choose an answer for them.
 - Some questions go to the person directly, outside your seat. Those wait for them where they already answer the team,
   such as the OpenRig TUI or Slack. You can mention that they're waiting; answering them isn't yours.
 

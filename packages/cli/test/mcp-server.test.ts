@@ -370,7 +370,9 @@ describe("MCP Server", () => {
       // The person's harm first: nothing tells this agent to work its inbox without asking.
       expect(instructions).not.toContain(MEMBER_WORKFLOW);
       expect(instructions).not.toContain("without asking whether you may");
-      for (const part of ["the person's to answer", "record only what the person tells you", "Never choose an answer for them"]) expect(FRONT_DOOR_WORKFLOW).toContain(part);
+      for (const part of ["the person's to answer", "record only what the person tells you", "Never choose an answer for them", "exactly what the person typed in resolution, with no label"]) expect(FRONT_DOOR_WORKFLOW).toContain(part);
+      // An agent told to say the words are the person's wrapped them as `The person's answer: "…"`, so the stored answer wasn't what they typed.
+      expect(FRONT_DOOR_WORKFLOW).not.toContain("saying they're the person's");
       const front = await mcpClient.callTool({ name: "rig_whoami", arguments: {} });
       expect(front.isError).toBeFalsy();
       expect(front.structuredContent).toMatchObject({ ok: true, seat: "claude-app@my-rig", rig: "my-rig", session: null,
