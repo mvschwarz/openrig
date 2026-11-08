@@ -385,7 +385,7 @@ describe("HerdrAppProvider.openView", () => {
     });
     const result = await provider.openView(composed([pane("dev.build@demo")]));
     expect(result).toMatchObject({ ok: true, opened: ["dev.build@demo"] });
-    expect(result.notes?.[0]).toMatch(/kept rig-pad as they are\. .*rig-pad isn't the copy OpenRig installed/);
+    expect(result.notes?.[0]).toMatch(/kept rig-pad unchanged\. .*rig-pad isn't the copy OpenRig installed/);
     expect(readFileSync(join(appHome, "mods", "rig-pad", "main.js"), "utf8")).toBe("// the person's own rig-pad");
     expect(existsSync(join(appHome, "mods", "rig-strip", "main.js"))).toBe(true);
   });

@@ -88,7 +88,7 @@ describe("installRigMods", () => {
     expect(result.refused).toEqual([expect.objectContaining({ name: "rig-pad", reason: expect.stringContaining("left as it is") })]);
     expect(readFileSync(join(home, "mods", "rig-pad", "main.js"), "utf8")).toBe("// the person's own rig-pad");
     expect(readdirSync(join(home, "mods")).sort()).toEqual([...RIG_MODS].sort());
-    expect(describeModInstall(result)).toMatch(/^OpenRig's herdr-app mods: installed rig-strip, rig-cell-header, rig-ended; kept rig-pad as they are\. .*rig-pad isn't the copy OpenRig installed/);
+    expect(describeModInstall(result)).toMatch(/^OpenRig's herdr-app mods: installed rig-strip, rig-cell-header, rig-ended; kept rig-pad unchanged\. .*rig-pad isn't the copy OpenRig installed/);
   });
 
   it("reports a needed mod that is missing and could not be installed (not shipped, or a link to nothing)", async () => {

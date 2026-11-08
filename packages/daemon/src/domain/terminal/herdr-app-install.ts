@@ -166,6 +166,6 @@ export function describeModInstall(r: ModInstallResult): string {
   const why = [r.error, ...r.refused.map((x) => x.reason)].filter(Boolean).join(" ");
   if (r.missing.length) return `OpenRig's herdr-app mods ${r.missing.join(", ")} are missing and could not be installed.${why ? ` ${why}` : ""}`;
   const parts = [r.installed.length ? `installed ${r.installed.join(", ")}` : "", r.updated.length ? `updated ${r.updated.join(", ")}` : "",
-    r.unchanged.length ? `${r.unchanged.length} already current` : "", r.refused.length ? `kept ${r.refused.map((x) => x.name).join(", ")} as they are` : ""].filter(Boolean);
+    r.unchanged.length ? `${r.unchanged.length} already current` : "", r.refused.length ? `kept ${r.refused.map((x) => x.name).join(", ")} unchanged` : ""].filter(Boolean);
   return `OpenRig's herdr-app mods: ${parts.join("; ")}.${why ? ` ${why}` : ""}`;
 }
