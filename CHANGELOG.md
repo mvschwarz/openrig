@@ -132,7 +132,7 @@ still fails against OpenShell 0.1.6: see Known limits.
 - **The `@openrig/acp` launcher** (`openrig-acp`) runs the matching
   `@openrig/cli`'s `rig acp serve` for the ACP registry's `npx` launch, with a
   new `acp.to` setting for the receiver. `npm run pack:release` packs it beside
-  the CLI; these changes don't publish it or submit its listing. ([#2655](https://github.com/mvschwarz/openrig/pull/2655), [#2715](https://github.com/mvschwarz/openrig/pull/2715))
+  the CLI at the same version. ([#2655](https://github.com/mvschwarz/openrig/pull/2655), [#2715](https://github.com/mvschwarz/openrig/pull/2715))
 
 ### People and connected assistants
 
@@ -330,6 +330,7 @@ Thanks to @billbenetti for the reports behind [#2752](https://github.com/mvschwa
 @pr0xc3nt4ur1 for the report behind [#2740](https://github.com/mvschwarz/openrig/pull/2740) and [#2743](https://github.com/mvschwarz/openrig/pull/2743), to @oneandonlydean for
 the process chain behind [#2751](https://github.com/mvschwarz/openrig/pull/2751), and to @niklasbaldi for the report and cause
 behind [#2654](https://github.com/mvschwarz/openrig/pull/2654).
+Thanks also to @ziadeh for the reports behind [#2622](https://github.com/mvschwarz/openrig/issues/2622) and [#2486](https://github.com/mvschwarz/openrig/issues/2486), and to @mlc-factory-bot for the reports behind [#2605](https://github.com/mvschwarz/openrig/issues/2605) and [#2607](https://github.com/mvschwarz/openrig/issues/2607).
 
 ## [0.7.10]
 
