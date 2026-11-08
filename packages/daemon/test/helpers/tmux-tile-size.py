@@ -132,8 +132,9 @@ def read_only_alone(server):
     server.call("send-keys", "-t", "seat:", "-l", "MARK-NEW-OUTPUT")
     server.wait_for(lambda: "MARK-NEW-OUTPUT" in server.seen(tile)[before:], "new seat output reaches the view")
     # While it shows, a read-only tile's terminal neither echoes keys nor turns Ctrl-C into a signal.
-    flags = termios.tcgetattr(tile[2])[3]
+    iflags, flags = termios.tcgetattr(tile[2])[0], termios.tcgetattr(tile[2])[3]
     assert not flags & termios.ECHO and not flags & termios.ISIG, "a read-only tile's terminal must be quiet"
+    assert not iflags & termios.IXON, "Ctrl-S must not freeze a read-only tile"
     os.write(tile[1], b"typed")
     time.sleep(1.5)
     assert "typed" not in server.seat_screen(), "keys typed in a read-only tile must not reach the seat"
@@ -157,6 +158,9 @@ def read_only_beside_another_client(server):
 def writable_tile(server):
     tile = server.tile(writable, 40, 30)
     server.wait_for(lambda: LINE in server.seen(tile), "a writable tile shows the whole line before anyone types")
+    # Every key is read as a key: no flow control, and no other special handling.
+    iflags, flags = termios.tcgetattr(tile[2])[0], termios.tcgetattr(tile[2])[3]
+    assert not iflags & termios.IXON and not flags & termios.IEXTEN, "a showing tile must read every key"
     assert server.client_ttys() == [] and server.geometry() == "160x20", "an unused writable tile is no client"
     # The first key reaches the seat, and the tile attaches for the rest.
     os.write(tile[1], b"hello")
@@ -224,6 +228,57 @@ def writable_first_input(server):
     os.write(tile[1], b"\x1b[200~" + paste + b"\x1b[201~" if framed else paste)
     expected += b"\x1b[200~" + paste + b"\x1b[201~"
     server.wait_for(lambda: received(server) == expected, "a paste reaches the seat as one paste")
+    server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
+    # Ctrl-S and Ctrl-Q are keys like any other.
+    os.write(tile[1], b"\x13\x11")
+    expected += b"\x13\x11"
+    server.wait_for(lambda: received(server) == expected, "Ctrl-S and Ctrl-Q reach the seat")
+    server.wait_for(lambda: server.client_ttys() == [tile[3]], "Ctrl-S and Ctrl-Q attach the tile")
+    server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
+    # A key and, at once, a paste: the paste is still framed, and both arrive in order.
+    server.wait_for(lambda: server.seen(tile).rfind("\x1b[?2004h") > server.seen(tile).rfind("[detached"), "the tile shows again")
+    os.write(tile[1], b"A")
+    time.sleep(0.03)
+    framed = server.seen(tile).rfind("\x1b[?2004h") > server.seen(tile).rfind("\x1b[?2004l")
+    os.write(tile[1], b"\x1b[200~" + paste + b"\x1b[201~" if framed else paste)
+    expected += b"A\x1b[200~" + paste + b"\x1b[201~"
+    server.wait_for(lambda: received(server) == expected, "a key then a paste arrive in order, the paste framed")
+    server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
+    # A run of text that ends in ; keeps it, through the client and before a paste alike.
+    os.write(tile[1], b"ls;\r")
+    expected += b"ls;\r"
+    server.wait_for(lambda: received(server) == expected, "a trailing ; reaches the seat")
+    server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
+    server.wait_for(lambda: server.seen(tile).rfind("\x1b[?2004h") > server.seen(tile).rfind("[detached"), "the tile shows again")
+    os.write(tile[1], b"x;\x1b[200~" + paste + b"\x1b[201~")
+    expected += b"x;\x1b[200~" + paste + b"\x1b[201~"
+    server.wait_for(lambda: received(server) == expected, "a trailing ; before a paste reaches the seat")
+    server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
+    # A key sequence goes by name, so the prefix applies to it: Ctrl-b PgUp scrolls back, and nothing reaches the seat.
+    os.write(tile[1], b"\x02\x1b[5~")
+    server.wait_for(lambda: server.call("display-message", "-p", "-t", "seat:", "#{pane_in_mode}") == "1", "Ctrl-b PgUp opens copy mode")
+    os.write(tile[1], b"q")
+    server.wait_for(lambda: server.call("display-message", "-p", "-t", "seat:", "#{pane_in_mode}") == "0", "q leaves copy mode")
+    time.sleep(0.3)
+    assert received(server) == expected, "Ctrl-b PgUp must not type into the seat: " + repr(received(server)[len(expected):])
+    return {"bytes": len(received(server))}
+
+
+def writable_first_input_window(server):
+    # The attach is slowed to a second, so keys typed after the first burst land before tmux takes the terminal.
+    slow = server.socket + ".slow-tmux"
+    open(slow, "w").write("#!/bin/sh\ncase \" $* \" in *\" attach \"*) sleep 1;; esac\nexec " + tmux + " \"$@\"\n")
+    os.chmod(slow, 0o700)
+    argv = list(writable)
+    argv[5] = slow
+    tile = server.tile(argv, 40, 30)
+    server.wait_for(lambda: "\x1b[H\x1b[2J" in server.seen(tile), "the tile views the seat")
+    os.write(tile[1], b"y")
+    time.sleep(0.5)
+    # Enter and Ctrl-C, before the attach completes.
+    os.write(tile[1], b"\r\x03")
+    server.wait_for(lambda: received(server) == b"y\r\x03", "Enter and Ctrl-C before the attach reach the seat as typed")
+    assert tile[0].poll() is None, "Ctrl-C before the attach must not end the tile"
     return {"bytes": len(received(server))}
 
 
@@ -234,5 +289,6 @@ with tempfile.TemporaryDirectory(prefix="tile-size-") as temporary:
         "readOnlyBesideAnother": cell(root, "b", read_only_beside_another_client),
         "writable": cell(root, "c", writable_tile),
         "firstInput": cell(root, "d", writable_first_input, recorder),
+        "firstInputWindow": cell(root, "e", writable_first_input_window, recorder),
     }
     print(json.dumps(result))

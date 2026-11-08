@@ -14,12 +14,13 @@ describe.skipIf(!available)("a tile views its seat without sizing it, and attach
       shell,
       JSON.stringify(tileAttachArgv("tmux", ["-S", "TILE_SOCKET"], "seat", false, 1, 2)),
       JSON.stringify(tileAttachArgv("tmux", ["-S", "TILE_SOCKET"], "seat", true, 1, 2)),
-    ], { encoding: "utf8", timeout: 50000 }));
+    ], { encoding: "utf8", timeout: 90000 }));
     expect(result).toEqual({
       readOnlyAlone: { window: "160x20" },
       readOnlyBesideAnother: { window: "160x20" },
       writable: { used: "40x30" },
-      firstInput: { bytes: 103 },
+      firstInput: { bytes: 180 },
+      firstInputWindow: { bytes: 3 },
     });
-  }, 60000);
+  }, 120000);
 });

@@ -18,11 +18,13 @@ export function tileAttachArgv(
   //   as any other detach of it does.
   // - A read-only tile only views.
   const open = readOnly
-    ? 'open() { t=$1; shift; stty -echo -isig 2>/dev/null; view "$t" "" "$@"; };'
+    ? 'open() { t=$1; shift; stty -echo -isig -ixon 2>/dev/null; view "$t" "" "$@"; };'
     : 'open() { t=$1; shift; while use "$t" "$@"; do :; done; };';
   // No apostrophes or control characters in the script: Herdr also stores this
   // argv as its restart command. All external values stay positional arguments.
   const script = [
+    // Files the script makes (the first input) are readable by this user alone.
+    'umask 077; b0=$(printf "\\033[200~"); b1=$(printf "\\033[201~");',
     // A box-drawing rule (Claude Code draws them as wide as its window) is cut to the tile's width, so a narrow tile
     // doesn't spend most of its rows on one wrapped rule. The cut works on bytes, so no character can blank the view.
     // One tmux call a second reads the activity time and the screen together; the screen is drawn only after new
@@ -50,29 +52,31 @@ export function tileAttachArgv(
     'if [ -n "$keys" ]; then dd bs=4096 count=1 of="$f" 2>/dev/null || return 1; if [ -s "$f" ]; then return 0; fi;',
     'else sleep 1 || return 1; fi;',
     'done; return 1; };',
-    // The first input goes through tmux as an attached client's does, and only while it's still the same seat. While a
-    // writable tile shows, the tile's terminal frames pastes, so the whole first burst (a paste, or keys) is read into a
-    // file, with a UTF-8 character it ends inside completed; nothing passes through a shell variable, so every byte is
-    // kept, NUL included. A paste goes in as one (paste-buffer frames it if the agent asked for that). Then the tile
-    // attaches and the keys go in through its client (send-keys -K), so tmux's own key table applies, the prefix
-    // included: control bytes by name, the rest as text. tmux reads anything typed after that itself.
+    // The first input goes through tmux as an attached client's does, and only while it's still the same seat. A
+    // writable tile's terminal frames pastes while it shows, and until the tile attaches. The whole first burst is read
+    // into a file, through any paste it opens, with a UTF-8 character it ends inside completed. Nothing passes through
+    // a shell variable, so every byte is kept, NUL included, and flow-control and other special keys are read as keys.
+    // - Keys alone go in the attach command itself, through the new client (send-keys -K): tmux runs them for that
+    //   client before anything typed since, so its key table applies, the prefix included.
+    // - A burst with a paste goes to the pane in order before the tile attaches: keys, then the paste (paste-buffer
+    //   frames it if the agent asked), then keys. tmux reads anything typed since only once the tile has attached.
+    // The tile's terminal keeps that one mode (raw, paste framing on) from the first key until tmux takes the terminal at
+    // attach, and tmux puts it back at detach; only a tile that doesn't attach restores it itself.
     // Without a terminal to read keys from, or a file to keep them in, a writable tile only views.
     'use() { t=$1; shift; f=$(mktemp 2>/dev/null) || f=;',
-    'if [ -n "$f" ] && stty -icanon -echo -isig -icrnl min 0 time 10 2>/dev/null; then',
-    'printf "\\033[?2004h"; view "$t" 1 "$@"; seen=$?; printf "\\033[?2004l"; [ "$seen" -ne 0 ] || take;',
-    'else view "$t" "" "$@"; seen=$?; fi; stty sane 2>/dev/null;',
-    'if [ "$seen" -ne 0 ] || ! here "$@"; then [ -z "$f" ] || rm -f "$f" "$f.p"; return 1; fi;',
-    'if [ -s "$f.p" ]; then "$@" load-buffer -b "openrig-tile-$$" "$f.p" \\; paste-buffer -p -d -b "openrig-tile-$$" -t "$t" 2>/dev/null; fi; rm -f "$f.p";',
+    'if [ -n "$f" ] && stty -icanon -echo -isig -iexten -ixon -icrnl min 0 time 10 2>/dev/null; then',
+    'printf "\\033[?2004h"; view "$t" 1 "$@"; seen=$?; [ "$seen" -ne 0 ] || take;',
+    'else view "$t" "" "$@"; seen=$?; fi;',
+    'if [ "$seen" -ne 0 ] || ! here "$@"; then printf "\\033[?2004l"; stty sane 2>/dev/null; [ -z "$f" ] || rm -f "$f" "$f".*; return 1; fi;',
     'me=$(tty 2>/dev/null) || me=; w=;',
     'if [ -n "$me" ]; then idle "$me" "$@" & w=$!; fi;',
-    'if [ -s "$f" ]; then go "$@"; else "$@" attach -t "$t"; fi;',
-    'if [ -n "$w" ]; then kill "$w" 2>/dev/null; wait "$w" 2>/dev/null; fi; rm -f "$f"; return 0; };',
-    'take() { stty min 0 time 1 2>/dev/null; b0=$(printf "\\033[200~"); b1=$(printf "\\033[201~"); i=0; pp=;',
-    'case "$(dd if="$f" bs=6 count=1 2>/dev/null)" in "$b0") pp=1; stty min 0 time 10 2>/dev/null;; esac;',
-    'while [ "$i" -lt 256 ]; do if [ -n "$pp" ] && LC_ALL=C grep -aqF -- "$b1" "$f"; then break; fi;',
+    'if LC_ALL=C grep -aqF -- "$b0" "$f"; then put "$@"; printf "\\033[?2004l"; "$@" attach -t "$t";',
+    'else printf "\\033[?2004l"; if [ -s "$f" ]; then go "$@"; else "$@" attach -t "$t"; fi; fi;',
+    'if [ -n "$w" ]; then kill "$w" 2>/dev/null; wait "$w" 2>/dev/null; fi; rm -f "$f" "$f".*; return 0; };',
+    'take() { i=0; while [ "$i" -lt 256 ]; do',
+    'if [ $(($(LC_ALL=C grep -abo -F -- "$b0" "$f" | wc -l))) -gt $(($(LC_ALL=C grep -abo -F -- "$b1" "$f" | wc -l))) ];',
+    'then stty min 0 time 10 2>/dev/null; else stty min 0 time 1 2>/dev/null; fi;',
     'dd bs=4096 count=1 of="$f.n" 2>/dev/null && [ -s "$f.n" ] || break; cat "$f.n" >> "$f"; i=$((i + 1)); done; rm -f "$f.n";',
-    'if [ -n "$pp" ] && o=$(LC_ALL=C grep -abo -F -- "$b1" "$f" 2>/dev/null); then o=${o%%:*};',
-    'dd if="$f" of="$f.p" bs=1 skip=6 count=$((o - 6)) 2>/dev/null; dd if="$f" of="$f.n" bs=1 skip=$((o + 6)) 2>/dev/null; mv "$f.n" "$f"; fi;',
     'm=0; for c in $(tail -c 4 "$f" | od -An -tu1 -v); do',
     'if [ "$c" -lt 128 ]; then m=0; elif [ "$c" -lt 192 ]; then [ "$m" -eq 0 ] || m=$((m - 1)); elif [ "$c" -lt 224 ]; then m=1;',
     'elif [ "$c" -lt 240 ]; then m=2; elif [ "$c" -lt 248 ]; then m=3; else m=0; fi; done;',
@@ -80,14 +84,34 @@ export function tileAttachArgv(
     'here() { v=$("$@" display-message -p -t "$t" "#{pid} #{session_id}" 2>/dev/null) || return 1; [ -n "${v#* }" ] || return 1;',
     '[ -z "$p" ] || [ "${v%% *}" = "$p" ] || return 1;',
     '[ -z "$n" ] || [ "$("$@" show-environment -t "$t" OPENRIG_NODE_ID 2>/dev/null)" = "$n" ]; };',
-    // The keys go in the attach command itself, after attach-session: tmux runs them for the new client before it
-    // reads anything typed since, so they keep their order.
-    'go() { set -- "$@" attach -t "$t"; x=0; r0=0; for c in $(od -An -tu1 -v "$f"); do if [ "$c" -lt 32 ] || [ "$c" -eq 127 ]; then',
-    'if [ "$x" -gt "$r0" ]; then set -- "$@" \\; send-keys -K -l -- "$(dd if="$f" bs=1 skip="$r0" count=$((x - r0)) 2>/dev/null)"; fi;',
-    'case "$c" in 0) k=C-Space;; 9) k=Tab;; 13) k=Enter;; 27) k=Escape;; 28) k=C-\\\\;; 29) k=C-];; 30) k=C-^;; 31) k=C-_;; 127) k=BSpace;;',
-    '*) k=C-$(printf "\\\\$(printf %o $((c + 96)))");; esac;',
-    'set -- "$@" \\; send-keys -K "$k"; r0=$((x + 1)); fi; x=$((x + 1)); done;',
-    'if [ "$x" -gt "$r0" ]; then set -- "$@" \\; send-keys -K -l -- "$(dd if="$f" bs=1 skip="$r0" count=$((x - r0)) 2>/dev/null)"; fi; "$@"; };',
+    'kn() { case "$1" in 0) k=C-Space;; 9) k=Tab;; 13) k=Enter;; 27) k=Escape;; 28) k=C-\\\\;; 29) k=C-];; 30) k=C-^;; 31) k=C-_;; 127) k=BSpace;;',
+    '*) k=C-$(printf "\\\\$(printf %o $(($1 + 96)))");; esac; };',
+    // Keys alone: in the attach command, through the new client. A key sequence tmux names (an arrow, PgUp) goes by
+    // its name, so a binding on it applies, as after the prefix.
+    'go() { set -- "$@" attach -t "$t"; x=0; r0=0; sk=0; for c in $(od -An -tu1 -v "$f"); do',
+    'if [ "$sk" -gt 0 ]; then sk=$((sk - 1)); x=$((x + 1)); r0=$x; continue; fi; if [ "$c" -lt 32 ] || [ "$c" -eq 127 ]; then',
+    'if [ "$x" -gt "$r0" ]; then tx "$r0" "$x"; set -- "$@" \\; send-keys -K -l -- "$u"; fi;',
+    'kn "$c"; [ "$c" -ne 27 ] || ke "$x"; set -- "$@" \\; send-keys -K "$k"; r0=$((x + 1)); fi; x=$((x + 1)); done;',
+    'if [ "$x" -gt "$r0" ]; then tx "$r0" "$x"; set -- "$@" \\; send-keys -K -l -- "$u"; fi; "$@"; };',
+    'ke() { q=$(dd if="$f" bs=1 skip=$(($1 + 1)) count=3 2>/dev/null); case "$q" in',
+    '"[5~"*) k=PPage; sk=3;; "[6~"*) k=NPage; sk=3;; "[2~"*) k=IC; sk=3;; "[3~"*) k=DC; sk=3;; "[1~"*) k=Home; sk=3;; "[4~"*) k=End; sk=3;;',
+    '"[A"*|"OA"*) k=Up; sk=2;; "[B"*|"OB"*) k=Down; sk=2;; "[C"*|"OC"*) k=Right; sk=2;; "[D"*|"OD"*) k=Left; sk=2;;',
+    '"[H"*|"OH"*) k=Home; sk=2;; "[F"*|"OF"*) k=End; sk=2;; "[Z"*) k=BTab; sk=2;;',
+    '"OP"*) k=F1; sk=2;; "OQ"*) k=F2; sk=2;; "OR"*) k=F3; sk=2;; "OS"*) k=F4; sk=2;; esac; };',
+    // tmux ends a command at an argument ending in ;, so a run of text keeps its last ; escaped.
+    'tx() { u=$(dd if="$f" bs=1 skip="$1" count=$(($2 - $1)) 2>/dev/null); case "$u" in *";") u="${u%?}\\\\;";; esac; };',
+    // A burst with a paste: each part to the pane, in order, before the tile attaches.
+    'put() { z=$(($(wc -c < "$f"))); pos=0; j=0; while [ "$pos" -lt "$z" ]; do',
+    'a=$(dd if="$f" bs=1 skip="$pos" 2>/dev/null | LC_ALL=C grep -abo -F -- "$b0" | head -n 1); a=${a%%:*};',
+    'if [ -z "$a" ]; then kz "$pos" "$z" "$@"; break; fi; kz "$pos" $((pos + a)) "$@"; a=$((pos + a + 6));',
+    'e=$(dd if="$f" bs=1 skip="$a" 2>/dev/null | LC_ALL=C grep -abo -F -- "$b1" | head -n 1); e=${e%%:*}; [ -n "$e" ] || e=$((z - a));',
+    'j=$((j + 1)); dd if="$f" of="$f.p$j" bs=1 skip="$a" count="$e" 2>/dev/null;',
+    '"$@" load-buffer -b "openrig-tile-$$-$j" "$f.p$j" \\; paste-buffer -p -d -b "openrig-tile-$$-$j" -t "$t" 2>/dev/null; pos=$((a + e + 6)); done; };',
+    'kz() { u=$1; y=$2; shift 2; [ "$y" -gt "$u" ] || return 0; x=$u; r0=$u;',
+    'for c in $(dd if="$f" bs=1 skip="$u" count=$((y - u)) 2>/dev/null | od -An -tu1 -v); do if [ "$c" -lt 32 ] || [ "$c" -eq 127 ]; then',
+    'if [ "$x" -gt "$r0" ]; then tx "$r0" "$x"; "$@" send-keys -t "$t" -l -- "$u" 2>/dev/null; fi;',
+    'kn "$c"; "$@" send-keys -t "$t" "$k" 2>/dev/null; r0=$((x + 1)); fi; x=$((x + 1)); done;',
+    'if [ "$x" -gt "$r0" ]; then tx "$r0" "$x"; "$@" send-keys -t "$t" -l -- "$u" 2>/dev/null; fi; };',
     'idle() { me=$1; shift; while sleep 1; do',
     'a=$("$@" display-message -p -c "$me" "#{client_activity}" 2>/dev/null) || return 0;',
     `if [ $(($(date +%s) - a)) -ge ${idleSeconds} ]; then "$@" detach-client -t "$me" 2>/dev/null; return 0; fi;`,
