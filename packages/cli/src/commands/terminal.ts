@@ -37,10 +37,10 @@ export interface TerminalDeps extends StatusDeps {
 }
 
 /**
- * The herdr-app client a command addresses, or null when it doesn't use herdr-app: named with `--provider herdr-app`;
- * or, with neither `--provider` nor `--window`, chosen by running in a herdr-core terminal whose herdr-app window
- * serves this machine (its socket file is a hint; the daemon opens nothing unless the window answers). `--window`
- * always means a desktop window.
+ * The herdr-app client a command addresses, or null when it doesn't use herdr-app: `--provider herdr-app` opens the
+ * view in the herdr-app window you run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the
+ * same while that window is answering (its socket file is a hint; the daemon opens nothing unless the window answers).
+ * `--window` always asks for a new desktop window.
  */
 export function herdrAppClient(opts: { provider?: string; window?: boolean; appHome?: string }, deps: TerminalDeps):
   { appHome: string } | null {
@@ -157,10 +157,10 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
   cmd
     .command("open")
     .argument("<view>", "a rig name, pod:<rig>/<pod>, seat:<rig>/<logical-id>, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
-    .description("Open a desktop terminal showing the view's live agents as interactive tiles")
-    .option("--provider <name>", "herdr, herdr-app, cmux or rex: open in the running provider without a desktop window; each open adds a new workspace, or in herdr-app a Rig view (inside Herdr, --window reuses a matching one); tmux requires --window. Inside Rex, the default opens in Rex")
+    .description("Open a terminal view: --provider herdr-app opens in the herdr-app window you run it in; inside a herdr-app terminal, plain rig terminal open <view> does the same while that window is answering; --window always asks for a new desktop window")
+    .option("--provider <name>", "herdr, herdr-app, cmux or rex: open in the running provider without a desktop window; --provider herdr-app opens a Rig view in the herdr-app window you run it in; each open in Herdr/cmux/Rex adds a new workspace (inside Herdr, --window reuses a matching one); tmux requires --window. Inside Rex, the default opens in Rex")
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
-    .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted, unless a herdr-app terminal selects herdr-app)")
+    .option("--window", "Always ask for a new desktop terminal tab/window, even inside a herdr-app terminal (the default outside herdr-app when --provider is omitted)")
     .option("--app-home <dir>", "herdr-app: the client to open in (default: herdr-app's own home, from HERDR_APP_HOME or ~/.config/herdr-app)")
     .option("--expected-plan <id>", "Open only if the view still matches this preview")
     .option("--follow", "Keep one qitem:<id>, slice:<id-or-name> or mission:<id> workspace following current obligation owners (Linux/macOS Herdr protocol 22)")

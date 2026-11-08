@@ -587,7 +587,7 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 
 See [named terminal sessions](../reference/terminal-sessions.md) to select a
 Herdr session per request, including session-bound previews and window reuse.
-herdr-app views (`--provider herdr-app`, `close`, `--app-home`) are in
+herdr-app views (`--provider herdr-app`, plain `rig terminal open <view>` inside an answering herdr-app terminal versus `--window` for a desktop window, `close`, `--app-home`) are in
 [herdr-app](../reference/herdr-app.md).
 
 ### watchdog

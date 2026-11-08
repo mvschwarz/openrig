@@ -37,8 +37,13 @@ rig herdr install --keys     # optional: alt-arrows move between a view's cells
   open both use that window, so the plan you previewed is the one that opens. The preview says the view opens in
   this window; it shows no desktop or SSH recipe. A shared TUI viewed from a herdr-app terminal does the same. The
   kernel view opens in its narrow arrangement there (one seat per page): the window's width isn't the TUI's.
-- **From a shell:** `rig terminal open <view> --provider herdr-app [--app-home <dir>]`. In a herdr-app terminal, plain
-  `rig terminal open <view>` chooses herdr-app too; `--window` still asks for a desktop window.
+- **From a shell:** `--provider herdr-app` opens the view in the herdr-app window you run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same while that window is answering. `--window` always asks for a new desktop window.
+
+  | Command | Where the view opens |
+  |---|---|
+  | `rig terminal open <view> --provider herdr-app [--app-home <dir>]` | In the herdr-app window this runs in (requires the window to answer). |
+  | `rig terminal open <view>` | Inside an answering herdr-app terminal, in that herdr-app window; otherwise a desktop window. |
+  | `rig terminal open <view> --window` | Always asks for a new desktop terminal window, even inside a herdr-app terminal. |
 
 The herdr-app window must be answering on its socket (`<app home>/herdr-app.sock`); otherwise the open fails and says
 so. Nothing falls back to a desktop window or an SSH recipe.

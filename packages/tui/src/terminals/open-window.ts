@@ -103,7 +103,9 @@ async function viewedFrom(viewer: () => Promise<NodeJS.ProcessEnv | undefined>):
 /**
  * The provider a terminal action uses from this TUI, for its preview and its open alike: Rex or cmux around this TUI;
  * else herdr-app when this TUI runs in a herdr-core terminal with a herdr-app window on this machine (or, for a shared
- * TUI, when the client viewing it does); else Herdr.
+ * TUI, when the client viewing it does); else Herdr. `--provider herdr-app` opens the view in the herdr-app window you
+ * run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same when that window is answering.
+ * `--window` always asks for a new desktop window.
  */
 export async function windowTarget(viewer: () => Promise<NodeJS.ProcessEnv | undefined> = viewerTerminalEnv): Promise<WindowTarget> {
   if (inRex(process.env)) return { provider: "rex" };
