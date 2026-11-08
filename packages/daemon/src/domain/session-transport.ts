@@ -61,7 +61,7 @@ import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverable
 // (daintree #3938) cite Claude 1-3s / Codex 3-5s inter-tool-call gaps with a 6s idle debounce. A 15s
 // window comfortably spans one inter-tool gap (so a mid-turn reading stays trusted) while refusing to
 // authorize a send from a reading tens of seconds old. (EXA: agtx#14, daintree#3938.)
-const SEND_READINESS_FRESHNESS_MS = 15_000;
+export const SEND_READINESS_FRESHNESS_MS = 15_000;
 
 // transport.verify_input_box: each extra input-box read gives up after this long and reads `unavailable`. A deadline
 // budget, not a guarantee: the pre-Enter read comes after the existing 200 ms wait and can add about this much before
