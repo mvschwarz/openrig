@@ -517,6 +517,9 @@ interface PreparationAttempt extends PreparationState {
   /** An automatic attempt begun after an ended one (#2682), with when that one ended: its request goes only to a seat its
    *  send reads idle. */
   afterEnded?: number;
+  /** The ended attempt's conversation, null when it read unknown: its gate falls only by that one (#2682), also after a
+   *  restart, whatever conversation this attempt later moves to. */
+  afterEndedSessionId?: string | null;
 }
 
 /** What the restore request must carry because the /compact command could not. With --skip-map the attempt
@@ -573,6 +576,8 @@ interface CompactionRecord {
   /** Begun after an attempt that ended then: its request goes only to a seat its send reads idle, and a restart before
    *  it goes out keeps the ended attempt's gate (#2682). */
   afterEnded?: number;
+  /** The ended attempt's conversation, null when unknown. A record without it (an older daemon's) reads as unknown. */
+  afterEndedSessionId?: string | null;
   lastDelivery?: RestoreDeliveryAttempt;
   updatedAt: number;
 }
@@ -605,6 +610,7 @@ function readCompactionRecord(file: string): CompactionRecord | null {
       && (r.mapReadyAt === undefined || Number.isFinite(r.mapReadyAt)) && (r.mapUsedPercentage === undefined || Number.isFinite(r.mapUsedPercentage))
       && (r.sessionId === undefined || text(r.sessionId)) && (r.endedAt === undefined || Number.isFinite(r.endedAt))
       && (r.afterEnded === undefined || Number.isFinite(r.afterEnded))
+      && (r.afterEndedSessionId === undefined || textOrNull(r.afterEndedSessionId))
       && (carry === undefined || (typeof carry === "object" && carry !== null && textOrNull(carry.mapPath) && textOrNull(carry.compactInstruction)
         && (carry.skipMap === undefined || (text(carry.skipMap?.mapPath) && text(carry.skipMap?.marker)))));
     return valid ? r : null;
@@ -890,17 +896,18 @@ export class ClaudeCompactionEnforcer {
     this.reconcilePreparations();
     const attempt = this.pendingPreCompactPrep.get(input.sessionName);
     if (input.runtime !== "claude-code" || attempt?.mode !== "automatic" || attempt.status !== "waiting"
-      || attempt.delivery === "pending" || !this.mapReady(attempt)) return { triggered: false, reason: "no_pending_stage" };
+      || attempt.delivery === "pending") return { triggered: false, reason: "no_pending_stage" };
     const threshold = this.settingsStore.resolveClaudeCompactionPolicy().thresholdPercent;
     if (!isValidThresholdPercent(threshold)) return { triggered: false, reason: "invalid_policy" };
-    const dropped = lastUsedPercentage != null && lastUsedPercentage < threshold;
     const otherConversation = !!attempt.sessionId && !!input.sessionId && attempt.sessionId !== input.sessionId;
-    // Another conversation, known on both sides, ends an armed or held map, as on the fresh path: a later sample whose
-    // conversation reads unknown must not compact with it.
+    // Another conversation, known on both sides, ends an armed or held map, as on the fresh path, also one whose map isn't
+    // complete yet: a later sample whose conversation reads unknown must not compact with it.
     if (otherConversation && !attempt.compactInFlight) {
       this.stopPreparation(input.sessionName, "below_threshold_while_prepared", attempt);
       return { triggered: false, reason: "preparation_stopped" };
     }
+    if (!this.mapReady(attempt)) return { triggered: false, reason: "no_pending_stage" };
+    const dropped = lastUsedPercentage != null && lastUsedPercentage < threshold;
     if (dropped && !attempt.compactInFlight) {
       // A held map ends, as on a fresh dip. An attempt not held keeps its deadline (and a later fresh sample above may
       // still use its map), but a stale sample never compacts it.
@@ -1209,9 +1216,10 @@ export class ClaudeCompactionEnforcer {
       // this same sample (endedAttemptGate ran first), so a restart must not bring it back for the new conversation. An
       // ended attempt whose conversation read unknown keeps its gate, and so does the replacement.
       const dropGate = armed.afterEnded !== undefined && !this.lastEnded.has(input.sessionName);
-      if (dropGate) armed.afterEnded = undefined;
+      if (dropGate) { armed.afterEnded = undefined; armed.afterEndedSessionId = undefined; }
       armed.sessionId = input.sessionId;
-      this.persist(input.sessionName, armed.attemptId, { sessionId: input.sessionId, ...(dropGate ? { afterEnded: undefined } : {}) });
+      this.persist(input.sessionName, armed.attemptId,
+        { sessionId: input.sessionId, ...(dropGate ? { afterEnded: undefined, afterEndedSessionId: undefined } : {}) });
     }
     if (armed?.mode === "automatic" && armed.status === "waiting" && armed.compact === "not_sent" && !armed.compactInFlight
       && !!armed.sessionId && !!input.sessionId && armed.sessionId !== input.sessionId) {
@@ -1434,7 +1442,11 @@ export class ClaudeCompactionEnforcer {
     // A manual compaction is explicit and replaces the ended attempt at once. An automatic one keeps the gate until its
     // request goes out (deliverPreparation).
     if (mode === "manual") this.lastEnded.delete(input.sessionName);
-    else if (this.lastEnded.has(input.sessionName)) attempt.afterEnded = this.lastEnded.get(input.sessionName)!.endedAt;
+    else if (this.lastEnded.has(input.sessionName)) {
+      const ended = this.lastEnded.get(input.sessionName)!;
+      attempt.afterEnded = ended.endedAt;
+      attempt.afterEndedSessionId = ended.sessionId;
+    }
     this.pendingPreCompactPrep.set(input.sessionName, attempt);
     this.stranded.delete(input.sessionName);
     // A map cannot satisfy an unknown occupant. Keep the failed attempt visible and
@@ -1751,7 +1763,8 @@ export class ClaudeCompactionEnforcer {
       phase: "preparing", delivery: attempt.delivery, deadlineAt: attempt.deadlineAt, sends: attempt.sends,
       mapPath: attempt.mapPath, marker: attempt.marker, compactInstruction: attempt.compactInstruction,
       preparationRoot: attempt.preparationRoot, ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}),
-      ...(attempt.afterEnded !== undefined ? { afterEnded: attempt.afterEnded } : {}), updatedAt: this.now(),
+      ...(attempt.afterEnded !== undefined ? { afterEnded: attempt.afterEnded, afterEndedSessionId: attempt.afterEndedSessionId ?? null } : {}),
+      updatedAt: this.now(),
     } });
     this.persist(sessionName, attempt.attemptId, {});
   }
@@ -1836,7 +1849,7 @@ export class ClaudeCompactionEnforcer {
       else if (record.mode === "automatic" && record.afterEnded !== undefined && record.delivery === "not_sent"
         && record.occupantGeneration !== null && (live === null || live === record.occupantGeneration)
         && this.now() - record.afterEnded < this.restartRecoveryWindowMs) {
-        this.lastEnded.set(session, { endedAt: record.afterEnded, occupantGeneration: record.occupantGeneration, sessionId: record.sessionId ?? null });
+        this.lastEnded.set(session, { endedAt: record.afterEnded, occupantGeneration: record.occupantGeneration, sessionId: record.afterEndedSessionId ?? null });
       }
       return;
     }
@@ -1869,12 +1882,12 @@ export class ClaudeCompactionEnforcer {
         ...(record.mapUsedPercentage !== undefined ? { mapUsedPercentage: record.mapUsedPercentage } : {}),
         ...(record.sessionId !== undefined ? { sessionId: record.sessionId } : {}),
         ...(record.mode === "automatic" && record.belowSince !== undefined ? { belowSince: record.belowSince } : {}),
-        ...(record.mode === "automatic" && record.afterEnded !== undefined ? { afterEnded: record.afterEnded } : {}),
+        ...(record.mode === "automatic" && record.afterEnded !== undefined ? { afterEnded: record.afterEnded, afterEndedSessionId: record.afterEndedSessionId ?? null } : {}),
       });
       // A replacement whose request never went out keeps the ended attempt's gate, as in memory.
       if (record.mode === "automatic" && record.afterEnded !== undefined && record.delivery === "not_sent" && record.occupantGeneration !== null
         && this.now() - record.afterEnded < this.restartRecoveryWindowMs) {
-        this.lastEnded.set(session, { endedAt: record.afterEnded, occupantGeneration: record.occupantGeneration, sessionId: record.sessionId ?? null });
+        this.lastEnded.set(session, { endedAt: record.afterEnded, occupantGeneration: record.occupantGeneration, sessionId: record.afterEndedSessionId ?? null });
       }
       if (record.mode === "manual") this.stopPreparation(session, "daemon_restarted");
       // A held map of any age is checked at once, without waiting for a send's checks (#2682).
@@ -1946,7 +1959,8 @@ export class ClaudeCompactionEnforcer {
     if (!attempt) return null;
     const { controller: _controller, sends: _sends, policyWasEnabled: _enabled, preparationRoot: _preparationRoot,
       compactInstruction: _instruction, stoppedAt: _stoppedAt, cancelled: _cancelled, belowSince: _belowSince,
-      compactInFlight: _inFlight, sessionId: _sessionId, afterEnded: _afterEnded, ...state } = attempt;
+      compactInFlight: _inFlight, sessionId: _sessionId, afterEnded: _afterEnded,
+      afterEndedSessionId: _afterEndedSessionId, ...state } = attempt;
     // A held attempt has no idle deadline left to show: it waits for its window.
     return { ...state, ...(attempt.mode === "automatic" && !attempt.prepared && attempt.deadlineAt !== null && this.mapReady(attempt)
       ? { idleDeadlineAt: this.compactDeadline(attempt)! } : {}) };
