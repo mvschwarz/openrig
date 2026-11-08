@@ -25,8 +25,9 @@ export type NativeRuntime = "claude-code" | "codex";
 function tokens(command: string): string[] {
   // ps flattens argv: inline settings JSON retains its string delimiters.
   // A quote inside a name or filename is literal, not a shell span delimiter.
-  // A JSON value keeps the spaces between its members too, as in `{"env": {"A": "b"}}`: a value that opens with `{`
-  // stays one token until its braces balance. Braces inside its strings don't count (#2508).
+  // A `--settings` or `--mcp-config` JSON value keeps the spaces between its members too, as in
+  // `{"env": {"A": "b"}}`: it stays one token until its braces balance. Braces inside its strings don't count, and
+  // a brace that opens any other option's value is literal (#2508).
   const result: string[] = [];
   let start = 0;
   let quote: string | null = null;
@@ -41,6 +42,8 @@ function tokens(command: string): string[] {
     || command.startsWith("'{", start) || command.startsWith("--settings={", start)
     || command.startsWith('--settings="', start) || command.startsWith("--mcp-config={", start)
     || command.startsWith('--mcp-config="', start);
+  const jsonValue = () => command.startsWith("--settings={", start) || command.startsWith("--mcp-config={", start)
+    || (command[start] === "{" && (result.at(-1) === "--settings" || result.at(-1) === "--mcp-config"));
   for (let index = 0; index < command.length; index += 1) {
     const char = command[index]!;
     if (quote !== null) {
@@ -48,7 +51,7 @@ function tokens(command: string): string[] {
       if (char === quote) quote = null;
     } else if (char === '"' && structured()) {
       quote = char;
-    } else if (char === "{" && structured()) {
+    } else if (char === "{" && jsonValue()) {
       depth += 1;
     } else if (char === "}" && depth > 0) {
       depth -= 1;

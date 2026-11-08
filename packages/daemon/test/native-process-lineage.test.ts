@@ -517,6 +517,7 @@ describe("Claude identity with inline settings in ps output", () => {
     `--settings /fixture/review"settings.json --session-id ${token}`,
     // #2508: a brace inside a spaced value's string doesn't end the value.
     `--settings {"env": {"note": "a } b {"}} --resume ${token}`,
+    `--settings={"env": {"A": "b"}} --session-id=${token}`,
   ])("accepts inline and file settings: %s", async args => {
     expect((await verifyClaudePaneProcess(input(args)))?.process.pid).toBe(21);
     expect((await observeClaudeDelivery(input(args))).state).toBe("verified");
@@ -606,6 +607,19 @@ describe("Claude identity with inline settings in ps output", () => {
   ])("does not promote ambiguous argv: %s", async args => {
     expect(await verifyClaudePaneProcess(input(args))).toBeNull();
     expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
+  // #2508: braces group only a `--settings` or `--mcp-config` value. Any other value that opens with `{` still ends at
+  // a space, so the options after it are read as on main.
+  it("keeps a second resume after another option's brace-led value visible", async () => {
+    const actual = input(`--resume ${token} --name {label --resume ${parent}`);
+    expect(await verifyClaudePaneProcess(actual)).toBeNull();
+    expect((await observeClaudeDelivery(actual)).state).not.toBe("verified");
+  });
+  it("reads the identity after another option's brace-led value", async () => {
+    const actual = input(`--name {label --resume ${token}`);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
   });
   it.each([
     `--resume ${parent} --fork-session --session-id ${token}`,
