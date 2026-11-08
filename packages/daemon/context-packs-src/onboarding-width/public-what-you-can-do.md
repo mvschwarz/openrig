@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Ninety-two top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.7.10`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.7.11`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
 `rig context get reference/whats-new.md`.
@@ -134,6 +134,12 @@ unseen — which makes messages the one delivery channel that never gets skipped
   `caller_cancelled` and never types later. **`--urgent`** marks a message urgent, as does a row
   at priority `urgent` or `critical`: its wake starts `Urgent (marked by …):`, and it gets through a
   seat whose typing guard lets only urgent input type (`openrig-urgent` or `urgent-only`, below).
+  **A seat whose prompt holds a person's typed draft gets the message joined to it** by default
+  (`transport.draft_delivery` `deliver`): the message is pasted at the cursor and the combined input
+  submitted as one prompt, and the result says when it joined a draft OpenRig saw. Tell the person.
+  `rig config set transport.draft_delivery refuse` brings back the refusal (`prompt_draft`) from the
+  next send. Menus, permission prompts, a seat's typing guard, managed compaction and
+  `--wait-for-idle` refuse or wait under either value. Draft detection isn't complete.
 - **`rig send --raw`** — send exact text or keystrokes without the From/To envelope;
   the interactive-prompt guard still applies. To deliberately drive an interactive prompt,
   **`--dangerously-interact --reason "<why>"`** is the explicit override and implies raw text.
@@ -208,6 +214,15 @@ unseen — which makes messages the one delivery channel that never gets skipped
   judge and close. Each permission request is a row to `--permissions-to` (default: you). The guide
   is `docs/reference/acp-agents.md` in the source repo, and `docs/reference/a2a-agents.md` covers
   A2A agents.
+- **`rig acp serve --to <member@rig>`** — the other direction: the team as an agent inside an ACP
+  app that launches a custom agent over stdio (Zed's `agent_servers`, T3 Code). A prompt becomes a
+  queue row, each row the work reaches shows as a step, and the closing resolution is the reply.
+  The team's questions reach the app as a permission request or a one-choice form, and the choice
+  is recorded as the person's answer; one left unanswered there stays open in the TUI and Slack.
+  `acp.to` sets the default receiver. Nothing runs until an app starts it, and it uses the daemon
+  `rig` uses (`OPENRIG_URL` can name another). The `@openrig/acp` launcher runs the matching
+  CLI's `rig acp serve` for the ACP registry's `npx` launch. A cancel stops waiting; the work
+  carries on. It's been checked in T3 Code and with a scripted client.
 - **`rig exec run <row> --harness claude|codex`** — a finite task for Claude Code or Codex without
   building a seat: the same single turn through that harness's ACP adapter, run by a detached
   connector that outlives the command, so closing the terminal or leaving `--wait` doesn't stop it.
@@ -348,6 +363,10 @@ your context, your compaction and your replacement — and it is the only thing 
   everything.
 - **`rig queue show`** — what a row *actually says*. The header is not the body. On a closed row,
   `--full` adds `closingTransition`: how it ended, who closed it and the closing note.
+  `rig queue show`, `list`, `transitions`, `update` and `block` take `--host <id>` for a row on
+  another host, as `create` and `handoff` do; `claim` doesn't, since only the destination seat
+  claims, on its own host. `rig queue artifact <qitemId>` (and MCP `rig_artifact_read`) returns the
+  exact commit pair from an `openrig.code-result/v1` manifest set as the row's `evidenceRef`.
 - **`rig queue claim` / `unclaim`** — is this mine and running, or still pending where two agents
   might double-work it. Put it down honestly when it is not yours.
 - **`rig queue update`** — record what happened in a form the rest of the system can act on. A
@@ -468,7 +487,9 @@ relay is a reason to inspect the available routing, not to surrender judgment to
   inspect `rig gateway human list --json`; when several people are registered, choose a default
   with `rig gateway default <id>`, or name one in `workspace.operator_seat_name`, which is read first.
 - **`rig workflow show` / `trace`** — what this instance is, and every step, actor and exit that
-  got it here.
+  got it here. `trace --full` returns the whole trail, and `show`, `trace` and `status` print the run's
+  `objective:`. **`rig workflow unregister <name>[@<version>]`** (or `--prune-missing`) removes
+  registered versions; a running instance keeps the spec it started with.
 - **`rig workflow revise <instance>`** — compare the bound graph with current authored
   inputs before changing a progressed run. Ordinary show and TUI inspection distinguish
   source-only edits (such as a catalog address) from executable changes. Preview names
@@ -580,6 +601,14 @@ not have to tear one down to change it, and you rarely have to start from nothin
   selects only the tmux server: home, credentials, filesystem and network stay shared.
   **`rig up <spec> --name <rig>`** runs one spec as another rig under that name; the rig keeps the
   name for `--existing`, snapshots and restore, and the spec file isn't changed.
+- **`launch_wrapper`** on a local Claude Code, Pi or Codex member is an argv prefix whose launcher
+  prepares the environment and execs the agent; a wrapped seat never starts unwrapped. It hasn't
+  run with zsh or with a real installed Claude.
+- **A person can work with the team from their own Claude Code or Codex** through the `openrig`
+  plugin, shipped beside openrig-core (its README in the installed package has the install
+  steps): hand it work, follow it, answer the team's questions in their own words, and read the
+  result. VS Code, Copilot CLI and Cursor load it with no seat: give the app its own
+  `rig mcp serve --front-door` server with `OPENRIG_SESSION_NAME` set and turn the plugin's off.
 - **A Claude member can bring its own setup** in the rig spec: `agent_file`,
   `append_system_prompt_file`, `plugin_dirs` and `advisor` (an Advisor model). They're copied into
   that seat's own storage, never the project, so one seat in a shared repository can have its own
@@ -1476,6 +1505,12 @@ your circumstances is configuration, and the ones that are not, another agent ca
   get a standard challenge; the key and its grant still decide what a caller may do. The rows a
   granted caller's actions write record whose grant acted: attribution, not authentication.
   Clients on MCP protocol revision 2026-07-28 and on the 2025 revisions share the same endpoint.
+  With a grant service (experimental and off by default; you serve it to the internet behind
+  your own tunnel), `--task-destination <member@rig>` names where a caller's `rig_queue_create`
+  goes when it gives no destination, and a seat's name alone resolves within the grant's team. A
+  grant that names a person adds `rig_question_list` and `rig_question_answer`, so that person
+  answers the team's questions from their assistant, recorded as their answer through that
+  connection.
   **An assistant connected this way can be a hosted member of a rig:** mark its roster entry
   `"hosted": true` and `rig_team` lists it with its declared capabilities and caveat, activity
   `unknown`. The server's instructions teach it the loop: its inbox, claiming, closing or handing
