@@ -1288,7 +1288,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             : `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${now_.ageMinutes} min)`,
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId),
-            ...(routed.has(c.row.qitemId) || now_.row.tags?.includes(ESCALATION_HOP_TAG) ? [ESCALATION_HOP_TAG] : [])],
+            ...(routed.has(c.row.qitemId) || now_.row.tags?.includes(ESCALATION_HOP_TAG) ? [ESCALATION_HOP_TAG] : []),
+            ...(now_.row.tags ?? []).filter((tag) => /^(project|mission|slice):/.test(tag))],
           // OpenRig's own finding, whoever created the stuck row.
           wakeTrigger: "openrig" as const,
         };
