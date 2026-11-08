@@ -13,7 +13,7 @@
 //   merged read fails rather than returning only the tmux half, which would read those seats as gone.
 // - Other server-scoped verbs stay on tmux.
 import type Database from "better-sqlite3";
-import type { TmuxAdapter, TmuxResult, SessionProbe } from "./tmux.js";
+import type { PaneCapture, TmuxAdapter, TmuxResult, SessionProbe } from "./tmux.js";
 import { deriveCanonicalSessionName, deriveSessionName } from "../domain/session-name.js";
 import { readStoredSubstrate, type TerminalSubstrate } from "../domain/terminal-substrate.js";
 
@@ -168,7 +168,11 @@ export function createTerminalRouter(tmux: TmuxAdapter, opts: TerminalRouterOpti
     return typeof args[0] === "string" ? resolver.forTarget(args[0]) : { kind: "tmux" };
   };
 
-  return new Proxy(tmux, {
+  /** The adapter a non-tmux target's own reads go to: the router itself, so refusals stay uniform. */
+  let self: TmuxAdapter;
+  const receiverOf = (_target: string): TmuxAdapter => self;
+
+  const proxy = new Proxy(tmux, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
       // The adapter's own fields (exec functions, maps) are state, not verbs: return them as they are.
@@ -180,9 +184,26 @@ export function createTerminalRouter(tmux: TmuxAdapter, opts: TerminalRouterOpti
           () => (Reflect.get(herdr, prop, herdr) as (...a: unknown[]) => Promise<unknown>).apply(herdr, args));
       }
       if (prop === "capturePanesContent" && typeof value === "function") {
-        // Batched capture is tmux's; any non-tmux target sends callers to their per-pane fallback, which routes.
-        return (targets: string[], ...rest: unknown[]) => targets.some(t => resolver.forTarget(t).kind !== "tmux")
-          ? Promise.resolve(null) : (value as (...a: unknown[]) => unknown).apply(target, [targets, ...rest]);
+        // Batched capture is tmux's. A batch with other seats is split: tmux targets go through tmux's batch, every
+        // other target reads on its own substrate, and the results merge. A null result means "tmux unreachable" to
+        // callers (transcript rotation fails every seat in the batch), so it is never returned for a mixed batch.
+        return async (targets: string[], lines?: number, now: () => Date = () => new Date()) => {
+          const others = targets.filter(t => resolver.forTarget(t).kind !== "tmux");
+          if (others.length === 0) return (value as (...a: unknown[]) => unknown).apply(target, [targets, lines, now]);
+          const tmuxTargets = targets.filter(t => !others.includes(t));
+          const fromTmux = tmuxTargets.length > 0
+            ? await (value as (...a: unknown[]) => Promise<Map<string, PaneCapture> | null>).apply(target, [tmuxTargets, lines, now])
+            : new Map<string, PaneCapture>();
+          const merged = new Map<string, PaneCapture>(fromTmux ?? []);
+          for (const other of others) {
+            let text: string | null = null;
+            try { text = await (receiverOf(other).capturePaneContent(other, lines)); } catch { text = null; }
+            merged.set(other, { text, capturedAt: now() });
+          }
+          // tmux unreachable keeps its meaning for the tmux seats; the other seats still carry their own reads.
+          if (fromTmux === null) for (const t of tmuxTargets) merged.set(t, { text: null, capturedAt: now() });
+          return merged;
+        };
       }
       if (typeof prop !== "string" || typeof value !== "function" || SERVER_SCOPED.has(prop) || prop === "constructor") {
         return typeof value === "function" ? value.bind(target) : value;
@@ -212,4 +233,6 @@ export function createTerminalRouter(tmux: TmuxAdapter, opts: TerminalRouterOpti
       return Reflect.set(target, prop, value, receiver);
     },
   });
+  self = proxy;
+  return proxy;
 }

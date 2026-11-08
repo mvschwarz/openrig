@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { HerdrSeatAdapter, overlap } from "../src/adapters/herdr-seat.js";
+import { HerdrSeatAdapter } from "../src/adapters/herdr-seat.js";
 import { HerdrRpcError, type HerdrResult } from "../src/domain/terminal/herdr-transport.js";
 import { createTerminalRouter, SubstrateResolver } from "../src/adapters/terminal-router.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -9,7 +9,6 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 /** A minimal in-memory Herdr: workspaces with one pane each, the socket methods the seat adapter uses. */
 function fakeHerdr() {
   const workspaces = new Map<string, { label: string; panes: string[]; env: Record<string, string> }>();
-  const revision = new Map<string, number>();
   const screen = new Map<string, string>();
   const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
   let next = 1;
@@ -43,26 +42,22 @@ function fakeHerdr() {
       case "pane.send_text": case "pane.send_keys": paneWs(p["pane_id"]); return { type: "ok" };
       case "pane.read": paneWs(p["pane_id"]); return { type: "pane_read", read: { text: screen.get(String(p["pane_id"])) ?? `screen of ${p["pane_id"]}` } };
       case "pane.process_info": paneWs(p["pane_id"]); return { type: "pane_process_info", process_info: { shell_pid: 4242, foreground_processes: [{ pid: 4243, name: "claude" }] } };
-      case "pane.get": paneWs(p["pane_id"]); return { type: "pane_info", pane: { pane_id: p["pane_id"], agent_status: "idle", revision: revision.get(String(p["pane_id"])) ?? 0 } };
+      // Like Herdr 0.9.5 (measured in the M4 sandbox): revision does NOT advance on output.
+      case "pane.get": paneWs(p["pane_id"]); return { type: "pane_info", pane: { pane_id: p["pane_id"], agent_status: "idle", revision: 1 } };
       default: throw new HerdrRpcError(`herdr error: unknown method ${req.method}`, "unknown_method");
     }
   };
-  const output = (pane: string, text: string) => { revision.set(pane, (revision.get(pane) ?? 0) + 1); screen.set(pane, text); };
+  const output = (pane: string, text: string) => { screen.set(pane, text); };
   return { rpc, workspaces, sent, output, setDown: (v: boolean) => { down = v; } };
 }
 
-function setup(extra: { now?: () => number; files?: Map<string, string> } = {}) {
+function setup(extra: { now?: () => number } = {}) {
   const db = createFullTestDb();
   const repo = new RigRepository(db);
   const rig = repo.createRig("hr");
   const node = repo.addNode(rig.id, "dev.solo", { runtime: "terminal", terminalSubstrate: "herdr" });
   const herdr = fakeHerdr();
-  const files = extra.files ?? new Map<string, string>();
-  const adapter = new HerdrSeatAdapter({
-    db, socketForNewSeats: () => "/sandbox/herdr.sock", rpcFor: () => herdr.rpc, transcriptIntervalMs: 0, now: extra.now,
-    appendFile: (f, t) => files.set(f, (files.get(f) ?? "") + t),
-    readFile: (f) => { const v = files.get(f); if (v === undefined) throw new Error("ENOENT"); return v; },
-  });
+  const adapter = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/herdr.sock", rpcFor: () => herdr.rpc, now: extra.now });
   const bind = (session: string, pane: string) =>
     db.prepare("INSERT INTO bindings (id, node_id, tmux_session, tmux_pane) VALUES (?, ?, ?, ?)").run(`b-${node.id}`, node.id, session, pane);
   return { db, repo, node, herdr, adapter, bind };
@@ -158,7 +153,7 @@ describe("HerdrSeatAdapter", () => {
 });
 
 describe("HerdrSeatAdapter activity and transcripts (M3)", () => {
-  it("S1: a revision change records the receive time; an unreachable endpoint reads unknown", async () => {
+  it("S1: a screen change records the receive time; an unreachable endpoint reads unknown", async () => {
     let t = 1_000_000;
     const { adapter, herdr, bind } = setup({ now: () => t });
     await adapter.createSession("dev-solo@hr");
@@ -173,40 +168,9 @@ describe("HerdrSeatAdapter activity and transcripts (M3)", () => {
     expect(adapter.lastAgentStatus("dev-solo@hr")).toBe("idle");
   });
 
-  it("appends only new complete lines, joined by overlap, and nothing for a repeated read", async () => {
-    const files = new Map<string, string>();
-    const { adapter, herdr, bind } = setup({ files });
-    await adapter.createSession("dev-solo@hr");
-    bind("dev-solo@hr", "w1:p1");
-    await adapter.startPipePane("dev-solo@hr", "/t/seat.log");
-    herdr.output("w1:p1", "$ echo one\none\n$ ");
-    await adapter.captureTranscripts();
-    expect(files.get("/t/seat.log")).toBe("$ echo one\none\n");
-    await adapter.captureTranscripts(); // same revision: no read, no append
-    herdr.output("w1:p1", "$ echo one\none\n$ echo two\ntwo\n$ ");
-    await adapter.captureTranscripts();
-    expect(files.get("/t/seat.log")).toBe("$ echo one\none\n$ echo two\ntwo\n");
-    await adapter.stopPipePane("dev-solo@hr");
-    herdr.output("w1:p1", "three\nfour\n");
-    await adapter.captureTranscripts();
-    expect(files.get("/t/seat.log")).toBe("$ echo one\none\n$ echo two\ntwo\n");
-  });
-
-  it("after a restart, the file's tail is the overlap base, so nothing is written twice", async () => {
-    const files = new Map([["/t/seat.log", "x\ny\n"]]);
-    const { adapter, herdr, bind } = setup({ files });
-    await adapter.createSession("dev-solo@hr");
-    bind("dev-solo@hr", "w1:p1");
-    await adapter.startPipePane("dev-solo@hr", "/t/seat.log");
-    herdr.output("w1:p1", "x\ny\nz\n$ ");
-    await adapter.captureTranscripts();
-    expect(files.get("/t/seat.log")).toBe("x\ny\nz\n");
-  });
-
-  it("overlap() finds the longest suffix/prefix match", () => {
-    expect(overlap(["a", "b", "c"], ["b", "c", "d"])).toBe(2);
-    expect(overlap(["a"], ["b"])).toBe(0);
-    expect(overlap([], ["a"])).toBe(0);
+  it("refuses pipe-pane (the web terminal live view) explicitly", async () => {
+    const { adapter } = setup();
+    expect(await adapter.startPipePane("dev-solo@hr", "/t/x.log")).toMatchObject({ ok: false, code: "herdr_unsupported" });
   });
 });
 
@@ -233,11 +197,11 @@ describe("HerdrSeatAdapter review fixes (F1-F5)", () => {
 
   it("F5: after a restart, a seat whose binding lacks the Herdr ids keeps its own endpoint, not the current setting", async () => {
     const { db, herdr, bind } = setup();
-    const first = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/A.sock", rpcFor: () => herdr.rpc, transcriptIntervalMs: 0 });
+    const first = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/A.sock", rpcFor: () => herdr.rpc });
     await first.createSession("dev-solo@hr");
     bind("dev-solo@hr", "w1:p1"); // the launcher's binding, without herdr_workspace/socket
     const sockets: string[] = [];
-    const restarted = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/B.sock", rpcFor: (s) => { sockets.push(s); return herdr.rpc; }, transcriptIntervalMs: 0 });
+    const restarted = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/B.sock", rpcFor: (s) => { sockets.push(s); return herdr.rpc; } });
     expect(await restarted.probeSession("dev-solo@hr")).toEqual({ state: "present" });
     expect(sockets).toEqual(["/sandbox/A.sock"]);
     expect(db.prepare("SELECT herdr_workspace, herdr_socket FROM bindings").get()).toEqual({ herdr_workspace: "w1", herdr_socket: "/sandbox/A.sock" });

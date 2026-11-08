@@ -581,8 +581,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       herdr: herdrSeatAdapter,
     },
   );
-  // Herdr has no pipe-pane: seats whose transcript was being captured before a restart are read again from here.
-  herdrSeatAdapter.resumeTranscripts();
   // Inherit keeps the native execution environment; attachment metadata still names
   // its server for a new terminal. Isolated execution and attachment share a fixed socket.
   setDaemonTmuxServer(tmuxSelection?.serverArgs ?? (opts?.tmuxExec ? [] : tmuxServerArgs(process.env)), tmuxSelection);

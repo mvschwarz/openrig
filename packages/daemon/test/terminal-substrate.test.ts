@@ -170,3 +170,17 @@ describe("terminal router review fixes", () => {
     expect(resolver.forTarget("dev-new@late")).toEqual({ kind: "herdr" });
   });
 });
+
+describe("terminal router: batched capture in a mixed rig (M4 finding)", () => {
+  it("splits a mixed batch: tmux seats through tmux's batch, a Herdr seat on its own, never a null for the batch", async () => {
+    const { db } = seatDb();
+    const tmuxBatch = vi.fn(async (targets: string[]) => new Map(targets.map(t => [t, { text: `tmux:${t}`, capturedAt: new Date(0) }])));
+    const tmux = Object.create({ capturePanesContent: tmuxBatch, capturePaneContent: vi.fn(async () => "wrong") });
+    const herdr = Object.create({ capturePaneContent: vi.fn(async (t: string) => `herdr:${t}`) });
+    const router = createTerminalRouter(tmux as TmuxAdapter, { resolver: new SubstrateResolver(db), herdr: herdr as TmuxAdapter });
+    const out = await router.capturePanesContent(["dev-old@mixed", "dev-new@mixed"], 50);
+    expect(out?.get("dev-old@mixed")?.text).toBe("tmux:dev-old@mixed");
+    expect(out?.get("dev-new@mixed")?.text).toBe("herdr:dev-new@mixed");
+    expect(tmuxBatch).toHaveBeenCalledWith(["dev-old@mixed"], 50, expect.any(Function));
+  });
+});
