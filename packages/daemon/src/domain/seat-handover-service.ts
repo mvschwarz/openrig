@@ -1,4 +1,5 @@
 import type { CodexPermissionEnvelope, CodexPermissionContinuity, CodexRebuildPermissions } from "./codex-rebuild-permissions.js";
+import { substrateFence } from "./terminal-substrate.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import { lstartToMinTs } from "./codex-thread-id.js";
 import type Database from "better-sqlite3";
@@ -317,6 +318,11 @@ export class SeatHandoverService {
     operator?: string | null;
     dryRun?: boolean;
   }): Promise<SeatHandoverResult> {
+    const fenceStatus = this.statusService.getStatus(input.seatRef);
+    if (fenceStatus.ok) {
+      const fence = substrateFence(this.db, this.lookupNode(fenceStatus.status)?.id ?? "", "Seat handover");
+      if (fence) return fence as unknown as SeatHandoverResult;
+    }
     if (input.dryRun) {
       const planResult = this.planner.plan({ ...input, dryRun: true });
       if (planResult.ok) {

@@ -138,7 +138,7 @@ describe("config routes (User Settings v0)", () => {
     // + 1 acp.to (the ACP agent's receiver; default empty).
     // + 1 daemon.seat_poll_interval_ms (#2687 the seat pollers' cadence; startup-only, default 1000).
     // + 1 retention.events_days (the history-only event types of events; default 0 = keep).
-    expect(Object.keys(body.settings).length).toBe(100);
+    expect(Object.keys(body.settings).length).toBe(102);
     expect(body.settings["launch.codex_login_shell"]).toMatchObject({ value: false, source: "default", defaultValue: false });
     expect(body.settings["transport.draft_delivery"]).toMatchObject({ value: "deliver", source: "default", defaultValue: "deliver" });
     expect(body.settings["retention.events_days"]).toMatchObject({ value: 0, source: "default", defaultValue: 0 });

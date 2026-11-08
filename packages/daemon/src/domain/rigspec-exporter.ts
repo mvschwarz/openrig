@@ -235,6 +235,8 @@ export class RigSpecExporter {
         if (node.advisor) member.advisor = node.advisor;
         if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
         if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) member.launchWrapper = node.launchWrapper;
+        // The stored substrate is the seat's own choice: an export pins it, so a later host default can't move it.
+        if (node.terminalSubstrate === "herdr") member.terminalSubstrate = "herdr";
         // #2044: unlike the copied files, a seat's plugin channels are names the record keeps as the spec gave them, so
         // an export carries the ones its launch passes.
         const channels = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.rigRepo.db, node.id).additions?.pluginChannels : undefined;

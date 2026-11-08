@@ -84,7 +84,19 @@ function tmuxOnDaemonServer(): string {
   return `tmux${server ? ` ${server}` : ""}`;
 }
 
-/** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
+/** The daemon's lookup of a seat's terminal substrate, recorded once at startup (absent: every seat is tmux). */
+let daemonSubstrateOf: ((session: string) => string) | null = null;
+
+export function setDaemonSubstrateLookup(lookup: ((session: string) => string) | null): void {
+  daemonSubstrateOf = lookup;
+}
+
+/** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. A seat on another
+ *  terminal substrate gets where to find it instead: a tmux attach by its name could reach an unrelated session. */
 export function tmuxAttachCommand(session: string): string {
+  const bare = session.replace(/^'(.*)'$/, "$1");
+  const substrate = daemonSubstrateOf?.(bare) ?? "tmux";
+  if (substrate === "herdr") return `(Herdr seat: open Herdr and select the workspace "${bare}")`;
+  if (substrate !== "tmux") return `(seat on terminal substrate "${substrate}": not attachable with tmux)`;
   return `${tmuxOnDaemonServer()} attach -t ${session}`;
 }

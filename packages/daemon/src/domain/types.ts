@@ -40,6 +40,8 @@ export interface Node {
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp | null;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches; null/absent = none. */
   launchWrapper?: string[] | null;
+  /** Stored terminal substrate (migration 155); null or absent is tmux. */
+  terminalSubstrate?: string | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -796,6 +798,10 @@ export interface NodeInventoryEntry {
   codexConfigProfile?: string | null;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches; absent = none. */
   launchWrapper?: string[];
+  /** The seat's terminal substrate as stored on its node ("unknown" when this daemon does not know the value). */
+  terminalSubstrate?: "tmux" | "herdr" | "unknown";
+  /** For a Herdr seat, where to look instead of a tmux attach command. */
+  herdrAttachHint?: string;
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF, or null when none is attached. */
   permissionPolicy?: string | null;
   resolvedSpecName: string | null;
@@ -1273,6 +1279,8 @@ export interface RigSpecPodMember {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
+  /** Terminal multiplexer for this seat's pane; see terminal-substrate.ts. */
+  terminalSubstrate?: "tmux" | "herdr";
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;
@@ -1365,6 +1373,8 @@ export interface WorkspaceSpec {
 export interface RigSpec {
   /** Authored launch-warning choice; an explicit launch option takes precedence. */
   nonInterruptive?: boolean;
+  /** Default terminal substrate for this rig's members (member wins; then the host setting; then tmux). */
+  terminalSubstrate?: "tmux" | "herdr";
   version: string;
   name: string;
   summary?: string;

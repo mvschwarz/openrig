@@ -90,6 +90,10 @@ interface NodeEntry {
   communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
   /** Configured literal argv prefix wrapping local built-in Pi/Codex launches; omitted when absent. */
   launchWrapper?: string[];
+  /** The seat's terminal substrate (tmux, herdr, or unknown for a value this daemon doesn't know). */
+  terminalSubstrate?: "tmux" | "herdr" | "unknown";
+  /** For a Herdr seat, where to look instead of a tmux attach command. */
+  herdrAttachHint?: string;
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
    *  NEVER derived from terminalActive. */
   hasAssignedWork?: boolean;
@@ -220,6 +224,8 @@ const ALLOWED_NODE_FIELDS = new Set([
   "runtime",
   "communityHarness",
   "launchWrapper",
+  "terminalSubstrate",
+  "herdrAttachHint",
   "model",
   "modelObservation",
   "sessionStatus",
@@ -737,6 +743,8 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       runtime: n.runtime ?? null,
       ...(n.communityHarness ? { communityHarness: n.communityHarness } : {}),
       ...(n.launchWrapper?.length ? { launchWrapper: n.launchWrapper } : {}),
+      terminalSubstrate: n.terminalSubstrate ?? "tmux",
+      ...(n.herdrAttachHint ? { herdrAttachHint: n.herdrAttachHint } : {}),
       model: n.model ?? null,
       // Compact tuple: [literal model, evidence source, native record time].
       // Full JSON / --fields retain the complete labelled object and occupant generation.
@@ -934,7 +942,8 @@ contextUsage.percent, contextUsage.state (with --nodes). Other keys are rejected
 activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
-podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarness, launchWrapper, model, sessionStatus,
+podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarness, launchWrapper, terminalSubstrate,
+herdrAttachHint, model, sessionStatus,
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
@@ -1397,7 +1406,8 @@ async function handleNodes(
         pod,
         member,
         n.canonicalSessionName ?? "—",
-        n.runtime ?? "—",
+        // A seat not on tmux shows its substrate beside the runtime, e.g. "claude-code (herdr)".
+        n.terminalSubstrate && n.terminalSubstrate !== "tmux" ? `${n.runtime ?? "—"} (${n.terminalSubstrate})` : (n.runtime ?? "—"),
         formatDeclaredModel(n.model),
         n.sessionStatus ?? "—",
         n.startupStatus ?? "—",

@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { substrateFence } from "./terminal-substrate.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { PodRepository } from "./pod-repository.js";
 import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
@@ -30,6 +31,8 @@ export type SelfAttachSuccess = {
 
 export type SelfAttachFailureCode =
   | "rig_not_found"
+  | "herdr_unsupported"
+  | "substrate_unknown"
   | "node_not_found"
   | "pod_not_found"
   | "already_bound"
@@ -127,6 +130,9 @@ export class SelfAttachService {
   }
 
   async attachToNode(opts: AttachToNodeOptions): Promise<SelfAttachResult> {
+    const fenceNode = this.db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(opts.rigId, opts.logicalId) as { id: string } | undefined;
+    const fence = fenceNode ? substrateFence(this.db, fenceNode.id, "Attaching a session to this seat") : null;
+    if (fence) return { ok: false, code: fence.code, error: fence.message };
     const serverFailure = this.checkTmuxServer(opts.context);
     if (serverFailure) return serverFailure;
     const rig = this.rigRepo.getRig(opts.rigId);

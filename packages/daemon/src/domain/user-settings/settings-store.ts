@@ -191,6 +191,10 @@ export const SETTINGS_VALID_KEYS = [
   // future-launches-only and never retroactive (BR-1 never-retro).
   "terminal.status_bar",
   "terminal.tmux_server",
+  // Host default terminal substrate for NEW seats (member > rig > this > tmux); resolved once at node creation.
+  "terminal.substrate",
+  // Herdr API socket for Herdr seats; empty = Herdr's default session socket. Never read from an inherited HERDR_SOCKET_PATH.
+  "terminal.herdr_socket",
   // The managed ~/.tmux.conf block's history-limit; written by `rig setup` (CLI), twin of the CLI key.
   "terminal.history_limit",
   "terminal.inherit_tmux_environment",
@@ -333,6 +337,8 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "terminal.tmux_server": { primary: "OPENRIG_TMUX_SERVER" },
+  "terminal.substrate": { primary: "OPENRIG_TERMINAL_SUBSTRATE" },
+  "terminal.herdr_socket": { primary: "OPENRIG_HERDR_SOCKET" },
   "terminal.history_limit": { primary: "OPENRIG_TERMINAL_HISTORY_LIMIT" },
   "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
@@ -438,6 +444,8 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
   "terminal.tmux_server": ["terminal", "tmuxServer"],
+  "terminal.substrate": ["terminal", "substrate"],
+  "terminal.herdr_socket": ["terminal", "herdrSocket"],
   "terminal.history_limit": ["terminal", "historyLimit"],
   "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
@@ -753,6 +761,8 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // is redundant chrome). Operator flip is future-launches-only.
     case "terminal.status_bar": return false;
     case "terminal.tmux_server": return "inherit";
+    case "terminal.substrate": return "tmux";
+    case "terminal.herdr_socket": return "";
     case "terminal.history_limit": return 10000;
     case "terminal.inherit_tmux_environment": return false;
     case "output.compact": return false;
@@ -844,6 +854,11 @@ function percentageConstraint(key: string) {
 }
 
 const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  "terminal.substrate": (raw) => {
+    if (raw !== "tmux" && raw !== "herdr") {
+      throw new Error(`Invalid value for terminal.substrate: must be "tmux" or "herdr", got "${raw}"`);
+    }
+  },
   "terminal.tmux_server": (raw) => {
     if (raw !== "inherit" && raw !== "isolated") {
       throw new Error(`Invalid value for terminal.tmux_server: must be "inherit" or "isolated", got "${raw}"`);

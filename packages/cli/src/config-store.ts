@@ -168,6 +168,10 @@ export interface RiggedConfig {
     statusBar: boolean;
     /** Applied at daemon startup; a live previous server is retained until drained. */
     tmuxServer: "inherit" | "isolated";
+    /** Default terminal substrate for new seats; member > rig > this > tmux. */
+    substrate: "tmux" | "herdr";
+    /** Herdr API socket for Herdr seats; empty = Herdr's default session socket. */
+    herdrSocket: string;
     /** Rows of tmux scrollback per pane; `rig setup` writes it into the managed `~/.tmux.conf` block. */
     historyLimit: number;
     inheritTmuxEnvironment: boolean;
@@ -369,6 +373,8 @@ const DEFAULTS = {
   terminal: {
     statusBar: false,
     tmuxServer: "inherit",
+    substrate: "tmux",
+    herdrSocket: "",
     historyLimit: 10000,
     inheritTmuxEnvironment: false,
   },
@@ -531,6 +537,10 @@ export const VALID_KEYS = [
   // (the parity test pins both). Flip is future-launches-only (BR-1).
   "terminal.status_bar",
   "terminal.tmux_server",
+  // Host default terminal substrate for NEW seats (member > rig > this > tmux); resolved once at node creation.
+  "terminal.substrate",
+  // Herdr API socket for Herdr seats; empty = Herdr's default session socket. Never read from an inherited HERDR_SOCKET_PATH.
+  "terminal.herdr_socket",
   // The managed ~/.tmux.conf block's history-limit, written by `rig setup`; lockstep with the daemon twin.
   "terminal.history_limit",
   "terminal.inherit_tmux_environment",
@@ -663,6 +673,8 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "terminal.tmux_server": { primary: "OPENRIG_TMUX_SERVER" },
+  "terminal.substrate": { primary: "OPENRIG_TERMINAL_SUBSTRATE" },
+  "terminal.herdr_socket": { primary: "OPENRIG_HERDR_SOCKET" },
   "terminal.history_limit": { primary: "OPENRIG_TERMINAL_HISTORY_LIMIT" },
   "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
@@ -769,6 +781,8 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
   "terminal.tmux_server": ["terminal", "tmuxServer"],
+  "terminal.substrate": ["terminal", "substrate"],
+  "terminal.herdr_socket": ["terminal", "herdrSocket"],
   "terminal.history_limit": ["terminal", "historyLimit"],
   "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
@@ -999,6 +1013,11 @@ function percentageConstraint(key: string) {
 }
 
 const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  "terminal.substrate": (raw) => {
+    if (raw !== "tmux" && raw !== "herdr") {
+      throw new Error(`Invalid value for terminal.substrate: must be "tmux" or "herdr", got "${raw}"`);
+    }
+  },
   "terminal.tmux_server": (raw) => {
     if (raw !== "inherit" && raw !== "isolated") {
       throw new Error(`Invalid value for terminal.tmux_server: must be "inherit" or "isolated", got "${raw}"`);
@@ -1414,6 +1433,8 @@ export class ConfigStore {
       terminal: {
         statusBar: v("terminal.status_bar") as boolean,
         tmuxServer: v("terminal.tmux_server") as "inherit" | "isolated",
+        substrate: v("terminal.substrate") as "tmux" | "herdr",
+        herdrSocket: v("terminal.herdr_socket") as string,
         historyLimit: v("terminal.history_limit") as number,
         inheritTmuxEnvironment: v("terminal.inherit_tmux_environment") as boolean,
       },
