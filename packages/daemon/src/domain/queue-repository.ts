@@ -161,6 +161,8 @@ const AUTO_UNPARK_WAKE_TAG = "queue:auto-unpark:blocker";
 const WAKE_TRIGGER_OPENRIG_TAG = "queue:wake-trigger:openrig";
 /** The wake telling a claimer that a cross-host handoff overrode its claim (#2631): it's about a row closed by design. */
 const CLAIM_OVERRIDDEN_WAKE_PREFIX = `${WAKE_INTENT_PREFIX}claim-overridden-`;
+/** The first id after every such wake's, so a range on the outbox's primary key finds them all and nothing else. */
+const CLAIM_OVERRIDDEN_WAKE_END = `${WAKE_INTENT_PREFIX}claim-overridden.`;
 /** On a wake intent whose ring a hosted member's trigger accepted: recovery doesn't ring that intent again. */
 const HOSTED_WAKE_ACCEPTED_TAG = "queue:hosted-wake-accepted";
 
@@ -1868,12 +1870,18 @@ export class QueueRepository {
       return (current?.state === "pending" || notice) && addresses.includes(current?.destinationSession ?? "")
         && (refusal === "failed:target_needs_input" || (refusal?.startsWith("failed:Refused:") === true && refusal.includes("interactive prompt")));
     };
+    const seats = addresses.map(() => "?").join(",");
+    const refused = (q: string) => `(${q}last_nudge_result LIKE 'failed:Refused:%interactive prompt%' OR ${q}last_nudge_result = 'failed:target_needs_input')`;
+    // A closed row is here only for a failed override notice, found from the notice by its id range, so this never
+    // reads the host's other failed history.
     const rows = this.db.prepare(`SELECT qitem_id, destination_session, source_session, last_nudge_result
-      FROM queue_items q WHERE (state = 'pending' OR EXISTS (SELECT 1 FROM outbox_entries o WHERE o.audit_pointer = q.qitem_id
-          AND substr(o.outbox_id, 1, ?) = ? AND o.delivery_state = 'failed'))
-        AND destination_session IN (${addresses.map(() => "?").join(",")})
-        AND (last_nudge_result LIKE 'failed:Refused:%interactive prompt%' OR last_nudge_result = 'failed:target_needs_input')`)
-      .all(CLAIM_OVERRIDDEN_WAKE_PREFIX.length, CLAIM_OVERRIDDEN_WAKE_PREFIX, ...addresses) as Array<{ qitem_id: string; destination_session: string; source_session: string }>;
+      FROM queue_items WHERE state = 'pending' AND destination_session IN (${seats}) AND ${refused("")}
+      UNION
+      SELECT q.qitem_id, q.destination_session, q.source_session, q.last_nudge_result
+      FROM outbox_entries o JOIN queue_items q ON q.qitem_id = o.audit_pointer AND q.destination_session = o.destination_session
+      WHERE o.outbox_id >= ? AND o.outbox_id < ? AND +o.delivery_state = 'failed' AND +o.destination_session IN (${seats})
+        AND ${refused("q.")}`)
+      .all(...addresses, CLAIM_OVERRIDDEN_WAKE_PREFIX, CLAIM_OVERRIDDEN_WAKE_END, ...addresses) as Array<{ qitem_id: string; destination_session: string; source_session: string }>;
     const attempted = new Set<string>();
     // Reserve the whole selection before awaiting: a correlated send can include several rows.
     // Its refusal stays durable, but must not re-arm this same clear-triggered pass.

@@ -993,6 +993,33 @@ describe("#2631 a claim made while a cross-host handoff is forwarded", () => {
     await vi.waitFor(() => expect(sent.sends).toEqual(["worker@rig-a", "worker@rig-a"]));
   });
 
+  it("the prompt-clear pass reaches a closed row only through its notice, never by reading other failed history", async () => {
+    const sent = recordingTransport();
+    const h = origin(sent.transport);
+    // Closed rows whose own wakes to this seat failed at a prompt, and no override notice among them.
+    const outbox = new OutboxHandler(h.db);
+    for (let i = 0; i < 200; i++) {
+      await h.repo.create({ qitemId: `qitem-old-${i}`, sourceSession: "orch@rig-a", destinationSession: "worker@rig-a", body: "old work", nudge: false });
+      outbox.record({ outboxId: `wake-intent-qitem-old-${i}`, senderSession: "orch@rig-a", destinationSession: "worker@rig-a", body: "old wake", auditPointer: `qitem-old-${i}` });
+    }
+    h.db.prepare("UPDATE outbox_entries SET delivery_state = 'failed' WHERE outbox_id LIKE 'wake-intent-qitem-old-%'").run();
+    h.db.prepare("UPDATE queue_items SET state = 'done', last_nudge_result = 'failed:target_needs_input' WHERE qitem_id LIKE 'qitem-old-%'").run();
+    const prepared: string[] = [];
+    const prepare = h.db.prepare.bind(h.db);
+    vi.spyOn(h.db, "prepare").mockImplementation(((sql: string) => { prepared.push(sql); return prepare(sql); }) as never);
+
+    await h.repo.retryPromptWakesOnClear("worker@rig-a", "needs_input");
+    await h.repo.retryPromptWakesOnClear("worker@rig-a", "idle");
+    expect(sent.sends).toEqual([]);
+
+    const sql = prepared.find((s) => s.includes("UNION") && s.includes("last_nudge_result"));
+    expect(sql).toBeDefined();
+    const plan = (prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...Array<string>((sql!.match(/\?/g) ?? []).length).fill("x")) as Array<{ detail: string }>)
+      .map((row) => row.detail);
+    expect(plan.filter((detail) => /\bSCAN\b/.test(detail))).toEqual([]);
+    expect(plan).toContainEqual(expect.stringMatching(/^SEARCH o USING INDEX sqlite_autoindex_outbox_entries_1 \(outbox_id>\? AND outbox_id<\?\)$/));
+  });
+
   it("after a reopen and another close elsewhere, the first notice is no longer current: it names the earlier successor", async () => {
     const h = origin();
     await handOffOverClaim(h);
