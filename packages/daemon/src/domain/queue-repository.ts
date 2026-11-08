@@ -4432,14 +4432,12 @@ export class QueueRepository {
       .prepare("SELECT * FROM queue_items WHERE qitem_id = ?")
       .get(qitemId) as QueueItemRow | undefined;
     if (!row) return null;
-    const item = this.rowToItem(row);
     // OPR.0.5.6.14 — the row FACE answers "did it reach them" in one read for
     // gateway-routed rows; null for pane-bound (absence-governed, no key lies).
-    const ledger = this.deliveryOutcomeFor(item.qitemId);
+    // The same projection as a listing's, for one row: one read of its owner notifications and ledger.
+    const item = this.projectRows([row], true)[0]!;
     return {
       ...item,
-      deliveryOutcome: ledger?.outcome ?? null,
-      ...(ledger && ledger.outcome !== "posted" && ledger.outcome !== "accepted" ? { deliveryFailureDetail: ledger.detail } : {}),
       ...(item.replyTo ? { replyToFallback: this.replyToFallbackFor(item.qitemId) } : {}),
     };
   }
@@ -4584,19 +4582,25 @@ export class QueueRepository {
         `SELECT ${columns} FROM queue_items ${where} ORDER BY ${orderBy} LIMIT ?`
       )
       .all(...params) as QueueItemRow[];
+    const items = this.projectRows(rows, !opts?.compact);
+    return opts?.compact ? items.map(compactRow) : items;
+  }
+
+  /** The listing projection (list, and show as a listing of one row): each row's item with its delivery outcome, the
+   *  owner notifications, ledgers and shared reads read once for all the rows. includeWaiting: full rows (SELECT *). */
+  private projectRows(rows: QueueItemRow[], includeWaiting: boolean): QueueItem[] {
     const owners = this.transitionLog.ownerNotificationsForQitems(rows.map((row) => row.qitem_id));
     const ledgers = this.deliveryOutcomesFor(rows, owners, true);
-    const reads = this.listingReads(rows, !opts?.compact);
-    const items = rows.map((r) => {
+    const reads = this.listingReads(rows, includeWaiting);
+    return rows.map((r) => {
       const ledger = ledgers.get(r.qitem_id);
-      const item = this.rowToItem(r, !opts?.compact, { owners: owners.get(r.qitem_id) ?? [], ledger: ledger ?? null, reads });
+      const item = this.rowToItem(r, includeWaiting, { owners: owners.get(r.qitem_id) ?? [], ledger: ledger ?? null, reads });
       return {
         ...item,
         deliveryOutcome: ledger?.outcome ?? null,
         ...(ledger && ledger.outcome !== "posted" && ledger.outcome !== "accepted" ? { deliveryFailureDetail: ledger.detail } : {}),
       };
     });
-    return opts?.compact ? items.map(compactRow) : items;
   }
 
   /**
