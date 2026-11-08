@@ -1,6 +1,6 @@
 {
   "name": "@openrig/acp",
-  "version": "0.7.1",
+  "version": "0.7.11",
   "description": "OpenRig as an agent in ACP apps: starts rig acp serve from the @openrig/cli it pins.",
   "type": "module",
   "bin": {
@@ -15,7 +15,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@openrig/cli": "0.7.1"
+    "@openrig/cli": "0.7.11"
   },
   "license": "Apache-2.0",
   "author": {
