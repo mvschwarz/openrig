@@ -328,10 +328,12 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     || body.eventFamily !== undefined)) return c.json({ ok: true });
 
   // Slice 16: a runtime switch's staged successor (before commit) and retired predecessor (after) don't speak for the
-  // seat. The staged successor's native identity is kept on the switch record, which the commit applies.
+  // seat. The staged successor's native identity is kept on the switch record, which the commit applies; a helper of
+  // another runtime the successor starts before then shares its generation, and its id isn't kept (#2702).
   const switchRole = runtimeSwitchActivityRole(store.db, stringOrNull(body.sessionName), stringOrNull(body.generation));
   if (switchRole) {
-    if (switchRole.role === "staged_successor" && body.eventFamily === "session_identity" && typeof body.sessionId === "string") {
+    if (switchRole.role === "staged_successor" && body.eventFamily === "session_identity" && typeof body.sessionId === "string"
+      && !reportedByAnotherRuntime(body)) {
       store.db.prepare(`UPDATE seat_runtime_switches SET successor_resume_type = ?, successor_resume_token = ?,
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND committed_at IS NULL`)
         .run(stringOrNull(body.runtime), body.sessionId, switchRole.id);
@@ -1051,12 +1053,16 @@ function namesClaudeTranscript(transcriptPath: unknown, sessionId: string): bool
 }
 
 /** #2702: whether a relay's report came from another runtime started inside the seat, which inherited the seat's
- *  environment and so posts as the seat: a Codex helper a Claude seat started, or a Claude a Codex seat started. Each
- *  runtime names its own conversation's transcript. Claude Code's is `<session id>.jsonl`, the file `claude --resume`
- *  reads. Codex's is a `rollout-…` file, or an explicit null for a thread it never persists, so it is never that. A
- *  report without transcriptPathPresent (an older relay) or without a session id counts as the seat's, as before. */
+ *  environment and so posts as the seat: a Codex helper a Claude seat started, or a Claude a Codex seat started.
+ *  - A claude-code report is the seat's only when it names a Claude Code transcript, `<session id>.jsonl`, the file
+ *    `claude --resume` reads; a Codex helper names a rollout file or null.
+ *  - A codex report is another runtime's only on positive evidence of Claude Code: the relay ran as a Claude Code hook
+ *    (claudeHook) and the transcript is `<session id>.jsonl`. A Codex seat's own report isn't a Claude Code hook,
+ *    whatever its rollout file is named (Codex keeps a legacy or supplied name on resume), so it still counts.
+ *  A report without transcriptPathPresent (an older relay) or without a session id counts as the seat's, as before. */
 function reportedByAnotherRuntime(body: Record<string, unknown>): boolean {
   if (body.transcriptPathPresent !== true || typeof body.sessionId !== "string") return false;
   const claudeTranscript = namesClaudeTranscript(body.transcriptPath, body.sessionId);
-  return body.runtime === "claude-code" ? !claudeTranscript : body.runtime === "codex" && claudeTranscript;
+  if (body.runtime === "claude-code") return !claudeTranscript;
+  return body.runtime === "codex" && body.claudeHook === true && claudeTranscript;
 }

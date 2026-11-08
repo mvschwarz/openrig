@@ -49,14 +49,17 @@ function firstString(...values) {
 // #2702: the conversation this event belongs to. A harness started inside a seat (a Codex helper a Claude seat runs, or
 // a Claude a Codex seat runs) inherits the seat's environment and so posts as the seat; the daemon tells it apart by
 // whether the transcript is the seat's runtime's own. Whether the runtime sent transcript_path is kept apart from its
-// value, as on session identity (#1524). A Claude permission request's report keeps its fixed field list (above).
-function conversationFields(providerPayload) {
+// value, as on session identity (#1524). claudeHook says this run is a Claude Code hook: Claude Code sets
+// CLAUDE_PROJECT_DIR for its hook commands, and neither Codex nor OpenRig sets it. Only that it is set is sent.
+// A Claude permission request's report keeps its fixed field list (below).
+function conversationFields(providerPayload, env) {
   const sessionId = firstString(providerPayload.session_id, providerPayload.sessionId);
   const transcriptPathPresent = Object.prototype.hasOwnProperty.call(providerPayload, "transcript_path");
   return {
     ...(sessionId ? { sessionId } : {}),
     transcriptPathPresent,
     ...(transcriptPathPresent ? { transcriptPath: providerPayload.transcript_path } : {}),
+    claudeHook: firstString(env.CLAUDE_PROJECT_DIR) !== null,
   };
 }
 
@@ -125,7 +128,7 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
     turnId: firstString(providerPayload.turn_id, providerPayload.turnId),
     occurredAt: now().toISOString(),
     relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed",
-    ...conversationFields(providerPayload),
+    ...conversationFields(providerPayload, env),
   };
 }
 
@@ -234,6 +237,7 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
     sessionId,
     transcriptPathPresent,
     ...(transcriptPathPresent ? { transcriptPath: providerPayload.transcript_path } : {}),
+    claudeHook: firstString(env.CLAUDE_PROJECT_DIR) !== null,
     occurredAt: now().toISOString(),
   };
 }
