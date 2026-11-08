@@ -109,8 +109,8 @@ still be the previous copy until startup.
   makes the team an agent in an app that launches a custom ACP agent, such as
   Zed or T3 Code. Nothing runs until an app starts it, and it uses the daemon
   `rig` uses. A question left unanswered in the app stays open in the TUI and
-  Slack. The `@openrig/acp` launcher is packed beside the CLI but not published
-  by these changes. See `docs/reference/acp-agents.md`.
+  Slack. The `@openrig/acp` launcher is packed beside the CLI at the same
+  version. See `docs/reference/acp-agents.md`.
 - **Assistants through a grant service** are experimental, unsupported and off
   by default: they need your own internet-reachable `rig mcp serve --http
   --grant-service <url>` and an outside grant service. A registered person can
