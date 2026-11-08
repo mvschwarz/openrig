@@ -29,10 +29,9 @@ const claudeTranscript = `/home/u/.claude/projects/-work-repo/${claudeConversati
 const codexThread = "01a1b6dc-0511-7841-b149-000000000002";
 const codexRollout = `/home/u/.codex/sessions/2026/11/07/rollout-2026-11-07T16-33-55-${codexThread}.jsonl`;
 
-/** One hook run: the stdin its runtime sends, and whether it runs as a Claude Code hook. Claude Code sets
- *  CLAUDE_PROJECT_DIR for its hook commands; a Codex process, even one a Claude started from its Bash tool, doesn't
- *  have it (recorded on Claude Code 2.1.282). Codex names its turn, and sends an explicit null for a thread it never
- *  persists. */
+/** One hook run: the stdin its runtime sends, and whether it runs as a Claude Code hook, which has Claude Code's marker
+ *  CLAUDE_PROJECT_DIR. A Codex process a Claude started from its Bash tool doesn't have it (both recorded on Claude Code
+ *  2.1.282). Codex names its turn, and sends an explicit null for a thread it never persists. */
 type HookRun = { stdin: Payload; claudeHook: boolean };
 const claude = (hook_event_name: string, extra: Payload = {}): HookRun => ({ claudeHook: true, stdin: {
   hook_event_name, session_id: claudeConversation, transcript_path: claudeTranscript, cwd: "/work/repo", permission_mode: "default", ...extra } });
@@ -217,7 +216,7 @@ describe("#2702: the relay names the conversation on every activity and identity
     expect(Object.hasOwn(payload, "transcriptPath")).toBe(Object.hasOwn(transcript, "transcript_path"));
   });
 
-  it("says whether it ran as a Claude Code hook, and sends nothing of CLAUDE_PROJECT_DIR's value", () => {
+  it("says whether Claude Code's marker, CLAUDE_PROJECT_DIR, is set, and sends nothing of its value", () => {
     const stdin = { hook_event_name: "SessionStart", session_id: claudeConversation, transcript_path: claudeTranscript };
     for (const build of [relay.buildOpenRigPayload, relay.buildSessionIdentityPayload]) {
       expect(build(stdin, env)).toMatchObject({ claudeHook: false });

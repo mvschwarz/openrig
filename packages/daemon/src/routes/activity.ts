@@ -1056,9 +1056,10 @@ function namesClaudeTranscript(transcriptPath: unknown, sessionId: string): bool
  *  environment and so posts as the seat: a Codex helper a Claude seat started, or a Claude a Codex seat started.
  *  - A claude-code report is the seat's only when it names a Claude Code transcript, `<session id>.jsonl`, the file
  *    `claude --resume` reads; a Codex helper names a rollout file or null.
- *  - A codex report is another runtime's only on positive evidence of Claude Code: the relay ran as a Claude Code hook
- *    (claudeHook) and the transcript is `<session id>.jsonl`. A Codex seat's own report isn't a Claude Code hook,
- *    whatever its rollout file is named (Codex keeps a legacy or supplied name on resume), so it still counts.
+ *  - A codex report is another runtime's only on positive evidence of Claude Code: the relay saw Claude Code's marker,
+ *    CLAUDE_PROJECT_DIR (claudeHook), and the transcript is `<session id>.jsonl`. A Codex seat's own process doesn't
+ *    carry that marker, whatever its rollout file is named (Codex keeps a legacy or supplied name on resume), so its
+ *    report still counts unless that process inherited the marker.
  *  A report without transcriptPathPresent (an older relay) or without a session id counts as the seat's, as before. */
 function reportedByAnotherRuntime(body: Record<string, unknown>): boolean {
   if (body.transcriptPathPresent !== true || typeof body.sessionId !== "string") return false;
