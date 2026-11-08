@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readlinkSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer } from "node:http";
 import Database from "better-sqlite3";
@@ -19,6 +19,8 @@ import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 // Only private fake executables, a loopback fixture and memory SQLite. No daemon,
 // provider, native account, tmux server, startup/config bootstrap or global homes.
 const exec = promisify(execFile);
+let hasZsh = false;
+try { execFileSync("zsh", ["--version"], { stdio: "ignore" }); hasZsh = true; } catch { /* optional shell */ }
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const f of cleanup.splice(0).reverse()) await f(); });
 function fixture() {
@@ -190,6 +192,197 @@ describe.skipIf(process.platform === "win32")("seat launch environment after she
     expect((await adapter.resume("seat@rig", "codex_id", "native-id", f.binding.cwd, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, ["test-wrapper", "--flag", "--"])).ok).toBe(true);
     expect(f.commands[0]).toContain(`${shellQuote(path.join(f.bin, "test-wrapper"))} '--flag' '--' ${shellQuote(path.join(f.bin, "codex"))}`);
     await f.execute(f.commands[0]!);
+  });
+  /** A wrapper that logs the argv it was handed after its own `--`, one line per argument, and then execs it. */
+  function loggingWrapper(f: ReturnType<typeof fixture>, name = "test-wrapper") {
+    vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue("bash"); // a POSIX pane shell, where the shim applies
+    const log = path.join(f.root, `${name}-argv.log`);
+    writeFileSync(path.join(f.bin, name), `#!/bin/sh\nwhile [ "$#" -gt 0 ]; do a="$1"; shift; [ "$a" = "--" ] && break; done\nfor a in "$@"; do printf '%s\\n' "$a"; done > ${shellQuote(log)}\nexec "$@"\n`, { mode: 0o700 });
+    return { log, argv: () => require("node:fs").readFileSync(log, "utf8").split("\n").slice(0, -1) as string[] };
+  }
+  /** Run a staged command in the pane shell after its rc. */
+  async function runStaged(f: ReturnType<typeof fixture>, command: string, extraRc = "", shell = "bash") {
+    const rc = path.join(f.root, "rc-extra");
+    writeFileSync(rc, require("node:fs").readFileSync(path.join(f.root, "rc"), "utf8") + "\n" + extraRc + "\n");
+    try {
+      const { stdout, stderr } = await exec(shell, shell === "zsh" ? ["-f", "-ic", `source ${shellQuote(rc)}\n${command}`] : ["--noprofile", "--rcfile", rc, "-ic", command], { env: f.env, cwd: f.binding.cwd, timeout: 15_000 });
+      return { code: 0, stdout, stderr };
+    } catch (error) { const e = error as { code?: number; stdout?: string; stderr?: string }; return { code: e.code ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }; }
+  }
+  it.each(["fresh", "resume", "fork"] as const)("classic Claude %s with launch_wrapper forwards the rc-selected executable and native args", async kind => {
+    const f = fixture(); const w = loggingWrapper(f);
+    const childLog = path.join(f.root, "child-argv");
+    const claude = path.join(f.root, "user-bin", "claude");
+    writeFileSync(claude, `#!/bin/sh\nprintf '%s\\n' "$@" > ${shellQuote(childLog)}\n`, { mode: 0o700 });
+    const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, fsOps: f.fsOps, seatLaunchEnvironment: f.launch, sleep: async () => {} });
+    vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+    const result = await adapter.launchHarness({ ...f.binding, launchWrapper: ["test-wrapper", "--tag", "space arg", "--"] } as NodeBinding,
+      { name: "seat", ...(kind === "resume" ? { resumeToken: "old-id" } : kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-id" } } : {}) });
+    expect(result.ok).toBe(true); expect(f.commands).toHaveLength(1);
+    const run = await runStaged(f, f.commands[0]!);
+    expect(run.code, run.stderr).toBe(0);
+    const argv = w.argv();
+    expect(argv).toEqual([claude, ...require("node:fs").readFileSync(childLog, "utf8").trim().split("\n")]);
+    expect(argv).toEqual(expect.arrayContaining(kind === "resume" ? ["--resume", "old-id"] : kind === "fork" ? ["--resume", "parent-id", "--fork-session"] : ["--session-id"]));
+    for (const intermediary of ["eval", "bash", "sh", "claude", "env", "exec"]) expect(argv).not.toContain(intermediary);
+  });
+  it("classic Claude selects the same executable through a relative pane PATH with or without a wrapper", async () => {
+    const f = fixture(); const w = loggingWrapper(f);
+    const relativeBin = path.join(f.binding.cwd!, "relative-bin"); mkdirSync(relativeBin);
+    const log = path.join(f.root, "selected-claude.log");
+    writeFileSync(path.join(relativeBin, "claude"), `#!/bin/sh\nprintf '%s\\n' "$@" > ${shellQuote(log)}\n`, { mode: 0o700 });
+    const rc = `export PATH=relative-bin:"$PATH"`;
+    const plain = await f.launch.command("seat@rig", "claude --resume 'same-id'", { nodeId: "node-current", runtime: "claude-code" });
+    const wrapped = await f.launch.command("seat@rig", "claude --resume 'same-id'", { nodeId: "node-current", runtime: "claude-code", launchWrapper: ["test-wrapper", "--"] });
+    const plainRun = await runStaged(f, plain, rc);
+    expect(plainRun.code, plainRun.stderr).toBe(0);
+    const plainArgs = require("node:fs").readFileSync(log, "utf8"); rmSync(log);
+    const wrappedRun = await runStaged(f, wrapped, rc);
+    expect(wrappedRun.code, wrappedRun.stderr).toBe(0);
+    expect(require("node:fs").readFileSync(log, "utf8")).toBe(plainArgs);
+    expect(w.argv()).toEqual(["relative-bin/claude", "--resume", "same-id"]);
+  });
+  it("classic Claude with launch_wrapper fails closed and never starts claude when the wrapper is missing", async () => {
+    const f = fixture(); vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue("bash");
+    const marker = path.join(f.root, "claude-ran");
+    writeFileSync(path.join(f.bin, "claude"), `#!/bin/sh\n: > ${shellQuote(marker)}\n`, { mode: 0o700 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const staged = await f.launch.command("seat@rig", "claude --resume 'x'", { nodeId: "node-current", runtime: "claude-code", launchWrapper: ["no-such-wrapper", "--"] });
+    expect(staged).toBe("printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false");
+    expect(warn).toHaveBeenCalledWith("[seat launch] launch_wrapper unavailable; no agent started.");
+    const run = await runStaged(f, staged);
+    expect(require("node:fs").existsSync(marker), `claude ran; ${run.stdout}${run.stderr}`).toBe(false);
+    expect(run.code, `${run.stdout}${run.stderr}`).not.toBe(0);
+  });
+  it("classic Claude with launch_wrapper refuses shells where the shim cannot apply", async () => {
+    const f = fixture(); loggingWrapper(f);
+    for (const shell of ["fish", "ksh", "mksh", "nu"]) {
+      vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue(shell);
+      expect(await f.launch.command("seat@rig", "claude --resume 'x'", { nodeId: "node-current", runtime: "claude-code", launchWrapper: ["test-wrapper", "--"] }), shell)
+        .toBe("printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false");
+    }
+  });
+  describe.each(["bash", "zsh"])("classic Claude aliases in %s", shell => {
+    it.skipIf(shell === "zsh" && !hasZsh).each(["none", "errexit", "flag", "assignment", "function", "absolute", "command", "env", "invalid-assignment"])("%s wraps an executable file or refuses aliases and functions", async kind => {
+      const f = fixture(); const w = loggingWrapper(f);
+      vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue(shell);
+      const childLog = path.join(f.root, "claude-args"); const envLog = path.join(f.root, "claude-env");
+      const functionLog = path.join(f.root, "function-ran");
+      writeFileSync(path.join(f.bin, "claude"), `#!/bin/sh\nprintf '%s\\n' "$@" > ${shellQuote(childLog)}\nprintf '%s' "\${FOO-}" > ${shellQuote(envLog)}\n`, { mode: 0o700 });
+      if (kind === "function") writeFileSync(path.join(f.binding.cwd!, "claude"), `#!/bin/sh\n: > ${shellQuote(functionLog)}\n`, { mode: 0o700 });
+      writeFileSync(path.join(f.bin, "forward-x=claude"), '#!/bin/sh\nexec "$@"\n', { mode: 0o700 });
+      const rc = kind === "flag" ? "alias claude='claude --alias-flag'" : kind === "assignment" ? "alias claude='FOO=1 claude --alias-flag'"
+        : kind === "function" ? `claude() { : > ${shellQuote(functionLog)}; }`
+        : kind === "absolute" ? `alias claude=${shellQuote(shellQuote(path.join(f.bin, "claude")) + " --alias-flag")}`
+        : kind === "command" ? "alias claude='command claude --alias-flag'"
+        : kind === "env" ? "alias claude='env FOO=1 claude --alias-flag'"
+        : kind === "invalid-assignment" ? "alias claude='forward-x=claude claude --alias-flag'"
+        : kind === "errexit" ? "set -e" : "";
+      const command = await f.launch.command("seat@rig", "claude --resume 'same-id'", { nodeId: "node-current", runtime: "claude-code", launchWrapper: ["test-wrapper", "--"] });
+      const result = await runStaged(f, command, rc, shell);
+      if (!["none", "errexit"].includes(kind)) {
+        for (const file of [functionLog, childLog, w.log]) expect(existsSync(file), file).toBe(false);
+        expect(result.code, result.stderr).not.toBe(0);
+        expect(result.stderr).toContain("launch_wrapper unavailable; no agent started.");
+      } else {
+        expect(result.code, result.stderr).toBe(0);
+        const args = ["--resume", "same-id"];
+        expect(w.argv()).toEqual([path.join(f.bin, "claude"), ...args]);
+        expect(require("node:fs").readFileSync(childLog, "utf8").trim().split("\n")).toEqual(args);
+        expect(require("node:fs").readFileSync(envLog, "utf8")).toBe("");
+      }
+    });
+  });
+  it("unwrapped classic Claude keeps alias flags and environment assignments", async () => {
+    const f = fixture(); vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue("bash");
+    writeFileSync(path.join(f.bin, "claude"), '#!/bin/sh\nprintf "%s\\n" "$FOO" "$@"\n', { mode: 0o700 });
+    const command = await f.launch.command("seat@rig", "claude --resume 'same-id'", { nodeId: "node-current", runtime: "claude-code" });
+    const result = await runStaged(f, command, "alias claude='FOO=keep claude --alias-flag'");
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout.trim().split("\n")).toEqual(["keep", "--alias-flag", "--resume", "same-id"]);
+  });
+  it("a pinned classic Claude continuation puts the wrapper in front of the pinned executable", async () => {
+    const f = fixture(); const w = loggingWrapper(f);
+    const pinned = path.join(f.root, "pinned-claude");
+    rmSync(path.join(f.bin, "claude"));
+    writeFileSync(pinned, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, fsOps: f.fsOps, seatLaunchEnvironment: f.launch, sleep: async () => {} });
+    vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+    const result = await adapter.launchHarness({ ...f.binding, claudeExecutable: pinned, launchWrapper: ["test-wrapper", "--"] } as NodeBinding, { name: "seat", resumeToken: "old-id" });
+    expect(result.ok).toBe(true);
+    expect(f.commands[0]).toContain(`exec ${shellQuote(path.join(f.bin, "test-wrapper"))} '--' ${shellQuote(pinned)} `);
+    const run = await runStaged(f, f.commands[0]!);
+    expect(run.code, run.stderr).toBe(0);
+    expect(w.argv()[0]).toBe(pinned);
+    expect(w.argv()).toEqual(expect.arrayContaining(["--resume", "old-id"]));
+  });
+  it.each(["identity", "shell"])("a pinned wrapped Claude refuses an unavailable %s environment", async kind => {
+    const f = fixture(); const w = loggingWrapper(f);
+    const pinned = path.join(f.root, "pinned-claude"); const marker = path.join(f.root, "claude-ran");
+    writeFileSync(pinned, `#!/bin/sh\n: > ${shellQuote(marker)}\n`, { mode: 0o700 });
+    if (kind === "identity") f.identity.OPENRIG_NODE_ID = "other-node";
+    else vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue("fish");
+    const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, fsOps: f.fsOps, seatLaunchEnvironment: f.launch, sleep: async () => {} });
+    await adapter.launchHarness({ ...f.binding, claudeExecutable: pinned, launchWrapper: ["test-wrapper", "--"] }, { name: "seat" });
+    const run = await runStaged(f, f.commands[0]!);
+    expect(existsSync(marker)).toBe(false); expect(existsSync(w.log)).toBe(false);
+    expect(run.code, run.stderr).not.toBe(0);
+    expect(run.stderr).toContain("launch_wrapper unavailable; no agent started.");
+  });
+  it("unwrapped classic Claude is byte-identical, and an empty launch_wrapper is the same as none", async () => {
+    const f = fixture(); vi.spyOn(f.tmux, "getPaneCommand").mockResolvedValue("bash");
+    const base = await f.launch.command("seat@rig", "claude --resume 'x'", { nodeId: "node-current", runtime: "claude-code" });
+    expect(await f.launch.command("seat@rig", "claude --resume 'x'", { nodeId: "node-current", runtime: "claude-code", launchWrapper: [] })).toBe(base);
+    expect(base.split("\n").slice(0, 5)).toEqual([
+      'if _openrig_claude_executable=$(command -v claude) && [ -f "$_openrig_claude_executable" ] && [ -x "$_openrig_claude_executable" ]; then',
+      '  case "$_openrig_claude_executable" in',
+      "    */*) eval 'claude() { exec \"$_openrig_claude_executable\" \"$@\"; }' ;;",
+      '  esac',
+      'fi',
+    ]);
+  });
+  it("legacy ClaudeResumeAdapter with launchWrapper hands the wrapper the real claude executable and the resume args", async () => {
+    const f = fixture();
+    const w = loggingWrapper(f);
+    writeFileSync(path.join(f.bin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const adapter = new ClaudeResumeAdapter(f.tmux, { seatLaunchEnvironment: f.launch });
+    vi.spyOn(adapter as any, "verifyResume").mockResolvedValue({ ok: true });
+    const args = [f.binding.cwd, undefined, undefined, undefined, "node-current"] as const;
+    expect((await adapter.resume("seat@rig", "claude_id", "native-id", ...args, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, ["test-wrapper", "--"])).ok).toBe(true);
+    const run = await runStaged(f, f.commands[0]!);
+    expect(run.code, run.stderr).toBe(0);
+    expect(w.argv()[0]).toBe(path.join(f.bin, "claude"));
+    expect(w.argv()).toEqual(expect.arrayContaining(["--resume", "native-id"]));
+    // No seat launch environment: the wrapper cannot be applied, so nothing is typed.
+    const bare = new ClaudeResumeAdapter(f.tmux, {});
+    const sent = f.commands.length;
+    const refused = await bare.resume("seat@rig", "claude_id", "native-id", ...args, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, ["test-wrapper", "--"]);
+    expect(refused).toMatchObject({ ok: false, code: "resume_failed" });
+    expect(f.commands).toHaveLength(sent);
+  });
+  it.each(["classic", "managed"] as const)("%s Claude never starts when its resolved wrapper disappears or cannot exec at spawn time", async mode => {
+    const f = fixture(); loggingWrapper(f);
+    const marker = path.join(f.root, "claude-ran");
+    writeFileSync(path.join(f.bin, "claude"), `#!/bin/sh\nif [ "$1" = --help ]; then printf '%s\\n' '--permission-mode <mode> (choices: "auto", "default")'; else : > ${shellQuote(marker)}; fi\n`, { mode: 0o700 });
+    let command: string;
+    if (mode === "managed") {
+      const db = new Database(":memory:"); cleanup.push(() => { db.close(); });
+      db.exec("CREATE TABLE nodes(id TEXT,runtime TEXT,cwd TEXT); CREATE TABLE bindings(id TEXT,node_id TEXT,tmux_session TEXT,tmux_pane TEXT); CREATE TABLE occupant_tenures(node_id TEXT,generation_uuid TEXT,generation_ordinal INTEGER)");
+      db.prepare("INSERT INTO nodes VALUES ('node-current','claude-code',?)").run(f.binding.cwd);
+      db.exec("INSERT INTO bindings VALUES ('b','node-current','seat@rig','%1'); INSERT INTO occupant_tenures VALUES ('node-current','current-generation',1)");
+      command = (await new ClaudeManagedLaunch(db, f.env, {}).prepare({ nodeId: "node-current", launchWrapper: ["test-wrapper", "--"] }, "auto")).command(["--resume", "same-id"]);
+    } else command = await f.launch.command("seat@rig", "claude --resume 'same-id'", { nodeId: "node-current", runtime: "claude-code", launchWrapper: ["test-wrapper", "--"] });
+    const wrapper = path.join(f.bin, "test-wrapper");
+    for (const failure of ["missing", "not-executable", "bad-interpreter"]) {
+      if (failure === "missing") rmSync(wrapper);
+      else {
+        writeFileSync(wrapper, failure === "bad-interpreter" ? "#!/openrig-missing-interpreter\n" : "#!/bin/sh\nexec \"$@\"\n");
+        chmodSync(wrapper, failure === "not-executable" ? 0o600 : 0o700);
+      }
+      const run = await runStaged(f, command);
+      expect(require("node:fs").existsSync(marker), `${failure}: Claude ran; ${run.stdout}${run.stderr}`).toBe(false);
+      expect(run.code, `${failure}: ${run.stdout}${run.stderr}`).not.toBe(0);
+    }
   });
   it("in-place launchShell hint validates the target execution shell when the pane foreground is codex/node and throws on refusal without leaking env values", async () => {
     const f = fixture();

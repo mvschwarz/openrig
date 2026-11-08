@@ -934,6 +934,32 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("attemptResume hands a Claude seat's launch_wrapper to the Claude resume adapter as its last argument, and nothing for an unwrapped seat", async () => {
+    const claudeResume = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({ claude: { canResume: vi.fn(() => true), resume: claudeResume } as unknown as ClaudeResumeAdapter });
+    const rig = rigRepo.createRig("claude-wrapper-forward");
+    const wrapped = rigRepo.addNode(rig.id, "dev.wrapped", { runtime: "claude-code", cwd: "/work", launchWrapper: ["rtk", "--claude-wrap"] });
+    const plain = rigRepo.addNode(rig.id, "dev.plain", { runtime: "claude-code", cwd: "/work" });
+    await (orch as any).attemptResume(wrapped.id, "s-wrapped", "claude_id", "tok-1", "/work", null, "sonnet", "floor");
+    await (orch as any).attemptResume(plain.id, "s-plain", "claude_id", "tok-2", "/work", null, "sonnet", "floor");
+    const wrappedCall = claudeResume.mock.calls[0] as unknown[];
+    expect(wrappedCall[2]).toBe("tok-1");
+    expect(wrappedCall).toHaveLength(19); // 8 base arguments, then the tail up to claudeMcp (index 17); the wrapper is index 18
+    expect(wrappedCall[18]).toEqual(["rtk", "--claude-wrap"]);
+    expect((claudeResume.mock.calls[1] as unknown[]).every(arg => !Array.isArray(arg) || !arg.includes("rtk"))).toBe(true);
+  });
+
+  it("attemptResume fails closed before dispatching Claude when the stored launch_wrapper is corrupt", async () => {
+    const claudeResume = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({ claude: { canResume: vi.fn(() => true), resume: claudeResume } as unknown as ClaudeResumeAdapter });
+    const rig = rigRepo.createRig("claude-wrapper-corrupt");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/work", launchWrapper: ["rtk", "--"] });
+    db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("{corrupt-json", node.id);
+    const result = await (orch as any).attemptResume(node.id, "s", "claude_id", "tok", "/work", null, "sonnet", "floor");
+    expect(result).toMatchObject({ kind: "failed", message: expect.stringMatching(/^Permission selection:.*launch_wrapper/) });
+    expect(claudeResume).not.toHaveBeenCalled();
+  });
+
   it("attemptResume forwards effort to claude and codex resume adapters", async () => {
     const claudeResume = vi.fn(async () => ({ ok: true as const }));
     const codexResume = vi.fn(async () => ({ ok: true as const }));

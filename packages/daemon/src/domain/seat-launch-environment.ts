@@ -126,6 +126,8 @@ export class SeatLaunchEnvironment {
     codexHome?: string;
     accountHome?: string | null;
     launchWrapper?: readonly string[];
+    /** A pinned Claude command already names its executable. */
+    claudeShellLookup?: false;
     /** In-place restart only: the shell that will run this command. The pane foreground is the running agent, so it is not probed. Set => a refusal throws. */
     launchShell?: string;
     /** A Claude seat's own token step (claude-seat-token.ts), run before Claude in the staged subshell. A POSIX pane only:
@@ -176,7 +178,7 @@ export class SeatLaunchEnvironment {
       }
       let prefix = "";
       if (wrapped) {
-        if (!isLaunchWrapperRuntime(target.runtime) || target.runtime !== "codex") {
+        if (!isLaunchWrapperRuntime(target.runtime) || target.runtime === "pi") {
           throw new Error("Unsupported launch_wrapper runtime.");
         }
         prefix = this.resolveLaunchWrapper(wrapped).map((arg) => shellQuote(arg)).join(" ") + " ";
@@ -196,21 +198,25 @@ export class SeatLaunchEnvironment {
         const launch = `${accountStep}${accountHome && target.claudeTokenStep ? `${target.claudeTokenStep} && ` : ""}${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
         // The token step is POSIX shell; another shell (fish, tcsh) gets the command without it.
         const token = !accountHome && target.claudeTokenStep && ["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell) ? [target.claudeTokenStep] : [];
+        if (target.claudeShellLookup === false) return [...token, launch].join("\n");
         // ksh calls a function without exporting a leading assignment that isn't already
         // exported, so it keeps the form above, where every assignment reaches Claude.
-        if (!["bash", "zsh", "sh", "dash"].includes(shell)) return [...token, launch].join("\n");
+        if (!["bash", "zsh", "sh", "dash"].includes(shell)) {
+          if (wrapped) throw new Error("Non-POSIX pane");
+          return [...token, launch].join("\n");
+        }
         // A file command must replace the staging subshell so tmux observes
         // Claude as the foreground process. Keep aliases/functions intact and
         // pass the original leading assignments through a subshell-local function.
         // The constant eval defers function-name parsing until alias lookup is ruled out.
         return [
-          'if _openrig_claude_executable=$(command -v claude) && [ -f "$_openrig_claude_executable" ] && [ -x "$_openrig_claude_executable" ]; then',
+          `if _openrig_claude_executable=$(command -v claude) && ${wrapped ? '[ "$_openrig_claude_executable" != claude ] && ' : ''}[ -f "$_openrig_claude_executable" ] && [ -x "$_openrig_claude_executable" ]; then`,
           '  case "$_openrig_claude_executable" in',
-          "    */*) eval 'claude() { exec \"$_openrig_claude_executable\" \"$@\"; }' ;;",
+          ...(wrapped ? [`    */*) eval ${shellQuote(`claude() { exec ${prefix}"$_openrig_claude_executable" "$@"; }`)} ;;`]
+            : ['    */*) eval \'claude() { exec "$_openrig_claude_executable" "$@"; }\' ;;']),
           '  esac',
-          'fi',
-          ...token,
-          launch,
+          ...(wrapped ? [...token, launch, 'else', "  printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false", 'fi']
+            : ['fi', ...token, launch]),
         ].join("\n");
       }
       const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`));

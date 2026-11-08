@@ -388,7 +388,7 @@ export class SeatRuntimeSwitchService {
       });
     } catch (error) { return failed((error as Error).message); }
     if (launchWrapper?.length && !isLaunchWrapperRuntime(target)) {
-      return failed(`${ctx.seatRef} has a launch_wrapper configured, which is only supported on Pi and Codex; switching to ${target} would unwrap the seat.`);
+      return failed(`${ctx.seatRef} has a launch_wrapper configured, which is only supported on Pi, Codex and Claude Code; switching to ${target} would unwrap the seat.`);
     }
     const successorGeneration = sessionRegistry.reserveOccupantGeneration();
     if (!successorGeneration) return failed("No occupant generation could be reserved for the successor (the tenure ledger is unavailable).");
