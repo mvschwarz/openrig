@@ -587,13 +587,13 @@ describe("round 2 controls", () => {
     await row("t-prose", A, B);
     repo.update({ qitemId: "t-prose", actorSession: B, state: "done", closureReason: "handed_off_to", closureTarget: "secret-prose-target, see the thread" });
     await row("t-super", A, B);
-    repo.update({ qitemId: "t-super", actorSession: B, state: "canceled", closureReason: "superseded", closureTarget: "qitem-20261109120000-0a1b2c3d" });
+    repo.update({ qitemId: "t-super", actorSession: B, state: "canceled", closureReason: "superseded", closureTarget: "qitem-successor-row" });
     db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id IN ('t-prose', 't-super')").run(ago(40));
     const report = await eraseQueue(db, { scope: routine, apply: true, nowIso: NOW });
     expect(report.qitems.map((q) => q.qitemId)).toEqual(["t-prose", "t-super"]);
     expect(everything()).not.toContain("secret-prose-target");
     expect(payloads()).not.toContain("secret-prose-target");
-    expect(db.prepare("SELECT closure_target AS t FROM queue_items WHERE qitem_id = 't-super'").get()).toEqual({ t: "qitem-20261109120000-0a1b2c3d" });
+    expect(db.prepare("SELECT closure_target AS t FROM queue_items WHERE qitem_id = 't-super'").get()).toEqual({ t: "qitem-successor-row" });
   });
 
   it("N1: a note archived while erasure was off still makes a scrubbed row eligible again", async () => {
