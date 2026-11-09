@@ -1534,6 +1534,21 @@ export class QueueRepository {
    * hold is left alone; failed/uncertain history permits another attempt. A recovery
    * pass tracks its coalesced members only in memory so each is attempted once per pass.
    */
+  /** #2789: a wake committed while its seat had no pane froze a binding that can never match once the seat is bound, so
+   *  the delivery guard refused it on every retry. Such an intent takes its first live binding, on the same node and
+   *  canonical session, only when it is known to have written no input (pending, or failed, which a send records only
+   *  without a write) and carries no expected identity of its own. A binding that ever named a pane is never replaced,
+   *  so a wake can't move to another occupant; the guard's write-time check against this binding still holds.
+   *  `entry` is the intent as read before its claim. Called inside the claim's transaction. */
+  private bindFirstTarget(entry: OutboxEntry): void {
+    const frozen = entry.guardBinding;
+    if (!frozen || frozen.pane !== null || (entry.deliveryState !== "pending" && entry.deliveryState !== "failed")) return;
+    if (this.outbox!.expectedIdentity(entry.outboxId)) return;
+    const live = this.transport?.deliveryTarget?.(entry.destinationSession);
+    if (!live?.pane || live.nodeId !== frozen.nodeId || live.session !== frozen.session) return;
+    this.db.prepare("UPDATE outbox_entries SET guard_binding = ? WHERE outbox_id = ?").run(JSON.stringify(live), entry.outboxId);
+  }
+
   private async deliverWakeIntent(
     outboxId: string,
     attempted: Set<string> = new Set(), // this pass's attempt history, inherited by any release it delivers
@@ -1550,6 +1565,7 @@ export class QueueRepository {
     let recovering = false;
     const claim = (entry: OutboxEntry): boolean => {
       if (!eligible(entry) || attempted.has(entry.outboxId) || !this.outbox!.claimForDelivery(entry.outboxId)) return false;
+      this.bindFirstTarget(entry);
       attempted.add(entry.outboxId);
       recovering ||= entry.deliveryState !== "pending";
       return true;
@@ -1911,6 +1927,59 @@ export class QueueRepository {
         if (remaining) this.promptClearRetries.set(row.qitem_id, remaining);
         else this.promptClearRetries.delete(row.qitem_id);
       }
+    }
+  }
+
+  /** The rule for re-sending a wake recorded unroutable once its seat may be back, shared by the stuck sweep and
+   *  {@link retryUnroutableWakesOnReachable}: unclaimed, not a person's notice, not a local human decision with no
+   *  gateway, not held or released for quiet hours, and its seat now pane-bound. A handoff's retry ladder is the
+   *  caller's to check: the sweep defers to a live ladder, the reachable-seat retry leaves every handed-off row to it. */
+  unroutableWakeRetryable(row: QueueItem, now: Date = new Date()): boolean {
+    return row.lastNudgeResult?.startsWith("unroutable:") === true
+      && !row.claimedAt
+      && row.deliveryOutcome !== "never-posted" && row.deliveryOutcome !== "transport-failed"
+      && !this.isLocalHumanDecisionWithoutGateway(row)
+      && !["held", "released"].includes(quietHoldCustody(this.db, row.qitemId, now)?.state ?? "")
+      && this.classifyDestinationOf(row.destinationSession).class === "pane-bound";
+  }
+
+  /** A wake recorded unroutable because its seat wasn't bound yet, as just after a restart (#2789), is re-sent as soon
+   *  as the seat is seen running or idle, rather than at the stuck sweep's next tick; the sweep remains the backstop.
+   *  Only this seat's own pending rows, oldest first, that {@link unroutableWakeRetryable} admits. */
+  async retryUnroutableWakesOnReachable(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
+    if (state !== "running" && state !== "idle") return;
+    const addresses = this.resolveSessionAddresses(sessionName);
+    if (!addresses.length) return;
+    // As for a prompt clear (#2575): while a compaction's restore is owed, the wake would reach the agent before it.
+    if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return;
+    const rows = this.db.prepare(`SELECT qitem_id FROM queue_items
+      WHERE destination_session IN (${addresses.map(() => "?").join(",")}) AND state = 'pending'
+        AND handed_off_from IS NULL AND last_nudge_result LIKE 'unroutable:%' ORDER BY ts_created, qitem_id`)
+      .all(...addresses) as Array<{ qitem_id: string }>;
+    const now = new Date();
+    // One attempt per intent for the pass: a returned result and its resume go as one send, so the second row's turn
+    // mustn't send them again after a refusal.
+    const attempted = new Set<string>();
+    // Correlation can add peers to a send. Each claim must qualify for this retry on its own: a failed wake of this
+    // seat's pending row that the shared rule admits. A peer that may already have been written (indeterminate), or
+    // failed for another reason, isn't claimed here.
+    const eligible = (entry: OutboxEntry): boolean => {
+      if (entry.deliveryState !== "failed" || !entry.auditPointer) return false;
+      const current = this.getById(entry.auditPointer);
+      return current?.state === "pending" && addresses.includes(current.destinationSession) && !current.handedOffFrom
+        && this.unroutableWakeRetryable(current, now);
+    };
+    for (const { qitem_id } of rows) {
+      const row = this.getById(qitem_id);
+      if (!row || row.state !== "pending" || !this.unroutableWakeRetryable(row, now)) continue;
+      // The failed wake may be the row's own intent or an un-park's blocker intent: re-send whichever failed.
+      // One in flight or delivered is never sent again; only a row with no intent at all takes the plain nudge.
+      const intents = this.outbox ? this.db.prepare(`SELECT outbox_id, delivery_state FROM outbox_entries
+        WHERE audit_pointer = ? AND substr(outbox_id, 1, ?) = ?`)
+        .all(qitem_id, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX) as Array<{ outbox_id: string; delivery_state: string }> : [];
+      if (intents.length) {
+        for (const intent of intents) if (intent.delivery_state === "failed") await this.deliverWakeIntent(intent.outbox_id, attempted, eligible);
+      } else await this.maybeNudge(qitem_id, row.destinationSession, undefined, row.sourceSession);
     }
   }
 
