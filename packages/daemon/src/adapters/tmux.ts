@@ -1704,6 +1704,15 @@ export class TmuxAdapter {
     return Object.fromEntries(varNames.map((name) => [name, lines === null ? null : usableEnvLine(lines, name)]));
   }
 
+  /** Compare transient native values with the kept session. Only differing names escape this read. */
+  async differingSessionEnv(sessionName: string, running: Readonly<Record<string, string>>): Promise<string[] | null> {
+    const lines = await this.sessionEnvLines(sessionName);
+    if (lines === null) return null;
+    const inherited = new Set(lines);
+    return Object.entries(running).filter(([key, value]) => key !== "CLAUDE_CONFIG_DIR" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
+      && !inherited.has(`${key}=${value}`)).map(([key]) => key).sort();
+  }
+
   private async sessionEnvLines(sessionName: string): Promise<string[] | null> {
     const target = exactTarget(sessionName, "session");
     try {

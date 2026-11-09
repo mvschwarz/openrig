@@ -61,6 +61,46 @@ function makeEntry(overrides?: Partial<ProjectionEntry>): ProjectionEntry {
   };
 }
 
+it("warning-only capture on a classic pod-aware resume still dispatches the ordinary command", async () => {
+  const tmux = mockTmux();
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+  await adapter.launchHarness({ ...makeBinding(), launchPosture: "floor", claudeExecutable: "/native/claude", claudeLaunch: { warnings: ["capture unavailable"] } }, { name: "seat", resumeToken: "same" });
+  expect(tmux.sendText).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("--permission-mode acceptEdits"));
+  expect(tmux.sendText).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("--resume 'same'"));
+});
+
+it.each([false, true])("provider continuation keeps native options on the pod-aware path (private environment: %s)", async privateEnvironment => {
+  const tmux = mockTmux();
+  const stage = vi.fn(async (_session: string, command: string) => command);
+  tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {},
+    ...(privateEnvironment ? { seatLaunchEnvironment: { command: stage } as never } : {}) });
+  const args = ["--settings", "/custom rules/settings.json", "--model", "opus", "--permission-mode", "auto"];
+  const result = await adapter.launchHarness({ ...makeBinding(), claudeExecutable: "/native/claude",
+    claudeLaunch: { args, configDir: "/custom config", warnings: [] } }, { name: "seat", resumeToken: "same" });
+  const command = privateEnvironment ? stage.mock.calls[0]![1] : vi.mocked(tmux.sendText).mock.calls[0]![1];
+  expect(command).toContain("'--settings' '/custom rules/settings.json' '--model' 'opus'");
+  expect(command).toContain("'--resume' 'same'");
+  expect(command).toContain("OPENRIG_RESUME_LAUNCH='same'");
+  if (privateEnvironment) expect(command).toContain("CLAUDE_CONFIG_DIR='/custom config'");
+  else {
+    expect(command).not.toContain("CUSTOM_SETTING");
+    expect(result.warnings?.join(" ")).toContain("cannot privately apply");
+  }
+});
+
+it("the pod-aware managed continuation retains custom options and the current resume marker", async () => {
+  const tmux = mockTmux();
+  tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+  const command = vi.fn(() => "private-launch");
+  const prepare = vi.fn(async () => ({ command, assertCurrent: () => {}, warnings: [] }));
+  const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, claudeManagedLaunch: { prepare } as never });
+  const launch = { args: ["--settings", "/custom rules.json", "--model", "opus"], configDir: "/custom config", warnings: [] };
+  await adapter.launchHarness({ ...makeBinding(), permissionMode: "auto", claudeExecutable: "/native/claude", claudeLaunch: launch }, { name: "seat", resumeToken: "same" });
+  expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ continuationConfigDir: launch.configDir }), "auto");
+  expect(command).toHaveBeenCalledWith([...launch.args, "--permission-mode", "auto", "--resume", "same"], { OPENRIG_RESUME_LAUNCH: "same" });
+});
+
 // 51-07 A1 — a per-agent model declared in the spec must reach the claude launch command.
 // binding.model already arrives (resolver → instantiator :1728); this pins the ADAPTER emitting it
 // on all three launch builders. RED-first: the three --model tests fail on main (0 model refs in the
