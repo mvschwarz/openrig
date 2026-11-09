@@ -855,8 +855,15 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     };
 
     /** The seat's activity can't be read (no reading, or one that reads unknown): said in the finding, so an unreadable
-     *  seat isn't taken for one ignoring its work. The stalled finding says the same (`queue-pickup.ts`). */
+     *  seat isn't taken for one ignoring its work. The stalled finding says the same (`queue-pickup.ts`). A person has no
+     *  seat to read, so their row never says so; nor does a row whose destination can't be classified, since it may be a
+     *  person's. A classification fault never stops the sweep. */
     function unreadableOwner(session: string): boolean {
+      try {
+        if (deps.queueRepo.isHumanDestination(session)) return false;
+      } catch {
+        return false;
+      }
       const activity = deps.queueRepo.ownerActivity(session)?.activity;
       return !activity || activity === "unknown";
     }
