@@ -4,7 +4,7 @@
 // in-memory database; the tmux adapter records commands instead of running them.
 import Database from "better-sqlite3";
 import stringWidth from "string-width";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,7 +12,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
-import { ClaudeCompactionEnforcer } from "../src/domain/claude-compaction-enforcer.js";
+import { ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE } from "../src/domain/claude-compaction-enforcer.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -108,11 +108,17 @@ it("checks the composer after buffer setup, immediately before the preparation p
   expect(f.writes).toEqual([]);
 });
 
-it("an unreadable composer holds managed preparation without input", async () => {
+it.each([null, { x: 0, y: 0, width: 100000, height: 60 }])("an unreadable composer holds managed preparation without input (cursor=%j)", async cursor => {
   const f = await fixture({ pane: "%1", mode: "off" });
-  vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue(null);
+  vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue(cursor);
   const outcome = await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true });
   expect(outcome).toMatchObject({ reason: "draft_input_unknown", preparation: { delivery: "not_sent" } });
+  const state = f.e.getPreparationState(seat)!;
+  expect(state).toMatchObject({ inputBox: { status: "unknown", confidence: "unknown", cursor,
+    evidence: expect.arrayContaining([cursor ? "cursor outside the input box" : "cursor unavailable"]) } });
+  expect(Object.keys(state.inputBox!).sort()).toEqual(["confidence", "cursor", "evidence", "status"]);
+  const saved = JSON.parse(readFileSync(join(dirname(state.mapPath), COMPACTION_RECORD_FILE), "utf8"));
+  expect(saved).toMatchObject({ delivery: "not_sent", inputBox: state.inputBox });
   expect(f.writes).toEqual([]);
 });
 
