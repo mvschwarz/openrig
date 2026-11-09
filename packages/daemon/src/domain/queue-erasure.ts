@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, closeSync, openSync, readSync, statSync } from "node:fs";
 import type Database from "better-sqlite3";
 
 /**
@@ -105,9 +105,10 @@ export interface EraseReport {
   alreadyAbsent: string[];
   /** ids scope, a ledger replay: entries whose batch rolled back, so not replayed */
   skipped?: Array<{ qitemId: string; batch: string }>;
-  /** an applied run with a ledger: batches missing their commit line that this database recorded as committed (the line
-   *  is written now), and batches with neither a line nor a record, which can't be decided and are left */
-  ledger?: { reconciled: string[]; unresolved: string[] };
+  /** an applied run with a ledger: batches this database recorded as committed whose commit line was missing (lost
+   *  after the commit), written now. A batch with neither a line nor a record surfaces only on a replay, as the gap
+   *  ledger-unresolved */
+  ledger?: { reconciled: string[] };
   /** an erased row's copies held with someone else: mixed (one of their sessions is the owner's) or foreign (none) */
   keptCopies: Array<{ table: CopyTable; id: string; qitemId: string; ownership: "mixed" | "foreign" }>;
   /** events naming a selected row whose payload can't be read: kept, since what they hold can't be inspected. The
@@ -350,35 +351,34 @@ function recordedBatches(st: Statements, batches: string[]): Set<string> {
     .all({ ids: JSON.stringify(batches) }) as Array<{ id: string }>).map((row) => row.id));
 }
 
-/** A ledger's batches with no commit or abort line. One this database recorded gets its commit line now: the line was
- *  lost after the commit. Any other is left unresolved, never decided here: on a restored database, a batch committed
- *  after the backup looks exactly like one that rolled back, so only its own line can say which. */
-function reconcileLedger(st: Statements, path: string, nowIso: string): { reconciled: string[]; unresolved: string[] } {
-  const batches: string[] = [];
-  const seen = new Set<string>();
-  const marked = new Set<string>();
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    if (!line.startsWith("{")) continue;
-    let value: { batch?: unknown; committed?: unknown; qitemId?: unknown };
-    try {
-      value = JSON.parse(line) as typeof value;
-    } catch {
-      continue;
-    }
-    if (typeof value.batch !== "string") continue;
-    if (typeof value.committed === "boolean") marked.add(value.batch);
-    else if (!seen.has(value.batch)) {
-      seen.add(value.batch);
-      batches.push(value.batch);
-    }
+/** Before a run writes to the ledger: a last line cut short (a full disk, say) is closed off, so it can't fuse with the
+ *  next one. A cut-short line is safe to delete by hand: an entry line's batch rolled back when its append failed, and
+ *  a commit line is written again from the record. */
+function endLedgerLine(path: string): void {
+  const size = statSync(path).size;
+  if (size === 0) return;
+  const last = Buffer.alloc(1);
+  const fd = openSync(path, "r");
+  try {
+    readSync(fd, last, 0, 1, size - 1);
+  } finally {
+    closeSync(fd);
   }
-  const open = batches.filter((batch) => !marked.has(batch));
-  const recorded = recordedBatches(st, open);
-  const reconciled = open.filter((batch) => recorded.has(batch));
-  if (reconciled.length > 0) {
-    appendFileSync(path, reconciled.map((batch) => JSON.stringify({ batch, committed: true, at: nowIso, reconciled: true })).join("\n") + "\n");
-  }
-  return { reconciled, unresolved: open.filter((batch) => !recorded.has(batch)) };
+  if (last[0] !== 0x0a) appendFileSync(path, "\n");
+}
+
+/** Batches this database recorded as committed whose commit line isn't in the ledger yet (lost after the commit): the
+ *  line is written now, from the record, without reading the ledger. A batch with neither a line nor a record isn't
+ *  decided here or anywhere: on a restored database, one committed after the backup looks exactly like one that rolled
+ *  back, so only its own line can say which, and a replay reports it. */
+function reconcileLedger(st: Statements, path: string, nowIso: string): { reconciled: string[] } {
+  const reconciled = (st.get("SELECT batch_id AS id FROM queue_erasure_batches WHERE line_at IS NULL ORDER BY rowid").all() as Array<{ id: string }>)
+    .map((row) => row.id);
+  if (reconciled.length === 0) return { reconciled };
+  appendFileSync(path, reconciled.map((batch) => JSON.stringify({ batch, committed: true, at: nowIso, reconciled: true })).join("\n") + "\n");
+  st.get("UPDATE queue_erasure_batches SET line_at = @now WHERE batch_id IN (SELECT value FROM json_each(@ids))")
+    .run({ now: nowIso, ids: JSON.stringify(reconciled) });
+  return { reconciled };
 }
 
 /** Erase queue rows in one scope. With apply false it reports exactly what an apply would erase and writes nothing. */
@@ -568,6 +568,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
     if (batch !== null && written.has(batch)) {
       try {
         mark(batch, true);
+        st.get("UPDATE queue_erasure_batches SET line_at = ? WHERE batch_id = ?").run(opts.nowIso, batch);
       } catch (err) {
         commitLineError = err;
       }
@@ -581,6 +582,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
     //    settled from this database's record where it has one.
     if (opts.apply && opts.ledgerPath) {
       appendFileSync(opts.ledgerPath, "");
+      endLedgerLine(opts.ledgerPath);
       report.ledger = reconcileLedger(st, opts.ledgerPath, opts.nowIso);
     }
 

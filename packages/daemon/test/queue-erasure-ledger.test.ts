@@ -77,7 +77,7 @@ describe("the erasure ledger replays exactly what committed", () => {
     const [entry, commit] = lines(path);
     expect(entry).toMatchObject({ qitemId: "c-row", action: "scrub", batch: expect.any(String) });
     expect(commit).toEqual({ batch: entry.batch, committed: true, at: NOW });
-    expect(db.prepare("SELECT batch_id FROM queue_erasure_batches").all()).toEqual([{ batch_id: entry.batch }]);
+    expect(db.prepare("SELECT batch_id, line_at FROM queue_erasure_batches").all()).toEqual([{ batch_id: entry.batch, line_at: NOW }]);
   });
 
   it("a rolled-back batch is never replayed, after a reopen, a restore and a replay", async () => {
@@ -119,11 +119,13 @@ describe("the erasure ledger replays exactly what committed", () => {
     close("l-row", 40);
     const path = ledgerFile();
     await eraseQueue(db, { scope: routine, apply: true, nowIso: NOW, ledgerPath: path });
+    // A crash between the commit and its commit line: the line is missing, and the record says so.
     dropLines(path, (line) => line.committed === undefined);
+    db.prepare("UPDATE queue_erasure_batches SET line_at = NULL").run();
     const batch = lines(path)[0].batch!;
     // The next applied run, on the live database, finds the batch's record and writes its commit line.
     const next = await eraseQueue(db, { scope: routine, apply: true, nowIso: NOW, ledgerPath: path });
-    expect(next.ledger).toEqual({ reconciled: [batch], unresolved: [] });
+    expect(next.ledger).toEqual({ reconciled: [batch] });
     expect(lines(path)).toContainEqual({ batch, committed: true, at: NOW, reconciled: true });
     db.close();
     open(new Database(backup));
@@ -164,7 +166,7 @@ describe("the erasure ledger replays exactly what committed", () => {
     db.close();
     open(new Database(backup));
     const replayed = await replay(path, path);
-    expect(replayed.ledger).toEqual({ reconciled: [], unresolved: [batch] });
+    expect(replayed.ledger).toEqual({ reconciled: [] });
     expect(replayed.gaps).toEqual([{ code: "ledger-unresolved", qitemId: "u-row" }]);
     expect(replayed.clean).toBe(false);
     expect(body("u-row")).toBe("secret-u-row body");
@@ -184,7 +186,22 @@ describe("the erasure ledger replays exactly what committed", () => {
     const replayed = await replay(path);
     expect(replayed.gaps).toEqual([{ code: "ledger-unresolved", qitemId: "k-row" }]);
     expect(body("k-row")).toBe("secret-k-row body");
+    // A routine (or members) run's clean is about its own scope: the undecided batch doesn't affect it. Only a replay,
+    // which would apply the batch, reports it (above).
     const live = await eraseQueue(db, { scope: routine, apply: true, nowIso: NOW, ledgerPath: path });
-    expect(live.ledger).toEqual({ reconciled: [], unresolved: [batch] });
+    expect(live).toMatchObject({ ledger: { reconciled: [] }, clean: true, gaps: [] });
+    expect(lines(path).filter((line) => line.batch === batch && line.committed !== undefined)).toEqual([]);
+  });
+
+  it("a last line cut short is closed off before the run writes, so the next line stays whole", async () => {
+    await row("n-row", 40);
+    const path = ledgerFile();
+    writeFileSync(path, '{"qitemId":"n-earlier","action":"scr');
+    await eraseQueue(db, { scope: routine, apply: true, nowIso: NOW, ledgerPath: path });
+    const [cut, ...rest] = readFileSync(path, "utf8").split("\n").filter(Boolean);
+    expect(cut).toBe('{"qitemId":"n-earlier","action":"scr');
+    expect(rest.map((line) => JSON.parse(line) as Line)).toEqual([
+      expect.objectContaining({ qitemId: "n-row", action: "scrub" }), expect.objectContaining({ committed: true }),
+    ]);
   });
 });

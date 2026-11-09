@@ -590,10 +590,6 @@ export async function runQueueRetentionSweep(
       summary.closedDeleted = closed.qitems.filter((row) => row.action === "delete").length;
       summary.closedKept = closed.gaps.length;
       summary.closedError = closed.error ? `${closed.error.stage}: ${closed.error.message}` : null;
-      if (closed.ledger && closed.ledger.unresolved.length > 0) {
-        console.error(`[queue-retention] erasure ledger: ${closed.ledger.unresolved.length} batch(es) with neither a commit nor an abort line, `
-          + `and no record here; never replayed until resolved: ${closed.ledger.unresolved.join(", ")}`);
-      }
     } catch (err) {
       summary.closedError = err instanceof Error ? err.message : String(err);
     }
