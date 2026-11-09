@@ -53,7 +53,7 @@ These apply to every review, not just deep reviews.
 
 Does the change solve the user's problem with a maintainable design? Check affected contracts, invalid input, state transitions, recovery, consumers and unnecessary duplication.
 
-What does this do when it can't tell? If it stops or refuses, is there positive evidence or an operator opt-in? Without either, the default answer is to deliver and report the uncertainty.
+What does this do when it can't tell? If it stops or refuses, is there positive evidence or an operator opt-in? Without either, the default answer is to deliver and report the uncertainty, except at the hard lines (credentials, destructive deletes, money, publishing), where it stops and asks.
 
 ### Anti-slop lens
 
