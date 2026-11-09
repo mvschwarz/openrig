@@ -1960,6 +1960,15 @@ export class QueueRepository {
     // One attempt per intent for the pass: a returned result and its resume go as one send, so the second row's turn
     // mustn't send them again after a refusal.
     const attempted = new Set<string>();
+    // Correlation can add peers to a send. Each claim must qualify for this retry on its own: a failed wake of this
+    // seat's pending row that the shared rule admits. A peer that may already have been written (indeterminate), or
+    // failed for another reason, isn't claimed here.
+    const eligible = (entry: OutboxEntry): boolean => {
+      if (entry.deliveryState !== "failed" || !entry.auditPointer) return false;
+      const current = this.getById(entry.auditPointer);
+      return current?.state === "pending" && addresses.includes(current.destinationSession) && !current.handedOffFrom
+        && this.unroutableWakeRetryable(current, now);
+    };
     for (const { qitem_id } of rows) {
       const row = this.getById(qitem_id);
       if (!row || row.state !== "pending" || !this.unroutableWakeRetryable(row, now)) continue;
@@ -1969,7 +1978,7 @@ export class QueueRepository {
         WHERE audit_pointer = ? AND substr(outbox_id, 1, ?) = ?`)
         .all(qitem_id, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX) as Array<{ outbox_id: string; delivery_state: string }> : [];
       if (intents.length) {
-        for (const intent of intents) if (intent.delivery_state === "failed") await this.deliverWakeIntent(intent.outbox_id, attempted);
+        for (const intent of intents) if (intent.delivery_state === "failed") await this.deliverWakeIntent(intent.outbox_id, attempted, eligible);
       } else await this.maybeNudge(qitem_id, row.destinationSession, undefined, row.sourceSession);
     }
   }

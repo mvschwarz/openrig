@@ -720,6 +720,52 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     for (const row of rows) expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("delivered");
   });
 
+  // A correlated peer is claimed only if it qualifies for this retry itself: one that may already have been written,
+  // or whose wake failed for another reason, isn't sent with the row that does.
+  async function correlatedLateRows() {
+    db.prepare("INSERT INTO rigs(id,name) VALUES ('fixture-rig','r')").run();
+    db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime,profile) VALUES ('late-node','fixture-rig','late','codex','none')").run();
+    const sent: string[] = [];
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      transport: { send: async (_destination, text) => { sent.push(text); return { ok: true, verified: true }; } },
+    });
+    const outbox = new OutboxHandler(db);
+    repo.attachOutbox(outbox);
+    const [failed, peer] = [await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body: "result" }),
+      await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body: "resume" })];
+    for (const row of [failed, peer]) {
+      await vi.waitFor(() => expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("failed"));
+      db.prepare("UPDATE outbox_entries SET tags = ? WHERE outbox_id = ?").run(JSON.stringify(["queue:return:common"]), `wake-intent-${row.qitemId}`);
+    }
+    db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
+    return { sent, outbox, failed, peer };
+  }
+
+  it("doesn't replay a correlated peer that may already have been written, sending only the failed row's wake", async () => {
+    const { sent, outbox, failed, peer } = await correlatedLateRows();
+    db.prepare("UPDATE outbox_entries SET delivery_state = 'indeterminate' WHERE outbox_id = ?").run(`wake-intent-${peer.qitemId}`);
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(failed.qitemId);
+    expect(sent[0]).not.toContain(peer.qitemId);
+    expect(outbox.getById(`wake-intent-${failed.qitemId}`)?.deliveryState).toBe("delivered");
+    expect(outbox.getById(`wake-intent-${peer.qitemId}`)?.deliveryState).toBe("indeterminate");
+  });
+
+  it("doesn't send a correlated peer whose wake failed for another reason with the row this retry re-sends", async () => {
+    const { sent, outbox, failed, peer } = await correlatedLateRows();
+    // The peer's wake was refused at a prompt: the prompt-clear retry's to re-send, not this one's.
+    db.prepare("UPDATE queue_items SET last_nudge_result = 'failed:target_needs_input' WHERE qitem_id = ?").run(peer.qitemId);
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(failed.qitemId);
+    expect(sent[0]).not.toContain(peer.qitemId);
+    expect(outbox.getById(`wake-intent-${failed.qitemId}`)?.deliveryState).toBe("delivered");
+    expect(outbox.getById(`wake-intent-${peer.qitemId}`)?.deliveryState).toBe("failed");
+  });
+
   it("re-sends through the row's wake intent: the intent reads delivered, and a later drain sends nothing", async () => {
     const { sent, outbox, row } = await lateSeatWithOutbox();
     await runSweep();
