@@ -134,9 +134,9 @@ export interface TerminalServiceDeps {
   resolveProvider(name: string): TerminalProvider | null;
   /** Resolve an explicit session without altering the default provider instance. */
   resolveSessionProvider?(name: string, session: string): TerminalProvider | null;
-  /** The herdr-app provider for one client (app home); null when this daemon can't serve herdr-app. */
   /** Daemon shutdown: stops herdr-app's own watcher and timers. */
   stopHerdrApp?(): void;
+  /** The herdr-app provider for one client (app home); null when this daemon can't serve herdr-app. */
   resolveHerdrAppProvider?(target: HerdrAppTarget): (TerminalProvider & { closeView(viewId: string): Promise<OpenViewResult>; appHome: string }) | null;
   /** The saved-views store (read paths only from this service). */
   viewsStore: Pick<TerminalViewsStore, "get" | "list">;
