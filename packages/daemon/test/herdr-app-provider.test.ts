@@ -124,7 +124,7 @@ let world: World;
 let files: HerdrAppClientFiles;
 let provider: HerdrAppProvider;
 
-function makeProvider(opts: { ackTimeoutMs?: number; hostname?: string; core?: { session: string; socket?: string }; ensureMods?: () => Promise<{ ok: true; notes?: string[] } | { ok: false; error: string }> } = {}) {
+function makeProvider(opts: { ackTimeoutMs?: number; gateWindowMs?: number; gatePollMs?: number; hostname?: string; core?: { session: string; socket?: string }; ensureMods?: () => Promise<{ ok: true; notes?: string[] } | { ok: false; error: string }> } = {}) {
   files = new HerdrAppClientFiles(join(home, "app"), join(home, "journal"));
   const realWrite = files.writeRig.bind(files);
   files.writeRig = async (tree) => {
@@ -144,6 +144,7 @@ function makeProvider(opts: { ackTimeoutMs?: number; hostname?: string; core?: {
     files, app: world.app(files) as never, hc, daemonInstance: "inst1", viewerCwd: join(home, "viewers"),
     ensureMods: opts.ensureMods ?? (async () => ({ ok: true })), ackTimeoutMs: opts.ackTimeoutMs ?? 300, nonce: () => `n${++n}`, now: () => world.clock,
     ...(opts.hostname ? { hostname: () => opts.hostname! } : {}),
+    gatePollMs: opts.gatePollMs ?? 20, ...(opts.gateWindowMs !== undefined ? { gateWindowMs: opts.gateWindowMs } : {}),
   });
 }
 
@@ -152,12 +153,14 @@ beforeEach(() => {
   mkdirSync(join(home, "app", "layouts"), { recursive: true });
   writeFileSync(join(home, "app", "layouts", "main.json"), JSON.stringify(BASE));
   world = new World(home);
+  // OpenRig's own viewers folder, where gate files go (ownWork creates it in the daemon).
+  mkdirSync(join(home, "viewers"), { recursive: true });
   makeProvider();
 });
-afterEach(() => { rmSync(home, { recursive: true, force: true }); });
+afterEach(() => { provider?.stop(); rmSync(home, { recursive: true, force: true }); });
 
 describe("HerdrAppProvider.openView", () => {
-  it("journals first, starts each viewer as the view's own tile (writable or read-only) with labels and no --keep, writes once, then reveals", async () => {
+  it("journals first, starts each viewer with labels and no --keep (an interactive one gated, a read-only one as composed), writes once, then reveals and opens the gate", async () => {
     const build = pane("dev.build@demo");
     const qa = pane("dev.qa@demo", true);
     const result = await provider.openView(composed([build, qa]));
@@ -167,20 +170,132 @@ describe("HerdrAppProvider.openView", () => {
     expect(world.log.filter((e) => e.startsWith("write:"))).toEqual(["write:t10,t11"]);
     const t = world.terminals.get("t10")!;
     expect(t.labels).toMatchObject({ "openrig.daemon": "inst1", "openrig.role": "viewer", "openrig.op": "n2", "openrig.seat": "dev.build@demo" });
-    expect(t.argv.slice(0, 5)).toEqual(["/bin/sh", "-c", expect.stringContaining("exec tail -f /dev/null"), "openrig-viewer", "n2"]);
-    // Each viewer runs the tile the view composed, unchanged: the interactive seat's writable tile (it attaches only
-    // while someone types in it), the read-only seat's tile that only shows.
-    expect(t.argv.slice(5)).toEqual(build.attachArgv);
+    // The interactive viewer: its gate file, the same seat's read-only tile, then the view's writable tile, unchanged.
+    const gate = join(home, "viewers", "n2.shown");
+    expect(t.argv.slice(0, 7)).toEqual(["/bin/sh", "-c", expect.stringContaining("exec tail -f /dev/null"), "openrig-viewer", "n2", gate,
+      tileAttachArgv("/usr/bin/tmux", ["-L", "openrig"], "dev.build@demo", true)[2]]);
+    expect(t.argv.slice(7)).toEqual(build.attachArgv);
+    // The read-only viewer runs its read-only tile as composed, with no gate.
+    expect(world.terminals.get("t11")!.argv.slice(3, 5)).toEqual(["openrig-viewer", "n3"]);
     expect(world.terminals.get("t11")!.argv.slice(5)).toEqual(qa.attachArgv);
-    expect(build.attachArgv).not.toEqual(qa.attachArgv);
     // Reveal order: switch to the Rig layout, then select the view once the app shows the write. Nothing else.
     const sw = world.log.findIndex((e) => e.startsWith("do:layout.switch"));
     const sel = world.log.findIndex((e) => e.startsWith(`do:layout.select:{"stack":"rig-work","child":"${result.space!.id}"}`));
     expect(sw).toBeGreaterThan(world.log.indexOf("write:t10,t11"));
     expect(sel).toBeGreaterThan(sw);
     expect(result.notes ?? []).toEqual([]);
-    // The journal records the read-only intent as the view composed it; there is no grant to record.
-    expect((await files.load()).views[0]!.viewers.map((v) => [v.seat, v.readOnly])).toEqual([["dev.build@demo", false], ["dev.qa@demo", true]]);
+    // The app showed the write, so the interactive viewer's gate is open and journalled; the read-only one has none.
+    expect(existsSync(gate)).toBe(true);
+    expect(existsSync(join(home, "viewers", "n3.shown"))).toBe(false);
+    expect((await files.load()).views[0]!.viewers.map((v) => [v.seat, v.readOnly, v.gate, v.gateUntil])).toEqual([
+      ["dev.build@demo", false, "open", undefined], ["dev.qa@demo", true, undefined, undefined]]);
+  });
+
+  describe("the reveal gate: an interactive viewer takes input only once the app shows it", () => {
+    const gateOf = (nonce: string) => join(home, "viewers", `${nonce}.shown`);
+    const viewers = async () => (await files.load()).views.flatMap((v) => v.viewers);
+    const waitFor = async (check: () => boolean, ms = 3_000) => { for (const end = Date.now() + ms; !check() && Date.now() < end;) await new Promise((r) => setTimeout(r, 10)); };
+
+    it("a view the app shows only after the open's wait opens its gate then, without selecting it", async () => {
+      world.applies = false;
+      const result = await provider.openView(composed([pane("dev.build@demo"), pane("dev.qa@demo", true)]));
+      expect(result.notes?.join(" ")).toContain("its interactive cells take no input until it does");
+      await new Promise((r) => setTimeout(r, 100));
+      expect(existsSync(gateOf("n2"))).toBe(false); // not shown yet: closed
+      expect((await viewers()).map((v) => v.gate)).toEqual(["pending", undefined]);
+      world.applies = true;
+      world.render(files);
+      await waitFor(() => existsSync(gateOf("n2")));
+      expect(existsSync(gateOf("n2"))).toBe(true);
+      for (let i = 0; i < 100 && (await viewers())[0]!.gate !== "open"; i++) await new Promise((r) => setTimeout(r, 10));
+      expect((await viewers()).map((v) => v.gate)).toEqual(["open", undefined]);
+      expect(existsSync(gateOf("n3"))).toBe(false);
+      expect(world.log.some((e) => e.startsWith("do:layout.select"))).toBe(false);
+    });
+
+    it("an acknowledged open whose gate can't be written at first (its viewers folder is missing) keeps it pending and opens it on a retry", async () => {
+      rmSync(join(home, "viewers"), { recursive: true, force: true });
+      await provider.openView(composed([pane("dev.build@demo")]));
+      expect((await viewers())[0]).toMatchObject({ gate: "pending", gateUntil: expect.any(String) });
+      mkdirSync(join(home, "viewers"));
+      await waitFor(() => existsSync(gateOf("n2")));
+      expect(existsSync(gateOf("n2"))).toBe(true);
+      for (let i = 0; i < 100 && (await viewers())[0]!.gate !== "open"; i++) await new Promise((r) => setTimeout(r, 10));
+      expect((await viewers())[0]!.gate).toBe("open");
+      expect(world.runs).toBe(1); // nothing started again
+    });
+
+    it("a late acknowledgement whose first gate attempt fails is tried again and opens", async () => {
+      world.applies = false;
+      await provider.openView(composed([pane("dev.build@demo")]));
+      rmSync(join(home, "viewers"), { recursive: true, force: true });
+      world.applies = true;
+      world.render(files);
+      await new Promise((r) => setTimeout(r, 150)); // shown, but the write keeps failing
+      expect((await viewers())[0]!.gate).toBe("pending");
+      mkdirSync(join(home, "viewers"));
+      await waitFor(() => existsSync(gateOf("n2")));
+      expect(existsSync(gateOf("n2"))).toBe(true);
+    });
+
+    it("the gate opens on the acknowledged reveal whatever the tile's tmux client is doing: OpenRig never looks for or switches a client", async () => {
+      // The provider has no tmux runner at all now; the gate is a file only this viewer reads.
+      await provider.openView(composed([pane("dev.build@demo")]));
+      expect(existsSync(gateOf("n2"))).toBe(true);
+      expect(world.log.some((e) => e.startsWith("tmux:"))).toBe(false);
+    });
+
+    it("stops waiting at its deadline, and stays closed", async () => {
+      makeProvider({ gateWindowMs: 50 });
+      world.applies = false;
+      await provider.openView(composed([pane("dev.build@demo")]));
+      await new Promise((r) => setTimeout(r, 150));
+      world.applies = true;
+      world.render(files);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(existsSync(gateOf("n2"))).toBe(false);
+      expect((await viewers())[0]!.gate).toBe("pending");
+    });
+
+    it("opens only the gates of viewers the app shows: never a read-only or remote viewer's, never another viewer's", async () => {
+      world.applies = false;
+      const remote: ComposedPane = { seat: "dev.remote@demo", label: "dev.remote · S1", runtime: "claude-code", readOnly: false, paneCommand: "ssh -t box2 'tmux attach -t =dev.remote@demo'" };
+      await provider.openView(composed([pane("dev.build@demo"), pane("dev.ops@demo"), pane("dev.qa@demo", true), remote]));
+      expect((await viewers()).map((v) => [v.seat, v.gate])).toEqual([
+        ["dev.build@demo", "pending"], ["dev.ops@demo", "pending"], ["dev.qa@demo", undefined], ["dev.remote@demo", undefined]]);
+      // An acknowledgement that lists only dev.build's terminal (t10).
+      world.ack = { revision: "r-other", terminals: ["t10"] };
+      await waitFor(() => existsSync(gateOf("n2")));
+      await new Promise((r) => setTimeout(r, 100));
+      expect(existsSync(gateOf("n2"))).toBe(true);
+      expect(["n3", "n4", "n5"].map((n) => existsSync(gateOf(n)))).toEqual([false, false, false]);
+    });
+
+    it("a cell already followed isn't followed twice (a resume while its follower runs adds no second one)", async () => {
+      world.applies = false;
+      let reads = 0;
+      makeProvider({ gatePollMs: 100 });
+      files.readAck = async () => { reads++; return world.ack; };
+      await provider.openView(composed([pane("dev.build@demo")]));
+      expect(await provider.resumePendingGates()).toEqual([(await viewers())[0]!.cellId]);
+      await provider.resumePendingGates();
+      await provider.resumePendingGates();
+      const before = reads;
+      await new Promise((r) => setTimeout(r, 1_000));
+      // One follower reads about every 100 ms; four would read about four times as often.
+      expect(reads - before).toBeGreaterThanOrEqual(4);
+      expect(reads - before).toBeLessThanOrEqual(13);
+    }, 10_000);
+
+    it("stop() ends the followers", async () => {
+      world.applies = false;
+      await provider.openView(composed([pane("dev.build@demo")]));
+      provider.stop();
+      world.applies = true;
+      world.render(files);
+      await new Promise((r) => setTimeout(r, 150));
+      expect(existsSync(gateOf("n2"))).toBe(false);
+    });
   });
 
   it("runs remote ssh viewers (interactive or read-only) as composed, with no read-only note, and migrates journals without attach", async () => {
@@ -225,6 +340,7 @@ describe("HerdrAppProvider.openView", () => {
       { seat: "dev.qa@demo", host: "herdr-app", code: "pane_unconfirmed", reason: expect.stringContaining("has not confirmed showing this view") },
     ]);
     expect(result.notes?.join(" ")).toContain("the window may not be showing it");
+    expect(result.notes?.join(" ")).toContain("its interactive cells take no input until it does");
     expect(result.notes?.join(" ")).not.toContain("appears there");
     // No retry and no rollback: the viewers run and the journal keeps them.
     expect(world.log.some((e) => e.startsWith("kill:"))).toBe(false);
@@ -713,9 +829,11 @@ describe("startup wiring (createHerdrAppProviders): passive lookups, views recov
   let spawnFn: typeof import("node:child_process").spawn;
   let herdrAppDir: string;
   const hcCalls: string[][] = [];
+  /** Viewers still running in core; any other recorded viewer ended while the daemon was down. */
+  const live = new Set<string>();
   const hc: HcRunner = async (args) => {
     hcCalls.push(args);
-    // The viewer recorded as live ended while the daemon was down.
+    if (args[0] === "get" && live.has(args[2]!)) return { exit: 0, json: { address: args[2], state: "live", pid: 4000 }, stdout: "" };
     if (args[0] === "get") return { exit: 3, json: null, stdout: "", error: { kind: "not_found" } };
     return { exit: 0, json: { terminals: [] }, stdout: "" };
   };
@@ -724,6 +842,7 @@ describe("startup wiring (createHerdrAppProviders): passive lookups, views recov
     const { EventEmitter } = await import("node:events");
     spawned = [];
     hcCalls.length = 0;
+    live.clear();
     herdrAppDir = join(home, "openrig", "private", "herdr-app");
     spawnFn = ((_cmd: string, args: string[]) => {
       const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), unref: () => {}, killed: false, exitCode: null, signalCode: null, args,
@@ -769,6 +888,39 @@ describe("startup wiring (createHerdrAppProviders): passive lookups, views recov
     const rig = readFileSync(journal.rigPath, "utf8");
     expect(rig).toContain("rv-1");
     expect(rig).not.toContain("\"t5\"");
+    herdrApp.stop();
+  });
+
+  it("after a restart, a pending gate still inside its window opens once the app shows its viewer; an expired one stays closed", async () => {
+    const appHome = join(home, "app");
+    const journal = new HerdrAppClientFiles(appHome, join(herdrAppDir, "clients"));
+    const minutes = (n: number) => new Date(Date.now() + n * 60_000).toISOString();
+    live.add("t5");
+    live.add("t6");
+    await journal.save({ appHome, base: "main", revision: null, writtenSha: null, pendingEnds: [], views: [{
+      id: "rv-1", name: "demo", source: { view: "rig:demo", page: 0 }, createdAt: "2026-11-07T00:00:00.000Z",
+      viewers: [
+        { cellId: "c-1", seat: "dev.build@demo", label: "dev.build · S1", nonce: "n1", argv: ["/bin/sh"], readOnly: false,
+          attach: "local", gate: "pending", gateUntil: minutes(5), terminal: "t5", state: "live" },
+        { cellId: "c-2", seat: "dev.qa@demo", label: "dev.qa · S1", nonce: "n2", argv: ["/bin/sh"], readOnly: false,
+          attach: "local", gate: "pending", gateUntil: minutes(-1), terminal: "t6", state: "live" },
+      ],
+    }] });
+    // The app shows both (its acknowledgement of an earlier revision lists them).
+    mkdirSync(join(appHome, "openrig"), { recursive: true });
+    writeFileSync(journal.ackPath, JSON.stringify({ revision: "r-before-restart", terminals: ["t5", "t6"] }));
+    const herdrApp = await create();
+    await herdrApp.recovered;
+    const gate = (nonce: string) => join(herdrAppDir, "viewers", `${nonce}.shown`);
+    for (let i = 0; i < 200 && !existsSync(gate("n1")); i++) await new Promise((r) => setTimeout(r, 10));
+    expect(existsSync(gate("n1"))).toBe(true);
+    expect(existsSync(gate("n2"))).toBe(false);
+    for (let i = 0; i < 100 && (await journal.load()).views[0]!.viewers[0]!.gate !== "open"; i++) await new Promise((r) => setTimeout(r, 10));
+    const [kept, expired] = (await journal.load()).views[0]!.viewers;
+    expect(kept).toMatchObject({ gate: "open", state: "live" });
+    expect(kept!.gateUntil).toBeUndefined();
+    expect(expired).toMatchObject({ gate: "pending", state: "live" });
+    expect(hcCalls.some((c) => c[0] === "run")).toBe(false); // nothing started
     herdrApp.stop();
   });
 

@@ -24,6 +24,11 @@ export interface ViewerRecord {
   argv: string[];
   /** As the view composed the pane: a read-only tile only shows its seat; an interactive one takes typed keys. */
   readOnly: boolean;
+  /** Interactive local viewers only. pending: the app hasn't shown it yet, so it takes no input; open: its gate file is
+   *  written, and its writable tile runs. */
+  gate?: "pending" | "open";
+  /** While pending: until when (ISO, wall clock) OpenRig keeps waiting for the app to show it, across a daemon restart. */
+  gateUntil?: string;
   /** Local seats run the view's own tile for the seat (openrig-tile); remote seats run their own ssh command. */
   attach: "local" | "remote";
   terminal: string | null;

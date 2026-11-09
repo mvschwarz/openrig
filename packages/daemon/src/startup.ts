@@ -2927,12 +2927,15 @@ export async function createHerdrAppProviders(opts: {
         if (!provider) continue;
         ownWork();
         await provider.reconcile().catch(() => {});
+        // A gate still pending when the daemon stopped is followed again, within its recorded window.
+        await provider.resumePendingGates().catch(() => {});
       } catch { /* an unreadable journal stays as it is; an open of that app home reports it */ }
     }
   })();
   const stop = () => {
     stopped = true;
     watch.stop();
+    for (const provider of providers.values()) provider.stop();
   };
   return { resolve, recovered, stop };
 }

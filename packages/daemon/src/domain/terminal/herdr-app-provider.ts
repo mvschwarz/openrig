@@ -14,7 +14,10 @@
 // Removing viewers (close, rollback, a viewer that ended) rewrites the file FIRST and ends a viewer only after the
 // app has acknowledged a revision that no longer shows it, and only when the viewer is verifiably OpenRig's
 // (journal + labels + exact argv). Anything uncertain is left running and reported.
+import { rm, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
+import { join } from "node:path";
+import { tileAttachArgv } from "./tile-attach.js";
 import { cellFor, deriveRigLayout, RIG_LAYOUT, RIG_STACK, type RigView } from "./herdr-app-layout.js";
 import { awaitApplied, newNonce, type ClientState, type HerdrAppClientFiles, type PendingEnd, type ViewerRecord, type ViewRecord } from "./herdr-app-state.js";
 import { describeCore, type AppReply, type HcRunner, type HerdrAppClient } from "./herdr-app-transport.js";
@@ -35,18 +38,38 @@ export const UNKNOWN_START_TTL_MS = 10 * 60 * 1000;
  */
 const DEFINITE_HC_ERROR_KINDS = new Set(["invalid_params", "not_found", "conflict", "name_taken", "usage"]);
 
-/** Waits after the attach ends, so the terminal never ends on its own; OpenRig rewrites the cell, then ends it.
- *  herdr-core panes may run programs with TERM=dumb, whose terminfo has no `clear` capability, so a tmux client
- *  refuses with "open terminal failed: terminal does not support clear". When the inherited TERM can't be verified as
+/** herdr-core panes may run programs with TERM=dumb, whose terminfo has no `clear` capability, so a tmux client refuses
+ *  with "open terminal failed: terminal does not support clear". When the inherited TERM can't be verified as
  *  clear-capable, use xterm-256color. */
-const VIEWER_WRAPPER = 'shift; if ! (command -v infocmp >/dev/null 2>&1 && infocmp "$TERM" 2>/dev/null | grep -q "clear="); then TERM=xterm-256color; export TERM; fi; "$@"; status=$?; printf "\\r\\n%s\\r\\n" "The seat session ended here (exit $status). OpenRig will update this view; nothing else runs in this cell."; exec tail -f /dev/null';
+const TERM_GUARD = 'if ! (command -v infocmp >/dev/null 2>&1 && infocmp "$TERM" 2>/dev/null | grep -q "clear="); then TERM=xterm-256color; export TERM; fi;';
+/** Waits after the tile ends, so the terminal never ends on its own; OpenRig rewrites the cell, then ends it. */
+const VIEWER_ENDED = 'status=$?; printf "\\r\\n%s\\r\\n" "The seat session ended here (exit $status). OpenRig will update this view; nothing else runs in this cell."; exec tail -f /dev/null';
+const VIEWER_WRAPPER = `shift; ${TERM_GUARD} "$@"; ${VIEWER_ENDED}`;
+/** An interactive local viewer until the app has shown it: the read-only tile (it shows the seat and takes no input)
+ *  runs until OpenRig writes this viewer's gate file, then the view's writable tile runs in its place. Input that came
+ *  before (typed in the cell, or written to the terminal with hc send) is dropped, never delivered late. Arguments:
+ *  the gate file, the read-only tile's script, then the writable tile's argv. */
+const GATED_WRAPPER = [
+  "shift;", TERM_GUARD,
+  "g=$1; ro=$2; shift 2; a=$1; b=$2; c=$3; shift 3;",
+  // The read-only tile keeps the terminal as its input (a background job's would be /dev/null), so its stty applies.
+  '"$a" "$b" "$ro" "$@" <&0 & v=$!;',
+  'while [ ! -e "$g" ] && kill -0 "$v" 2>/dev/null; do sleep 0.2 2>/dev/null || sleep 1; done;',
+  'if [ -e "$g" ] && kill -0 "$v" 2>/dev/null; then kill "$v" 2>/dev/null; wait "$v" 2>/dev/null;',
+  'if [ -t 0 ]; then stty -icanon min 0 time 0 2>/dev/null; i=0; while [ "$i" -lt 64 ]; do dd bs=4096 count=1 of=/dev/null 2>/dev/null; i=$((i + 1)); done; stty sane 2>/dev/null; fi;',
+  '"$a" "$b" "$c" "$@"; else wait "$v"; fi;',
+  VIEWER_ENDED,
+].join(" ");
 
-export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand">, nonce: string): string[] {
-  // The pane's own tile, as the view composed it (writable or read-only), or a remote pane's ssh command: OpenRig
-  // rewrites neither. A writable tile isn't a client of the seat until someone types in its cell, and checks the
-  // seat's server and identity before it attaches.
-  const attach = pane.attachArgv ?? ["/bin/sh", "-c", pane.paneCommand];
-  return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, ...attach];
+/** A viewer's argv. A remote pane runs its ssh paneCommand as composed, and a read-only local pane its read-only tile;
+ *  OpenRig rewrites neither. An interactive local pane, given its gate file, shows the read-only tile until the gate
+ *  opens and the view's writable tile after (`GATED_WRAPPER`). */
+export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand" | "readOnly">, nonce: string, gate?: string): string[] {
+  if (!pane.attachArgv) return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, "/bin/sh", "-c", pane.paneCommand];
+  if (pane.readOnly || !gate) return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, ...pane.attachArgv];
+  // The composed tile is `sh -c <script> openrig-tile <session> <tmux> <server args...>`; the same seat's read-only tile.
+  const readOnly = tileAttachArgv(pane.attachArgv[5]!, pane.attachArgv.slice(6), pane.attachArgv[4]!, true);
+  return ["/bin/sh", "-c", GATED_WRAPPER, "openrig-viewer", nonce, gate, readOnly[2]!, ...pane.attachArgv];
 }
 
 export interface HerdrAppProviderDeps {
@@ -64,6 +87,11 @@ export interface HerdrAppProviderDeps {
    *  that work needs (the viewers folder, the hc events watcher). A status, preview or listing never calls it. */
   ownWork?(): void;
   ackTimeoutMs?: number;
+  /** How long an interactive viewer's gate keeps waiting for the app to show it (late acknowledgement, a failed gate
+   *  write), across a daemon restart. */
+  gateWindowMs?: number;
+  /** How often a pending gate checks whether the app shows its viewer yet. */
+  gatePollMs?: number;
   nonce?(): string;
   /** This daemon's machine, named when no window answers here (default: os.hostname()). */
   hostname?(): string;
@@ -94,8 +122,34 @@ export class HerdrAppProvider implements TerminalProvider {
   readonly name = HERDR_APP_PROVIDER;
   readonly panesPerPage = 16;
   private queue: Promise<unknown> = Promise.resolve();
+  private stopped = false;
+  /** Cells a pending-gate follower already follows (never two followers for one cell). */
+  private readonly watching = new Set<string>();
+  /** The followers' timers: each wakes its sleeper early on stop. */
+  private readonly timers = new Map<ReturnType<typeof setTimeout>, () => void>();
 
   constructor(private readonly deps: HerdrAppProviderDeps) {}
+
+  /** Ends this provider's own waits (daemon shutdown). Viewers, gates and files are left as they are. */
+  stop(): void {
+    this.stopped = true;
+    for (const [timer, wake] of this.timers) { clearTimeout(timer); wake(); }
+    this.timers.clear();
+  }
+
+  private sleep(ms: number): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { this.timers.delete(timer); resolve(); }, ms);
+      timer.unref?.();
+      this.timers.set(timer, resolve);
+    });
+  }
+
+  /** The file whose existence lets this viewer take input (in OpenRig's own viewers folder). */
+  private gatePath(nonce: string): string { return join(this.deps.viewerCwd, `${nonce}.shown`); }
+  /** A pending gate's deadline: wall clock, so it holds across a restart. */
+  private gateDeadline(): string { return new Date(Date.now() + (this.deps.gateWindowMs ?? 10 * 60 * 1000)).toISOString(); }
 
   get appHome(): string { return this.deps.files.appHome; }
 
@@ -204,6 +258,7 @@ export class HerdrAppProvider implements TerminalProvider {
         } else if (seen.state === "gone") {
           viewer.state = "ended";
           viewer.terminal = null;
+          await this.closeGate(viewer.nonce);
           changed = true;
           notes.push(`${viewer.label}: its viewer ended outside OpenRig; its cell now says so.`);
         }
@@ -263,8 +318,11 @@ export class HerdrAppProvider implements TerminalProvider {
         viewers: page.map((pane) => {
           const nonce = this.nonce();
           const cell = cellFor(id, pane, nonce, null);
+          const gated = !!pane.attachArgv && !pane.readOnly;
           return { cellId: cell.id, seat: pane.seat, label: pane.label, ...(pane.runtime ? { runtime: pane.runtime } : {}),
-            nonce, argv: viewerArgv(pane, nonce), readOnly: pane.readOnly, attach: pane.attachArgv ? "local" as const : "remote" as const,
+            nonce, argv: viewerArgv(pane, nonce, gated ? this.gatePath(nonce) : undefined), readOnly: pane.readOnly,
+            attach: pane.attachArgv ? "local" as const : "remote" as const,
+            ...(gated ? { gate: "pending" as const, gateUntil: this.gateDeadline() } : {}),
             terminal: null, state: "planned" as const };
         }),
       };
@@ -362,7 +420,8 @@ export class HerdrAppProvider implements TerminalProvider {
     return { ok: true, revision };
   }
 
-  /** Shows the first page of this open: the Rig layout, then the view once the app shows the write. */
+  /** Shows the first page of this open: the Rig layout, then the view once the app shows the write. Once the app has
+   *  acknowledged the write, every page's interactive viewers take input (their gates open); not before. */
   private async reveal(pages: ViewRecord[], revision: string): Promise<{ notes: string[]; confirmed: boolean }> {
     const view = pages[0]!;
     const notes: string[] = [];
@@ -373,12 +432,83 @@ export class HerdrAppProvider implements TerminalProvider {
       if (switched.kind !== "ok") notes.push(`Showing OpenRig's Rig layout: ${describe(switched)}.`);
     }
     if (!await awaitApplied(this.deps.files, revision, [], { timeoutMs: this.deps.ackTimeoutMs ?? 8_000 })) {
-      notes.push(`herdr-app has not confirmed showing this view. It is written to the Rig layout file, but the window may not be showing it. If this window is attached to a different herdr-core than the daemon's (${describeCore(this.deps.hc)}), the viewers never appear here; start the daemon with that core's HC_SESSION/HC_SOCKET.`);
+      // It may still be shown later: its interactive viewers' gates open then, within their window.
+      this.watchPending(pages.flatMap((page) => page.viewers).filter((v) => v.gate === "pending").map((v) => v.cellId));
+      notes.push(`herdr-app has not confirmed showing this view. It is written to the Rig layout file, but the window may not be showing it; its interactive cells take no input until it does. If this window is attached to a different herdr-core than the daemon's (${describeCore(this.deps.hc)}), the viewers never appear here; start the daemon with that core's HC_SESSION/HC_SOCKET.`);
       return { notes, confirmed: false };
     }
     const selected = await app.do("layout.select", { stack: RIG_STACK, child: view.id });
     if (selected.kind !== "ok") notes.push(`Selecting the view: ${describe(selected)}. It is in the Rig strip.`);
+    // The app shows it: the interactive viewers take input from now on. A gate that can't be written yet is retried.
+    const retry: string[] = [];
+    for (const viewer of pages.flatMap((page) => page.viewers)) {
+      if (viewer.gate !== "pending" || viewer.state !== "live" || !viewer.terminal) continue;
+      if (await this.openGate(viewer)) { viewer.gate = "open"; delete viewer.gateUntil; } else retry.push(viewer.cellId);
+    }
+    this.watchPending(retry);
     return { notes, confirmed: true };
+  }
+
+  /** Writes this viewer's gate file; false when it can't be written (the follower tries again). */
+  private async openGate(viewer: ViewerRecord): Promise<boolean> {
+    try { await writeFile(this.gatePath(viewer.nonce), ""); return true; } catch { return false; }
+  }
+
+  /** Follows pending gates until each opens or its window (`gateUntil`) ends: the app showing the viewer late (an
+   *  acknowledgement of that write or a later one lists its terminal), or a gate write that failed. Never selects the
+   *  view (the person may be elsewhere) and never starts anything. A cell already followed isn't followed twice. */
+  private watchPending(cells: string[]): void {
+    const fresh = cells.filter((cell) => !this.watching.has(cell));
+    if (!fresh.length) return;
+    for (const cell of fresh) this.watching.add(cell);
+    let waiting = fresh;
+    void (async () => {
+      try {
+        while (!this.stopped && waiting.length) {
+          const ack = await this.deps.files.readAck().catch(() => null);
+          waiting = await this.serial(() => this.openPending(waiting, ack?.terminals ?? []));
+          if (!waiting.length) return;
+          await this.sleep(this.deps.gatePollMs ?? 500);
+        }
+      } finally {
+        for (const cell of fresh) this.watching.delete(cell);
+      }
+    })().catch(() => {});
+  }
+
+  /** One pass: opens the pending gates of viewers the app shows. Returns the cells still waiting within their window. */
+  private async openPending(cells: readonly string[], shown: readonly string[]): Promise<string[]> {
+    if (this.stopped) return [];
+    const state = await this.deps.files.load();
+    const waiting: string[] = [];
+    let changed = false;
+    for (const viewer of state.views.flatMap((v) => v.viewers)) {
+      if (!cells.includes(viewer.cellId) || viewer.gate !== "pending") continue;
+      if (viewer.attach !== "local" || viewer.readOnly || viewer.state !== "live" || !viewer.terminal) continue;
+      const until = viewer.gateUntil ? Date.parse(viewer.gateUntil) : NaN;
+      if (!(until > Date.now())) continue;
+      if (shown.includes(viewer.terminal) && await this.openGate(viewer)) {
+        viewer.gate = "open";
+        delete viewer.gateUntil;
+        changed = true;
+      } else waiting.push(viewer.cellId);
+    }
+    if (changed) await this.deps.files.save(state);
+    return waiting;
+  }
+
+  /** After a daemon restart: pending gates the journal records, still inside their window, are followed again. */
+  resumePendingGates(): Promise<string[]> {
+    return this.serial(async () => {
+      if (this.stopped) return [];
+      const state = await this.deps.files.load();
+      const cells = state.views.flatMap((v) => v.viewers)
+        .filter((v) => v.gate === "pending" && v.attach === "local" && !v.readOnly && v.state === "live" && v.terminal
+          && v.gateUntil && Date.parse(v.gateUntil) > Date.now())
+        .map((v) => v.cellId);
+      this.watchPending(cells);
+      return cells;
+    });
   }
 
   /**
@@ -461,6 +591,11 @@ export class HerdrAppProvider implements TerminalProvider {
     return notes;
   }
 
+  /** Removes a viewer's gate file once the viewer is gone. */
+  private async closeGate(nonce: string): Promise<void> {
+    await rm(this.gatePath(nonce), { force: true }).catch(() => {});
+  }
+
   /** Ends a viewer only when the journal, its labels and its exact argv all say it is this OpenRig's. `kept`: still
    *  pending (core couldn't be asked, or the kill failed), to be tried again. */
   private async endVerified(end: Removal): Promise<{ kept: boolean; note?: string }> {
@@ -484,7 +619,7 @@ export class HerdrAppProvider implements TerminalProvider {
       terminal = hit.address as string;
     }
     const seen = await terminalState(this.deps.hc, terminal);
-    if (seen.state === "gone") return { kept: false };
+    if (seen.state === "gone") { await this.closeGate(end.nonce); return { kept: false }; }
     if (seen.state === "unknown") return { kept: true, note: `Viewer ${terminal} was left running for now: core could not be asked (${seen.reason}).` };
     const t = seen.record;
     const ours = t.labels?.["openrig.role"] === "viewer" && t.labels?.["openrig.op"] === end.nonce
@@ -492,6 +627,7 @@ export class HerdrAppProvider implements TerminalProvider {
       && JSON.stringify(t.argv) === JSON.stringify(end.argv);
     if (!ours) return { kept: false, note: `Viewer ${terminal} was left in place: it can't be verified as this OpenRig's.` };
     const killed = await this.deps.hc(["kill", terminal]);
+    if (killed.exit === 0) await this.closeGate(end.nonce);
     return killed.exit === 0 ? { kept: false } : { kept: true, note: `Viewer ${terminal} could not be ended yet: ${killed.error?.message ?? `hc exited ${killed.exit}`}.` };
   }
 }
