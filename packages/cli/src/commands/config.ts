@@ -10,12 +10,17 @@ function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting
   return store.resolveAllWithSource();
 }
 
+interface ContextPressureFallbackInfo {
+  effectiveValue: number;
+  explanation: string;
+}
+
 /**
- * Returns an explanatory string if setting/resetting a context-pressure key caused
- * an inverted threshold pair to be rejected and fall back to 95/99 defaults in this shell.
+ * Returns fallback explanation and effective default value if setting/resetting a context-pressure
+ * key caused an inverted threshold pair to be rejected and fall back to 95/99 defaults in this shell.
  * Returns null if no pair rejection occurred.
  */
-function getContextPressureFallbackExplanation(store: ConfigStore, key: string): string | null {
+function getContextPressureFallbackInfo(store: ConfigStore, key: string): ContextPressureFallbackInfo | null {
   if (key !== "health.context_pressure.warning_percent" && key !== "health.context_pressure.critical_percent") {
     return null;
   }
@@ -34,7 +39,9 @@ function getContextPressureFallbackExplanation(store: ConfigStore, key: string):
     envSources.push(`${ENV_MAP[critKey].primary}=${state.critical.value}`);
   }
   const envDetails = envSources.length > 0 ? ` from ${envSources.join(", ")}` : "";
-  return `; inverted pair ${state.rejectedPair.warning}/${state.rejectedPair.critical}${envDetails} falls back to 95/99 defaults in this shell`;
+  const explanation = `; inverted pair ${state.rejectedPair.warning}/${state.rejectedPair.critical}${envDetails} falls back to 95/99 defaults in this shell`;
+  const effectiveValue = key === warnKey ? 95 : 99;
+  return { effectiveValue, explanation };
 }
 
 // These settings remain boot-only; capture interval/line settings reload live.
@@ -220,10 +227,9 @@ Precedence: CLI flag > environment variable > config file > default`)
     .action(async (key: string, value: string) => {
       try {
         store.set(key, value);
-        const explanation = getContextPressureFallbackExplanation(store, key);
-        if (explanation) {
-          const resolved = store.resolveWithSource(key);
-          console.log(`${key} file override saved; effective value ${resolved.value} (source: default${explanation})`);
+        const fallbackInfo = getContextPressureFallbackInfo(store, key);
+        if (fallbackInfo) {
+          console.log(`${key} file override saved; effective value ${fallbackInfo.effectiveValue} (source: default${fallbackInfo.explanation})`);
         } else {
           console.log(`${key} = ${store.get(key)}`);
         }
@@ -245,10 +251,9 @@ Precedence: CLI flag > environment variable > config file > default`)
       try {
         store.reset(key);
         if (key) {
-          const explanation = getContextPressureFallbackExplanation(store, key);
-          if (explanation) {
-            const resolved = store.resolveWithSource(key);
-            console.log(`${key} file override cleared; effective value ${resolved.value} (source: default${explanation}).`);
+          const fallbackInfo = getContextPressureFallbackInfo(store, key);
+          if (fallbackInfo) {
+            console.log(`${key} file override cleared; effective value ${fallbackInfo.effectiveValue} (source: default${fallbackInfo.explanation}).`);
           } else {
             console.log(`${key} reset to default (${store.get(key)}).`);
           }

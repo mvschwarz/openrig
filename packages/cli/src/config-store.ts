@@ -1456,9 +1456,19 @@ export class ConfigStore {
   }
 
   /** Inspect resolved context-pressure policy and whether an inverted pair was rejected. */
-  resolveContextPressurePolicyState(): ContextPressurePolicyState {
-    const fileConfig = this.readConfigFile();
-    const workspaceRoot = this.resolveOne("workspace.root", fileConfig, DEFAULT_WORKSPACE_ROOT).value as string;
+  resolveContextPressurePolicyState(
+    fileConfig?: Record<string, unknown>,
+    workspaceRoot?: string,
+  ): ContextPressurePolicyState {
+    const fc = fileConfig ?? this.readConfigFile();
+    const wr = workspaceRoot ?? (this.resolveOne("workspace.root", fc, DEFAULT_WORKSPACE_ROOT).value as string);
+    return this.resolveContextPressureStateRaw(fc, wr);
+  }
+
+  private resolveContextPressureStateRaw(
+    fileConfig: Record<string, unknown>,
+    workspaceRoot: string,
+  ): ContextPressurePolicyState {
     const warningKey = "health.context_pressure.warning_percent" as const;
     const criticalKey = "health.context_pressure.critical_percent" as const;
     const warning = this.resolveOneUnpaired(warningKey, fileConfig, workspaceRoot);
@@ -1486,13 +1496,12 @@ export class ConfigStore {
   ): Record<"health.context_pressure.warning_percent" | "health.context_pressure.critical_percent", ResolvedSetting> {
     const warningKey = "health.context_pressure.warning_percent" as const;
     const criticalKey = "health.context_pressure.critical_percent" as const;
-    const warning = this.resolveOneUnpaired(warningKey, fileConfig, workspaceRoot);
-    const critical = this.resolveOneUnpaired(criticalKey, fileConfig, workspaceRoot);
-    if ((warning.value as number) < (critical.value as number)) {
-      return { [warningKey]: warning, [criticalKey]: critical };
+    const state = this.resolveContextPressureStateRaw(fileConfig, workspaceRoot);
+    if (!state.rejectedPair) {
+      return { [warningKey]: state.warning, [criticalKey]: state.critical };
     }
     process.stderr.write(
-      `[openrig-config] context-pressure policy rejected: warning (${warning.value}) must be less than critical (${critical.value}); falling back to 95/99 defaults\n`,
+      `[openrig-config] context-pressure policy rejected: warning (${state.warning.value}) must be less than critical (${state.critical.value}); falling back to 95/99 defaults\n`,
     );
     return {
       [warningKey]: { value: 95, source: "default", defaultValue: 95 },
