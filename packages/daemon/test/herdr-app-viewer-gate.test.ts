@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { viewerArgv } from "../src/domain/terminal/herdr-app-provider.js";
@@ -45,8 +46,9 @@ describe.skipIf(!tmuxBin)("the generated herdr-app viewer (real tmux): nothing r
   };
 
   beforeEach(async () => {
-    // tmux socket paths are limited to about 100 bytes, so not under a long temporary folder.
-    dir = mkdtempSync("/tmp/orvg-");
+    // Under the system's temporary folder (a sandbox may allow sockets only there), with short names: tmux socket paths
+    // are limited to about 100 bytes.
+    dir = mkdtempSync(join(tmpdir(), "orvg-"));
     seat = join(dir, "s");
     view = join(dir, "v");
     await tmux(seat, "-f", "/dev/null", "new-session", "-d", "-s", "seat1", "-x", "80", "-y", "20", "cat");
