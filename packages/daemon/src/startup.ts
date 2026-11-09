@@ -687,6 +687,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // by the seat-handover full-cycle composer when it creates a successor
   // session (OPR.0.4.3.04), so a handed-over successor self-identifies +
   // reports activity exactly like a launched seat.
+  const terminalTokenEnv = process.env.OPENRIG_TERMINAL_BEARER_TOKEN?.trim();
+  const terminalBearerToken = opts && Object.prototype.hasOwnProperty.call(opts, "terminalBearerToken")
+    ? opts.terminalBearerToken ?? null : terminalTokenEnv || null;
   const launchSessionEnv: Record<string, string | undefined> = {
     PATH: process.env.PATH,
     OPENRIG_HOME,
@@ -696,6 +699,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     OPENRIG_HOST: openRigHost,
     OPENRIG_URL: resolvedActivityHookUrl,
     OPENRIG_ACTIVITY_HOOK_TOKEN: resolvedActivityHookToken,
+    ...(terminalBearerToken ? { OPENRIG_TERMINAL_BEARER_TOKEN: terminalBearerToken } : {}),
+    ...(opts?.bearerToken ? { OPENRIG_AUTH_BEARER_TOKEN: opts.bearerToken } : {}),
     ...providerAuthEnv,
     HOME: daemonHome,
     USER: process.env.USER,
@@ -1970,11 +1975,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // at route mount time (not per-request).
     deps.missionControlBearerToken = opts?.bearerToken ?? null;
 
-    const terminalTokenEnv = process.env.OPENRIG_TERMINAL_BEARER_TOKEN?.trim();
-    deps.terminalBearerToken =
-      opts && Object.prototype.hasOwnProperty.call(opts, "terminalBearerToken")
-        ? opts.terminalBearerToken ?? null
-        : terminalTokenEnv || null;
+    deps.terminalBearerToken = terminalBearerToken;
 
     // Notification dispatcher: chosen mechanism via env config.
     // OPENRIG_NOTIFICATIONS_MECHANISM=ntfy|webhook|none (default none).
