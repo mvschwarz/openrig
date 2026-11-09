@@ -644,7 +644,7 @@ describe("readSeatBeforePaste: verified needs a seat proven idle before the past
       ["a choice behind a heavy border", ["┃ 2) No"]],
       ["a row starting with ❯", ["❯ resume the last session"]],
       ["numbered choices selected by colour only", ["  1. Yes", "  2. No"]],
-      // Revisão cruzada S1: a blank row among statusLine rows, as the idle check rules it out.
+      // A blank row among statusLine rows: the idle check rules it out, so the input-box read must too.
       ["a blank row above a statusLine row", ["", STATUS]],
       ["a whitespace-only row under a statusLine row", [STATUS, "   "]],
     ])("unrecognized: %s between the closing rule and the footer", (_name, rows) => {
