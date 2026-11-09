@@ -206,7 +206,7 @@ it.each([false, true])("resume tolerates unavailable tmux identity only without 
   expect(dispatched).toBe(!chosen);
 });
 
-it("reports the real cause when a declared home meets the seat's own Pi login, and keeps that login", async () => {
+it("reports the real cause and the seat's own login file when a declared home meets that login, and keeps it", async () => {
   const { main } = await import("../src/adapters/pi-runner.js");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-own-login-")); roots.push(root);
   const account = path.join(root, "account"), agent = path.join(root, "seat", "agent");
@@ -220,8 +220,10 @@ it("reports the real cause when a declared home meets the seat's own Pi login, a
     expect(process.exitCode).toBe(2);
     const printed = error.mock.calls.flat().join("\n");
     expect(printed).toContain("Existing Pi login is not a managed account link; use a confirmed account switch");
-    expect(printed).toContain("The seat's own Pi login was not changed");
+    expect(printed).toContain(`seat login file ${JSON.stringify(path.join(agent, "auth.json"))}`);
+    expect(printed).toContain(`account file ${JSON.stringify(path.join(account, "auth.json"))}`);
     expect(printed).not.toContain("provide a readable prepared account file");
+    expect(printed).not.toContain("was not changed");
     expect(fs.readFileSync(path.join(agent, "auth.json"), "utf8")).toBe("seat-login");
   } finally { process.exitCode = exitCode; error.mockRestore(); }
 });
