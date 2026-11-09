@@ -52,8 +52,9 @@ const VIEWER_WRAPPER = `shift; ${TERM_GUARD} "$@"; ${VIEWER_ENDED}`;
 const GATED_WRAPPER = [
   "shift;", TERM_GUARD,
   "g=$1; ro=$2; shift 2; a=$1; b=$2; c=$3; shift 3;",
-  // The read-only tile keeps the terminal as its input (a background job's would be /dev/null), so its stty applies.
-  '"$a" "$b" "$ro" "$@" <&0 & v=$!;',
+  // The read-only tile keeps the terminal as its input, so its stty applies (no echo). A background job's stdin is
+  // /dev/null before any redirection, so the terminal is kept on fd 3 first.
+  'exec 3<&0; "$a" "$b" "$ro" "$@" <&3 3<&- & v=$!; exec 3<&-;',
   'while [ ! -e "$g" ] && kill -0 "$v" 2>/dev/null; do sleep 0.2 2>/dev/null || sleep 1; done;',
   'if [ -e "$g" ] && kill -0 "$v" 2>/dev/null; then kill "$v" 2>/dev/null; wait "$v" 2>/dev/null;',
   'if [ -t 0 ]; then stty -icanon min 0 time 0 2>/dev/null; i=0; while [ "$i" -lt 64 ]; do dd bs=4096 count=1 of=/dev/null 2>/dev/null; i=$((i + 1)); done; stty sane 2>/dev/null; fi;',

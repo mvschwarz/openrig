@@ -52,6 +52,8 @@ describe.skipIf(!tmuxBin)("the generated herdr-app viewer (real tmux): nothing r
     await new Promise((r) => setTimeout(r, 1_500));
     expect(await shown()).not.toMatch(/BEFORE/);
     expect(await clients()).toEqual([]); // the read-only tile only shows the seat
+    // Nor does the cell echo it: the read-only tile turned echo off on the viewer's own terminal.
+    expect((await tmux(view, "capture-pane", "-p", "-t", "v1")).stdout).not.toMatch(/BEFOREKEYS|BEFORE-PASTE/);
     writeFileSync(gate, "");
     await new Promise((r) => setTimeout(r, 1_500));
     await paste("AFTER-PASTE");
