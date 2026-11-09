@@ -73,8 +73,8 @@ describe("rig queue erase", () => {
     expect(process.exitCode).toBe(1);
     expect(posts).toEqual([]);
     expect(errors.join("\n")).toMatch(/Nothing was erased/);
-    await run(deps, "--routine", "--actor", "cloud-executor@n-ops");
-    expect(posts).toEqual([{ path: "/api/queue/erase", body: { apply: false, routine: true, actorSession: "cloud-executor@n-ops" } }]);
+    await run(deps, "--routine", "--actor", "erase-runner@n-ops");
+    expect(posts).toEqual([{ path: "/api/queue/erase", body: { apply: false, routine: true, actorSession: "erase-runner@n-ops" } }]);
   });
 
   it("a daemon refusal exits nonzero", async () => {
