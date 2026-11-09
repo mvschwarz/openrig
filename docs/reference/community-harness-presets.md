@@ -165,7 +165,8 @@ and reports what it's doing, as OpenRig's own Pi runner does. The seat's activit
   unavailable.
 - **Input is as for any seat.** A send pastes the text and presses Enter, so a runner should submit everything up to that
   Enter as one prompt.
-- **`launch_wrapper: true` declares wrapper support and requires `runner: true`.** See the
+- **`launch_wrapper: true` declares wrapper support and requires `runner: true`.** A member with a wrapper and a runner preset without this flag is refused at preflight and launch (not schema validation):
+  `launch_wrapper unsupported: the community preset "<runtime>" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.` See the
   [harness and runner contract](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch)
   for the environment handoff, native-child execution and refusal requirements.
 

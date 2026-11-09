@@ -933,7 +933,7 @@ describe("legacy flat node launch_wrapper (#2328)", () => {
     for (const value of [["mtn", "--"], []]) {
       const result = LegacyRigSpecSchema.validate(withLegacyNode(runtime, { launch_wrapper: value }));
       expect(result.valid).toBe(false);
-      expect(result.errors).toContain('nodes.worker.launch_wrapper: only valid when runtime is "pi", "codex" or "claude-code"');
+      expect(result.errors).toContain('nodes.worker.launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness');
     }
   });
 

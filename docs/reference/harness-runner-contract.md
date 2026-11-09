@@ -86,8 +86,9 @@ has a wrapper and its runner preset declares `launch_wrapper: true`, OpenRig pas
 The runner must exec its native child as `<argv...> <agent> <args>`, preserving argument boundaries, and keep its own
 process outside the wrapper. The runner must remove `OPENRIG_LAUNCH_WRAPPER` from the environment it passes to the wrapper
 and native child; the handoff belongs to the runner only. The wrapper must `exec` the agent in place. If wrapping fails,
-the runner must never fall back to an unwrapped spawn. A runner preset without the flag is refused at preflight and launch when a wrapper is
-configured: `launch_wrapper unavailable; no agent started.` A plain preset needs no flag: OpenRig prefixes its command
+the runner must never fall back to an unwrapped spawn. A runner preset without the flag is refused at preflight and launch (not schema validation) when a wrapper is
+configured: `launch_wrapper unsupported: the community preset "<runtime>" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.`
+A plain preset needs no flag: OpenRig prefixes its command
 immediately before the preset's native command, after OpenRig's launcher assignments (for example,
 `/usr/bin/env OPENRIG_LAUNCH_RESULT=… <wrapper> <preset.command>`), at the same seam as Codex. OpenRig never sets
 `OPENRIG_LAUNCH_WRAPPER` for a plain preset and removes any inherited value.

@@ -117,7 +117,7 @@ exec "$@"
     const up = await rig(["up", specFor("incapable-runner-rig", "incapable-runner", wrapper.argv), "--cwd", rigRoot, "--json", "--yes"], 120_000);
     expect(up.code, JSON.stringify(up)).not.toBe(0);
     expect(JSON.parse(up.stdout)).toMatchObject({ code: "preflight_failed", errors: expect.arrayContaining([
-      expect.stringContaining("launch_wrapper unavailable; no agent started.")]) });
+      expect.stringContaining('launch_wrapper unsupported: the community preset "incapable-runner" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.')]) });
     expect(() => readFileSync(marker)).toThrow();
     expect(() => readFileSync(wrapper.record)).toThrow();
   }, 150_000);

@@ -13,6 +13,7 @@ import type {
 import type { ProjectionPlan } from "../domain/projection-planner.js";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
+import { unsupportedCommunityRunnerLaunchWrapperMessage } from "../domain/launch-wrapper.js";
 import { isShellForeground } from "../domain/shell-classifier.js";
 import { isCommunityHarnessRuntime, loadCommunityHarnessPreset, communityHarnessesDir } from "../domain/community-harness-presets.js";
 import { communityHarnessOf } from "../domain/built-in-runtimes.js";
@@ -115,8 +116,11 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     if (!found.ok) return { ok: false, error: found.message };
     let resolvedWrapper: string[] | undefined;
     if (binding.launchWrapper?.length) {
-      if (!this.deps.seatLaunchEnvironment || (found.preset.runner && !found.preset.launchWrapper)) {
+      if (!this.deps.seatLaunchEnvironment) {
         return { ok: false, error: "launch_wrapper unavailable; no agent started." };
+      }
+      if (found.preset.runner && !found.preset.launchWrapper) {
+        return { ok: false, error: unsupportedCommunityRunnerLaunchWrapperMessage(this.runtime) };
       }
       try {
         resolvedWrapper = this.deps.seatLaunchEnvironment.resolveLaunchWrapper(binding.launchWrapper);
@@ -190,9 +194,6 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       if (!binding.launchWrapper?.length) throw error;
       return { ok: false, error: "launch_wrapper unavailable; no agent started." };
     }
-    if (binding.launchWrapper?.length && command === "printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false") {
-      return { ok: false, error: "launch_wrapper unavailable; no agent started." };
-    }
     const sent = await this.deps.tmux.sendShellCommand(session, command, beforeInput, { stageIfLong: true, execInScript: true });
     if (!sent.ok) return { ok: false, error: `Couldn't start community harness "${this.runtime}": ${sent.message}` };
     onSent?.();
@@ -236,9 +237,6 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
         : launcherPrefix + preset;
     } catch (error) {
       if (!binding.launchWrapper?.length) throw error;
-      return { ok: false, error: "launch_wrapper unavailable; no agent started." };
-    }
-    if (binding.launchWrapper?.length && command === "printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false") {
       return { ok: false, error: "launch_wrapper unavailable; no agent started." };
     }
     const sent = await this.deps.tmux.sendShellCommand(session, command, beforeInput, { stageIfLong: true, execInScript: true });

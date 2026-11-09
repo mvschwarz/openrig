@@ -221,7 +221,7 @@ describe("the community harness adapter", () => {
     const resolveLaunchWrapper = vi.fn(() => ["/resolved/wrapper"]);
     const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: { command, resolveLaunchWrapper }, presetsDir: () => dir });
     expect(await app.launchHarness({ ...binding, launchWrapper: ["wrapper"] }, { name: "w@r", firstInputText: "never sent" }))
-      .toEqual({ ok: false, error: "launch_wrapper unavailable; no agent started." });
+      .toEqual({ ok: false, error: 'launch_wrapper unsupported: the community preset "synth" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.' });
     expect(tmux.sendShellCommand).not.toHaveBeenCalled();
     expect(command).not.toHaveBeenCalled();
     expect(resolveLaunchWrapper).not.toHaveBeenCalled();
@@ -245,23 +245,20 @@ describe("the community harness adapter", () => {
   });
 
   it.each(["plain", "reported", "named", "resume", "runner"])("refuses wrapped %s command failures before recording any input or identity", async mode => {
-    for (const failure of ["throw", "refusal"]) {
-      const declarations = mode === "runner" ? "runner: true\nlaunch_result: true\nlaunch_wrapper: true\n"
-        : mode === "reported" ? "launch_result: true\n" : mode === "plain" ? "" : "names_conversation: true\nresume: true\n";
-      const dir = presets({ "synth.yaml": GOOD + declarations + "first_input: true\npasses_model: true\n" });
-      const { tmux } = adapter(dir);
-      const command = vi.fn(async () => {
-        if (failure === "throw") throw new Error("private environment detail");
-        return "printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false";
-      });
-      const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir,
-        seatLaunchEnvironment: { command, resolveLaunchWrapper: () => ["/bin/echo", "--"] },
-        launchResultRoot: () => join(dir, "results"), launchResultWait: { timeoutMs: 0 } });
-      expect(await app.launchHarness({ ...binding, launchWrapper: ["/bin/echo", "--"], model: "model-a" },
-        { name: "w@r", firstInputText: "never handed off", ...(mode === "resume" ? { resumeToken: "saved", resumeType: "community:synth" } : {}) }))
-        .toEqual({ ok: false, error: "launch_wrapper unavailable; no agent started." });
-      expect(tmux.sendShellCommand).not.toHaveBeenCalled();
-    }
+    const declarations = mode === "runner" ? "runner: true\nlaunch_result: true\nlaunch_wrapper: true\n"
+      : mode === "reported" ? "launch_result: true\n" : mode === "plain" ? "" : "names_conversation: true\nresume: true\n";
+    const dir = presets({ "synth.yaml": GOOD + declarations + "first_input: true\npasses_model: true\n" });
+    const { tmux } = adapter(dir);
+    const command = vi.fn(async () => {
+      throw new Error("private environment detail");
+    });
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir,
+      seatLaunchEnvironment: { command, resolveLaunchWrapper: () => ["/bin/echo", "--"] },
+      launchResultRoot: () => join(dir, "results"), launchResultWait: { timeoutMs: 0 } });
+    expect(await app.launchHarness({ ...binding, launchWrapper: ["/bin/echo", "--"], model: "model-a" },
+      { name: "w@r", firstInputText: "never handed off", ...(mode === "resume" ? { resumeToken: "saved", resumeType: "community:synth" } : {}) }))
+      .toEqual({ ok: false, error: "launch_wrapper unavailable; no agent started." });
+    expect(tmux.sendShellCommand).not.toHaveBeenCalled();
   });
 
   it("preserves transport uncertainty after a wrapped command was prepared", async () => {

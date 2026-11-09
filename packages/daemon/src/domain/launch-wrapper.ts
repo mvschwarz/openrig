@@ -7,6 +7,10 @@ export function isLaunchWrapperRuntime(runtime: unknown): runtime is string {
   return typeof runtime === "string" && (LAUNCH_WRAPPER_RUNTIMES.has(runtime) || (isCommunityHarnessRuntime(runtime) && runtime !== "openshell-claude"));
 }
 
+export function unsupportedCommunityRunnerLaunchWrapperMessage(runtime: string): string {
+  return `launch_wrapper unsupported: the community preset "${runtime}" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.`;
+}
+
 function isValidWrapperExecutable(executable: string): boolean {
   if (executable.trim().length === 0) return false;
   return executable.startsWith("/") || !executable.includes("/");

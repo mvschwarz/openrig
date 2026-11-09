@@ -606,7 +606,7 @@ describe("RigInstantiator", () => {
     if (!result.ok) {
       expect(result.code).toBe("validation_failed");
       if (result.code === "validation_failed") {
-        expect(result.errors).toContain('nodes.bad-terminal.launch_wrapper: only valid when runtime is "pi", "codex" or "claude-code"');
+        expect(result.errors).toContain('nodes.bad-terminal.launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness');
       }
     }
     expect(rigRepo.listRigs()).toHaveLength(0);

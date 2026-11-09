@@ -357,7 +357,7 @@ describe("Rebooted rig preflight", () => {
       });
       expect(result.ready, JSON.stringify(result.errors)).toBe(ready);
       if (ready) expect(result.errors).toEqual([]);
-      else expect(result.errors).toContain("dev.impl: launch_wrapper unavailable; no agent started.");
+      else expect(result.errors).toContain('dev.impl: launch_wrapper unsupported: the community preset "synth" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.');
     } finally {
       if (previousHome === undefined) delete process.env.OPENRIG_HOME;
       else process.env.OPENRIG_HOME = previousHome;

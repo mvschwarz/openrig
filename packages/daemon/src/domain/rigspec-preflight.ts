@@ -11,7 +11,7 @@ import { deriveCanonicalSessionName, deriveSessionName, tmuxRenamedSessionError,
 import { shellQuote } from "../adapters/shell-quote.js";
 import { mergeSeatEnv, type SeatEnv } from "./seat-env.js";
 import { withoutRuntimeHomes } from "./seat-runtime-home.js";
-import { isLaunchWrapperRuntime } from "./launch-wrapper.js";
+import { isLaunchWrapperRuntime, unsupportedCommunityRunnerLaunchWrapperMessage } from "./launch-wrapper.js";
 import { resolveLaunchWrapperArgv } from "./seat-launch-environment.js";
 
 const RUNTIME_COMMANDS: Record<string, string> = {
@@ -439,7 +439,7 @@ async function preflightMembers(
         if (!app.ok) {
           errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}": ${app.kind === "missing" ? "it isn't built in, and " : ""}${app.message}`);
         } else if (member.launchWrapper?.length && app.preset.runner && !app.preset.launchWrapper) {
-          errors.push(`${pod.id}.${member.id}: launch_wrapper unavailable; no agent started.`);
+          errors.push(`${pod.id}.${member.id}: ${unsupportedCommunityRunnerLaunchWrapperMessage(member.runtime)}`);
         }
       }
 
