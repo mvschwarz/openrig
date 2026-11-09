@@ -172,7 +172,10 @@ rig gateway human set alice binding.0 "relay:local-bridge:file:$HOME/.config/ope
 ```
 
 > [!NOTE]
-> `rig gateway human set alice binding.<n>` requires a full binding specification string. Supplying `unset` is not supported for binding slots. To reassign a participant, overwrite the slot with a full binding string or remove and re-add the human fragment.
+> `rig gateway human set alice binding.<n>` accepts either a full binding specification string or `unset` to remove that binding slot:
+> - **One-primary rule:** No replacement primary is chosen silently. If removing a `primary` binding would leave other bindings, the command refuses. To replace the primary in place, set its slot to the new primary spec; to promote an existing secondary binding, unset that secondary slot first, then set the primary slot to its spec with role `primary` (`rig gateway human show <entityId> --json` prints it); to remove every binding, unset the secondary bindings first, then the primary.
+> - **Shifted slot indexes:** Removal returns `remainingBindings` with their new `binding.<n>` slot numbers. Because indexes shift down after removal, do not blindly retry `binding.0 unset`; inspect `remainingBindings`, the operation receipt, or `rig gateway human show <entityId>` before retrying.
+> - **What removal does:** Removing a binding keeps the person, their preferences, their other bindings, and their open questions. Removing the last binding makes the current delivery episode inactive, so missing-post findings stop; the current delivery-outcome display may disappear too, while historical receipt notes remain. It does not answer, close, or cancel open questions, cancel or reroute already-prepared deliveries, or retract anything a bridge has already accepted. A person with no binding needs a daemon from the release that accepts one (v0.7.9+); do not roll back past it while any fragment has `connectorBindings: []`.
 
 Operator notices use the existing default person. If several people are registered, choose the recipient explicitly when needed:
 
@@ -203,7 +206,11 @@ rig daemon status
 In `rig gateway human show <entityId> --json`, `deliveryReadiness.state` reports `ready` when the binding configuration and local secrets file are valid. This confirms local readiness, not whether the operator bridge process is currently running.
 
 ### Step 5: Removing Bindings or Participants
-Before removing a participant, ensure any pending queue items and conversations assigned to them are resolved.
+To remove a connector binding while keeping the participant, their preferences, their other bindings, and their open questions, unset the binding slot:
+```bash
+rig gateway human set alice binding.0 unset --reason "retire relay bridge"
+```
+Before removing a participant altogether, ensure any pending queue items and conversations assigned to them are resolved:
 ```bash
 rig gateway human remove alice
 ```
