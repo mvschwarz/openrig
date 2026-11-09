@@ -694,7 +694,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // The line writers must give exactly the planned fields in valid TOML (they don't read every TOML spelling);
     // otherwise neither file changes, and OpenRig's old inline block, if any, stays working.
     try {
-      if (!isDeepStrictEqual(parseToml(config), expected)) throw new Error("its trust records couldn't be written exactly");
+      if (!sameToml(parseToml(config), expected)) throw new Error("its trust records couldn't be written exactly");
     } catch (err) {
       console.error(`[openrig] codex activity hooks skipped: ${configPath}: ${(err as Error).message}; left untouched`);
       return;
@@ -782,7 +782,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           if (kept.length > 0) document.hooks[event] = kept.map((index) => groups[index]!);
           else delete document.hooks[event];
         }
-        if (!isDeepStrictEqual(withoutEmptyHookTables(parseToml(config)), withoutEmptyHookTables(expected))) {
+        if (!sameToml(withoutEmptyHookTables(parseToml(config)), withoutEmptyHookTables(expected))) {
           throw new Error("its hooks' trust records couldn't be moved exactly");
         }
         const json = `${JSON.stringify(document, null, 2)}\n`;
@@ -2481,6 +2481,20 @@ type CodexHookState = Record<string, Record<string, unknown>>;
 
 function codexHookStateOf(document: unknown): CodexHookState {
   return (document as { hooks?: { state?: CodexHookState } } | null)?.hooks?.state ?? {};
+}
+
+/** Whether two TOML values hold the same content. smol-toml 1.9 parses tables with a null prototype (1.8 gave them
+ *  Object's), and isDeepStrictEqual also compares prototypes, so a table OpenRig builds never equaled the same table
+ *  parsed back (#2720). Both sides' tables are compared as plain objects; other objects, such as dates, as they are. */
+function sameToml(a: unknown, b: unknown): boolean {
+  const plain = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(plain);
+    if (value === null || typeof value !== "object") return value;
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== null && proto !== Object.prototype) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, plain(entry)]));
+  };
+  return isDeepStrictEqual(plain(a), plain(b));
 }
 
 /** A parsed config without an empty `hooks.state`, or then an empty `hooks`: the text drops a table with its last
