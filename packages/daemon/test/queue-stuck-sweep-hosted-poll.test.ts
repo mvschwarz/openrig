@@ -262,4 +262,38 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     const open = notices().filter((n) => n.state === "pending");
     expect(open.map((n) => n.destinationSession)).toEqual(["operator@hub"]);
   });
+
+  it("a notice to a creator lists only that creator's rows: another creator's row moves every row to the next recipient", async () => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    const noPerson = { resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" };
+    const first = await work(MEMBER, { ageMinutes: 61 });
+    await sweep(noPerson);
+    const [toLead] = notices();
+    expect(toLead!.destinationSession).toBe("lead@hub");
+
+    // Another row from the same creator joins it in place.
+    const second = await work(MEMBER, { ageMinutes: 62 });
+    await sweep(noPerson);
+    expect(notices().map((n) => n.qitemId)).toEqual([toLead!.qitemId]);
+    expect(repo.getById(toLead!.qitemId)!.body).toContain(second.qitemId);
+
+    // A row from another creator never reaches lead@hub: that notice closes, and one notice for every row goes on.
+    const other = await work(MEMBER, { from: "orch@hub", ageMinutes: 70 });
+    await sweep(noPerson);
+    const closed = repo.getById(toLead!.qitemId)!;
+    expect(closed.body).not.toContain(other.qitemId);
+    expect(closed.state).toBe("done");
+    const open = notices().filter((n) => n.state === "pending");
+    expect(open.map((n) => n.destinationSession)).toEqual(["operator@hub"]);
+    for (const row of [first, second, other]) expect(open[0]!.body).toContain(row.qitemId);
+
+    // The operator agent sees any row: a further creator's row joins its notice in place.
+    seedSeat("third@hub");
+    const third = await work(MEMBER, { from: "third@hub", ageMinutes: 71 });
+    await sweep(noPerson);
+    expect(notices().filter((n) => n.state === "pending").map((n) => n.qitemId)).toEqual([open[0]!.qitemId]);
+    expect(repo.getById(open[0]!.qitemId)!.body).toContain(third.qitemId);
+    expect(perRow()).toEqual([]);
+  });
 });

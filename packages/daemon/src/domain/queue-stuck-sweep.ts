@@ -1212,6 +1212,12 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         && !isBoundTerminalSeat(deps.db, seat));
       return { chosen, seat: chosen < 0 ? null : choices[chosen]! };
     };
+    /** The person (the operator seat when it's a person's address) or the operator agent: recipients that may see any row. */
+    const seesAnyRow = (seat: string): boolean => {
+      const operatorSeat = (deps.resolveOperatorSeat ?? resolveOperatorSeat)();
+      if (operatorSeat === seat && classOf(seat) === "gateway-routable") return true;
+      return (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)() === seat;
+    };
     const routeAroundNoWake = (c: Candidate): void => {
       if (c.route !== c.row.destinationSession) return;
       const destination = classOf(c.row.destinationSession);
@@ -1415,17 +1421,45 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const backlogText = (standsFor: BacklogRow[]) => polled
         ? polledBacklogText(seat, standsFor, ageMinutes, deps.queueRepo.lastInboxCheckIn(seat), now)
         : unclaimedBacklogText(seat, standsFor, ageMinutes, node);
+      // A polling member's notice goes where its rows' findings went: the person, else their creator when they share one,
+      // else the operator agent. With none, it stays with the member, which reads it when it next checks.
+      const recipientFor = (creators: string[]): string => {
+        if (!polled) return seat;
+        const distinct = [...new Set(creators)];
+        return noWakeRecipient(seat, distinct.length === 1 ? distinct[0]! : null).seat ?? seat;
+      };
+      const fileNotice = async (text: { summary: string; body: string }, recipient: string): Promise<void> => {
+        try {
+          const created = await deps.queueRepo.create({
+            // A notice about a seat's own rows comes from that seat, as a restore notice does; OpenRig wakes its recipient.
+            sourceSession: seat,
+            destinationSession: recipient,
+            body: text.body,
+            summary: text.summary,
+            evidenceRef: `rig queue list --destination ${seat} --state pending`,
+            tags: [STUCK_SWEEP_FINDING_TAG, tag],
+            wakeTrigger: "openrig" as const,
+          });
+          othersMayHaveRun();
+          findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: created.qitemId, action: "created" });
+        } catch (err) {
+          const message = `unclaimed-backlog notice for ${seat} not created: ${err instanceof Error ? err.message : String(err)}`;
+          othersMayHaveRun();
+          log(`[stuck-sweep] ${message}`);
+          failedCreates.push(message);
+        }
+      };
       const last = deps.db
         .prepare(
           // The first term lets the planner use idx_queue_items_recovery_tags, as the finding lookup above does.
-          `SELECT qitem_id, state, ts_updated, summary, body FROM queue_items
+          `SELECT qitem_id, state, ts_updated, summary, body, destination_session FROM queue_items
             WHERE (tags LIKE '%"stuck-sweep:%') AND tags LIKE ? ESCAPE '\\'
             ORDER BY CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END,
                      ts_updated DESC, ts_created DESC, qitem_id DESC
             LIMIT 1`,
         )
         .get(`%"${tag.replace(/[\\%_]/g, (ch) => `\\${ch}`)}"%`) as
-        | { qitem_id: string; state: string; ts_updated: string; summary: string | null; body: string }
+        | { qitem_id: string; state: string; ts_updated: string; summary: string | null; body: string; destination_session: string }
         | undefined;
       if (last && ["pending", "in-progress", "blocked"].includes(last.state)) {
         const listedNow = new Set(rows.map((c) => c.row.qitemId));
@@ -1456,6 +1490,24 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: last.qitem_id, action: "closed" });
           continue;
         }
+        // A notice that went to one of its rows' creators (no person reachable) shows that creator only rows it sent. When a
+        // row from anyone else would join it, it closes, and one notice for every row it stands for goes where a new notice
+        // would go now, which wakes that recipient. A person, the operator agent and the member see any of the rows.
+        if (polled && last.destination_session !== seat && !seesAnyRow(last.destination_session)
+          && standsFor.some((r) => r.from !== last.destination_session)) {
+          const recipient = recipientFor(standsFor.map((r) => r.from));
+          await deps.queueRepo.update({
+            qitemId: last.qitem_id,
+            actorSession: "stuck-sweep@system",
+            state: "done",
+            closureReason: "no-follow-on",
+            transitionNote: `stuck-sweep re-filed: unclaimed-backlog on ${seat}: a row it stands for didn't come from ${last.destination_session}, the creator it went to; one notice for every row goes to ${recipient}`,
+          });
+          othersMayHaveRun();
+          findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: last.qitem_id, action: "closed" });
+          await fileNotice(backlogText(standsFor), recipient);
+          continue;
+        }
         const text = backlogText(standsFor);
         if (text.summary !== last.summary || text.body !== last.body) {
           deps.db.prepare("UPDATE queue_items SET body = ?, summary = ? WHERE qitem_id = ? AND body = ? AND summary IS ? AND state IN ('pending', 'in-progress', 'blocked')")
@@ -1477,30 +1529,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // A closed notice whose list is unreadable holds back every row, each until it has newer evidence than the close.
       const covered = last ? backlogRowsOf(last.body) : null;
       if (last && !current.some((c) => (covered !== null && !covered.has(c.row.qitemId)) || evidenceIsNewer(c.evidenceAt, last.ts_updated))) continue;
-      const text = backlogText(current.map(backlogRow));
-      // A polling member's notice goes where its rows' findings went: the person, else their creator when they share one,
-      // else the operator agent. With none, it stays with the member, which reads it when it next checks.
-      const creators = [...new Set(current.map((c) => c.row.sourceSession))];
-      const recipient = polled ? (noWakeRecipient(seat, creators.length === 1 ? creators[0]! : null).seat ?? seat) : seat;
-      try {
-        const created = await deps.queueRepo.create({
-          // A notice about a seat's own rows comes from that seat, as a restore notice does; OpenRig wakes its recipient.
-          sourceSession: seat,
-          destinationSession: recipient,
-          body: text.body,
-          summary: text.summary,
-          evidenceRef: `rig queue list --destination ${seat} --state pending`,
-          tags: [STUCK_SWEEP_FINDING_TAG, tag],
-          wakeTrigger: "openrig" as const,
-        });
-        othersMayHaveRun();
-        findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: created.qitemId, action: "created" });
-      } catch (err) {
-        const message = `unclaimed-backlog notice for ${seat} not created: ${err instanceof Error ? err.message : String(err)}`;
-        othersMayHaveRun();
-        log(`[stuck-sweep] ${message}`);
-        failedCreates.push(message);
-      }
+      await fileNotice(backlogText(current.map(backlogRow)), recipientFor(current.map((c) => c.row.sourceSession)));
     }
 
     // Resolution: an open finding whose underlying condition is no longer detected closes
