@@ -129,8 +129,9 @@ export async function exitedSeats(
   const live = listed.filter((p): p is Record<string, unknown> =>
     p !== null && typeof p === "object" && (p as Record<string, unknown>)["tab_id"] === tabId);
   if (live.length === 0) return unconfirmed();
-  if (!live.every((p) => typeof p["label"] === "string")) return unconfirmed();
-  const liveLabels = live.map((p) => p["label"] as string);
+  // Herdr omits the optional label on blank filler panes (#2747).
+  if (!live.every((p) => !("label" in p) || typeof p["label"] === "string")) return unconfirmed();
+  const liveLabels = live.map((p) => (p["label"] ?? "") as string);
   // A seat whose label is blank can't be matched, and can't be told apart from a filler pane.
   const blankSeats = pagePanes.filter((pane) => normalLabel(pane.label) === "");
   // Blank filler panes run a shell and stay. A tab holding exactly the fillers, all blank-labelled, has
