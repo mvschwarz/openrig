@@ -10,5 +10,6 @@ export const queueErasureLinkIndexesSchema: Migration = {
     CREATE INDEX IF NOT EXISTS idx_stream_dispositions_work_qitem ON stream_dispositions(work_qitem_id);
     CREATE INDEX IF NOT EXISTS idx_stream_dispositions_effect_qitem ON stream_dispositions(effect_qitem_id);
     CREATE INDEX IF NOT EXISTS idx_stream_reader_actions_work_qitem ON stream_reader_actions(work_qitem_id);
+    CREATE INDEX IF NOT EXISTS idx_stream_reader_actions_duplicate_of ON stream_reader_actions(duplicate_of);
   `,
 };

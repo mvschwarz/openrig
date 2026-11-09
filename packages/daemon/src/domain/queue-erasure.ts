@@ -21,17 +21,28 @@ import type Database from "better-sqlite3";
  * retention touches only closed rows (done, canceled, denied, handed-off; never failed or open work), aged from the
  * start of their final closed state. A row a workflow still references is reported, never erased.
  *
- * A run selects everything first, then walks the events table once in seq windows (no index serves a payload match,
- * and one statement over a large table would hold the daemon), then erases rows batch by batch, one transaction each
- * (better-sqlite3 commits a transaction on return and rolls it back on a throw), yielding between steps. With a
- * ledger path, each batch's ids and actions are appended there before the batch commits. A run that stops, by its
- * batch limit or an error, returns only what it committed; a rerun picks up the rest.
+ * A run selects everything first, then reads the events table once in seq windows to find the events naming each
+ * selected row (no index serves a payload match, and one statement over a large table would hold the daemon), then
+ * erases batch by batch, yielding between steps. Each batch is one transaction (better-sqlite3 commits a transaction
+ * on return and rolls it back on a throw): it rechecks its rows, since anything may have changed them since selection
+ * (a reopened row is open work again), writes their ledger lines, then changes their events, copies and rows. A run
+ * that stops, by its batch limit or an error, returns only what it committed; a rerun picks up the rest.
  */
 
 /** The closed states routine retention may erase. `failed` stays out: account deletion covers it. */
 export const CLOSED_QUEUE_STATES = ["done", "canceled", "denied", "handed-off"] as const;
-/** The closure reasons whose closure_target is an id (a successor); for the others it can be a reason or note. */
+/** The closure reasons whose closure_target names a successor; for the others it can be a reason or note. */
 const ID_CLOSURE_REASONS = ["handed_off_to", "superseded"] as const;
+/** A successor as a closure target names it: a session address, or a queue id (either with a host suffix). */
+const ADDRESS_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?$/;
+const QITEM_SHAPE = /^qitem-[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?$/;
+
+/** A scrub keeps a closure target only when it names a successor: closure writes don't constrain the target, so text
+ *  under a successor reason is cleared like any other note. */
+function keepsClosureTarget(reason: unknown, target: unknown): boolean {
+  return ID_CLOSURE_REASONS.includes(reason as (typeof ID_CLOSURE_REASONS)[number]) && typeof target === "string"
+    && target.length <= 256 && (ADDRESS_SHAPE.test(target) || QITEM_SHAPE.test(target));
+}
 
 export type EraseAction = "scrub" | "delete";
 export type EraseScope =
@@ -56,12 +67,14 @@ export interface EraseOptions {
   maxBatches?: number;
   /** events rows (by seq) read per step of the events walk */
   eventsWindow?: number;
-  /** append each erased row's {qitemId, action, reason, erasedAt} here, one JSON line each, before its batch commits */
+  /** append each erased row's {qitemId, action, reason, erasedAt} here, one JSON line each, before its batch changes
+   *  anything; the file is opened before the run writes anything at all */
   ledgerPath?: string;
 }
 
-type Stage = "select" | "events" | "rows" | "unlinked" | "rig";
+type Stage = "ledger" | "select" | "events" | "rows" | "unlinked" | "rig";
 type CopyTable = "outbox_entries" | "inbox_entries" | "stream_reader_actions" | "stream_dispositions";
+export type EraseGap = { code: "workflow-reference" | "not-found" | "changed-during-run"; qitemId: string };
 
 export interface EraseReport {
   ok: true;
@@ -69,7 +82,8 @@ export interface EraseReport {
   scope: EraseScope["kind"];
   /** false when the run stopped at maxBatches or on an error; rerun to continue */
   complete: boolean;
-  /** complete, and nothing was left: no mixed rows or copies, gaps, unknowns, or left-over entries or rig records */
+  /** complete, and nothing was left: no mixed rows or copies, gaps, unreadable events, or left-over entries or rig
+   *  records */
   clean: boolean;
   /** why the run stopped early, and where; everything listed in qitems was committed before it */
   error?: { stage: Stage; message: string };
@@ -77,25 +91,32 @@ export interface EraseReport {
   qitems: Array<{ qitemId: string; action: EraseAction; state: string }>;
   /** members scope: rows with exactly one member endpoint, left untouched */
   mixed: Array<{ qitemId: string; memberEndpoint: "source" | "destination" }>;
-  /** rows not erased, and why: a workflow references them, or (ids scope) no such row to scrub */
-  gaps: Array<{ code: "workflow-reference" | "not-found"; qitemId: string }>;
-  /** ids scope, delete: rows already gone whose id marker is (re)written */
+  /** rows not erased, and why: a workflow references them, (ids scope) no such row to scrub, or the row changed after
+   *  selection so it no longer qualifies (reopened, or written to out of its window) */
+  gaps: EraseGap[];
+  /** ids scope, delete: rows already gone whose id marker is (re)written; listed once the marker is committed */
   alreadyAbsent: string[];
   /** an erased row's copies held with someone else: mixed (one of their sessions is the owner's) or foreign (none) */
   keptCopies: Array<{ table: CopyTable; id: string; qitemId: string; ownership: "mixed" | "foreign" }>;
+  /** events naming a selected row whose payload can't be read: kept, since what they hold can't be inspected */
+  unreadableEvents: Array<{ seq: number; qitemIds: string[] }>;
   /** copies erased with the rows, or that would be */
   linked: { transitions: number; archivedTransitions: number; outbox: number; inbox: number; events: number; streamActions: number; missionControl: number };
   /** members scope: entries between members that no queue row owns; mixed ones are counted and left */
   unlinked?: { outbox: number; inbox: number; streamItems: number; mixedEntries: number; referencedStreamItems: number };
-  /** members scope with rig: whether the rig was found and verified, its records erased and left per table, and the
-   *  tables whose records can't be counted (an unverified removed rig) */
-  rig?: { id: string; found: boolean; verified: boolean; erased: Record<string, number>; left: Record<string, number>; unknown: string[] };
+  /** members scope with rig: whether the rig was found and verified, its records erased and left per table, the
+   *  tables whose records can't be counted (an unverified removed rig), and when its erasure completed */
+  rig?: { id: string; found: boolean; verified: boolean; erased: Record<string, number>; left: Record<string, number>; unknown: string[];
+    completedAt?: string };
   routine?: { contentDays: number; metadataDays: number };
 }
 
 const DEFAULT_BATCH = 500;
 const DEFAULT_MAX_BATCHES = 10_000;
 const DEFAULT_EVENTS_WINDOW = 1_000;
+/** Rows erased per transaction. Each one rechecks its rows and rewrites their events, so it's kept smaller than a
+ *  selection page: on a 2.4M-event store, 500 rows held the daemon up to 0.5 s, and 100 up to 0.25 s. */
+const ROWS_PER_TRANSACTION = 100;
 
 function cutoffIso(nowIso: string, days: number): string {
   const now = new Date(nowIso);
@@ -109,13 +130,14 @@ function yieldToLoop(): Promise<void> {
 
 const IDS = "(SELECT value FROM json_each(@ids))";
 const MEMBERS = "(SELECT value FROM json_each(@members))";
-const ID_CLOSURES = ID_CLOSURE_REASONS.map((reason) => `'${reason}'`).join(", ");
 /** The payload keys a row-naming event uses: queue events name it in qitemId; inbox, workflow and mission-control
  *  events use these others. */
 const EVENT_ID_KEYS = ["qitemId", "promotedQitemId", "priorQitemId", "nextQitemId"] as const;
-/** The content keys of row-naming events; a scrubbed event keeps its type and ids. closureTarget goes too, unless the
- *  closure names a successor. */
+/** The content keys of row-naming events; a scrubbed event keeps its type and ids. closureTarget goes too, unless it
+ *  names a successor. */
 const EVENT_CONTENT_KEYS = ["summary", "reason", "error"] as const;
+/** instr is a cheap prefilter for row-naming events: every id key ends in "temId" (qitemId, promotedQitemId, ...). */
+const NAMES_A_ROW = "instr(payload, 'temId') > 0";
 
 class Statements {
   constructor(private readonly db: Database.Database) {}
@@ -148,6 +170,7 @@ function workflowReferenced(st: Statements, ids: string[]): Set<string> {
 
 type Candidate = { qitemId: string; state: string; action: EraseAction; source: string; destination: string };
 type Copy = { table: CopyTable; id: string; qitemId: string; sessions: Array<string | null> };
+type Current = { qitemId: string; state: string; tsUpdated: string; erasedAt: string | null };
 
 /** The copies of these rows that another party holds, each found through its own indexed link. */
 function linkedCopies(st: Statements, ids: string[]): Copy[] {
@@ -204,15 +227,20 @@ function eraseCopies(st: Statements, copies: Copy[], action: EraseAction): void 
 
 function scrubRows(st: Statements, ids: string[], nowIso: string): void {
   const params = { ids: JSON.stringify(ids) };
+  // Closure targets that don't name a successor, found here: SQLite has no pattern match for the id shapes.
+  for (const [table, key] of [["queue_items", "qitem_id"], ["queue_transitions", "transition_id"], ["queue_transitions_archive", "transition_id"]]) {
+    const notes = (st.get(`SELECT ${key} AS k, closure_reason AS reason, closure_target AS target FROM ${table}
+        WHERE qitem_id IN ${IDS} AND closure_target IS NOT NULL`).all(params) as Array<{ k: string | number; reason: string | null; target: string }>)
+      .filter((row) => !keepsClosureTarget(row.reason, row.target)).map((row) => row.k);
+    if (notes.length > 0) {
+      st.get(`UPDATE ${table} SET closure_target = NULL WHERE ${key} IN (SELECT value FROM json_each(@keys))`).run({ keys: JSON.stringify(notes) });
+    }
+  }
   st.get(`UPDATE queue_items SET body = '', summary = NULL, resolution = NULL, tags = NULL, blocked_on = NULL,
       chain_of_record = NULL, evidence_ref = NULL, human_detail = NULL, human_questions = NULL, human_answers = NULL,
-      delegated_decision = NULL, last_nudge_input_box = NULL,
-      closure_target = CASE WHEN closure_reason IN (${ID_CLOSURES}) THEN closure_target ELSE NULL END,
-      content_erased_at = @now WHERE qitem_id IN ${IDS}`).run({ ...params, now: nowIso });
+      delegated_decision = NULL, last_nudge_input_box = NULL, content_erased_at = @now WHERE qitem_id IN ${IDS}`).run({ ...params, now: nowIso });
   for (const table of ["queue_transitions", "queue_transitions_archive"]) {
-    st.get(`UPDATE ${table} SET transition_note = NULL, identity_principal = NULL,
-        closure_target = CASE WHEN closure_reason IN (${ID_CLOSURES}) THEN closure_target ELSE NULL END
-        WHERE qitem_id IN ${IDS}`).run(params);
+    st.get(`UPDATE ${table} SET transition_note = NULL, identity_principal = NULL WHERE qitem_id IN ${IDS}`).run(params);
   }
   st.get(`UPDATE mission_control_actions SET before_state_json = NULL, after_state_json = NULL, reason = NULL,
       annotation = NULL, notify_result = NULL, audit_notes_json = NULL WHERE qitem_id IN ${IDS}`).run(params);
@@ -230,48 +258,45 @@ function deleteRows(st: Statements, ids: string[], nowIso: string, reason: strin
     .run({ ...params, now: nowIso, reason });
 }
 
-/** One pass over events in seq windows: each event naming a target row is scrubbed or deleted with it (a delete wins
- *  when an event names two). Returns the number matched. */
-async function walkEvents(db: Database.Database, targets: Map<string, EraseAction>, apply: boolean, window: number): Promise<number> {
-  if (targets.size === 0) return 0;
-  const top = (db.prepare("SELECT MAX(seq) AS seq FROM events").get() as { seq: number | null }).seq ?? 0;
-  // instr is a cheap prefilter: every id key ends in "temId" (qitemId, promotedQitemId, ...).
-  const read = db.prepare("SELECT seq, payload FROM events WHERE seq > ? AND seq <= ? AND instr(payload, 'temId') > 0");
-  const rewrite = db.prepare("UPDATE events SET payload = ? WHERE seq = ?");
-  const remove = db.prepare("DELETE FROM events WHERE seq = ?");
-  let matched = 0;
-  for (let lo = 0; lo < top; lo += window) {
-    const scrub: Array<[string, number]> = [];
-    const drop: number[] = [];
-    for (const row of read.all(lo, lo + window) as Array<{ seq: number; payload: string }>) {
-      let payload: Record<string, unknown>;
-      try {
-        payload = JSON.parse(row.payload) as Record<string, unknown>;
-      } catch {
+type EventPayload = Record<string, unknown>;
+/** A payload's own JSON, or null when it doesn't parse to an object. */
+function parsePayload(text: string): EventPayload | null {
+  try {
+    const value: unknown = JSON.parse(text);
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value as EventPayload : null;
+  } catch {
+    return null;
+  }
+}
+const namedIds = (payload: EventPayload) => EVENT_ID_KEYS.map((key) => payload[key]).filter((id): id is string => typeof id === "string");
+
+/** Where each target row's events are: one read-only pass over events in seq windows, up to the seq it started at.
+ *  Nothing changes here; each batch changes its own rows' events after rechecking the rows. A payload that names a
+ *  target but can't be read is listed as unreadable. */
+async function walkEvents(db: Database.Database, targets: Set<string>, window: number):
+  Promise<{ seqs: Map<string, number[]>; unreadable: Array<{ seq: number; qitemIds: string[] }>; top: number }> {
+  const found = { seqs: new Map<string, number[]>(), unreadable: [] as Array<{ seq: number; qitemIds: string[] }>, top: 0 };
+  if (targets.size === 0) return found;
+  found.top = (db.prepare("SELECT MAX(seq) AS seq FROM events").get() as { seq: number | null }).seq ?? 0;
+  const read = db.prepare(`SELECT seq, payload FROM events WHERE seq > ? AND seq <= ? AND ${NAMES_A_ROW}`);
+  for (let lo = 0; lo < found.top; lo += window) {
+    for (const row of read.all(lo, Math.min(lo + window, found.top)) as Array<{ seq: number; payload: string }>) {
+      const payload = parsePayload(row.payload);
+      if (payload === null) {
+        const named = [...targets].filter((id) => row.payload.includes(id));
+        if (named.length > 0) found.unreadable.push({ seq: row.seq, qitemIds: named });
         continue;
       }
-      const actions = EVENT_ID_KEYS.map((key) => payload[key]).filter((id): id is string => typeof id === "string")
-        .map((id) => targets.get(id)).filter((action): action is EraseAction => action !== undefined);
-      if (actions.length === 0) continue;
-      matched += 1;
-      if (actions.includes("delete")) {
-        drop.push(row.seq);
-      } else {
-        for (const key of EVENT_CONTENT_KEYS) delete payload[key];
-        if (!ID_CLOSURE_REASONS.includes(payload.closureReason as (typeof ID_CLOSURE_REASONS)[number])) delete payload.closureTarget;
-        payload.contentErased = true;
-        scrub.push([JSON.stringify(payload), row.seq]);
+      for (const id of new Set(namedIds(payload))) {
+        if (!targets.has(id)) continue;
+        const seqs = found.seqs.get(id);
+        if (seqs) seqs.push(row.seq);
+        else found.seqs.set(id, [row.seq]);
       }
-    }
-    if (apply && (scrub.length > 0 || drop.length > 0)) {
-      db.transaction(() => {
-        for (const [payload, seq] of scrub) rewrite.run(payload, seq);
-        for (const seq of drop) remove.run(seq);
-      })();
     }
     await yieldToLoop();
   }
-  return matched;
+  return found;
 }
 
 /** When a closed row entered its final closed state: the earliest transition after the last one recorded in another
@@ -293,6 +318,17 @@ function membersDigest(members: readonly string[]): string {
   return createHash("sha256").update(JSON.stringify([...new Set(members)].sort())).digest("hex");
 }
 
+type BatchPlan = {
+  rows: Candidate[];
+  absent: string[];
+  dropped: EraseGap[];
+  owned: Record<EraseAction, Copy[]>;
+  kept: EraseReport["keptCopies"];
+  counts: { transitions: number; archivedTransitions: number; missionControl: number };
+  events: { rewrite: Array<[string, number]>; remove: number[]; seqs: number[] };
+  unreadable: Array<{ seq: number; qitemIds: string[] }>;
+};
+
 /** Erase queue rows in one scope. With apply false it reports exactly what an apply would erase and writes nothing. */
 export async function eraseQueue(db: Database.Database, opts: EraseOptions): Promise<EraseReport> {
   const st = new Statements(db);
@@ -300,9 +336,10 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   const maxBatches = opts.maxBatches ?? DEFAULT_MAX_BATCHES;
   const { scope } = opts;
 
-  // A rig named with the members must be theirs, both ways: every member is one of its sessions, and every session of
-  // it is a member. A rig already removed is verified only by the record an earlier run kept with this membership.
-  let rig: { id: string; name: string | null; found: boolean; verified: boolean } | null = null;
+  // A rig named with the members must be theirs, both ways: every member's session is named in the rig (departed
+  // members included), and every session of it is a member. A rig already removed is verified only by the record an
+  // earlier run kept with this membership.
+  let rig: { id: string; name: string | null; found: boolean; verified: boolean; completedAt: string | null } | null = null;
   if (scope.kind === "members" && scope.rig !== undefined) {
     const name = (db.prepare("SELECT name FROM rigs WHERE id = ?").get(scope.rig) as { name: string } | undefined)?.name ?? null;
     if (name !== null) {
@@ -316,22 +353,24 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
           unlisted.length > 0 ? `Rig ${name} has sessions the members don't list: ${unlisted.join(", ")}.` : "",
         ].filter(Boolean).join(" "));
       }
-      rig = { id: scope.rig, name, found: true, verified: true };
+      rig = { id: scope.rig, name, found: true, verified: true, completedAt: null };
     } else {
-      const kept = db.prepare("SELECT rig_name AS name, members_digest AS digest FROM queue_erased_rigs WHERE rig_id = ?")
-        .get(scope.rig) as { name: string; digest: string } | undefined;
-      const verified = kept?.digest === membersDigest(scope.members);
-      rig = { id: scope.rig, name: verified ? kept!.name : null, found: false, verified };
+      const kept = db.prepare(`SELECT rig_name AS name, members_digest AS digest, completed_at AS completedAt
+          FROM queue_erased_rigs WHERE rig_id = ?`).get(scope.rig) as { name: string; digest: string; completedAt: string | null } | undefined;
+      const verified = kept !== undefined && kept.digest === membersDigest(scope.members);
+      rig = { id: scope.rig, name: verified && kept.name !== "" ? kept.name : null, found: false, verified,
+        completedAt: verified ? kept.completedAt : null };
     }
   }
 
   const report: EraseReport = {
     ok: true, applied: opts.apply, scope: scope.kind, complete: true, clean: false, qitems: [], mixed: [], gaps: [],
-    alreadyAbsent: [], keptCopies: [],
+    alreadyAbsent: [], keptCopies: [], unreadableEvents: [],
     linked: { transitions: 0, archivedTransitions: 0, outbox: 0, inbox: 0, events: 0, streamActions: 0, missionControl: 0 },
   };
   if (scope.kind === "routine") report.routine = { contentDays: scope.contentDays, metadataDays: scope.metadataDays };
   const reason = scope.kind === "members" ? "account-deletion" : scope.kind === "routine" ? "retention-metadata" : "erase-by-id";
+  const ledgerReason = (action: EraseAction) => scope.kind === "routine" && action === "scrub" ? "retention-content" : reason;
   const memberSet = new Set(scope.kind === "members" ? scope.members : []);
   const members = JSON.stringify([...memberSet]);
   const entries = scope.kind === "ids"
@@ -340,6 +379,23 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   const contentCutoff = scope.kind === "routine" && scope.contentDays > 0 ? cutoffIso(opts.nowIso, scope.contentDays) : null;
   const metadataCutoff = scope.kind === "routine" && scope.metadataDays > 0 ? cutoffIso(opts.nowIso, scope.metadataDays) : null;
 
+  // What routine retention does with a row now: delete it past the row window, scrub it past the content window while
+  // it has content, or nothing. A scrubbed row written to since (a note appends a transition without touching
+  // ts_updated, and may since have been archived; a reclose moves both) has content again.
+  const routineAction = (row: Current): EraseAction | null => {
+    if (!CLOSED_QUEUE_STATES.includes(row.state as (typeof CLOSED_QUEUE_STATES)[number])) return null;
+    const since = closedSince(st, row.qitemId, row.state, row.tsUpdated);
+    if (metadataCutoff && since < metadataCutoff) return "delete";
+    if (!contentCutoff || since >= contentCutoff) return null;
+    const hasContent = !row.erasedAt || row.tsUpdated > row.erasedAt
+      || st.get(`SELECT 1 FROM queue_transitions WHERE qitem_id = @q AND ts > @since
+          UNION ALL SELECT 1 FROM queue_transitions_archive WHERE qitem_id = @q AND ts > @since LIMIT 1`)
+        .get({ q: row.qitemId, since: row.erasedAt }) !== undefined;
+    return hasContent ? "scrub" : null;
+  };
+
+  // Ids scope, delete: ids with no row at selection; their markers are written at the end.
+  const absentAtSelect: string[] = [];
   // One page of candidate rows, keyed on qitem_id so selection moves forward without writing anything.
   const page = (after: string, offset: number): { rows: Candidate[]; last: string | null; seen: number } => {
     const select = "qitem_id AS qitemId, state, source_session AS source, destination_session AS destination";
@@ -351,7 +407,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       for (const [id, action] of slice) {
         const row = found.get(id);
         if (row !== undefined) rows.push({ ...row, action });
-        else if (action === "delete") report.alreadyAbsent.push(id);
+        else if (action === "delete") absentAtSelect.push(id);
         else report.gaps.push({ code: "not-found", qitemId: id });
       }
       return { rows, last: null, seen: slice.length };
@@ -377,13 +433,8 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       .all({ after, limit: batchSize }) as Array<Omit<Candidate, "action"> & { tsUpdated: string; erasedAt: string | null }>;
     const rows: Candidate[] = [];
     for (const { tsUpdated, erasedAt, ...row } of found) {
-      const since = closedSince(st, row.qitemId, row.state, tsUpdated);
-      // A scrubbed row written to since (a note or summary appends a transition without touching ts_updated; a reclose
-      // moves both) has content again.
-      const hasContent = !erasedAt || tsUpdated > erasedAt
-        || st.get("SELECT 1 FROM queue_transitions WHERE qitem_id = @q AND ts > @since LIMIT 1").get({ q: row.qitemId, since: erasedAt }) !== undefined;
-      if (metadataCutoff && since < metadataCutoff) rows.push({ ...row, action: "delete" });
-      else if (contentCutoff && since < contentCutoff && hasContent) rows.push({ ...row, action: "scrub" });
+      const action = routineAction({ qitemId: row.qitemId, state: row.state, tsUpdated, erasedAt });
+      if (action !== null) rows.push({ ...row, action });
     }
     return { rows, last: found.at(-1)?.qitemId ?? null, seen: found.length };
   };
@@ -398,14 +449,29 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   // Stream actions and dispositions this run deletes, so the unlinked pass plans on the same references either way.
   const plannedActions: string[] = [];
   const plannedDispositions: string[] = [];
+  const eventSeqs = new Set<number>();
+  const unreadable = new Map<number, Set<string>>();
+  const noteUnreadable = (found: Array<{ seq: number; qitemIds: string[] }>) => {
+    for (const { seq, qitemIds } of found) {
+      const ids = unreadable.get(seq) ?? new Set<string>();
+      for (const id of qitemIds) ids.add(id);
+      unreadable.set(seq, ids);
+    }
+    report.unreadableEvents = [...unreadable.entries()].sort(([a], [b]) => a - b).map(([seq, ids]) => ({ seq, qitemIds: [...ids].sort() }));
+  };
   const ledger = (rows: Array<{ qitemId: string; action: EraseAction }>) => {
     if (!opts.apply || !opts.ledgerPath || rows.length === 0) return;
-    appendFileSync(opts.ledgerPath, rows.map((row) => JSON.stringify({ qitemId: row.qitemId, action: row.action, reason, erasedAt: opts.nowIso })).join("\n") + "\n");
+    appendFileSync(opts.ledgerPath, rows.map((row) => JSON.stringify({ qitemId: row.qitemId, action: row.action,
+      reason: ledgerReason(row.action), erasedAt: opts.nowIso })).join("\n") + "\n");
   };
 
-  let stage: Stage = "select";
+  let stage: Stage = "ledger";
   try {
+    // 0. A ledger that can't be written stops the run before anything changes.
+    if (opts.apply && opts.ledgerPath) appendFileSync(opts.ledgerPath, "");
+
     // 1. Select every candidate, writing nothing.
+    stage = "select";
     const candidates: Candidate[] = [];
     let after = "";
     let offset = 0;
@@ -425,70 +491,141 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       await yieldToLoop();
     }
 
-    // 2. Events naming a candidate: one walk over the table, before the rows go.
+    // 2. Where the candidates' events are: one read-only walk over the table.
     stage = "events";
-    report.linked.events = await walkEvents(db, new Map(candidates.map((row) => [row.qitemId, row.action])), opts.apply,
-      opts.eventsWindow ?? DEFAULT_EVENTS_WINDOW);
+    const events = await walkEvents(db, new Set(candidates.map((row) => row.qitemId)), opts.eventsWindow ?? DEFAULT_EVENTS_WINDOW);
+    noteUnreadable(events.unreadable);
+    const eventsAt = st.get(`SELECT seq, payload FROM events WHERE seq IN (SELECT value FROM json_each(@seqs))
+        UNION ALL SELECT seq, payload FROM events WHERE seq > @top AND ${NAMES_A_ROW}`);
+    const rewriteEvent = db.prepare("UPDATE events SET payload = ? WHERE seq = ?");
+    const removeEvent = db.prepare("DELETE FROM events WHERE seq = ?");
 
-    // 3. The rows and their other copies, a batch per transaction. A row is listed once its batch has committed.
-    stage = "rows";
-    for (let start = 0; start < candidates.length; start += batchSize) {
-      const chunk = candidates.slice(start, start + batchSize);
-      const ids = chunk.map((row) => row.qitemId);
-      const byId = new Map(chunk.map((row) => [row.qitemId, row]));
-      const owned: Record<EraseAction, Copy[]> = { scrub: [], delete: [] };
-      const kept: EraseReport["keptCopies"] = [];
+    // One batch, read at the moment it's erased: each row is rechecked, since anything may have changed it after
+    // selection (a reopen makes it open work again; a workflow may have taken it up), then its copies and events.
+    const planBatch = (chunk: Candidate[]): BatchPlan => {
+      const chunkIds = chunk.map((row) => row.qitemId);
+      const current = new Map((st.get(`SELECT qitem_id AS qitemId, state, ts_updated AS tsUpdated, content_erased_at AS erasedAt
+          FROM queue_items WHERE qitem_id IN ${IDS}`).all({ ids: JSON.stringify(chunkIds) }) as Current[]).map((row) => [row.qitemId, row]));
+      const referenced = workflowReferenced(st, chunkIds);
+      const plan: BatchPlan = { rows: [], absent: [], dropped: [], owned: { scrub: [], delete: [] }, kept: [],
+        counts: { transitions: 0, archivedTransitions: 0, missionControl: 0 }, events: { rewrite: [], remove: [], seqs: [] }, unreadable: [] };
+      for (const candidate of chunk) {
+        const now = current.get(candidate.qitemId);
+        if (now === undefined) {
+          // Gone since selection: a delete still writes its marker; a scrub has nothing to scrub.
+          if (candidate.action === "delete") plan.absent.push(candidate.qitemId);
+          else plan.dropped.push({ code: "changed-during-run", qitemId: candidate.qitemId });
+        } else if (referenced.has(candidate.qitemId)) {
+          plan.dropped.push({ code: "workflow-reference", qitemId: candidate.qitemId });
+        } else if (scope.kind === "routine" && routineAction(now) !== candidate.action) {
+          plan.dropped.push({ code: "changed-during-run", qitemId: candidate.qitemId });
+        } else {
+          plan.rows.push({ ...candidate, state: now.state });
+        }
+      }
+      const ids = plan.rows.map((row) => row.qitemId);
+      if (ids.length === 0) return plan;
+      const byId = new Map(plan.rows.map((row) => [row.qitemId, row]));
       for (const copy of linkedCopies(st, ids)) {
         const candidate = byId.get(copy.qitemId)!;
         const whose = ownership(copy, ownerOf(candidate));
-        if (whose === "owned") owned[candidate.action].push(copy);
-        else kept.push({ table: copy.table, id: copy.id, qitemId: copy.qitemId, ownership: whose });
+        if (whose === "owned") plan.owned[candidate.action].push(copy);
+        else plan.kept.push({ table: copy.table, id: copy.id, qitemId: copy.qitemId, ownership: whose });
       }
       const params = { ids: JSON.stringify(ids) };
-      const counts = {
+      plan.counts = {
         transitions: st.count(`SELECT COUNT(*) AS n FROM queue_transitions WHERE qitem_id IN ${IDS}`, params),
         archivedTransitions: st.count(`SELECT COUNT(*) AS n FROM queue_transitions_archive WHERE qitem_id IN ${IDS}`, params),
         missionControl: st.count(`SELECT COUNT(*) AS n FROM mission_control_actions WHERE qitem_id IN ${IDS}`, params),
       };
-      if (opts.apply) {
-        ledger(chunk);
-        db.transaction(() => {
-          const scrub = chunk.filter((row) => row.action === "scrub").map((row) => row.qitemId);
-          const remove = chunk.filter((row) => row.action === "delete").map((row) => row.qitemId);
-          eraseCopies(st, owned.scrub, "scrub");
-          eraseCopies(st, owned.delete, "delete");
+      // The walk's events for these rows, plus any written since it began. An event naming two rows is deleted if
+      // either is deleted; one naming rows of a later batch is changed again there.
+      const seqs = [...new Set(ids.flatMap((id) => events.seqs.get(id) ?? []))];
+      const seen = new Set<number>();
+      for (const event of eventsAt.all({ seqs: JSON.stringify(seqs), top: events.top }) as Array<{ seq: number; payload: string }>) {
+        if (seen.has(event.seq)) continue;
+        seen.add(event.seq);
+        const payload = parsePayload(event.payload);
+        if (payload === null) {
+          const named = ids.filter((id) => event.payload.includes(id));
+          if (named.length > 0) plan.unreadable.push({ seq: event.seq, qitemIds: named });
+          continue;
+        }
+        const actions = namedIds(payload).map((id) => byId.get(id)?.action).filter((action): action is EraseAction => action !== undefined);
+        if (actions.length === 0) continue;
+        plan.events.seqs.push(event.seq);
+        if (actions.includes("delete")) {
+          plan.events.remove.push(event.seq);
+        } else {
+          for (const key of EVENT_CONTENT_KEYS) delete payload[key];
+          if (!keepsClosureTarget(payload.closureReason, payload.closureTarget)) delete payload.closureTarget;
+          payload.contentErased = true;
+          plan.events.rewrite.push([JSON.stringify(payload), event.seq]);
+        }
+      }
+      return plan;
+    };
+
+    // 3. The rows, their events and their other copies, a batch per transaction. A row is listed once its batch has
+    //    committed; its ledger lines are written in the transaction, before anything in it changes.
+    stage = "rows";
+    const perTransaction = Math.min(batchSize, ROWS_PER_TRANSACTION);
+    for (let start = 0; start < candidates.length; start += perTransaction) {
+      const chunk = candidates.slice(start, start + perTransaction);
+      const plan = opts.apply
+        ? db.transaction(() => {
+          const planned = planBatch(chunk);
+          ledger([...planned.rows, ...planned.absent.map((qitemId) => ({ qitemId, action: "delete" as const }))]);
+          for (const [payload, seq] of planned.events.rewrite) rewriteEvent.run(payload, seq);
+          for (const seq of planned.events.remove) removeEvent.run(seq);
+          eraseCopies(st, planned.owned.scrub, "scrub");
+          eraseCopies(st, planned.owned.delete, "delete");
+          const scrub = planned.rows.filter((row) => row.action === "scrub").map((row) => row.qitemId);
+          const remove = [...planned.rows.filter((row) => row.action === "delete").map((row) => row.qitemId), ...planned.absent];
           if (scrub.length > 0) scrubRows(st, scrub, opts.nowIso);
           if (remove.length > 0) deleteRows(st, remove, opts.nowIso, reason);
-        })();
-      }
-      const all = [...owned.scrub, ...owned.delete];
-      report.linked.transitions += counts.transitions;
-      report.linked.archivedTransitions += counts.archivedTransitions;
-      report.linked.missionControl += counts.missionControl;
+          return planned;
+        })()
+        : planBatch(chunk);
+      const all = [...plan.owned.scrub, ...plan.owned.delete];
+      report.linked.transitions += plan.counts.transitions;
+      report.linked.archivedTransitions += plan.counts.archivedTransitions;
+      report.linked.missionControl += plan.counts.missionControl;
       report.linked.outbox += all.filter((copy) => copy.table === "outbox_entries").length;
       report.linked.inbox += all.filter((copy) => copy.table === "inbox_entries").length;
       report.linked.streamActions += all.filter((copy) => copy.table === "stream_reader_actions" || copy.table === "stream_dispositions").length;
-      plannedActions.push(...owned.delete.filter((copy) => copy.table === "stream_reader_actions").map((copy) => copy.id));
-      plannedDispositions.push(...owned.delete.filter((copy) => copy.table === "stream_dispositions").map((copy) => copy.id));
-      report.keptCopies.push(...kept);
-      report.qitems.push(...chunk.map(({ qitemId, action, state }) => ({ qitemId, action, state })));
+      for (const seq of plan.events.seqs) eventSeqs.add(seq);
+      report.linked.events = eventSeqs.size;
+      noteUnreadable(plan.unreadable);
+      plannedActions.push(...plan.owned.delete.filter((copy) => copy.table === "stream_reader_actions").map((copy) => copy.id));
+      plannedDispositions.push(...plan.owned.delete.filter((copy) => copy.table === "stream_dispositions").map((copy) => copy.id));
+      report.keptCopies.push(...plan.kept);
+      report.gaps.push(...plan.dropped);
+      report.alreadyAbsent.push(...plan.absent);
+      report.qitems.push(...plan.rows.map(({ qitemId, action, state }) => ({ qitemId, action, state })));
       await yieldToLoop();
     }
-    if (opts.apply && report.alreadyAbsent.length > 0) {
-      ledger(report.alreadyAbsent.map((qitemId) => ({ qitemId, action: "delete" as const })));
-      db.transaction(() => {
-        st.get(`INSERT OR IGNORE INTO queue_erased_ids (qitem_id, erased_at, reason) SELECT value, @now, @reason FROM json_each(@ids)`)
-          .run({ ids: JSON.stringify(report.alreadyAbsent), now: opts.nowIso, reason });
-      })();
+    if (absentAtSelect.length > 0) {
+      if (opts.apply) {
+        db.transaction(() => {
+          ledger(absentAtSelect.map((qitemId) => ({ qitemId, action: "delete" as const })));
+          st.get(`INSERT OR IGNORE INTO queue_erased_ids (qitem_id, erased_at, reason) SELECT value, @now, @reason FROM json_each(@ids)`)
+            .run({ ids: JSON.stringify(absentAtSelect), now: opts.nowIso, reason });
+        })();
+      }
+      report.alreadyAbsent.push(...absentAtSelect);
     }
 
     // 4. Account deletion's other passes, once every row is done.
     if (scope.kind === "members" && report.complete) {
       stage = "unlinked";
-      report.unlinked = eraseUnlinked(db, st, { members, plannedActions, plannedDispositions }, opts.apply);
+      report.unlinked = eraseUnlinked(db, st, {
+        members, plannedActions, plannedDispositions, erasedRows: report.qitems.map((row) => row.qitemId),
+      }, opts.apply);
       if (rig !== null) {
         stage = "rig";
-        report.rig = await eraseRigRecords(db, st, { ...rig, members, digest: membersDigest(scope.members) }, opts.apply, opts.nowIso);
+        report.rig = { id: rig.id, found: rig.found, verified: rig.verified, erased: {}, left: {}, unknown: [] };
+        await eraseRigRecords(db, st, { ...rig, members, digest: membersDigest(scope.members) }, opts.apply, opts.nowIso, report.rig);
       }
     }
   } catch (err) {
@@ -500,20 +637,22 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   const unlinkedLeft = report.unlinked ? report.unlinked.mixedEntries + report.unlinked.referencedStreamItems : 0;
   const rigLeft = report.rig ? Object.values(report.rig.left).reduce((sum, n) => sum + n, 0) + report.rig.unknown.length : 0;
   report.clean = report.complete && report.mixed.length === 0 && report.gaps.length === 0 && unlinkedLeft === 0 && rigLeft === 0
-    && !report.keptCopies.some((copy) => copy.ownership === "mixed");
+    && report.unreadableEvents.length === 0 && !report.keptCopies.some((copy) => copy.ownership === "mixed");
   return report;
 }
 
 /** Account deletion's second pass: outbox and inbox entries between two members that no queue row owns, and the
  *  members' stream items. An entry with one member endpoint, or a stream item something still references, is counted
- *  and left. References this run deletes are left out in a dry run too, so both report the same set. */
+ *  and left. Rows and references this run erases are counted as they were before it, so a dry run and an apply report
+ *  the same set. */
 function eraseUnlinked(db: Database.Database, st: Statements,
-  plan: { members: string; plannedActions: string[]; plannedDispositions: string[] }, apply: boolean): NonNullable<EraseReport["unlinked"]> {
+  plan: { members: string; plannedActions: string[]; plannedDispositions: string[]; erasedRows: string[] }, apply: boolean): NonNullable<EraseReport["unlinked"]> {
+  // A row this run erased still owns its copies here: they were reported with it (keptCopies), not as unowned.
+  const rows = "(SELECT qitem_id FROM queue_items UNION ALL SELECT value FROM json_each(@rows))";
   // COALESCE: an entry with no pointer is unowned, not unknown (NULL IN (...) would drop it from both counts).
-  const ownedOutbox = `(COALESCE(audit_pointer, '') IN (SELECT qitem_id FROM queue_items)
-      OR (outbox_id LIKE 'wake-intent-%' AND substr(outbox_id, 13) IN (SELECT qitem_id FROM queue_items)))`;
-  const ownedInbox = `(COALESCE(absorbed_qitem_id, '') IN (SELECT qitem_id FROM queue_items)
-      OR COALESCE(audit_pointer, '') IN (SELECT qitem_id FROM queue_items))`;
+  const ownedOutbox = `(COALESCE(audit_pointer, '') IN ${rows}
+      OR (outbox_id LIKE 'wake-intent-%' AND substr(outbox_id, 13) IN ${rows}))`;
+  const ownedInbox = `(COALESCE(absorbed_qitem_id, '') IN ${rows} OR COALESCE(audit_pointer, '') IN ${rows})`;
   const both = `sender_session IN ${MEMBERS} AND destination_session IN ${MEMBERS}`;
   const fromMember = `sender_session IN ${MEMBERS} AND destination_session NOT IN ${MEMBERS}`;
   const toMember = `destination_session IN ${MEMBERS} AND sender_session NOT IN ${MEMBERS}`;
@@ -531,7 +670,8 @@ function eraseUnlinked(db: Database.Database, st: Statements,
     `SELECT duplicate_of FROM stream_reader_actions WHERE duplicate_of IS NOT NULL AND ${notPlannedAction}`,
   ];
   const referenced = `stream_item_id IN (${references.join(" UNION ")})`;
-  const params = { members: plan.members, actions: JSON.stringify(plan.plannedActions), dispositions: JSON.stringify(plan.plannedDispositions) };
+  const params = { members: plan.members, actions: JSON.stringify(plan.plannedActions), dispositions: JSON.stringify(plan.plannedDispositions),
+    rows: JSON.stringify(plan.erasedRows) };
   const result = {
     outbox: st.count(`SELECT COUNT(*) AS n FROM outbox_entries WHERE ${both} AND NOT ${ownedOutbox}`, params),
     inbox: st.count(`SELECT COUNT(*) AS n FROM inbox_entries WHERE ${both} AND NOT ${ownedInbox}`, params),
@@ -589,49 +729,62 @@ const RIG_RECORDS_LEFT: Array<{ table: string; where: string; byName: boolean }>
 ];
 const RIG_RECORDS_CHUNK = 1_000;
 
+/** The account rig's records, counted into `out` as each chunk commits, so a pass that stops partway still reports
+ *  what it erased. */
 async function eraseRigRecords(db: Database.Database, st: Statements,
-  rig: { id: string; name: string | null; found: boolean; verified: boolean; members: string; digest: string }, apply: boolean,
-  nowIso: string): Promise<NonNullable<EraseReport["rig"]>> {
+  rig: { id: string; name: string | null; found: boolean; verified: boolean; completedAt: string | null; members: string; digest: string },
+  apply: boolean, nowIso: string, out: NonNullable<EraseReport["rig"]>): Promise<void> {
   const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>)
     .map((row) => row.name));
   const params = { rig: rig.id, rigName: rig.name ?? "", members: rig.members };
-  const erased: Record<string, number> = {};
-  const left: Record<string, number> = {};
-  const unknown = new Set<string>();
   const add = (into: Record<string, number>, table: string, n: number) => {
     into[table] = (into[table] ?? 0) + n;
   };
   for (const { table, where, byRigId } of RIG_RECORDS) {
     if (!tables.has(table)) continue;
-    const n = st.count(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, params);
     if (byRigId && !rig.verified) {
       // An unverified id: its records are counted and left, never erased on a guess.
-      add(left, table, n);
+      add(out.left, table, st.count(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, params));
       continue;
     }
-    add(erased, table, n);
-    if (!apply || n === 0) continue;
+    if (!apply) {
+      add(out.erased, table, st.count(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, params));
+      continue;
+    }
+    add(out.erased, table, 0);
     // In chunks by rowid (every one of these tables has one; a declared key can be NULL), so a large table (events)
     // never holds the daemon in one statement.
     const chunk = st.get(`DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${where} LIMIT ${RIG_RECORDS_CHUNK})`);
-    while (chunk.run(params).changes > 0) await yieldToLoop();
+    for (let changes = chunk.run(params).changes; changes > 0; changes = chunk.run(params).changes) {
+      add(out.erased, table, changes);
+      await yieldToLoop();
+    }
   }
+  const unknown = new Set<string>();
   for (const { table, where, byName } of RIG_RECORDS_LEFT) {
     if (!tables.has(table)) continue;
-    if (byName && rig.name === null) unknown.add(table);
-    else add(left, table, st.count(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, params));
+    if (byName && rig.name === null) {
+      // No name to count by. After a completed erasure that's expected: these were empty when it completed.
+      if (rig.completedAt === null) unknown.add(table);
+    } else {
+      add(out.left, table, st.count(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, params));
+    }
   }
-  const leftTotal = Object.values(left).reduce((sum, n) => sum + n, 0);
+  out.unknown = [...unknown];
+  const leftTotal = Object.values(out.left).reduce((sum, n) => sum + n, 0);
+  if (rig.completedAt !== null) out.completedAt = rig.completedAt;
   if (apply && rig.verified) {
     if (rig.found) {
       // While the rig exists, its id and name are kept with this membership, so the run after its removal is verified.
-      db.prepare(`INSERT INTO queue_erased_rigs (rig_id, rig_name, members_digest, verified_at) VALUES (?, ?, ?, ?)
+      db.prepare(`INSERT INTO queue_erased_rigs (rig_id, rig_name, members_digest, verified_at, completed_at) VALUES (?, ?, ?, ?, NULL)
           ON CONFLICT(rig_id) DO UPDATE SET rig_name = excluded.rig_name, members_digest = excluded.members_digest,
-          verified_at = excluded.verified_at`).run(rig.id, rig.name, rig.digest, nowIso);
-    } else if (leftTotal === 0) {
-      // After the removal, once nothing of the rig is left, the record goes too.
-      db.prepare("DELETE FROM queue_erased_rigs WHERE rig_id = ?").run(rig.id);
+          verified_at = excluded.verified_at, completed_at = NULL`).run(rig.id, rig.name, rig.digest, nowIso);
+    } else if (leftTotal === 0 && unknown.size === 0 && rig.completedAt === null) {
+      // After the removal, once nothing of the rig is left, the record becomes a completion receipt: the name goes,
+      // and the id, membership digest and time stay, so an identical rerun (say, after a lost response) still
+      // verifies and reports the same clean result.
+      db.prepare("UPDATE queue_erased_rigs SET rig_name = '', completed_at = ? WHERE rig_id = ?").run(nowIso, rig.id);
+      out.completedAt = nowIso;
     }
   }
-  return { id: rig.id, found: rig.found, verified: rig.verified, erased, left, unknown: [...unknown] };
 }

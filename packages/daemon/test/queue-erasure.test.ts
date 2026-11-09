@@ -336,6 +336,21 @@ describe("account deletion with the account's rig", () => {
     expect(rerun.clean).toBe(true);
     expect(payloads()).not.toContain(`"sessionName":"${A}"`);
     expect(payloads()).toContain(`"sessionName":"${OUT}"`);
+    // The record is now a completion receipt without the rig's name, so an identical rerun (after a lost response,
+    // say) still verifies and reports clean.
+    expect(rerun.rig).toMatchObject({ completedAt: NOW });
+    expect(db.prepare("SELECT rig_name, completed_at FROM queue_erased_rigs WHERE rig_id = ?").get(RIG)).toEqual({ rig_name: "", completed_at: NOW });
+    const again = await eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: RIG }, apply: true, nowIso: NOW });
+    expect(again.rig).toMatchObject({ found: false, verified: true, completedAt: NOW, unknown: [] });
+    expect(again.clean).toBe(true);
+  });
+
+  it("K2: a rig pass that stops partway reports the records it already erased", async () => {
+    db.exec("CREATE TEMP TRIGGER fail_wd BEFORE DELETE ON watchdog_jobs BEGIN SELECT RAISE(ABORT, 'disk I/O error (test)'); END;");
+    const report = await eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: RIG }, apply: true, nowIso: NOW });
+    expect(report).toMatchObject({ complete: false, error: { stage: "rig" }, rig: { erased: { snapshots: 1, watchdog_history: 1 } } });
+    expect(report.rig!.erased.events).toBeGreaterThanOrEqual(2);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM snapshots WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
   });
 
   it("restore control: after restoring a backup taken before the erase, the documented replay leaves no account content", async () => {
@@ -406,7 +421,7 @@ describe("round 1 controls", () => {
     await row("c-canceled", A, B);
     repo.update({ qitemId: "c-canceled", actorSession: B, state: "done", closureReason: "canceled", closureTarget: "secret-closure-note" });
     await row("c-handed", A, B);
-    repo.update({ qitemId: "c-handed", actorSession: B, state: "done", closureReason: "handed_off_to", closureTarget: "successor-id" });
+    repo.update({ qitemId: "c-handed", actorSession: B, state: "done", closureReason: "handed_off_to", closureTarget: B });
     db.prepare("INSERT INTO stream_items (stream_item_id, ts_emitted, stream_sort_key, source_session, body) VALUES ('s-dup', ?, 'k', ?, 'x')").run(NOW, A);
     recordReaderAction(db, { streamItemId: "s-dup", readerSession: A, action: "duplicate", duplicateOf: "c-canceled", reason: "secret-dup-reason" }, NOW);
     db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id IN ('c-canceled', 'c-handed')").run(ago(40));
@@ -414,7 +429,7 @@ describe("round 1 controls", () => {
     const all = everything();
     expect(all).not.toContain("secret-closure-note");
     expect(all).not.toContain("secret-dup-reason");
-    expect(db.prepare("SELECT closure_target AS t FROM queue_items WHERE qitem_id = 'c-handed'").get()).toEqual({ t: "successor-id" });
+    expect(db.prepare("SELECT closure_target AS t FROM queue_items WHERE qitem_id = 'c-handed'").get()).toEqual({ t: B });
   });
 
   it("J4: content written to a scrubbed row after its scrub is erased by the next run, and a reclose counts from the new close", async () => {
@@ -453,6 +468,9 @@ describe("round 1 controls", () => {
     expect(report).toMatchObject({ complete: false, clean: false, error: { stage: "rows", message: "disk I/O error (test)" } });
     expect(report.qitems.map((q) => q.qitemId)).toEqual(["f-1"]);
     expect([exists("f-1"), exists("f-2")]).toEqual([false, true]);
+    expect(report.linked.events).toBeGreaterThan(0);
+    expect(payloads()).not.toContain('"qitemId":"f-1"');
+    expect(payloads()).toContain('"qitemId":"f-2"');
     db.exec("CREATE TEMP TRIGGER fail_scrub BEFORE UPDATE OF content_erased_at ON queue_items BEGIN SELECT RAISE(ABORT, 'disk I/O error (test)'); END;");
     db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = 'f-2'").run(ago(40));
     const swept = await runQueueRetentionSweep(db, { nowIso: NOW, closedContentDays: 30, transitionsRetentionDays: 1 });
@@ -504,7 +522,7 @@ describe("round 1 controls: the account rig after removal, and a restore across 
     db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = 'l-row'").run(ago(40));
     await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW, ledgerPath });
     const lines = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { qitemId: string; action: "scrub" });
-    expect(lines).toEqual([{ qitemId: "l-row", action: "scrub", reason: "retention-metadata", erasedAt: NOW }]);
+    expect(lines).toEqual([{ qitemId: "l-row", action: "scrub", reason: "retention-content", erasedAt: NOW }]);
     db.close();
     open(new Database(backup));
     expect(everything()).toContain("secret-l-row body");
@@ -513,5 +531,93 @@ describe("round 1 controls: the account rig after removal, and a restore across 
     const all = everything();
     expect(all).not.toContain("secret-l-row");
     expect(all).toContain("secret-l-open body");
+  });
+});
+
+describe("round 2 controls", () => {
+  const routine = { kind: "routine", contentDays: 30, metadataDays: 0 } as const;
+
+  it("K1: a row reopened or taken up by a workflow after selection is kept and reported, with its events", async () => {
+    await row("k-reopen", A, B, [{ state: "done", daysAgo: 100 }]);
+    await row("k-workflow", A, B, [{ state: "done", daysAgo: 100 }]);
+    await row("k-stays", A, B, [{ state: "done", daysAgo: 100 }]);
+    // The run yields after each events window. With a window of 1, these writes land during the walk, after selection.
+    const run = eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 90 }, apply: true, nowIso: NOW, eventsWindow: 1 });
+    await new Promise((resolve) => setImmediate(resolve));
+    repo.update({ qitemId: "k-reopen", actorSession: B, state: "pending", reopen: true, transitionNote: "back to work" });
+    db.pragma("foreign_keys = OFF");
+    db.prepare(`INSERT INTO workflow_frontier_bindings (instance_id, packet_id, step_id, created_at) VALUES ('wf-k', 'k-workflow', 's1', ?)`).run(NOW);
+    db.pragma("foreign_keys = ON");
+    const report = await run;
+    expect(report.qitems.map((q) => q.qitemId)).toEqual(["k-stays"]);
+    expect(report.gaps).toEqual(expect.arrayContaining([{ code: "changed-during-run", qitemId: "k-reopen" },
+      { code: "workflow-reference", qitemId: "k-workflow" }]));
+    expect(report.clean).toBe(false);
+    expect(db.prepare("SELECT state, body FROM queue_items WHERE qitem_id = 'k-reopen'").get()).toEqual({ state: "pending", body: "secret-k-reopen body" });
+    expect(marker("k-reopen")).toBeUndefined();
+    expect(payloads()).toContain("secret-k-reopen");
+    expect(payloads()).toContain("secret-k-workflow");
+    expect([exists("k-workflow"), exists("k-stays")]).toEqual([true, false]);
+  });
+
+  it("K2: a ledger that can't be written stops the run before anything changes", async () => {
+    await row("l-one", A, B, [{ state: "done", daysAgo: 2 }]);
+    const before = everything();
+    const ledgerPath = join(mkdtempSync(join(tmpdir(), "erase-ledger-")), "missing", "ledger.jsonl");
+    const report = await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "l-one", action: "delete" }, { qitemId: "l-gone", action: "delete" }] },
+      apply: true, nowIso: NOW, ledgerPath });
+    expect(report).toMatchObject({ complete: false, clean: false, error: { stage: "ledger" }, qitems: [], alreadyAbsent: [] });
+    expect(everything()).toBe(before);
+    expect(payloads()).toContain("secret-l-one");
+  });
+
+  it("K3: an event that names a row but can't be read is kept and reported, and the run isn't clean", async () => {
+    await row("u-row", A, B, [{ state: "done", daysAgo: 2 }]);
+    db.prepare("INSERT INTO events (type, payload) VALUES ('queue.updated', ?)").run('{"qitemId":"u-row","summary":"secret-truncated');
+    const dry = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: false, nowIso: NOW });
+    const report = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW });
+    expect({ ...report, applied: false }).toEqual(dry);
+    expect(report.unreadableEvents).toEqual([{ seq: expect.any(Number), qitemIds: ["u-row"] }]);
+    expect([report.complete, report.clean]).toEqual([true, false]);
+    expect(exists("u-row")).toBe(false);
+    expect(payloads()).toContain("secret-truncated");
+  });
+
+  it("K4: a successor reason keeps its target only when it names a session or a queue row", async () => {
+    await row("t-prose", A, B);
+    repo.update({ qitemId: "t-prose", actorSession: B, state: "done", closureReason: "handed_off_to", closureTarget: "secret-prose-target, see the thread" });
+    await row("t-super", A, B);
+    repo.update({ qitemId: "t-super", actorSession: B, state: "canceled", closureReason: "superseded", closureTarget: "qitem-20261109120000-0a1b2c3d" });
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id IN ('t-prose', 't-super')").run(ago(40));
+    const report = await eraseQueue(db, { scope: routine, apply: true, nowIso: NOW });
+    expect(report.qitems.map((q) => q.qitemId)).toEqual(["t-prose", "t-super"]);
+    expect(everything()).not.toContain("secret-prose-target");
+    expect(payloads()).not.toContain("secret-prose-target");
+    expect(db.prepare("SELECT closure_target AS t FROM queue_items WHERE qitem_id = 't-super'").get()).toEqual({ t: "qitem-20261109120000-0a1b2c3d" });
+  });
+
+  it("N1: a note archived while erasure was off still makes a scrubbed row eligible again", async () => {
+    await row("v-row", A, B, [{ state: "done", daysAgo: 40 }]);
+    await eraseQueue(db, { scope: routine, apply: true, nowIso: NOW });
+    repo.update({ qitemId: "v-row", actorSession: B, transitionNote: "secret-archived-note" });
+    const later = new Date(Date.now() + 2 * 86_400_000).toISOString();
+    await runQueueRetentionSweep(db, { nowIso: later, transitionsRetentionDays: 1 });
+    const note = "SELECT COUNT(*) AS n FROM %s WHERE transition_note = 'secret-archived-note'";
+    expect([db.prepare(note.replace("%s", "queue_transitions")).get(), db.prepare(note.replace("%s", "queue_transitions_archive")).get()])
+      .toEqual([{ n: 0 }, { n: 1 }]);
+    const again = await eraseQueue(db, { scope: routine, apply: true, nowIso: later });
+    expect(again.qitems.map((q) => q.qitemId)).toEqual(["v-row"]);
+    expect(everything()).not.toContain("secret-archived-note");
+  });
+
+  it("N2: a dry run and an apply count the same mixed entries when a kept copy points at an erased row", async () => {
+    await row("m-row", A, B, [{ state: "done", daysAgo: 2 }]);
+    db.prepare(`INSERT INTO outbox_entries (outbox_id, sender_session, destination_session, body, ts_dispatched, audit_pointer)
+      VALUES ('o-m', ?, ?, 'secret-m-copy', ?, 'm-row')`).run(A, OUT, NOW);
+    const dry = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: false, nowIso: NOW });
+    const applied = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW });
+    expect({ ...applied, applied: false }).toEqual(dry);
+    expect(dry.keptCopies).toEqual([{ table: "outbox_entries", id: "o-m", qitemId: "m-row", ownership: "mixed" }]);
+    expect(dry.unlinked).toMatchObject({ mixedEntries: 0 });
   });
 });
