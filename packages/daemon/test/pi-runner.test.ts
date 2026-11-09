@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "node:stream";
+import readline from "node:readline";
 import {
   createRunnerInput, inOrder, MAX_PI_INPUT_BYTES, RunnerCore, mapPiEvent, parseRunnerArgs,
   prepareRunnerSidecar, startHeartbeatTimer,
@@ -473,6 +474,56 @@ describe("runner input", () => {
       t.input.write("removeX\u007f\r");
       t.input.write("clear this\u0015kept\r");
       expect(t.blocks).toEqual(["prefix paste\n café  suffix", "abc", "remove", "kept"]);
+    } finally { t.editor.close(); }
+  });
+
+  it.each([
+    ["ac\u001b[Dbé🦊\r", "abé🦊c"],
+    ["world\u001b[Hhello \r", "hello world"],
+    ["do delete" + "\u001b[D".repeat(6) + "not \r", "do not delete"],
+    ["abcd\u001b[D\u007fXY\r", "abXYd"],
+    ["hello world\u001bbX\r", "hello Xworld"],
+  ])("keeps coalesced edit keys and text ordered: %j", (input, expected) => {
+    const t = terminal();
+    try {
+      t.input.write(input);
+      expect(t.blocks).toEqual([expected]);
+    } finally { t.editor.close(); }
+  });
+
+  it("keeps split escape sequences and UTF-8 ordered across every byte boundary", () => {
+    const bytes = Buffer.from("ac\u001b[Dbé🦊\r");
+    for (let i = 1; i < bytes.length; i++) {
+      const t = terminal();
+      try {
+        t.input.write(bytes.subarray(0, i));
+        t.input.write(bytes.subarray(i));
+        expect(t.blocks).toEqual(["abé🦊c"]);
+      } finally { t.editor.close(); }
+    }
+  });
+
+  it("leaves unknown escape sequences to readline without holding the next input", () => {
+    const t = terminal();
+    try {
+      t.input.write("ac\u001b[999~b\rnext\r");
+      expect(t.blocks).toEqual(["acb", "next"]);
+    } finally { t.editor.close(); }
+  });
+
+  it("preserves undo grouping on Node releases with correct native cursor insertion", ({ skip }) => {
+    const input = new PassThrough(), output = new PassThrough(), control: string[] = [];
+    output.resume();
+    const native = readline.createInterface({ input, output, terminal: true });
+    if (Object.prototype.hasOwnProperty.call(native, "_ttyWrite")) delete (native as any)._ttyWrite;
+    native.on("line", line => control.push(line));
+    input.write("ac\u001b[Db\r");
+    native.close();
+    if (control[0] !== "abc") { skip(); return; } // Affected Node uses grouped text in the workaround.
+    const t = terminal();
+    try {
+      t.input.write("abc\u001f\r");
+      expect(t.blocks).toEqual(["ab"]);
     } finally { t.editor.close(); }
   });
 

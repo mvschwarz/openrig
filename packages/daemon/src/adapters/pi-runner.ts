@@ -88,9 +88,14 @@ export function createRunnerInput(
     return readline.createInterface({ input, crlfDelay: Infinity }).on("line", submit);
   }
 
+  const [major = 0, minor = 0, patch = 0] = process.versions.node.split(".").map(Number);
+  const batchText = (major === 22 && (minor === 21 || (minor === 22 && patch === 0)))
+    || (major === 24 && minor >= 9 && (minor < 11 || (minor === 11 && patch <= 1)))
+    || (major === 25 && (minor === 0 || (minor === 1 && patch === 0)));
   const keys = new PassThrough();
+  const editorInput = batchText ? new PassThrough() : keys;
   const editor = readline.createInterface({
-    input: keys, output, terminal: true, prompt: "", historySize: 0, crlfDelay: Infinity,
+    input: editorInput, output, terminal: true, prompt: "", historySize: 0, crlfDelay: Infinity,
   });
   // Node forces dumb-terminal mode without editing if TERM=dumb. When terminal: true
   // was requested, remove the dumb-mode override so VT100 line editing is preserved.
@@ -109,9 +114,31 @@ export function createRunnerInput(
     editor.prompt(true);
   };
   const clear = () => setLine("", 0);
+  // Node 22.21–22.22.0 (also some 24/25 releases) appends batched text after
+  // cursor edits. Decode keys with Node, then write each plain-text run at once;
+  // controls flush that run first. Fixed Node keeps its original undo grouping.
+  let typed = "";
+  const flushTyped = () => {
+    if (!typed) return;
+    const text = typed;
+    typed = "";
+    editor.write(text);
+  };
+  const keypress = (text: string | undefined, key: readline.Key) => {
+    if (text && !key.ctrl && !key.meta && !/[\u0000-\u001f\u007f]/.test(text)) typed += text;
+    else {
+      flushTyped();
+      editor.write(text ?? "", key);
+    }
+  };
+  if (batchText) {
+    readline.emitKeypressEvents(keys);
+    keys.on("keypress", keypress);
+  }
   const consume = (text: string) => {
     if (paste === null) {
       keys.write(text);
+      if (batchText) flushTyped();
     } else if (!discarded) {
       pasteBytes += Buffer.byteLength(text);
       if (pasteBytes > MAX_PI_INPUT_BYTES) {
@@ -175,7 +202,9 @@ export function createRunnerInput(
     input.removeListener("end", end);
     input.setRawMode(wasRaw);
     input.pause();
+    keys.removeListener("keypress", keypress);
     keys.destroy();
+    if (editorInput !== keys) editorInput.destroy();
     output.write("\u001b[?2004l");
   });
   return editor;
