@@ -419,6 +419,33 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect.soft(scopeLines()).not.toMatch(/resolves to \d+ directories/i);
   });
 
+  it.each(["mission", "slice"] as const)("retains a visible %s conflict when long values share a display prefix", async level => {
+    const common = ("ordinary_" + level + "_").padEnd(220, "x");
+    const first = level + ":" + common + "A";
+    const second = level + ":" + common + "B";
+    const tags = level === "mission"
+      ? [first, second, "project:alpha"] : ["mission:release", first, second, "project:alpha"];
+    const unchanged = preserveAuthored(source);
+    await create(source.app, ["--tags", tags.join(",")], true);
+    committed(source, "qitem-create-contract", tags);
+    unchanged();
+    const raw = responseHeaders[0]?.get("X-OpenRig-Scope-Advisory");
+    expect(raw).toBeTypeOf("string");
+    expect(raw!.length).toBeLessThanOrEqual(1024);
+    expect(raw).toMatch(/^[\x20-\x7e]+$/);
+    const metadata = JSON.parse(raw!) as { status: string; tags: unknown[] };
+    expect(metadata.status).toBe("conflict");
+    expect(Array.isArray(metadata.tags)).toBe(true);
+    expect(metadata.tags.length).toBeGreaterThan(0);
+    expect(metadata.tags.length).toBeLessThanOrEqual(8);
+    for (const tag of metadata.tags) {
+      expect(tag).toMatch(new RegExp("^" + level + ":[^\\x00-\\x1f\\x7f]{1,160}$"));
+    }
+    expect.soft(scopeLines(), "actual bounded header: " + raw).toMatch(/\bconflict(?:ing)?\b/i);
+    expect.soft(scopeLines()).toContain(level + ":");
+    expect.soft(scopeLines()).not.toMatch(/resolves to \d+ directories/i);
+  });
+
   it.each([
     { level: "mission", code: "EACCES", wanted: "DUP.MISSION" },
     { level: "slice", code: "EIO", wanted: "DUP.SLICE" },
