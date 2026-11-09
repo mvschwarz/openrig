@@ -60,7 +60,7 @@ const LABELS: Record<string, string> = {
   "queue.stuck_sweep_unclaimed_age_minutes": "Unclaimed age", "policies.idle_gate_qitem.auto_register": "Auto-registration",
   "snapshots.periodic.enabled": "Periodic snapshots", "snapshots.periodic.interval_seconds": "Snapshot interval",
   "snapshots.periodic.retention_keep": "Snapshots to retain", "ui.terminal.max_live_terminals": "Legacy web terminal limit",
-  "retention.usage_samples_days": "Usage sample retention", "retention.events_days": "Event history retention (days)",
+  "retention.usage_samples_days": "Usage sample retention", "retention.events_days": "Event history retention (days)", "retention.closed_content_days": "Closed work content retention (days)", "retention.closed_metadata_days": "Closed work row retention (days)", "retention.erasure_ledger": "Erasure ledger file",
   "retention.stream_days": "Stream retention (days)", "retention.stream_max_items": "Stream items kept",
   "transcripts.poll_interval_seconds": "Transcript refresh", "transcripts.lines": "Transcript lines",
   "ui.preview.refresh_interval_seconds": "Preview refresh", "ui.preview.max_pins": "Preview pins",

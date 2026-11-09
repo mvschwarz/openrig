@@ -216,6 +216,9 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",
       "retention.events_days", // the history-only event types of events
+      "retention.closed_content_days", // closed-work erasure: content
+      "retention.closed_metadata_days", // closed-work erasure: the row, keeping its id
+      "retention.erasure_ledger", // queue erasure's replay ledger file
       "stream.intake",
       "retention.batch_size",
       "queue.pickup_stall_threshold_minutes",

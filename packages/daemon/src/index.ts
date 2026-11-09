@@ -118,7 +118,8 @@ export function startPeriodicSnapshotScheduler(deps: {
 /** OPR.0.4.6.FS-1 W2 — start the queue-retention maintenance sweep (arch D3): a
  *  boot sweep + a daily tick that archives aged terminal `queue_transitions`
  *  (never-delete) and prunes `watchdog_history`, `usage_samples`, stream items and
- *  the history-only event types of `events`, all in bounded batches with
+ *  the history-only event types of `events`, and (opt-in) erases closed work
+ *  (`retention.closed_content_days`, `retention.closed_metadata_days`), all in bounded batches with
  *  event-loop yields. Reads the `retention.*` settings (baked defaults via
  *  RETENTION_DEFAULTS). Fire-and-forget with error logging — a sweep failure must
  *  never crash the daemon. Returns the daily interval handle (cleared on
@@ -135,6 +136,10 @@ export function startQueueRetentionScheduler(deps: {
     const v = store ? store.resolveOne(key).value : fallback;
     return typeof v === "number" ? v : fallback;
   };
+  const ledger = (): string | undefined => {
+    const v = store ? store.resolveOne("retention.erasure_ledger").value : undefined;
+    return typeof v === "string" && v.length > 0 ? v : undefined;
+  };
   const runOnce = (): void => {
     void runQueueRetentionSweep(db, {
       nowIso: new Date().toISOString(),
@@ -146,6 +151,9 @@ export function startQueueRetentionScheduler(deps: {
       streamMaxItems: num("retention.stream_max_items", RETENTION_DEFAULTS.streamMaxItems),
       batchSize: num("retention.batch_size", RETENTION_DEFAULTS.batchSize),
       eventsRetentionDays: num("retention.events_days", RETENTION_DEFAULTS.eventsRetentionDays),
+      closedContentDays: num("retention.closed_content_days", RETENTION_DEFAULTS.closedContentDays),
+      closedMetadataDays: num("retention.closed_metadata_days", RETENTION_DEFAULTS.closedMetadataDays),
+      ...(ledger() ? { erasureLedgerPath: ledger() } : {}),
     }).catch((err: unknown) => {
       console.error(`[queue-retention] sweep error: ${err instanceof Error ? err.message : String(err)}`);
     });

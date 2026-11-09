@@ -308,6 +308,9 @@ export interface QueueItem {
    *  (convention C3). NULL for all non-human-routed items (BR-1); required
    *  at the domain write path only when the §5 predicate is true. */
   evidenceRef: string | null;
+  /** Set only on a row whose content queue erasure removed (queue-erasure.ts): its body and other content are empty
+   *  because they were erased, not because the row was written that way. */
+  contentErasedAt?: string;
   /** Present only on compact list rows, which omit these fields entirely so omitted content
    *  can't be mistaken for an empty value. Full reads never carry this marker. */
   fieldsElided?: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
@@ -363,6 +366,7 @@ interface QueueItemRow {
   delegated_decision?: string | null;
   summary: string | null;
   evidence_ref: string | null;
+  content_erased_at?: string | null;
   closure_reason: string | null;
   closure_target: string | null;
   closure_required_at: string | null;
@@ -1075,6 +1079,7 @@ export class QueueRepository {
   private readonly hasMintingGenColumn: boolean;
   private readonly hasClaimedGenColumn: boolean;
   private readonly hasQueueTransitionsTable: boolean;
+  private readonly hasErasedIdsTable: boolean;
   private readonly hasTransitionProvenanceColumn: boolean;
   private readonly hasOwnerNotificationColumns: boolean;
   private readonly loadHumanRegistryFn: () => LoadResult;
@@ -1157,6 +1162,7 @@ export class QueueRepository {
     this.hasDelegatedDecisionColumn = detectQueueColumn(db, "delegated_decision");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
     this.hasQueueTransitionsTable = detectTable(db, "queue_transitions");
+    this.hasErasedIdsTable = detectTable(db, "queue_erased_ids");
     const transitionColumns = this.hasQueueTransitionsTable
       ? new Set((db.prepare("PRAGMA table_info(queue_transitions)").all() as Array<{ name: string }>).map((column) => column.name))
       : new Set<string>();
@@ -2343,6 +2349,11 @@ export class QueueRepository {
     }
     this.assertHumanAlert(input.humanAlert, input.destinationSession, input.humanIntent);
     const id = input.qitemId ?? newQitemId();
+    // A row queue erasure deleted keeps only its id: a create that reuses it would bring erased work back.
+    if (input.qitemId && this.hasErasedIdsTable
+      && this.db.prepare("SELECT 1 FROM queue_erased_ids WHERE qitem_id = ?").get(input.qitemId)) {
+      throw new QueueRepositoryError("qitem_erased", `qitem ${input.qitemId} was erased; its id can't be used again.`);
+    }
     const ts = new Date().toISOString();
     const priority = input.priority ?? "routine";
     const tier = input.tier ?? null;
@@ -5737,6 +5748,7 @@ export class QueueRepository {
       // PL-007: target_repo present only when migration 038 has applied;
       // older test fixtures supply legacy rows where target_repo is undefined.
       targetRepo: row.target_repo ?? null,
+      ...(row.content_erased_at ? { contentErasedAt: row.content_erased_at } : {}),
     };
   }
 }

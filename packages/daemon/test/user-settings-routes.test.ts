@@ -138,10 +138,15 @@ describe("config routes (User Settings v0)", () => {
     // + 1 acp.to (the ACP agent's receiver; default empty).
     // + 1 daemon.seat_poll_interval_ms (#2687 the seat pollers' cadence; startup-only, default 1000).
     // + 1 retention.events_days (the history-only event types of events; default 0 = keep).
-    expect(Object.keys(body.settings).length).toBe(100);
+    // + 2 retention.closed_content_days, retention.closed_metadata_days (closed-work erasure; default 0 = keep).
+    // + 1 retention.erasure_ledger (queue erasure's replay ledger; default empty = none).
+    expect(Object.keys(body.settings).length).toBe(103);
     expect(body.settings["launch.codex_login_shell"]).toMatchObject({ value: false, source: "default", defaultValue: false });
     expect(body.settings["transport.draft_delivery"]).toMatchObject({ value: "deliver", source: "default", defaultValue: "deliver" });
     expect(body.settings["retention.events_days"]).toMatchObject({ value: 0, source: "default", defaultValue: 0 });
+    expect(body.settings["retention.closed_content_days"]).toMatchObject({ value: 0, source: "default", defaultValue: 0 });
+    expect(body.settings["retention.closed_metadata_days"]).toMatchObject({ value: 0, source: "default", defaultValue: 0 });
+    expect(body.settings["retention.erasure_ledger"]).toMatchObject({ value: "", source: "default", defaultValue: "" });
     expect(body.settings["specs.builtins_visible"]).toMatchObject({ value: true, source: "default", defaultValue: true });
     expect(body.settings["stream.intake"]).toMatchObject({ value: "queue.worker", source: "default", defaultValue: "queue.worker" });
     expect(body.settings["retention.stream_days"]).toMatchObject({ value: 30, source: "default", defaultValue: 30 });
