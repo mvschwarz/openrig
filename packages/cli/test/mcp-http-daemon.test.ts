@@ -34,6 +34,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
   let db: Database.Database;
   let home: string;
   let shared: string;
+  let otherShared: string;
   let repo: QueueRepository;
   let bus: EventBus;
   /** Registered people a test sets; null reads the instance's registry, as the daemon does. */
@@ -52,6 +53,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     migrate(db, ALL_MIGRATIONS);
     home = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-"));
     shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-shared-")));
+    otherShared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-acct-b-")));
     process.env.OPENRIG_HOME = home;
     // The env seat a local caller is declared as; an authenticated caller must never act as it.
     process.env.OPENRIG_SESSION_NAME = "env-seat@elsewhere";
@@ -68,7 +70,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       appDeps: {
         sessionTransport: { resolveSessions: async (target: unknown) => { resolved.push(target); return { ok: false, code: "not_found", error: "inert fixture" }; }, send: inert, capture: inert, broadcast: inert } as never,
         queueRepo: repo,
-        filesAllowlist: [{ name: "proof", canonicalPath: shared }],
+        // Two shared roots, as one daemon serving two accounts has: proof, and another account's acct-b.
+        filesAllowlist: [{ name: "proof", canonicalPath: shared }, { name: "acct-b", canonicalPath: otherShared }],
       },
     });
     const { app } = setup;
@@ -84,6 +87,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     db.close();
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(shared, { recursive: true, force: true });
+    fs.rmSync(otherShared, { recursive: true, force: true });
     if (saved.home === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = saved.home;
     if (saved.session === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = saved.session;
   });
@@ -252,6 +256,30 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     const viaItem = await asCarol("rig_artifact_read", { qitemId: withRef.qitemId });
     expect(viaItem.structured).toMatchObject({ available: false, roots: [] });
     expect(viaItem.text).not.toContain("ARTIFACT body");
+  });
+
+  it("a scoped grant's root_unknown names only the shared roots it may read, and an unscoped caller still sees them all", async () => {
+    // The grant names proof and a root this daemon no longer shares; acct-b is another account's.
+    const dana = await grant("dana", { roots: ["proof", "stale"] });
+    const owner = await grant("owner", { owner: true });
+    const served = await listen();
+    const asDana = await connect(served.url, dana);
+    const asOwner = await connect(served.url, owner);
+    const withRef = await repo.create({ sourceSession: "dana@team", destinationSession: "impl@team", body: "x", nudge: false } as never);
+    db.prepare("UPDATE queue_items SET evidence_ref = ? WHERE qitem_id = ?").run("report.md", withRef.qitemId);
+
+    for (const args of [{ root: "stale", path: "report.md" }, { qitemId: withRef.qitemId, root: "stale" }]) {
+      const scoped = await asDana("rig_artifact_read", args);
+      expect(scoped.structured).toMatchObject({ ok: false, code: "root_unknown",
+        message: "Shared root 'stale' is not configured on this daemon. Shared roots this connection may read: proof." });
+      expect(JSON.parse(scoped.text)).toEqual({ error: "root_unknown", rootName: "stale", configuredRoots: ["proof"],
+        message: "Shared root 'stale' is not configured on this daemon. Shared roots this connection may read: proof." });
+    }
+
+    const unscoped = await asOwner("rig_artifact_read", { root: "stale", path: "report.md" });
+    expect(unscoped.structured).toMatchObject({ code: "root_unknown" });
+    expect(JSON.parse(unscoped.text)).toMatchObject({ rootName: "stale", configuredRoots: ["proof", "acct-b"] });
+    expect(unscoped.text).toContain("acct-b");
   });
 
   it("a hosted member works its own rows as its grant's seat, shows on the team with activity unknown, and keeps its record after revoke", async () => {
