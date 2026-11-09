@@ -13,6 +13,9 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
+import { getRequestListener } from "@hono/node-server";
+import { once } from "node:events";
+import { createServer } from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -428,6 +431,55 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       const response = await app.request("/api/slices/same-slice/doc/SPEC.md?project=alpha&mission=z-later");
       const body = await response.json();
       expect({ status: response.status, content: body.content }).toEqual({ status: 404, content: undefined });
+      expect(body).toEqual({ error: "doc_not_found" });
+    });
+
+    it.each([
+      { route: "detail", endpoint: "" },
+      { route: "doc", endpoint: "/doc/SPEC.md" },
+      { route: "proof", endpoint: "/proof-asset/screenshots/scope.png" },
+    ])("returns project_not_found from $route through the default Node adapter", async ({ route, endpoint }) => {
+      const originalRequest = globalThis.Request;
+      const originalResponse = globalThis.Response;
+      const requestDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Request")!;
+      const responseDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Response")!;
+      let server: ReturnType<typeof createServer> | undefined;
+      try {
+        // Exercise the adapter defaults that replace the request and response globals.
+        server = createServer(getRequestListener(app.fetch));
+        server.listen(0, "127.0.0.1");
+        await once(server, "listening");
+        expect(globalThis.Request).not.toBe(originalRequest);
+        expect(globalThis.Response).not.toBe(originalResponse);
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("fixture did not bind a TCP port");
+        expect(address.address).toBe("127.0.0.1");
+        expect(address.port).toBeGreaterThanOrEqual(32768);
+        const response = await fetch(`http://127.0.0.1:${address.port}/api/slices/same-slice${endpoint}?project=missing&mission=a-first`, {
+          headers: { Connection: "close" },
+        });
+        const body = await response.text();
+        console.log("slice adapter result", JSON.stringify({ route, status: response.status, body }));
+        expect(response.status).toBe(409);
+        expect(JSON.parse(body)).toMatchObject({ error: "project_not_found" });
+      } finally {
+        try {
+          if (server) {
+            server.closeAllConnections();
+            await new Promise<void>((resolve, reject) => server!.close(err => err ? reject(err) : resolve()));
+          }
+        } finally {
+          Object.defineProperty(globalThis, "Request", requestDescriptor);
+          Object.defineProperty(globalThis, "Response", responseDescriptor);
+          expect(Object.getOwnPropertyDescriptor(globalThis, "Request")).toEqual(requestDescriptor);
+          expect(Object.getOwnPropertyDescriptor(globalThis, "Response")).toEqual(responseDescriptor);
+          expect(globalThis.Request).toBe(originalRequest);
+          expect(globalThis.Response).toBe(originalResponse);
+          expect(server?.listening ?? false).toBe(false);
+          expect(server?.address() ?? null).toBeNull();
+          console.log("slice adapter cleanup", JSON.stringify({ route, globalsRestored: true, serverClosed: true }));
+        }
+      }
     });
 
     it.each(["", "?mission=z-later"])("unqualified ambiguous reads preserve the literal first-name selection for %s", async (query) => {
@@ -460,9 +512,13 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       },
     );
 
-    it.each(["doc/..%2F..%2Foutside.md", "proof-asset/..%2F..%2Foutside.png"])("keeps the existing path guard for %s", async (endpoint) => {
+    it.each([
+      { endpoint: "doc/..%2F..%2Foutside.md", error: "doc_path_invalid" },
+      { endpoint: "proof-asset/..%2F..%2Foutside.png", error: "proof_asset_path_invalid" },
+    ])("keeps the existing path guard for $endpoint", async ({ endpoint, error }) => {
       const response = await app.request(`/api/slices/same-slice/${endpoint}?project=beta&mission=a-first`);
       expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error });
     });
 
     it.each(["", "/doc/SPEC.md", "/proof-asset/screenshots/scope.png"])("preserves the production browser boundary and token exception for %s", async (endpoint) => {
