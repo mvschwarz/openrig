@@ -114,7 +114,7 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(notice!.destinationSession).toBe(PERSON);
     expect(notice!.sourceSession).toBe(MEMBER);
     expect(notice!.body).toContain(`check-ins: no check-in observed since ${at.toISOString()}`);
-    expect(notice!.body).toContain("it hasn't read its queue in that time. Ask its owner to start it, or route the work to another seat");
+    expect(notice!.body).toContain("no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat");
     for (const row of rows) expect(notice!.body).toContain(`- ${row.qitemId}, unclaimed since ${row.tsCreated}, from lead@hub: work for ${MEMBER}`);
     expect(notice!.body).not.toMatch(/dead/i);
   });
@@ -153,6 +153,9 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     ["the attention view", `destinationSession=${MEMBER}&attention=1`, MEMBER, false],
     ["the member's rows with someone else", `destinationSession=${MEMBER}&as=lead@hub`, MEMBER, false],
     ["a team read", "rig=hub", MEMBER, false],
+    ["a read of only what the member sent", `as=${MEMBER}&sourceSession=${MEMBER}`, MEMBER, false],
+    ["the member's own rows from one sender", `as=${MEMBER}&sourceSession=lead@hub`, MEMBER, true],
+    ["its own inbox filtered to rows it sent itself", `destinationSession=${MEMBER}&sourceSession=${MEMBER}`, MEMBER, true],
   ] as const)("check-in from %s: %s", async (_label, query, sender, counts) => {
     await poll(repo, query, sender);
     expect(repo.lastInboxCheckIn(MEMBER).state).toBe(counts ? "seen" : "never");

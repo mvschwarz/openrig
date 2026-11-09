@@ -1297,11 +1297,13 @@ export function queueRoutes(): Hono {
         sortByUpdated: c.req.query("sort") === "updated",
       });
       // A seat that lists its own active inbox is checking in; the stuck sweep reads that for hosted members that pick up
-      // work by polling. Another actor's read, a read with no sender, a read that can't return pending rows and the
-      // attention view aren't. A check-in proves the seat was reading, never that it saw or took any row.
+      // work by polling. Another actor's read, a read with no sender, a read that can't return pending rows, a read of
+      // only what the seat sent (`as` and `sourceSession` both the seat, no destination) and the attention view aren't.
+      // A check-in proves the seat was reading, never that it saw or took any row.
       const sender = transportSenderSession(c);
       const named = [destinationSession, asSession].filter((s): s is string => !!s);
-      if (sender && named.length > 0 && (!state || state.includes("pending")) && named.every((s) => repo.isSameSession(sender, s))) {
+      const sentOnly = !destinationSession && !!sourceSession && !!sender && repo.isSameSession(sender, sourceSession);
+      if (sender && named.length > 0 && !sentOnly && (!state || state.includes("pending")) && named.every((s) => repo.isSameSession(sender, s))) {
         repo.recordInboxCheckIn(sender);
       }
       return c.json(items);

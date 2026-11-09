@@ -611,7 +611,7 @@ function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes:
     ? "it's checking in, but this work is still unclaimed. Check whether it can do this work, or route it to another seat"
     : checkIn.state === "unknown"
       ? "nobody has claimed these rows, and whether it's reading its queue isn't known. Ask its owner, or route the work to another seat"
-      : "nobody has claimed these rows, and it hasn't read its queue in that time. Ask its owner to start it, or route the work to another seat";
+      : "nobody has claimed these rows, and no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat";
   return {
     summary: `Stuck sweep: unclaimed-backlog on ${member} (${count})`,
     body:

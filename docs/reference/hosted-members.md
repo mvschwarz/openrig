@@ -86,8 +86,11 @@ entry. The entry holds secret names, never values:
 These facts stay separate on the row:
 - **Wake:** with a trigger, the row's wake result is `wake-accepted:webhook (<url_ref>) answered <status>` when the trigger took the
   ring, or `failed:webhook …`. Accepted means the tool's trigger answered, not that the member read the row.
-  - With no trigger, the result is `unroutable`, and OpenRig tells the person: the operator seat when it's a person, else whoever
-    created the row.
+  - With no trigger, the result is `unroutable`. The member picks up work when it reads its own inbox, so a row gets no finding
+    of its own. Work it leaves unclaimed past the stuck sweep's unclaimed age (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by
+    default) is listed in one standing notice per member. The notice goes to the operator seat when it's a person, else the
+    rows' creator when they all share one, else the operator agent. It says whether the member has read its own pending inbox
+    recently: a check-in, never a receipt or a claim.
   - It tells the person too when the member was rung but hasn't claimed the work by the stuck sweep's unclaimed age
     (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by default).
   - The member sees new work when it checks: when it's rung, when its person asks it to, or on a schedule the tool runs.
@@ -141,8 +144,8 @@ and nothing else is offered:
   - **Queued:** the item exists and is `pending` with no claim.
   - **Picked up:** the receiver's claim (`in-progress`).
   - **Answered:** closed `done`, with the answer in `resolution`.
-  - Reading or listing an item records nothing, and nothing wakes an assistant, so an item stays queued until its receiver
-    claims it.
+  - Reading or listing an item records nothing on the item, and nothing wakes an assistant, so an item stays queued until its
+    receiver claims it. A member listing its own pending inbox records only a check-in time, which the notice above reads.
 
 ### A person answering the team's questions through their assistant
 
@@ -184,5 +187,5 @@ unusable `person` withholds only these two tools while the grant's other tools k
 ## Limits today
 
 - **Webhook triggers only:** OpenRig rings a webhook. Email and other triggers aren't supported yet. A member without a trigger
-  isn't rung, and its person is told instead.
+  isn't rung; work it leaves unclaimed past the unclaimed age is listed in one notice to its person instead.
 - **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one, except through a grant service's grant that names its person, which records that person's own answers (above).
