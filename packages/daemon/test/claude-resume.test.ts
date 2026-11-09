@@ -35,18 +35,28 @@ function mockTmux(overrides?: {
 }
 
 describe("ClaudeResumeAdapter", () => {
-  it("an in-place provider continuation keeps custom settings, config dir, model and extra env", async () => {
+  it("warning-only capture on a classic resume still dispatches the ordinary command", async () => {
+    const tmux = mockTmux();
+    const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });
+    await adapter.resume("seat@rig", "claude_id", "same", "/repo", "floor", undefined, undefined, "node",
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native/claude", undefined, undefined,
+      { warnings: ["capture unavailable"] });
+    expect(tmux.sendText).toHaveBeenCalledWith("seat@rig", expect.stringContaining("--permission-mode acceptEdits"));
+    expect(tmux.sendText).toHaveBeenCalledWith("seat@rig", expect.stringContaining("--resume 'same'"));
+  });
+
+  it("an in-place provider continuation keeps custom settings, config dir and model", async () => {
     const tmux = mockTmux();
     tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
     const nativeCommand = vi.fn(() => "retained-launch");
     const prepare = vi.fn(async () => ({ command: nativeCommand, warnings: [], assertCurrent: () => {} }));
     const adapter = new ClaudeResumeAdapter(tmux, { claudeManagedLaunch: { prepare } as unknown as ClaudeManagedLaunch });
     const launch = { args: ["--settings", "/custom rules/settings.json", "--model", "opus", "--permission-mode", "auto", "--name", "seat@rig"],
-      env: { CLAUDE_CONFIG_DIR: "/custom config", CUSTOM_SETTING: "kept" }, warnings: [] };
+      configDir: "/custom config", warnings: [] };
     await adapter.resume("seat@rig", "claude_id", "same-conversation", "/repo", "auto", "sonnet", "auto", "node",
       "high", undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native/claude", undefined, undefined, launch);
-    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ continuationEnv: launch.env }), "auto");
-    expect(nativeCommand).toHaveBeenCalledWith([...launch.args, "--effort", "high", "--resume", "same-conversation"], { ...launch.env, OPENRIG_RESUME_LAUNCH: "same-conversation" });
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ continuationConfigDir: launch.configDir }), "auto");
+    expect(nativeCommand).toHaveBeenCalledWith(["--settings", "/custom rules/settings.json", "--model", "opus", "--name", "seat@rig", "--effort", "high", "--permission-mode", "auto", "--resume", "same-conversation"], { OPENRIG_RESUME_LAUNCH: "same-conversation" });
     expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
   });
 

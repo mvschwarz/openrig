@@ -832,6 +832,7 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
         const { rigId, nodeIds } = seedPodAwareRig();
         seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
         liveDriver(rigId, nodeIds[0]!);
+        (tmux as any).differingSessionEnv = vi.fn(async () => ["CUSTOM_SETTING"]);
         tmux.getPanePid.mockResolvedValue(child.pid! as never);
         // Pane/lineage is simulated; argv/environment are read from this real owned child.
         processes = [{ pid: child.pid!, ppid: process.pid, pgid: child.pid!, tpgid: child.pid!, command: `${executable} --session-id original`, executableName: "claude", startedAt: "Fri Oct 9 07:00:00 2026" }];
@@ -839,7 +840,7 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
         (tmux as any).signalPaneProcess.mockImplementation(async () => { processes = []; return { ok: true }; });
         const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true, keepClaudeLaunch: true });
         expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ claudeLaunch: expect.objectContaining({
-          args: ["--settings", "/custom rules.json", "--model", "opus"], env: expect.objectContaining({ CLAUDE_CONFIG_DIR: "/custom config", CUSTOM_SETTING: "transient-only" }),
+          args: ["--settings", "/custom rules.json", "--model", "opus"], configDir: "/custom config",
         }) }), expect.anything());
         expect(result.warnings?.join(" ")).toContain("Kept mapped running Claude options");
         expect(JSON.stringify(result)).not.toContain("transient-only");

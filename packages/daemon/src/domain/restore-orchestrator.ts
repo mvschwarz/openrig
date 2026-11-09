@@ -1247,7 +1247,7 @@ export class RestoreOrchestrator {
       return { nodeId, logicalId: node.logicalId, status: "failed", error: `${node.logicalId} has no bound tmux pane to keep, so nothing was stopped.` };
     }
     // Read before takeover ends the process. An unavailable witness keeps normal launch resolution unchanged.
-    const continuation = keptPane && node.runtime === "claude-code" ? await this.claudeContinuationExecutable(keptPane, opts?.keepClaudeLaunch) : undefined;
+    const continuation = keptPane && node.runtime === "claude-code" ? await this.claudeContinuationExecutable(keptPane, opts?.keepClaudeLaunch, this.sessionRegistry.getBindingForNode(node.id)?.tmuxSession ?? undefined) : undefined;
     const claudeExecutable = continuation?.executable, claudeLaunch = continuation?.launch;
     if (opts?.keepClaudeLaunch && keptPane && node.runtime === "claude-code") warnings?.push(...(claudeLaunch?.warnings ?? ["Running Claude launch capture unavailable; using ordinary launch settings."]));
 
@@ -1428,7 +1428,7 @@ export class RestoreOrchestrator {
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id } : checked;
   }
 
-  private async claudeContinuationExecutable(pane: string, keepLaunch = false): Promise<{ executable: string; launch?: ClaudeContinuationLaunch } | undefined> {
+  private async claudeContinuationExecutable(pane: string, keepLaunch = false, session?: string): Promise<{ executable: string; launch?: ClaudeContinuationLaunch } | undefined> {
     const native = await verifyClaudePaneRuntime({ target: pane, tmux: this.tmuxAdapter,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
     if (!native) return undefined;
@@ -1441,7 +1441,7 @@ export class RestoreOrchestrator {
       if (!statSync(executable).isFile()) return undefined;
       const selected = realpathSync(executable);
       if (!keepLaunch) return { executable: selected };
-      const launch = await captureClaudeContinuation(native.process.pid, selected);
+      const launch = await captureClaudeContinuation(native.process.pid, selected, session ? env => this.tmuxAdapter.differingSessionEnv(session, env) : undefined);
       const current = await verifyClaudePaneRuntime({ target: pane, tmux: this.tmuxAdapter,
         ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
       if (!current || current.process.pid !== native.process.pid || current.process.startedAt !== native.process.startedAt) return undefined;

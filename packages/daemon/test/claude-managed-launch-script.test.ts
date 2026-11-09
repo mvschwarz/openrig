@@ -144,15 +144,16 @@ describe("managed launch_wrapper", () => {
   });
 });
 
-it("a retained launch keeps its custom config directory, settings file and environment in the actual script", async () => {
-  const { target, resolver } = await prepared(`#!/bin/sh\nif [ "$1" = --help ]; then ${printsHelp}exit 0; fi\nprintf '%s\\n' "$CLAUDE_CONFIG_DIR" "$CUSTOM_SETTING" "$@"\n`);
+it("a retained config selector and settings reach the actual script without unrelated captured values", async () => {
+  const { target, resolver } = await prepared(`#!/bin/sh\nif [ "$1" = --help ]; then ${printsHelp}exit 0; fi\nprintf '%s\\n' "$CLAUDE_CONFIG_DIR" "$@"\n`);
   const root = path.dirname(path.dirname(target)), configDir = path.join(root, "custom config");
   mkdirSync(configDir);
   const settings = path.join(root, "custom settings.json"); writeFileSync(settings, '{"permissions":{"allow":["Read(/kept)"]}}');
-  const env = { PATH: `${path.dirname(target)}:/usr/bin:/bin`, HOME: path.join(root, "home"), CLAUDE_CONFIG_DIR: configDir, CUSTOM_SETTING: "kept Ω" };
-  const managed = await resolver.prepare({ nodeId: "node", continuationEnv: env }, "auto");
+  const managed = await resolver.prepare({ nodeId: "node", continuationConfigDir: configDir }, "auto");
   const args = ["--settings", settings, "--model", "opus", "--resume", "same-conversation"];
-  const { stdout: output } = await exec("/bin/sh", ["-c", managed.command(args, env)], { encoding: "utf8", env: {} });
+  const command = managed.command(args);
+  expect(command).not.toContain("synthetic-unrelated-secret-2853");
+  const { stdout: output } = await exec("/bin/sh", ["-c", command], { encoding: "utf8", env: { NPM_TOKEN: "synthetic-unrelated-secret-2853" } });
   expect(managed.configDir).toBe(configDir);
-  expect(output.trimEnd().split("\n")).toEqual([configDir, "kept Ω", ...args]);
+  expect(output.trimEnd().split("\n")).toEqual([configDir, ...args]);
 });

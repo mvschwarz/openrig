@@ -1,4 +1,4 @@
-import { continuationPermission, resumedClaudeArguments } from "../domain/claude-continuation-launch.js";
+import { continuationChoiceNotes, resumedClaudeArguments } from "../domain/claude-continuation-launch.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
@@ -322,7 +322,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         if (!this.claudeManagedLaunch) await unresolvedClaudePermissionModes();
         managed = await this.claudeManagedLaunch!.prepare({ nodeId: binding.nodeId, cwd: binding.cwd,
           ...(binding.claudeExecutable ? { executable: binding.claudeExecutable } : {}),
-          ...(binding.claudeLaunch?.env ? { continuationEnv: binding.claudeLaunch.env } : {}),
+          ...(binding.claudeLaunch?.configDir !== undefined ? { continuationConfigDir: binding.claudeLaunch.configDir } : {}),
           ...(binding.launchWrapper?.length ? { launchWrapper: binding.launchWrapper } : {}),
           session: binding.tmuxSession, pane: binding.tmuxPane, generation: binding.launchGeneration,
           ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome, accountToken: binding.accountHome === null ? binding.accountToken : binding.accountToken ?? null } : {}),
@@ -374,7 +374,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     };
     const launchNotes = () => (tokenWarnings.length ? { warnings: [...tokenWarnings] } : {});
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
-    const appliedLaunch = observeClaudePermission(binding.claudeLaunch?.args ? continuationPermission(binding.claudeLaunch) : posture);
+    const appliedLaunch = observeClaudePermission(posture);
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
     });
@@ -443,16 +443,16 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
     const permissionMode = permissionArg(launchArgs);
     const nativeArgs = resumedClaudeArguments(opts.resumeToken ? binding.claudeLaunch : undefined, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
-      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort);
-    const cmd = managed ? managed.command(nativeArgs, { ...binding.claudeLaunch?.env, ...(opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : {}) }) : opts.resumeToken
+      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture);
+    const cmd = managed ? managed.command(nativeArgs, opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
       ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
       : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
-    const retainedEnv = binding.claudeLaunch?.env && this.seatLaunchEnvironment && binding.claudeExecutable
-      ? `/usr/bin/env ${Object.entries(binding.claudeLaunch.env).map(([k, v]) => shellQuote(`${k}=${v}`)).join(" ")} ` : "";
-    const classicCommand = opts.resumeToken && binding.claudeLaunch && binding.claudeExecutable
-      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}exec ${retainedEnv}${wrapperPrefix}${shellQuote(binding.claudeExecutable)} ${nativeArgs.map(shellQuote).join(" ")}` : cmd;
-    if (!managed && binding.claudeLaunch?.env && !retainedEnv) tokenWarnings.push("This launch path cannot privately carry the captured environment; ordinary pane environment is used.");
+    const configPrefix = binding.claudeLaunch?.configDir != null && this.seatLaunchEnvironment ? `CLAUDE_CONFIG_DIR=${shellQuote(binding.claudeLaunch.configDir)} ` : "";
+    const classicCommand = configPrefix + (opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable
+      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}exec ${wrapperPrefix}${shellQuote(binding.claudeExecutable)} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
+    if (!managed && binding.claudeLaunch?.configDir !== undefined && !configPrefix) tokenWarnings.push("This classic launch cannot privately apply the captured config selector; ordinary pane selection is used.");
+    tokenWarnings.push(...continuationChoiceNotes(binding.claudeLaunch, posture, model));
 
     if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Claude launch preparation; no native command was sent.", recovery: "attention_required" };
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, beforeManagedInput)

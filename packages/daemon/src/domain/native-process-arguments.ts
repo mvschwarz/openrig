@@ -56,6 +56,7 @@ function parse(data, used, environment) {
   while (offset < used) {
     var end = bytes.indexOf("\\u0000", offset);
     if (end < 0 || end >= used) return null;
+    if (end === offset) break; // End of environ; XNU apple strings follow a NUL separator.
     if (end > offset) {
       var entry = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(exact.subdataWithRange({location: offset, length: end - offset}), $.NSUTF8StringEncoding));
       if (typeof entry !== "string") return null;
