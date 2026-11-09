@@ -206,6 +206,26 @@ it.each([false, true])("resume tolerates unavailable tmux identity only without 
   expect(dispatched).toBe(!chosen);
 });
 
+it("reports the real cause when a declared home meets the seat's own Pi login, and keeps that login", async () => {
+  const { main } = await import("../src/adapters/pi-runner.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-own-login-")); roots.push(root);
+  const account = path.join(root, "account"), agent = path.join(root, "seat", "agent");
+  fs.mkdirSync(account); fs.writeFileSync(path.join(account, "auth.json"), "declared-auth");
+  fs.mkdirSync(agent, { recursive: true }); fs.writeFileSync(path.join(agent, "auth.json"), "seat-login");
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  const exitCode = process.exitCode;
+  try {
+    await main(["--session-name", "seat", "--state-root", root, "--cwd", root,
+      "--launch-id", "attempt", "--no-approve", "--account-home", account]);
+    expect(process.exitCode).toBe(2);
+    const printed = error.mock.calls.flat().join("\n");
+    expect(printed).toContain("Existing Pi login is not a managed account link; use a confirmed account switch");
+    expect(printed).toContain("The seat's own Pi login was not changed");
+    expect(printed).not.toContain("provide a readable prepared account file");
+    expect(fs.readFileSync(path.join(agent, "auth.json"), "utf8")).toBe("seat-login");
+  } finally { process.exitCode = exitCode; error.mockRestore(); }
+});
+
 it("reports a missing prepared auth file in the seat's own home without an uncaught lstat error", async () => {
   const { main } = await import("../src/adapters/pi-runner.js");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-own-account-")); roots.push(root);

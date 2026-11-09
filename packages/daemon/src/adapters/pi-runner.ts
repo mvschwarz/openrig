@@ -1264,8 +1264,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   fs.mkdirSync(paths.sessionsDir, { recursive: true });
   if (runtime === "pi") {
     try { preparePiAccount(paths.agentDir, args.accountHome); }
-    catch {
-      console.error(`${PI_RUNNER_ERROR_MARKER} Pi account preparation failed for ${JSON.stringify(nodePath.join(args.accountHome ?? paths.agentDir, "auth.json"))}; provide a readable prepared account file and keep any existing seat login intact, then retry the account operation.`);
+    catch (err) {
+      // Say what actually failed: a login that isn't a managed link, a missing or unreadable file, or an I/O error.
+      // preparePiAccount removes auth.json only when it is OpenRig's own link, so the seat's own login is unchanged.
+      console.error(`${PI_RUNNER_ERROR_MARKER} Pi account preparation failed for ${JSON.stringify(nodePath.join(args.accountHome ?? paths.agentDir, "auth.json"))}: ${(err as Error).message}. The seat's own Pi login was not changed; resolve that, then retry the account operation.`);
       process.exitCode = 2;
       return;
     }
