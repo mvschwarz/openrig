@@ -405,9 +405,11 @@ budget window when exhausted. Slack's per-method `Retry-After` is retained acros
 Only an acknowledged edit gets a success receipt. `rig slack status` shows queued reconciliation
 and the last edit failure. Transient failures retry with increasing waits, capped at an hour,
 behind other queued work. Permanent Slack failures (such as missing scope, a deleted original,
-an archived channel or an uneditable message) remain unfinished and are retried only on the next
-connector start. They do not keep consuming edit capacity. These edit calls have their own
-budget, separate from missed-message scanning below.
+an archived channel or an uneditable message) remain unfinished. A deleted original is recorded
+on the row and never asked about again; a new post of the same ask is tried afresh. The others,
+which a scope, membership, a different bot token or an upgrade can fix, are retried on the next
+connector start. A message is uneditable when the configured token didn't post it. They do not keep consuming edit capacity. These edit calls have their own budget,
+separate from missed-message scanning below.
 
 The baseline already includes public-channel history access and `chat:write`. Private-channel
 reads may require `groups:history`, which the baseline does not grant; a refused read never
