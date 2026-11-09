@@ -1386,27 +1386,43 @@ export function hasExpectedStagedText(pane: string | null, expected: string, run
   return stagedEvidence;
 }
 
-/** An interaction may consume its answer immediately. Only add Enter when the
- * complete answer is still visible in a bounded current text input, never a
- * numbered choice or a partial prefix. Unknown rendering is not consumption. */
-function promptAnswerStaged(pane: string | null, answer: string, runtime: string | null): boolean {
-  if (!pane || !answer.trim() || /[\r\n\x1b]/.test(answer)) return false;
-  // Fail closed for an unknown runtime: with no scoped glyph set there is no way to
-  // say which prompt line is the live input (the pre-shared-matcher check did the same).
-  if (runtime !== "codex" && runtime !== "claude-code") return false;
+/** An interaction may consume its answer immediately, so Enter is added for the complete answer still visible in a
+ *  bounded current text input (`staged`), never a numbered choice or a partial prefix. `not_staged` is positive
+ *  evidence against it: a recognized box holding something else, a numbered choice, a menu whose key-hint row ends
+ *  the current screen, or no Enter by contract. A screen that couldn't be read (`unreadable`), or one with no input box
+ *  the parser recognizes (`unrecognized`), is unknown, not evidence: unknown rendering is not consumption. */
+function promptAnswerStaged(pane: string | null, answer: string, runtime: string | null): "staged" | "not_staged" | "unreadable" | "unrecognized" {
+  // The caller's own keys (CR, LF, Esc) or an empty answer never get an added Enter.
+  if (!answer.trim() || /[\r\n\x1b]/.test(answer)) return "not_staged";
+  // A runtime with no scoped glyph set has no known input line; there the caller puts CR in the payload.
+  if (runtime !== "codex" && runtime !== "claude-code") return "not_staged";
+  if (!pane) return "unreadable";
   const promptClass = composerPromptClassForRuntime(runtime);
   const lines = pane.split("\n");
   // Only the LAST prompt line of this runtime's glyph set can be the current input;
   // everything above it is transcript history, and another harness's glyph is not ours.
   const inputIndex = findComposerInputLineIndex(lines, promptClass);
-  if (inputIndex < 0) return false;
-  const input = lines[inputIndex]!.trimStart();
   // A numbered choice (`.` or `)`), e.g. `» 1)` or `❯ 1.`, is a menu selection, never the answer.
-  if (composerNumberedChoicePattern(promptClass).test(input)) return false;
+  if (inputIndex >= 0 && composerNumberedChoicePattern(promptClass).test(lines[inputIndex]!.trimStart())) return "not_staged";
   // Where the input ends: Codex closes the composer on a blank line, Claude Code on a rule line.
-  const end = lines.findIndex((line, index) => index > inputIndex && (runtime === "codex"
+  const end = inputIndex < 0 ? -1 : lines.findIndex((line, index) => index > inputIndex && (runtime === "codex"
     ? line.trim() === "" : /^[─═-]{10,}$/.test(line.trim())));
-  return end > inputIndex && lines.slice(inputIndex, end).join("\n").trimStart().slice(1).trim() === answer.trim();
+  if (end <= inputIndex) return currentMenuKeyHint(lines) ? "not_staged" : "unrecognized";
+  return lines.slice(inputIndex, end).join("\n").trimStart().slice(1).trim() === answer.trim() ? "staged" : "not_staged";
+}
+
+/** Whether the current screen ends in a list or menu's key-hint row, where Enter acts on the focused item and Esc
+ *  dismisses it: `Enter to select · Esc to cancel`, `Space to select · Enter to confirm · Esc to reject all`, or
+ *  `t trust all · enter review · esc close`. Like the native menu recognizers, it reads only the last row (below
+ *  OpenRig's seat rule, if drawn), so an old hint in the transcript holds nothing. A send or newline hint, or Esc to
+ *  interrupt work, is a composer's or a busy seat's, not a menu's. */
+function currentMenuKeyHint(lines: string[]): boolean {
+  const rows = lines.map((line) => line.trim()).filter(Boolean);
+  if (/^─{3,} [\w.-]+@[\w.-]+ ─+$/.test(rows.at(-1) ?? "")) rows.pop();
+  const segments = (rows.at(-1) ?? "").split(/\s+·\s+/);
+  return segments.length > 1
+    && segments.some((segment) => /^(?:enter\b|⏎|↵)\s*(?:to\s+)?(?:select|confirm|choose|review|open|accept)\b/i.test(segment))
+    && segments.some((segment) => /^esc\b\s*(?:to\s+)?(?:cancel|close|reject|dismiss|exit)\b/i.test(segment));
 }
 
 // Codex 0.160 input box: the last prompt line plus indented continuation rows, one blank row, then a footer
@@ -3377,6 +3393,8 @@ export class SessionTransport {
     let draftAdvised = false;
     // Broadcast can carry wait + override: after waiting, it still uses the same deliberate-input boundary.
     const promptOverride = Boolean(opts?.dangerouslyInteract);
+    // Positive evidence of an interactive prompt: there an Enter after a consumed answer lands in the next prompt.
+    let overrideAtPrompt = false;
     if (waitForIdleMs === undefined || promptOverride) {
       const readiness = await this.classifySendReadiness({
         sessionName,
@@ -3388,6 +3406,7 @@ export class SessionTransport {
       // Explicit interaction selects key input even when readiness cannot recognize the prompt.
       // Only bypassing a positive picker requires a successful audit; other states already sent.
       if (opts?.dangerouslyInteract) {
+        overrideAtPrompt = readiness.state === "needs_input";
         if (readiness.state === "needs_input" && (!opts.reason || opts.reason.trim().length === 0)) {
           return {
             ok: false,
@@ -3411,14 +3430,16 @@ export class SessionTransport {
             existingInput = { target, classification, rows: input?.rows ?? [], suggestionRows: input?.suggestionRows ?? [],
               cursor: input?.cursor ?? null, fullContentsVisible: !!input && input.state !== "unknown" && !input.collapsedPaste,
               ...(input?.unknownReason ? { reason: input.unknownReason } : {}), cleared: false };
-            const stopped = classification === "typed_or_pasted" || classification === "unreadable";
+            // Only seen typed or pasted text stops the override. An input that can't be read is not
+            // evidence of text, so the override delivers and says it couldn't read the input.
+            const stopped = classification === "typed_or_pasted";
             const audit = this.recordPromptOverride({ ...auditInput, input: { classification, visibleRows: existingInput.rows.length,
               suggestionRows: existingInput.suggestionRows.length, choice: unchecked ? "type_without_checking" : "inspect",
               outcome: stopped ? "stopped" : "proceed", clearAttempted: false } });
             if (!audit.ok) sendAdvisory = `prompt-override: audit unavailable (${audit.reason}).`;
-            if (stopped) throw new DeliveryGuardError(classification === "unreadable" ? "override_input_unknown" : "override_input_present",
-              classification === "unreadable" ? "Input could not be read. Nothing was typed. Inspect the native terminal, deliberately clear its prompt with native/tmux controls, then retry; or explicitly choose --type-without-checking (does not clear)."
-                : "Existing typed or pasted input (author unknown). Nothing was typed. Inspect the shown input, deliberately clear the prompt with native/tmux controls, then retry. Manual clearing is outside OpenRig's lease and observation checks and is not recorded.");
+            if (stopped) throw new DeliveryGuardError("override_input_present",
+              "Existing typed or pasted input (author unknown). Nothing was typed. Inspect the shown input, deliberately clear the prompt with native/tmux controls, then retry. Manual clearing is outside OpenRig's lease and observation checks and is not recorded.");
+            if (classification === "unreadable") sendAdvisory = [sendAdvisory, "Input could not be read and was not cleared; this send may join or submit existing text."].filter(Boolean).join(" ");
             if (unchecked) sendAdvisory = [sendAdvisory, "Input was not checked or cleared; this send may join or submit existing text."].filter(Boolean).join(" ");
           };
         }
@@ -3627,11 +3648,19 @@ export class SessionTransport {
         const pane = await this.runStage("session_transport.prompt_override_pre_submit_capture",
           () => this.tmuxAdapter.capturePaneContent(readTarget, 50)).catch(() => null);
         if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
-        if (!promptAnswerStaged(pane, text, runtime)) {
+        const staged = promptAnswerStaged(pane, text, runtime);
+        // A screen that couldn't be read, or one with no input box the parser recognizes, is not evidence the answer
+        // was consumed or joined: outside a recognized prompt, submit it and say so. Visible evidence, or a
+        // recognized prompt, still withholds Enter.
+        if (staged === "not_staged" || (staged !== "staged" && overrideAtPrompt)) {
           return observe({ ok: true, sessionName, sent: true, verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified",
             warning: [sendAdvisory, "prompt-override: answer sent as unbracketed input; submission unverified. No trailing Enter: the complete answer is not visibly staged (it may have been consumed, the prompt changed, or observation is unavailable)."].filter(Boolean).join(" ") });
         }
-        sendAdvisory = [sendAdvisory, "prompt-override: answer sent as unbracketed input; Enter submitted the complete still-staged answer."].filter(Boolean).join(" ");
+        sendAdvisory = [sendAdvisory, staged === "staged"
+          ? "prompt-override: answer sent as unbracketed input; Enter submitted the complete still-staged answer."
+          : staged === "unreadable"
+            ? "prompt-override: answer sent as unbracketed input; the screen couldn't be read, so Enter was sent without confirming the staged answer."
+            : "prompt-override: answer sent as unbracketed input; no input box was recognized on the screen, so Enter was sent without confirming the staged answer."].filter(Boolean).join(" ");
       }
 
       // 5. Submit (Enter)

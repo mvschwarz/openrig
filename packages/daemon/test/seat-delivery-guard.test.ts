@@ -153,7 +153,7 @@ describe("real adapter/transport guard boundaries with no external effects", () 
     expect(f.commands).toEqual([]);expect(f.files).toEqual([]);expect(f.tmux.listPanes).not.toHaveBeenCalled();
     expect(f.outbox.heldForNode("a").total).toBe(4);f.db.close();
   });
-  it("an explicit override under hold reads the composer and stops on unreadable input without typing or retaining", async () => {
+  it("an explicit override under hold reads the composer and delivers on unreadable input, saying it couldn't read it", async () => {
     // This send reaches session metadata; use the existing migrated fixture, not the hold-only schema.
     const f = queueFixture(); await f.guard.set("a", true, "person", "draft");
     f.db.prepare("UPDATE nodes SET runtime = 'terminal' WHERE id = 'a'").run();
@@ -162,11 +162,13 @@ describe("real adapter/transport guard boundaries with no external effects", () 
       sleep: async () => {}, captureObserver: observer });
     const capture = vi.spyOn(f.tmux, "captureComposerSnapshot").mockResolvedValue(null);
     const result = await transport.send("worker@test", "message", { dangerouslyInteract: true, reason: "explicit" });
-    expect(result).toMatchObject({ ok: false, reason: "override_input_unknown", sent: false,
-      existingInput: { classification: "unreadable", reason: expect.any(String) } });
+    // Unknown is reported as unknown, never as empty, and it doesn't stop the explicit override.
+    expect(result).toMatchObject({ ok: true,
+      existingInput: { classification: "unreadable", fullContentsVisible: false, reason: expect.any(String) } });
+    expect(result.warning).toContain("Input could not be read and was not cleared; this send may join or submit existing text.");
     expect(capture).toHaveBeenCalledTimes(1);
-    // Preparing the inert buffer precedes inspection; no pane input occurs.
-    expect(f.writes.some(command => /paste-buffer|send-keys/.test(command))).toBe(false);
+    expect(f.writes.some(command => /paste-buffer/.test(command))).toBe(true);
+    // The override is not retained behind the hold, and the capture observer stays off for overrides.
     expect(f.outbox.heldForNode("a").total).toBe(0);
     expect(f.db.prepare("SELECT count(*) AS n FROM outbox_entries").get()).toEqual({ n: 0 });
     expect(observer.record).not.toHaveBeenCalled(); f.db.close();

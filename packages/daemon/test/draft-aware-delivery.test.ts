@@ -1032,11 +1032,20 @@ describe("deliberate override preserves existing input", () => {
     expect(f.observations).toEqual([]);
   });
 
-  it.each([null, "[Pasted text #4 +18 lines]"])("shows unreadable or collapsed input honestly: %s", async body => {
-    const f = fixture(); f.bodies.a = body;
+  it("stops on a collapsed paste and shows only its label", async () => {
+    const f = fixture(); f.bodies.a = "[Pasted text #4 +18 lines]";
     const result = await f.send("override", "incoming", override);
-    expect(result).toMatchObject({ ok: false, sent: false, existingInput: { classification: body === null ? "unreadable" : "typed_or_pasted", fullContentsVisible: false } });
+    expect(result).toMatchObject({ ok: false, sent: false, existingInput: { classification: "typed_or_pasted", fullContentsVisible: false } });
     expect(f.writes).toEqual([]);
+  });
+
+  it("delivers on unreadable input and reports it as unreadable, never empty", async () => {
+    const f = fixture(); f.bodies.a = null;
+    const result = await f.send("override", "incoming", override);
+    expect(result).toMatchObject({ ok: true, sent: true, existingInput: { classification: "unreadable", fullContentsVisible: false, cleared: false } });
+    expect(result.warning).toContain("Input could not be read and was not cleared; this send may join or submit existing text.");
+    expect(f.writes).toEqual(["paste:a:incoming"]);
+    expect(f.submissions).toEqual([]); // Unreadable input cannot prove the answer staged for Enter.
   });
 
   it.each(["", "typed"])("separates the suggestion from %j and never stores either", async typed => {
