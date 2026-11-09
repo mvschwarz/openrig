@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { execFile, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 
 // The runner conformance check that ships in docs/reference, run against a test double that keeps the contract, and
 // against copies of it that each break one promise: the check must pass the first and catch every break.
@@ -15,7 +16,7 @@ type Result = { id: string; status: "pass" | "fail" | "skip" | "advisory"; met?:
 type Report = { results: Result[]; summary: { pass: number; fail: number; skip: number; advisory: number } };
 
 async function check(args: string[], runnerFlags = "", nodeArgs: string[] = [], timeoutMs = 90_000): Promise<{ code: number; report: Report }> {
-  const runner = `${process.execPath} ${RUNNER} --agent {agent}${runnerFlags}`;
+  const runner = `${shellQuote(process.execPath)} ${shellQuote(RUNNER)} --agent {agent}${runnerFlags}`;
   try {
     const { stdout } = await promisify(execFile)(process.execPath, [...nodeArgs, CHECK, "--runner", runner, "--name", "minimal", "--json", ...args], { timeout: timeoutMs });
     return { code: 0, report: JSON.parse(stdout) };
