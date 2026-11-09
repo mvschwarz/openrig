@@ -213,14 +213,37 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     expect(res.degraded.map((d) => d.seat)).toEqual(["b", "c"]);
   });
 
-  it("an unlabelled remainder confirms no seats: every seat is degraded with a note", async () => {
+  it("an omitted filler label follows the same exited-seat rule as an empty label", async () => {
     const { adapter } = herdrOpening(() => listed(undefined));
     const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
-    expect(res.ok).toBe(false);
     expect(res.opened).toEqual([]);
-    expect(res.degraded.map(d => d.seat)).toEqual(["a", "b", "c"]);
-    expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
-    expect(res.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
+    expect(res.degraded.map(d => d.reason)).toEqual(Array(3).fill(HERDR_PANE_EXITED_REASON));
+    expect(res.notes ?? []).not.toContain(HERDR_PANES_UNCONFIRMED_NOTE);
+  });
+
+  it("seven live seats stay confirmed when Herdr omits both filler labels", async () => {
+    const seats = ["a", "b", "c", "d", "e", "f", "g"];
+    const { adapter } = herdrOpening(() => listed(...seats, undefined, undefined));
+    const res = await adapter.openView(viewOf(...seats.map(seat => pane(seat))));
+    expect(res.opened).toEqual(seats);
+    expect(res.degraded).toEqual([]);
+    expect(res.ok).toBe(true);
+  });
+
+  it("still reports a missing seat beside a live seat and an omitted filler label", async () => {
+    const { adapter } = herdrOpening(() => listed("a", "c", undefined));
+    const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
+    expect(res.opened).toEqual(["a", "c"]);
+    expect(res.degraded).toEqual([{ seat: "b", host: "herdr", reason: HERDR_PANE_EXITED_REASON }]);
+  });
+
+  it.each([null, 42, {}])("a present malformed label %j keeps the page unconfirmed", async label => {
+    const { adapter } = herdrOpening(() => ({ type: "pane_list", panes: [
+      { tab_id: "w1:t1", label: "a" }, { tab_id: "w1:t1", label },
+    ] }));
+    const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
+    expect(res.opened).toEqual([]);
+    expect(res.degraded.every(d => d.code === "pane_unconfirmed")).toBe(true);
   });
 
   it("a blank-labelled seat is degraded while its confirmed labelled siblings stay opened", async () => {
