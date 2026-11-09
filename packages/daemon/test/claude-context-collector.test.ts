@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, mkdtempSync, copyFileSync, chmodSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
@@ -100,7 +100,7 @@ describe("Claude Status Line Collector Script", () => {
   // T1: Parses valid status line and writes sidecar
   it("parses valid Claude status line JSON and writes sidecar file", () => {
     const outputPath = join(tmpDir, "context", "test.json");
-    execSync(`echo '${VALID_STATUS_LINE}' | node ${collectorPath} ${outputPath}`, { encoding: "utf-8" });
+    execFileSync(process.execPath, [collectorPath, outputPath], { input: VALID_STATUS_LINE, encoding: "utf-8" });
 
     expect(existsSync(outputPath)).toBe(true);
     const content = JSON.parse(readFileSync(outputPath, "utf-8"));
@@ -128,7 +128,7 @@ describe("Claude Status Line Collector Script", () => {
   // T2: Atomic write (no .tmp left behind on success)
   it("writes atomically — no .tmp file left behind", () => {
     const outputPath = join(tmpDir, "context", "atomic.json");
-    execSync(`echo '${VALID_STATUS_LINE}' | node ${collectorPath} ${outputPath}`, { encoding: "utf-8" });
+    execFileSync(process.execPath, [collectorPath, outputPath], { input: VALID_STATUS_LINE, encoding: "utf-8" });
 
     expect(existsSync(outputPath)).toBe(true);
     expect(existsSync(outputPath + ".tmp")).toBe(false);
@@ -165,7 +165,7 @@ describe("Claude Status Line Collector Script", () => {
 
   it("writes to a session-specific sidecar when given a context directory", () => {
     const outputDir = join(tmpDir, "context");
-    execSync(`echo '${VALID_STATUS_LINE}' | node ${collectorPath} ${outputDir}`, { encoding: "utf-8" });
+    execFileSync(process.execPath, [collectorPath, outputDir], { input: VALID_STATUS_LINE, encoding: "utf-8" });
 
     const sessionSidecar = join(outputDir, "dev-impl@test.json");
     expect(existsSync(sessionSidecar)).toBe(true);
@@ -236,7 +236,7 @@ describe("Claude Status Line Collector Script", () => {
   // T3b: No output path arg — silent exit
   it("silently exits with no output path argument", () => {
     // Should not throw
-    execSync(`echo '${VALID_STATUS_LINE}' | node ${collectorPath}`, { encoding: "utf-8" });
+    execFileSync(process.execPath, [collectorPath], { input: VALID_STATUS_LINE, encoding: "utf-8" });
   });
 
   it("logs a shape error when a directory target cannot be resolved to a session sidecar", () => {
