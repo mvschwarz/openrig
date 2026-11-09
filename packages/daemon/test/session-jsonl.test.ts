@@ -85,3 +85,29 @@ describe("parseJsonlExchanges — claude-projects role/content shape", () => {
     expect(parseJsonlExchanges(p, 10)).toEqual([{ role: "user", content: "codex hello" }]);
   });
 });
+
+describe("recap tail boundaries", () => {
+  it.each(["", "\n", "\r\n"])("keeps chronological order with trailing %j", (ending) => {
+    const p = fixture([]);
+    const message = (content: string) => JSON.stringify({ message: { role: "user", content } });
+    writeFileSync(p, [message("old"), message("first retained"), "{partial", "", JSON.stringify({ type: "metadata" }), message("last retained")].join("\r\n") + ending);
+    expect(parseJsonlExchanges(p, 2)).toEqual([
+      { role: "user", content: "first retained" },
+      { role: "user", content: "last retained" },
+    ]);
+  });
+
+  it("returns the first line when it is the only visible exchange", () => {
+    const p = fixture([{ message: { role: "user", content: "first" } }, { type: "metadata" }]);
+    expect(parseJsonlExchanges(p, 6)).toEqual([{ role: "user", content: "first" }]);
+    expect(parseJsonlExchanges(p, 0)).toEqual([]);
+  });
+
+  it("returns only the latest exchanges from a long record", () => {
+    const p = fixture(Array.from({ length: 20_000 }, (_, i) => ({ message: { role: "user", content: String(i) } })));
+    expect(parseJsonlExchanges(p, 2)).toEqual([
+      { role: "user", content: "19998" },
+      { role: "user", content: "19999" },
+    ]);
+  });
+});
