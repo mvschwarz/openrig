@@ -205,8 +205,10 @@ describe("HerdrAppProvider.openView", () => {
       await new Promise((r) => setTimeout(r, 100));
       expect(existsSync(gateOf("n2"))).toBe(false); // not shown yet: closed
       expect((await viewers()).map((v) => v.gate)).toEqual(["pending", undefined]);
-      // The cell's own deadline is the journal's, so the cell and the daemon give up together.
-      expect(Number(world.terminals.get("t10")!.argv[6])).toBe(Math.floor(Date.parse((await viewers())[0]!.gateUntil!) / 1000));
+      // The cell's own deadline is the journal's, rounded up to a whole second, so the cell never gives up first.
+      const journalled = Date.parse((await viewers())[0]!.gateUntil!) / 1000;
+      expect(Number(world.terminals.get("t10")!.argv[6])).toBe(Math.ceil(journalled));
+      expect(Number(world.terminals.get("t10")!.argv[6])).toBeGreaterThanOrEqual(journalled);
       expect(result.notes?.join(" ")).toContain("OpenRig waits 10 minutes; after that each cell says so, and the view has to be opened again");
       world.applies = true;
       world.render(files);

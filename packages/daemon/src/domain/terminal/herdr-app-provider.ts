@@ -354,7 +354,8 @@ export class HerdrAppProvider implements TerminalProvider {
           const gated = interactive && !!readOnlyTile(pane.attachArgv!);
           if (interactive && !gated) unshaped.push(pane.label);
           const gateUntil = this.gateDeadline();
-          const gate = interactive ? { path: this.gatePath(nonce), until: Math.floor(Date.parse(gateUntil) / 1000), expired: this.gateExpired(view.id) } : undefined;
+          // Rounded up, so the cell never gives up before the daemon does.
+          const gate = interactive ? { path: this.gatePath(nonce), until: Math.ceil(Date.parse(gateUntil) / 1000), expired: this.gateExpired(view.id) } : undefined;
           return { cellId: cell.id, seat: pane.seat, label: pane.label, ...(pane.runtime ? { runtime: pane.runtime } : {}),
             nonce, argv: viewerArgv(pane, nonce, gate), readOnly: pane.readOnly,
             attach: pane.attachArgv ? "local" as const : "remote" as const,
