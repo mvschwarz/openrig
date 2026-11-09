@@ -1285,7 +1285,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             }
           }
         };
-        const emitRecoveredScopeAdvisory = () => {
+        const emitRecoveredScopeAdvisory = async () => {
           const recoveredTags: string[] = [];
           for (const raw of tags ?? []) {
             if (recoveredTags.length >= 8) break;
@@ -1296,7 +1296,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             if (!recoveredTags.includes(sanitized)) recoveredTags.push(sanitized);
           }
           if (recoveredTags.length === 0) return;
-          if (sent.remoteHost !== undefined) {
+          // A --host naming the selected daemon's own id took the local path (resolvesToLocalHost),
+          // and an unreadable selfHostId is not proof of forwarding.
+          const selfHostId = sent.remoteHost !== undefined ? await daemonSelfHostId(client) : null;
+          if (sent.remoteHost !== undefined && selfHostId !== undefined && selfHostId !== sent.remoteHost) {
             console.error(`Note: queue create scope check skipped for cross-host write (${recoveredTags.join(", ")}); row was forwarded.`);
           } else {
             console.error(`Warning: queue create scope check outcome unavailable after response recovery (${recoveredTags.join(", ")}): original scope check result was lost with the create response; row was created.`);
@@ -1305,7 +1308,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
         const finish = async (created: Record<string, unknown>, status: number, headers?: Headers, recovered = false) => {
           if (status < 400) {
-            if (recovered) emitRecoveredScopeAdvisory();
+            if (recovered) await emitRecoveredScopeAdvisory();
             else emitScopeAdvisory(headers);
           }
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
