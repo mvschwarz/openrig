@@ -325,7 +325,7 @@ describe("gateway human lifecycle (S12, amended A1: single-human surface): list 
       expect(res.error).toContain('cannot unset binding.0 (role "primary") while 1 other binding(s) remain (binding.1)');
       expect(res.error).toContain("no replacement is chosen silently");
       expect(res.error).toContain('To replace the primary, set binding.0 to the new primary spec: rig gateway human set ana binding.0 "<kind:connectorRef:secretsRef:primary[:handle=<id>]>"');
-      expect(res.error).toContain("To promote one of the other bindings (binding.1), unset that secondary slot first, then find the primary's current slot in remainingBindings (or rig gateway human show ana --json, since unsetting a lower slot shifts the primary down) and set it to the spec with role primary.");
+      expect(res.error).toContain("To promote one of the other bindings (binding.1), first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show ana --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show ana --json, since unsetting a lower slot shifts the primary down) and set it to the saved spec with role primary.");
       expect(res.error).toContain("To remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show ana, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).");
       expect(res.error).not.toContain("--replace");
     }
@@ -333,7 +333,7 @@ describe("gateway human lifecycle (S12, amended A1: single-human surface): list 
     expect(sha(projectionPath(home))).toBe(projBefore);
   });
 
-  it("primary at nonzero slot (binding.1): refusal names current slots, promote route shifts primary to binding.0, and remove-all route finishes at binding.0", () => {
+  it("primary at nonzero slot (binding.1): refusal names current slots, promote route saves spec from show --json before unsetting and shifts primary to binding.0, and remove-all route finishes at binding.0", () => {
     expect(
       addHumanFragment(
         {
@@ -359,31 +359,47 @@ describe("gateway human lifecycle (S12, amended A1: single-human surface): list 
     if (!refused.ok) {
       expect(refused.error).toContain('cannot unset binding.1 (role "primary") while 2 other binding(s) remain (binding.0, binding.2)');
       expect(refused.error).toContain('To replace the primary, set binding.1 to the new primary spec: rig gateway human set kai binding.1 "<kind:connectorRef:secretsRef:primary[:handle=<id>]>"');
-      expect(refused.error).toContain("To promote one of the other bindings (binding.0, binding.2), unset that secondary slot first, then find the primary's current slot in remainingBindings (or rig gateway human show kai --json, since unsetting a lower slot shifts the primary down) and set it to the spec with role primary.");
+      expect(refused.error).toContain("To promote one of the other bindings (binding.0, binding.2), first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show kai --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show kai --json, since unsetting a lower slot shifts the primary down) and set it to the saved spec with role primary.");
       expect(refused.error).toContain("To remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show kai, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).");
     }
 
     // 2. Promote route from binding.0 when primary started at binding.1:
-    //    Step 1: unset secondary binding.0 -> primary shifts down from binding.1 to binding.0
+    //    Step 1: save binding.0's full spec (including secretsRef) from showHuman (rig gateway human show kai --json)
+    const beforePromote = showHuman("kai", home);
+    expect(beforePromote.ok).toBe(true);
+    if (!beforePromote.ok) return;
+    const savedSecondary = beforePromote.record.connectorBindings[0]!;
+    expect(savedSecondary.secretsRef).toBe("file:/etc/a.env");
+    const promotedSpec = `${savedSecondary.kind}:${savedSecondary.connectorRef}:${savedSecondary.secretsRef}:primary${savedSecondary.handle ? `:handle=${savedSecondary.handle}` : ""}`;
+
+    //    Step 2: unset secondary binding.0 -> primary shifts down from binding.1 to binding.0
     const promoteUnset = setHumanField("kai", "binding.0", "unset", home);
     expect(promoteUnset.ok).toBe(true);
-    if (promoteUnset.ok) {
-      expect(promoteUnset.remainingBindings?.map((b) => [b.slot, b.connectorRef, b.role])).toEqual([
-        ["binding.0", "main", "primary"],
-        ["binding.1", "bridge-b", "secondary"],
-      ]);
-    }
-    //    Step 2: set primary's current slot (binding.0, NOT old binding.1) to the promoted spec with role primary
-    const promoteSet = setHumanField("kai", "binding.0", "relay:bridge-a:file:/etc/a.env:primary:handle=kai-a", home);
+    if (!promoteUnset.ok) return;
+    expect(promoteUnset.remainingBindings?.map((b) => [b.slot, b.connectorRef, b.role])).toEqual([
+      ["binding.0", "main", "primary"],
+      ["binding.1", "bridge-b", "secondary"],
+    ]);
+    const currentPrimarySlot = promoteUnset.remainingBindings!.find((b) => b.role === "primary")!.slot;
+    expect(currentPrimarySlot).toBe("binding.0");
+
+    //    Step 3: set primary's current slot (binding.0, NOT old binding.1) to the saved spec with role primary
+    const promoteSet = setHumanField("kai", currentPrimarySlot, promotedSpec, home);
     expect(promoteSet.ok).toBe(true);
     const afterPromote = showHuman("kai", home);
     expect(afterPromote.ok).toBe(true);
     if (afterPromote.ok) {
-      expect(afterPromote.record.connectorBindings.map((b) => [b.kind, b.connectorRef, b.role, b.handle])).toEqual([
-        ["relay", "bridge-a", "primary", "kai-a"],
-        ["relay", "bridge-b", "secondary", "kai-b"],
+      expect(afterPromote.record.connectorBindings.map((b) => [b.kind, b.connectorRef, b.secretsRef, b.role, b.handle])).toEqual([
+        ["relay", "bridge-a", "file:/etc/a.env", "primary", "kai-a"],
+        ["relay", "bridge-b", "file:/etc/b.env", "secondary", "kai-b"],
       ]);
       expect(afterPromote.record.slackSubscription).toEqual({ value: "urgent-only", source: "authored" });
+      expect(afterPromote.record.prefs.deliveryClass).toEqual({ value: "A", source: "authored" });
+    }
+    const loadedAfterPromote = loadHumanRegistry(home);
+    expect(loadedAfterPromote.ok).toBe(true);
+    if (loadedAfterPromote.ok) {
+      expect(loadedAfterPromote.entities.find((e) => e.entityId === "kai")?.prefs.availability).toBe("focus");
     }
 
     // 3. Remove-all route when primary is at a nonzero slot ([secondary binding.0, primary binding.1, secondary binding.2]):

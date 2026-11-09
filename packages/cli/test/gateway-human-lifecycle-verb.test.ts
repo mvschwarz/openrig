@@ -247,7 +247,7 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     const refusal = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(refusal).toContain("no replacement is chosen silently");
     expect(refusal).toContain('To replace the primary, set binding.0 to the new primary spec: rig gateway human set ana binding.0 "<kind:connectorRef:secretsRef:primary[:handle=<id>]>"');
-    expect(refusal).toContain("To promote one of the other bindings (binding.1), unset that secondary slot first, then find the primary's current slot in remainingBindings (or rig gateway human show ana --json, since unsetting a lower slot shifts the primary down) and set it to the spec with role primary.");
+    expect(refusal).toContain("To promote one of the other bindings (binding.1), first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show ana --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show ana --json, since unsetting a lower slot shifts the primary down) and set it to the saved spec with role primary.");
     expect(refusal).toContain("To remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show ana, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).");
     expect(refusal).not.toContain("--replace");
 
