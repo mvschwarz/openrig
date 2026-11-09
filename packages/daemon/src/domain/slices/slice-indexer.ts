@@ -209,6 +209,10 @@ interface SliceIdAliases {
   expiresAt: number;
 }
 
+interface MissionIdAliases extends SliceIdAliases {
+  idByPath: Map<string, string>;
+}
+
 interface SliceLocation {
   name: string;
   missionId: string | null;
@@ -362,7 +366,7 @@ export class SliceIndexer {
   private membershipIndex: MembershipIndex | null = null;
   // Slice id <-> directory name map, built once per cache window (same TTL as the listing).
   private idAliases: SliceIdAliases | null = null;
-  private missionAliases: SliceIdAliases | null = null;
+  private missionAliases: MissionIdAliases | null = null;
   // Depth of open withMembershipBatch scopes.
   private batchDepth = 0;
   private compositionBasis: string | null = null;
@@ -570,9 +574,13 @@ export class SliceIndexer {
   }
 
   /** The `mission:` tag values that name this mission: its directory name and, when
-   *  its node file declares one that no other mission shares, its frontmatter id. */
-  missionTagKeys(missionId: string): string[] {
-    const id = this.missionIdAliases().idByName.get(missionId);
+   *  its node file declares one that no other mission in that root shares, its frontmatter id. */
+  missionTagKeys(missionId: string, slicePath?: string): string[] {
+    const aliases = this.missionIdAliases();
+    const missionPath = slicePath ? this.missionPathOfSlice(missionId, slicePath) : null;
+    const id = missionPath
+      ? aliases.idByPath.get(missionPath)
+      : aliases.idByName.get(missionId);
     return id ? [missionId, id] : [missionId];
   }
 
@@ -603,7 +611,7 @@ export class SliceIndexer {
       }
       const counts = zeroQueueCounts();
       result.set(entry.slicePath, counts);
-      const missionKeys = new Set(this.missionTagKeys(entry.missionId));
+      const missionKeys = new Set(this.missionTagKeys(entry.missionId, entry.slicePath));
       const sliceKeys = new Set(this.sliceTagKeys(entry.name));
       const target: TargetScope = { projectId, missionKeys, sliceKeys, counts };
       for (const token of sliceKeys) {
@@ -742,12 +750,21 @@ export class SliceIndexer {
     return this.idAliases;
   }
 
-  private missionIdAliases(): SliceIdAliases {
+  private missionPathOfSlice(missionId: string, slicePath: string): string | null {
+    const slicesDir = path.dirname(slicePath);
+    if (path.basename(slicesDir) !== "slices") return null;
+    const missionDir = path.dirname(slicesDir);
+    return path.basename(missionDir) === missionId ? path.resolve(missionDir) : null;
+  }
+
+  private missionIdAliases(): MissionIdAliases {
     const now = Date.now();
     if (this.missionAliases && this.missionAliases.expiresAt > now) return this.missionAliases;
     const missionNames = new Set<string>();
-    const idOfMission = new Map<string, string | null>();
-    const claims = new Map<string, Set<string>>();
+    const roots: Array<{
+      missions: Array<{ name: string; missionPath: string; id: string | null }>;
+      claims: Map<string, Set<string>>;
+    }> = [];
     for (const root of this.sliceRoots()) {
       let entries: fs.Dirent[];
       try {
@@ -755,30 +772,51 @@ export class SliceIndexer {
       } catch {
         continue;
       }
+      const missions: Array<{ name: string; missionPath: string; id: string | null }> = [];
+      const claims = new Map<string, Set<string>>();
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
         const entryPath = path.join(root, entry.name);
         if (!this.isDirectory(path.join(entryPath, "slices"))) continue;
         missionNames.add(entry.name);
-        if (!idOfMission.has(entry.name)) {
-          idOfMission.set(entry.name, this.readSliceId(entryPath));
+        const id = this.readSliceId(entryPath);
+        missions.push({ name: entry.name, missionPath: path.resolve(entryPath), id });
+        if (id) {
+          const claimants = claims.get(id) ?? new Set<string>();
+          claimants.add(entry.name);
+          claims.set(id, claimants);
         }
       }
+      roots.push({ missions, claims });
     }
-    for (const [missionName, id] of idOfMission) {
-      if (!id || missionNames.has(id)) continue;
-      const claimants = claims.get(id) ?? new Set<string>();
-      claimants.add(missionName);
-      claims.set(id, claimants);
+    const idByPath = new Map<string, string>();
+    const idsByName = new Map<string, Set<string | null>>();
+    const namesById = new Map<string, Set<string>>();
+    for (const { missions, claims } of roots) {
+      for (const { name, missionPath, id } of missions) {
+        const validId = id && !missionNames.has(id) && claims.get(id)?.size === 1 ? id : null;
+        if (validId) {
+          idByPath.set(missionPath, validId);
+          const names = namesById.get(validId) ?? new Set<string>();
+          names.add(name);
+          namesById.set(validId, names);
+        }
+        const ids = idsByName.get(name) ?? new Set<string | null>();
+        ids.add(validId);
+        idsByName.set(name, ids);
+      }
     }
     const nameById = new Map<string, string>();
-    const idByName = new Map<string, string>();
-    for (const [missionName, id] of idOfMission) {
-      if (!id || missionNames.has(id) || claims.get(id)?.size !== 1) continue;
-      nameById.set(id, missionName);
-      idByName.set(missionName, id);
+    for (const [id, names] of namesById) {
+      if (names.size === 1) nameById.set(id, names.values().next().value!);
     }
-    this.missionAliases = { nameById, idByName, expiresAt: now + this.cacheTtlMs };
+    const idByName = new Map<string, string>();
+    for (const [name, ids] of idsByName) {
+      if (ids.size !== 1) continue;
+      const only = ids.values().next().value;
+      if (only && nameById.get(only) === name) idByName.set(name, only);
+    }
+    this.missionAliases = { nameById, idByName, idByPath, expiresAt: now + this.cacheTtlMs };
     return this.missionAliases;
   }
 
