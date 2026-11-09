@@ -36,8 +36,11 @@ export const UNKNOWN_START_TTL_MS = 10 * 60 * 1000;
  */
 const DEFINITE_HC_ERROR_KINDS = new Set(["invalid_params", "not_found", "conflict", "name_taken", "usage"]);
 
-/** Waits after the attach ends, so the terminal never ends on its own; OpenRig rewrites the cell, then ends it. */
-const VIEWER_WRAPPER = 'shift; "$@"; status=$?; printf "\\r\\n%s\\r\\n" "The seat session ended here (exit $status). OpenRig will update this view; nothing else runs in this cell."; exec tail -f /dev/null';
+/** Waits after the attach ends, so the terminal never ends on its own; OpenRig rewrites the cell, then ends it.
+ *  herdr-core panes run programs with TERM=dumb, whose terminfo has no `clear` capability, so a tmux client
+ *  refuses with "open terminal failed: terminal does not support clear". Keep any TERM that can clear
+ *  (never stomp a real terminal env); otherwise fall back to xterm-256color. */
+const VIEWER_WRAPPER = 'shift; if ! (command -v infocmp >/dev/null 2>&1 && infocmp "$TERM" 2>/dev/null | grep -q "clear="); then TERM=xterm-256color; export TERM; fi; "$@"; status=$?; printf "\\r\\n%s\\r\\n" "The seat session ended here (exit $status). OpenRig will update this view; nothing else runs in this cell."; exec tail -f /dev/null';
 
 export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand">, nonce: string): string[] {
   // A remote pane (no attachArgv) runs its ssh paneCommand as composed: the remote command's own readOnly decides,
