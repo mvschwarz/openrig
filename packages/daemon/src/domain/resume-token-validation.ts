@@ -9,7 +9,7 @@
 // actually resume" probe is intentionally out of scope (heavy + must not
 // mutate live state); format validation is the safe, side-effect-free floor.
 
-export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file";
+export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file" | `community:${string}`;
 
 export interface ResumeTokenValidationOk {
   ok: true;
@@ -110,3 +110,33 @@ export function validateResumeToken(
   }
   return validateIdShapedToken(resumeType, token);
 }
+
+const COMMUNITY_HARNESS_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+export function validateCommunityResumeToken(
+  harness: string | null | undefined,
+  rawToken: unknown,
+): ResumeTokenValidationOk | ResumeTokenValidationErr {
+  const normalizedHarness = typeof harness === "string" ? harness.trim() : "";
+  if (!normalizedHarness || !COMMUNITY_HARNESS_NAME_RE.test(normalizedHarness)) {
+    return { ok: false, error: `Invalid community harness name "${harness ?? "unknown"}".` };
+  }
+  if (typeof rawToken !== "string") {
+    return { ok: false, error: "Resume token is missing or not a string." };
+  }
+  const token = rawToken.trim();
+  if (token.length === 0) {
+    return { ok: false, error: "Resume token is empty." };
+  }
+  if (token.length > MAX_TOKEN_LEN) {
+    return { ok: false, error: `Resume token is too long (max ${MAX_TOKEN_LEN} characters).` };
+  }
+  if (!SAFE_TOKEN_RE.test(token)) {
+    return {
+      ok: false,
+      error: "Resume token contains disallowed characters (allowed: letters, digits, '.', '_', '-').",
+    };
+  }
+  return { ok: true, resumeType: `community:${normalizedHarness}`, token };
+}
+

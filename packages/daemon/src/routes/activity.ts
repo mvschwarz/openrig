@@ -18,7 +18,8 @@ import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
 import { nodeExecutorConfirmedStopped } from "../domain/node-inventory.js";
 import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
-import { validateResumeToken } from "../domain/resume-token-validation.js";
+import { validateResumeToken, validateCommunityResumeToken } from "../domain/resume-token-validation.js";
+import { communityHarnessOf, isCommunityHarnessRuntime } from "../domain/built-in-runtimes.js";
 import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import {
@@ -458,6 +459,73 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
         provenance: "rpc",
       });
       return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted: validation.ok });
+    }
+
+    const sessionCommunity = store.db.prepare(
+      `SELECT ${sessionCommunityHarnessSelect(store.db, "sessions")} AS community_harness FROM sessions WHERE id = ?`
+    ).get(resolved.sessionId) as { community_harness: string | null } | undefined;
+    const nodeRow = store.db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(resolved.nodeId) as { runtime: string | null } | undefined;
+    const effectiveRuntime = resolved.runtime ?? nodeRow?.runtime ?? runtime;
+    const rawHarness = sessionCommunity?.community_harness;
+    const communityHarness = communityHarnessOf(rawHarness, effectiveRuntime)
+      ?? communityHarnessOf(rawHarness, runtime);
+
+    const seatIsNative = (resolved.runtime !== null && ["claude-code", "codex", "pi", "omp"].includes(resolved.runtime))
+      || (runtime !== null && ["claude-code", "codex", "pi", "omp"].includes(runtime));
+
+    if (communityHarness && !seatIsNative) {
+      const generation = stringOrNull(body.generation);
+      let generationMismatch = false;
+      try {
+        const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
+        generationMismatch = !!generation && !!current && current.generationUuid !== generation
+          && sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)
+          && !sessionRegistry.isOccupantContinuedByAdoption(resolved.nodeId, generation);
+      } catch { /* an unreadable ledger is no evidence of a mismatch */ }
+      if (generationMismatch) {
+        return c.json({
+          ok: false,
+          code: "generation_mismatch",
+          tokenPersisted: false,
+          error: "Community harness session identity ignored: emitter is an earlier occupant of this seat.",
+        }, 409);
+      }
+
+      let currentGeneration = false;
+      try {
+        currentGeneration = !!generation && sessionRegistry.currentOccupantTenure(resolved.nodeId)?.generationUuid === generation;
+      } catch { /* an unreadable ledger is no evidence */ }
+      if (!currentGeneration) {
+        return c.json({
+          ok: true,
+          sessionId,
+          provenance: "hook",
+          tokenPersisted: false,
+          code: "generation_unconfirmed",
+        });
+      }
+
+      const validation = validateCommunityResumeToken(communityHarness, sessionId);
+      const tokenPersisted = validation.ok
+        && (sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
+          || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token));
+
+      eventBus.emit({
+        type: "agent.session_identity",
+        rigId: resolved.rigId,
+        nodeId: resolved.nodeId,
+        sessionName: resolved.sessionName,
+        runtime: runtime ?? effectiveRuntime ?? communityHarness,
+        sessionId: validation.ok ? validation.token : sessionId,
+        provenance: "hook",
+      });
+
+      return c.json({
+        ok: true,
+        sessionId: validation.ok ? validation.token : sessionId,
+        provenance: "hook",
+        tokenPersisted,
+      });
     }
 
     // The resume-type label derives from the RUNTIME, never a fixed default: this line used to stamp

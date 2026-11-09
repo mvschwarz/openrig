@@ -1,5 +1,5 @@
-import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync, appendFileSync, renameSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync, appendFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -8,7 +8,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { ProcessCensus } from "../src/domain/process-census.js";
-import { CurrentModelReader } from "../src/domain/model-divergence/current-model-reader.js";
+import { CurrentModelReader, type CurrentModelObservationTarget } from "../src/domain/model-divergence/current-model-reader.js";
 import { parseSqliteUtcMs } from "../src/domain/sqlite-time.js";
 import * as recordReaders from "../src/domain/model-divergence/effective-model-readers.js";
 import { readClaudeModelObservation, readCodexModelObservation } from "../src/domain/model-divergence/effective-model-readers.js";
@@ -376,3 +376,140 @@ it.each(["child-replaced", "child-moved", "pane-replaced", "binding-changed", "o
     expect((await f.reader.readEffectiveModel(f.seat)).ok).toBe(false);
   },
 );
+
+describe("community harness current model observation", () => {
+  function communityFixture() {
+    const f = fixture("custom-runner");
+    const stateDir = f.dir;
+    const contextUsageDir = join(stateDir, "context-usage");
+    mkdirSync(contextUsageDir, { recursive: true });
+    f.sessions.recordCommunityHarnessSelection(f.session.id, "custom-runner", true);
+    const sidecarPath = join(contextUsageDir, "editor@studio.json");
+    const validSidecar = {
+      session_id: f.id,
+      session_name: "editor@studio",
+      occupant_generation: f.tenure.generationUuid,
+      sampled_at: f.stamp,
+      model: { id: "gpt-4o", source: "runner-sidecar" },
+    };
+    writeFileSync(sidecarPath, JSON.stringify(validSidecar));
+
+    f.readAllPaneProcesses.mockResolvedValue(new Map([
+      ["%1", { pid: 10, command: "node runner.js", dead: false } as any],
+    ]));
+
+    const reader = new CurrentModelReader({
+      sessions: f.sessions,
+      identities: f.identities,
+      context: { readSidecar: () => ({ ok: false, reason: "missing_sidecar" }) } as never,
+      codexRollout: () => f.path,
+      piRunner: () => ({} as never),
+      readAllPaneProcesses: f.readAllPaneProcesses,
+      census: f.reader.processCensus,
+      now: () => f.boot + 60_000,
+      native: { getPanePid: f.getPanePid, listProcesses: () => f.census.list(), readThreadIdByPid: f.thread },
+      stateDir,
+    });
+
+    const input: CurrentModelObservationTarget = {
+      nodeId: f.node.id,
+      canonicalSessionName: "editor@studio",
+      runtime: "custom-runner",
+      sessionStatus: "running",
+      communityHarness: "custom-runner",
+      resumeToken: f.id,
+    };
+
+    return { ...f, stateDir, contextUsageDir, sidecarPath, validSidecar, reader, input };
+  }
+
+  it("observes valid model and source for a community runner seat", async () => {
+    const f = communityFixture();
+    const result = await f.reader.observe(f.input);
+    expect(result).toEqual({
+      status: "observed",
+      model: "gpt-4o",
+      source: "runner-sidecar",
+      observedAt: new Date(Date.parse(f.stamp)).toISOString(),
+      generation: f.tenure.generationUuid,
+      reason: null,
+    });
+  });
+
+  it("returns unsupported-runtime when community harness does not match runtime", async () => {
+    const f = communityFixture();
+    const input = { ...f.input, communityHarness: "other-runner" };
+    const result = await f.reader.observe(input);
+    expect(result).toMatchObject({ status: "unknown", reason: "unsupported-runtime" });
+  });
+
+  it("returns process-unverified when pane command drops to shell or is dead", async () => {
+    const f = communityFixture();
+    f.readAllPaneProcesses.mockResolvedValue(new Map([
+      ["%1", { pid: 10, command: "bash", dead: false } as any],
+    ]));
+    expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "process-unverified" });
+
+    f.readAllPaneProcesses.mockResolvedValue(new Map([
+      ["%1", { pid: 10, command: "node runner.js", dead: true } as any],
+    ]));
+    expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "process-unverified" });
+  });
+
+  it("returns record-not-found when context-usage file is missing or unreadable", async () => {
+    const f = communityFixture();
+    rmSync(f.sidecarPath);
+    expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "record-not-found" });
+  });
+
+  it("returns generation-mismatch when occupant_generation does not match", async () => {
+    const f = communityFixture();
+    writeFileSync(f.sidecarPath, JSON.stringify({ ...f.validSidecar, occupant_generation: "wrong-generation" }));
+    expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "generation-mismatch" });
+  });
+
+  it("returns session-mismatch on session name or session id discrepancy", async () => {
+    const f = communityFixture();
+    writeFileSync(f.sidecarPath, JSON.stringify({ ...f.validSidecar, session_name: "other-seat@studio" }));
+    expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "session-mismatch" });
+
+    writeFileSync(f.sidecarPath, JSON.stringify({ ...f.validSidecar, session_id: "other-resume-token" }));
+    expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "session-mismatch" });
+  });
+
+  it("returns record-predates-current-occupant when sampled_at is before boot", async () => {
+    const f = communityFixture();
+    writeFileSync(f.sidecarPath, JSON.stringify({
+      ...f.validSidecar,
+      sampled_at: new Date(f.boot - 5000).toISOString(),
+    }));
+    expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "record-predates-current-occupant" });
+  });
+
+  it("returns timestamp-in-future when sampled_at is in the future", async () => {
+    const f = communityFixture();
+    writeFileSync(f.sidecarPath, JSON.stringify({
+      ...f.validSidecar,
+      sampled_at: new Date(f.boot + 100_000).toISOString(),
+    }));
+    expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "timestamp-in-future" });
+  });
+
+  it("returns invalid-model when model is malformed", async () => {
+    const f = communityFixture();
+    writeFileSync(f.sidecarPath, JSON.stringify({
+      ...f.validSidecar,
+      model: "??bad model!!",
+    }));
+    expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "invalid-model" });
+  });
+
+  it("returns invalid-source when model source is provider-response or invalid", async () => {
+    const f = communityFixture();
+    writeFileSync(f.sidecarPath, JSON.stringify({
+      ...f.validSidecar,
+      model: { id: "gpt-4o", source: "provider-response" },
+    }));
+    expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "invalid-source" });
+  });
+});

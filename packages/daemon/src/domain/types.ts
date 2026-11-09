@@ -1630,12 +1630,13 @@ export type ContextUnknownReason =
   | "stale"
   | "session_mismatch"
   | "stale_generation"
+  | "window_capacity_unknown"
   | "no_data";
 
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: "claude_statusline_json" | "codex_token_count_jsonl" | null;
+  source: string | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;

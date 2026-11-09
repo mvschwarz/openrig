@@ -448,4 +448,77 @@ describe("ContextUsageStore", () => {
       expect(result.availability).toBe("known");
     });
   });
+
+  describe("community runner and window capacity observability", () => {
+    it("uses custom source when provided, otherwise defaults to claude_statusline_json", () => {
+      const store = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
+      const custom = store.normalizeSample({
+        ...VALID_SIDECAR,
+        source: "runner-sidecar",
+      });
+      expect(custom.source).toBe("runner-sidecar");
+
+      const def = store.normalizeSample(VALID_SIDECAR);
+      expect(def.source).toBe("claude_statusline_json");
+    });
+
+    it("returns stale_generation when occupant_generation mismatches active tenure", () => {
+      const { node } = seedNode();
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('s1', ?, 'dev-impl@test-rig', 'running')").run(node.id);
+      db.prepare("INSERT INTO occupant_tenures (node_id, generation_uuid, generation_ordinal, kind, boot_at) VALUES (?, 'gen-active', 1, 'initial', datetime('now'))")
+        .run(node.id);
+
+      const store = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
+      const result = store.normalizeSample("dev-impl@test-rig", {
+        ...VALID_SIDECAR,
+        session_name: "dev-impl@test-rig",
+        occupant_generation: "gen-retired",
+      });
+      expect(result.availability).toBe("unknown");
+      expect(result.reason).toBe("stale_generation");
+    });
+
+    it("returns window_capacity_unknown when used_percentage is missing but token metrics exist", () => {
+      const store = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
+      const raw = {
+        session_id: "sess-1",
+        session_name: "worker@rig",
+        source: "runner-sidecar",
+        context_window: {
+          context_window_size: 128000,
+          total_input_tokens: 45000,
+          total_output_tokens: 1200,
+          current_usage: { input_tokens: 45000 },
+        },
+        transcript_path: "/path/to/transcript",
+        cost: { total_cost_usd: 0.15 },
+        sampled_at: "2026-11-09T12:00:00.000Z",
+      };
+
+      const result = store.normalizeSample(raw);
+      expect(result.availability).toBe("unknown");
+      expect(result.reason).toBe("window_capacity_unknown");
+      expect(result.source).toBe("runner-sidecar");
+      expect(result.usedPercentage).toBeNull();
+      expect(result.remainingPercentage).toBeNull();
+      expect(result.contextWindowSize).toBe(128000);
+      expect(result.totalInputTokens).toBe(45000);
+      expect(result.totalOutputTokens).toBe(1200);
+      expect(result.transcriptPath).toBe("/path/to/transcript");
+      expect(result.clientCostEstimateUsd).toBe(0.15);
+    });
+
+    it("returns parse_error when neither used_percentage nor token metrics exist", () => {
+      const store = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
+      const raw = {
+        session_id: "sess-1",
+        session_name: "worker@rig",
+        context_window: {},
+      };
+
+      const result = store.normalizeSample(raw);
+      expect(result.availability).toBe("unknown");
+      expect(result.reason).toBe("parse_error");
+    });
+  });
 });

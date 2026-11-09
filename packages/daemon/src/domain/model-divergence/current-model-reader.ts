@@ -1,10 +1,15 @@
 import { observeCodexRebuildPermissions } from "../codex-rebuild-permissions.js";
-import { realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { SessionRegistry } from "../session-registry.js";
 import type { SeatIdentityStore } from "../seat-identity-store.js";
 import type { ContextUsageStore } from "../context-usage-store.js";
 import { parseSqliteUtcMs } from "../sqlite-time.js";
 import { ProcessCensus } from "../process-census.js";
+import { communityHarnessOf } from "../built-in-runtimes.js";
+import type { CommunityHarnessLabel } from "../community-harness-presets.js";
+import { isShellForeground } from "../shell-classifier.js";
 import {
   resolveIdentityVerifiedClaudeRecord, resolveIdentityVerifiedPiRecord,
   resolveLiveCodexThreadId, readCurrentPiOccupantModel,
@@ -31,7 +36,7 @@ export function unknownModelObservation(reason: string, generation: string | nul
 }
 
 interface Seat { nodeId: string; sessionName: string; runtime: string | null; generation: string | null }
-interface Deps {
+export interface CurrentModelReaderDeps {
   sessions: Pick<SessionRegistry, "currentOccupantTenure" | "getBindingForNode" | "currentOccupantGenerationForSession">;
   identities: Pick<SeatIdentityStore, "getForNode">;
   context: Pick<ContextUsageStore, "readSidecar">;
@@ -39,22 +44,47 @@ interface Deps {
   piRunner: (sessionName: string) => PiOccupantRecordInput["runner"];
   native: CurrentGenerationDeps;
   census: ProcessCensus;
-  readAllPaneProcesses?: () => Promise<Map<string, { pid: number | null }> | null>;
+  readAllPaneProcesses?: () => Promise<Map<string, { pid: number | null; command?: string | null; dead?: boolean }> | null>;
   now?: () => number;
+  stateDir?: string;
 }
-type InventoryNode = { nodeId: string; canonicalSessionName: string | null; runtime: string | null; sessionStatus: string | null };
+type Deps = CurrentModelReaderDeps;
+
+export interface CurrentModelObservationTarget {
+  nodeId: string;
+  canonicalSessionName?: string | null;
+  sessionName?: string | null;
+  runtime: string | null;
+  sessionStatus?: string | null;
+  status?: string | null;
+  communityHarness?: string | CommunityHarnessLabel | null;
+  resumeToken?: string | null;
+}
+export type InventoryNode = CurrentModelObservationTarget;
 type PendingObservation = { pane: string; finish: (pid: number | null, unavailableReason?: string) => ModelObservation };
 type Selection = { ok: true; path: string; notBeforeMs?: number } | { ok: false; reason: string };
 type Binding = { tmuxSession: string | null; tmuxPane: string | null };
 /** The verified current Pi runner plus its newest own turn, read with the occupant unchanged throughout. */
 export type CurrentPiRecord = (PiRecordSelection & { ok: true; observation: PiModelObservation }) | { ok: false; reason: string };
 
+export function resolveContextUsageStateDir(): string {
+  const openrigHome = process.env.OPENRIG_HOME;
+  return openrigHome ? join(openrigHome, "state") : join(homedir(), ".openrig", "state");
+}
+
+const VALID_MODEL_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:/@+\-]{0,199}$/;
+const FUTURE_SKEW_MS = 15_000;
+
 /** One current-record path for reporting and the existing divergence monitor. Reporting never
  * needs a configured pin, alias or comparator. Both share the same coalescing process census. */
 export class CurrentModelReader {
   readonly processCensus: ProcessCensus;
+  private readonly stateDir: string;
   private readonly facts = new Map<string, { key: string; signature: string; fact: NativeModelObservation | null }>();
-  constructor(private readonly deps: Deps) { this.processCensus = deps.census; }
+  constructor(private readonly deps: Deps) {
+    this.processCensus = deps.census;
+    this.stateDir = deps.stateDir ?? resolveContextUsageStateDir();
+  }
 
   /** Rebuild continuity uses a fresh process read before and after the bounded native record read. */
   currentCodexPermissions(nodeId: string, sessionName: string, cwd: string) {
@@ -124,7 +154,28 @@ export class CurrentModelReader {
   }
 
   /** Sampled synchronously AFTER the final PID lookup; a null final PID is unavailable, not turnover. */
-  private occupantUnchanged(nodeId: string, sessionName: string, generation: string, binding: Binding, pid: number, finalPid: number | null): boolean {
+  private occupantUnchanged(node: CurrentModelObservationTarget, finalPid: number | null): boolean;
+  private occupantUnchanged(nodeId: string, sessionName: string, generation: string, binding: Binding, pid: number, finalPid: number | null): boolean;
+  private occupantUnchanged(
+    arg1: string | CurrentModelObservationTarget,
+    arg2?: string | number | null,
+    arg3?: string,
+    arg4?: Binding,
+    arg5?: number,
+    arg6?: number | null,
+  ): boolean {
+    if (typeof arg1 === "object") {
+      const node = arg1;
+      const finalPid = (arg2 as number | null) ?? null;
+      const tenure = this.deps.sessions.currentOccupantTenure(node.nodeId);
+      const sessionName = node.canonicalSessionName ?? node.sessionName ?? "";
+      const generation = tenure?.generationUuid ?? null;
+      const binding = this.deps.sessions.getBindingForNode(node.nodeId);
+      if (!generation || this.deps.sessions.currentOccupantGenerationForSession(sessionName) !== generation) return false;
+      if (!binding?.tmuxPane || binding.tmuxSession !== sessionName) return false;
+      return true;
+    }
+    const [nodeId, sessionName, generation, binding, pid, finalPid] = [arg1, arg2 as string, arg3!, arg4!, arg5!, arg6!];
     const current = this.deps.sessions.currentOccupantTenure(nodeId);
     const currentBinding = this.deps.sessions.getBindingForNode(nodeId);
     return !(current?.generationUuid !== generation || this.deps.sessions.currentOccupantGenerationForSession(sessionName) !== generation || currentBinding?.tmuxPane !== binding.tmuxPane
@@ -210,9 +261,18 @@ export class CurrentModelReader {
     const tenure = this.deps.sessions.currentOccupantTenure(node.nodeId);
     const generation = tenure?.generationUuid ?? null;
     const unknown = (reason: string) => unknownModelObservation(reason, generation);
-    if (node.sessionStatus !== "running" || !node.canonicalSessionName) return unknown("seat-not-running");
-    const sessionName = node.canonicalSessionName;
-    if (!["claude-code", "codex", "pi"].includes(node.runtime ?? "")) return unknown("unsupported-runtime");
+    const sessionStatus = node.sessionStatus ?? node.status;
+    const sessionName = node.canonicalSessionName ?? node.sessionName;
+    if (sessionStatus !== "running" || !sessionName) return unknown("seat-not-running");
+
+    if (!["claude-code", "codex", "pi"].includes(node.runtime ?? "")) {
+      const rawHarness = typeof node.communityHarness === "object" && node.communityHarness !== null
+        ? node.communityHarness.harness
+        : node.communityHarness;
+      const harness = communityHarnessOf(rawHarness, node.runtime);
+      if (!harness) return unknown("unsupported-runtime");
+      return this.observeCommunityHarness(node, sessionName, generation, tenure, native);
+    }
     const boot = tenure ? parseSqliteUtcMs(tenure.bootAt) : NaN;
     if (!generation || !Number.isFinite(boot) || this.deps.sessions.currentOccupantGenerationForSession(sessionName) !== generation) return unknown("occupant-unknown");
     const binding = this.deps.sessions.getBindingForNode(node.nodeId);
@@ -245,5 +305,123 @@ export class CurrentModelReader {
         return { status: "observed", model: fact.model, source: fact.source, observedAt: fact.observedAt, generation, reason: null };
       } };
     } catch { return unknown("native-read-unavailable"); }
+  }
+
+  private async observeCommunityHarness(
+    node: InventoryNode,
+    sessionName: string,
+    generation: string | null,
+    tenure: ReturnType<SessionRegistry["currentOccupantTenure"]>,
+    native: CurrentGenerationDeps,
+  ): Promise<ModelObservation> {
+    const unknown = (reason: string) => unknownModelObservation(reason, generation);
+    const bootMs = tenure ? parseSqliteUtcMs(tenure.bootAt) : NaN;
+    if (!generation || !Number.isFinite(bootMs) || this.deps.sessions.currentOccupantGenerationForSession(sessionName) !== generation) {
+      return unknown("occupant-unknown");
+    }
+    const binding = this.deps.sessions.getBindingForNode(node.nodeId);
+    if (!binding?.tmuxPane || binding.tmuxSession !== sessionName) {
+      return unknown("canonical-pane-unknown");
+    }
+
+    let snapshot: { finalPid: number | null; paneDead?: boolean; paneCommand: string | null } | null = null;
+    if (this.deps.readAllPaneProcesses) {
+      try {
+        const map = await this.deps.readAllPaneProcesses();
+        const info = map?.get(binding.tmuxPane);
+        if (info) {
+          snapshot = {
+            finalPid: info.pid ?? null,
+            paneDead: info.dead === true,
+            paneCommand: info.command ?? null,
+          };
+        }
+      } catch { /* ignore */ }
+    }
+    if (!snapshot) {
+      try {
+        const finalPid = await native.getPanePid(binding.tmuxPane);
+        const paneCommand = typeof (native as any).getPaneCommand === "function"
+          ? await (native as any).getPaneCommand(binding.tmuxPane)
+          : (typeof (this.deps.native as any).getPaneCommand === "function" ? await (this.deps.native as any).getPaneCommand(binding.tmuxPane) : null);
+        const paneDead = typeof (native as any).isPaneDead === "function"
+          ? await (native as any).isPaneDead(binding.tmuxPane)
+          : false;
+        snapshot = { finalPid, paneDead, paneCommand };
+      } catch { /* ignore */ }
+    }
+
+    if (!snapshot || snapshot.finalPid === null || snapshot.paneDead || !snapshot.paneCommand || isShellForeground(snapshot.paneCommand)) {
+      return unknown("process-unverified");
+    }
+
+    const filePath = join(this.stateDir, "context-usage", `${sessionName}.json`);
+    try {
+      const st = lstatSync(filePath);
+      if (st.isSymbolicLink() || !st.isFile() || st.size > 65536) {
+        return unknown("record-not-found");
+      }
+    } catch {
+      return unknown("record-not-found");
+    }
+
+    let raw: any;
+    try {
+      raw = JSON.parse(readFileSync(filePath, "utf-8"));
+    } catch {
+      return unknown("record-not-found");
+    }
+
+    if (typeof raw.occupant_generation !== "string" || raw.occupant_generation !== generation) {
+      return unknown("generation-mismatch");
+    }
+
+    if (typeof raw.session_name === "string" && raw.session_name !== sessionName) {
+      return unknown("session-mismatch");
+    }
+
+    const resumeToken = node.resumeToken ?? (node as any).resume_token;
+    if (resumeToken && typeof raw.session_id === "string" && raw.session_id !== resumeToken) {
+      return unknown("session-mismatch");
+    }
+
+    if (typeof raw.sampled_at !== "string") {
+      return unknown("record-predates-current-occupant");
+    }
+    const obsMs = Date.parse(raw.sampled_at);
+    if (!Number.isFinite(obsMs) || obsMs < bootMs) {
+      return unknown("record-predates-current-occupant");
+    }
+    const nowMs = (this.deps.now ?? Date.now)();
+    if (obsMs > nowMs + FUTURE_SKEW_MS) {
+      return unknown("timestamp-in-future");
+    }
+
+    const rawModel = typeof raw.model === "string" ? raw.model : raw.model?.id;
+    if (typeof rawModel !== "string" || !VALID_MODEL_RE.test(rawModel)) {
+      return unknown("invalid-model");
+    }
+    const modelId = rawModel;
+
+    const rawSource = typeof raw.model === "object" && typeof raw.model?.source === "string"
+      ? raw.model.source
+      : (typeof raw.source === "string" ? raw.source : "runner-sidecar");
+    if (!/^[a-zA-Z0-9._:-]{1,64}$/.test(rawSource) || rawSource === "provider-response") {
+      return unknown("invalid-source");
+    }
+    const modelSource = rawSource as NativeModelObservation["source"];
+
+    if (!this.occupantUnchanged(node, snapshot.finalPid)) {
+      return unknown("occupant-changed-during-read");
+    }
+
+    return {
+      status: "observed",
+      model: modelId,
+      source: modelSource,
+      observedAt: new Date(obsMs).toISOString(),
+      generation,
+      reason: null,
+    };
   }
 }

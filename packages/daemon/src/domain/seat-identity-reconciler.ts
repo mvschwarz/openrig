@@ -372,6 +372,24 @@ export class SeatIdentityReconciler {
 
     // A community harness's process doesn't prove which session it is: the pane is live, its identity unconfirmed.
     if (communityHarnessOf(seat.community_harness, seat.runtime)) {
+      if (seat.resume_provenance === "hook" && seat.resume_token) {
+        if (command && (isShellForeground(command) || SHELL_COMMANDS.has(command.trim().toLowerCase()))) {
+          return {
+            ...base,
+            verdict: "mismatch",
+            evidenceSource: "pane_process",
+            reason: "process_identity_mismatch",
+            evidence: { registeredPane: seat.tmux_pane, observedPid: pid, observedCommand: command, matchedLayer: 1 },
+          };
+        }
+        return {
+          ...base,
+          verdict: "verified",
+          evidenceSource: "pane_process",
+          reason: "process_identity_verified" as unknown as null,
+          evidence: { registeredPane: seat.tmux_pane, observedPid: pid, observedCommand: command, matchedLayer: 1 },
+        };
+      }
       return {
         ...base,
         verdict: "unconfirmed",

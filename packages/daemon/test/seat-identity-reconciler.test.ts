@@ -8,7 +8,9 @@
 
 import { afterEach, describe, it, expect, vi } from "vitest";
 import type Database from "better-sqlite3";
-import { createFullTestDb } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 import {
   SeatIdentityReconciler,
   classifyPaneRuntimeMatch,
@@ -587,5 +589,220 @@ describe("SeatIdentityReconciler — bounded polling", () => {
       await rec.reconcileAll();
       expect(store.getForNode("n1")?.verdict).toBe("verified");
     } finally { rec.stop(); db.close(); }
+  });
+});
+
+describe("community harness seat identity reconciliation", () => {
+  it("community seat without hook provenance stays unconfirmed", async () => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "comm-1", sessionName: "comm-1@rig", pane: "%1", runtime: "custom-runner" });
+      db.prepare("UPDATE sessions SET agent_app = 'custom-runner', resume_token = 'tok-1', resume_provenance = 'launcher'").run();
+      const tmux = makeTmux({ sessions: ["comm-1@rig"], panePid: { "%1": 42 }, paneCommand: { "%1": "custom-runner" } });
+      const rec = new SeatIdentityReconciler({ db, tmux });
+      const store = new SeatIdentityStore(db);
+      await rec.reconcileAll();
+      const v = store.getForNode("comm-1");
+      expect(v?.verdict).toBe("unconfirmed");
+      expect(v?.reason).toBe("process_identity_unconfirmed");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("community seat with resume_provenance = 'hook' and active runner command becomes verified", async () => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "comm-2", sessionName: "comm-2@rig", pane: "%1", runtime: "custom-runner" });
+      db.prepare("UPDATE sessions SET agent_app = 'custom-runner', resume_token = 'tok-1', resume_provenance = 'hook'").run();
+      const tmux = makeTmux({ sessions: ["comm-2@rig"], panePid: { "%1": 42 }, paneCommand: { "%1": "custom-runner" } });
+      const rec = new SeatIdentityReconciler({ db, tmux });
+      const store = new SeatIdentityStore(db);
+      await rec.reconcileAll();
+      const v = store.getForNode("comm-2");
+      expect(v?.verdict).toBe("verified");
+      expect(v?.reason).toBe("process_identity_verified");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("community seat with resume_provenance = 'hook' that drops to bash becomes mismatch (process_identity_mismatch)", async () => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, { nodeId: "comm-3", sessionName: "comm-3@rig", pane: "%1", runtime: "custom-runner" });
+      db.prepare("UPDATE sessions SET agent_app = 'custom-runner', resume_token = 'tok-1', resume_provenance = 'hook'").run();
+      const tmux = makeTmux({ sessions: ["comm-3@rig"], panePid: { "%1": 42 }, paneCommand: { "%1": "bash" } });
+      const rec = new SeatIdentityReconciler({ db, tmux });
+      const store = new SeatIdentityStore(db);
+      await rec.reconcileAll();
+      const v = store.getForNode("comm-3");
+      expect(v?.verdict).toBe("mismatch");
+      expect(v?.reason).toBe("process_identity_mismatch");
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("POST /api/activity/hooks session_identity for community harness seat", () => {
+  it("persists with provenance: 'hook' when generation matches active tenure", async () => {
+    const db = createFullTestDb();
+    try {
+      const rigRepo = new RigRepository(db);
+      const rig = rigRepo.createRig("comm-rig");
+      const node = rigRepo.addNode(rig.id, "runner.worker", { runtime: "custom-runner" });
+      const reg = new SessionRegistry(db);
+      const sess = reg.registerSession(node.id, "runner-worker@comm-rig");
+      reg.updateStatus(sess.id, "running");
+      reg.recordCommunityHarnessSelection(sess.id, "custom-runner", true);
+      const activeTenure = reg.currentOccupantTenure(node.id);
+      expect(activeTenure).not.toBeNull();
+      const gen = activeTenure!.generationUuid;
+
+      const { app } = createTestApp(db, { activityHookToken: "tok" });
+      const res = await app.request("/api/activity/hooks", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-openrig-activity-token": "tok" },
+        body: JSON.stringify({
+          eventFamily: "session_identity",
+          sessionName: "runner-worker@comm-rig",
+          runtime: "custom-runner",
+          sessionId: "tok-custom-123",
+          generation: gen,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body).toMatchObject({
+        ok: true,
+        sessionId: "tok-custom-123",
+        provenance: "hook",
+        tokenPersisted: true,
+      });
+
+      const stored = db.prepare("SELECT resume_type, resume_token, resume_provenance FROM sessions WHERE id = ?").get(sess.id) as {
+        resume_type: string;
+        resume_token: string;
+        resume_provenance: string;
+      };
+      expect(stored).toEqual({
+        resume_type: "community:custom-runner",
+        resume_token: "tok-custom-123",
+        resume_provenance: "hook",
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("refuses when generation is missing/unconfirmed", async () => {
+    const db = createFullTestDb();
+    try {
+      const rigRepo = new RigRepository(db);
+      const rig = rigRepo.createRig("comm-rig");
+      const node = rigRepo.addNode(rig.id, "runner.worker", { runtime: "custom-runner" });
+      const reg = new SessionRegistry(db);
+      const sess = reg.registerSession(node.id, "runner-worker@comm-rig");
+      reg.updateStatus(sess.id, "running");
+      reg.recordCommunityHarnessSelection(sess.id, "custom-runner", true);
+
+      const { app } = createTestApp(db, { activityHookToken: "tok" });
+      // Missing generation
+      const res1 = await app.request("/api/activity/hooks", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-openrig-activity-token": "tok" },
+        body: JSON.stringify({
+          eventFamily: "session_identity",
+          sessionName: "runner-worker@comm-rig",
+          runtime: "custom-runner",
+          sessionId: "tok-custom-456",
+        }),
+      });
+      expect(res1.status).toBe(200);
+      const body1 = await res1.json() as Record<string, unknown>;
+      expect(body1).toMatchObject({
+        ok: true,
+        sessionId: "tok-custom-456",
+        provenance: "hook",
+        tokenPersisted: false,
+        code: "generation_unconfirmed",
+      });
+
+      // Unregistered/unconfirmed generation
+      const res2 = await app.request("/api/activity/hooks", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-openrig-activity-token": "tok" },
+        body: JSON.stringify({
+          eventFamily: "session_identity",
+          sessionName: "runner-worker@comm-rig",
+          runtime: "custom-runner",
+          sessionId: "tok-custom-456",
+          generation: "unregistered-gen-uuid",
+        }),
+      });
+      expect(res2.status).toBe(200);
+      const body2 = await res2.json() as Record<string, unknown>;
+      expect(body2).toMatchObject({
+        ok: true,
+        sessionId: "tok-custom-456",
+        provenance: "hook",
+        tokenPersisted: false,
+        code: "generation_unconfirmed",
+      });
+
+      const stored = db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(sess.id) as { resume_token: string | null };
+      expect(stored.resume_token).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("returns 409 on earlier generation mismatch", async () => {
+    const db = createFullTestDb();
+    try {
+      const rigRepo = new RigRepository(db);
+      const rig = rigRepo.createRig("comm-rig");
+      const node = rigRepo.addNode(rig.id, "runner.worker", { runtime: "custom-runner" });
+      const reg = new SessionRegistry(db);
+      const sess1 = reg.registerSession(node.id, "runner-worker@comm-rig");
+      reg.updateStatus(sess1.id, "running");
+      reg.recordCommunityHarnessSelection(sess1.id, "custom-runner", true);
+      const genA = reg.currentOccupantTenure(node.id)!.generationUuid;
+
+      // Handover to second occupant B
+      const genB = reg.reserveOccupantGeneration()!;
+      const sess2 = reg.registerClaimedSession(node.id, "runner-worker@comm-rig", "handover", genB);
+      reg.updateStatus(sess2.id, "running");
+      reg.recordCommunityHarnessSelection(sess2.id, "custom-runner", true);
+      expect(reg.isOccupantGenerationRegistered(node.id, genA)).toBe(true);
+      expect(reg.currentOccupantTenure(node.id)!.generationUuid).toBe(genB);
+
+      const { app } = createTestApp(db, { activityHookToken: "tok" });
+      // Earlier occupant genA emits SessionStart
+      const res = await app.request("/api/activity/hooks", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-openrig-activity-token": "tok" },
+        body: JSON.stringify({
+          eventFamily: "session_identity",
+          sessionName: "runner-worker@comm-rig",
+          runtime: "custom-runner",
+          sessionId: "tok-earlier-occupant",
+          generation: genA,
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body).toMatchObject({
+        ok: false,
+        code: "generation_mismatch",
+        tokenPersisted: false,
+        error: "Community harness session identity ignored: emitter is an earlier occupant of this seat.",
+      });
+    } finally {
+      db.close();
+    }
   });
 });

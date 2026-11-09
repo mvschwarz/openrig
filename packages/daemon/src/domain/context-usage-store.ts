@@ -38,6 +38,8 @@ interface SidecarRaw {
   };
   session_id?: string;
   session_name?: string;
+  source?: string;
+  model?: string | { id?: string; display_name?: string; source?: string };
   /** Managed seat generation inherited by the status-line collector. Lets consumers distinguish
    *  a canonical occupant from a retained predecessor whose launch-time --name aliases the seat. */
   occupant_generation?: string;
@@ -169,7 +171,7 @@ export class ContextUsageStore {
   readAndNormalize(sessionName: string): ContextUsage {
     const result = this.readSidecar(sessionName);
     if (!result.ok) return this.unknownUsage(result.reason);
-    return this.normalizeSample(result.data);
+    return this.normalizeSample(sessionName, result.data);
   }
 
   /** Read the latest Codex token_count event for a thread and normalize it. */
@@ -196,24 +198,78 @@ export class ContextUsageStore {
     return this.readCodexThread(threadId)?.rollout_path ?? null;
   }
 
+  private isMismatchedOccupantGeneration(sessionName: string, reportedGeneration: string): boolean {
+    try {
+      const physical = physicalSessionName(this.db, sessionName);
+      const row = this.db.prepare(
+        `SELECT ot.generation_uuid FROM sessions s
+         JOIN occupant_tenures ot ON ot.node_id = s.node_id
+         WHERE s.session_name = ? AND s.status = 'running'
+         ORDER BY ot.generation_ordinal DESC LIMIT 1`
+      ).get(physical) as { generation_uuid: string | null } | undefined;
+      return !!row && row.generation_uuid !== null && row.generation_uuid !== reportedGeneration;
+    } catch {
+      return false;
+    }
+  }
+
   /** Normalize raw sidecar data into a ContextUsage record. */
-  normalizeSample(raw: SidecarRaw | null): ContextUsage {
+  normalizeSample(raw: SidecarRaw | null): ContextUsage;
+  normalizeSample(sessionName: string, raw: SidecarRaw | null): ContextUsage;
+  normalizeSample(arg1: string | SidecarRaw | null, arg2?: SidecarRaw | null): ContextUsage {
+    let sessionName = "";
+    let raw: SidecarRaw | null;
+    if (typeof arg1 === "string") {
+      sessionName = arg1;
+      raw = arg2 ?? null;
+    } else {
+      raw = arg1;
+      sessionName = raw?.session_name ?? "";
+    }
+
     if (!raw) {
       return this.unknownUsage("missing_sidecar");
     }
 
+    const sessionId = typeof raw.session_id === "string" ? raw.session_id : null;
+    const sessionNameResolved = sessionId !== null && typeof raw.session_name === "string" ? raw.session_name : (sessionName || null);
+    const resolvedSource = typeof raw.source === "string" && raw.source.trim().length > 0 ? raw.source.trim() : "claude_statusline_json";
+
+    if (typeof raw.occupant_generation === "string" && raw.occupant_generation.trim().length > 0) {
+      if (this.isMismatchedOccupantGeneration(sessionName || raw.session_name || "", raw.occupant_generation.trim())) {
+        return this.unknownUsage("stale_generation", { sessionId, sessionName: sessionNameResolved });
+      }
+    }
+
     const cw = raw.context_window;
-    if (!cw || typeof cw.used_percentage !== "number") {
-      // Still unknown, but the conversation the sidecar names is kept: the first sample after a /clear can carry no
-      // percentage yet, and a held compaction for the previous conversation must see that it changed (#2682). The
-      // session name goes with it, so the name guards that read this row (resume-token discovery, session_mismatch)
-      // still apply.
-      const sessionId = typeof raw.session_id === "string" ? raw.session_id : null;
-      return {
-        ...this.unknownUsage("parse_error"),
-        sessionId,
-        sessionName: sessionId !== null && typeof raw.session_name === "string" ? raw.session_name : null,
-      };
+    if (!cw) {
+      return this.unknownUsage("parse_error", { sessionId, sessionName: sessionNameResolved });
+    }
+
+    if (typeof cw.used_percentage !== "number") {
+      const hasTokenMetrics = typeof cw.total_input_tokens === "number" || typeof cw.total_output_tokens === "number" || cw.current_usage !== undefined;
+      if (hasTokenMetrics) {
+        const sampledAt = raw.sampled_at ?? new Date().toISOString();
+        const fresh = this.isFresh(sampledAt);
+        return {
+          availability: "unknown",
+          reason: "window_capacity_unknown",
+          source: resolvedSource,
+          sessionId,
+          sessionName: sessionNameResolved,
+          usedPercentage: null,
+          remainingPercentage: null,
+          contextWindowSize: cw.context_window_size ?? null,
+          totalInputTokens: cw.total_input_tokens ?? null,
+          totalOutputTokens: cw.total_output_tokens ?? null,
+          currentUsage: this.normalizeCurrentUsage(cw.current_usage),
+          transcriptPath: raw.transcript_path ?? null,
+          sampledAt,
+          fresh,
+          clientCostEstimateUsd: typeof raw.cost?.total_cost_usd === "number" && Number.isFinite(raw.cost.total_cost_usd) ? raw.cost.total_cost_usd : null,
+        };
+      }
+      return this.unknownUsage("parse_error", { sessionId, sessionName: sessionNameResolved });
     }
 
     const sampledAt = raw.sampled_at ?? null;
@@ -222,7 +278,7 @@ export class ContextUsageStore {
     return {
       availability: "known",
       reason: null,
-      source: "claude_statusline_json",
+      source: resolvedSource,
       usedPercentage: cw.used_percentage ?? null,
       remainingPercentage: cw.remaining_percentage ?? null,
       contextWindowSize: cw.context_window_size ?? null,
@@ -230,8 +286,8 @@ export class ContextUsageStore {
       totalOutputTokens: cw.total_output_tokens ?? null,
       currentUsage: this.normalizeCurrentUsage(cw.current_usage),
       transcriptPath: raw.transcript_path ?? null,
-      sessionId: raw.session_id ?? null,
-      sessionName: raw.session_name ?? null,
+      sessionId,
+      sessionName: sessionNameResolved,
       sampledAt,
       fresh,
       clientCostEstimateUsd: typeof raw.cost?.total_cost_usd === "number" && Number.isFinite(raw.cost.total_cost_usd) ? raw.cost.total_cost_usd : null,
@@ -393,7 +449,10 @@ export class ContextUsageStore {
   }
 
   /** Create an unknown ContextUsage with an honest reason. */
-  unknownUsage(reason: ContextUnknownReason): ContextUsage {
+  unknownUsage(
+    reason: ContextUnknownReason,
+    meta?: { sessionId?: string | null; sessionName?: string | null },
+  ): ContextUsage {
     return {
       availability: "unknown",
       reason,
@@ -405,8 +464,8 @@ export class ContextUsageStore {
       totalOutputTokens: null,
       currentUsage: null,
       transcriptPath: null,
-      sessionId: null,
-      sessionName: null,
+      sessionId: meta?.sessionId ?? null,
+      sessionName: meta?.sessionName ?? null,
       sampledAt: null,
       fresh: false,
     };

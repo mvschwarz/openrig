@@ -10,7 +10,7 @@ import {
 import type { UsageSamplesStore, ProviderWindowSampleInput } from "./usage-samples-store.js";
 import type { ContextUsage } from "./types.js";
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, readPendingStartupContext } from "./startup-orchestrator.js";
-import { claudeResumeRotation, SessionRegistry } from "./session-registry.js";
+import { claudeResumeRotation, SessionRegistry, sessionCommunityHarnessSelect } from "./session-registry.js";
 
 /** Default polling interval: 30 seconds. */
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
@@ -20,6 +20,7 @@ interface EligibleSession {
   session_id: string;
   session_name: string;
   runtime: string | null;
+  community_harness: string | null;
   resume_token: string | null;
   resume_provenance: string | null;
   resume_rotated_from: string | null;
@@ -269,7 +270,8 @@ export class ContextMonitor {
         (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id = n.id
           ORDER BY generation_ordinal DESC LIMIT 1) AS generation_uuid,
         (SELECT MAX(seq) FROM events e WHERE e.node_id = n.id
-          AND e.type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed')) AS startup_event_seq
+          AND e.type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed')) AS startup_event_seq,
+        ${sessionCommunityHarnessSelect(this.db, "s")} AS community_harness
       FROM nodes n
       JOIN rigs r ON r.id = n.rig_id
       JOIN sessions s ON s.node_id = n.id
@@ -278,6 +280,7 @@ export class ContextMonitor {
       WHERE (
           (n.runtime = 'claude-code' AND s.status = 'running')
           OR (n.runtime = 'stub' AND s.status = 'running')
+          OR ((${sessionCommunityHarnessSelect(this.db, "s")}) IS NOT NULL AND s.status = 'running')
           OR (
             n.runtime = 'codex'
             AND (
@@ -305,7 +308,7 @@ export class ContextMonitor {
     // their cwd. A runtime:stub seat self-provides its context sidecar, so the
     // monitor consumes it via readAndNormalize below WITHOUT writing any
     // Claude-specific collector config into the stub's cwd.
-    if (session.runtime === "claude-code") {
+    if (session.runtime === "claude-code" && !session.community_harness) {
       this.claudeContextProvisioner?.ensureContextCollector({
         cwd: session.cwd ?? undefined,
         tmuxSession: session.session_name,

@@ -3,7 +3,7 @@
 // in an error message (credential-class redaction).
 
 import { describe, it, expect } from "vitest";
-import { validateResumeToken, resumeTypeForRuntime } from "../src/domain/resume-token-validation.js";
+import { validateResumeToken, validateCommunityResumeToken, resumeTypeForRuntime } from "../src/domain/resume-token-validation.js";
 
 describe("resumeTypeForRuntime", () => {
   it("maps runtimes to their resume-id type", () => {
@@ -166,5 +166,57 @@ describe("validateResumeToken — pi_session_file (path-shaped, per-type)", () =
   it("keeps per-type separation: a path-shaped token is still rejected for claude/codex", () => {
     expect(validateResumeToken("claude-code", validPath).ok).toBe(false);
     expect(validateResumeToken("codex", validPath).ok).toBe(false);
+  });
+});
+
+describe("validateCommunityResumeToken", () => {
+  it("accepts a well-formed token and valid harness name", () => {
+    const r = validateCommunityResumeToken("custom-agent", "abc-123_456.xyz");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.resumeType).toBe("community:custom-agent");
+      expect(r.token).toBe("abc-123_456.xyz");
+    }
+  });
+
+  it("trims surrounding whitespace from token", () => {
+    const r = validateCommunityResumeToken("my-runner", "  session-999  ");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.token).toBe("session-999");
+    }
+  });
+
+  it("rejects an invalid harness name", () => {
+    expect(validateCommunityResumeToken(null, "tok-123").ok).toBe(false);
+    expect(validateCommunityResumeToken("", "tok-123").ok).toBe(false);
+    expect(validateCommunityResumeToken("Invalid_Harness!", "tok-123").ok).toBe(false);
+  });
+
+  it("rejects an empty or non-string token", () => {
+    expect(validateCommunityResumeToken("my-runner", "").ok).toBe(false);
+    expect(validateCommunityResumeToken("my-runner", "   ").ok).toBe(false);
+    expect(validateCommunityResumeToken("my-runner", null).ok).toBe(false);
+    expect(validateCommunityResumeToken("my-runner", 12345).ok).toBe(false);
+  });
+
+  it("rejects a token with disallowed characters without echoing it (redaction)", () => {
+    const secret = "secret token with spaces; injection";
+    const r = validateCommunityResumeToken("my-runner", secret);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).not.toContain(secret);
+      expect(r.error).toMatch(/disallowed characters/i);
+    }
+  });
+
+  it("rejects an over-long token (>200 chars) without echoing it", () => {
+    const huge = "a".repeat(201);
+    const r = validateCommunityResumeToken("my-runner", huge);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).not.toContain(huge);
+      expect(r.error).toMatch(/too long/i);
+    }
   });
 });
