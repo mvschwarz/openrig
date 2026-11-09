@@ -2099,6 +2099,8 @@ export interface SendResult {
   pastedOverInputBox?: InputBoxAnnotation["status"];
   /** A `preserveInput` hold: the input box reading it held on. */
   heldInputBox?: InputBoxAnnotation["status"];
+  /** The existing preserve-input reading, without the draft or suggestion text. No extra capture. */
+  heldInputBoxReading?: Pick<InputBoxAnnotation, "status" | "confidence" | "evidence" | "cursor">;
 }
 
 /** One reading of a Claude Code or Codex input box: `exact` (the sent text, word boundaries kept), `ambiguous`
@@ -3035,11 +3037,12 @@ export class SessionTransport {
     } : null;
     let existingInput: ExistingInput | undefined;
     let pastedOverInputBox: InputBoxAnnotation["status"] | undefined, heldInputBox: InputBoxAnnotation["status"] | undefined;
+    let heldInputBoxReading: SendResult["heldInputBoxReading"];
     let overrideBeforePaste: (() => Promise<void>) | undefined;
     const observe = (result: SendResult): SendResult => {
       if (checkedIdentity) result = { ...result, checkedIdentity, identityContract: 1 };
       if (pastedOverInputBox) result = { ...result, pastedOverInputBox };
-      if (heldInputBox && !result.ok) result = { ...result, heldInputBox };
+      if (heldInputBox && !result.ok) result = { ...result, heldInputBox, ...(heldInputBoxReading ? { heldInputBoxReading } : {}) };
       if (existingInput) result = { ...result, existingInput };
       if (result.ok && runtimeAdvisory) result = { ...result, warning: [runtimeAdvisory, result.warning].filter(Boolean).join(" ") };
       if (observed && this.captureObserver) {
@@ -3547,6 +3550,10 @@ export class SessionTransport {
       const typed = box?.status === "typed" || box?.status === "typed-with-suggestion";
       if (!clear && (opts?.preserveInput !== "typed" || typed)) {
         heldInputBox = box?.status ?? "unknown";
+        if (box) {
+          const { status, confidence, evidence, cursor } = box;
+          heldInputBoxReading = { status, confidence, evidence, cursor };
+        }
         throw new DeliveryGuardError(box?.status === "typed" ? "draft_input_busy" : "draft_input_unknown",
           `Managed input waits for an empty composer (it reads ${box?.status ?? "unknown"}). Your draft was left untouched; inspect the pane before retrying.`);
       }

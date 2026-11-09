@@ -460,6 +460,8 @@ export interface ObservedCompaction {
   detail: string;
 }
 export interface PreparationState {
+  /** The reading that held this preparation send; never includes draft text. */
+  inputBox?: SendResult["heldInputBoxReading"];
   policyActor?: TerminalActor;
   attemptId: string;
   occupantGeneration: string | null;
@@ -536,6 +538,7 @@ export const RESTART_RECOVERY_WINDOW_MS_DEFAULT = 6 * 60 * 60_000;
 const DAEMON_PROCESS_ID = randomUUID();
 
 interface CompactionRecord {
+  inputBox?: PreparationState["inputBox"];
   /** The daemon process that last wrote it. */
   daemon: string;
   attemptId: string;
@@ -1566,7 +1569,8 @@ export class ClaudeCompactionEnforcer {
     // Record this attempt's effect even if cancellation/retry happened during the await.
     // Neither a failed response nor its loss proves no paste/Enter. Never replay uncertainty.
     attempt.delivery = prep?.ok && prep.outcome !== "retained" ? "delivered" : notSent ? "not_sent" : "uncertain";
-    this.persist(input.sessionName, attempt.attemptId, { delivery: attempt.delivery, sends: attempt.sends });
+    attempt.inputBox = prep?.heldInputBoxReading;
+    this.persist(input.sessionName, attempt.attemptId, { delivery: attempt.delivery, sends: attempt.sends, inputBox: attempt.inputBox });
     // The replacement request went out (or may have): the ended attempt's gate is used up.
     if (!notSent && attempt.afterEnded !== undefined && this.pendingPreCompactPrep.get(input.sessionName) === attempt) this.lastEnded.delete(input.sessionName);
     if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.controller.signal.aborted) return;
@@ -1876,7 +1880,7 @@ export class ClaudeCompactionEnforcer {
         compact: "not_sent", sends: record.sends,
         deadlineAt: record.deadlineAt ?? (record.delivery === "not_sent" ? null : record.updatedAt + AUTO_PREP_WAIT_MS_DEFAULT),
         policyWasEnabled: true, preparationRoot: record.preparationRoot, controller: new AbortController(),
-        compactInstruction: record.compactInstruction,
+        compactInstruction: record.compactInstruction, inputBox: record.inputBox,
         // A held attempt comes back held, with its recorded hold (never stamped again) and its map's age and usage.
         ...(held ? { prepared: true as const, preparedAt: record.preparedAt ?? record.updatedAt, preparedReason: record.preparedReason ?? "map_complete_seat_never_idle" } : {}),
         ...(held ? { mapReadyAt: record.mapReadyAt ?? record.preparedAt ?? record.updatedAt } : record.mapReadyAt !== undefined ? { mapReadyAt: record.mapReadyAt } : {}),
