@@ -1923,6 +1923,8 @@ export class QueueRepository {
     if (state !== "running" && state !== "idle") return;
     const addresses = this.resolveSessionAddresses(sessionName);
     if (!addresses.length) return;
+    // As for a prompt clear (#2575): while a compaction's restore is owed, the wake would reach the agent before it.
+    if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return;
     const rows = this.db.prepare(`SELECT qitem_id, destination_session, source_session FROM queue_items
       WHERE destination_session IN (${addresses.map(() => "?").join(",")}) AND state = 'pending' AND claimed_at IS NULL
         AND handed_off_from IS NULL AND last_nudge_result LIKE 'unroutable:%'`)
@@ -1933,7 +1935,14 @@ export class QueueRepository {
       if (["held", "released"].includes(quietHoldCustody(this.db, row.qitem_id)?.state ?? "")) continue;
       this.unroutableRetries.add(row.qitem_id);
       try {
-        await this.deliverWakeForSuccessor(row.qitem_id, row.destination_session, true, row.source_session);
+        // The failed wake may be the row's own intent or an un-park's blocker intent: re-send whichever failed.
+        // One in flight or delivered is never sent again; only a row with no intent at all takes the plain nudge.
+        const intents = this.outbox ? this.db.prepare(`SELECT outbox_id, delivery_state FROM outbox_entries
+          WHERE audit_pointer = ? AND substr(outbox_id, 1, ?) = ?`)
+          .all(row.qitem_id, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX) as Array<{ outbox_id: string; delivery_state: string }> : [];
+        if (intents.length) {
+          for (const intent of intents) if (intent.delivery_state === "failed") await this.deliverWakeIntent(intent.outbox_id);
+        } else await this.maybeNudge(row.qitem_id, row.destination_session, undefined, row.source_session);
       } finally {
         this.unroutableRetries.delete(row.qitem_id);
       }

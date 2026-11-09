@@ -608,11 +608,12 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
 
   // With the durable wake intents in place (the production path), the re-send goes through the row's own intent: it's
   // claimed and settled, so a later startup drain doesn't wake the seat a second time.
-  async function lateSeatWithOutbox() {
+  async function lateSeatWithOutbox(extra: Partial<ConstructorParameters<typeof QueueRepository>[2]> = {}) {
     db.prepare("INSERT INTO rigs(id,name) VALUES ('fixture-rig','r')").run();
     db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime,profile) VALUES ('late-node','fixture-rig','late','codex','none')").run();
     const sent: string[] = [];
     repo = new QueueRepository(db, new EventBus(db), {
+      ...extra,
       validateRig: () => true,
       loadHumanRegistry: () => ({ ok: true, entities: [] }),
       transport: { send: async (destination) => { sent.push(destination); return { ok: true, verified: true }; } },
@@ -650,6 +651,39 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     await repo.retryUnroutableWakesOnReachable("sender@r", "idle");
     expect(sent).toEqual([]);
     expect(repo.getById(row.qitemId)!.lastNudgeResult).toMatch(/^unroutable:/);
+  });
+
+  it("doesn't re-send an unroutable wake while the seat's compaction restore is still owed", async () => {
+    let restoreOwed = true;
+    const { sent } = await lateSeatWithOutbox({ hasPendingPostCompactStage: (session: string) => restoreOwed && session === "late@r" });
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toEqual([]);
+    restoreOwed = false;
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toEqual(["late@r"]);
+  });
+
+  it("re-sends an un-parked row's blocker wake recorded unroutable, not its already delivered own wake", async () => {
+    const { sent, outbox, row } = await lateSeatWithOutbox();
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle"); // the row's own wake lands
+    expect(sent).toEqual(["late@r"]);
+    // The seat goes away; the row is parked on a blocker, which then closes and un-parks it while the seat is unbound.
+    db.prepare("DELETE FROM bindings WHERE id = 'late-binding'").run();
+    const blocker = await repo.create({ sourceSession: "sender@r", destinationSession: "sender@r", body: "blocker" });
+    repo.update({ qitemId: row.qitemId, actorSession: "late@r", state: "blocked", blockedOn: blocker.qitemId });
+    repo.claim({ qitemId: blocker.qitemId, destinationSession: "sender@r" });
+    repo.update({ qitemId: blocker.qitemId, actorSession: "sender@r", state: "done", closureReason: "no-follow-on" });
+    expect(repo.getById(row.qitemId)!.state).toBe("pending");
+    const blockerWake = () => db.prepare("SELECT outbox_id, delivery_state FROM outbox_entries WHERE audit_pointer = ? AND outbox_id LIKE 'wake-intent-blocker-%'")
+      .get(row.qitemId) as { outbox_id: string; delivery_state: string } | undefined;
+    await vi.waitFor(() => expect(blockerWake()?.delivery_state).toBe("failed"));
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).toMatch(/^unroutable:/);
+
+    db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toEqual(["late@r", "late@r"]);
+    expect(blockerWake()!.delivery_state).toBe("delivered");
+    expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("delivered");
   });
 
   it("re-sends through the row's wake intent: the intent reads delivered, and a later drain sends nothing", async () => {
