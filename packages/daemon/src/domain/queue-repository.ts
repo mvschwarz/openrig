@@ -1055,7 +1055,6 @@ export class QueueRepository {
   // a new positive refusal/attention episode, so a returning prompt cannot spin retries.
   private readonly promptRecoveryState = new Map<string, boolean>();
   private readonly promptClearRetries = new Map<string, number>();
-  private readonly unroutableRetries = new Set<string>();
   private resolveOccupantGeneration?: (sessionName: string) => string | null;
   private readonly resolveSessionAddresses: (name: string) => string[];
   private readonly hasPendingPostCompactStage?: (sessionName: string) => boolean;
@@ -1931,37 +1930,47 @@ export class QueueRepository {
     }
   }
 
+  /** The rule for re-sending a wake recorded unroutable once its seat may be back, shared by the stuck sweep and
+   *  {@link retryUnroutableWakesOnReachable}: unclaimed, not a person's notice, not a local human decision with no
+   *  gateway, not held or released for quiet hours, and its seat now pane-bound. A handoff's retry ladder is the
+   *  caller's to check: the sweep defers to a live ladder, the reachable-seat retry leaves every handed-off row to it. */
+  unroutableWakeRetryable(row: QueueItem, now: Date = new Date()): boolean {
+    return row.lastNudgeResult?.toLowerCase().startsWith("unroutable:") === true
+      && !row.claimedAt
+      && row.deliveryOutcome !== "never-posted" && row.deliveryOutcome !== "transport-failed"
+      && !this.isLocalHumanDecisionWithoutGateway(row)
+      && !["held", "released"].includes(quietHoldCustody(this.db, row.qitemId, now)?.state ?? "")
+      && this.classifyDestinationOf(row.destinationSession).class === "pane-bound";
+  }
+
   /** A wake recorded unroutable because its seat wasn't bound yet, as just after a restart (#2789), is re-sent as soon
    *  as the seat is seen running or idle, rather than at the stuck sweep's next tick; the sweep remains the backstop.
-   *  Only this seat's own pending, unclaimed rows, once it classifies pane-bound, and never one held for quiet hours.
-   *  Rows on a handoff's retry ladder are left to the ladder. */
+   *  Only this seat's own pending rows, oldest first, that {@link unroutableWakeRetryable} admits. */
   async retryUnroutableWakesOnReachable(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
     if (state !== "running" && state !== "idle") return;
     const addresses = this.resolveSessionAddresses(sessionName);
     if (!addresses.length) return;
     // As for a prompt clear (#2575): while a compaction's restore is owed, the wake would reach the agent before it.
     if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return;
-    const rows = this.db.prepare(`SELECT qitem_id, destination_session, source_session FROM queue_items
-      WHERE destination_session IN (${addresses.map(() => "?").join(",")}) AND state = 'pending' AND claimed_at IS NULL
-        AND handed_off_from IS NULL AND last_nudge_result LIKE 'unroutable:%'`)
-      .all(...addresses) as Array<{ qitem_id: string; destination_session: string; source_session: string }>;
-    for (const row of rows) {
-      if (this.unroutableRetries.has(row.qitem_id)) continue; // a retry for it is already in flight
-      if (this.classifyDestinationOf(row.destination_session).class !== "pane-bound") continue;
-      if (["held", "released"].includes(quietHoldCustody(this.db, row.qitem_id)?.state ?? "")) continue;
-      this.unroutableRetries.add(row.qitem_id);
-      try {
-        // The failed wake may be the row's own intent or an un-park's blocker intent: re-send whichever failed.
-        // One in flight or delivered is never sent again; only a row with no intent at all takes the plain nudge.
-        const intents = this.outbox ? this.db.prepare(`SELECT outbox_id, delivery_state FROM outbox_entries
-          WHERE audit_pointer = ? AND substr(outbox_id, 1, ?) = ?`)
-          .all(row.qitem_id, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX) as Array<{ outbox_id: string; delivery_state: string }> : [];
-        if (intents.length) {
-          for (const intent of intents) if (intent.delivery_state === "failed") await this.deliverWakeIntent(intent.outbox_id);
-        } else await this.maybeNudge(row.qitem_id, row.destination_session, undefined, row.source_session);
-      } finally {
-        this.unroutableRetries.delete(row.qitem_id);
-      }
+    const rows = this.db.prepare(`SELECT qitem_id FROM queue_items
+      WHERE destination_session IN (${addresses.map(() => "?").join(",")}) AND state = 'pending'
+        AND handed_off_from IS NULL AND last_nudge_result LIKE 'unroutable:%' ORDER BY ts_created, qitem_id`)
+      .all(...addresses) as Array<{ qitem_id: string }>;
+    const now = new Date();
+    // One attempt per intent for the pass: a returned result and its resume go as one send, so the second row's turn
+    // mustn't send them again after a refusal.
+    const attempted = new Set<string>();
+    for (const { qitem_id } of rows) {
+      const row = this.getById(qitem_id);
+      if (!row || row.state !== "pending" || !this.unroutableWakeRetryable(row, now)) continue;
+      // The failed wake may be the row's own intent or an un-park's blocker intent: re-send whichever failed.
+      // One in flight or delivered is never sent again; only a row with no intent at all takes the plain nudge.
+      const intents = this.outbox ? this.db.prepare(`SELECT outbox_id, delivery_state FROM outbox_entries
+        WHERE audit_pointer = ? AND substr(outbox_id, 1, ?) = ?`)
+        .all(qitem_id, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX) as Array<{ outbox_id: string; delivery_state: string }> : [];
+      if (intents.length) {
+        for (const intent of intents) if (intent.delivery_state === "failed") await this.deliverWakeIntent(intent.outbox_id, attempted);
+      } else await this.maybeNudge(qitem_id, row.destinationSession, undefined, row.sourceSession);
     }
   }
 

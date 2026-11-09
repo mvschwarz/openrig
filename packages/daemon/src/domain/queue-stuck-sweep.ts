@@ -750,15 +750,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // row's own wake intent instead of reporting it: the intent is claimed and settled, so a startup drain doesn't send it
     // again, and one already in flight or settled isn't sent twice. The next tick reads the new result, so a failed send
     // is reported then. A row with a live retry ladder is left to the ladder.
-    const wakeToRetry = (row: QueueItem, humanNotice: boolean): boolean => !humanNotice
-      && startsWithCI(row.lastNudgeResult, "unroutable:")
-      && !hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes)
-      && deps.queueRepo.classifyDestinationOf(row.destinationSession).class === "pane-bound";
+    // The rule is shared with the reachable-seat retry; a live retry ladder is this sweep's own check.
+    const wakeToRetry = (row: QueueItem): boolean => deps.queueRepo.unroutableWakeRetryable(row, now)
+      && !hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes);
     const isHumanNotice = (row: QueueItem): boolean => row.deliveryOutcome === "never-posted" || row.deliveryOutcome === "transport-failed";
-    /** The checks that run before the wake retry, as in the loop this replaces: a row they exclude is never woken. */
-    const wakeRetryEligible = (row: QueueItem): boolean => !row.claimedAt
-      && !deps.queueRepo.isLocalHumanDecisionWithoutGateway(row)
-      && !["held", "released"].includes(quietHoldCustody(deps.db, row.qitemId, now)?.state ?? "");
     /** `row` comes from findUndelivered (it carries the delivery verdict). Call it after any wake retry the row needs. */
     const undeliveredCandidate = (row: QueueItem, recordSuppression: boolean): Candidate | null => {
       if (isFindingRow(row)) return null;
@@ -1029,7 +1024,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (dueToYield()) await yieldLoop();
       let row = listedAt !== othersRan ? undeliveredNow(listed.qitemId) : listed;
       if (!row || isFindingRow(row)) continue;
-      if (wakeRetryEligible(row) && wakeToRetry(row, isHumanNotice(row))) {
+      if (wakeToRetry(row)) {
         await deps.queueRepo.deliverWakeForSuccessor(row.qitemId, row.destinationSession, true, row.sourceSession);
         othersMayHaveRun();
         // judged again on the row as the send (and anyone else during it) left it

@@ -686,6 +686,40 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("delivered");
   });
 
+  it("sends related rows' wakes once per pass when the seat refuses, and a later pass still delivers them", async () => {
+    db.prepare("INSERT INTO rigs(id,name) VALUES ('fixture-rig','r')").run();
+    db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime,profile) VALUES ('late-node','fixture-rig','late','codex','none')").run();
+    const sent: string[] = [];
+    let atPrompt = true;
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      transport: { send: async (_destination, text) => { sent.push(text);
+        return atPrompt ? { ok: false, sent: false, reason: "target_needs_input" } : { ok: true, verified: true }; } },
+    });
+    const outbox = new OutboxHandler(db);
+    repo.attachOutbox(outbox);
+    // A returned result and its resume: both created before the seat is bound, their wakes correlated.
+    const rows = [];
+    for (const body of ["result", "resume"]) {
+      const created = await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body });
+      await vi.waitFor(() => expect(outbox.getById(`wake-intent-${created.qitemId}`)?.deliveryState).toBe("failed"));
+      db.prepare("UPDATE outbox_entries SET tags = ? WHERE outbox_id = ?").run(JSON.stringify(["queue:return:common"]), `wake-intent-${created.qitemId}`);
+      rows.push(created);
+    }
+    db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
+
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toHaveLength(1); // one combined send, refused at the prompt, and not sent again for the second row
+    for (const row of rows) expect(repo.getById(row.qitemId)!.lastNudgeResult).toBe("failed:target_needs_input");
+
+    atPrompt = false;
+    await repo.retryPromptWakesOnClear("late@r", "needs_input");
+    await repo.retryPromptWakesOnClear("late@r", "idle");
+    expect(sent).toHaveLength(2);
+    for (const row of rows) expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("delivered");
+  });
+
   it("re-sends through the row's wake intent: the intent reads delivered, and a later drain sends nothing", async () => {
     const { sent, outbox, row } = await lateSeatWithOutbox();
     await runSweep();
