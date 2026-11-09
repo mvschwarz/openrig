@@ -26,7 +26,19 @@ import { eligibleQueueBindings, ineligibleBindingDetail, loadLearnedHostBindings
 import { getSelfHostId, resolvesToLocalHost } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
-import { deriveCurrentWork, deriveCurrentWorkChoice, deriveRole, deriveWorkCandidates, type CurrentWorkRow, type MissionsRootResolver, type RoleOrientation } from "../domain/current-work.js";
+import {
+  deriveCurrentWork,
+  deriveCurrentWorkChoice,
+  deriveRole,
+  deriveWorkCandidates,
+  encodeScopeAdvisory,
+  evaluateCreateScope,
+  SCOPE_ADVISORY_HEADER,
+  skippedCreateScopeAdvisory,
+  type CurrentWorkRow,
+  type MissionsRootResolver,
+  type RoleOrientation,
+} from "../domain/current-work.js";
 import { listProjects, projectCatalogPaths } from "../domain/workspace/project-read.js";
 import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
@@ -147,6 +159,31 @@ export function queueRoutes(): Hono {
     // must neither fail that write nor misreport membership as unmatched.
     try { return getRepo(c).destinationAdvisory(sessionRef); }
     catch { return null; }
+  }
+  function createScopeAdvisory(c: { get: (key: string) => unknown }, tags: string[] | null) {
+    try {
+      return evaluateCreateScope(tags, () => {
+        const flat = (tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim())).filter(Boolean);
+        const projectTags = flat.filter((tag) => tag.startsWith("project:"));
+        if (projectTags.some((tag) => !tag.slice("project:".length).trim())) return null;
+        const projectIds = [...new Set(projectTags.map((tag) => tag.slice("project:".length).trim()))];
+        if (projectIds.length > 1) return null;
+        if (projectIds.length === 1) {
+          const projectId = projectIds[0]!;
+          const { catalog } = projectCatalogPaths(c as never);
+          const entries = readProjectCatalog(catalog);
+          if (!entries) return null;
+          const project = listProjects(c as never).projects.find((entry) => entry.id === projectId);
+          if (!project || project.error || !project.missionsRoot) return null;
+          return project.missionsRoot;
+        }
+        const store = c.get("settingsStore" as never) as SettingsStore | undefined;
+        const value = store?.resolveOne("workspace.slices_root").value;
+        return typeof value === "string" && value.trim() ? value : null;
+      });
+    } catch {
+      return null;
+    }
   }
   /** An ask (anything but an update) to a shared channel is accepted, with a word to the agent: the channel's replies
    *  come back as correspondence, never as an answer, so nothing there will settle it. Context, not a refusal. */
@@ -656,7 +693,10 @@ export function queueRoutes(): Hono {
         tags: crossHostProvenanceTags(body.tags),
       };
       const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
-      return fwd.ok ? c.json(fwd.payload as Record<string, unknown>, fwd.status as 200) : fwd.response;
+      if (!fwd.ok) return fwd.response;
+      const skippedScope = skippedCreateScopeAdvisory(body.tags);
+      if (skippedScope) c.header(SCOPE_ADVISORY_HEADER, encodeScopeAdvisory(skippedScope));
+      return c.json(fwd.payload as Record<string, unknown>, fwd.status as 200);
     }
 
     try {
@@ -683,6 +723,8 @@ export function queueRoutes(): Hono {
         nudge: (body as { nudge?: boolean }).nudge,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
+      const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
+      if (scopeAdvisory) c.header(SCOPE_ADVISORY_HEADER, encodeScopeAdvisory(scopeAdvisory));
       const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent)].filter(Boolean);
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {

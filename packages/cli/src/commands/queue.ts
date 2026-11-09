@@ -1229,8 +1229,48 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
         const sent: SentCreate = { destinationSession: hostResolved.destination, claimedSource: managedSource === undefined ? source : undefined, body: resolvedBody,
           remoteHost: remoteHostOf(hostResolved.hostId) };
+        const emitScopeAdvisory = (headers?: Headers) => {
+          if (!headers || typeof headers.get !== "function") return;
+          const raw = headers.get("X-OpenRig-Scope-Advisory") ?? headers.get("x-openrig-scope-advisory");
+          if (!raw || raw.length > 1024) return;
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            return;
+          }
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+          const safeTag = (value: unknown): value is string =>
+            typeof value === "string" && /^(?:mission|slice):[^\x00-\x1f\x7f]{1,160}$/.test(value);
+          const record = parsed as { status?: unknown; tag?: unknown; count?: unknown; tags?: unknown };
+          if (record.status === "unresolved" && safeTag(record.tag)) {
+            console.error(`Warning: queue create scope check: ${record.tag} is unresolved (resolves to 0 directories); row was created.`);
+            return;
+          }
+          if (
+            record.status === "ambiguous" &&
+            safeTag(record.tag) &&
+            typeof record.count === "number" &&
+            Number.isInteger(record.count) &&
+            record.count >= 2 &&
+            record.count <= 10_000
+          ) {
+            console.error(`Warning: queue create scope check: ${record.tag} is ambiguous (resolves to ${record.count} directories, cannot uniquely resolve); row was created.`);
+            return;
+          }
+          if ((record.status === "unavailable" || record.status === "skipped") && Array.isArray(record.tags) && record.tags.length > 0 && record.tags.length <= 8) {
+            const validTags = record.tags.filter(safeTag);
+            if (validTags.length !== record.tags.length) return;
+            if (record.status === "unavailable") {
+              console.error(`Warning: queue create scope check unavailable (${validTags.join(", ")}): could not run scope check on this host; row was created.`);
+            } else {
+              console.error(`Note: queue create scope check skipped for cross-host write (${validTags.join(", ")}); row was forwarded.`);
+            }
+          }
+        };
         // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
-        const finish = async (created: Record<string, unknown>, status: number) => {
+        const finish = async (created: Record<string, unknown>, status: number, headers?: Headers) => {
+          if (status < 400) emitScopeAdvisory(headers);
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
           if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
             console.error(`Warning: ${createWarning.message}`);
@@ -1288,7 +1328,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         if (refusal) console.error(`No row was created: ${refusal}`);
         const hint = hostSubstitutionHint(res.status, res.data, opts.destination, opts.host, hostResolved, `, keeping --id ${shellQuote(qitemId)}`);
         if (hint) console.error(hint);
-        await finish(res.data, res.status);
+        await finish(res.data, res.status, res.headers);
       }, hostResolved.hostId !== undefined, hostResolved.hostId);
     });
 

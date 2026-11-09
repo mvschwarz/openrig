@@ -205,13 +205,21 @@ function tagValues(tags: string[], prefix: string): string[] {
  * Directories directly under `root` addressed by `wanted` — either because the directory
  * is named that, or because its SPEC.md frontmatter `id` is that. A directory can only
  * match once, so a name hit short-circuits its own frontmatter read.
+ *
+ * `inspectWorkNodeDirs` preserves whether `root` could actually be read as a directory
+ * (`ok: true` even when 0 children match, vs `ok: false` with the OS error code when
+ * `readdirSync` fails) so callers that distinguish an unavailable root from a completed
+ * zero-match check do not collapse both to `[]`.
  */
-export function resolveWorkNodeDirs(root: string, wanted: string): Match[] {
+export function inspectWorkNodeDirs(
+  root: string,
+  wanted: string,
+): { ok: true; matches: Match[] } | { ok: false; code?: string } {
   let entries: string[];
   try {
     entries = fs.readdirSync(root);
-  } catch {
-    return [];
+  } catch (err) {
+    return { ok: false, code: (err as NodeJS.ErrnoException)?.code };
   }
   const out: Match[] = [];
   for (const dir of entries.sort()) {
@@ -227,7 +235,134 @@ export function resolveWorkNodeDirs(root: string, wanted: string): Match[] {
     }
     if (parseFrontmatter(raw)["id"] === wanted) out.push({ dir, form: "frontmatter id" });
   }
-  return out;
+  return { ok: true, matches: out };
+}
+
+export function resolveWorkNodeDirs(root: string, wanted: string): Match[] {
+  const res = inspectWorkNodeDirs(root, wanted);
+  return res.ok ? res.matches : [];
+}
+
+export const SCOPE_ADVISORY_HEADER = "X-OpenRig-Scope-Advisory";
+
+export type CreateScopeAdvisory =
+  | { status: "unresolved"; tag: string; count: 0 }
+  | { status: "ambiguous"; tag: string; count: number }
+  | { status: "unavailable"; tags: string[] }
+  | { status: "skipped"; tags: string[] };
+
+const SAFE_SCOPE_TAG_RE = /^(?:mission|slice):[^\x00-\x1f\x7f]{1,160}$/;
+
+function sanitizeScopeTag(raw: string): string | null {
+  const cleaned = raw.replace(/[\x00-\x1f\x7f]+/g, "").trim().slice(0, 160);
+  return SAFE_SCOPE_TAG_RE.test(cleaned) ? cleaned : null;
+}
+
+function parseCreateScopeTags(tags: string[] | null | undefined): {
+  missions: string[];
+  slices: string[];
+  malformed: string[];
+  scopeTags: string[];
+} {
+  const flat = (tags ?? []).flatMap((t) => t.split(",").map((s) => s.trim())).filter(Boolean);
+  const missions: string[] = [];
+  const slices: string[] = [];
+  const malformed: string[] = [];
+  for (const t of flat) {
+    if (t.startsWith(MISSION_TAG)) {
+      const v = t.slice(MISSION_TAG.length).trim();
+      if (!v) malformed.push(t);
+      else if (!missions.includes(v)) missions.push(v);
+    } else if (t.startsWith(SLICE_TAG)) {
+      const v = t.slice(SLICE_TAG.length).trim();
+      if (!v) malformed.push(t);
+      else if (!slices.includes(v)) slices.push(v);
+    }
+  }
+  const scopeTags: string[] = [];
+  for (const raw of [...missions.map((m) => `mission:${m}`), ...slices.map((s) => `slice:${s}`), ...malformed]) {
+    const safe = sanitizeScopeTag(raw);
+    if (safe && !scopeTags.includes(safe)) scopeTags.push(safe);
+    if (scopeTags.length >= 8) break;
+  }
+  return { missions, slices, malformed, scopeTags };
+}
+
+export function skippedCreateScopeAdvisory(tags: string[] | null | undefined): CreateScopeAdvisory | null {
+  const { scopeTags } = parseCreateScopeTags(tags);
+  return scopeTags.length > 0 ? { status: "skipped", tags: scopeTags } : null;
+}
+
+export function encodeScopeAdvisory(advisory: CreateScopeAdvisory): string {
+  return JSON.stringify(advisory).replace(/[\u007f-\uffff]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/**
+ * Nonblocking post-create scope check (#2725). Distinguishes a completed check whose
+ * mission/slice tag resolved to 0 or >1 directories from a check that could not run
+ * because the catalogue or missions root was unavailable.
+ */
+export function evaluateCreateScope(
+  tags: string[] | null | undefined,
+  resolveRoot: () => string | null,
+): CreateScopeAdvisory | null {
+  const { missions, slices, malformed, scopeTags } = parseCreateScopeTags(tags);
+  if (scopeTags.length === 0) return null;
+
+  let missionsRoot: string | null = null;
+  try {
+    missionsRoot = resolveRoot();
+  } catch {
+    missionsRoot = null;
+  }
+  if (!missionsRoot) return { status: "unavailable", tags: scopeTags };
+
+  try {
+    fs.readdirSync(missionsRoot);
+  } catch {
+    return { status: "unavailable", tags: scopeTags };
+  }
+
+  if (malformed.length > 0) {
+    return { status: "unresolved", tag: sanitizeScopeTag(malformed[0]!) ?? scopeTags[0]!, count: 0 };
+  }
+  if (missions.length > 1) {
+    return { status: "ambiguous", tag: sanitizeScopeTag(`mission:${missions[0]!}`) ?? scopeTags[0]!, count: missions.length };
+  }
+
+  let resolvedMissionDir: string | null = null;
+  if (missions.length === 1) {
+    const missionTarget = missions[0]!;
+    const missionTag = sanitizeScopeTag(`mission:${missionTarget}`) ?? scopeTags[0]!;
+    const missionCheck = inspectWorkNodeDirs(missionsRoot, missionTarget);
+    if (!missionCheck.ok) return { status: "unavailable", tags: scopeTags };
+    if (missionCheck.matches.length === 0) return { status: "unresolved", tag: missionTag, count: 0 };
+    if (missionCheck.matches.length > 1) {
+      return { status: "ambiguous", tag: missionTag, count: missionCheck.matches.length };
+    }
+    resolvedMissionDir = missionCheck.matches[0]!.dir;
+  }
+
+  if (slices.length > 1) {
+    return { status: "ambiguous", tag: sanitizeScopeTag(`slice:${slices[0]!}`) ?? scopeTags[0]!, count: slices.length };
+  }
+  if (slices.length === 1) {
+    const sliceTarget = slices[0]!;
+    const sliceTag = sanitizeScopeTag(`slice:${sliceTarget}`) ?? scopeTags[0]!;
+    if (!resolvedMissionDir) return { status: "unresolved", tag: sliceTag, count: 0 };
+    const slicesRoot = path.join(missionsRoot, resolvedMissionDir, "slices");
+    const sliceCheck = inspectWorkNodeDirs(slicesRoot, sliceTarget);
+    if (!sliceCheck.ok) {
+      if (sliceCheck.code === "ENOENT") return { status: "unresolved", tag: sliceTag, count: 0 };
+      return { status: "unavailable", tags: scopeTags };
+    }
+    if (sliceCheck.matches.length === 0) return { status: "unresolved", tag: sliceTag, count: 0 };
+    if (sliceCheck.matches.length > 1) {
+      return { status: "ambiguous", tag: sliceTag, count: sliceCheck.matches.length };
+    }
+  }
+
+  return null;
 }
 
 interface Candidate {
