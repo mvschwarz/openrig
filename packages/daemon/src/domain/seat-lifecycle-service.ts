@@ -70,6 +70,35 @@ import { seatSkillPaths } from "./seat-skill-storage.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
+/**
+ * The supported routes for a session registered as adopted (origin=claimed). `rig unclaim` releases
+ * it and leaves its process running, so ending that process in its own terminal ends only this seat.
+ * `rig down` ends it with the rest of its rig, so it is the route only when the rig has one seat;
+ * otherwise it is named for what it ends. Only the guidance names them; the refusal stands.
+ * `seats` is the rig's node count when known. A seat handed over before 0.7.9 gets
+ * earlierHandoverRefusal instead. A seat joined with `rig attach` as an external CLI has no tmux
+ * session that `rig down` stops.
+ */
+export function claimedSessionRoutes(rigName: string, sessionName: string, seats: number | null, externalCli = false): string {
+  const session = shellQuote(sessionName);
+  const release = `To release it from OpenRig and leave its process running, run rig unclaim ${session}.`;
+  if (externalCli) return `This seat was joined with rig attach as an external CLI, so rig down leaves it running. ${release} End the process in its own terminal.`;
+  if (seats === 1) return `To end the session, run ${rigDownRoute(rigName)}. ${release}`;
+  return `To end only this session, run rig unclaim ${session} (it releases the session from OpenRig and leaves its process running), `
+    + `then end that process in its own terminal. ${rigDownScope(rigName, seats)}`;
+}
+
+/** `rig down <rig>` as the route for a one-seat rig, and how the rig comes back. */
+function rigDownRoute(rigName: string): string {
+  const rig = shellQuote(rigName);
+  return `rig down ${rig} (this rig has one seat, so it stops only this session; rig up ${rig} --existing brings the rig back)`;
+}
+
+/** What `rig down <rig>` ends in a rig with more than one seat, or an unknown count. */
+function rigDownScope(rigName: string, seats: number | null): string {
+  return `rig down ${shellQuote(rigName)} ends ${seats !== null && seats > 1 ? `all ${seats} seats` : "every seat"} in this rig.`;
+}
+
 /** Terminal session statuses — rows the clean verb must NOT touch (they already
  *  record an ended tenancy; the vocabulary is shared with seat-handover-service
  *  and the watchdog's TERMINAL_SESSION_STATUSES). */
@@ -1090,7 +1119,7 @@ export class SeatLifecycleService {
         ok: false,
         code: "claimed_session",
         message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`,
-        guidance: "Release an adopted session with: rig unclaim",
+        guidance: this.claimedRoutes(seat, session.session_name),
       };
     }
 
@@ -1136,7 +1165,7 @@ export class SeatLifecycleService {
         if ("code" in resolved) return { ok: false, code: "selection_changed", message: "The selected seat changed." };
         const seat = this.describe(resolved);
         const session = this.latestSession(resolved.nodeId)!;
-        if (session.origin === "claimed") return this.earlierHandoverRefusal(resolved.nodeId, session, "stop refuses to kill it") ?? { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`, guidance: "Release an adopted session with: rig unclaim" };
+        if (session.origin === "claimed") return this.earlierHandoverRefusal(resolved.nodeId, session, "stop refuses to kill it") ?? { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig — stop refuses to kill it.`, guidance: this.claimedRoutes(seat, session.session_name) };
         const probed = await this.probeLiveness(session.session_name, "stop refuses rather than kill blind");
         if ("code" in probed) return probed;
         const afterProbe = selection();
@@ -1392,13 +1421,18 @@ export class SeatLifecycleService {
    * before any stop. Null means no historical blocker was observed; the caller must
    * still validate the canonical occupant and recheck absence before launching.
    */
-  private async validateFreshHistory(nodeId: string, canonicalSessionName: string, seatRef: string): Promise<SeatRefusal | null> {
+  private async validateFreshHistory(seat: SeatDescriptor, canonicalSessionName: string, seatRef: string): Promise<SeatRefusal | null> {
+    const nodeId = seat.nodeId;
     const rows = this.nonTerminalSessions(nodeId);
-    if (rows.some(row => row.origin === "claimed")) {
+    const claimed = rows.find(row => row.origin === "claimed");
+    if (claimed) {
+      const seats = this.rigRepo.getRig(seat.rigId)?.nodes.length ?? null;
+      const externalCli = this.sessionRegistry.getBindingForNode(nodeId)?.attachmentType === "external_cli";
       return {
         ok: false, code: "claimed_session",
         message: `Seat "${seatRef}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
-        guidance: "Stop the adopted process yourself, then run rig seat clean before launching fresh.",
+        guidance: `Release it with rig unclaim ${shellQuote(claimed.session_name)} (its process keeps running), end that process yourself, then launch fresh.`
+          + (externalCli ? "" : seats === 1 ? ` Or end it with ${rigDownRoute(seat.rigName)}.` : ` ${rigDownScope(seat.rigName, seats)}`),
       };
     }
     const binding = this.sessionRegistry.getBindingForNode(nodeId);
@@ -1452,7 +1486,7 @@ export class SeatLifecycleService {
         blockers.push({ code: error.code, message: error.message, guidance: error.guidance });
       } else blockers.push({ code: error.code, message: `Fresh launch would be refused: ${error.code}.` });
     };
-    const history = await this.validateFreshHistory(node.id, canonicalSessionName, input.seatRef);
+    const history = await this.validateFreshHistory(seat, canonicalSessionName, input.seatRef);
     if (history) record(history);
     const probe = await this.probeLiveness(canonicalSessionName, "preview does not repair tmux");
     const currentOccupant = "code" in probe ? "unknown" : probe.state;
@@ -1519,7 +1553,7 @@ export class SeatLifecycleService {
     const prepared = this.resolveFreshLaunch(resolved, input.seatRef);
     if ("code" in prepared) return prepared;
     const { seat, node, adapter, startup, canonicalSessionName, nodeLauncher, startupOrchestrator } = prepared;
-    const historyRefusal = await this.validateFreshHistory(resolved.nodeId, canonicalSessionName, input.seatRef);
+    const historyRefusal = await this.validateFreshHistory(seat, canonicalSessionName, input.seatRef);
     if (historyRefusal) return historyRefusal;
     const retiringRows = this.nonTerminalSessions(node.id);
     // Detached is terminal for process cleanup, but remains a reboot candidate.
@@ -1876,7 +1910,7 @@ export class SeatLifecycleService {
     if (session.origin === "claimed") {
       return this.earlierHandoverRefusal(node.id, session, "in-place restart refuses it")
         ?? { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig; in-place restart refuses it.`,
-          guidance: "Release an adopted session with: rig unclaim" };
+          guidance: this.claimedRoutes(seat, session.session_name) };
     }
     const probed = await this.probeLiveness(session.session_name, "in-place restart refuses rather than act on an unknown session");
     if ("code" in probed) return probed;
@@ -2250,6 +2284,12 @@ export class SeatLifecycleService {
       return { ok: false, code: "missing_reason", message: "An audit reason is required (--reason)." };
     }
     return null;
+  }
+
+  /** The claimed-session routes for this seat's rig (see claimedSessionRoutes). */
+  private claimedRoutes(seat: SeatDescriptor, sessionName: string): string {
+    return claimedSessionRoutes(seat.rigName, sessionName, this.rigRepo.getRig(seat.rigId)?.nodes.length ?? null,
+      this.sessionRegistry.getBindingForNode(seat.nodeId)?.attachmentType === "external_cli");
   }
 
   private describe(resolved: ResolvedSeat): SeatDescriptor {
