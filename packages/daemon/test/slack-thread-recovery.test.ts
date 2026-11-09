@@ -559,3 +559,27 @@ it("with the production readiness rule, a recovered reply for an unbound seat wa
   await r.run();
   expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(1);
 });
+
+it("a reply waiting for its seat keeps its soon-retry when its thread closes and the replacement source isn't reached in budget", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const f = fixture();
+    f.track(ROOT, "asker@test");
+    f.replies[`C1:${ROOT}`] = [f.reply(50, ROOT)];
+    f.unbind("asker@test");
+    const r = f.recovery();
+    await r.run();
+
+    // The thread closes, so the next pass builds it a fresh source; the channel's read takes the rest of that pass's
+    // budget, so the fresh source never steps.
+    f.map.close(ROOT, "C1");
+    f.respond(u => { if (u.pathname.endsWith("conversations.history")) f.advance(20_000); return undefined; });
+    f.bind("asker@test"); f.advance(10_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(0);
+
+    f.respond(undefined);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.rows().filter(row => row.destinationSession === "asker@test")).toHaveLength(1);
+  } finally { vi.useRealTimers(); }
+});

@@ -129,13 +129,15 @@ export class SlackRecovery {
   private retryWhileUnready(): void {
     const now = this.now();
     const sources = [
-      ...this.channels.map((c) => ({ key: c.key, method: HISTORY, ...c.status() })),
-      ...[...this.threads.values()].map((t) => ({ key: t.source.key, method: REPLIES, state: t.source.state, reason: t.source.reason })),
+      // Caught up: a channel reads "pending" once nothing new is left; a thread reads "pending" before it has stepped or when
+      // the pass budget ran out first, so only "scanned" says a thread has caught up.
+      ...this.channels.map((c) => { const s = c.status(); return { key: c.key, method: HISTORY, reason: s.reason, caughtUp: s.state === "scanned" || s.state === "pending" }; }),
+      ...[...this.threads.values()].map((t) => ({ key: t.source.key, method: REPLIES, reason: t.source.reason, caughtUp: t.source.state === "scanned" })),
     ];
     const live = new Set(sources.map((s) => s.key));
     for (const s of sources) {
       if (s.reason === "destination-unready") { if (!this.awaitingSeat.has(s.key)) this.awaitingSeat.set(s.key, now); }
-      else if (s.state === "scanned" || s.state === "pending") this.awaitingSeat.delete(s.key);
+      else if (s.caughtUp) this.awaitingSeat.delete(s.key);
     }
     for (const [key, since] of this.awaitingSeat) {
       if (!live.has(key) || now - since > SEAT_WAIT_RETRY_WINDOW_MS) this.awaitingSeat.delete(key);
