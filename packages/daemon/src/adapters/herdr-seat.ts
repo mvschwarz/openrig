@@ -16,7 +16,10 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { TmuxAdapter, type SessionProbe, type TmuxCursorPosition, type TmuxPane, type TmuxResult, type TmuxSession, type TmuxWindow } from "./tmux.js";
+import { removeParentSessionEnv } from "../domain/parent-session-env.js";
+import { addSeatRuntimeDir } from "../domain/seat-runtime-dir.js";
+import { shellQuote } from "./shell-quote.js";
+import { defaultTmuxFileOps, TmuxAdapter, type TmuxFileOps, type SessionProbe, type TmuxCursorPosition, type TmuxPane, type TmuxResult, type TmuxSession, type TmuxWindow } from "./tmux.js";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { createHerdrSocketRpc, HerdrRpcError, type HerdrResult, type HerdrSocketRpc } from "../domain/terminal/herdr-transport.js";
 
@@ -62,7 +65,15 @@ export interface HerdrSeatAdapterDeps {
   rpcFor?: (socketPath: string) => HerdrSocketRpc;
   timeoutMs?: number;
   now?: () => number;
+  /** The staged-environment file writer (tests inject one). */
+  fileOps?: TmuxFileOps;
 }
+
+/** tmux's default update-environment names: the scoped tmux launch carries these from the daemon too. */
+const TMUX_DEFAULT_UPDATE_ENVIRONMENT = ["DISPLAY", "KRB5CCNAME", "SSH_ASKPASS", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "SSH_CONNECTION", "WINDOWID", "XAUTHORITY"];
+/** What Herdr itself sets per pane; the scoped launch keeps these, as tmux's keeps TMUX, TMUX_PANE and TERM. */
+const HERDR_PANE_ENV = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "SHELL", "HERDR_ENV", "HERDR_BIN_PATH",
+  "HERDR_SESSION", "HERDR_SOCKET_PATH", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"];
 
 
 export class HerdrSeatAdapter extends TmuxAdapter {
@@ -393,10 +404,28 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       const all = (await this.call<{ workspaces: HerdrWorkspaceInfo[] }>(socket, "workspace.list", {})).workspaces ?? [];
       if (all.some(w => w.label === name)) return { ok: false, code: "duplicate_session", message: `duplicate session: ${name} (a Herdr workspace already has this label)` };
       const seatEnv = { OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...env };
+      // Like a tmux seat, a managed seat must not inherit its terminal server's environment: the person's Herdr server
+      // may carry another CLAUDE_CONFIG_DIR (another account, no trust records, none of the seat's conversations).
+      const scoped = await this.scopedLaunch(seatEnv, cwd);
       const created = await this.call<{ workspace: HerdrWorkspaceInfo; root_pane: HerdrPaneInfo }>(socket, "workspace.create",
         { label: name, ...(cwd ? { cwd } : {}), env: seatEnv, focus: false });
       const workspace = created.workspace?.workspace_id ?? created.root_pane.workspace_id;
-      const pane = created.root_pane.pane_id;
+      let pane = created.root_pane.pane_id;
+      if (scoped) {
+        // workspace.create always starts the server's own shell; a layout pane runs our argv instead. Then the plain
+        // root pane goes, leaving one tab with the scoped pane.
+        try {
+          const applied = await this.call<{ layout: { root?: { pane_id?: string } } }>(socket, "layout.apply",
+            { workspace_id: workspace, tab_label: name, focus: false, root: { type: "pane", label: name, ...(cwd ? { cwd } : {}), command: scoped } });
+          const scopedPane = applied.layout?.root?.pane_id;
+          if (!scopedPane) throw new Error("Herdr did not report the seat's pane");
+          await this.call(socket, "pane.close", { pane_id: pane });
+          pane = scopedPane;
+        } catch (error) {
+          try { await this.call(socket, "workspace.close", { workspace_id: workspace }); } catch { /* reported below */ }
+          return { ok: false, code: "session_not_created", message: `The seat's scoped Herdr pane could not be started, so its workspace was closed: ${(error as Error).message}` };
+        }
+      }
       try {
         this.created.set(name, { workspace, pane, socket });
         for (const [key, value] of Object.entries({ workspace, pane, socket })) this.writeMeta(name, "seat", key, value);
@@ -422,6 +451,35 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       if (error instanceof HerdrSeatError) return { ok: false, code: error.resultCode, message: error.message };
       return { ok: false, code: "session_not_created", message: (error as Error).message };
     }
+  }
+
+  /** The argv that starts a managed seat's shell with the scoped environment a tmux seat gets (launchEnvironment, unless
+   *  terminal.inherit_tmux_environment is on): the daemon's launch values plus the seat's own, from a 0600 file the
+   *  shell removes, under env -i keeping only what Herdr sets per pane. Null keeps the server's environment (legacy).
+   *  A failure to stage it refuses the launch: unlike tmux, a Herdr server is the person's own and may hold another
+   *  account. */
+  private async scopedLaunch(seatEnv: Record<string, string>, cwd?: string): Promise<string[] | null> {
+    if (!this.launchEnvironment || !seatEnv["OPENRIG_NODE_ID"]) return null;
+    const policy = this.launchEnvironment();
+    if (policy.inheritTmuxEnvironment) return null;
+    const baseline: Record<string, string | undefined> = {
+      ...Object.fromEntries(TMUX_DEFAULT_UPDATE_ENVIRONMENT.map(key => [key, process.env[key]])), ...policy.env };
+    removeParentSessionEnv(baseline);
+    const selected: Record<string, string | undefined> = { ...baseline, ...seatEnv };
+    addSeatRuntimeDir(selected, policy.runtimeDir);
+    const exports = Object.entries(selected)
+      .filter((entry): entry is [string, string] => entry[1] !== undefined && !HERDR_PANE_ENV.includes(entry[0]) && entry[0] !== "TMUX" && entry[0] !== "TMUX_PANE")
+      .map(([key, value]) => {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new HerdrSeatError("transport_unavailable", "Invalid environment name");
+        return `export ${key}=${shellQuote(value)}`;
+      });
+    const fileOps = this.deps.fileOps ?? defaultTmuxFileOps();
+    const file = fileOps.tmpName();
+    const cd = cwd ? `cd -- ${shellQuote(cwd)} || exit 1\n` : "";
+    await fileOps.writeFile(file, `/bin/rm -f -- ${shellQuote(file)}\n${exports.join("\n")}\n${cd}exec "$@"\n`, { mode: 0o600, flag: "wx" });
+    const keep = HERDR_PANE_ENV.map(key => `${key}="\${${key}-}"`).join(" ");
+    const shell = (await this.getDefaultShell()) ?? "/bin/sh";
+    return ["/bin/sh", "-c", `exec /usr/bin/env -i -- ${keep} /bin/sh "$@"`, "sh", file, shell, "-l"];
   }
 
   override async killSession(name: string, beforeEffect?: () => void): Promise<TmuxResult> {

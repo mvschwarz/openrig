@@ -10,6 +10,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 function fakeHerdr() {
   const workspaces = new Map<string, { label: string; panes: string[]; env: Record<string, string> }>();
   const screen = new Map<string, string>();
+  const commands = new Map<string, string[]>();
   const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
   let next = 1;
   let down = false;
@@ -37,6 +38,12 @@ function fakeHerdr() {
         workspaces.set(id, { label: String(p["label"]), panes: [pane], env: (p["env"] ?? {}) as Record<string, string> });
         return { type: "workspace_created", workspace: { workspace_id: id, label: p["label"] }, root_pane: { pane_id: pane, workspace_id: id } };
       }
+      case "layout.apply": {
+        const w = ws(p["workspace_id"]); const pane = `${p["workspace_id"]}:p${w.panes.length + 1}`; w.panes.push(pane);
+        commands.set(pane, (p["root"] as { command: string[] }).command);
+        return { type: "layout_apply", layout: { workspace_id: p["workspace_id"], root: { type: "pane", pane_id: pane } } };
+      }
+      case "pane.close": { const w = paneWs(p["pane_id"]); w.panes = w.panes.filter(id => id !== p["pane_id"]); return { type: "ok" }; }
       case "workspace.close": ws(p["workspace_id"]); workspaces.delete(String(p["workspace_id"])); return { type: "workspace_closed" };
       case "pane.list": { const w = ws(p["workspace_id"]); return { type: "pane_list", panes: w.panes.map(id => ({ pane_id: id, workspace_id: p["workspace_id"] })) }; }
       case "pane.send_text": case "pane.send_keys": paneWs(p["pane_id"]); return { type: "ok" };
@@ -49,16 +56,16 @@ function fakeHerdr() {
     }
   };
   const output = (pane: string, text: string) => { screen.set(pane, text); };
-  return { rpc, workspaces, sent, output, setDown: (v: boolean) => { down = v; } };
+  return { rpc, workspaces, sent, output, commands, setDown: (v: boolean) => { down = v; } };
 }
 
-function setup(extra: { now?: () => number } = {}) {
+function setup(extra: { now?: () => number; fileOps?: import("../src/adapters/tmux.js").TmuxFileOps } = {}) {
   const db = createFullTestDb();
   const repo = new RigRepository(db);
   const rig = repo.createRig("hr");
   const node = repo.addNode(rig.id, "dev.solo", { runtime: "terminal", terminalSubstrate: "herdr" });
   const herdr = fakeHerdr();
-  const adapter = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/herdr.sock", rpcFor: () => herdr.rpc, now: extra.now });
+  const adapter = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/herdr.sock", rpcFor: () => herdr.rpc, now: extra.now, fileOps: extra.fileOps });
   const bind = (session: string, pane: string) =>
     db.prepare("INSERT INTO bindings (id, node_id, tmux_session, tmux_pane) VALUES (?, ?, ?, ?)").run(`b-${node.id}`, node.id, session, pane);
   return { db, repo, node, herdr, adapter, bind };
@@ -267,5 +274,69 @@ describe("CodeRabbit follow-ups on PR #2785", () => {
     // A whole-server read comes first, before any per-seat call could backfill the binding.
     expect((await restarted.listSessions()).map(x => x.name)).toEqual(["dev-solo@hr"]);
     expect(sockets).toEqual(["/sandbox/A.sock"]);
+  });
+});
+
+describe("HerdrSeatAdapter scoped launch (live move 1: the Herdr server's CLAUDE_CONFIG_DIR leaked into a seat)", () => {
+  function files() {
+    const written = new Map<string, { content: string; mode?: number }>();
+    let n = 0;
+    return { written, ops: {
+      writeFile: async (path: string, content: string, options?: { mode: number; flag: "wx" }) => { written.set(path, { content, mode: options?.mode }); },
+      unlink: async () => {}, tmpName: () => `/tmp/orh-scoped-${++n}`, bufferName: () => `buf-${n}`,
+    } };
+  }
+  const policy = (inherit = false) => () => ({ inheritTmuxEnvironment: inherit,
+    env: { CLAUDE_CONFIG_DIR: "/home/u/.openrig/claude", HOME: "/home/u", LANG: undefined } as Record<string, string | undefined> });
+
+  it("starts a managed seat's shell under env -i with the daemon's launch values and the seat's own, and drops the server shell", async () => {
+    const f = files();
+    const { adapter, herdr } = setup({ fileOps: f.ops });
+    adapter.launchEnvironment = policy();
+    expect(await adapter.createSession("dev-solo@hr", "/work dir", { OPENRIG_NODE_ID: "n1", FOO: "bar" })).toEqual({ ok: true });
+    const ws = [...herdr.workspaces.values()][0]!;
+    expect(ws.panes).toEqual(["w1:p2"]);
+    expect((await adapter.listPanes("dev-solo@hr")).map(p => p.id)).toEqual(["w1:p2"]);
+    const argv = herdr.commands.get("w1:p2")!;
+    expect(argv.slice(0, 2)).toEqual(["/bin/sh", "-c"]);
+    expect(argv[2]).toContain("exec /usr/bin/env -i -- ");
+    expect(argv[2]).toContain('HERDR_PANE_ID="${HERDR_PANE_ID-}"');
+    expect(argv[2]).toContain('TERM="${TERM-}"');
+    expect(argv.slice(3, 5)).toEqual(["sh", "/tmp/orh-scoped-1"]);
+    expect(argv.at(-1)).toBe("-l");
+    const file = f.written.get("/tmp/orh-scoped-1")!;
+    expect(file.mode).toBe(0o600);
+    expect(file.content).toContain("export CLAUDE_CONFIG_DIR='/home/u/.openrig/claude'");
+    expect(file.content).toContain("export FOO='bar'");
+    expect(file.content).toContain("export OPENRIG_NODE_ID='n1'");
+    expect(file.content).toContain("cd -- '/work dir' || exit 1");
+    expect(file.content).not.toContain("LANG");
+    expect(file.content.split("\n")[0]).toBe("/bin/rm -f -- '/tmp/orh-scoped-1'");
+    expect(file.content.trimEnd().split("\n").at(-1)).toBe('exec "$@"');
+  });
+
+  it("keeps the server environment when terminal.inherit_tmux_environment is on, or for an unmanaged session", async () => {
+    const f = files();
+    const { adapter, herdr } = setup({ fileOps: f.ops });
+    adapter.launchEnvironment = policy(true);
+    await adapter.createSession("dev-solo@hr", "/tmp", { OPENRIG_NODE_ID: "n1" });
+    adapter.launchEnvironment = policy();
+    await adapter.createSession("other@hr", "/tmp", {});
+    expect(herdr.sent.filter(s => s.method === "layout.apply")).toHaveLength(0);
+    expect(f.written.size).toBe(0);
+  });
+
+  it("closes the new workspace when the scoped pane can't be started", async () => {
+    const f = files();
+    const { db, herdr } = setup({ fileOps: f.ops });
+    const original = herdr.rpc;
+    const failing = async (req: { id: string; method: string; params: unknown }) => {
+      if (req.method === "layout.apply") throw new HerdrRpcError("herdr error: bad layout", "invalid_layout");
+      return original(req);
+    };
+    const a2 = new HerdrSeatAdapter({ db, socketForNewSeats: () => "/sandbox/herdr.sock", rpcFor: () => failing, fileOps: f.ops });
+    a2.launchEnvironment = policy();
+    expect(await a2.createSession("dev-solo@hr", "/tmp", { OPENRIG_NODE_ID: "n1" })).toMatchObject({ ok: false, code: "session_not_created" });
+    expect(herdr.workspaces.size).toBe(0);
   });
 });
