@@ -27,12 +27,17 @@ export function resolveEscalationOwner(db: Database.Database, session: string, a
   const source = resolveSessionNodeId(db, session);
   const parent = defaultResolveOrchestrator(db, session);
   if (!source) return { owner: parent, outcome: "none", reason: "no recorded source topology" };
-  // A declared parent without a session still wins over a newly declared fallback.
-  if (db.prepare("SELECT 1 FROM edges WHERE target_id=? AND kind='delegates_to'").get(source)) {
+  // One declared parent, even without a session, still wins over a newly declared fallback. Several parents name no
+  // single owner (#2840): a declared escalates_to decides, and without one the caller keeps its own fallback.
+  const parents = (db.prepare("SELECT COUNT(DISTINCT source_id) AS n FROM edges WHERE target_id=? AND kind='delegates_to'")
+    .get(source) as { n: number }).n;
+  if (parents === 1) {
     return { owner: parent, outcome: "parent", reason: "declared delegation parent retained" };
   }
   if (!db.prepare("SELECT 1 FROM edges WHERE source_id=? AND kind='escalates_to'").get(source)) {
-    return { owner: null, outcome: "none", reason: "no escalation destination declared" };
+    return parents > 1
+      ? { owner: null, outcome: "ambiguous", reason: `delegates_to ambiguous: ${parents} declared parents and no escalates_to; existing fallback retained` }
+      : { owner: null, outcome: "none", reason: "no escalation destination declared" };
   }
   // Curated/older test stores without the new column have no deferred targets.
   const hasRefs = (db.prepare("PRAGMA table_info(edges)").all() as Array<{ name: string }>).some(c => c.name === "target_ref");
