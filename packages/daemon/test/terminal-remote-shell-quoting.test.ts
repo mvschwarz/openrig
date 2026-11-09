@@ -12,8 +12,9 @@ it.each(["inherit", "isolated"] as const)("keeps remote session names intact thr
   // Simulate ssh's remote-command reconstruction. The local and remote shell
   // parsing are real; no SSH server or terminal provider is claimed here.
   writeFileSync(join(bin, "ssh"), '#!/bin/sh\n[ "$1" = -t ] || exit 64\nshift 2\nexec /bin/sh -c "$*"\n', { mode: 0o700 });
-  // Inherited replacement tracking needs only remote tmux and a POSIX shell, not rig.
-  writeFileSync(join(bin, "tmux"), '#!/bin/sh\ncase $1 in display-message) printf "%s\\n" "$4" >> "$OPR_ARGS"; target=$4; target=${target#=}; printf "7 session-id:%s\\n" "${target%:}";; show-environment) exit 1;; attach) printf "%s\\n" "$@" >> "$OPR_ARGS";; esac\n', { mode: 0o700 });
+  // Inherited replacement tracking needs only remote tmux and a POSIX shell, not rig. The tile reads the seat's
+  // activity and screen once; with no sleep on this PATH, its view then ends rather than reading again at once.
+  writeFileSync(join(bin, "tmux"), '#!/bin/sh\ncase $1 in display-message) printf "%s\\n" "$4" >> "$OPR_ARGS"; case $5 in "#{pid} #{window_activity}") [ -e "$OPR_ARGS.seen" ] && exit 0; : > "$OPR_ARGS.seen"; printf "7 1\\n";; *) target=$4; target=${target#=}; printf "7 session-id:%s\\n" "${target%:}";; esac;; show-environment) exit 1;; attach) printf "%s\\n" "$@" >> "$OPR_ARGS";; esac\n', { mode: 0o700 });
   if (mode === "isolated") {
     writeFileSync(join(bin, "rig"), '#!/bin/sh\nprintf "%s\\n" "$OPENRIG_HOST_SELECTED" "$@" > "$OPR_ARGS"\n', { mode: 0o700 });
   }
@@ -25,17 +26,21 @@ it.each(["inherit", "isolated"] as const)("keeps remote session names intact thr
           seat: session, label: session, tmuxSession: session, host: "edge", readOnly, alive: true,
         }], { resolveHost: () => ({ id: "edge", transport: "ssh", target: "fixture" }),
           localTmuxServer: ["-S", "/local/only/socket"], localTmuxServerMode: mode });
-        writeFileSync(argsFile, "");
+        writeFileSync(argsFile, ""); rmSync(`${argsFile}.seen`, { force: true });
         execFileSync("/bin/sh", ["-c", view.opened[0]!.paneCommand], {
           env: { PATH: mode === "inherit" ? bin : `${bin}:/usr/bin:/bin`, OPR_ARGS: argsFile, OPENRIG_HOST_SELECTED: "another-host" },
+          // A tile that never ends fails here rather than hanging the run.
+          timeout: 10000,
         });
         expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(mode === "isolated"
           ? ["local", "terminal", "attach", ...(readOnly ? ["--read-only"] : []), "--", session]
-          : [`=${session}:`, "attach", ...(readOnly ? ["-r"] : []), "-t", "session-id"]);
+          : [`=${session}:`, "session-id"]);
         expect(view.opened[0]!.paneCommand).not.toContain("/local/only/socket");
         writeFileSync(argsFile, "");
         execFileSync("/bin/sh", ["-c", view.opened[0]!.recoveryCommand!], {
           env: { PATH: mode === "inherit" ? bin : `${bin}:/usr/bin:/bin`, OPR_ARGS: argsFile, OPENRIG_HOST_SELECTED: "another-host" },
+          // A tile that never ends fails here rather than hanging the run.
+          timeout: 10000,
         });
         expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual(mode === "isolated"
           ? ["local", "terminal", "attach", ...(readOnly ? ["--read-only"] : []), "--", session]
@@ -63,7 +68,7 @@ it.each(["missing", "failed"])("does not attach to a namesake when the isolated 
       seat: "seat@rig", label: "seat", tmuxSession: "seat@rig", host: "edge", readOnly: false, alive: true,
     }], { resolveHost: () => ({ id: "edge", transport: "ssh", target: "fixture" }), localTmuxServerMode: "isolated" });
     const result = spawnSync("/bin/sh", ["-c", view.opened[0]!.paneCommand], {
-      env: { PATH: bin, OPR_ARGS: argsFile }, encoding: "utf8",
+      env: { PATH: bin, OPR_ARGS: argsFile }, encoding: "utf8", timeout: 10000,
     });
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(failure === "missing" ? 127 : 69);

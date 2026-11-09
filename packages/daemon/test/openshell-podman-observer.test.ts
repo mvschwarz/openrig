@@ -40,11 +40,11 @@ it.skipIf(!supported)("does not treat an engine error or missing original invent
   await expect(f.observer.observe(f.binding)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed" });
 });
 
-async function httpFixture(failure?: "404" | "malformed") {
+async function httpFixture(failure?: "404" | "malformed", mountedVolumes?: string[]) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "os-")));
   closers.push(() => rmSync(root, { recursive: true, force: true }));
   const socket = join(root, "s"), id = "compute-one", workloadId = "a".repeat(64), supervisorId = "b".repeat(64);
-  const ownedVolumes = [`openshell-sandbox-${id}-workspace`, `openshell-control-${id}`, `openshell-channel-${id}`];
+  const ownedVolumes = mountedVolumes ?? [`openshell-sandbox-${id}-workspace`, `openshell-control-${id}`, `openshell-channel-${id}`];
   const unrelated = { Id: "c".repeat(64), Names: ["unrelated"], Labels: {} };
   let containers = [unrelated,
     { Id: workloadId, Names: ["workload"], Labels: { "openshell.managed": "true", "openshell.ai/sandbox-id": id, "openshell.ai/isolation-role": "sandbox", "openshell.ai/sandbox-workspace": "workspace" } },
@@ -99,4 +99,23 @@ it.each(["404", "malformed"] as const)("keeps an HTTP %s inventory response unco
   await expect(f.observer.capture(f.binding, f.socket)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed" });
   expect(f.requests).toHaveLength(1);
   expect(f.requests[0]?.method).toBe("GET");
+});
+
+it("captures a custom-image sandbox without inventing a workspace volume or selecting user mounts", async () => {
+  const volumes = ["openshell-control-compute-one", "openshell-channel-compute-one"];
+  const f = await httpFixture(undefined, [...volumes, "user-data", "openshell-control-another"]);
+  const selected = await f.observer.capture(f.binding, f.socket);
+  expect(selected.volumes).toEqual(volumes);
+  f.retireContainers();
+  expect(await f.observer.observe(f.binding, selected)).toEqual({ workload: false, supervisor: false, volumes: true });
+  f.retireVolumes();
+  expect(await f.observer.observe(f.binding, selected)).toEqual({ workload: false, supervisor: false, volumes: false });
+  expect(f.requests.every(req => req.method === "GET")).toBe(true);
+});
+
+it.each(["control", "channel"])("refuses an unattributable %s volume even when other mounts exist", async missing => {
+  const volumes = ["openshell-control-compute-one", "openshell-channel-compute-one", "openshell-sandbox-compute-one-workspace"]
+    .filter(name => name !== `openshell-${missing}-compute-one`);
+  const f = await httpFixture(undefined, volumes);
+  await expect(f.observer.capture(f.binding, f.socket)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed" });
 });

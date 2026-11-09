@@ -2,7 +2,7 @@ import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { specClaudeTokenRef } from "./claude-seat-token.js";
 import { validateClaudeMcp } from "./claude-mcp.js";
-import { validateLaunchWrapper } from "./launch-wrapper.js";
+import { isLaunchWrapperRuntime, validateLaunchWrapper } from "./launch-wrapper.js";
 import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type {
@@ -553,8 +553,8 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     catch (error) { errors.push((error as Error).message); }
   }
   if (member["launch_wrapper"] !== undefined) {
-    if (member["runtime"] !== "pi" && member["runtime"] !== "codex") {
-      errors.push(`${prefix}.launch_wrapper: only valid when runtime is "pi" or "codex"`);
+    if (!isLaunchWrapperRuntime(member["runtime"])) {
+      errors.push(`${prefix}.launch_wrapper: only valid when runtime is "pi", "codex" or "claude-code"`);
     }
     try { validateLaunchWrapper(member["launch_wrapper"], `${prefix}.launch_wrapper`); }
     catch (error) { errors.push((error as Error).message); }
@@ -1460,8 +1460,8 @@ export class LegacyRigSpecSchema {
           catch (error) { errors.push((error as Error).message); }
         }
         if (node["launch_wrapper"] !== undefined) {
-          if (node["runtime"] !== "pi" && node["runtime"] !== "codex") {
-            errors.push(`nodes.${nodeWhere}.launch_wrapper: only valid when runtime is "pi" or "codex"`);
+          if (!isLaunchWrapperRuntime(node["runtime"])) {
+            errors.push(`nodes.${nodeWhere}.launch_wrapper: only valid when runtime is "pi", "codex" or "claude-code"`);
           }
           try { validateLaunchWrapper(node["launch_wrapper"], `nodes.${nodeWhere}.launch_wrapper`); }
           catch (error) { errors.push((error as Error).message); }

@@ -19,6 +19,7 @@ import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.
 import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
 import { startupContextSchema } from "../src/db/migrations/015_startup_context.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
+import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
@@ -932,6 +933,32 @@ describe("RestoreOrchestrator", () => {
       expect(new AppliedLaunchObservationStore(db).readCurrent(node.id)).toBeNull();
       expect(db.prepare("SELECT COUNT(*) AS n FROM applied_launch_observations WHERE generation_uuid = ?").get(generation)).toEqual({ n: 0 });
     }
+  });
+
+  it("attemptResume hands a Claude seat's launch_wrapper to the Claude resume adapter as its last argument, and nothing for an unwrapped seat", async () => {
+    const claudeResume = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({ claude: { canResume: vi.fn(() => true), resume: claudeResume } as unknown as ClaudeResumeAdapter });
+    const rig = rigRepo.createRig("claude-wrapper-forward");
+    const wrapped = rigRepo.addNode(rig.id, "dev.wrapped", { runtime: "claude-code", cwd: "/work", launchWrapper: ["rtk", "--claude-wrap"] });
+    const plain = rigRepo.addNode(rig.id, "dev.plain", { runtime: "claude-code", cwd: "/work" });
+    await (orch as any).attemptResume(wrapped.id, "s-wrapped", "claude_id", "tok-1", "/work", null, "sonnet", "floor");
+    await (orch as any).attemptResume(plain.id, "s-plain", "claude_id", "tok-2", "/work", null, "sonnet", "floor");
+    const wrappedCall = claudeResume.mock.calls[0] as unknown[];
+    expect(wrappedCall[2]).toBe("tok-1");
+    expect(wrappedCall).toHaveLength(19); // 8 base arguments, then the tail up to claudeMcp (index 17); the wrapper is index 18
+    expect(wrappedCall[18]).toEqual(["rtk", "--claude-wrap"]);
+    expect((claudeResume.mock.calls[1] as unknown[]).every(arg => !Array.isArray(arg) || !arg.includes("rtk"))).toBe(true);
+  });
+
+  it("attemptResume fails closed before dispatching Claude when the stored launch_wrapper is corrupt", async () => {
+    const claudeResume = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({ claude: { canResume: vi.fn(() => true), resume: claudeResume } as unknown as ClaudeResumeAdapter });
+    const rig = rigRepo.createRig("claude-wrapper-corrupt");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/work", launchWrapper: ["rtk", "--"] });
+    db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("{corrupt-json", node.id);
+    const result = await (orch as any).attemptResume(node.id, "s", "claude_id", "tok", "/work", null, "sonnet", "floor");
+    expect(result).toMatchObject({ kind: "failed", message: expect.stringMatching(/^Permission selection:.*launch_wrapper/) });
+    expect(claudeResume).not.toHaveBeenCalled();
   });
 
   it("attemptResume forwards effort to claude and codex resume adapters", async () => {
@@ -5623,8 +5650,43 @@ describe("RestoreOrchestrator", () => {
       expect(names).not.toContain("dev-driver@r99");
     });
 
-    it("no binding row: falls back to the derived name, observably", async () => {
-      const { snapId } = seedSeat({ logicalId: "worker-a", boundName: null });
+    it.each(["restore", "subset"] as const)("clean down then %s derives the same name without a missing-binding warning", async door => {
+      const { rigId, nodeId } = seedSeat({ logicalId: "worker-a", boundName: "r99-worker-a" });
+      const tmux = mockTmux();
+      const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, snapshotCapture }).teardown(rigId);
+      expect(down.errors).toEqual([]);
+      expect(down.sessionsKilled).toBe(1);
+      expect(down.snapshotId).not.toBeNull();
+      expect(sessionRegistry.getBindingForNode(nodeId)).toBeNull();
+      expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE node_id = ?").get(nodeId))
+        .toMatchObject({ status: "exited", intentionally_stopped: 1 });
+      const claude = mockClaudeResume();
+      const orch = createOrchestrator({ tmux, claude });
+      const result = door === "restore" ? await orch.restore(down.snapshotId!) : await orch.launchNodeSubset(rigId, ["worker-a"]);
+      expect(result.ok).toBe(true);
+      const warnings = "result" in result ? result.result.warnings : result.warnings;
+      expect(warnings?.some(w => w.includes("FR-5") && w.includes("no durably-bound"))).toBe(false);
+      expect(createdSessionNames(tmux)).toContain("r99-worker-a");
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("r99-worker-a");
+      expect(vi.mocked(claude.resume).mock.calls.at(-1)?.slice(0, 3)).toEqual(["r99-worker-a", "claude_id", "tok-abc"]);
+    });
+
+    it("an older intentional stop does not hide a newer missing-binding warning", async () => {
+      const { snapId, nodeId } = seedSeat({ logicalId: "worker-a", boundName: null });
+      const old = sessionRegistry.registerSession(nodeId, "old@r99");
+      sessionRegistry.markIntentionallyStopped(old.id);
+      db.prepare("UPDATE sessions SET created_at = '2000-01-01' WHERE id = ?").run(old.id);
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(snapId);
+      expect(result.ok).toBe(true);
+      expect(result.result.warnings.some(w => w.includes("FR-5") && w.includes("no durably-bound"))).toBe(true);
+      expect(createdSessionNames(tmux)).toContain("r99-worker-a");
+    });
+
+    it.each(["running", "exited"])("no binding row after an unintentional %s: falls back to the derived name, observably", async status => {
+      const { snapId, nodeId, rigId } = seedSeat({ logicalId: "worker-a", boundName: null });
+      const session = sessionRegistry.getSessionsForRig(rigId).find(s => s.nodeId === nodeId)!;
+      sessionRegistry.updateStatus(session.id, status);
       const tmux = mockTmux();
       const orch = createOrchestrator({ tmux });
 
@@ -5634,8 +5696,9 @@ describe("RestoreOrchestrator", () => {
       expect(result.result.warnings.some((w) => w.includes("FR-5") && w.includes("no durably-bound"))).toBe(true);
     });
 
-    it("binding row with empty tmux_session: falls back to the derived name, observably", async () => {
-      const { snapId } = seedSeat({ logicalId: "worker-a", bindEmpty: true });
+    it.each([false, true])("binding row with empty tmux_session still warns after intentional stop %s", async stopped => {
+      const { snapId, rigId } = seedSeat({ logicalId: "worker-a", bindEmpty: true });
+      if (stopped) sessionRegistry.markIntentionallyStopped(sessionRegistry.getSessionsForRig(rigId)[0]!.id);
       const tmux = mockTmux();
       const orch = createOrchestrator({ tmux });
 

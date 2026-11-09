@@ -1285,9 +1285,14 @@ export class RestoreOrchestrator {
         warnings?.push(`FR-5: durably-bound session name "${pinnedTarget}" for ${node.logicalId} is invalid; falling back to a derived name.`);
       }
     } else {
-      // No durably-bound session name (old data / null binding or empty
-      // tmux_session) → observable derived-name fallback (PRD back-compat AC).
-      warnings?.push(`FR-5: no durably-bound session name for ${node.logicalId}; falling back to a derived session name.`);
+      // A supported stop deliberately removes the binding after recording an intentional exit.
+      // Keep the warning for unclean/legacy state and incomplete binding rows.
+      const latest = this.db.prepare(
+        "SELECT status, intentionally_stopped FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+      ).get(nodeId) as { status: string; intentionally_stopped: number } | undefined;
+      if (priorState.binding || latest?.status !== "exited" || latest.intentionally_stopped !== 1) {
+        warnings?.push(`FR-5: no durably-bound session name for ${node.logicalId}; falling back to a derived session name.`);
+      }
     }
 
     // Derived-name FALLBACK — only when no usable pin. The existing derive,
@@ -2527,9 +2532,10 @@ export class RestoreOrchestrator {
       const guardedTail = beforeNative || claudeExecutable ? [...tail, ...Array(Math.max(0, 7 - tail.length)).fill(undefined), beforeNative,
         ...(claudeExecutable ? [claudeExecutable] : [])] : tail;
       const mcpTail = claudeMcp === undefined ? guardedTail : [...guardedTail, ...Array(Math.max(0, 9 - guardedTail.length)).fill(undefined), claudeMcp];
+      const wrappedTail = launchWrapper?.length ? [...mcpTail, ...Array(Math.max(0, 10 - mcpTail.length)).fill(undefined), launchWrapper] : mcpTail;
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId,
-        ...(mcpTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp]));
+        ...(wrappedTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, launchWrapper?: readonly string[]]));
       if (result.ok) {
         // OPR.0.7.0.9: the resumed conversation's own start, as on the pod-aware path.
         const promptNote = launch.additions?.appendSystemPromptFile && nodeId && resumeToken ? systemPromptPendingNoteForNode(this.db, nodeId, resumeToken) : undefined;

@@ -241,7 +241,7 @@ describe("RigSpecExporter", () => {
     expect(result.valid).toBe(true);
   });
 
-  it("exports launch_wrapper on legacy flat pi and codex nodes, omits cleared/absent, and round-trips through codec/schema/reimport", () => {
+  it("exports launch_wrapper on legacy flat pi, codex and claude-code nodes, omits cleared/absent, and round-trips through codec/schema/reimport", () => {
     const rig = rigRepo.createRig("legacy-wrapper-export");
     const piArgv = ["mtn", "sandbox", "exec", "", "--pi-seat", "alpha", "--"];
     const codexArgv = ["/usr/local/bin/codex-wrap", "--codex-seat", "beta", "--"];
@@ -265,7 +265,12 @@ describe("RigSpecExporter", () => {
       launchWrapper: [],
     });
 
+    const claudeArgv = ["/usr/local/bin/claude-wrap", "--claude-seat", "gamma", "--"];
+    rigRepo.addNode(rig.id, "claude-worker", { runtime: "claude-code", cwd: "/repo", launchWrapper: claudeArgv });
+
     const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").LegacyRigSpec;
+    expect(exported.nodes.find((n) => n.id === "claude-worker")?.launchWrapper).toEqual(claudeArgv);
+    expect(RigSpecSchema.normalize(RigSpecCodec.parse(RigSpecCodec.serialize(exported))).nodes.find((n) => n.id === "claude-worker")?.launchWrapper).toEqual(claudeArgv);
     expect(exported.nodes.find((n) => n.id === "orchestrator")?.launchWrapper).toBeUndefined();
     expect(exported.nodes.find((n) => n.id === "pi-worker")?.launchWrapper).toEqual(piArgv);
     expect(exported.nodes.find((n) => n.id === "codex-worker")?.launchWrapper).toEqual(codexArgv);

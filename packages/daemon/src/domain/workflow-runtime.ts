@@ -367,9 +367,9 @@ export class WorkflowRuntime {
   };
 
   validate(specPath: string, seatLivenessCheck?: SeatLivenessCheckFn): ValidationResult & { exceptionReadiness: ExceptionReadiness } {
-    const specRow = this.specCache.readThrough(specPath);
-    return { ...this.validator.validate(specRow.spec, seatLivenessCheck ?? this.seatLivenessCheck, this.hostRegistryLookup),
-      exceptionReadiness: this.readExceptionReadiness(specRow.spec, exceptionConfigurationSource(specRow.sourcePath)) };
+    const read = this.specCache.readFromDisk(specPath); // #2726: in memory, never written to workflow_specs
+    return { ...this.validator.validate(read.spec, seatLivenessCheck ?? this.seatLivenessCheck, this.hostRegistryLookup),
+      exceptionReadiness: this.readExceptionReadiness(read.spec, exceptionConfigurationSource(read.sourcePath)) };
   }
 
   /**
@@ -1149,7 +1149,7 @@ export class WorkflowRuntime {
       if (!specRow) {
         throw new WorkflowProjectorError(
           "spec_not_cached",
-          `workflow spec ${instance.workflowName}@${instance.workflowVersion} is not in the spec cache; re-run validate to refresh it before resuming`,
+          `workflow spec ${instance.workflowName}@${instance.workflowVersion} is not in the spec cache; re-register its file (workflows-folder scan, or instantiate by path) to refresh it before resuming`,
           { workflowName: instance.workflowName, workflowVersion: instance.workflowVersion },
         );
       }

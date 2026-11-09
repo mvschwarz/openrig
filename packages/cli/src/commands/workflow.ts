@@ -172,7 +172,7 @@ export function workflowCommand(depsOverride?: WorkflowDeps): Command {
 
   cmd
     .command("validate <specPath>")
-    .description("Validate a workflow spec file (returns structured ok/error report)")
+    .description("Validate a workflow spec file in memory, without registering it (returns structured ok/error report)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:

@@ -1057,6 +1057,7 @@ export class QueueRepository {
   private readonly promptClearRetries = new Map<string, number>();
   private resolveOccupantGeneration?: (sessionName: string) => string | null;
   private readonly resolveSessionAddresses: (name: string) => string[];
+  private readonly hasPendingPostCompactStage?: (sessionName: string) => boolean;
   private readonly wakeRepo: QueueWakeRepository;
   private watchdogJobsRepo: WatchdogJobsRepository | undefined;
   /** PL-007 Workspace Primitive — true when migration 038 has applied the
@@ -1123,6 +1124,8 @@ export class QueueRepository {
        */
       resolveOccupantGeneration?: (sessionName: string) => string | null;
       resolveSessionAddresses?: (name: string) => string[];
+      /** True while a managed compaction still owes this seat a post-compaction step (turn boundary, restore or audit). */
+      hasPendingPostCompactStage?: (sessionName: string) => boolean;
       loadHumanRegistry?: () => LoadResult;
       sharedChannels?: () => ReadonlyArray<{ address: string }>;
       hostedWake?: (destination: string) => RosterWake | null;
@@ -1140,6 +1143,7 @@ export class QueueRepository {
     this.workflowFrontierPredicate = opts?.workflowFrontierPredicate;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
     this.resolveSessionAddresses = opts?.resolveSessionAddresses ?? ((name) => [name]);
+    this.hasPendingPostCompactStage = opts?.hasPendingPostCompactStage;
     this.loadHumanRegistryFn = opts?.loadHumanRegistry ?? (() => loadHumanRegistry());
     this.sharedChannelsFn = opts?.sharedChannels ?? (() => sharedChannelAddresses());
     this.hostedWakeFn = opts?.hostedWake ?? defaultHostedWake;
@@ -1860,6 +1864,9 @@ export class QueueRepository {
     }
     if (state !== "running" && state !== "idle") return;
     if (addresses.every(address => this.promptRecoveryState.get(address) === false)) return;
+    // A compaction's "Compacted" is also a clear. While its turn boundary, restore or audit is still owed, a retried wake
+    // would reach the agent before its restore (#2575): stay armed, and the next clear after those steps retries it.
+    if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return;
     for (const address of addresses) this.promptRecoveryState.set(address, false);
     // Correlation may expand the group or release members for separate sends. Each claim must
     // independently qualify for this clear-triggered pass; general recovery keeps its broader policy.

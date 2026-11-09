@@ -39,6 +39,7 @@ describe("Socket Mode liveness", () => {
   let openGate: Promise<void> | null;
   let openFails: boolean;
   let openCalls: number;
+  let gapConnects: number;
   const pingChannel: PingChannel = { subscribe: (fn) => { pings.add(fn); }, unsubscribe: (fn) => { pings.delete(fn); } };
   const ping = () => { for (const fn of pings) fn({ payload: Buffer.from("") }); };
 
@@ -50,6 +51,7 @@ describe("Socket Mode liveness", () => {
     openGate = null;
     openFails = false;
     openCalls = 0;
+    gapConnects = 0;
     const fsx = memFs();
     receipts = new InboundReceiptStore("/s/inbound-receipts.jsonl", fsx);
     const router = new InboundRouter({
@@ -74,6 +76,7 @@ describe("Socket Mode liveness", () => {
       },
       pingChannel,
       receipts,
+      recovery: { run: async () => {}, stop: () => {}, connected: () => { gapConnects += 1; } },
       log: () => {},
     });
   });
@@ -157,6 +160,19 @@ describe("Socket Mode liveness", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(sockets, "the old connection's close is the end of the refresh, not a reconnect").toHaveLength(2);
     expect(handle!.status()).toMatchObject({ state: "connected", generation: 2 });
+  });
+
+  it("tells recovery about a connect after a gap, never about a refresh that overlapped the old connection", async () => {
+    const first = await openSocket(1);
+    expect(gapConnects).toBe(1);
+    message(first, { envelope_id: "d-9", type: "disconnect", reason: "refresh_requested" });
+    const second = await openSocket(2);
+    expect(gapConnects).toBe(1);
+    first.ws.onclose!();
+    second.ws.onclose!();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await openSocket(3);
+    expect(gapConnects).toBe(2);
   });
 
   it("reports disconnected when the retired connection closes before its replacement opens", async () => {

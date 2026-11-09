@@ -35,6 +35,32 @@ function mockTmux(overrides?: {
 }
 
 describe("ClaudeResumeAdapter", () => {
+  it.each([false, true])("carries the retained executable and wrapper through restore preparation (managed: %s)", async managed => {
+    const tmux = mockTmux();
+    tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+    const command = vi.fn(async (_session: string, text: string, _options: unknown) => text);
+    const prepare = vi.fn(async (_input: unknown, _mode: string) => ({ command: () => "managed-resume", warnings: [] }));
+    const adapter = new ClaudeResumeAdapter(tmux, {
+      seatLaunchEnvironment: { command, resolveLaunchWrapper: () => wrapper } as unknown as SeatLaunchEnvironment,
+      ...(managed ? { claudeManagedLaunch: { prepare } as unknown as ClaudeManagedLaunch } : {}),
+    });
+    const wrapper = ["/wrapper", "--"];
+    await adapter.resume("seat@rig", "claude_id", "original", "/repo", "floor", undefined, managed ? "acceptEdits" : undefined, "node",
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native tools/claude", undefined, wrapper);
+
+    if (managed) {
+      expect(prepare).toHaveBeenCalledWith({ nodeId: "node", cwd: "/repo", session: "seat@rig", executable: "/native tools/claude", launchWrapper: wrapper }, "acceptEdits");
+      expect(command).not.toHaveBeenCalled();
+    } else {
+      expect(command).toHaveBeenCalledWith("seat@rig", expect.stringContaining("exec '/wrapper' '--' '/native tools/claude'"), {
+        runtime: "claude-code", nodeId: "node", launchWrapper: wrapper, claudeShellLookup: false,
+      });
+      expect(prepare).not.toHaveBeenCalled();
+    }
+    expect(tmux.sendShellCommand).toHaveBeenCalledOnce();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])("refuses API resume when the token step cannot run (environment present: %s)", async (hasEnvironment) => {
     const tmux = mockTmux();
     tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));

@@ -551,7 +551,7 @@ describe("RigInstantiator", () => {
     }
   });
 
-  it("persists launchWrapper on flat pi and codex nodes and stores NULL for [] or omitted", async () => {
+  it("persists launchWrapper on flat pi, codex and claude-code nodes and stores NULL for [] or omitted", async () => {
     const piWrapper = ["mtn", "sandbox", "exec", "", "--seat", "pi-worker", "--"];
     const codexWrapper = ["/usr/local/bin/codex-wrapper", "--profile", "strict", "--"];
     const spec = validSpec({
@@ -560,6 +560,8 @@ describe("RigInstantiator", () => {
         { id: "codex-wrapped", runtime: "codex", cwd: "/", launchWrapper: codexWrapper },
         { id: "pi-cleared", runtime: "pi", cwd: "/", launchWrapper: [] },
         { id: "codex-omitted", runtime: "codex", cwd: "/" },
+        { id: "claude-wrapped", runtime: "claude-code", cwd: "/", launchWrapper: ["/usr/local/bin/claude-wrapper", "--"] },
+        { id: "claude-cleared", runtime: "claude-code", cwd: "/", launchWrapper: [] },
       ],
       edges: [],
     });
@@ -568,6 +570,9 @@ describe("RigInstantiator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const rig = rigRepo.getRig(result.result.rigId)!;
+      const claude = new Map(rig.nodes.map((n) => [n.logicalId, n]));
+      expect(claude.get("claude-wrapped")!.launchWrapper).toEqual(["/usr/local/bin/claude-wrapper", "--"]); // a flat claude-code node is stored wrapped, so it never launches unwrapped
+      expect(claude.get("claude-cleared")!.launchWrapper).toBeUndefined();
       const byLogicalId = new Map(rig.nodes.map((n) => [n.logicalId, n]));
       expect(byLogicalId.get("pi-wrapped")!.launchWrapper).toEqual(piWrapper);
       expect(byLogicalId.get("codex-wrapped")!.launchWrapper).toEqual(codexWrapper);
@@ -578,6 +583,8 @@ describe("RigInstantiator", () => {
         .prepare("SELECT logical_id, launch_wrapper FROM nodes WHERE rig_id = ? ORDER BY logical_id")
         .all(result.result.rigId) as Array<{ logical_id: string; launch_wrapper: string | null }>;
       expect(rawRows).toEqual([
+        { logical_id: "claude-cleared", launch_wrapper: null },
+        { logical_id: "claude-wrapped", launch_wrapper: JSON.stringify(["/usr/local/bin/claude-wrapper", "--"]) },
         { logical_id: "codex-omitted", launch_wrapper: null },
         { logical_id: "codex-wrapped", launch_wrapper: JSON.stringify(codexWrapper) },
         { logical_id: "pi-cleared", launch_wrapper: null },
@@ -589,7 +596,7 @@ describe("RigInstantiator", () => {
   it("rejects flat node launchWrapper on unsupported runtime during instantiate validation", async () => {
     const spec = validSpec({
       nodes: [
-        { id: "bad-claude", runtime: "claude-code", cwd: "/", launchWrapper: ["mtn", "--"] },
+        { id: "bad-terminal", runtime: "terminal", cwd: "/", launchWrapper: ["mtn", "--"] },
       ],
       edges: [],
     });
@@ -599,7 +606,7 @@ describe("RigInstantiator", () => {
     if (!result.ok) {
       expect(result.code).toBe("validation_failed");
       if (result.code === "validation_failed") {
-        expect(result.errors).toContain('nodes.bad-claude.launch_wrapper: only valid when runtime is "pi" or "codex"');
+        expect(result.errors).toContain('nodes.bad-terminal.launch_wrapper: only valid when runtime is "pi", "codex" or "claude-code"');
       }
     }
     expect(rigRepo.listRigs()).toHaveLength(0);

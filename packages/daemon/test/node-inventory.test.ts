@@ -1218,11 +1218,11 @@ describe("Node inventory launchWrapper projection (#2328)", () => {
   beforeEach(() => { db = createFullTestDb(); });
   afterEach(() => { db.close(); });
 
-  it("projects launchWrapper array in getNodeInventory, getNodeInventoryForAllRigs, and getNodeDetail when configured and omits when absent or cleared", () => {
+  it.each(["pi", "codex", "claude-code"])("projects %s launchWrapper in inventory and detail, omitting absent or cleared values", runtime => {
     const repo = new RigRepository(db);
     const rig = repo.createRig("wrapper-inv-rig");
     const wrapped = repo.addNode(rig.id, "dev.pi-wrapped", {
-      runtime: "pi",
+      runtime,
       cwd: "/project",
       launchWrapper: ["mtn", "sandbox", "exec", "--seat", "synthetic", "--"],
     });
@@ -1254,14 +1254,14 @@ describe("Node inventory launchWrapper projection (#2328)", () => {
     expect("launchWrapper" in clearedEntry).toBe(false);
   });
 
-  it("fails closed when stored launch_wrapper is malformed or attached to an unsupported runtime", () => {
+  it.each(["pi", "codex", "claude-code"])("fails closed when stored %s launch_wrapper is malformed or attached to an unsupported runtime", runtime => {
     const repo = new RigRepository(db);
     const rig = repo.createRig("bad-wrapper-inv-rig");
-    const node = repo.addNode(rig.id, "dev.codex", { runtime: "codex", cwd: "/project" });
+    const node = repo.addNode(rig.id, "dev.codex", { runtime, cwd: "/project" });
     db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("[]", node.id);
     expect(() => getNodeInventory(db, rig.id)).toThrow(/launch_wrapper/);
 
-    db.prepare("UPDATE nodes SET runtime = 'claude-code', launch_wrapper = ? WHERE id = ?")
+    db.prepare("UPDATE nodes SET runtime = 'terminal', launch_wrapper = ? WHERE id = ?")
       .run('["mtn","--"]', node.id);
     expect(() => getNodeInventory(db, rig.id)).toThrow(/pi|codex/i);
   });

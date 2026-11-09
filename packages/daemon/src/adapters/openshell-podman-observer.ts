@@ -43,7 +43,7 @@ export class OpenShellPodmanObserver {
     const workloadContainer = workload[0], supervisorContainer = supervisor[0];
     if (workload.length !== 1 || supervisor.length !== 1 || !workloadContainer || !supervisorContainer || workloadContainer.Labels?.["openshell.ai/sandbox-workspace"] !== binding.placement.workspace)
       throw new EnvironmentError("environment_cleanup_unconfirmed", "The exact local workload and supervisor must be observed before deletion");
-    const volumes = [`openshell-sandbox-${id}-workspace`, `openshell-control-${id}`, `openshell-channel-${id}`];
+    const requiredVolumes = [`openshell-control-${id}`, `openshell-channel-${id}`];
     const containers = [workloadContainer, supervisorContainer];
     const mounted = new Set<string>();
     for (const container of containers) {
@@ -53,7 +53,9 @@ export class OpenShellPodmanObserver {
       if (inspected.status !== 200 || actual?.Id !== container.Id || !Array.isArray(actual.Mounts)) throw new EnvironmentError("environment_cleanup_unconfirmed", "The captured container cannot be inspected");
       for (const mount of actual.Mounts) if (mount.Type === "volume" && typeof mount.Name === "string") mounted.add(mount.Name);
     }
-    if (volumes.some(volume => !mounted.has(volume))) throw new EnvironmentError("environment_cleanup_unconfirmed", "Expected workspace/control/channel volumes are not attributable to the selected containers");
+    if (requiredVolumes.some(volume => !mounted.has(volume))) throw new EnvironmentError("environment_cleanup_unconfirmed", "Expected control/channel volumes are not attributable to the selected containers");
+    // Custom-image workspaces have no managed workspace volume. Keep only observed provider-owned mounts.
+    const volumes = [`openshell-sandbox-${id}-workspace`, ...requiredVolumes].filter(volume => mounted.has(volume));
     return { version: 1, ...selected, resourceId: id, workspace: binding.placement.workspace, workloadId: workloadContainer.Id, supervisorId: supervisorContainer.Id, volumes };
   }
   async observe(binding: EnvironmentBinding, selected?: PodmanCleanupSelection): Promise<DependentObservation> {

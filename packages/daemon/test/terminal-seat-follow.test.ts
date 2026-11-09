@@ -59,54 +59,117 @@ it.skipIf(process.platform === "win32")("keeps all four terminal tiles on their 
       panes.push(await viewer(i === 0 ? ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "view", terminal(tile.paneCommand)] : ["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=view:", terminal(tile.paneCommand)]));
       await viewer(["select-layout", "-t", "=view:", "tiled"]);
     }
-    const attached = () => seats(["list-sessions", "-F", "#{session_name}:#{session_attached}"]);
-    const expected = ["anchor:0", ...names.map(name => `${name}:1`)].sort();
-    await until(async () => JSON.stringify((await attached()).split("\n").sort()) === JSON.stringify(expected));
-    expect(await seats(["list-clients", "-t", `=${names[3]}`, "-F", "#{client_readonly}"])).toBe("1");
+    const shows = async (i: number, text: string) => (await viewer(["capture-pane", "-p", "-t", panes[i]!])).includes(text);
+    // Each tile views its own seat, and none of them is a client of it.
+    for (let i = 0; i < 4; i++) await until(() => shows(i, `SEAT${i}`));
+    expect(await seats(["list-clients", "-F", "#{client_tty}"])).toBe("");
     expect((await adapter.killSession(names[1]!)).ok).toBe(true);
     await create(1, "REPLACED_SEAT1");
-    await until(async () => JSON.stringify((await attached()).split("\n").sort()) === JSON.stringify(expected));
+    await until(() => shows(1, "REPLACED_SEAT1"));
     expect((await viewer(["list-panes", "-t", "=view:", "-F", "#{pane_dead}"])).split("\n")).toEqual(["0", "0", "0", "0"]);
-    await until(async () => (await viewer(["capture-pane", "-p", "-t", panes[1]!])).includes("REPLACED_SEAT1"));
-    // Current handover/restart respawn in place; the same tile stays attached.
+    for (const i of [0, 2, 3]) expect(await shows(i, `SEAT${i}`)).toBe(true);
+    // Current handover/restart respawn in place; the same tile keeps viewing it.
     await seats(["respawn-pane", "-k", "-t", `=${names[0]}:`, "printf 'RESPAWNED_SEAT0\\n'; sleep 60"]);
-    await until(async () => (await viewer(["capture-pane", "-p", "-t", panes[0]!])).includes("RESPAWNED_SEAT0"));
-    expect((await attached()).split("\n").sort()).toEqual(expected);
+    await until(() => shows(0, "RESPAWNED_SEAT0"));
     // A fresh launch of the last session restarts the server and can reuse $0.
     for (const i of [0, 2, 3]) expect((await adapter.killSession(names[i]!)).ok).toBe(true);
     await seats(["kill-session", "-t", "=anchor"]);
     expect((await adapter.killSession(names[1]!)).ok).toBe(true);
     await create(1, "NEW_SERVER_SEAT1");
-    await until(async () => (await viewer(["capture-pane", "-p", "-t", panes[1]!])).includes("NEW_SERVER_SEAT1"));
-    expect(await seats(["list-clients", "-F", "#{session_name}"])).toBe(names[1]);
+    await until(() => shows(1, "NEW_SERVER_SEAT1"));
+    expect(await viewer(["display-message", "-p", "-t", panes[1]!, "#{pane_dead}"])).toBe("0");
   });
 });
 
-it.skipIf(process.platform === "win32").each(["detach", "identity", "removed", "unmanaged", "removed-marker"])("ends the tile on %s without attaching a sibling", async mode => {
+it.skipIf(process.platform === "win32").each(["identity", "removed", "unmanaged", "removed-marker"])("ends the tile on %s without viewing a sibling", async mode => {
   await fixture(async ({ socket, seats, viewer, adapter }) => {
-    await seats(["new-session", "-d", "-s", "seat", ...(mode === "unmanaged" ? [] : ["-e", "OPENRIG_NODE_ID=original"]), "sleep 60"]);
+    await seats(["new-session", "-d", "-s", "seat", ...(mode === "unmanaged" ? [] : ["-e", "OPENRIG_NODE_ID=original"]), "printf 'ORIGINAL\\n'; sleep 60"]);
     if (mode === "removed-marker") await seats(["set-environment", "-r", "-t", "=seat", "OPENRIG_NODE_ID"]);
-    const command = tileAttachArgv("tmux", ["-S", socket], "seat", false, mode === "detach" ? 4 : 2).map(shellQuote).join(" ");
+    const command = tileAttachArgv("tmux", ["-S", socket], "seat", false, 2).map(shellQuote).join(" ");
     await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
-    await until(async () => (await seats(["list-clients", "-t", "=seat", "-F", "#{session_name}"])) === "seat");
-    if (mode === "detach") await seats(["detach-client", "-s", "=seat"]);
-    else {
-      expect((await adapter.killSession("seat")).ok).toBe(true);
-      const name = mode === "removed" ? "seat-prefix" : "seat";
-      await seats(["new-session", "-d", "-s", name, "-e", "OPENRIG_NODE_ID=other-seat", "sleep 60",
-        ...(mode === "removed-marker" ? [";", "set-environment", "-r", "-t", "=seat", "OPENRIG_NODE_ID"] : [])]);
-    }
+    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
+    expect((await adapter.killSession("seat")).ok).toBe(true);
+    const name = mode === "removed" ? "seat-prefix" : "seat";
+    await seats(["new-session", "-d", "-s", name, "-e", "OPENRIG_NODE_ID=other-seat", "printf 'SIBLING\\n'; sleep 60",
+      ...(mode === "removed-marker" ? [";", "set-environment", "-r", "-t", "=seat", "OPENRIG_NODE_ID"] : [])]);
     await until(async () => (await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])) === "1");
     expect(await seats(["list-clients", "-F", "#{session_name}"])).toBe("");
-    if (mode === "detach") expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("No replacement");
+    expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("SIBLING");
+  });
+});
+
+// A restarted server numbers its sessions afresh, so the seat's old session id can belong to another seat.
+it.skipIf(process.platform === "win32").each([["seat-other", true], ["seat", true], ["seat-other", false]])("never shows or types into another seat that holds the old session id on a restarted server, named %s (managed: %s)", async (name, managed) => {
+  await fixture(async ({ socket, seats, viewer }) => {
+    await seats(["new-session", "-d", "-s", "seat", ...(managed ? ["-e", "OPENRIG_NODE_ID=original"] : []), "printf 'ORIGINAL\\n'; exec cat"]);
+    const command = tileAttachArgv("tmux", ["-S", socket], "seat", false, 2).map(shellQuote).join(" ");
+    await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
+    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
+    const id = await seats(["display-message", "-p", "-t", "=seat:", "#{session_id}"]);
+    await seats(["kill-server"]);
+    await seats(["-f", "/dev/null", "new-session", "-d", "-s", "anchor", "sleep 60", ";",
+      "new-session", "-d", "-s", name, "-e", "OPENRIG_NODE_ID=DIFFERENT", "printf 'OTHER-SEAT\\n'; exec cat"]);
+    expect(await seats(["display-message", "-p", "-t", id, "#{session_name}"])).toBe(name);
+    await viewer(["send-keys", "-t", "=view:", "-l", "KEY-FOR-ORIGINAL"]);
+    await until(async () => (await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])) === "1");
+    expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("OTHER-SEAT");
+    expect(await seats(["capture-pane", "-p", "-t", `=${name}:`])).not.toContain("KEY-FOR-ORIGINAL");
+    expect(await seats(["list-clients", "-F", "#{session_name}"])).toBe("");
+  });
+});
+
+// With no key typed, only the view's own reads can tell the seat changed.
+it.skipIf(process.platform === "win32").each([false, true])("a read-only tile stops showing a restarted server's session that another seat now holds (managed: %s)", async managed => {
+  await fixture(async ({ socket, seats, viewer }) => {
+    await seats(["new-session", "-d", "-s", "seat", ...(managed ? ["-e", "OPENRIG_NODE_ID=original"] : []), "printf 'ORIGINAL\\n'; exec cat"]);
+    const command = tileAttachArgv("tmux", ["-S", socket], "seat", true, 2).map(shellQuote).join(" ");
+    await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
+    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
+    const id = await seats(["display-message", "-p", "-t", "=seat:", "#{session_id}"]);
+    await seats(["kill-server"]);
+    await seats(["-f", "/dev/null", "new-session", "-d", "-s", "anchor", "sleep 60", ";",
+      "new-session", "-d", "-s", "seat-other", "-e", "OPENRIG_NODE_ID=DIFFERENT", "printf 'OTHER-SEAT\\n'; exec cat"]);
+    expect(await seats(["display-message", "-p", "-t", id, "#{session_name}"])).toBe("seat-other");
+    await new Promise(r => setTimeout(r, 2500));
+    expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("OTHER-SEAT");
+    await until(async () => (await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])) === "1");
+  });
+});
+
+it.skipIf(process.platform === "win32")("stops showing a session whose seat identity changed in place", async () => {
+  await fixture(async ({ socket, seats, viewer }) => {
+    await seats(["new-session", "-d", "-s", "seat", "-e", "OPENRIG_NODE_ID=original", "printf 'ORIGINAL\\n'; exec cat"]);
+    const command = tileAttachArgv("tmux", ["-S", socket], "seat", false, 2).map(shellQuote).join(" ");
+    await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
+    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
+    await seats(["set-environment", "-t", "=seat", "OPENRIG_NODE_ID", "DIFFERENT", ";", "send-keys", "-t", "=seat:", "-l", "OTHER-SEAT"]);
+    await until(async () => (await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])) === "1");
+    expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("OTHER-SEAT");
+  });
+});
+
+it.skipIf(process.platform === "win32")("a detach returns a tile someone typed in to viewing its seat", async () => {
+  await fixture(async ({ socket, seats, viewer }) => {
+    await seats(["new-session", "-d", "-s", "seat", "-e", "OPENRIG_NODE_ID=original", "printf 'ORIGINAL\\n'; exec cat"]);
+    const command = tileAttachArgv("tmux", ["-S", socket], "seat", false, 2).map(shellQuote).join(" ");
+    await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
+    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
+    await viewer(["send-keys", "-t", "=view:", "-l", "typed"]);
+    await until(async () => (await seats(["list-clients", "-t", "=seat", "-F", "#{session_name}"])) === "seat");
+    await until(async () => (await seats(["capture-pane", "-p", "-t", "=seat:"])).includes("typed"));
+    await seats(["detach-client", "-s", "=seat"]);
+    await until(async () => (await seats(["list-clients", "-F", "#{session_name}"])) === "");
+    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("typed"));
+    expect(await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])).toBe("0");
+    expect(await viewer(["capture-pane", "-p", "-t", "=view:"])).not.toContain("No replacement");
   });
 });
 
 it.skipIf(process.platform === "win32")("waits through missing-target observations without reading a sibling's identity", async () => {
   await fixture(async ({ socket, seats, viewer, adapter }) => {
     await seats(["set-environment", "-t", "=anchor", "OPENRIG_NODE_ID", "sibling"]);
-    const create = () => seats(["new-session", "-d", "-s", "seat", "-e", "OPENRIG_NODE_ID=original", "printf 'REPLACEMENT\\n'; sleep 60"]);
-    await create();
+    const create = (text: string) => seats(["new-session", "-d", "-s", "seat", "-e", "OPENRIG_NODE_ID=original", `printf '${text}\\n'; sleep 60`]);
+    await create("ORIGINAL");
     const wrapper = `${socket}-probe`, missing = `${socket}-missing`;
     // Observe actual tmux absence; don't create the replacement until two retry probes saw it.
     writeFileSync(wrapper, `#!/bin/sh
@@ -117,11 +180,11 @@ exec tmux "$@"
 `, { mode: 0o700 });
     const command = tileAttachArgv(wrapper, ["-S", socket], "seat", false).map(shellQuote).join(" ");
     await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
-    await until(async () => (await seats(["list-clients", "-t", "=seat", "-F", "#{session_name}"])) === "seat");
+    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
     expect((await adapter.killSession("seat")).ok).toBe(true);
     await until(async () => existsSync(missing) && readFileSync(missing, "utf8").trim().split("\n").length >= 2);
-    await create();
-    await until(async () => (await seats(["list-clients", "-F", "#{session_name}"])) === "seat");
+    await create("REPLACEMENT");
+    await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("REPLACEMENT"));
     expect(await viewer(["display-message", "-p", "-t", "=view:", "#{pane_dead}"])).toBe("0");
   });
 });

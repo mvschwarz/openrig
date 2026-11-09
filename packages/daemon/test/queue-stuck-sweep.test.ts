@@ -113,6 +113,100 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     );
   }
 
+  it.each([
+    { label: "project, mission and slice", scope: ["project:sample-app", "mission:qitem-sample-mission", "slice:queue-recovery"] },
+    { label: "unscoped source", scope: [] as string[] },
+  ])("#2758 newly created per-row recovery retains $label without copying unrelated tags", async ({ scope }) => {
+    const unrelated = ["gate:spec-review", "priority:rush", "note:project:unrelated"];
+    const row = await repo.create({
+      sourceSession: "sender@r", destinationSession: "worker@r", body: "scoped work",
+      tags: [...scope, ...unrelated], nudge: false,
+    });
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    expect(repo.getById(row.qitemId)!.pickup?.state).toBe("stalled-after-claim");
+
+    const first = await runSweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding).toBeDefined();
+    expect(first.result.findings).toContainEqual(expect.objectContaining({
+      kind: "stalled-after-claim", qitemId: row.qitemId, findingQitemId: finding!.qitemId, action: "created",
+    }));
+    expect(finding).toMatchObject({ sourceSession: "sender@r", destinationSession: "worker@r", state: "pending" });
+    expect(finding!.tags).toEqual(expect.arrayContaining([
+      "stuck-sweep-finding", `stuck-sweep:stalled-after-claim:${row.qitemId}`, `recovery-for:${row.qitemId}`,
+    ]));
+    for (const tag of unrelated) expect(finding!.tags).not.toContain(tag);
+    expect(finding!.tags).not.toContain(ESCALATION_HOP_TAG);
+    expect(repo.getById(row.qitemId)!.tags).toEqual([...scope, ...unrelated]);
+
+    const second = await runSweep();
+    expect(second.result.findings).toContainEqual(expect.objectContaining({
+      qitemId: row.qitemId, findingQitemId: finding!.qitemId, action: "refreshed",
+    }));
+    expect(await findingsFor(row.qitemId)).toEqual([expect.objectContaining({ qitemId: finding!.qitemId, state: "pending" })]);
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", transitionNote: "resumed scoped work" });
+    const progress = await runSweep();
+    expect(progress.result.findings).toContainEqual(expect.objectContaining({
+      qitemId: row.qitemId, findingQitemId: finding!.qitemId, action: "closed",
+    }));
+    expect(repo.getById(finding!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+    const actualScope = (finding!.tags ?? []).filter(tag => /^(project|mission|slice):/.test(tag));
+    expect(actualScope).toEqual(scope);
+  });
+
+  it("#2758 new recovery uses the current source scope after the sweep awaits another row's wake", async () => {
+    const beforeScope = ["project:before", "mission:qitem-before", "slice:before"];
+    const currentScope = ["project:current", "mission:qitem-current", "slice:current"];
+    const row = await repo.create({
+      sourceSession: "sender@r", destinationSession: "worker@r", body: "work with changing scope",
+      tags: beforeScope, nudge: false,
+    });
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    const wake = await repo.create({
+      sourceSession: "sender@r", destinationSession: "new-seat@r", body: "retry fixture wake", nudge: false,
+    });
+    setNudgeResult(wake.qitemId, "unroutable:no-pane", new Date(Date.now() - 10 * 60_000));
+    let listedScope: string[] | undefined;
+    const route = () => {
+      listedScope ??= repo.getById(row.qitemId)!.tags ?? [];
+      return null;
+    };
+    const classify = vi.spyOn(repo, "classifyDestinationOf").mockReturnValue({
+      class: "pane-bound",
+    } as ReturnType<typeof repo.classifyDestinationOf>);
+    // Only the external wake is fake; sweep selection, tag reads, creation and SQLite writes are real.
+    const deliver = vi.spyOn(repo, "deliverWakeForSuccessor").mockImplementation(async (id) => {
+      expect(id).toBe(wake.qitemId);
+      await Promise.resolve();
+      db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(currentScope), row.qitemId);
+      repo.recordNudgeAttempt(wake.qitemId, "ok");
+    });
+    try {
+      const first = await runSweep({ resolveOrchestrator: route });
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(listedScope, "the candidate was listed before the awaited scope update").toEqual(beforeScope);
+      expect(repo.getById(row.qitemId)!.tags).toEqual(currentScope);
+      const findings = await findingsFor(row.qitemId);
+      expect(findings).toHaveLength(1);
+      const finding = findings[0]!;
+      expect(first.result.findings).toContainEqual(expect.objectContaining({
+        kind: "stalled-after-claim", qitemId: row.qitemId, findingQitemId: finding.qitemId, action: "created",
+      }));
+      expect(finding).toMatchObject({ sourceSession: "sender@r", destinationSession: "worker@r", state: "pending" });
+      expect(finding.tags).toEqual(expect.arrayContaining([
+        "stuck-sweep-finding", `stuck-sweep:stalled-after-claim:${row.qitemId}`, `recovery-for:${row.qitemId}`,
+      ]));
+      for (const tag of beforeScope) expect(finding.tags).not.toContain(tag);
+      const actualScope = (finding.tags ?? []).filter(tag => /^(project|mission|slice):/.test(tag));
+      expect(actualScope).toEqual(currentScope);
+    } finally {
+      deliver.mockRestore();
+      classify.mockRestore();
+    }
+  });
+
   it("updates the current reason of a retained recovery while preserving its original evidence", async () => {
     const row = await mkRow();
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
@@ -2194,6 +2288,30 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     expect(repo.waitingView(row.qitemId)!.nextBackstop.mechanism).toBe("queue-stuck-sweep:unclaimed");
     await sweep();
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("an unclaimed finding says when the seat can't be read, and doesn't when it can", async () => {
+    const unread = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "work" });
+    age(unread.qitemId);
+    await sweep();
+    expect((await findingsFor(unread.qitemId))[0]!.body).toContain("; owner activity unknown (can't read the seat)");
+
+    repo.attachActivityReader(() => ({ activity: "idle", needsInput: { count: 0, reason: null } } as never));
+    const read = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "more work" });
+    age(read.qitemId);
+    await sweep();
+    const [finding] = await findingsFor(read.qitemId);
+    expect(finding!.body).toContain("actionable with a destination and unclaimed for");
+    expect(finding!.body).not.toContain("can't read the seat");
+  });
+
+  it("a person's unposted ask gets its unclaimed finding without the seat clause: a person has no seat to read", async () => {
+    const row = await ask();
+    age(row.qitemId);
+    await sweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.body).toContain("actionable with a destination and unclaimed for");
+    expect(finding!.body).not.toContain("can't read the seat");
   });
 
   it.each(["never-posted", "transport-failed"] as const)("a %s human ask keeps its existing finding", async (outcome) => {

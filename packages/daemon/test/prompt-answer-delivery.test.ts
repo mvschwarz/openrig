@@ -151,6 +151,55 @@ describe("explicit prompt answer delivery", () => {
     expect(f.state.commands.some(a => a[1] === "send-keys")).toBe(false);
   });
 
+  it("submits outside a recognized prompt when the screen can't be read, and says so", async () => {
+    const f = fixture("ordinary");
+    f.tmux.capturePaneContent = async () => { throw new Error("capture unavailable"); };
+    const result = await f.transport.send(f.name, "green", { dangerouslyInteract: true, reason: "answer an ordinary input" });
+    expect(result).toMatchObject({ ok: true, promptInteraction: "enter-sent" });
+    expect(result.warning).toContain("the screen couldn't be read, so Enter was sent without confirming the staged answer.");
+    expect(f.state.submitted).toEqual(["green"]);
+    expect(f.state.commands.filter(a => a[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", f.name, "Enter"]]);
+  });
+
+  it.each(["green", "❯ green"])("submits outside a recognized prompt when no input box is recognized (%j), and says so", async capture => {
+    const f = fixture("ordinary"); f.state.capture = capture;
+    const result = await f.transport.send(f.name, "green", { dangerouslyInteract: true, reason: "answer an ordinary input" });
+    expect(result).toMatchObject({ ok: true, promptInteraction: "enter-sent" });
+    expect(result.warning).toContain("no input box was recognized on the screen, so Enter was sent without confirming the staged answer.");
+    expect(f.state.received).toEqual(["green"]);
+    expect(f.state.commands.filter(a => a[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", f.name, "Enter"]]);
+  });
+
+  it.each(["green", "❯ green"])("withholds Enter at a recognized prompt when no input box is recognized (%j)", async capture => {
+    const f = fixture("text"); f.state.capture = capture;
+    const result = await f.transport.send(f.name, "green", { dangerouslyInteract: true, reason: "answer the text field" });
+    expect(result).toMatchObject({ ok: true, sent: true, verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified" });
+    expect(f.state.received).toEqual(["green"]);
+    expect(f.state.commands.some(a => a[1] === "send-keys")).toBe(false);
+  });
+
+  it.each(["Enter to select · Esc to cancel", "Space to select · Enter to confirm · Esc to reject all",
+    "t trust all · enter review · esc close", "⏎ to select · esc to cancel"])("withholds Enter on a list whose key-hint row ends the current screen (%j)", async hints => {
+    const f = fixture("ordinary"); f.state.capture = `Pick one\n❯ Focused item\n  Other item\n${hints}`;
+    const result = await f.transport.send(f.name, "green", { dangerouslyInteract: true, reason: "answer an ordinary input" });
+    expect(result).toMatchObject({ ok: true, sent: true, promptInteraction: "unverified" });
+    expect(f.state.commands.some(a => a[1] === "send-keys")).toBe(false);
+  });
+
+  it("submits under an old menu hint left in the transcript above the current box", async () => {
+    const f = fixture("ordinary"); f.state.capture = "Pick one\n  Earlier item\nEnter to select · Esc to cancel\n\n❯ green";
+    const result = await f.transport.send(f.name, "green", { dangerouslyInteract: true, reason: "answer an ordinary input" });
+    expect(result).toMatchObject({ ok: true, promptInteraction: "enter-sent" });
+    expect(f.state.commands.filter(a => a[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", f.name, "Enter"]]);
+  });
+
+  it.each(["✻ Working… (esc to interrupt)", "⏎ send · esc to interrupt", "enter to submit · esc to interrupt"])("submits under a working or idle footer, not a menu (%j)", async footer => {
+    const f = fixture("ordinary"); f.state.capture = `❯ green\n${footer}`;
+    const result = await f.transport.send(f.name, "green", { dangerouslyInteract: true, reason: "answer an ordinary input" });
+    expect(result).toMatchObject({ ok: true, promptInteraction: "enter-sent" });
+    expect(f.state.commands.filter(a => a[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", f.name, "Enter"]]);
+  });
+
   it("keeps ordinary bracketed delivery and its Enter unchanged", async () => {
     const f = fixture("ordinary");
     const result = await f.transport.send(f.name, "ordinary message");

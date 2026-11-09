@@ -170,7 +170,6 @@ it.each([
   "fish-shell",
   "unknown-shell",
   "unsupported-runtime-pi",
-  "unsupported-runtime-claude",
   "unsupported-runtime-omp",
   "unsupported-runtime-terminal",
   "missing-runtime",
@@ -210,7 +209,6 @@ it.each([
   if (failure === "fish-shell") { f.tmux.getPaneCommand.mockResolvedValue("fish"); runtime = "codex"; }
   if (failure === "unknown-shell") f.tmux.getPaneCommand.mockResolvedValue("unknown");
   if (failure === "unsupported-runtime-pi") runtime = "pi";
-  if (failure === "unsupported-runtime-claude") runtime = "claude-code";
   if (failure === "unsupported-runtime-omp") runtime = "omp";
   if (failure === "unsupported-runtime-terminal") runtime = "terminal";
   if (failure === "missing-runtime") runtime = undefined;

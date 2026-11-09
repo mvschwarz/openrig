@@ -188,7 +188,7 @@ the sections that were not read are `null`.
 |---|---|---|
 | `rig gateway` | — | — |
 | `rig gateway human` | — | — |
-| `rig gateway human add <entityId>` | — | `--display-name <name>` **required**<br>`--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>` **required** (repeatable)<br>`--delivery-class <A\|B\|C\|D>` **required**<br>`--away`<br>`--replace`<br>`--reason <reason>`<br>`--actor <actor>`<br>`--organization <id>`<br>`--group <id>` (repeatable)<br>`--policy <text>`<br>`--policy-file <path>`<br>`--default` |
+| `rig gateway human add <entityId>` | — | `--display-name <name>` **required**<br>`--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>` (repeatable; without one, the person is reached in the Feed and Steering only)<br>`--delivery-class <A\|B\|C\|D>` **required**<br>`--away`<br>`--replace`<br>`--reason <reason>`<br>`--actor <actor>`<br>`--organization <id>`<br>`--group <id>` (repeatable)<br>`--policy <text>`<br>`--policy-file <path>`<br>`--default` |
 | `rig gateway human list` | — | `--json` |
 | `rig gateway human quiet` | — | — |
 | `rig gateway human quiet set <entityId>` | — | `--daily <window>`<br>`--until <time>`<br>`--tz <zone>`<br>`--actor <actor>`<br>`--json` |

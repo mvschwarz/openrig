@@ -392,8 +392,8 @@ function externalScope(access: McpAccess, seatOf: () => string | undefined): Sco
 }
 
 /** A target outside an authenticated caller's scope. It names the kind of target only, never the record. */
-function outOfScope(what: string): TextResult {
-  const message = `${what} is outside what this connection may reach.`;
+function outOfScope(what: string, hint?: string): TextResult {
+  const message = `${what} is outside what this connection may reach.${hint ? ` ${hint}` : ""}`;
   return errorResult(JSON.stringify({ ok: false, error: "out_of_scope", message }), "out_of_scope", message);
 }
 
@@ -1305,7 +1305,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       description: "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord.",
       inputSchema: z.object({
         destination: access?.external
-          ? z.string().optional().describe("Destination seat; omit to use the connected team's configured receiver")
+          ? z.string().optional().describe("Destination seat: member@rig, or its name alone (e.g. workshop-lead) within this connection's team; omit to use the connected team's configured receiver")
           : z.string().describe("Destination seat (e.g. dev-impl@my-rig)"),
         body: z.string().describe("The task: what to do and what to return"),
         summary: z.string().optional().describe("One-line summary"),
@@ -1319,6 +1319,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       annotations: ADDITIVE,
     },
     async ({ destination, body, summary, tags, priority, tier, qitemId, revises, alert }) => {
+      // The server's one receiver counts for this connection only when its grant reaches it. Then a refused destination
+      // says how to reach it, so the assistant retries instead of telling the person the connection lacks access. It
+      // never names the receiver.
+      const receiver = options.taskDestination && scope?.destination(options.taskDestination) ? options.taskDestination : undefined;
+      const omitHint = receiver ? "Omit destination to reach the team's configured receiver." : undefined;
       if (destination === undefined && access?.external) {
         destination = options.taskDestination;
         const unavailable = () => errorResult("The connected team's task receiver is unavailable. Ask the server operator to configure it.",
@@ -1330,8 +1335,21 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         try {
           if (!await taskDestinationExists(client, destination)) return unavailable();
         } catch { return unavailable(); }
+      } else if (destination !== undefined && access?.external && !destination.includes("@")) {
+        // A person names their lead as their team shows it ("workshop-lead"), and the assistant passes that on. A name
+        // alone is the receiver this connection reaches when it is that seat's name, else a seat of this connection's one
+        // rig; never another rig's. It must be in scope and exist, or nothing is written.
+        const named = destination;
+        const resolved = receiver?.split("@")[0] === named ? receiver
+          : access.rigs.length === 1 ? `${named}@${access.rigs[0]}` : undefined;
+        let exists = false;
+        if (resolved && scope?.destination(resolved)) {
+          try { exists = await taskDestinationExists(client, resolved); } catch { /* not resolved */ }
+        }
+        if (!exists) return outOfScope(`Destination ${named}`, omitHint);
+        destination = resolved!;
       }
-      if (scope && !scope.destination(destination)) return outOfScope(`Destination ${destination}`);
+      if (scope && !scope.destination(destination)) return outOfScope(`Destination ${destination}`, access?.external ? omitHint : undefined);
       // A revision carries its original's lineage as a handoff does: the original's chain, then the original.
       let lineage: { chainOfRecord: string[]; body: string } | undefined;
       if (revises) {

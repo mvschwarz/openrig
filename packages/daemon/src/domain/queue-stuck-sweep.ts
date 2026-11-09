@@ -99,12 +99,22 @@ export type StuckFindingKind =
   | "undelivered-wake"
   | "undelivered-human-notice"
   | "unclaimed-obligation"
-  | "dangling-closure";
+  | "dangling-closure"
+  /** One standing notice for an agent seat's unclaimed rows when their findings would go back to that seat (#2430). */
+  | "unclaimed-backlog";
 
 /** Idempotency key: one open finding row per (stuck row, finding kind). */
 export function findingDedupTag(kind: StuckFindingKind, qitemId: string): string {
   return `stuck-sweep:${kind}:${qitemId}`;
 }
+
+/** Idempotency key of a seat's standing unclaimed-backlog notice: one open notice per seat. */
+export function unclaimedBacklogTag(seat: string): string {
+  return `stuck-sweep:unclaimed-backlog:${seat}`;
+}
+
+/** How many of a seat's unclaimed rows its standing notice lists by id; the rest are counted. */
+export const UNCLAIMED_BACKLOG_LISTED_ROWS = 20;
 
 export interface StuckSweepStatusSnapshot {
   lastSweepAt: string | null;
@@ -220,6 +230,7 @@ export interface StuckSweepDeps {
 
 export interface StuckSweepFindingAction {
   kind: StuckFindingKind;
+  /** The stuck row; for an unclaimed-backlog notice, the seat it stands for. */
   qitemId: string;
   findingQitemId: string;
   action: "created" | "refreshed" | "closed";
@@ -538,6 +549,53 @@ function evidenceBody(db: Database.Database, c: Candidate): string {
   );
 }
 
+/** One row a seat's standing notice stands for: its id, when it became actionable, who sent it, and its subject. */
+interface BacklogRow { qitemId: string; since: string; from: string; summary?: string | null }
+
+/** The last line of a standing notice's body: every row it stands for, so the sweep knows what it covered. */
+const BACKLOG_ROWS_PREFIX = "Every row this notice stands for: ";
+
+/** A seat's standing unclaimed-backlog notice: its rows by id, how to list them, and how to send their findings to a seat
+ *  that watches this one. Built only from the rows' fixed facts, so a pass rewrites it only when the rows change. */
+function unclaimedBacklogText(seat: string, rows: BacklogRow[], thresholdMinutes: number,
+  node: { rig: string; logicalId: string } | null): { summary: string; body: string } {
+  const sorted = [...rows].sort((a, b) => a.since.localeCompare(b.since) || a.qitemId.localeCompare(b.qitemId));
+  const listed = sorted.slice(0, UNCLAIMED_BACKLOG_LISTED_ROWS).map((r) => {
+    const about = r.summary ? `: ${r.summary.replace(/\s+/g, " ").trim().slice(0, 120)}` : "";
+    return `- ${r.qitemId}, unclaimed since ${r.since}, from ${r.from}${about}`;
+  });
+  if (sorted.length > listed.length) listed.push(`- and ${sorted.length - listed.length} more`);
+  const count = `${rows.length} ${rows.length === 1 ? "row" : "rows"}`;
+  const edge = node ? `rig edge add ${node.rig} ${node.logicalId} <watching seat> --kind escalates_to` : "an escalates_to edge from this seat";
+  return {
+    summary: `Stuck sweep: unclaimed-backlog on ${seat} (${count})`,
+    body:
+      `STUCK SWEEP FINDING (unclaimed-backlog)\n` +
+      `seat: ${seat}\n` +
+      `unclaimed: ${count} (the threshold is ${thresholdMinutes} min)\n` +
+      `${listed.join("\n")}\n` +
+      `why: nobody has claimed these rows, and this seat has no delegation parent and no escalates_to route, so this one ` +
+      `notice stands for them instead of a finding per row. It follows the rows as they come and go.\n` +
+      `List them: rig queue list --destination ${seat} --state pending\n` +
+      `To send these findings to a seat that watches this one, one finding per row: ${edge}\n` +
+      `The sweep closes this notice itself once every row it stands for is claimed, parked or closed.\n` +
+      `${BACKLOG_ROWS_PREFIX}${JSON.stringify(sorted.map((r) => r.qitemId))}`,
+  };
+}
+
+/** The rows a standing notice's body says it stands for, or null when the line is missing or unreadable: unknown, which is
+ *  never read as "none". */
+function backlogRowsOf(body: string): Set<string> | null {
+  const line = body.split("\n").reverse().find((l) => l.startsWith(BACKLOG_ROWS_PREFIX));
+  if (!line) return null;
+  try {
+    const ids = JSON.parse(line.slice(BACKLOG_ROWS_PREFIX.length)) as unknown;
+    return Array.isArray(ids) ? new Set(ids.filter((id): id is string => typeof id === "string")) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * One sweep pass. Instance-wide (no rig scope — the loop is the net for every rig the
  * daemon carries). Never throws: a sweep that cannot run reports outcome=failed loudly
@@ -791,9 +849,24 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         evidenceAt: actionableAt,
         why: quiet?.state === "orphaned"
           ? `held for quiet hours (window ${quiet.windowId}) for ${minutesSince(actionableAt, now)} min, but no release job is live for that window: nothing will release it`
-          : `actionable with a destination and unclaimed for ${minutesSince(actionableAt, now)} min (threshold ${ageMinutes})`,
+          : `actionable with a destination and unclaimed for ${minutesSince(actionableAt, now)} min (threshold ${ageMinutes})${
+            unreadableOwner(row.destinationSession) ? "; owner activity unknown (can't read the seat)" : ""}`,
       };
     };
+
+    /** The seat's activity can't be read (no reading, or one that reads unknown): said in the finding, so an unreadable
+     *  seat isn't taken for one ignoring its work. The stalled finding says the same (`queue-pickup.ts`). A person has no
+     *  seat to read, so their row never says so; nor does a row whose destination can't be classified, since it may be a
+     *  person's. A classification fault never stops the sweep. */
+    function unreadableOwner(session: string): boolean {
+      try {
+        if (deps.queueRepo.isHumanDestination(session)) return false;
+      } catch {
+        return false;
+      }
+      const activity = deps.queueRepo.ownerActivity(session)?.activity;
+      return !activity || activity === "unknown";
+    }
 
     // The custody class — a terminal row whose closure names one or more successor
     // qitems or seat-address targets (closure_reason = 'handed_off_to'). A local miss is
@@ -1119,10 +1192,44 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // A finding that could not be created (a row whose destination no longer resolves, say) must not
     // stop the others: it is reported, its row stays detected, and the pass is still a failure.
     const failedCreates: string[] = [];
+    // #2430: an unclaimed row whose finding would go back to its own agent seat (no delegation parent and no escalates_to
+    // route declared) tells that seat nothing: it already holds the row. A seat that reads its rows without claiming
+    // them, a person's front door, got one such finding per row. Those rows share one standing notice per seat instead
+    // (below). A finding per row stays for a person's address or a terminal seat, for a declared route that failed (its
+    // finding names why, and a declared delegation parent with no session is one), and for a row that already has a
+    // recovery.
+    const agentSeats = new Map<string, { logicalId: string; rig: string } | null>();
+    /** An agent seat's node: one whose runtime isn't a terminal, with no declared delegation parent, at an address that
+     *  isn't a person's. An address the human registry can't classify counts as a person's. null for anything else. Read
+     *  once per seat per pass. */
+    const agentSeatNode = (session: string): { logicalId: string; rig: string } | null => {
+      if (agentSeats.has(session)) return agentSeats.get(session)!;
+      const nodeId = resolveSessionNodeId(deps.db, session);
+      const node = nodeId ? deps.db.prepare(`SELECT n.logical_id AS logicalId, n.runtime AS runtime, r.name AS rig,
+          EXISTS (SELECT 1 FROM edges e WHERE e.target_id = n.id AND e.kind = 'delegates_to') AS parent
+          FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?`)
+        .get(nodeId) as { logicalId: string; runtime: string | null; rig: string; parent: number } | undefined : undefined;
+      let agent: { logicalId: string; rig: string } | null = null;
+      try {
+        if (node && node.runtime !== "terminal" && !node.parent && !deps.queueRepo.isHumanDestination(session)) {
+          agent = { logicalId: node.logicalId, rig: node.rig };
+        }
+      } catch { /* unclassifiable: a person's, as above */ }
+      agentSeats.set(session, agent);
+      return agent;
+    };
+    const selfRoutedUnclaimed = (c: Candidate): boolean => c.kind === "unclaimed-obligation"
+      && c.route === c.row.destinationSession && !routeNotes.has(c.row.qitemId) && agentSeatNode(c.route) !== null;
+    const unclaimedBacklog = new Map<string, Candidate[]>();
     for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
       if (dueToYield()) await yieldLoop();
       const dedupTag = findingDedupTag(c.kind, c.row.qitemId);
       const shared = recoveries.find(c.row.qitemId);
+      if (!shared && selfRoutedUnclaimed(c)) {
+        const rows = unclaimedBacklog.get(c.route);
+        if (rows) rows.push(c); else unclaimedBacklog.set(c.route, [c]);
+        continue;
+      }
       const sharedRow = shared ? indexed(() => deps.queueRepo.getById(shared.qitemId)) : null;
       // A later accepted deadline can expire after the previous finding closed.
       // Its newer time is fresh evidence even when the pickup candidate wins this row.
@@ -1196,7 +1303,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             : `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${now_.ageMinutes} min)`,
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId),
-            ...(routed.has(c.row.qitemId) || now_.row.tags?.includes(ESCALATION_HOP_TAG) ? [ESCALATION_HOP_TAG] : [])],
+            ...(routed.has(c.row.qitemId) || now_.row.tags?.includes(ESCALATION_HOP_TAG) ? [ESCALATION_HOP_TAG] : []),
+            ...(now_.row.tags ?? []).filter((tag) => /^(project|mission|slice):/.test(tag))],
           // OpenRig's own finding, whoever created the stuck row.
           wakeTrigger: "openrig" as const,
         };
@@ -1210,6 +1318,111 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           log(`[stuck-sweep] ${message}`);
           failedCreates.push(message);
         }
+      }
+    }
+
+    // A seat's standing notice for those rows. It stands for every row it has listed until that row is resolved at its
+    // source (the evidence a finding per row needs to close: claimed, parked, closed) or gets a finding of its own, so a
+    // detection filter (a raised threshold, the wake ladder) never reads as done. While any is left it stays open and is
+    // rewritten in place; once none is, the sweep closes it. A closed notice, dismissed or resolved, holds back only the
+    // rows it stood for, each only until it has newer evidence than the close: any other row files a new notice. It wakes
+    // the seat once, when it's filed.
+    const backlogRow = (c: Candidate): BacklogRow => ({ qitemId: c.row.qitemId, since: c.evidenceAt, from: c.row.sourceSession, summary: c.row.summary });
+    const backlogPrefix = unclaimedBacklogTag("");
+    const backlogSeats = new Set(unclaimedBacklog.keys());
+    for (const { tags } of deps.db.prepare(`SELECT tags FROM queue_items WHERE state IN ('pending', 'in-progress', 'blocked')
+        AND (tags LIKE '%"stuck-sweep:%') AND tags LIKE ?`).all(`%"${backlogPrefix}%`) as Array<{ tags: string }>) {
+      try {
+        for (const tag of JSON.parse(tags) as string[]) if (tag.startsWith(backlogPrefix)) backlogSeats.add(tag.slice(backlogPrefix.length));
+      } catch { /* Skip malformed tags */ }
+    }
+    for (const seat of backlogSeats) {
+      if (dueToYield()) await yieldLoop();
+      const rows = unclaimedBacklog.get(seat) ?? [];
+      const tag = unclaimedBacklogTag(seat);
+      liveDedupTags.add(tag);
+      const node = agentSeatNode(seat);
+      const last = deps.db
+        .prepare(
+          // The first term lets the planner use idx_queue_items_recovery_tags, as the finding lookup above does.
+          `SELECT qitem_id, state, ts_updated, summary, body FROM queue_items
+            WHERE (tags LIKE '%"stuck-sweep:%') AND tags LIKE ? ESCAPE '\\'
+            ORDER BY CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END,
+                     ts_updated DESC, ts_created DESC, qitem_id DESC
+            LIMIT 1`,
+        )
+        .get(`%"${tag.replace(/[\\%_]/g, (ch) => `\\${ch}`)}"%`) as
+        | { qitem_id: string; state: string; ts_updated: string; summary: string | null; body: string }
+        | undefined;
+      if (last && ["pending", "in-progress", "blocked"].includes(last.state)) {
+        const listedNow = new Set(rows.map((c) => c.row.qitemId));
+        const stoodFor = backlogRowsOf(last.body);
+        const still = [...(stoodFor ?? [])].filter((id) => !listedNow.has(id)).flatMap((id): BacklogRow[] => {
+          const row = indexed(() => deps.queueRepo.getById(id));
+          // Gone, someone else's now, resolved at its source, or held by a finding or recovery of its own: one actually
+          // written, so a create that failed this pass leaves the row here.
+          if (!row || row.destinationSession !== seat || recoveries.find(id)
+            || deliveryResolutionEvidence(deps, "unclaimed-obligation", id, now)) return [];
+          return [{ qitemId: id, since: pendingSince(deps.db, id) ?? row.tsCreated, from: row.sourceSession, summary: row.summary }];
+        });
+        const standsFor = [...rows.map(backlogRow), ...still];
+        // With its list unreadable, the notice may still stand for rows: it's left as it is, never closed.
+        if (standsFor.length === 0 && !stoodFor) {
+          findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: last.qitem_id, action: "refreshed" });
+          continue;
+        }
+        if (standsFor.length === 0) {
+          await deps.queueRepo.update({
+            qitemId: last.qitem_id,
+            actorSession: "stuck-sweep@system",
+            state: "done",
+            closureReason: "no-follow-on",
+            transitionNote: `stuck-sweep resolved: unclaimed-backlog on ${seat}: every row it stood for is claimed, parked, closed or has its own finding`,
+          });
+          othersMayHaveRun();
+          findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: last.qitem_id, action: "closed" });
+          continue;
+        }
+        const text = unclaimedBacklogText(seat, standsFor, ageMinutes, node);
+        if (text.summary !== last.summary || text.body !== last.body) {
+          deps.db.prepare("UPDATE queue_items SET body = ?, summary = ? WHERE qitem_id = ? AND body = ? AND summary IS ? AND state IN ('pending', 'in-progress', 'blocked')")
+            .run(text.body, text.summary, last.qitem_id, last.body, last.summary);
+        }
+        findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: last.qitem_id, action: "refreshed" });
+        continue;
+      }
+      if (rows.length === 0) continue;
+      // Each row's rule again, on the row as it is now, as a finding per row is checked right before it's created.
+      const current = rows.flatMap((c) => {
+        routeNotes.delete(c.row.qitemId);
+        routed.delete(c.row.qitemId);
+        const now_ = freshCandidate(c.kind, c.row.qitemId);
+        if (now_) routeCandidate(now_);
+        return now_ && selfRoutedUnclaimed(now_) && now_.route === seat && !recoveries.find(now_.row.qitemId) ? [now_] : [];
+      });
+      if (current.length === 0) continue;
+      // A closed notice whose list is unreadable holds back every row, each until it has newer evidence than the close.
+      const covered = last ? backlogRowsOf(last.body) : null;
+      if (last && !current.some((c) => (covered !== null && !covered.has(c.row.qitemId)) || evidenceIsNewer(c.evidenceAt, last.ts_updated))) continue;
+      const text = unclaimedBacklogText(seat, current.map(backlogRow), ageMinutes, node);
+      try {
+        const created = await deps.queueRepo.create({
+          // A notice to a seat about its own rows comes from that seat, as a restore notice does; OpenRig wakes it.
+          sourceSession: seat,
+          destinationSession: seat,
+          body: text.body,
+          summary: text.summary,
+          evidenceRef: `rig queue list --destination ${seat} --state pending`,
+          tags: [STUCK_SWEEP_FINDING_TAG, tag],
+          wakeTrigger: "openrig" as const,
+        });
+        othersMayHaveRun();
+        findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: created.qitemId, action: "created" });
+      } catch (err) {
+        const message = `unclaimed-backlog notice for ${seat} not created: ${err instanceof Error ? err.message : String(err)}`;
+        othersMayHaveRun();
+        log(`[stuck-sweep] ${message}`);
+        failedCreates.push(message);
       }
     }
 

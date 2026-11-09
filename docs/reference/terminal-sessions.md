@@ -72,11 +72,11 @@ verified viewer mapping.
 
 New tiles keep their place when a seat's tmux session is replaced. They wait up
 to 30 seconds for the same session name and managed seat identity to return,
-then reattach with the original read-only setting. This uses the shared tile
-command for Herdr, cmux, Rex and plain tmux, including SSH tiles. In-place
-handover and restart keep the existing attachment.
+then show the new session with the original read-only setting. This uses the
+shared tile command for Herdr, cmux, Rex and plain tmux, including SSH tiles.
+In-place handover and restart keep showing the same session.
 
-A deliberate detach closes the tile after about two seconds. A different seat
+Detaching a tile you typed in returns it to showing the seat. A different seat
 under the old name is never followed. If no replacement returns in time, or a
 session has no managed identity, reopen the rig view with
 `rig terminal open rig:<name> --window` (or your explicit provider). Views
@@ -244,8 +244,8 @@ opening; the result explains why. A failed endpoint/identity read or an existing
 canvas stays unconfirmed, preserving it instead of creating a fallback view.
 Other providers and selector kinds retain ordinary one-shot open. Use
 `--provider herdr --json` to operate without opening a desktop window, and
-`--session <name>` to select that endpoint. Opening a tile can change the
-agent's terminal size; `ignore-size` does not guarantee isolation.
+`--session <name>` to select that endpoint. Typing in a tile can change the
+agent's terminal size while you type.
 
 ```bash
 rig terminal open qitem:example --follow --provider herdr --json
@@ -325,17 +325,22 @@ small presentation provenance, separate from queue membership. Herdr display
 labels are not that provenance. Other providers/platforms remain unsupported
 for ensure-viewer until qualified; ordinary open retains its existing behavior.
 
-A writable tile attaches with `tmux attach -f ignore-size` when its session
-already has a client that sizes it, so the tile doesn't fight that client over
-the agent window's dimensions. When the session has no sizing client, as with a
-freshly launched seat, the tile attaches without the flag and sizes the window
-itself: tmux applies ignore-size across the whole server, so a session viewed
-only by ignore-size clients would otherwise keep its 80x24 creation size while
-any other session has a sizing client. Read-only clients keep `-r` (which also
-implies ignore-size), and the printed manual attach commands keep
-`-f ignore-size`. This is **not resize isolation**: opening a tile can change
-the agent's terminal size. Observers of a Herdr terminal do not themselves resize it;
-a controlling browser can. No cross-version resize guarantee is implied.
+A tmux window has one size, and a tmux client narrower than it sees only the
+left part of each line. So a tile shows its seat without attaching to it: about
+once a second it reads the seat's screen with `tmux capture-pane`, redraws only
+after tmux records new activity, and lets the tile's own terminal wrap each
+line. A tile narrower than the agent's window still shows whole lines, and
+showing a seat never changes its size. A rule drawn across the window is cut to
+the tile's width. A read-only tile only shows the seat. In a writable tile, the
+first thing you type or paste attaches the tile and goes through tmux as it
+would in any attached client: a paste arrives as one paste, and tmux's prefix
+works (prefix then `[` to scroll back, for example). The tile sizes the window
+while you use it, as any client you type in does; after 30 seconds without a
+key it detaches and shows the seat again. A tile that's only showing has no
+scrollback of its own. If the seat's tmux server restarts, a tile shows the
+seat again only when the same managed seat returns. The printed manual attach commands
+keep `-f ignore-size`. Observers of a Herdr terminal do not themselves resize
+it; a controlling browser can. No cross-version resize guarantee is implied.
 
 To type into a seat without changing its size, send the text through OpenRig
 (`rig send`, or `POST /api/transport/send`): it is written to the pane with tmux
