@@ -246,7 +246,7 @@ export function sendCommand(depsOverride?: SendDeps): Command {
     .option("--force", "Back-compat no-op: a mid-task/busy pane already sends-with-advisory by default; --force never bypasses the interactive-prompt/permission guard")
     .option("--wait-for-idle <seconds>", "Wait until the target is explicitly idle before sending. If it's still busy, or its activity is unknown, when the wait ends, nothing is sent (exit 1) and nothing is kept to send later; put separate work in a queue row (rig queue create)")
     .option("--raw", "Send exact text/keystrokes without the From/To messaging envelope (still guarded against interactive prompts)")
-    .option("--dangerously-interact", "DANGEROUS: type an answer as keystrokes into an interactive prompt (implies --raw; requires --reason). Letters can select menu shortcuts; CR/ESC act as keys. Enter is added for the complete visibly staged answer, or away from a recognized prompt when the screen can't be read.")
+    .option("--dangerously-interact", "DANGEROUS: type an answer as keystrokes into an interactive prompt (implies --raw; requires --reason). Letters can select menu shortcuts; CR/ESC act as keys. Enter is added for the complete visibly staged answer, or away from a recognized prompt when the input box can't be found or read.")
     .option("--type-without-checking", "With --dangerously-interact: type without reading or clearing existing input; may join or submit that text")
     .option("--reason <text>", "Why the prompt is being driven (required with --dangerously-interact; recorded in the audit log)")
     .option("--urgent", "Mark this message urgent: it types at seats whose interruption level holds other messages. Anyone may mark one; the recipient sees who did")
@@ -324,7 +324,8 @@ option or approve a permission) — the only override of the prompt guard; it
 implies --raw and is audit-logged. The answer is typed as keystrokes: letters may
 be menu shortcuts, and CR/ESC act as keys. An Enter is added when the complete
 answer is visibly staged in a recognized text input, and, away from a recognized
-prompt, when the screen can't be read at all (the result says so). Combining --verify with
+prompt or menu, when the input box can't be found or read (the result says so).
+Combining --verify with
 --dangerously-interact never adds an automatic submit retry, even when the daemon
 did not detect a prompt or did not report its disposition. Unknown consumption
 is not a send failure. On a managed seat with the delivery guard attached, a
