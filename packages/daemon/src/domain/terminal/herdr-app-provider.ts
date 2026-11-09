@@ -71,12 +71,16 @@ const GATED_WRAPPER = [
 export interface ViewerGate { path: string; until: number; expired: string }
 
 /** The same seat's read-only tile, from the composed tile `sh -c <script> openrig-tile <session> <tmux> <server...>`
- *  (tile-attach.ts). Null when the composed argv doesn't have that shape, so nothing is built from a guess. */
+ *  (tile-attach.ts). Only when rebuilding the writable tile from those parts gives back the composed argv exactly, so a
+ *  different shape (another script, flag or tag) gives null and nothing is built from a guess. Words after tmux are the
+ *  tile's server arguments by its own positional contract, so both tiles get all of them. */
 export function readOnlyTile(attach: readonly string[]): string[] | null {
-  const [sh, flag, script, tag, session, tmux] = attach;
-  if (attach.length < 6 || !sh || flag !== "-c" || !script || tag !== "openrig-tile" || !session || !tmux) return null;
-  const tile = tileAttachArgv(tmux, attach.slice(6), session, true);
-  return tile.length === attach.length && tile[0] === sh && tile[1] === "-c" && tile[3] === tag && tile.slice(4).every((a, i) => a === attach[4 + i]) ? tile : null;
+  const [, flag, , tag, session, tmux] = attach;
+  if (attach.length < 6 || flag !== "-c" || tag !== "openrig-tile" || !session || !tmux) return null;
+  const server = attach.slice(6);
+  const writable = tileAttachArgv(tmux, server, session, false);
+  if (writable.length !== attach.length || writable.some((word, i) => word !== attach[i])) return null;
+  return tileAttachArgv(tmux, server, session, true);
 }
 
 /** An interactive cell whose read-only tile couldn't be built: it shows this and takes no input (fail closed). */

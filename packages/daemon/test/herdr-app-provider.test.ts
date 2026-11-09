@@ -305,6 +305,19 @@ describe("HerdrAppProvider.openView", () => {
         expect(argv.join(" ")).toContain("could not build a read-only view of this seat");
         expect(argv).not.toContain(odd[2]); // nothing of the composed command runs
       }
+      // The right tag and length, but not what tile-attach.ts would compose from those parts (another tile script): not
+      // read, so it fails closed.
+      const otherScript = [...composedTile];
+      otherScript[2] = `${composedTile[2]} ;`;
+      expect(readOnlyTile(otherScript)).toBeNull();
+      expect(viewerArgv({ attachArgv: otherScript, paneCommand: "", readOnly: false }, "n9", { path: "/x/n9.shown", until: 9_999_999_999, expired: "x" }).join(" "))
+        .toContain("could not build a read-only view of this seat");
+      // An extra argument after tmux is, by the tile's own positional contract, one more server argument: both tiles get it.
+      const extra = tileAttachArgv("/usr/bin/tmux", ["-L", "openrig", "-f", "/dev/null"], "dev.build@demo", false);
+      expect(readOnlyTile(extra)).toEqual(tileAttachArgv("/usr/bin/tmux", ["-L", "openrig", "-f", "/dev/null"], "dev.build@demo", true));
+      // Another server argument is just another seat server: the read-only tile follows it.
+      const otherServer = tileAttachArgv("/usr/bin/tmux", ["-S", "/run/other.sock"], "dev.build@demo", false);
+      expect(readOnlyTile(otherServer)).toEqual(tileAttachArgv("/usr/bin/tmux", ["-S", "/run/other.sock"], "dev.build@demo", true));
       const noGate = viewerArgv({ attachArgv: composedTile, paneCommand: "", readOnly: false }, "n9");
       expect(noGate.join(" ")).toContain("could not build a read-only view of this seat");
       expect(noGate).not.toContain(composedTile[2]);
