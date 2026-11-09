@@ -434,6 +434,8 @@ describe("parked-owner-consumer policy — unit contract (OPR.0.5.6.24)", () => 
     const afterRefusal = await makeParkedOwnerConsumerPolicy(makeDeps([parkedSeat()], store, h1)).evaluate(makeJob());
     expect(afterRefusal.action).toBe("skip");
     expect(JSON.stringify(afterRefusal.notes)).toContain("destination-refused-interactive-prompt");
+    expect(afterRefusal.notes?.["skippedSeats"]).toMatchObject([{ seat: SEAT, why: "destination-refused-interactive-prompt",
+      primaryRow: primary, obligations: ROW_IDS, episodeKey: key, refusalReason: expect.stringContaining(refusal) }]);
     expect(openPromptRefusals(store.transitions.get(primary) ?? [])).toMatchObject([{ key, ids: ROW_IDS }]);
     expect(store.appended.some((a) => a.note.startsWith(REFUSED_PREFIX))).toBe(true);
     expect(store.nudges).toHaveLength(0);
