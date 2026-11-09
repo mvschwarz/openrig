@@ -325,8 +325,8 @@ describe("gateway human lifecycle (S12, amended A1: single-human surface): list 
       expect(res.error).toContain('cannot unset binding.0 (role "primary") while 1 other binding(s) remain (binding.1)');
       expect(res.error).toContain("no replacement is chosen silently");
       expect(res.error).toContain('To replace the primary, set binding.0 to the new primary spec: rig gateway human set ana binding.0 "<kind:connectorRef:secretsRef:primary[:handle=<id>]>"');
-      expect(res.error).toContain("To promote one of the other bindings (binding.1), unset it first, then set binding.0 to its spec with role primary (rig gateway human show ana --json prints it)");
-      expect(res.error).toContain("To remove every binding, unset the others first, then binding.0");
+      expect(res.error).toContain("To promote one of the other bindings (binding.1), unset that secondary slot first, then find the primary slot again in remainingBindings (or rig gateway human show ana --json) and set it to the spec with role primary.");
+      expect(res.error).toContain("To remove every binding, unset the secondary bindings first (checking remainingBindings or rig gateway human show ana after each unset because slot indexes shift), then unset the remaining primary slot.");
       expect(res.error).not.toContain("--replace");
     }
     expect(sha(join(humansDir(home), "ana.yaml"))).toBe(fragBefore);
