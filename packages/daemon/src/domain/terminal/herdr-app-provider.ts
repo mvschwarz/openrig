@@ -179,7 +179,7 @@ export class HerdrAppProvider implements TerminalProvider {
   private gateWindow(): number { return this.deps.gateWindowMs ?? 10 * 60 * 1000; }
   /** What an interactive cell says when its gate's window ends before herdr-app showed the view. */
   private gateExpired(view: string): string {
-    return `herdr-app did not show this view within ${this.windowText()} of its open, so this cell takes no input. Reopen it with: rig terminal open ${view}`;
+    return `herdr-app did not show this view within ${this.windowText()} of its open, so this cell takes no input. Reopen it with: rig terminal open ${view} --provider herdr-app`;
   }
   private windowText(): string {
     const minutes = Math.round(this.gateWindow() / 60_000);

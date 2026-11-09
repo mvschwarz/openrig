@@ -69,7 +69,7 @@ What an open does, in order:
    hasn't confirmed as unconfirmed, not opened; its viewers keep running and it stays in the Rig layout, and its cells
    take input once herdr-app shows it. OpenRig keeps watching for 10 minutes, across a daemon restart; if herdr-app
    hasn't shown it by then, each interactive cell says so, takes no input, and names the command that opens the view
-   again (`rig terminal open <view>`).
+   again (`rig terminal open <view> --provider herdr-app`).
 
 Other layouts and other herdr-app windows don't show Rig views. Each window (app home) has its own.
 

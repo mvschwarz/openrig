@@ -173,7 +173,7 @@ describe("HerdrAppProvider.openView", () => {
     // The interactive viewer: its gate file, the same seat's read-only tile, then the view's writable tile, unchanged.
     const gate = join(home, "viewers", "n2.shown");
     expect(t.argv.slice(0, 9)).toEqual(["/bin/sh", "-c", expect.stringContaining("exec tail -f /dev/null"), "openrig-viewer", "n2", gate,
-      expect.stringMatching(/^\d+$/), "herdr-app did not show this view within 10 minutes of its open, so this cell takes no input. Reopen it with: rig terminal open rig:demo",
+      expect.stringMatching(/^\d+$/), "herdr-app did not show this view within 10 minutes of its open, so this cell takes no input. Reopen it with: rig terminal open rig:demo --provider herdr-app",
       tileAttachArgv("/usr/bin/tmux", ["-L", "openrig"], "dev.build@demo", true)[2]]);
     expect(Number(t.argv[6])).toBeGreaterThan(Math.floor(Date.now() / 1000) + 9 * 60);
     expect(t.argv.slice(9)).toEqual(build.attachArgv);
