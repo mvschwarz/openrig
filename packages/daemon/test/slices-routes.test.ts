@@ -438,7 +438,7 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       { route: "detail", endpoint: "" },
       { route: "doc", endpoint: "/doc/SPEC.md" },
       { route: "proof", endpoint: "/proof-asset/screenshots/scope.png" },
-    ])("returns project_not_found from $route through the default Node adapter", async ({ route, endpoint }) => {
+    ])("returns project_not_found from $route through the default Node adapter", async ({ endpoint }) => {
       const originalRequest = globalThis.Request;
       const originalResponse = globalThis.Response;
       const requestDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Request")!;
@@ -459,7 +459,6 @@ describe("PL-slice-story-view-v0 slices routes", () => {
           headers: { Connection: "close" },
         });
         const body = await response.text();
-        console.log("slice adapter result", JSON.stringify({ route, status: response.status, body }));
         expect(response.status).toBe(409);
         expect(JSON.parse(body)).toMatchObject({ error: "project_not_found" });
       } finally {
@@ -477,7 +476,6 @@ describe("PL-slice-story-view-v0 slices routes", () => {
           expect(globalThis.Response).toBe(originalResponse);
           expect(server?.listening ?? false).toBe(false);
           expect(server?.address() ?? null).toBeNull();
-          console.log("slice adapter cleanup", JSON.stringify({ route, globalsRestored: true, serverClosed: true }));
         }
       }
     });
