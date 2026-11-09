@@ -58,8 +58,6 @@ export class ThreadRecovery implements RecoverySource {
     this.coverage = next; // publish only after the atomic write succeeds
   }
 
-  /** Read and land one page of thread replies. Coverage advances only past replies that landed or were settled; a
-   *  reply still landing or waiting for its seat ends the pass incomplete, with coverage held before it. */
   private async page(budget: RecoveryBudget, backoff: MethodBackoff): Promise<"more" | "done"> {
     const now = this.opts.now();
     if (this.missing) { this.state = "incomplete"; this.reason = "thread_not_found"; return "done"; }
@@ -121,8 +119,6 @@ export class ThreadRecovery implements RecoverySource {
       if (landed.reason === "inflight" || landed.reason === "inactive") {
         this.state = "incomplete"; this.reason = "landing-in-progress"; return "done";
       }
-      // Its seat can't be woken yet: keep coverage before this reply, so a later pass lands it.
-      if (landed.reason === "destination-unready") { this.state = "incomplete"; this.reason = "destination-unready"; return "done"; }
       if (landed.disposition === "accepted") this.accepted++;
       if (landed.disposition === "dead-lettered") this.deadLettered++;
     }

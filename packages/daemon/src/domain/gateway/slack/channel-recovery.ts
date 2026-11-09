@@ -100,8 +100,6 @@ export class ChannelRecovery implements RecoverySource {
     this.coverage = next; // publish only after the atomic write succeeds
   }
 
-  /** Read and land one page of channel history. Coverage advances only past messages that landed or were settled; a
-   *  message still landing or waiting for its seat ends the pass incomplete, with coverage held before it. */
   private async page(budget: RecoveryBudget, backoff: MethodBackoff): Promise<"more" | "done"> {
     if (backoff.blocked(HISTORY, this.now())) { this.state = "backoff"; this.reason = "rate-limited"; return "done"; }
     if (this.coverage!.nextRetryAt && this.coverage!.nextRetryAt > this.now()) { this.state = "backoff"; return "done"; }
@@ -165,8 +163,6 @@ export class ChannelRecovery implements RecoverySource {
       if (landed.reason === "inflight" || landed.reason === "inactive") {
         this.state = "incomplete"; this.reason = "landing-in-progress"; return "done";
       }
-      // Its seat can't be woken yet: keep coverage before this message, so a later pass lands it.
-      if (landed.reason === "destination-unready") { this.state = "incomplete"; this.reason = "destination-unready"; return "done"; }
       if (landed.disposition === "accepted") this.accepted++;
       if (landed.disposition === "dead-lettered") this.deadLettered++;
     }

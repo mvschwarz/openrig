@@ -43,13 +43,7 @@ interface SlackRecoveryOptions {
    *  only once the hub has relayed it here (adoptRelayed), from that moment, and across restarts. A machine nothing is
    *  relayed to never reads history. */
   relayed?: boolean;
-  /** While a recovered message waits for its seat to become reachable, run again after this long (default 30 s). */
-  unreadyRetryMs?: number;
 }
-
-/** How long a recovered message's wait for its seat keeps the short retry going. Longer than the connector's ten-minute
- *  seat grace, after which the message lands or is dead-lettered; past it, the five-minute pass is enough. */
-const SEAT_WAIT_RETRY_WINDOW_MS = 15 * 60 * 1000;
 
 interface TrackedSource { source: ThreadRecovery; mapping: string }
 
@@ -61,10 +55,6 @@ export class SlackRecovery {
   private readonly backoff = new MethodBackoff();
   private readonly now: () => number;
   private pass?: Promise<void>;
-  private unreadyRetry?: ReturnType<typeof setTimeout>;
-  /** Sources holding a message for its seat, by key, with when the wait began. Kept apart from each source's status,
-   *  which a Slack page error on a later pass overwrites while the message is still uncovered. */
-  private readonly awaitingSeat = new Map<string, number>();
   private stopped = false;
   private lastChannel: string | undefined;
   private lastThread: string | undefined;
@@ -104,50 +94,19 @@ export class SlackRecovery {
     } catch { /* an unreadable checkpoint file is never replaced; the channel keeps waiting */ }
   }
 
-  /** Stop recovering: no further passes, and a pending soon-retry for a waiting message is cancelled. */
   stop(): void {
     this.stopped = true;
-    if (this.unreadyRetry) clearTimeout(this.unreadyRetry);
     for (const channel of this.channels) channel.stop();
   }
 
-  /** Run one recovery pass (or join the one in progress), then schedule a soon-retry if a message waits for its seat. */
   run(): Promise<void> {
     if (this.pass) return this.pass;
     if (this.stopped || !this.opts.token) return Promise.resolve();
     if (!this.initialized) this.initialize();
-    const pass = this.scan().finally(() => this.retryWhileUnready()); // a failed pass still retries; its error still propagates
+    const pass = this.scan();
     this.pass = pass;
-    const clear = () => { if (this.pass === pass) this.pass = undefined; };
-    pass.then(clear, clear); // a failed pass is the caller's to handle, never an unhandled rejection here
+    void pass.finally(() => { if (this.pass === pass) this.pass = undefined; });
     return pass;
-  }
-
-  /** A recovered message is waiting for its seat (just after a restart, before its binding is back): try again soon rather
-   *  than at the next five-minute pass, so it lands shortly after the seat does. The wait ends when its source has caught
-   *  up, stops being tracked, or has waited past the seat grace period, after which the five-minute pass carries it. */
-  private retryWhileUnready(): void {
-    const now = this.now();
-    const sources = [
-      // Caught up: a channel reads "pending" once nothing new is left; a thread reads "pending" before it has stepped or when
-      // the pass budget ran out first, so only "scanned" says a thread has caught up.
-      ...this.channels.map((c) => { const s = c.status(); return { key: c.key, method: HISTORY, reason: s.reason, caughtUp: s.state === "scanned" || s.state === "pending" }; }),
-      ...[...this.threads.values()].map((t) => ({ key: t.source.key, method: REPLIES, reason: t.source.reason, caughtUp: t.source.state === "scanned" })),
-    ];
-    const live = new Set(sources.map((s) => s.key));
-    for (const s of sources) {
-      if (s.reason === "destination-unready") { if (!this.awaitingSeat.has(s.key)) this.awaitingSeat.set(s.key, now); }
-      else if (s.caughtUp) this.awaitingSeat.delete(s.key);
-    }
-    for (const [key, since] of this.awaitingSeat) {
-      if (!live.has(key) || now - since > SEAT_WAIT_RETRY_WINDOW_MS) this.awaitingSeat.delete(key);
-    }
-    if (this.awaitingSeat.size === 0 || this.stopped || this.unreadyRetry) return;
-    // Honour a Slack rate-limit hold on the method a waiting source reads with, rather than retrying into it.
-    const hold = Math.max(0, ...sources.filter((s) => this.awaitingSeat.has(s.key)).map((s) => this.backoff.waitMs(s.method, now)));
-    this.unreadyRetry = setTimeout(() => { this.unreadyRetry = undefined; void this.run().catch(() => {}); },
-      Math.max(this.opts.unreadyRetryMs ?? 30_000, hold));
-    this.unreadyRetry.unref?.();
   }
 
   /** On a relayed machine, the configured channels the hub has relayed here (saved, so a restart keeps them). */

@@ -297,20 +297,6 @@ function deadLetterBacklogFields(
   return { deadLetterBacklog: records, deadLetterBacklogState: "ok" };
 }
 
-/** How long after the connector starts a recovered message waits for its seat to become reachable. */
-export const RECOVERY_SEAT_GRACE_MS = 10 * 60 * 1000;
-
-/** After a restart, recovery reads Slack within seconds of the socket connecting, often before the seats' tmux bindings
- *  are back; a row created then has its wake fail and nothing retries it. A recovered message waits while its seat has
- *  no transport, for a grace period after start, so a seat that never returns can't hold recovery. */
-export function recoveryDestinationReady(
-  classify: (destination: string) => { class: string },
-  startedAt: number,
-  now: () => number = Date.now,
-): (destination: string) => boolean {
-  return (destination) => now() - startedAt > RECOVERY_SEAT_GRACE_MS || classify(destination).class !== "unroutable";
-}
-
 /** Build the production Slack gateway wire from config + secrets. Never throws on a missing
  *  configuration — that is an honest inert wire, not a boot failure. */
 export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
@@ -1284,7 +1270,6 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     const built = (router = new InboundRouter({
       queue: ports,
       seen: inboundSeen,
-      destinationReady: recoveryDestinationReady((destination) => opts.queueRepo.classifyDestinationOf(destination), Date.now()),
       deadLetter: dead,
       destination: cfg.inboundDestination,
       reactions: cfg.reactions === "off" ? "off" : "route",
