@@ -16,6 +16,9 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { observeCodexSandbox } from "../src/domain/permission-drift.js";
 import { type OccupantInvalidator } from "../src/domain/occupant-invalidator.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 
 describe("Claude fresh in-place handover readiness", () => {
   let db: Database.Database;
@@ -291,6 +294,12 @@ describe("Claude fresh in-place handover readiness", () => {
       predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 5000,
       sleep: async ms => { elapsed += ms; vi.setSystemTime(startedAtMs + elapsed); trace.push({ kind: "sleep", ms, elapsed }); },
     });
+    const unconfirmedPacket = unverifiablePacketMode || sameSizedDifferentPasteMode || stagedPacketMode;
+    if (unconfirmedPacket) { // a held message, whose notice must add no text or Enter after an unconfirmed packet (#2431)
+      db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql);
+      new OutboxHandler(db).retain({ outboxId: "held-1", senderSession: "orch-lead@seat-rig", destinationSession: "dev-impl@seat-rig", body: "Real work for you" },
+        { nodeId: node.id, session: "dev-impl@seat-rig", occupant: null, pane: null });
+    }
     const result = await handover.handover({ seatRef: "dev-impl@seat-rig", source: "fresh", reason: "bounded scrollback reproduction" });
     const sessions = db.prepare("SELECT session_name,status,resume_token,startup_status FROM sessions ORDER BY id").all();
     observations.push({ mode, result, trace, reads, listProcessesCalls: listProcesses.mock.calls.length,
@@ -303,12 +312,14 @@ describe("Claude fresh in-place handover readiness", () => {
       expect(capturePaneScreen).toHaveBeenCalledWith("%9");
       return;
     }
-    if (unverifiablePacketMode || sameSizedDifferentPasteMode || stagedPacketMode) {
+    if (unconfirmedPacket) {
       expect(result.ok).toBe(true);
       expect(result).toMatchObject({ result: {
         restorePacket: { status: "unconfirmed" },
         sideEffects: { startupContextDelivered: false },
+        warnings: ["1 held message was kept for this seat and not delivered: read it with rig seat held-messages dev-impl@seat-rig."],
       } });
+      expect(trace.filter((x: any) => x.kind === "packet-paste")).toHaveLength(1);
       expect(trace.filter((x: any) => x.kind === "input")).toHaveLength(1);
       if (unverifiablePacketMode) {
         expect((result as any).result.restorePacket.reason).toBe("the input box could not be observed");

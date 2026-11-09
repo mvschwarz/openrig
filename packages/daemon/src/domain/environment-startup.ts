@@ -2,7 +2,7 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathS
 import { join, posix } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ProjectionPlan } from "./projection-planner.js";
-import type { NodeBinding, ProjectionResult, ResolvedStartupFile, StartupDeliveryResult, HarnessLaunchResult } from "./runtime-adapter.js";
+import type { NodeBinding, ProjectionResult, ResolvedStartupFile, StartupDeliveryResult, HarnessLaunchResult, ReadinessResult } from "./runtime-adapter.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { EnvironmentPlatform, EnvironmentError, regularBytes, sha256, type ProjectionFile, type ProjectionReceipt } from "./environment-platform.js";
@@ -137,7 +137,18 @@ export class EnvironmentStartup {
       return { delivered: files.length, failed: [] };
     } finally { rmSync(stage, { recursive: true }); }
   }
-  async launch(binding: NodeBinding, opts: { resumeToken?: string; resumeType?: string; forkSource?: unknown; beforeNativeDispatch?: () => boolean }, tmux: Pick<TmuxAdapter, "sendShellCommand">): Promise<HarnessLaunchResult> {
+  async checkReady(binding: NodeBinding): Promise<ReadinessResult> {
+    try {
+      const selected = this.selected(binding);
+      if (selected.generation !== binding.launchGeneration) throw new Error("The selected guest generation changed");
+      const native = new EnvironmentLifecycle(this.platform, undefined, this.stageRoot).native(selected);
+      const observed = await (this.platform.driver as OpenShellDriver).guest(selected, ["--identity"]);
+      if (observed.nativeId !== native.nativeId || observed.generation !== native.generation || observed.running !== true)
+        throw new Error("The selected guest execution is not running");
+      return { ready: true };
+    } catch (error) { return { ready: false, code: "harness_not_running", reason: `Environment worker is not ready: ${(error as Error).message}` }; }
+  }
+  async launch(binding: NodeBinding, opts: { resumeToken?: string; resumeType?: string; forkSource?: unknown; firstInputText?: string; beforeNativeDispatch?: () => boolean }, tmux: Pick<TmuxAdapter, "sendShellCommand">): Promise<HarnessLaunchResult> {
     if (opts.forkSource) return { ok: false, recovery: "attention_required", error: "Environment fork is unsupported; no fresh conversation was started." };
     const checkpoint = this.retainedResume(binding, opts);
     const selected = this.selected(binding), generation = binding.launchGeneration!;
@@ -155,7 +166,9 @@ export class EnvironmentStartup {
         throw new EnvironmentError("environment_native_unconfirmed", "The original native identity is unconfirmed; no grant or execution was replaced");
       const receipt = { ...request, nativeType: "community:openshell-claude", destinationCwd: posix.join(selected.guestRoot, "work"), nativeState: posix.join(selected.guestRoot, "native"), checkpoint: checkpoint?.checkpointId ?? null, predecessorResourceId: checkpoint?.predecessorResourceId ?? null };
       this.platform.db.prepare("UPDATE environment_operations SET state = 'confirmed', receipt_json = ? WHERE operation_id = ?").run(JSON.stringify(receipt), operationId);
-      return { ok: true, resumeToken: request.nativeId, resumeType: "community:openshell-claude", resumeProvenance: "launcher", warnings: ["The original native identity was reconciled; viewer readiness still requires its existing observation and no viewer input was replayed."] };
+      return { ok: true, resumeToken: request.nativeId, resumeType: "community:openshell-claude", resumeProvenance: "launcher",
+        ...(request.firstInput ? { firstInput: { path: posix.join(selected.guestRoot, request.firstInput.path), submission: "unconfirmed" as const } } : {}),
+        warnings: ["The original native identity was reconciled; viewer readiness still requires its existing observation and no viewer input was replayed."] };
     }
     const older = this.platform.db.prepare("SELECT operation_id FROM environment_operations WHERE binding_id = ? AND kind = 'launch' AND operation_id <> ? AND state IN ('requested','confirmed')").get(selected.bindingId, operationId);
     if (older && !checkpoint) throw new EnvironmentError("environment_prior_execution_unconfirmed", "A prior native execution must be reconciled through lifecycle/restore before another launch");
@@ -198,7 +211,13 @@ export class EnvironmentStartup {
       this.platform.db.prepare("UPDATE environment_operations SET request_json = ? WHERE operation_id = ? AND state = 'intent'").run(JSON.stringify({ ...request, activityGrantId: activity.grantId }), operationId);
       await putPrivate("activity.json", JSON.stringify(activity.env));
       await putPrivate("coordination.json", coordination.toString("utf8"));
-      const descriptor = { ...request, files, ...(checkpoint ? { resumeToken: checkpoint.nativeId, nativeType: checkpoint.nativeType, checkpoint: { nativeId: checkpoint.nativeId, nativeType: checkpoint.nativeType, files: [...checkpoint.files, ...(checkpoint.artifacts ?? [])].map(({ path, sha256, bytes }) => ({ path, sha256, bytes })) } } : {}), model: binding.model, effort: binding.effort, permissionMode: binding.permissionMode,
+      const firstInput = opts.firstInputText === undefined ? undefined : { path: "control/first-input.txt", sha256: sha256(opts.firstInputText), bytes: Buffer.byteLength(opts.firstInputText) };
+      if (firstInput) {
+        await putPrivate("first-input.txt", opts.firstInputText!);
+        this.platform.db.prepare("UPDATE environment_operations SET request_json = ? WHERE operation_id = ? AND state = 'intent'")
+          .run(JSON.stringify({ ...request, activityGrantId: activity.grantId, firstInput }), operationId);
+      }
+      const descriptor = { ...request, files, ...(firstInput ? { firstInput } : {}), ...(checkpoint ? { resumeToken: checkpoint.nativeId, nativeType: checkpoint.nativeType, checkpoint: { nativeId: checkpoint.nativeId, nativeType: checkpoint.nativeType, files: [...checkpoint.files, ...(checkpoint.artifacts ?? [])].map(({ path, sha256, bytes }) => ({ path, sha256, bytes })) } } : {}), model: binding.model, effort: binding.effort, permissionMode: binding.permissionMode,
         plugins: files.filter(file => file.path.includes("/.claude/plugins/") && file.path.endsWith("/.claude-plugin/plugin.json"))
           .map(file => posix.join(selected.guestRoot, file.path.slice(0, -"/.claude-plugin/plugin.json".length))) };
       await putPrivate("launch.pending.json", JSON.stringify(descriptor));
@@ -207,9 +226,11 @@ export class EnvironmentStartup {
       if (!(this.platform.driver instanceof OpenShellDriver)) throw new EnvironmentError("environment_launch_unsupported", "This driver does not implement native launch preparation");
       const claimed = this.platform.db.prepare("UPDATE environment_operations SET state = 'requested' WHERE operation_id = ? AND state = 'intent'").run(operationId);
       if (!claimed.changes) throw new EnvironmentError("environment_native_unconfirmed", "The saved native launch intent needs reconciliation; no second launch was attempted");
-      await this.platform.driver.guest(selected, ["--prepare"]);
+      await this.platform.driver.guest(selected, ["--prepare", ...(firstInput ? ["--first-input-required"] : [])]);
       const command = ["rig", "environment", "connect", selected.bindingId, "--generation", generation].map(shellQuote).join(" ");
-      const sent = await tmux.sendShellCommand(binding.tmuxSession!, command, undefined, { stageIfLong: true, execInScript: true });
+      // Binding and generation identifiers keep this command below the short-input bound. Replace the host
+      // shell itself: a viewer failure must close this pane, never leave a shell for later startup input.
+      const sent = await tmux.sendShellCommand(binding.tmuxSession!, `exec ${command}`, undefined, { stageIfLong: true });
       if (!sent.ok) throw new EnvironmentError("environment_viewer_unconfirmed", "The native execution may have started; its viewer dispatch is unconfirmed");
       let observed: Record<string, any> | undefined;
       const deadline = Date.now() + 30_000;
@@ -220,7 +241,8 @@ export class EnvironmentStartup {
       if (observed?.nativeId !== nativeId || observed.generation !== generation || observed.running !== true) throw new EnvironmentError("environment_native_unconfirmed", "The native process identity is not confirmed; nothing was restarted");
       const receipt = { ...request, activityGrantId: activity.grantId, nativeType: "community:openshell-claude", destinationCwd: posix.join(selected.guestRoot, "work"), nativeState: posix.join(selected.guestRoot, "native"), checkpoint: checkpoint?.checkpointId ?? null, predecessorResourceId: checkpoint?.predecessorResourceId ?? null };
       this.platform.db.prepare("UPDATE environment_operations SET state = 'confirmed', receipt_json = ? WHERE operation_id = ?").run(JSON.stringify(receipt), operationId);
-      return { ok: true, resumeToken: nativeId, resumeType: "community:openshell-claude", resumeProvenance: "launcher" };
+      return { ok: true, resumeToken: nativeId, resumeType: "community:openshell-claude", resumeProvenance: "launcher",
+        ...(firstInput ? { firstInput: { path: posix.join(selected.guestRoot, firstInput.path), submission: "unconfirmed" as const } } : {}) };
     } finally { rmSync(stage, { recursive: true }); }
   }
 }

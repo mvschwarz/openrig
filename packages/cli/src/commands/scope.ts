@@ -213,7 +213,7 @@ function buildSliceLsCommand(): Command {
   const cmd = new Command("ls")
     .description("List slices in a mission (or across all missions)")
     .option("--mission <name>", "Restrict to a single mission")
-    .option("--state <state>", "Filter: active | closed | shipped | all", "active")
+    .option("--state <state>", "Filter: active (in flight, blocked included) | shipped (delivered in place: shipped or done) | closed (in closed/, or superseded, retired or closed in place) | all", "active")
     .option("--json", "Machine-readable output")
     .action(async (opts, command) => {
       const out = makeStdout();
@@ -727,12 +727,13 @@ function buildMissionLsCommand(): Command {
           id: m.id,
           path: m.absPath,
           activeSliceCount: m.activeSliceCount,
+          shippedSliceCount: m.shippedSliceCount,
           closedSliceCount: m.closedSliceCount,
         }));
         emit(out, { ok: true, count: rows.length, missions: rows }, json,
           rows.length === 0
             ? ["(no missions)"]
-            : rows.map((r) => `${r.name}    ${r.id ?? "—"}    active=${r.activeSliceCount}  closed=${r.closedSliceCount}`),
+            : rows.map((r) => `${r.name}    ${r.id ?? "—"}    active=${r.activeSliceCount}  shipped=${r.shippedSliceCount}  closed=${r.closedSliceCount}`),
         );
       } catch (err) {
         fail(err, json, out);
@@ -764,6 +765,7 @@ function buildMissionShowCommand(): Command {
             id: mission.id,
             path: mission.absPath,
             activeSliceCount: mission.activeSliceCount,
+            shippedSliceCount: mission.shippedSliceCount,
             closedSliceCount: mission.closedSliceCount,
             frontmatter: mission.frontmatter,
             trust,
@@ -778,6 +780,7 @@ function buildMissionShowCommand(): Command {
           out.write(`  id: ${mission.id ?? "—"}\n`);
           out.write(formatTrustLine(trust));
           out.write(`  active slices: ${mission.activeSliceCount}\n`);
+          out.write(`  shipped slices: ${mission.shippedSliceCount}\n`);
           out.write(`  closed slices: ${mission.closedSliceCount}\n`);
           out.write(`  path: ${mission.absPath}\n`);
           if (readme) {
@@ -1100,6 +1103,7 @@ function buildAuditCommand(): Command {
               frontmatter: {},
               id: null,
               activeSliceCount: 0,
+              shippedSliceCount: 0,
               closedSliceCount: 0,
             };
         const graph = buildMissionDependencyGraph(auditMission);
@@ -1232,6 +1236,8 @@ function buildAuditCommand(): Command {
         for (const sr of sliceResults) {
           const shadow = shadowedNodeFileFinding(path.join(slicesDir, sr.name), "slice");
           if (shadow) sr.result.findings.push(shadow);
+          const shared = sharedSliceNameFinding(missionsRoot, missionName, sr.name);
+          if (shared) sr.result.findings.push(shared);
         }
 
         const allFindings = [
@@ -2152,6 +2158,45 @@ function shadowedNodeFileFinding(dir: string, level: "mission" | "slice"): {
   };
 }
 
+/**
+ * Advisory-only: another mission has a slice folder of the same name. The slice list and the routes that
+ * find a slice by name keep one slice per name, so the others are hidden there with no sign they exist.
+ * Twin of the daemon's finding of the same name.
+ */
+function sharedSliceNameFinding(missionsRoot: string, missionName: string, sliceName: string): {
+  kind: "slice_name_shared"; severity: "low"; path: string; message: string; remediation: string;
+} | null {
+  let others: string[];
+  try {
+    others = fs.readdirSync(missionsRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== missionName
+        && fs.statSync(path.join(missionsRoot, e.name, "slices", sliceName), { throwIfNoEntry: false })?.isDirectory() === true)
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    return null;
+  }
+  if (others.length === 0) return null;
+  return {
+    kind: "slice_name_shared",
+    severity: "low",
+    path: path.join(missionsRoot, missionName, "slices", sliceName),
+    message: `Mission ${others.join(", ")} also ${others.length === 1 ? "has" : "have"} a slice named "${sliceName}". The slice list (GET /api/slices) and the routes that find a slice by name keep one slice per name, so all but one of these slices are hidden there.`,
+    remediation: "Rename one of the slice folders so each slice name is unique across missions. Advisory only — nothing is blocked.",
+  };
+}
+
+/** Show the inherited workspace route because Commander lists a parent option only in the parent's help. */
+export function scopeWorkspaceHelp(tier: "slice" | "mission", verb?: string): string {
+  return `
+Workspace: the parent option --workspace selects the missions root this command reads.
+  rig scope --workspace <project root> ${tier} ${verb ?? "<verb>"} ...
+A project root uses its project.yaml missions.root, else its missions/ folder; a
+folder named missions is used as is. Use it for a catalog project, for example
+$(rig config get workspace.projects_root)/<project>. Without --workspace,
+OPENRIG_WORK_ROOT applies, then the configured workspace.slices_root.`;
+}
+
 export function scopeCommand(): Command {
   const cmd = new Command("scope")
     .description("Scope tree primitive: missions, slices, sub-slices (per conventions/scope-and-versioning)")
@@ -2182,6 +2227,10 @@ export function scopeCommand(): Command {
   mission.addCommand(buildMissionVerifiedCommand());
   mission.addCommand(buildApproveCommand("mission"));
   cmd.addCommand(mission);
+  for (const [tier, group] of [["slice", slice], ["mission", mission]] as const) {
+    group.addHelpText("after", scopeWorkspaceHelp(tier));
+    for (const verb of group.commands) verb.addHelpText("after", scopeWorkspaceHelp(tier, verb.name()));
+  }
   cmd.addCommand(buildResolveNotesCommand());
   cmd.addCommand(buildAuditCommand());
 

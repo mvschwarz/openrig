@@ -678,6 +678,17 @@ describe("rig scope mission ls (HG-8)", () => {
     const names = parsed.missions.map((m: { name: string }) => m.name).sort();
     expect(names).toEqual(["backlog", "release-0.3.2"]);
   });
+
+  it("counts a mission's shipped slices apart from its active ones (#2427)", async () => {
+    for (const nn of ["02-shipped-a", "03-shipped-b"]) {
+      writeFile(path.join(env.missionsRoot, "release-0.3.2", "slices", nn, "README.md"), `---\nid: OPR.0.3.2.${nn[1]}\nstatus: shipped\n---\n# ${nn}\n`);
+    }
+    const text = await run(["mission", "ls"], env.missionsRoot);
+    expect(text.stdout).toContain("release-0.3.2    OPR.0.3.2    active=1  shipped=2  closed=0");
+    const json = JSON.parse((await run(["mission", "ls", "--json"], env.missionsRoot)).stdout);
+    expect(json.missions.find((m: { name: string }) => m.name === "release-0.3.2"))
+      .toMatchObject({ activeSliceCount: 1, shippedSliceCount: 2, closedSliceCount: 0 });
+  });
 });
 
 describe("rig scope mission show", () => {
@@ -1351,6 +1362,29 @@ describe("--help is present on every command (HG-12)", () => {
       expect(tier.description()).toBeTruthy();
       for (const verb of tier.commands) {
         expect(verb.description()).toBeTruthy();
+      }
+    }
+  });
+});
+
+describe("slice and mission verb help names the parent --workspace option", () => {
+  const helpOf = (cmd: Command): string => {
+    let out = "";
+    cmd.configureOutput({ writeOut: (text) => { out += text; } });
+    cmd.outputHelp();
+    return out;
+  };
+
+  it("every slice and mission verb, and each tier, shows the rig scope --workspace route", () => {
+    const cmd = scopeCommand();
+    for (const tierName of ["slice", "mission"] as const) {
+      const tier = cmd.commands.find((c) => c.name() === tierName)!;
+      expect(helpOf(tier)).toContain(`rig scope --workspace <project root> ${tierName} <verb> ...`);
+      for (const verb of tier.commands) {
+        const help = helpOf(verb);
+        expect(help, `${tierName} ${verb.name()}`).toContain(`rig scope --workspace <project root> ${tierName} ${verb.name()} ...`);
+        expect(help, `${tierName} ${verb.name()}`).toContain("$(rig config get workspace.projects_root)/<project>");
+        expect(help, `${tierName} ${verb.name()}`).not.toContain("~/.openrig");
       }
     }
   });

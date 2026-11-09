@@ -7,11 +7,12 @@ import { Hono } from "hono";
 import { noServerTerminal } from "./helpers/no-server-terminal.js";
 import { kernelStatusRoutes } from "../src/routes/kernel-status.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { BootstrapRepository } from "../src/domain/bootstrap-repository.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -58,7 +59,7 @@ function host(claimed = false) {
   const rig = rigRepo.createRig("kernel");
   db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("kernel-pod", rig.id, "Kernel");
   const nodes = SEATS.map((logicalId) => {
-    const node = rigRepo.addNode(rig.id, logicalId, { runtime: "claude-code", podId: "kernel-pod" });
+    const node = rigRepo.addNode(rig.id, logicalId, { runtime: "claude-code", podId: "kernel-pod", cwd: "/workspace/stored" });
     const name = `${logicalId.replace(".", "-")}@kernel`;
     const session = claimed ? sessionRegistry.registerClaimedSession(node.id, name) : sessionRegistry.registerSession(node.id, name);
     sessionRegistry.updateStatus(session.id, "running");
@@ -102,7 +103,7 @@ function host(claimed = false) {
   const statuses = () => (db.prepare(
     "SELECT status FROM sessions WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = ?) ORDER BY created_at, id",
   ).all(rig.id) as Array<{ status: string }>).map((row) => row.status);
-  return { db, rigRepo, sessionRegistry, eventBus, tmux, snapshotRepo, snapshotCapture, rig, nodes, live, reboot, down, reconcile, daemonStart, statuses, bootstrap };
+  return { db, rigRepo, sessionRegistry, eventBus, tmux, snapshotRepo, snapshotCapture, rig, nodes, live, reboot, down, reconcile, daemonStart, statuses, bootstrap, specsDir };
 }
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -110,6 +111,9 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 describe("daemon start with an existing kernel rig", () => {
   it("restores a kernel a reboot left down", async () => {
     const h = host();
+    const history = new BootstrapRepository(h.db);
+    const run = history.createRun("rig_spec", join(h.specsDir, "rigs/launch/kernel/rig-claude-only.yaml"));
+    history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     h.reboot();
     const restore = vi.fn(async () => ({ errors: [] }));
     const tracker = await h.daemonStart(restore);
@@ -117,7 +121,11 @@ describe("daemon start with an existing kernel rig", () => {
     expect(restore).toHaveBeenCalledTimes(1);
     expect(restore).toHaveBeenCalledWith(h.rig.id);
     expect(tracker.getStatus().kernelState).toBe("booting");
+    expect(tracker.getStatus().variant).toBe("rig-claude-only.yaml");
     expect(h.bootstrap.bootstrap).not.toHaveBeenCalled();
+    // An existing kernel comes back where it was created: no new kernel folder, and each seat's directory unchanged.
+    expect(h.rigRepo.getRig(h.rig.id)!.nodes.map((node) => node.cwd)).toEqual(["/workspace/stored", "/workspace/stored"]);
+    expect(existsSync(join(h.specsDir, "kernel"))).toBe(false);
   });
 
   it("doesn't bring back a kernel that was already down before this start, or its old conversations", async () => {
@@ -213,6 +221,9 @@ describe("daemon start with an existing kernel rig", () => {
 
   it("a kernel stopped with `rig down kernel` stays stopped across daemon restarts", async () => {
     const h = host();
+    const history = new BootstrapRepository(h.db);
+    const run = history.createRun("rig_spec", join(h.specsDir, "rigs/launch/kernel/rig-claude-only.yaml"));
+    history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     const down = await h.down();
     expect(down.errors).toEqual([]);
     expect(h.statuses()).toEqual(["exited", "exited"]);
@@ -220,7 +231,9 @@ describe("daemon start with an existing kernel rig", () => {
     for (let restart = 0; restart < 3; restart++) {
       if (restart === 1) h.reboot();
       const tracker = await h.daemonStart(restore);
-      expect(tracker.getStatus()).toMatchObject({ kernelState: "skipped", detail: "kernel rig already managed" });
+      expect(tracker.getStatus()).toMatchObject({
+        kernelState: "skipped", detail: "kernel rig already managed", variant: "rig-claude-only.yaml",
+      });
     }
     expect(restore).not.toHaveBeenCalled();
     expect(h.bootstrap.bootstrap).not.toHaveBeenCalled();
@@ -263,20 +276,36 @@ describe("daemon start with an existing kernel rig", () => {
 
   it("OPENRIG_NO_KERNEL=1 never restores one", async () => {
     const h = host();
+    const history = new BootstrapRepository(h.db);
+    const run = history.createRun("rig_spec", join(h.specsDir, "rigs/launch/kernel/rig-codex-only.yaml"));
+    history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     h.reboot();
     process.env.OPENRIG_NO_KERNEL = "1";
     const restore = vi.fn(async () => ({ errors: [] }));
     const tracker = await h.daemonStart(restore);
-    expect(tracker.getStatus()).toMatchObject({ kernelState: "skipped", detail: "OPENRIG_NO_KERNEL=1" });
+    expect(tracker.getStatus()).toMatchObject({ kernelState: "skipped", detail: "OPENRIG_NO_KERNEL=1", variant: "rig-codex-only.yaml" });
     expect(restore).not.toHaveBeenCalled();
   });
 
   it("a running kernel is left alone and reported from its seats", async () => {
     const h = host();
+    // Its current seats are Claude-only, but the original selection is still the dual-runtime template.
+    const history = new BootstrapRepository(h.db);
+    const run = history.createRun("rig_spec", join(h.specsDir, "rigs/launch/kernel/rig.yaml"));
+    history.updateRunStatus(run.id, "completed", { rigId: h.rig.id });
     const restore = vi.fn(async () => ({ errors: [] }));
     const tracker = await h.daemonStart(restore);
     expect(restore).not.toHaveBeenCalled();
-    expect(tracker.getStatus()).toMatchObject({ kernelState: "ready", detail: "kernel rig already managed" });
+    expect(tracker.getStatus()).toMatchObject({ kernelState: "ready", detail: "kernel rig already managed", variant: "rig.yaml" });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("kernelBootTracker" as never, tracker); await next(); });
+    app.route("/api/kernel", kernelStatusRoutes);
+    const response = await app.request("/api/kernel/status");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      variant: "rig.yaml",
+      agents: h.nodes.map(({ name }) => expect.objectContaining({ session_name: name, runtime: "claude-code" })),
+    });
   });
 
   it("a running kernel with no seat ready stays skipped rather than reporting a new failure", async () => {

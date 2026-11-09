@@ -1,0 +1,24 @@
+# Captured on a Linux host (systemd 255, tmux 3.8) on 2026-11-08 for #2710. Data lines are copied verbatim from
+# the capture; the section headers are added. Read-only commands: no scope was created.
+## systemd-run --version
+systemd 255 (255.4-1ubuntu8.18)
+## systemctl --user is-system-running, user manager up
+degraded
+exit=1
+## systemd-run --user --scope, XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS unset
+Failed to connect to bus: No medium found
+exit=1
+## systemd-run --user --scope, XDG_RUNTIME_DIR an empty directory, DBUS_SESSION_BUS_ADDRESS unset
+Failed to connect to bus: No such file or directory
+exit=1
+## systemctl --user, with the bus address a seat's shell gets
+Failed to connect to bus: Connection refused
+exit=1
+## systemd-run missing from PATH, run by /bin/sh -c
+/bin/sh: 1: systemd-run: not found
+exit=127
+## the tmux server the daemon started today, and its cgroup
+pid=2723922 cmdline: tmux -D
+cgroup: 0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-cadeiras.slice/openrig-cadeiras.scope
+## the daemon's cgroup
+0::/user.slice/user-1000.slice/user@1000.service/app.slice/openrig-daemon.service

@@ -755,6 +755,41 @@ describe("SessionTransport with transport.verify_input_box", () => {
     });
   });
 
+  describe("a person's own statusLine between the closing rule and the footer (#2798)", () => {
+    const STATUS = "  gpt-6.1-sol-fast · ctx 171.1k/872k (19.6%) · orchestrator";
+    // Edit: rows a statusLine prints, drawn right above the last footer row of a real frame (every phase keeps them).
+    const withStatusLine = (frame: string, rows: string[]) => {
+      const lines = frame.split("\n");
+      let at = lines.length - 1;
+      while (at >= 0 && !/^ {2}[⏵⏸]/.test(lines[at]!)) at--;
+      lines.splice(at, 0, ...rows);
+      return lines.join("\n");
+    };
+    const frames = (rows: string[]) => ({
+      prePaste: withStatusLine(claude("after-enter-15s.J"), rows),
+      afterPaste: withStatusLine(claude("submit-staged.J"), rows),
+      afterEnter: withStatusLine(claude("after-enter-0.4s.J"), rows),
+    });
+
+    it("T1 with a statusLine row in every frame: verified, as without it", async () => {
+      seedCanonicalRig("claude-code");
+      const { result, log } = await run({ frames: frames([STATUS]) }, texts.submit, true);
+      expectOnePasteOneEnter(result, log);
+      expect(result).toMatchObject({ verified: true, outcome: "delivered" });
+    });
+
+    it.each([
+      ["a dialog's selected choice behind a side border", ["│ ❯ 1. Yes │"]],
+      ["numbered choices selected by colour only", ["  1. Yes", "  2. No"]],
+      ["a box corner", ["╭──────────────────────╮"]],
+    ])("T1 with %s where the statusLine goes: unconfirmed", async (_name, rows) => {
+      seedCanonicalRig("claude-code");
+      const { result, log } = await run({ frames: frames(rows) }, texts.submit, true);
+      expectOnePasteOneEnter(result, log);
+      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed" });
+    });
+  });
+
   describe("uncertainty from the capture: never a refusal, never a retry", () => {
     const frames = { prePaste: idle, afterPaste: claude("submit-staged.J"), afterEnter: claude("after-enter-0.4s.J") };
 
@@ -994,6 +1029,85 @@ describe("SessionTransport with transport.verify_input_box", () => {
       const result = await transport(tmux, () => { throw new Error("settings unreadable"); }).send(SESSION, texts.submit, { verify: true });
       expectOnePasteOneEnter(result, log);
     });
+  });
+});
+
+describe("transport.draft_delivery through the input-box reader (framed drafts the pane classifier misses)", () => {
+  let db: Database.Database;
+  let rigRepo: RigRepository;
+  let sessionRegistry: SessionRegistry;
+  const SESSION = "dev-impl@my-rig";
+  const DRAFT = "my unfinished thought";
+  // OpenRig's own framed Claude seat with a person's draft in the box (an edit of a real 2.1.296 frame), captured with
+  // styling, so "not faint" is evidence; the cursor sits after the draft, where a person typing leaves it.
+  const framed = (text: string) => {
+    const lines = openRig.staged(text).split("\n");
+    const row = lines.findLastIndex((line) => line.startsWith("❯"));
+    lines[row] = `\x1b[0m${lines[row]}`;
+    return { screen: lines.join("\n"), row };
+  };
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    rigRepo = new RigRepository(db);
+    sessionRegistry = new SessionRegistry(db);
+    const rig = rigRepo.createRig("my-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { role: "worker", runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, SESSION);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: SESSION });
+  });
+  afterEach(() => db.close());
+
+  async function send(screen: string, cursorX: number, row: number, choice: "deliver" | "refuse" | undefined, opts?: { waitForIdleMs?: number }) {
+    const { tmux, log } = phasedTmux({ frames: { prePaste: screen, afterPaste: screen, afterEnter: screen } });
+    const cursorReads = vi.fn(async () => ({ x: cursorX, y: row, width: 120, height: 40 }));
+    (tmux as unknown as { getPaneCursorPosition: typeof cursorReads }).getPaneCursorPosition = cursorReads;
+    const result = await new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, sleep: async () => {},
+      ...(choice ? { deliverOverDraft: () => choice === "deliver" } : {}) }).send(SESSION, "hello team", opts);
+    return { result, log, cursorReads };
+  }
+
+  it("under an explicit refuse, a typed box the classifier misses is refused before any input", async () => {
+    const { screen, row } = framed(DRAFT);
+    const { result, log } = await send(screen, 2 + DRAFT.length, row, "refuse");
+    expect(result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false, inputPhase: "not_reached",
+      activity: { state: "needs_input", reason: "prompt_draft" } });
+    expect(result.error).toContain("transport.draft_delivery is refuse");
+    expect(log.filter((call) => call === "sendText" || call.startsWith("sendKeys"))).toEqual([]);
+  });
+
+  it("with --wait-for-idle under refuse, the refusal reports the draft, not the idle the wait ended on, and keeps the wait's time", async () => {
+    const { screen, row } = framed(DRAFT);
+    const { result, log } = await send(screen, 2 + DRAFT.length, row, "refuse", { waitForIdleMs: 1_000 });
+    expect(result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false,
+      activity: { state: "needs_input", reason: "prompt_draft" }, waitedMs: expect.any(Number), attempts: expect.any(Number) });
+    expect(log.filter((call) => call === "sendText" || call.startsWith("sendKeys"))).toEqual([]);
+  });
+
+  it("under deliver, the same draft is joined and submitted, and the result says so", async () => {
+    const { screen, row } = framed(DRAFT);
+    const { result, log } = await send(screen, 2 + DRAFT.length, row, "deliver");
+    expect(result.ok).toBe(true);
+    expect(log.filter((call) => call === "sendText" || call.startsWith("sendKeys"))).toEqual(["sendText", "sendKeys:Enter"]);
+    expect(result.warning).toContain("transport.draft_delivery is deliver");
+  });
+
+  it("under deliver, an empty box sends as before, with no draft advisory", async () => {
+    const lines = openRig.idle.split("\n");
+    const row = lines.findLastIndex((line) => line.startsWith("❯"));
+    lines[row] = `\x1b[0m${lines[row]}`;
+    const { result, log } = await send(lines.join("\n"), 2, row, "deliver");
+    expect(result.ok).toBe(true);
+    expect(log.filter((call) => call === "sendText" || call.startsWith("sendKeys"))).toEqual(["sendText", "sendKeys:Enter"]);
+    expect(result.warning ?? "").not.toContain("transport.draft_delivery");
+  });
+
+  it("a transport without the setting's reader doesn't read the box, as every other construction keeps today's sends", async () => {
+    const { screen, row } = framed(DRAFT);
+    const { result, cursorReads } = await send(screen, 2 + DRAFT.length, row, undefined);
+    expect(result.ok).toBe(true);
+    expect(cursorReads).not.toHaveBeenCalled();
   });
 });
 

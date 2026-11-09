@@ -58,25 +58,27 @@ export function getOfflineHelpPath(): string | undefined {
 }
 
 /** Whether a command should make its real request: false only when the daemon is confirmed down
- *  (stopped, a stale record, or a refused health probe, meaning nothing is listening), when this
+ *  (stopped, a stale record, or a refused health probe, meaning nothing is listening, including one under a
+ *  pending start, whose `startPending` is set only on a refused probe), when this
  *  machine blocked the health probe, or when a live sibling home suggests the request would reach
  *  another home's daemon. A daemon that is alive but busy (its health check slow, failing or
  *  reporting a starved loop) gets the request, under its normal timeout. */
 export function daemonMayAnswer(status: DaemonStatus): boolean {
   if (status.state === "stopped" || status.state === "stale") return false;
-  if (status.probeErrorCode === "ECONNREFUSED") return false;
+  if (status.probeErrorCode === "ECONNREFUSED" || status.startPending) return false;
   if (status.siblingHint || isBlockedConnectionCode(status.probeErrorCode)) return false;
   return true;
 }
 
 /** Whether `rig up` or `rig start` should start a local daemon. Yes for one confirmed down (stopped, or a
  *  stale record). For an unverified status, as before this check existed, when another home's daemon is
- *  live (an independent home elsewhere, this one's own endpoint possibly free) or the probe was blocked;
+ *  live (an independent home elsewhere, this one's own endpoint possibly free);
  *  preflight and the start's own state and listener checks then decide. Not for an explicit HOME-MOVED
  *  marker, and not for a daemon of this home that is alive but too busy to answer (it gets the request). */
 export function shouldAutoStartDaemon(status: DaemonStatus): boolean {
   if (status.state === "stopped" || status.state === "stale") return true;
   if (status.state !== "unverified") return false;
+  if (isBlockedConnectionCode(status.probeErrorCode)) return !status.explicitRemote && !status.siblingHint?.moved;
   if (status.siblingHint) return !status.siblingHint.moved;
-  return isBlockedConnectionCode(status.probeErrorCode);
+  return false;
 }

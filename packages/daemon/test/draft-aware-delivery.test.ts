@@ -347,6 +347,44 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(f.outbox.getById("wake-intent-" + item.qitemId)!.deliveryState).toBe("delivered");
   });
 
+  // Constructed footer transition: U3 retained no immediate pre-Enter snapshot.
+  // Exercise the real transport/guard path, not just the empty-composer parser.
+  it.each(["✔ Update installed · Restart to update", "✔ Update installed · Restart to apply", "✔ Update installed · /restart to apply"])(
+    "submits one owned paste when its hint shares the footer with %s", async banner => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      const text = "first line\nsecond line\nlast line";
+      vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+        const staged = f.bodies.a === text;
+        const snapshot = frame(staged ? "[Pasted text #1 +2 lines]" : f.bodies.a ?? "");
+        snapshot.screen = snapshot.screen.replace("? for shortcuts\n",
+          staged ? `paste again to expand  ${banner}\n`
+            : `⏵⏵ accept edits on (shift+tab to cycle)\n${banner}\n`);
+        return snapshot;
+      });
+      const result = await f.send("update-banner-paste", text, { verify: false });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+      expect(f.submissions).toEqual([text]);
+      expect(f.bodies.a).toBe("");
+      expect(f.writes.filter(write => write.startsWith("paste:"))).toHaveLength(1);
+      expect(f.writes.filter(write => write.startsWith("keys:"))).toHaveLength(1);
+    });
+
+  it.each(["✔ Update installed · Restart to update now", "Update installed · Restart to update", "✔ Update downloaded · Restart to update"])(
+    "does not submit an owned paste under an unrecognized footer suffix %s", async suffix => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      const text = "first line\nsecond line\nlast line";
+      vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+        const snapshot = frame(f.bodies.a ?? "");
+        snapshot.screen = snapshot.screen.replace("? for shortcuts\n", f.bodies.a === text
+          ? `paste again to expand  ${suffix}\n`
+          : "⏵⏵ accept edits on (shift+tab to cycle)\n");
+        return snapshot;
+      });
+      expect(await f.send("unknown-paste-footer", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+      expect(f.submissions).toEqual([]);
+      expect(f.bodies.a).toBe(text);
+    });
+
   it.each(Array.from({ length: nativePaste.afterSamples }, (_, i) => i + 1))("submits its retained native paste across the footer change (sample %i)", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const text = Array.from({ length: 71 }, (_, i) => `delivery line ${i}`).join("\n");
@@ -430,6 +468,129 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(f.writes).toHaveLength(1);
     expect(f.submissions).toEqual([]);
     expect(f.bodies.a).toBe("incoming message");
+  });
+
+  // #2429: Claude may still be redrawing a fresh paste when the guard reads before Enter; this frame has no composer yet.
+  const redrawing = (): ComposerSnapshot => ({ screen: "Ready\n❯ [Pasted text #1 +2 lines]\n", cursor: { x: 27, y: 1, width: 240, height: 60 }, inMode: false });
+
+  it("re-reads its own paste once when it can't read the input before Enter, then submits it (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    const text = "first line\nsecond line\nlast line";
+    let entering = false, readsBeforeEnter = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text && entering && readsBeforeEnter++ === 0) return redrawing();
+      return body == null ? null : frame(body === text ? "[Pasted text #1 +2 lines]" : body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200) entering = true; };
+    expect(await f.send("redrawn-paste", text, { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(readsBeforeEnter).toBe(2);
+    expect(f.submissions).toEqual([text]);
+  });
+
+  it.each([["its recorded collapsed label", "first line\nsecond line\nlast line"], ["its visible text", "one line"]])(
+    "submits its own unreadable leftover, shown as %s, before the next wake (#2429)", async (_shown, text) => {
+    const f = fixture(); await f.enable();
+    let unreadable = false;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text) return unreadable ? redrawing() : frame(text.includes("\n") ? "[Pasted text #1 +2 lines]" : text);
+      return body == null ? null : frame(body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200 && f.bodies.a === text) unreadable = true; };
+    const first = await f.send("unreadable-paste", text, { verify: false });
+    expect(first).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+    expect(first.error).toContain("Enter was not sent");
+    unreadable = false;
+    expect(await f.send("next-wake", "next work", { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text, "next work"]);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toHaveLength(2);
+    expect(f.bodies.a).toBe("");
+  });
+
+  // A wake whose Enter was refused on an unreadable input, leaving its paste behind.
+  async function leaveOwnPaste(f: ReturnType<typeof fixture>, text: string) {
+    let unreadable = false;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text) return unreadable ? redrawing() : frame(text);
+      return body == null ? null : frame(body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200 && f.bodies.a === text) unreadable = true; };
+    expect(await f.send("unreadable-paste", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+    unreadable = false;
+  }
+
+  it("submits the leftover only after this send's own checks pass: a check that refuses after buffer preparation sends no key (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    let prepared = false;
+    f.hooks.load = () => { prepared = true; };
+    // The caller's own check passes until the send's buffer is prepared, then refuses (as a cancellation would).
+    const next = await f.send("next-wake", "next work", { verify: false, beforeWrite: () => { if (prepared) throw new Error("fixture: the caller went away"); } });
+    expect(next.sent).not.toBe(true);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe("one line");
+  });
+
+  it("submits nothing when this send's own check goes invalid during the re-read before the leftover's Enter, and keeps the record (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    let prepared = false, readsAfterPrepare = 0, valid = true;
+    f.hooks.load = () => { prepared = true; };
+    const capture = vi.mocked(f.tmux.captureComposerSnapshot).getMockImplementation()!;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      // The second read after the buffer is prepared is the re-read after this send's checks passed: the caller goes away then.
+      if (prepared && ++readsAfterPrepare === 2) valid = false;
+      return capture(name);
+    });
+    const next = await f.send("next-wake", "next work", { verify: false, beforeWrite: () => { if (!valid) throw new Error("fixture: the caller went away"); } });
+    expect(next.sent).not.toBe(true);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe("one line");
+    // The record is kept, so a later ordinary wake still submits the leftover first.
+    expect(await f.send("later-wake", "later work", { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["one line", "later work"]);
+  });
+
+  it("a send that needs an idle seat leaves the leftover and is held, so it never types into the turn the leftover would start (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    expect(await f.send("idle-wake", "next work", { verify: false, waitForIdleMs: 60000 })).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe("one line");
+  });
+
+  it("says it submitted the leftover even when its own text then isn't sent (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    // The caller goes away after the leftover's Enter, before this send's own paste.
+    const next = await f.send("next-wake", "next work", { verify: false, beforeWrite: () => { if (f.submissions.length) throw new Error("fixture: the caller went away"); } });
+    expect(next).toMatchObject({ ownPasteSubmitted: true, warning: expect.stringContaining("earlier paste") });
+    expect(next.sent).not.toBe(true);
+    expect(f.submissions).toEqual(["one line"]);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it.each(["a different label", "human input", "an unrecorded label"])("keeps the next wake held when its unreadable leftover isn't provably its own: %s (#2429)", async condition => {
+    const f = fixture(); await f.enable();
+    const text = "first line\nsecond line\nlast line", other = "other first\nother second\nother last";
+    let unreadable = condition === "an unrecorded label";
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text) return unreadable ? redrawing() : frame("[Pasted text #1 +2 lines]");
+      return body == null ? null : frame(body === other ? "[Pasted text #2 +2 lines]" : body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200 && f.bodies.a === text) unreadable = true; };
+    expect(await f.send("unreadable-paste", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+    unreadable = false;
+    // A person attached directly replaces the paste, or types through OpenRig.
+    if (condition === "a different label") f.bodies.a = other;
+    if (condition === "human input") await f.guard.humanInput("worker@test", async () => {});
+    expect(await f.send("next-wake", "next work", { verify: false })).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(f.submissions).toEqual([]);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe(condition === "a different label" ? other : text);
   });
 
   it("tries a current request after the person's draft clears, without replaying a saved prerequisite", async () => {
@@ -799,7 +960,6 @@ describe("supported seat and queue integration", () => {
       { mode: "draft-aware", holdSeconds: 60, reason: "obsolete" }, { mode: "hold" }]) {
       expect((await f.post("/api/seat/set-typing-guard/worker@test", body)).status).toBe(400);
     }
-    expect((await f.post("/api/seat/set-typing-guard/worker@test", { mode: "hold", reason: "draft", actor: "spoof" }, "")).status).toBe(400);
   });
 
   it("hold keeps messages indefinitely while a sibling still receives sends", async () => {
@@ -872,11 +1032,20 @@ describe("deliberate override preserves existing input", () => {
     expect(f.observations).toEqual([]);
   });
 
-  it.each([null, "[Pasted text #4 +18 lines]"])("shows unreadable or collapsed input honestly: %s", async body => {
-    const f = fixture(); f.bodies.a = body;
+  it("stops on a collapsed paste and shows only its label", async () => {
+    const f = fixture(); f.bodies.a = "[Pasted text #4 +18 lines]";
     const result = await f.send("override", "incoming", override);
-    expect(result).toMatchObject({ ok: false, sent: false, existingInput: { classification: body === null ? "unreadable" : "typed_or_pasted", fullContentsVisible: false } });
+    expect(result).toMatchObject({ ok: false, sent: false, existingInput: { classification: "typed_or_pasted", fullContentsVisible: false } });
     expect(f.writes).toEqual([]);
+  });
+
+  it("delivers on unreadable input and reports it as unreadable, never empty", async () => {
+    const f = fixture(); f.bodies.a = null;
+    const result = await f.send("override", "incoming", override);
+    expect(result).toMatchObject({ ok: true, sent: true, existingInput: { classification: "unreadable", fullContentsVisible: false, cleared: false } });
+    expect(result.warning).toContain("Input could not be read and was not cleared; this send may join or submit existing text.");
+    expect(f.writes).toEqual(["paste:a:incoming"]);
+    expect(f.submissions).toEqual([]); // Unreadable input cannot prove the answer staged for Enter.
   });
 
   it.each(["", "typed"])("separates the suggestion from %j and never stores either", async typed => {
@@ -935,5 +1104,55 @@ describe("deliberate override preserves existing input", () => {
     const audit = f.db.prepare("SELECT payload FROM events WHERE type='transport.prompt_override'").get() as { payload: string };
     expect(JSON.parse(audit.payload)).not.toHaveProperty("input");
     expect(f.observations).toEqual([]);
+  });
+});
+
+// #2430 in draft-aware, the mode the issue describes: a seat holds one message per sender, and a draft-aware attempt
+// takes its sender's place only once it settles as held.
+describe("draft-aware at a full held quota (#2430)", () => {
+  const fill = (f: ReturnType<typeof fixture>, sender: string) => {
+    const target = f.guard.target("worker@test");
+    f.outbox.retain({ outboxId: "older", senderSession: sender, destinationSession: "worker@test", body: "older message" }, target);
+    for (let i = 1; i < 100; i++) f.outbox.retain({ outboxId: `filler-${i}`, senderSession: `filler-${i}@test`, destinationSession: "worker@test", body: "held" }, target);
+    expect(f.outbox.retentionUsage("a").count).toBe(100);
+  };
+
+  it("a queue notification is staged when its sender holds a message there, and takes its place when it's held", async () => {
+    // An agent seat: a queue wake is never typed into a terminal seat.
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "unfinished note";
+    fill(f, "sender@test");
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "next work", nudge: false });
+    f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
+    await f.repo.drainPendingWakeIntents();
+
+    const id = `wake-intent-${item.qitemId}`;
+    expect(f.outbox.getById(id)!.deliveryState).toBe("retained");
+    expect(f.outbox.coalescedInto(id)).toEqual(["older"]);
+    expect(f.outbox.getById("older")).toMatchObject({ deliveryState: "retired", body: "older message" });
+    expect(f.outbox.retentionUsage("a").count).toBe(100);
+    expect(f.submissions).toEqual([]);
+  });
+
+  it("a queue notification from a sender that holds nothing there is still refused at a full quota", async () => {
+    const f = fixture(); await f.enable(); f.bodies.a = "unfinished note";
+    fill(f, "sender@test");
+    const item = await f.repo.create({ sourceSession: "newcomer@test", destinationSession: "worker@test", body: "other work", nudge: false });
+    expect(() => f.repo.stageWakeIntent(item.qitemId, "newcomer@test", "worker@test", null, true)).toThrow(/quota/i);
+    expect(f.outbox.getById("older")!.deliveryState).toBe("retained");
+  });
+
+  it("a send that's held takes its sender's place; one that's delivered never absorbs held messages", async () => {
+    const f = fixture(); await f.enable();
+    fill(f, "human@test");
+
+    expect(await f.send("delivered")).toMatchObject({ ok: true, sent: true });
+    expect(f.outbox.getById("older")!.deliveryState).toBe("retained");
+    expect(f.outbox.coalescedInto("delivered")).toEqual([]);
+
+    f.bodies.a = "unfinished note";
+    const held = await f.send("held");
+    expect(held).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(f.outbox.coalescedInto(held.outboxIds![0]!)).toEqual(["older"]);
+    expect(f.outbox.retentionUsage("a").count).toBe(100);
   });
 });

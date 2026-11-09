@@ -8,7 +8,7 @@ applies-when: |
   read it before claiming a stub-agent scenario covers a behaviour.
 siblings: [arteries.md, README.md, codemap.md]
 last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
-last-updated: 2026-10-08
+last-updated: 2026-11-09
 ---
 
 # Test layers: what to run before you push, and what each layer proves
@@ -448,9 +448,12 @@ not as current status.
 
 ## Help wanted: command families without a behavioural scenario
 
-> This list may be stale. It was taken from the `rig --help` tree of 0.6.3: 85 visible
-> top-level families. At `e8f0ab34`, `packages/cli/src/index.ts` registers 87 top-level
-> commands; `roster` and `telemetry` were added since and have no row yet. Before picking one up, check `packages/test-system/scenarios/`, the cases in
+> This list may be stale. The tables below cover the families that have a proposed first
+> check: at `b29a70f14`, the Commander tree returned by `createProgram()`
+> (`packages/cli/src/index.ts`) registers 92 top-level families, 87 of which have a row
+> below (7 of them marked partial); `roster` and `telemetry` now have rows too. These 5
+> families still have no row: `acp`, `community-harness`, `edge`, `environment`, `exec`.
+> Before picking one up, check `packages/test-system/scenarios/`, the cases in
 > `scripts/run-pr-scenarios.sh`, and the current `rig --help`.
 > One scenario doesn't cover a family's every option, sequence or platform. A `--help`
 > check only proves the command is discoverable. Existing unit tests are not counted here.
@@ -522,6 +525,8 @@ Before you start, two honest constraints:
 | reads | `status` | Two rigs in different states. Status matches their exact identities and transitions. |
 | reads | `ps` | Two rigs with overlapping seat names. Rig and node filters return exactly the intended members. |
 | reads | `usage` | Deterministic stub telemetry. top and series respect seat and time bounds. Missing data isn't reported as zero. |
+| reads | `roster` | A scratch workspace with two rigs and a rosters folder: `rig roster find` returns the expected specialists, and an empty folder reports none without an error. |
+| reads | `telemetry` | Deterministic retained-metadata fixtures: one bounded page returns exactly the recorded rows, and a history gap is named rather than skipped silently. |
 | reads | `health` | Known fresh, stale and cleared findings. Scope, explain and diagnosis values match the fixture. |
 | continuity | `snapshot` | Snapshot two seats. Rig, membership and snapshot bytes survive a daemon restart. |
 | continuity | `restore` | Restore after a daemon and tmux reset. Seat identity and nonce answers survive. |
@@ -540,7 +545,7 @@ Before you start, two honest constraints:
 | registry | `host` | add/list/select/rename isolated entries that resolve to fixture endpoints. Pairing needs two container daemons. |
 | coordination | `parked` | An owed item with a stopped worker is reported. A held worker with a live wake is distinguished. |
 | coordination | `stream` | emit/list/show/archive an exact item. A restart and a bounded watch keep the order with no duplicates. |
-| coordination | `queue` | (partial) Next: handoff, block, resolve and unclaim, each with exact items and destinations. |
+| coordination | `queue` | (partial) handoff → successor owned by `--to` and source asserted closed (`handed-off`), block → parked blocked, resolve → unpark to in-progress (owner nudge suppressed), unclaim → pending with destination kept — each with exact items and destinations asserted via `expect queue` (`rig queue list --json --full --all`) in `queue-transitions-reach-exact-states.yaml`; baton restart coverage stays in `queue-baton-survives-restart.yaml`. |
 | coordination | `project` | Acquire a lease, classify one item twice, read one projection. The wrong holder cannot act. |
 | coordination | `view` | Register a view over known items. list/show return the exact filtered result after a mutation. |
 | coordination | `watchdog` | Register one short wake, see one response, stop it, prove no further deliveries. |

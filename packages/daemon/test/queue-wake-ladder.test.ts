@@ -275,6 +275,25 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(calls.some((c) => c.target === "worker@r")).toBe(false);
   });
 
+  it("DELIVERY MACHINERY IS NOT PICKUP: a relay-owner-notification-transport-failed note on an unconfirmed or held baton does not count as pickup evidence", async () => {
+    const mod = await ladderMod();
+    for (const [idx, result] of ["gateway-owned: virtual destination", "retained:typing_guard"].entries()) {
+      const baton = await mkBaton(`worker-${idx}@r`);
+      setNudgeResult(baton.qitemId, result, 45);
+      ageCreated(baton.qitemId, 45);
+      repo.transitionLog.append({
+        qitemId: baton.qitemId,
+        state: "pending",
+        actorSession: "daemon@kernel",
+        transitionNote: `relay-owner-notification-transport-failed notification_key=${baton.qitemId}:1 connector_ref=wa-main class=http-503 error=http 503`,
+      });
+      expect(mod.readWakeLadderBackstop(db, baton.qitemId)).not.toBeNull();
+      await tick();
+      expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX)).toHaveLength(1);
+      expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX)[0]).toMatch(/orchestrator/);
+    }
+  });
+
   // ── G4: F2 — SUSPENSION DERIVES FROM THE SWAP STATE ──────────────────────────
 
   it("SWAP SUSPENDS THE LADDER: a destination inside the post-swap grace gets ZERO wake attempts and one recorded suspend marker (the stale-wake-burst specimen)", async () => {
@@ -307,6 +326,31 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(calls).toHaveLength(0);
     expect(markersOf(baton.qitemId, "ladder-suspend:")).toHaveLength(1);
     expect(markersOf(baton.qitemId, "ladder-suspend:")[0]).toMatch(/operator/i); // named as the override
+  });
+
+  it("DECLARED WINDOW PARSES EXTERNAL DESTINATIONS: a colon in the session does not disable the override", async () => {
+    const baton = await mkBaton("slack:U123@external");
+    setNudgeResult(baton.qitemId, "failed:tmux session not found", 60);
+    process.env.OPENRIG_WAKE_SUSPEND = `slack:U123@external:${new Date(Date.now() + 3600_000).toISOString()}`;
+    await tick();
+    expect(calls).toHaveLength(0);
+    expect(markersOf(baton.qitemId, "ladder-suspend:")).toHaveLength(1);
+  });
+
+  // Any form Date.parse reads keeps suspending: `date -u '+%Y-%m-%d %H:%M'` prints the space form. (A comma can't
+  // appear: entries are comma-separated, so the textual form drops toUTCString's weekday.)
+  it.each([
+    ["the space form", "worker@r", (d: Date) => d.toISOString().replace("T", " ")],
+    ["the space form", "slack:U123@external", (d: Date) => d.toISOString().replace("T", " ")],
+    ["a textual date", "worker@r", (d: Date) => d.toUTCString().replace(/^\w+, /, "")],
+    ["a textual date", "slack:U123@external", (d: Date) => d.toUTCString().replace(/^\w+, /, "")],
+  ])("DECLARED WINDOW KEEPS EVERY DATE FORM Date.parse reads: %s suspends %s", async (_form, destination, format) => {
+    const baton = await mkBaton(destination);
+    setNudgeResult(baton.qitemId, "failed:tmux session not found", 60);
+    process.env.OPENRIG_WAKE_SUSPEND = `${destination}:${format(new Date(Date.now() + 3600_000))}`;
+    await tick();
+    expect(calls).toHaveLength(0);
+    expect(markersOf(baton.qitemId, "ladder-suspend:")).toHaveLength(1);
   });
 
   // ── G5: F3 — STORMS AGGREGATE ────────────────────────────────────────────────
@@ -469,7 +513,7 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     const tag = consumed ? `consumed-hop:${baton.qitemId}` : (await ladderMod()).escalationDedupTag(baton.destinationSession);
     const carriers = repo.list({ limit: 500 }).filter(row => row.tags?.includes(tag));
     expect(carriers).toHaveLength(1);
-    expect(carriers[0]).toMatchObject({ sourceSession: staleSource, destinationSession: baton.destinationSession });
+    expect(carriers[0]).toMatchObject({ sourceSession: "daemon@kernel", destinationSession: baton.destinationSession });
     await tick(overrides);
     expect(posted).toEqual([baton.qitemId]);
   });
@@ -480,6 +524,62 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     await tick({ resolveOrchestrator: () => null, deliveryEngine: recordingEngine(posted) });
     expect(posted).toEqual([baton.qitemId]);
     expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX).some((r) => /dispatched-to-engine/.test(r))).toBe(true);
+  });
+
+  it("OPERATOR RUNG RELAY RECEIPT: pending dispatch resolves on matching post-marker relay-owner-notification-accepted", async () => {
+    const baton = await exhaustToSelfSkip();
+    const notificationKey = "notif-key-123";
+    let dispatchCount = 0;
+    const pendingEngine = {
+      dispatchEscalation: async (row: QueueItem) => {
+        dispatchCount++;
+        return { decision: "post", resolved: false, dispatched: true, notificationKey };
+      },
+    };
+
+    // Pre-marker receipt in history (simulates receipt from a previous episode before dispatch):
+    // Must NOT resolve the upcoming dispatch.
+    repo.transitionLog.append({
+      qitemId: baton.qitemId,
+      state: "pending",
+      actorSession: "daemon@kernel",
+      transitionNote: `relay-owner-notification-accepted notification_key=${notificationKey} delivery_id=d-pre`,
+    });
+
+    // 1. Initial tick with pending deliveryEngine outcome (resolved: false).
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: pendingEngine });
+    expect(dispatchCount).toBe(1);
+    expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX).some((r) => /dispatched-to-engine.*notification_key=notif-key-123/.test(r))).toBe(true);
+    // Pre-marker matching receipt did not resolve it; ladder not exhausted yet, underlying baton remains pending.
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(0);
+    expect(repo.getById(baton.qitemId)!.state).toBe("pending");
+
+    // 2. Wrong key post-marker relay receipt -> no resolution.
+    repo.transitionLog.append({
+      qitemId: baton.qitemId,
+      state: "pending",
+      actorSession: "daemon@kernel",
+      transitionNote: "relay-owner-notification-accepted notification_key=wrong-key delivery_id=d-1",
+    });
+    ageMarkers(baton.qitemId, 30);
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: pendingEngine });
+    expect(dispatchCount).toBe(1); // No second dispatch/resume!
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(0);
+
+    // 3. Matching post-marker relay receipt -> exhausts operator rung without second dispatch and without closing pending work.
+    repo.transitionLog.append({
+      qitemId: baton.qitemId,
+      state: "pending",
+      actorSession: "daemon@kernel",
+      transitionNote: `relay-owner-notification-accepted notification_key=${notificationKey} delivery_id=d-2`,
+    });
+    ageMarkers(baton.qitemId, 30);
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: pendingEngine });
+    expect(dispatchCount).toBe(1); // Exactly-once dispatch preserved
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(1);
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)[0]).toContain("engine outcome resolved");
+    // Underlying blocked/pending work is NOT closed/cancelled
+    expect(repo.getById(baton.qitemId)!.state).toBe("pending");
   });
 
   it("HUMAN RUNG EXPLICIT-ONLY: an agent-to-agent baton ends at the escalation row and nothing is posted to a person", async () => {

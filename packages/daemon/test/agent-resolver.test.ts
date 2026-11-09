@@ -41,6 +41,17 @@ describe("AgentSpec source resolver + import resolver", () => {
     }
   });
 
+  it("carries the spec's validation advisories on the resolved spec, and none when it has none", () => {
+    const fs = mockFs({
+      "/project/rigs/my-rig/agents/impl/agent.yaml": `name: impl\nversion: "1.0.0"\ndefaults:\n  effort: 3\nresources:\n  skills: []\nprofiles: {}`,
+      "/project/rigs/my-rig/agents/plain/agent.yaml": validAgentYaml(),
+    });
+    const advised = resolveAgentRef("local:agents/impl", RIG_ROOT, fs);
+    expect(advised.ok && advised.resolved.advisories).toEqual(['defaults.effort: non-string value "3" ignored; effort must be a text value']);
+    const plain = resolveAgentRef("local:agents/plain", RIG_ROOT, fs);
+    expect(plain.ok && "advisories" in plain.resolved).toBe(false);
+  });
+
   // T2: path: ref resolves as absolute path
   it("path: ref resolves as absolute path", () => {
     const fs = mockFs({

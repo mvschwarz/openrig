@@ -3,6 +3,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { defaultTmuxFileOps, isStagedSendScriptPath } from "../src/adapters/tmux.js";
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import type Database from "better-sqlite3";
@@ -19,6 +21,7 @@ import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-
 import { accountLineNames, accountTextMark, defaultInPlaceRestartIo, linesAfterAnchor, parseEffectiveSettings, procCmdlineArgv, shellWords } from "../src/domain/seat-restart-in-place.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { CodexThreadIdResolver, type CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
+import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 
 // No test here may read a real Codex home: the fake io answers every native-thread read. The real resolver is watched for
 // the whole file, and any call fails the test that made it.
@@ -80,13 +83,29 @@ interface WorldOptions {
   holdFails?: "write" | "readback";
   /** The pane disappears when its process is signalled, and tmux doesn't report it dead (review-r2's case). */
   paneVanishes?: boolean;
+  /** Persisted nodes.launch_wrapper selection for the seat. */
+  launchWrapper?: string[];
+  /** Build the resume command through the production CodexRuntimeAdapter (and SeatLaunchEnvironment when "env"). */
+  realResumeBuilder?: "env" | "without_env";
+  /** Executables placed on the daemon launch PATH when realResumeBuilder === "env". */
+  wrapperEnvBins?: string[];
+  /** Shell-backed root shell process name (default "bash"). */
+  rootShell?: string;
+  /** tmux default-shell returned by getDefaultShell() (default "/bin/bash"; "omitted" removes the method). */
+  defaultShell?: string | null | "omitted";
+  /** Initial foreground command returned by getPaneCommand before stop (default "codex"). */
+  paneCommandBefore?: string;
 }
 
 const dbs: Database.Database[] = [];
-afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
+const tmpDirs: string[] = [];
+afterEach(() => {
+  for (const db of dbs.splice(0)) db.close();
+  for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
-function shellRow(pid: number, tpgid: number): NativeProcessRow {
-  return { pid, ppid: 1, pgid: pid, tpgid, executableName: "bash", command: "-bash", startedAt: LSTART };
+function shellRow(pid: number, tpgid: number, shell = "bash"): NativeProcessRow {
+  return { pid, ppid: 1, pgid: pid, tpgid, executableName: shell, command: `-${shell}`, startedAt: LSTART };
 }
 function codexRow(pid: number, ppid: number, args: string, startedAt = LSTART, pgid = pid, argv?: string[]): NativeProcessRow {
   return { pid, ppid, pgid, tpgid: pgid, executableName: "codex", command: `/usr/local/bin/codex ${args}`,
@@ -104,7 +123,12 @@ function world(options: WorldOptions = {}) {
   const sessionRegistry = new SessionRegistry(db);
   const eventBus = new EventBus(db);
   const rig = rigRepo.createRig("r");
-  const node = rigRepo.addNode(rig.id, "dev.codex", { runtime: "codex", cwd: "/work", ...(options.savedModel !== null ? { model: options.savedModel ?? "gpt-5.5" } : {}) });
+  const node = rigRepo.addNode(rig.id, "dev.codex", {
+    runtime: "codex",
+    cwd: "/work",
+    ...(options.savedModel !== null ? { model: options.savedModel ?? "gpt-5.5" } : {}),
+    ...(options.launchWrapper ? { launchWrapper: options.launchWrapper } : {}),
+  });
   if (options.savedEffort?.authored) rigRepo.setNodeEffort(node.id, options.savedEffort.authored);
   if (options.savedEffort?.choice) rigRepo.setNodeEffortChoice(node.id, options.savedEffort.choice);
   const session = sessionRegistry.registerSession(node.id, SEAT);
@@ -112,14 +136,16 @@ function world(options: WorldOptions = {}) {
   sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: SEAT, tmuxPane: "%1" });
   sessionRegistry.updateResumeToken(session.id, "codex_id", TOKEN, "scrape");
 
-  const runningArgs = options.runningArgs ?? `-m gpt-5.5 -s workspace-write resume ${TOKEN}`;
+  const rootShell = options.rootShell ?? "bash";
+  const runningArgs = options.runningArgs
+    ?? `-m gpt-5.5 -s workspace-write${options.realResumeBuilder ? " -c check_for_update_on_startup=false" : ""} resume ${TOKEN}`;
   let rows: NativeProcessRow[] = shape === "shell_backed"
     ? options.between
-      ? [shellRow(100, 150), { pid: 150, ppid: 100, pgid: 150, tpgid: 150, executableName: options.betweenName ?? options.between.split(" ")[0]!.split("/").pop()!, command: options.between, startedAt: LSTART },
+      ? [shellRow(100, 150, rootShell), { pid: 150, ppid: 100, pgid: 150, tpgid: 150, executableName: options.betweenName ?? options.between.split(" ")[0]!.split("/").pop()!, command: options.between, startedAt: LSTART },
         codexRow(200, 150, runningArgs, LSTART, 150, options.runningArgv)]
-      : [shellRow(100, 200), codexRow(200, 100, runningArgs, LSTART, 200, options.runningArgv)]
+      : [shellRow(100, 200, rootShell), codexRow(200, 100, runningArgs, LSTART, 200, options.runningArgv)]
     : [codexRow(100, 1, runningArgs, LSTART, 100, options.runningArgv)];
-  let paneCommand = "codex";
+  let paneCommand = options.paneCommandBefore ?? "codex";
   let dead = false;
   let paneGone = false;
   let remainOnExit: string | null = options.remainOnExit === "unreadable" ? null : options.remainOnExit ?? null;
@@ -137,7 +163,7 @@ function world(options: WorldOptions = {}) {
     const replacement = shape === "shell_backed"
       ? codexRow(300, 100, runningArgs, startedAt, 300, options.runningArgv)
       : codexRow(300, 1, runningArgs, startedAt, 300, options.runningArgv);
-    rows = shape === "shell_backed" ? [shellRow(100, 300), replacement] : [replacement];
+    rows = shape === "shell_backed" ? [shellRow(100, 300, rootShell), replacement] : [replacement];
     relaunched = true;
     paneCommand = "codex";
     dead = false;
@@ -148,12 +174,20 @@ function world(options: WorldOptions = {}) {
     listPanes: async () => (paneGone ? [] : [{ id: "%1", index: 0, cwd: "/work", width: 80, height: 24, active: true }]),
     getPanePid: async () => (shape === "shell_backed" ? 100 : rows[0]?.pid ?? null),
     getPaneCommand: async () => paneCommand,
-    getSessionEnv: async (_s: string, key: string) => (key === "CODEX_HOME" ? HOME : undefined),
+    ...(options.defaultShell === "omitted"
+      ? {}
+      : { getDefaultShell: async () => (options.defaultShell === undefined ? "/bin/bash" : options.defaultShell) }),
+    getSessionEnv: async (_s: string, key: string) =>
+      key === "CODEX_HOME" ? HOME
+      : options.realResumeBuilder === "env" && key === "OPENRIG_NODE_ID" ? node.id
+      : options.realResumeBuilder === "env" && key === "OPENRIG_SESSION_NAME" ? SEAT
+      : options.realResumeBuilder === "env" && key === "OPENRIG_RUNTIME" ? "codex"
+      : undefined,
     signalPid: async (pid: number, signal: string): Promise<TmuxResult> => {
       calls.push(`signalPid ${pid} ${signal}`);
       maybeThrow("signalPid");
       // The launch script ends with Codex, so its sh exits too.
-      if (!options.codexIgnoresSignals) { rows = rows.filter((row) => row.executableName !== "codex" && row.pid !== 150); paneCommand = "bash"; }
+      if (!options.codexIgnoresSignals) { rows = rows.filter((row) => row.executableName !== "codex" && row.pid !== 150); paneCommand = rootShell; }
       return { ok: true };
     },
     signalPaneProcess: async (_pane: string, signal: string): Promise<TmuxResult> => {
@@ -188,11 +222,54 @@ function world(options: WorldOptions = {}) {
   const launches: Array<{ command: string; resumeToken: string }> = [];
   /** The Codex home each resume proof was asked to read. */
   const proofHomes: Array<string | undefined> = [];
-  const builds: Array<{ running?: unknown }> = [];
+  const builds: Array<{ running?: unknown; launchWrapper?: string[]; launchShell?: string }> = [];
+  const wrapperEnv = options.realResumeBuilder === "env"
+    ? (() => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-inplace-wrapper-"));
+        tmpDirs.push(root);
+        const binDir = path.join(root, "bin");
+        const openrigHome = path.join(root, "openrig-home");
+        fs.mkdirSync(binDir, { recursive: true });
+        fs.mkdirSync(openrigHome, { recursive: true });
+        for (const name of options.wrapperEnvBins ?? ["codex", "rig", "mtn"]) {
+          const binPath = path.join(binDir, name);
+          fs.writeFileSync(binPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        }
+        return { binDir, openrigHome };
+      })()
+    : undefined;
+  const seatLaunchEnvironment = wrapperEnv
+    ? new SeatLaunchEnvironment(
+        tmux,
+        { PATH: wrapperEnv.binDir, OPENRIG_HOME: wrapperEnv.openrigHome },
+        "/work",
+        path.join(wrapperEnv.binDir, "rig"),
+        HOME,
+      )
+    : undefined;
+  const realBuilder = options.realResumeBuilder
+    ? new CodexRuntimeAdapter({
+        tmux,
+        fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {} },
+        ...(seatLaunchEnvironment ? { seatLaunchEnvironment } : {}),
+      })
+    : null;
   const codex = {
     runtime: "codex",
-    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] } }) {
-      builds.push({ running: opts.running });
+    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] }; launchShell?: string }) {
+      builds.push({
+        running: opts.running,
+        ...(binding.launchWrapper ? { launchWrapper: binding.launchWrapper } : {}),
+        ...(opts.launchShell !== undefined ? { launchShell: opts.launchShell } : {}),
+      });
+      if (realBuilder) {
+        return realBuilder.buildResumeCommand(binding, {
+          name: SEAT,
+          resumeToken: opts.resumeToken,
+          running: opts.running,
+          ...(opts.launchShell !== undefined ? { launchShell: opts.launchShell } : {}),
+        });
+      }
       const running = opts.running;
       const core = `codex${running?.daemonOptOut ? " --no-daemon" : ""}${binding.model ? ` -m '${binding.model}'` : ""}`
         + `${binding.effort ? ` -c 'model_reasoning_effort="${binding.effort}"'` : ""} -s workspace-write`
@@ -258,6 +335,7 @@ function world(options: WorldOptions = {}) {
   const events = () => (db.prepare("SELECT type, payload FROM events WHERE type LIKE 'seat.restart_in_place%' ORDER BY seq").all() as Array<{ type: string; payload: string }>)
     .map((row) => ({ type: row.type, ...JSON.parse(row.payload) }));
   return { db, service, node, session, calls, launches, proofHomes, builds, events, sessionRegistry, tmux,
+    wrapperBinDir: wrapperEnv?.binDir,
     replacementYields, get replacementReads() { return replacementReads; }, get relaunched() { return relaunched; },
     setRows: (next: NativeProcessRow[]) => { rows = next; },
     print: (text: string) => { paneLines.push(...text.split("\n").filter(Boolean)); },
@@ -503,7 +581,39 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
   it("refuses a pane that is neither a shell running Codex nor Codex itself", async () => {
     const w = world();
     w.setRows([{ ...shellRow(100, 200), executableName: "python3", command: "python3 wrapper.py" }, codexRow(200, 100, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`)]);
-    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "pane_shape_unknown" });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "pane_shape_unknown",
+      detail: { panePid: 100, processChain: [{ pid: 200, ppid: 100, name: "codex" }, { pid: 100, ppid: 1, name: "python3" }] } });
+  });
+
+  it.each([true, false])("reports only process names and parent links for an unrecognized wrapper (plan: %s)", async plan => {
+    const w = world({ between: "/usr/bin/python3 /private/project/wrapper.py --token private-wrapper-token" });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, plan, reason: "refresh hooks" });
+    expect(result).toMatchObject({ ok: false, code: "pane_shape_unknown", guidance: expect.stringContaining("--plan --json") });
+    expect((result as { detail: unknown }).detail).toEqual({ panePid: 100, processChain: [
+      { pid: 200, ppid: 150, name: "codex" },
+      { pid: 150, ppid: 100, name: "python3" },
+      { pid: 100, ppid: 1, name: "bash" },
+    ] });
+    expect(JSON.stringify(result)).not.toMatch(/private-wrapper-token|\/private\/project|019a0000/);
+    expect(w.calls).toEqual([]);
+    expect(w.builds).toEqual([]);
+    expect(w.events()).toEqual([]);
+  });
+
+  it("leaves an unavailable process name unknown rather than deriving it from command arguments", async () => {
+    const w = world();
+    w.setRows([shellRow(100, 150),
+      { pid: 150, ppid: 100, pgid: 150, tpgid: 150, command: "/private/wrapper --token private-wrapper-token", startedAt: LSTART },
+      codexRow(200, 150, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`, LSTART, 150)]);
+    const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(result).toMatchObject({ ok: false, code: "pane_shape_unknown" });
+    expect((result as { detail: unknown }).detail).toEqual({ panePid: 100, processChain: [
+      { pid: 200, ppid: 150, name: "codex" },
+      { pid: 150, ppid: 100, name: null },
+      { pid: 100, ppid: 1, name: "bash" },
+    ] });
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(w.calls).toEqual([]);
   });
 
   it("refuses while an earlier restart has no recorded result, and a request that waited behind another", async () => {
@@ -524,7 +634,25 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "not_codex" });
     w.db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(w.node.id);
     w.db.prepare("UPDATE sessions SET origin = 'claimed' WHERE id = ?").run(w.session.id);
-    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "claimed_session" });
+    const claimed = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(claimed).toMatchObject({ ok: false, code: "claimed_session" });
+    // B5: the refusal names rig down and rig unclaim, not only rig unclaim.
+    expect((claimed as { guidance?: string }).guidance).toMatch(/run rig down '[^']+' \(.*\)\. To release it from OpenRig and leave its process running, run rig unclaim '/);
+  });
+
+  it("names a seat handed over before 0.7.9 instead of pointing at rig unclaim", async () => {
+    const w = world();
+    w.db.prepare("UPDATE sessions SET origin = 'claimed' WHERE id = ?").run(w.session.id);
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true }))
+      .toMatchObject({ ok: false, code: "claimed_session", guidance: expect.stringContaining("rig unclaim") });
+    w.db.prepare("UPDATE nodes SET continuity_outcome = 'rebuilt', handover_result = 'complete', handover_at = ? WHERE id = ?")
+      .run("2026-11-01T10:00:00.000Z", w.node.id);
+    const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(result).toMatchObject({ ok: false, code: "claimed_session",
+      guidance: "It keeps that origin until its next launched handover or managed launch." });
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.message).toContain("last handover (rebuilt at 2026-11-01T10:00:00.000Z)");
+    expect(result.message).toContain("in-place restart refuses it");
   });
 });
 
@@ -981,7 +1109,13 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
   it("passes the running argv's network override, --no-daemon and add-dirs to the relaunch", async () => {
     const w = world({ runningArgs: `--no-daemon -m gpt-5.5 -s workspace-write -c sandbox_workspace_write.network_access=true resume --add-dir /shared/state ${TOKEN}` });
     await w.service.restartInPlace({ seatRef: SEAT, plan: true });
-    expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, addDirs: ["/shared/state"] } }]);
+    expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, nonLoginShell: false, addDirs: ["/shared/state"] } }]);
+  });
+
+  it("reads the running Codex's non-login shell choice, so the relaunch keeps it", async () => {
+    const w = world({ runningArgs: `-s workspace-write -c allow_login_shell=false resume ${TOKEN}` });
+    await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(w.builds).toEqual([{ running: { networkOverride: false, daemonOptOut: false, nonLoginShell: true, addDirs: [] } }]);
   });
 
   it("an --add-dir holding a space survives whole: the relaunch reads the exact argv, not ps's whitespace split", async () => {
@@ -989,7 +1123,7 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
     const argv = ["/usr/local/bin/codex", "-m", "gpt-5.5", "-s", "workspace-write", "resume", TOKEN, "--add-dir", "/home/u/my repo/.git"];
     const w = world({ runningArgs: argv.slice(1).join(" "), runningArgv: argv, facts: { 200: facts({ argv }) } });
     await w.service.restartInPlace({ seatRef: SEAT, plan: true });
-    expect(w.builds).toEqual([{ running: { networkOverride: false, daemonOptOut: false, addDirs: ["/home/u/my repo/.git"] } }]);
+    expect(w.builds).toEqual([{ running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: ["/home/u/my repo/.git"] } }]);
   });
 
   it("does not plan a restart when the saved token occurs only inside an argv option value", async () => {
@@ -1034,7 +1168,7 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
     });
     const binding = { id: "", nodeId: "n", attachmentType: "tmux", tmuxSession: SEAT, tmuxWindow: null, tmuxPane: "%1",
       cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/work", codexConfigProfile: "prof", teamPermissionDefault: true } as NodeBinding;
-    const built = await adapter.buildResumeCommand(binding, { name: SEAT, resumeToken: TOKEN, running: { networkOverride: false, daemonOptOut: true, addDirs: ["/a b"] } });
+    const built = await adapter.buildResumeCommand(binding, { name: SEAT, resumeToken: TOKEN, running: { networkOverride: false, daemonOptOut: true, nonLoginShell: false, addDirs: ["/a b"] } });
     expect(probes).toEqual([]);
     expect(built).toMatchObject({ ok: true, core: expect.stringContaining("--no-daemon") });
     if (built.ok) {
@@ -1073,7 +1207,7 @@ describe("#1196 round 2: the shell branch keeps the running settings (F1)", () =
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
     expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", paneShape: "shell_backed" });
     // Built once, before anything stopped; nothing is prepared again after Codex exits.
-    expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, addDirs: ["/shared/one", "/shared/two"] } }]);
+    expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, nonLoginShell: false, addDirs: ["/shared/one", "/shared/two"] } }]);
     expect(w.launches).toHaveLength(1);
     const typed = shellWords(w.launches[0]!.command);
     expect(typed).toContain("--no-daemon");
@@ -1447,5 +1581,225 @@ describe("post-relaunch identity observation window", () => {
     expect(w.replacementReads).toBe(2);
     expect(w.events()).toHaveLength(2);
     expect(w.launches).toHaveLength(1);
+  });
+});
+
+describe("rig seat restart-in-place: launch_wrapper forwarding (#2328 B1)", () => {
+  it.each([
+    ["shell_backed", "codex", "bash"],
+    ["shell_backed", "node", "zsh"],
+    ["direct_native", "codex", "/usr/bin/zsh"],
+    ["direct_native", "node", "/bin/bash"],
+  ] as const)(
+    "%s (foreground=%s, shell=%s): forwards persisted launch_wrapper and launchShell to buildResumeCommand and retains the quoted wrapper prefix before the Codex entry while preserving model, effort, identity, settings and history validation",
+    async (shape, foreground, configuredShell) => {
+      const wrapper = ["mtn", "sandbox", "--profile=dev team", "--"];
+      const rollout = JSON.stringify({ timestamp: "2099-01-01T00:00:00Z", type: "response_item", payload: { type: "function_call_output" } });
+      const w = world({
+        shape,
+        paneCommandBefore: foreground,
+        ...(shape === "shell_backed" ? { rootShell: configuredShell } : { remainOnExit: null, defaultShell: configuredShell }),
+        launchWrapper: wrapper,
+        realResumeBuilder: "env",
+        savedEffort: { authored: "medium", choice: "high" },
+        runningArgs: `--no-daemon -m gpt-5.5 -c model_reasoning_effort="medium" -s workspace-write -c check_for_update_on_startup=false resume --add-dir /shared/one ${TOKEN}`,
+        screenBefore: "  Account:  old@example.com (Pro)",
+        rollout,
+      });
+
+      expect(await w.tmux.getPaneCommand(SEAT)).toBe(foreground);
+
+      const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+      expect(plan).toMatchObject({
+        ok: true,
+        planOnly: true,
+        paneShape: shape,
+        conversationId: TOKEN,
+        settings: {
+          effective: { model: "gpt-5.5", sandbox: "workspace-write" },
+          saved: { model: "gpt-5.5", effort: "high" },
+          effort: { running: "medium", relaunch: "high", changes: true, source: "seat_choice" },
+        },
+      });
+      expect(w.builds).toEqual([
+        {
+          running: { networkOverride: false, daemonOptOut: true, nonLoginShell: false, addDirs: ["/shared/one"] },
+          launchWrapper: wrapper,
+          launchShell: configuredShell,
+        },
+      ]);
+
+      const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "wrapped account restart" });
+      expect(result).toMatchObject({
+        ok: true,
+        outcome: "restarted_account_unverified",
+        paneShape: shape,
+        oldProcess: { pid: shape === "shell_backed" ? 200 : 100 },
+        newProcess: { pid: 300, startedAt: LATER, sameExecutable: true },
+      });
+      expect(w.builds).toHaveLength(2);
+      expect(w.builds[1]).toEqual({
+        running: { networkOverride: false, daemonOptOut: true, nonLoginShell: false, addDirs: ["/shared/one"] },
+        launchWrapper: wrapper,
+        launchShell: configuredShell,
+      });
+
+      const expectedPrefix = `'${path.join(w.wrapperBinDir!, "mtn")}' 'sandbox' '--profile=dev team' '--' '${path.join(w.wrapperBinDir!, "codex")}'`;
+      const launchedCommand = shape === "shell_backed"
+        ? w.launches[0]!.command
+        : w.calls.find((call) => call.startsWith("respawn "))!.slice("respawn ".length);
+      expect(launchedCommand).toContain(expectedPrefix);
+      expect(launchedCommand).toContain("--no-daemon -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.5' -c 'model_reasoning_effort=\"high\"' resume");
+      expect(launchedCommand).toContain(`'${TOKEN}' --add-dir '/shared/one'`);
+      // The running Codex kept its login shell, so the relaunch does too.
+      expect(launchedCommand).not.toContain("allow_login_shell");
+      if (shape === "shell_backed") {
+        expect(w.calls).toEqual(["signalPid 200 TERM"]);
+        expect(w.launches).toEqual([{ command: launchedCommand, resumeToken: TOKEN }]);
+      } else {
+        expect(w.calls).toEqual([
+          "remain-on-exit on",
+          "remain-on-exit on",
+          "signalPaneProcess TERM",
+          `respawn ${launchedCommand}`,
+          "verifyResumeInPane",
+          "restore remain-on-exit null",
+        ]);
+      }
+
+      // History anchor and post-restart account verification remain intact.
+      expect(await w.service.verifyRestartInPlace({ seatRef: SEAT, expectAccount: "old@example.com" }))
+        .toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
+      w.print("  Account:  new@example.com (Pro)");
+      expect(await w.service.verifyRestartInPlace({ seatRef: SEAT, expectAccount: "new@example.com" }))
+        .toMatchObject({ ok: true, outcome: "moved", accountEvidence: { state: "matched" } });
+    },
+  );
+
+  it("a wrapped restart of a running non-login Codex keeps the non-login setting exactly once after the wrapper", async () => {
+    const wrapper = ["mtn", "sandbox", "--"];
+    const rollout = JSON.stringify({ timestamp: "2099-01-01T00:00:00Z", type: "response_item", payload: { type: "function_call_output" } });
+    // The same running Codex as the cells above, launched with the non-login setting.
+    const w = world({
+      shape: "shell_backed", paneCommandBefore: "codex", rootShell: "bash", launchWrapper: wrapper, realResumeBuilder: "env",
+      savedEffort: { authored: "medium", choice: "high" },
+      runningArgs: `--no-daemon -m gpt-5.5 -c model_reasoning_effort="medium" -s workspace-write -c check_for_update_on_startup=false -c allow_login_shell=false resume --add-dir /shared/one ${TOKEN}`,
+      screenBefore: "  Account:  old@example.com (Pro)",
+      rollout,
+    });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "wrapped non-login restart" })).toMatchObject({ ok: true });
+    expect(w.builds.at(-1)).toMatchObject({ running: { nonLoginShell: true }, launchWrapper: wrapper, launchShell: "bash" });
+    const launchedCommand = w.launches[0]!.command;
+    expect(launchedCommand).toContain(`'${path.join(w.wrapperBinDir!, "mtn")}' 'sandbox' '--' '${path.join(w.wrapperBinDir!, "codex")}'`);
+    expect(launchedCommand.split("allow_login_shell=false").length - 1).toBe(1);
+  });
+
+  it("leaves unconfigured NodeBinding and produced commands unchanged when no launch_wrapper is selected", async () => {
+    const w = world({ realResumeBuilder: "env" });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "unwrapped restart" });
+    expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    expect(w.builds).toEqual([{ running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: [] } }]);
+    expect("launchWrapper" in w.builds[0]!).toBe(false);
+    expect("launchShell" in w.builds[0]!).toBe(false);
+    expect(w.launches[0]!.command).toContain(`'${path.join(w.wrapperBinDir!, "codex")}' -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.5' resume '${TOKEN}'`);
+    expect(w.launches[0]!.command).not.toContain("mtn");
+  });
+
+  it("refuses before stopping or typing when launch_wrapper is selected but SeatLaunchEnvironment is unavailable (never falls back to bare)", async () => {
+    const wrapper = ["mtn", "sandbox", "--"];
+    const w = world({ launchWrapper: wrapper, realResumeBuilder: "without_env" });
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plan).toMatchObject({
+      ok: false,
+      code: "relaunch_unavailable",
+      message: expect.stringContaining("launch_wrapper support unavailable; no agent started."),
+    });
+    const exec = await w.service.restartInPlace({ seatRef: SEAT, reason: "must not unwrap" });
+    expect(exec).toMatchObject({
+      ok: false,
+      code: "relaunch_unavailable",
+      message: expect.stringContaining("launch_wrapper support unavailable; no agent started."),
+    });
+    expect(w.builds).toEqual([
+      { running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
+      { running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
+    ]);
+    expect(w.calls).toEqual([]);
+    expect(w.launches).toEqual([]);
+    expect(w.events()).toEqual([]);
+  });
+
+  it.each([
+    { label: "shell_backed fish root shell", shape: "shell_backed" as const, rootShell: "fish", expectedMsg: "launch_wrapper unavailable; no agent started." },
+    { label: "shell_backed nu root shell", shape: "shell_backed" as const, rootShell: "nu", expectedMsg: "launch_wrapper unavailable; no agent started." },
+    { label: "direct_native fish default-shell", shape: "direct_native" as const, defaultShell: "/usr/bin/fish", expectedMsg: "launch_wrapper unavailable; no agent started." },
+    { label: "direct_native nu default-shell", shape: "direct_native" as const, defaultShell: "/usr/bin/nu", expectedMsg: "launch_wrapper unavailable; no agent started." },
+    { label: "direct_native null default-shell", shape: "direct_native" as const, defaultShell: null, expectedMsg: "The shell that will run the wrapped relaunch could not be determined. Nothing was stopped." },
+    { label: "direct_native missing getDefaultShell capability", shape: "direct_native" as const, defaultShell: "omitted" as const, expectedMsg: "The shell that will run the wrapped relaunch could not be determined. Nothing was stopped." },
+  ])(
+    "refuses before any signal, provider input or event when wrapped execution shell is unsupported or unknown ($label)",
+    async ({ shape, rootShell, defaultShell, expectedMsg }) => {
+      const wrapper = ["mtn", "sandbox", "--"];
+      const w = world({
+        shape,
+        ...(rootShell !== undefined ? { rootShell } : {}),
+        ...(defaultShell !== undefined ? { defaultShell } : {}),
+        launchWrapper: wrapper,
+        realResumeBuilder: "env",
+      });
+      const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+      expect(plan).toMatchObject({
+        ok: false,
+        code: "relaunch_unavailable",
+        message: expect.stringContaining(expectedMsg),
+      });
+      const exec = await w.service.restartInPlace({ seatRef: SEAT, reason: "unsupported shell" });
+      expect(exec).toMatchObject({
+        ok: false,
+        code: "relaunch_unavailable",
+        message: expect.stringContaining(expectedMsg),
+      });
+      expect(w.calls).toEqual([]);
+      expect(w.launches).toEqual([]);
+      expect(w.events()).toEqual([]);
+    },
+  );
+
+  it("fails closed before any signal, provider input or event when the wrapper executable is missing on the daemon launch PATH", async () => {
+    const wrapper = ["missing-wrapper", "sandbox", "--"];
+    const w = world({
+      launchWrapper: wrapper,
+      realResumeBuilder: "env",
+      wrapperEnvBins: ["codex", "rig"],
+    });
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plan).toMatchObject({
+      ok: false,
+      code: "relaunch_unavailable",
+      message: expect.stringContaining("launch_wrapper unavailable; no agent started."),
+    });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "missing wrapper binary" });
+    expect(result).toMatchObject({
+      ok: false,
+      code: "relaunch_unavailable",
+      message: expect.stringContaining("launch_wrapper unavailable; no agent started."),
+    });
+    expect(w.builds).toEqual([
+      { running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
+      { running: { networkOverride: false, daemonOptOut: false, nonLoginShell: false, addDirs: [] }, launchWrapper: wrapper, launchShell: "bash" },
+    ]);
+    expect(w.calls).toEqual([]);
+    expect(w.launches).toEqual([]);
+    expect(w.events()).toEqual([]);
+  });
+
+  it("fails closed on corrupt stored nodes.launch_wrapper before signalling or launching", async () => {
+    const w = world();
+    w.db.prepare("UPDATE nodes SET launch_wrapper = '[]' WHERE id = ?").run(w.node.id);
+    await expect(w.service.restartInPlace({ seatRef: SEAT, plan: true })).rejects.toThrow(/launch_wrapper/);
+    await expect(w.service.restartInPlace({ seatRef: SEAT, reason: "corrupt row" })).rejects.toThrow(/launch_wrapper/);
+    expect(w.calls).toEqual([]);
+    expect(w.launches).toEqual([]);
+    expect(w.events()).toEqual([]);
   });
 });

@@ -55,7 +55,8 @@ together in that home; it needs its own working sign-in and doesn't relocate `~/
 >   - Codex: hooks, workspace trust and team-selected config fragments (including MCP) in the selected
 >     `CODEX_HOME/config.toml`, default `~/.codex/config.toml`. These affect other Codex sessions using that home.
 >   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
->     `.claude/settings.local.json`, plus a status line unless you already have your own.
+>     `.claude/settings.local.json`, plus a status line unless you already have your own. `rig down` takes the hooks
+>     and status line back out once no Claude seat uses that directory.
 >   - Discovery skills go in `~/.claude/skills` and `~/.agents/skills`.
 >   - Each seat's `CLAUDE.md` or `AGENTS.md` gets OpenRig's managed blocks (culture, identity, onboarding). One more
 >     line, pointing an agent at its seat skills, is added only on a yes: saved at setup, or set where the daemon runs
@@ -75,8 +76,17 @@ You need Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude
 Code or Codex account: one is enough, since the kernel operator adapts the
 shipped `starter` team to whichever you have. On Linux, the distribution's own
 Node.js can be older (Ubuntu 24.04's is 18); install a supported version with
-[nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac
-with Apple silicon, use Node.js 22 (see the [compatibility
+[nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource.
+
+For a tarball or manual Node install on Linux, put its bin directory on PATH in
+`~/.profile`, for example `export PATH="/path/to/node/bin:$PATH"`, rather than only
+in an interactive `~/.bashrc`. Bash reads the first of `~/.bash_profile`,
+`~/.bash_login` and `~/.profile`; if one of the first two exists, source `~/.profile`
+there. Other shells use their own login file (for example, zsh's `~/.zprofile`).
+Check `bash -lc 'command -v node rig'`: both paths must appear in the output.
+Use Codex's tool shell for this check if it differs from Bash.
+
+On a Mac with Apple silicon, use Node.js 22 (see the [compatibility
 history](../releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where
 you aren't an administrator, or where Homebrew belongs to another account (its
 `brew install` is refused), install Node.js in your own home folder with
@@ -199,8 +209,9 @@ The same command without `--dry-run`,
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
-`FAILED [n/4] <command or check> (exit <code>)`. Where a provider isn't signed in yet, step 4 ends that way and
-`rig setup` lists each sign-in under "Some steps need attention". If the only remaining failures are provider
+`FAILED [n/4] <command or check> (exit <code>)` for steps 1–3. If step 4 is not ready, it reports
+`INSTALLED, SETUP NOT COMPLETE` and points to the details from `rig setup` above. Follow that output and any Fix, then rerun
+`rig setup`; the CLI does not need reinstalling. If the only remaining failures are provider
 sign-ins, the install steps finished: sign in to each selected provider as below, then continue at
 [Start the kernel](#start-the-kernel-and-check-its-state). To install only what the selected providers need, go step
 by step instead:
@@ -259,6 +270,17 @@ opt in with
 `rig config set terminal.inherit_tmux_environment true`. Setup points out this option
 when it detects custom tmux configuration; it never enables it automatically. The setting
 applies to future launches and successors, not running agents or your personal tmux server.
+
+Managed Codex seats run tool commands in a non-login shell: OpenRig passes Codex
+`-c allow_login_shell=false`. Tool commands inherit the environment their pane's shell set up,
+OpenRig's command folder included, so plain `rig` works however OpenRig was installed.
+Inherited setup isn't re-run for each command. Setup that lives only in login or rc files, such as
+lines in `~/.bashrc` that your login file doesn't source, or a tmux `default-command` that doesn't
+start a login shell, may be missing from tool commands, and so may shell functions and aliases.
+To defer to Codex's own setting instead, run `rig config set launch.codex_login_shell true`. That
+omits OpenRig's override rather than forcing login shells, and a login file that sets `PATH`
+outright can then hide `rig`. It applies at each seat's next launch; a restart in place keeps
+the running choice.
 If the scoped environment cannot be prepared, launch keeps its previous environment and
 reports a warning in fresh launch results and the daemon log. For handovers, check
 that log for this warning. This is not a promise that shell startup cannot add or override values.
@@ -289,6 +311,17 @@ kernel in the background without a project starter. An absent unused provider is
 fine; if both accounts are authenticated, the kernel uses both even when your
 later project uses just one. A request to use only one provider for everything
 is a separate choice.
+
+`/api/kernel/status` retains the chosen template (`rig.yaml`,
+`rig-claude-only.yaml` or `rig-codex-only.yaml`) across daemon restarts and
+recovery, including starts with `--no-kernel`. It reads the rig's latest rig-spec
+bootstrap record, including a partial launch, so an older kernel's recorded
+selection is also available. This is the original selection; the rig's live spec
+describes its current configuration. The saved source must match a template under
+the current installation’s built-in specs directory. A custom project path with
+the same directory suffix, an old source path that can no longer be verified
+(for example, after a Node version change moves the global install), or a kernel
+without bootstrap history reports an unknown variant.
 
 **Started is not ready.** Read the `Kernel:` boot state in `rig status` and the
 individual seat state in `rig ps --nodes --rig kernel`. The view may open while
@@ -482,7 +515,7 @@ different points in the same journey:
 | What you see | Why and what to do next |
 | --- | --- |
 | Codex offers to switch to a cheaper model near a rate limit | This is Codex's own menu. Ask the person to choose in the seat's terminal; do not silently change the team's configured model. OpenRig disables Codex's startup update check for managed launches, but does not answer this model-choice menu. |
-| A missing Node.js, npm or tmux; an install download or command fails | The named prerequisite or install step did not finish. Read its error and the [platform and provider instructions](#install-and-sign-in), resolve that step, then recheck it. `FAILED [4/4]` with only selected-provider sign-ins outstanding means the package installed but those logins still need the person. |
+| A missing Node.js, npm or tmux; an install download or command fails | The named prerequisite or install step did not finish. Read its error and the [platform and provider instructions](#install-and-sign-in), resolve that step, then recheck it. `INSTALLED, SETUP NOT COMPLETE` means the CLI is installed but setup needs attention; follow its output and any Fix, then rerun `rig setup`. |
 | The installing harness refuses a tool call or asks for permission | Its native rules, sandbox or automatic permission decision apply before OpenRig can run. Claude Code's [auto mode can deny calls](https://code.claude.com/docs/en/auto-mode-config) as well as approve them. Show the specific refusal and ask the person to review it in the harness permission controls or run that named step themselves. Keep their chosen restrictions; a refused call does not prove the OpenRig command failed. |
 | Herdr or Ghostty installation is unavailable or declined | Herdr is optional for the view: `--window` uses plain tmux when Herdr is absent, and its install failure is a warning. On macOS, Terminal.app is the fallback when supported Ghostty is absent. An explicitly requested Ghostty install can fail setup; resolve that install or decline it with `--no-ghostty`, preserving earlier choices. Address separate required-tool or login failures. Existing cmux remains supported. |
 | macOS asks for Automation access, or the window action is denied | The command asks the desktop terminal app to open a new surface. Let the person answer the system prompt. Read the error and inspect any new window before retrying an uncertain action; do not silently switch apps and open a duplicate. |
@@ -783,6 +816,19 @@ option, the seat's agent spec for the target runtime, or the runtime's own
 default), what is cleared, and the costs below. Nothing changes until you run it
 without `--dry-run`.
 
+Use `--runtime pi` to move a Claude Code or Codex seat to Pi; use `--runtime
+claude-code` or `--runtime codex` to move back. Pi uses a fresh managed state
+directory. Select a prepared Pi account with `--account-home /absolute/path`
+(the directory must contain readable `auth.json`), or use the target's configured
+login. A source account override or Claude token is cleared only at commit;
+credentials are never converted between runtimes. Pi-to-Pi account changes keep
+Pi settings, but cross-runtime switches resolve settings afresh for the target.
+
+A configured `launch_wrapper` carries across runtime switches among Pi, Codex
+and Claude Code. It must support each successor executable and preserve that
+runtime's credential environment. A wrapped Pi seat cannot switch to Claude
+Code; set `launch_wrapper: []` in the authored spec and re-apply it first.
+
 The new runtime takes over before the old one stops. Its successor starts beside
 the current occupant, reads a handover (the seat's recap, its open rows and the
 predecessor's screen), and confirms it with `rig seat set-runtime <seat>
@@ -814,7 +860,7 @@ What it costs:
   again afterwards to reach whoever holds the seat.
 - **Leftover files after a failed switch.** The target runtime's prepared seat
   storage and projections can remain.
-- **Codex and Claude Code, single-pane seats.** Startup slash commands aren't
+- **Codex, Claude Code and Pi, single-pane seats.** Startup slash commands aren't
   run by a switch; the dry run lists them.
 
 ## Stop your teams
@@ -849,6 +895,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | --- | --- |
 | Tool missing or login fails | Use the specific setup/auth hint; recheck that executable in the launch shell. Do not send work to an unready seat. |
 | "Startup attention" or "Startup details" names a prompt | Answer the login, trust or bypass prompt in that seat's terminal, then run the `rig seat continue <seat>` it shows. |
+| A restored seat still counts as needing attention after its prompt was answered | Its restore outcome is still `attention_required`, and answering the prompt or running `rig seat continue` doesn't change it. Once the agent is up in its pane, run `rig seat clear-attention <seat>`; see [After a restored seat's prompt](agent-startup-guide.md#after-a-restored-seats-prompt). |
 | "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
 | "Claude resume did not finish within Ns; Claude may still be starting, so the launch was kept" | A restored Claude seat was not interactive when the wait ended. Its pane and resume token are kept. Look at the pane; once Claude is up, run `rig seat clear-attention <seat>`. The wait is about `runtime.readiness_timeout_seconds` in total for each seat (default 30 s), counting the first 3.2 s, and the time adds up seat by seat in a restore. Raising the setting for slow fresh launches lengthens it. If `rig up` or `rig launch` times out at 120 s, that is not a rollback: check `rig ps` before running it again. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |
@@ -1128,8 +1175,15 @@ rig up ./openrig-specs/rigs/launch/starter/rig.yaml --cwd .
 
 OpenRig's `permission_policy: builtin:yolo` setting selects
 `-s danger-full-access -a never` on fresh, resume and fork launches, replacing
-the named-profile argument. The profile recipe above remains useful when you
-want to maintain those choices in native configuration. The legacy
+the named-profile argument. That drops the whole profile, not only its sandbox
+and approval settings. To keep a named profile with full access, put full access
+in the profile itself and leave `permission_policy` absent, as in the recipe
+above. To keep it with a workspace-write or read-only posture that OpenRig
+records, use the member's `codex_permissions` (see
+[per-member Codex permissions](rig-spec.md#per-member-codex-permissions)):
+OpenRig passes `-p` and adds that envelope's flags, and for that seat the
+envelope replaces a policy posture such as `builtin:yolo`. Full access isn't an
+envelope. The legacy
 environment-only `OPENRIG_YOLO=1` path remains sandbox-only when no resolved
 policy is present. A standalone `codex --yolo` command is not an OpenRig setting.
 At full access, Codex can show its full-access and GPT-5.1 migration notices at

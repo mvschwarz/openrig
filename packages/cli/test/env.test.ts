@@ -47,12 +47,14 @@ describe("rig env", () => {
   let probeStatus = "fresh";
   let probeError: string | undefined;
   let kept: string | undefined;
+  const requests: string[] = [];
 
   const rigSummary = [{ id: "rig-1", name: "my-rig", nodeCount: 2 }];
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       const url = req.url ?? "";
+      requests.push(`${req.method} ${url}`);
       let body = "";
       req.on("data", (chunk: Buffer) => { body += chunk; });
       req.on("end", () => {
@@ -199,6 +201,28 @@ describe("rig env", () => {
     });
 
     expect(logs.join("\n")).toContain("Services stopped");
+  });
+
+  it.each(["status", "logs", "down"])("env %s refuses an ambiguous name before contacting services", async (action) => {
+    rigSummary.push({ id: "rig-2", name: "my-rig", nodeCount: 0 });
+    requests.length = 0;
+    try {
+      const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "env", action, "my-rig"]).then(() => {}));
+      expect(exitCode).toBe(1);
+      expect(logs.join("\n")).toContain("'my-rig' matches 2 rigs");
+      expect(requests.filter((request) => request.includes("/env"))).toEqual([]);
+    } finally { rigSummary.pop(); }
+  });
+
+  it("prefers an exact ID over another rig's matching name", async () => {
+    rigSummary.unshift({ id: "rig-2", name: "rig-1", nodeCount: 0 });
+    requests.length = 0;
+    try {
+      const { exitCode } = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "env", "down", "rig-1"]).then(() => {}));
+      expect(exitCode).toBeUndefined();
+      expect(requests).toContain("POST /api/rigs/rig-1/env/down");
+      expect(requests).not.toContain("POST /api/rigs/rig-2/env/down");
+    } finally { rigSummary.shift(); }
   });
 
   it("env down explains an archived predecessor's retained project", async () => {

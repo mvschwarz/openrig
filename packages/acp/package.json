@@ -1,0 +1,38 @@
+{
+  "name": "@openrig/acp",
+  "version": "0.7.1",
+  "description": "OpenRig as an agent in ACP apps: starts rig acp serve from the @openrig/cli it pins.",
+  "type": "module",
+  "bin": {
+    "openrig-acp": "bin/openrig-acp.js"
+  },
+  "files": [
+    "bin",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@openrig/cli": "0.7.1"
+  },
+  "license": "Apache-2.0",
+  "author": {
+    "name": "mvschwarz",
+    "url": "https://esoteric.run"
+  },
+  "homepage": "https://openrig.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mvschwarz/openrig",
+    "directory": "packages/acp"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "acp",
+    "agent-client-protocol",
+    "openrig"
+  ]
+}

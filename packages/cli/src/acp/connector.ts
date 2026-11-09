@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { JsonRpcRequestError, JsonRpcTransportClosed, StdioJsonRpcPeer } from "./json-rpc-stdio.js";
+import { JsonRpcRequestError, JsonRpcTransportClosed, StdioJsonRpcPeer, type JsonRpcErrorObject } from "./json-rpc-stdio.js";
 import { findRunProcesses, RUN_MARKER } from "./run-processes.js";
 
 // `rig acp run`: one queue row's task to one ACP agent turn, with the outcome back on that row. OpenRig carries the
@@ -48,10 +48,22 @@ export interface AcpRunOptions {
   detachRequested?: Promise<void>;
   /** How long to wait for the agent to exit after its stdin closes (default 5 s). */
   exitWaitMs?: number;
+  /** A harness's own evidence that a `session/load` error means that session doesn't exist. Without it, or when it
+   *  doesn't match, the load error reads `failed` with the agent's code and message: no code means missing by itself. */
+  missingSession?: (error: JsonRpcErrorObject, sessionId: string) => boolean;
+  /** Called once with what the stop found: the agent's exit and whether any process carrying the run's marker remains. */
+  onSettled?: (report: string) => void;
 }
 
-export type AcpOutcomeKind = "completed" | "stopped" | "cancelled" | "failed" | "unknown";
-export interface AcpOutcome { kind: AcpOutcomeKind; summary: string; text: string; sessionId?: string }
+export type AcpOutcomeKind = "completed" | "stopped" | "cancelled" | "failed" | "unknown" | "missing";
+/** What the agent itself reported; OpenRig measures none of it. */
+export interface AcpUsage {
+  /** The prompt response's `usage` (an unstable ACP field), as the agent counted it. */
+  tokens?: { total?: number; input?: number; output?: number; thought?: number; cachedRead?: number; cachedWrite?: number };
+  /** The last `usage_update` cost: the agent's own cumulative figure for the whole session, in its unit. */
+  cost?: { amount: number; currency: string };
+}
+export interface AcpOutcome { kind: AcpOutcomeKind; summary: string; text: string; sessionId?: string; usage?: AcpUsage }
 
 /** Agent text that reports a failed turn while still ending it `end_turn` (OpenClaw #178057; its #44294 is open). */
 export const INTERRUPTION_MARKERS = ["[OpenClaw interruption]"];
@@ -87,6 +99,7 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
   let sessionId: string | undefined;
   let text = "";
   let usage: { used?: number; size?: number; cost?: unknown } | undefined;
+  const reported: AcpUsage = {};
   let toolCalls = 0;
   let lastTool = "";
   let lastProgressNote = Date.now();
@@ -104,6 +117,8 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
       progress(`\n[tool] ${lastTool}\n`);
     } else if (update.sessionUpdate === "usage_update") {
       usage = { used: update.used as number, size: update.size as number, cost: update.cost };
+      const cost = update.cost as { amount?: unknown; currency?: unknown } | null | undefined;
+      if (typeof cost?.amount === "number" && typeof cost.currency === "string") reported.cost = { amount: cost.amount, currency: cost.currency };
     }
     if (Date.now() - lastProgressNote >= 60_000) {
       lastProgressNote = Date.now();
@@ -153,10 +168,11 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
 
   const record = async (outcome: AcpOutcome): Promise<AcpOutcome> => {
     const shown = outcome.text.length > NOTE_TEXT_LIMIT ? `${outcome.text.slice(0, NOTE_TEXT_LIMIT)}\n… (truncated; the full transcript is in ${options.logPath})` : outcome.text;
+    const withUsage: AcpOutcome = { ...outcome, usage: { ...reported } };
     await queue.update(row.qitemId, {
-      note: `ACP run ${options.runId} outcome ${outcome.kind}: ${outcome.summary}${shown ? `\n\n${shown}` : ""}\nThis is the agent's report, not a judgment of the work; the row stays open for you to judge and close with your own resolution.`,
+      note: `ACP run ${options.runId} outcome ${outcome.kind}: ${outcome.summary}${shown ? `\n\n${shown}` : ""}\nThis is the agent's report, not a judgment of the work; the row stays open for you to judge and close with your own resolution.\n${describeUsage(withUsage.usage)}`,
     });
-    return outcome;
+    return withUsage;
   };
 
   try {
@@ -166,7 +182,12 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
     const loads = init.agentCapabilities?.loadSession === true;
     if (options.loadSession) {
       if (!loads) return await record({ kind: "failed", summary: `the agent doesn't advertise loadSession, so session ${options.loadSession} wasn't loaded and no new session was started`, text: "" });
-      await peer.request("session/load", { sessionId: options.loadSession, cwd: options.cwd, mcpServers: [] });
+      try {
+        await peer.request("session/load", { sessionId: options.loadSession, cwd: options.cwd, mcpServers: [] });
+      } catch (error) {
+        if (!(error instanceof JsonRpcRequestError) || !options.missingSession?.(error.error, options.loadSession)) throw error;
+        return await record({ kind: "missing", text: "", summary: `session ${options.loadSession} doesn't exist for this agent (session/load returned ${describeError(error.error)}); no new session was started` });
+      }
       sessionId = options.loadSession;
     } else {
       sessionId = (await peer.request("session/new", { cwd: options.cwd, mcpServers: [] }) as { sessionId: string }).sessionId;
@@ -190,13 +211,18 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
       void options.detachRequested?.then(() => { void peer.end(0); reject(new DetachedBeforeTurnEnd()); });
     });
     detached.catch(() => {});
-    const response = await Promise.race([peer.request("session/prompt", { sessionId, prompt: [{ type: "text", text: row.body }] }), detached]) as { stopReason?: string };
+    const response = await Promise.race([peer.request("session/prompt", { sessionId, prompt: [{ type: "text", text: row.body }] }), detached]) as { stopReason?: string; usage?: Record<string, unknown> };
     turnOver = true;
+    const tokens = response.usage;
+    if (tokens && typeof tokens === "object") {
+      const count = (key: string) => (typeof tokens[key] === "number" ? tokens[key] as number : undefined);
+      reported.tokens = { total: count("totalTokens"), input: count("inputTokens"), output: count("outputTokens"), thought: count("thoughtTokens"), cachedRead: count("cachedReadTokens"), cachedWrite: count("cachedWriteTokens") };
+    }
     return await record(classify(response.stopReason, text, usage, cancelRequestedAt, sessionId));
   } catch (error) {
     turnOver = true;
     if (error instanceof JsonRpcRequestError) {
-      return await record({ kind: "failed", sessionId, text, summary: `${error.method} returned error ${error.error.code} ${error.error.message}${error.error.data === undefined ? "" : ` ${JSON.stringify(error.error.data)}`}` });
+      return await record({ kind: "failed", sessionId, text, summary: `${error.method} returned error ${describeError(error.error)}` });
     }
     if (error instanceof DetachedBeforeTurnEnd) {
       return await record({ kind: "unknown", sessionId, text, summary: "detached before the turn ended; the agent may still be working" });
@@ -212,7 +238,9 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
     const settled = left === undefined ? "unknown (the process table couldn't be read)"
       : left.length === 0 ? "settled: no process carrying this run's marker remains"
         : `incomplete: ${left.length} process(es) carrying this run's marker still run (${left.map((p) => p.pid).join(", ")}); stop them with the runtime's own stop, or rig acp stop ${options.runId} -- <its stop command>`;
-    await queue.update(row.qitemId, { note: `ACP run ${options.runId} detached: agent ${exit === "still-running" ? "still running after stdin closed" : `exited (code ${exit.code ?? "none"}, signal ${exit.signal ?? "none"})`}; ${settled}` }).catch(() => {});
+    const report = `agent ${exit === "still-running" ? "still running after stdin closed" : `exited (code ${exit.code ?? "none"}, signal ${exit.signal ?? "none"})`}; ${settled}`;
+    options.onSettled?.(report);
+    await queue.update(row.qitemId, { note: `ACP run ${options.runId} detached: ${report}` }).catch(() => {});
     peer.release(); // a still-running agent keeps running, but holds nothing that keeps this process alive
   }
 }
@@ -229,6 +257,22 @@ export function classify(stopReason: string | undefined, text: string, usage: { 
     return { kind: "unknown", sessionId, text, summary: `the agent ended its turn with no output and ${usage ? "zero" : "no"} usage reported; not treated as done` };
   }
   return { kind: "completed", sessionId, text, summary: "the agent ended its turn (end_turn)" };
+}
+
+const describeError = (error: JsonRpcErrorObject) => `${error.code} ${error.message}${error.data === undefined ? "" : ` ${JSON.stringify(error.data)}`}`;
+
+/** Usage and cost as the agent reported them, with where each came from; a figure it didn't report reads unknown. */
+export function describeUsage(usage: AcpUsage | undefined): string {
+  const t = usage?.tokens;
+  const parts = t ? [["in", t.input], ["out", t.output], ["thought", t.thought], ["cache read", t.cachedRead], ["cache write", t.cachedWrite]]
+    .filter(([, n]) => n !== undefined).map(([label, n]) => `${n} ${label}`) : [];
+  const tokens = t?.total !== undefined || parts.length > 0
+    ? `${t?.total !== undefined ? `${t.total} tokens` : "tokens"}${parts.length ? ` (${parts.join(", ")})` : ""}, from the agent's prompt response`
+    : "tokens unknown (the agent's prompt response reported none)";
+  const cost = usage?.cost
+    ? `cost ${usage.cost.amount} ${usage.cost.currency}, the agent's own cumulative figure for the session (usage_update)`
+    : "cost unknown (the agent reported none)";
+  return `Usage as the agent reported it: ${tokens}; ${cost}.`;
 }
 
 /** An owner answers with the offered option's id; its kind (allow_once …) works when only one option has it. */

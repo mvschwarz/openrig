@@ -259,7 +259,7 @@ export class WorkflowProjector {
     if (!specRow) {
       throw new WorkflowProjectorError(
         "spec_not_cached",
-        `workflow spec ${instance.workflowName}@${instance.workflowVersion} is not in the spec cache. Re-run validate to refresh the cache.`,
+        `workflow spec ${instance.workflowName}@${instance.workflowVersion} is not in the spec cache. Re-register its file (touch it in the workflows folder for the next scan, or instantiate it by path) to refresh the cache.`,
         { workflowName: instance.workflowName, workflowVersion: instance.workflowVersion },
       );
     }
@@ -653,7 +653,7 @@ export class WorkflowProjector {
         };
         // P34: stage the next-step packet's wake intent in THIS transaction, so
         // the close and the durable wake are one act or none.
-        this.queueRepo.stageWakeIntent(
+        this.queueRepo.stageHandoffWake(
           createdNext.qitemId,
           input.actorSession,
           createdNext.destinationSession,
@@ -993,7 +993,7 @@ export class WorkflowProjector {
       );
     }
     registerEvent(createdException.persistedEvent);
-    this.queueRepo.stageWakeIntent(createdException.qitemId, input.actorSession,
+    this.queueRepo.stageHandoffWake(createdException.qitemId, input.actorSession,
       createdException.destinationSession, input.identityProvenance ?? null, createdException.nudge);
     return { qitemId: createdException.qitemId, destinationSession: createdException.destinationSession, nudge: createdException.nudge };
   }
@@ -1189,7 +1189,7 @@ export class WorkflowProjector {
           chainOfRecord: [input.currentPacketId],
         });
         addEvent(created.persistedEvent);
-        this.queueRepo.stageWakeIntent(created.qitemId, input.actorSession, created.destinationSession, input.identityProvenance ?? null, created.nudge);
+        this.queueRepo.stageHandoffWake(created.qitemId, input.actorSession, created.destinationSession, input.identityProvenance ?? null, created.nudge);
         if (plan.gate?.parkOn) {
           const parked = this.queueRepo.updateWithinTransaction({
             qitemId: created.qitemId,

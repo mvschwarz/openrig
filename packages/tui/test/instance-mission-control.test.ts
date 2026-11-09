@@ -140,6 +140,8 @@ describe("S12 instance mission control", () => {
     expect(whole).toMatch(/empty\s+—\s+\(no seats\).*stopped/);
     expect(whole).toMatch(/dev\s+[\s\S]*┈{8,}[\s\S]*qa\s+/);
     expect((whole.match(/┈{8,}/g) ?? [])).toHaveLength(1);
+    expect(whole).toMatch(/build\s+qa\s+[^\n]*\n[^\n]*─{8,}[^\n]*\n[^\n]*docs\s+write/);
+    expect(whole).toMatch(/docs\s+write\s+[^\n]*\n[^\n]*─{8,}[^\n]*\n[^\n]*empty\s+—/);
     expect(whole).not.toMatch(/\+\d+|more hidden/i);
     expect(reached).toEqual(expectedAgents);
     expect(scrolledSeatRows).toBeGreaterThan(0);
@@ -278,7 +280,7 @@ describe("S12 view-aware hydration", () => {
         "/api/queue/list?state=blocked": [],
         "/api/queue/list?state=in-progress": [],
         "/api/queue/list?state=pending&limit=50": [],
-        "/api/queue/list?state=done,handed-off&limit=20": [],
+        "/api/queue/list?state=done,handed-off&sort=updated&limit=20": [],
         "/api/scopes?detail=1": { missions: [] },
         "/api/views/execution": { rows: [] },
         "/api/queue/recent-transitions?scope=instance&limit=20": [],
@@ -308,7 +310,7 @@ describe("S12 view-aware hydration", () => {
         "/healthz": {}, "/api/queue/attention-aggregate": { hosts: [] }, "/api/rigs/summary": [],
         "/api/review/fleet": { needsYou: { items: [] }, hosts: [] }, "/api/stream/list?limit=5&direction=latest": [],
         "/api/queue/list?attention=1": [], "/api/queue/list?state=blocked": [], "/api/queue/list?state=in-progress": [],
-        "/api/queue/list?state=pending&limit=50": [], "/api/queue/list?state=done,handed-off&limit=20": [],
+        "/api/queue/list?state=pending&limit=50": [], "/api/queue/list?state=done,handed-off&sort=updated&limit=20": [],
         "/api/scopes?detail=1": { missions: [] }, "/api/views/execution": { rows: [] },
       };
       return { ok: route in empty, status: route in empty ? 200 : 404, json: async () => empty[route] ?? {} } as Response;

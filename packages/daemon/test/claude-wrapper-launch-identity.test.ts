@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { observeClaudePaneProcess, verifyClaudePaneProcess, verifyClaudePaneRuntime, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { observeClaudeDelivery, observeClaudePaneProcess, verifyClaudePaneProcess, verifyClaudePaneRuntime, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 // A managed launch freezes the realpath of the first `claude` on the daemon's PATH. When that file is a
 // `#!` script that execs the real binary (a user's own ~/.local/bin/claude), the live process is the
@@ -32,6 +32,39 @@ it("proves a Claude that a #! wrapper script exec'd, by its OS executable path",
 it("accepts the versioned install layout when its OS name is the version and argv[0] is bare", async () => {
   const list = () => rows({ executableName: "2.1.302", executablePath: versioned, command: `claude --resume ${token}` });
   expect((await verifyClaudePaneProcess(input(list)))?.process.pid).toBe(12);
+});
+
+// #2341, reported on 0.7.9: the seat's `claude` is a #! launcher that execs the native installer's `claude` symlink. The
+// live process is the versioned binary: argv[0] is the symlink's path, the OS path is the versioned file, and the OS
+// name is `claude`, which the binary sets for itself. The pane's shell is its parent, since the launcher exec'd.
+const launcher = "/home/user/.openrig/provider-bin/claude-max2/claude";
+const linkedRows = (patch: Partial<NativeProcessRow> = {}): NativeProcessRow[] => [
+  { pid: 10, ppid: 1, pgid: 10, tpgid: 12, executableName: "bash", command: "-bash", startedAt },
+  { pid: 12, ppid: 10, pgid: 12, tpgid: 12, executableName: "claude", executablePath: versioned, startedAt,
+    command: `${wrapper} --no-chrome --permission-mode auto --session-id ${token} --name seat@rig`, ...patch },
+];
+
+it("proves a Claude a #! launcher exec'd through the native installer's symlink, by its versioned OS path", async () => {
+  const linked = input(() => linkedRows(), { selectedExecutable: launcher });
+  expect((await verifyClaudePaneProcess(linked))?.process.pid).toBe(12);
+  expect((await verifyClaudePaneRuntime(linked))?.process.pid).toBe(12);
+});
+
+it.each([
+  ["the launch's token missing", { command: `${wrapper} --no-chrome --permission-mode auto --name seat@rig` }],
+  ["an OS name other than claude or the version", { executableName: "node" }],
+  ["a versioned OS path outside the native installer's layout", { executablePath: "/home/user/claude/versions/2.1.302" }],
+])("keeps refusing that chain with %s", async (_name, patch) => {
+  expect(await verifyClaudePaneProcess(input(() => linkedRows(patch), { selectedExecutable: launcher }))).toBeNull();
+});
+
+it("a Claude started with --no-chrome still names its conversation to ordinary delivery", async () => {
+  const plain: NativeProcessRow[] = [
+    { pid: 10, ppid: 1, pgid: 10, tpgid: 12, executableName: "bash", command: "-bash", startedAt },
+    { pid: 12, ppid: 10, pgid: 12, tpgid: 12, executableName: "claude", command: `claude --no-chrome --resume ${token}`, startedAt },
+  ];
+  expect(await observeClaudeDelivery(input(() => plain, { selectedExecutable: undefined, scriptLaunch: undefined })))
+    .toMatchObject({ state: "verified" });
 });
 
 it("puts the OS executable path in the fingerprint, so a later check can match it", async () => {
@@ -104,4 +137,88 @@ it("leaves a Nix wrapProgram launch (also a #! script) as it is today", async ()
   expect(withRule?.fingerprint).toBe(today?.fingerprint);
   // And a different launch's wrapper still does not prove it.
   expect(await verifyClaudePaneProcess(nixInput({ selectedExecutable: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-claude-code-2.1.281/bin/claude" }))).toBeNull();
+});
+
+// #2341: a wrapper that starts Claude WITHOUT exec stays the pane's foreground group leader, running the frozen script
+// (`/bin/sh <wrapper> …`), and Claude is its child under any name (here a versioned binary outside the native layout).
+const elf = "/opt/claude-runtime/2.1.316";
+const launched = `--permission-mode auto --session-id ${token} --name seat@rig`;
+function nonExec(patch: Partial<NativeProcessRow> = {}, wrapperCommand = `/bin/sh ${wrapper} ${launched}`): NativeProcessRow[] {
+  return [
+    { pid: 20, ppid: 1, pgid: 20, tpgid: 21, executableName: "bash", command: "/bin/bash", startedAt },
+    { pid: 21, ppid: 20, pgid: 21, tpgid: 21, executableName: "claude", command: wrapperCommand, startedAt },
+    { pid: 22, ppid: 21, pgid: 21, tpgid: 21, executableName: "2.1.316", command: `${elf} ${launched}`, startedAt, ...patch },
+  ];
+}
+const nonExecInput = (list: () => NativeProcessRow[], extra: Record<string, unknown> = {}) =>
+  input(list, { tmux: { getPanePid: async () => 20 }, ...extra });
+
+it("proves the Claude that a non-exec #! wrapper started, as the direct child of the process running the frozen script", async () => {
+  expect((await verifyClaudePaneProcess(nonExecInput(() => nonExec())))?.process.pid).toBe(22);
+  expect((await verifyClaudePaneRuntime(nonExecInput(() => nonExec())))?.process.pid).toBe(22);
+});
+
+it("accepts the script after one shebang option (`#!/bin/bash -e`)", async () => {
+  const list = () => nonExec({}, `/bin/bash -e ${wrapper} ${launched}`);
+  expect((await verifyClaudePaneProcess(nonExecInput(list)))?.process.pid).toBe(22);
+});
+
+const nonExecRefused: [string, () => NativeProcessRow[], Record<string, unknown>?][] = [
+  ["a child naming another conversation", () => nonExec({ command: `${elf} --session-id 00000000-0000-4000-8000-000000000002` })],
+  ["a child naming no conversation", () => nonExec({ command: `${elf} --print hello` })],
+  ["a parent running another script", () => nonExec({}, `/bin/sh /home/user/.local/bin/other ${launched}`)],
+  ["a script path that is only an argument", () => nonExec({}, `/bin/sh -c 'exec x' ${wrapper} ${launched}`)],
+  ["a child outside the foreground group", () => nonExec({ pgid: 88 })],
+  ["a grandchild of the script", () => [...nonExec({ executableName: "sh", command: "/bin/sh -c run-claude" }), { ...nonExec()[2]!, pid: 23, ppid: 22 }]],
+  ["two children naming the conversation", () => [...nonExec(), { ...nonExec()[2]!, pid: 23 }]],
+  ["a launch that wasn't a script", () => nonExec(), { scriptLaunch: false }],
+  ["another launch's wrapper", () => nonExec(), { selectedExecutable: "/home/user/.local/bin/claude-other" }],
+];
+it.each(nonExecRefused)("still refuses %s", async (_name, list, extra = {}) => {
+  expect(await verifyClaudePaneProcess(nonExecInput(list, extra))).toBeNull();
+});
+
+it("refuses a non-exec child whose process changes between the two samples", async () => {
+  let reads = 0;
+  expect(await verifyClaudePaneProcess(nonExecInput(() => nonExec(reads++ === 0 ? {} : { pid: 24 })))).toBeNull();
+});
+
+// #2341, the reported frame: the native installer's `~/.local/bin/claude` is a symlink to `versions/<ver>`, and a managed
+// launch freezes its realpath. The live Claude can still spell argv[0] through the link, with the OS name `claude`; the
+// OS's own executable path says it runs exactly the frozen file.
+const link = "/home/user/.local/bin/claude";
+const installed = "/home/user/.local/share/claude/versions/2.1.316";
+function throughLink(patch: Partial<NativeProcessRow> = {}): NativeProcessRow[] {
+  return [
+    { pid: 30, ppid: 1, pgid: 30, tpgid: 32, executableName: "fish", command: "-fish", startedAt },
+    { pid: 31, ppid: 30, pgid: 31, tpgid: 32, executableName: "fish", command: "fish", startedAt },
+    { pid: 32, ppid: 31, pgid: 32, tpgid: 32, executableName: "claude", executablePath: installed, command: `${link} ${launched}`, startedAt, ...patch },
+  ];
+}
+const linkInput = (list: () => NativeProcessRow[], extra: Record<string, unknown> = {}) =>
+  input(list, { tmux: { getPanePid: async () => 30 }, selectedExecutable: installed, scriptLaunch: false, ...extra });
+
+it("proves a Claude spelled through the installer's symlink when the OS says it runs the frozen file", async () => {
+  expect((await verifyClaudePaneProcess(linkInput(() => throughLink())))?.process.pid).toBe(32);
+  expect((await verifyClaudePaneRuntime(linkInput(() => throughLink())))?.process.pid).toBe(32);
+});
+
+const linkRefused: [string, Partial<NativeProcessRow> | ((r: NativeProcessRow[]) => NativeProcessRow[])][] = [
+  ["another install's binary", { executablePath: "/home/user/.local/share/claude/versions/2.1.315" }],
+  ["no readable OS path", { executablePath: undefined }],
+  ["a relative OS path", { executablePath: "home/user/.local/share/claude/versions/2.1.316" }],
+  ["an OS path with a dot segment", { executablePath: "/home/user/.local/share/claude/versions/../versions/2.1.316" }],
+  ["another conversation", { command: `${link} --permission-mode auto --session-id 00000000-0000-4000-8000-000000000002 --name seat@rig` }],
+  ["an argv[0] that isn't Claude", { command: `/usr/bin/node ${launched}` }],
+  ["a process outside the foreground group", { pgid: 88 }],
+  ["a second candidate", r => [...r, { ...r[2]!, pid: 33 }]],
+];
+it.each(linkRefused)("still refuses a symlink-spelled process with %s", async (_name, patch) => {
+  const list = () => typeof patch === "function" ? patch(throughLink()) : throughLink(patch);
+  expect(await verifyClaudePaneProcess(linkInput(list))).toBeNull();
+});
+
+it("refuses a symlink-spelled process that changes between the two samples", async () => {
+  let reads = 0;
+  expect(await verifyClaudePaneProcess(linkInput(() => throughLink(reads++ === 0 ? {} : { pid: 34 })))).toBeNull();
 });

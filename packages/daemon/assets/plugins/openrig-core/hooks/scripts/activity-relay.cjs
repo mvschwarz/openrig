@@ -46,6 +46,24 @@ function firstString(...values) {
   return null;
 }
 
+// #2702: the conversation this event belongs to. A harness started inside a seat (a Codex helper a Claude seat runs, or
+// a Claude a Codex seat runs) inherits the seat's environment and so posts as the seat; the daemon tells it apart by
+// whether the transcript is the seat's runtime's own. Whether the runtime sent transcript_path is kept apart from its
+// value, as on session identity (#1524). claudeHook is whether CLAUDE_PROJECT_DIR is set: the marker Claude Code gives
+// its hook commands, and also the LSP, status line and MCP processes it starts. Neither Codex nor OpenRig sets it, so
+// it's evidence that a Claude Code process ran this, not proof. Only whether it is set is sent.
+// A Claude permission request's report keeps its fixed field list (below).
+function conversationFields(providerPayload, env) {
+  const sessionId = firstString(providerPayload.session_id, providerPayload.sessionId);
+  const transcriptPathPresent = Object.prototype.hasOwnProperty.call(providerPayload, "transcript_path");
+  return {
+    ...(sessionId ? { sessionId } : {}),
+    transcriptPathPresent,
+    ...(transcriptPathPresent ? { transcriptPath: providerPayload.transcript_path } : {}),
+    claudeHook: firstString(env.CLAUDE_PROJECT_DIR) !== null,
+  };
+}
+
 // The route this run reports by, so the daemon can count one event once per route: "plugin" for the plugin's hook
 // (started with --from-plugin), "managed" for the settings or managed hook copy.
 function buildOpenRigPayload(providerPayload, env = process.env, now = () => new Date(), argv = process.argv) {
@@ -62,6 +80,25 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
   );
 
   if ((!sessionName && !nodeId) || !runtime || !hookEvent) return null;
+
+  if (runtime === "claude-code" && hookEvent === "PermissionRequest") {
+    // Passive observation only: discard all native tool data before transport. An absent/broken
+    // sanitizer loses detail rather than affecting approval or the existing activity hooks.
+    let descriptor = "Tool: details withheld";
+    let suggestions = { state: "unavailable", entries: [], unsupported: false, size_cut: false };
+    try {
+      descriptor = require("./permission-stop-descriptor.cjs").buildPermissionStopDescriptor(providerPayload);
+    } catch { /* Withhold details. No provider decision is ever returned. */ }
+    try {
+      suggestions = require("./permission-stop-descriptor.cjs").buildPermissionRuleSuggestions(providerPayload);
+    } catch { /* Optional rule evidence is unavailable, not an approval or a native absence claim. */ }
+    const actor = providerPayload.agent_id;
+    return { sessionName, nodeId, runtime, generation, hookEvent,
+      ...(actor == null ? { hookAgentId: null }
+        : typeof actor === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(actor) ? { hookAgentId: actor } : {}),
+      permissionStopDescriptor: descriptor, permissionRuleSuggestions: suggestions, occurredAt: now().toISOString(),
+      relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed" };
+  }
 
   // StopFailure has a typed error field. Never infer it from rendered error text,
   // a tool name, or another event's subtype; those are not provider failures.
@@ -92,6 +129,7 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
     turnId: firstString(providerPayload.turn_id, providerPayload.turnId),
     occurredAt: now().toISOString(),
     relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed",
+    ...conversationFields(providerPayload, env),
   };
 }
 
@@ -200,6 +238,7 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
     sessionId,
     transcriptPathPresent,
     ...(transcriptPathPresent ? { transcriptPath: providerPayload.transcript_path } : {}),
+    claudeHook: firstString(env.CLAUDE_PROJECT_DIR) !== null,
     occurredAt: now().toISOString(),
   };
 }

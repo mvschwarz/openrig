@@ -6,6 +6,7 @@ import { execSync } from "node:child_process";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { DaemonClient, ForeignLocalDaemonError, formatDaemonHostForUrl } from "../client.js";
 import { ConfigStore } from "../config-store.js";
+import { fetchWithTimeout } from "../fetch-with-timeout.js";
 import { buildWritableHomeCheck } from "../system-preflight.js";
 import {
   CMUX_SETTINGS_DISCLOSURE_PATH,
@@ -45,7 +46,7 @@ export interface DoctorDeps {
   /** The caller's effective user id, compared with the one the port's daemon reports. Absent: this process's own;
    *  null: this platform has none. */
   callerUid?: number | null;
-  /** How long the port's /healthz body may take to arrive (default 2000 ms); after that its owner is unknown. */
+  /** How long each part of /healthz and the cmux status response may take (default 2000 ms). */
   ownerReportTimeoutMs?: number;
   /**
    * Build B — path to a rig spec to check against the RUNNING rig of the same name (`--spec`).
@@ -61,6 +62,7 @@ export interface DoctorDeps {
 }
 
 const DEFAULT_PORT = 7433;
+const DOCTOR_HTTP_TIMEOUT_MS = 2000;
 const CMUX_SOCKET_CONTROL_FIX = 'In cmux Settings > Automation, select "Automation mode" for Socket Control Mode, or set automation.socketControlMode to "automation" in ~/.config/cmux/cmux.json (older versions use ~/.config/cmux/settings.json; current cmux reads that legacy file only for keys absent from cmux.json). cmux reloads saved settings automatically; rerun `rig doctor` to re-probe without restarting the daemon.';
 
 /** The port's OpenRig daemon, judged by the OS user it reports. /healthz's pid and euid are the daemon's own report,
@@ -301,6 +303,15 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
   const daemonPort = config.daemon.port ?? DEFAULT_PORT;
   const daemonBase = `http://${formatDaemonHostForUrl(daemonHost)}:${daemonPort}`;
   const fetchFn = deps.fetch ?? globalThis.fetch;
+  const healthHeaders = async (controller: AbortController) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        fetchFn(`${daemonBase}/healthz`, { signal: controller.signal }),
+        new Promise<null>(resolve => { timer = setTimeout(() => { resolve(null); controller.abort(); }, deps.ownerReportTimeoutMs ?? 2000); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  };
   const portCheck = deps.checkPort(daemonPort, daemonHost).then(async (available): Promise<DoctorCheck> => {
     if (available) {
       return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} available.` };
@@ -308,7 +319,13 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
     // Port in use — check if it's an OpenRig daemon via healthz, and whose.
     const owner = new AbortController();
     try {
-      const res = await fetchFn(`${daemonBase}/healthz`, { signal: owner.signal });
+      const res = await healthHeaders(owner);
+      if (!res) return {
+        name: "port", status: "warn",
+        message: `Port ${daemonHost}:${daemonPort} is in use by an unknown listener.`,
+        reason: "Its /healthz response headers did not arrive in time, so doctor cannot identify it.",
+        fix: `Check the listener on port ${daemonPort} or configure a free port for the daemon.`,
+      };
       if (res.ok) return await listenerOwnerCheck(`${daemonHost}:${daemonPort}`, daemonBase, res, () => owner.abort(), deps);
     } catch { /* not our daemon */ }
     finally { owner.abort(); }
@@ -325,19 +342,27 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
   const asyncChecks: Promise<DoctorCheck>[] = [portCheck];
   if (shellCmuxPassed) {
     const daemonCmuxCheck = (async (): Promise<DoctorCheck> => {
+      const health = new AbortController();
       try {
-        const healthRes = await fetchFn(`${daemonBase}/healthz`);
-        if (!healthRes.ok) {
+        const healthRes = await healthHeaders(health);
+        if (!healthRes?.ok) {
           return { name: "cmux_daemon", status: "skipped", message: "Daemon healthz not ok. Skipping daemon cmux check." };
         }
       } catch {
         return { name: "cmux_daemon", status: "skipped", message: "Daemon not reachable. Skipping daemon cmux check." };
-      }
+      } finally { health.abort(); }
 
       try {
-        const cmuxRes = await fetchFn(`${daemonBase}/api/adapters/cmux/status`);
-        if (cmuxRes.ok && cmuxRes.json) {
-          const data = (await cmuxRes.json()) as { available?: boolean };
+        let data: { available?: boolean } = {};
+        const cmuxRes = await fetchWithTimeout(fetchFn as typeof fetch, `${daemonBase}/api/adapters/cmux/status`, {}, {
+          timeoutMs: deps.ownerReportTimeoutMs ?? DOCTOR_HTTP_TIMEOUT_MS,
+          timeoutMessage: "Doctor's cmux status read timed out.",
+          consumeResponse: async res => {
+            if (res.ok && res.json) data = (await res.json()) as { available?: boolean };
+            else await res.body?.cancel();
+          },
+        });
+        if (cmuxRes.ok) {
           if (data.available) {
             return { name: "cmux_daemon", status: "pass", message: "Daemon cmux control available." };
           }
@@ -350,9 +375,70 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
     asyncChecks.push(daemonCmuxCheck);
   }
 
+  asyncChecks.push(buildTmuxControlModeCheck(deps, daemonBase));
   asyncChecks.push(buildSpecConformanceCheck(deps));
 
   return { checks, portCheck, asyncChecks };
+}
+
+type TmuxControlReport = { requested?: boolean; state?: "on" | "allowed" | "off" | "undecided"; serverVersion?: string };
+
+/**
+ * #161 — does the daemon drive tmux through one control-mode client (OPENRIG_TMUX_CONTROL=1)? Asked for on a server
+ * older than tmux 3.7c, it uses a spawned client for every command, and nothing else says so.
+ */
+async function buildTmuxControlModeCheck(deps: DoctorDeps, daemonBase: string): Promise<DoctorCheck> {
+  const name = "tmux_control_mode";
+  let control = null as TmuxControlReport | null;
+  try {
+    await fetchWithTimeout((deps.fetch ?? globalThis.fetch) as typeof fetch, `${daemonBase}/api/adapters/tmux/control`, {}, {
+      timeoutMs: deps.ownerReportTimeoutMs ?? DOCTOR_HTTP_TIMEOUT_MS,
+      timeoutMessage: "Doctor's tmux control mode read timed out.",
+      consumeResponse: async res => {
+        if (res.ok && res.json) control = (await res.json()) as TmuxControlReport;
+        else await res.body?.cancel();
+      },
+    });
+  } catch { /* no daemon, or one from before this route */ }
+  if (!control) {
+    return { name, status: "skipped", message: "The daemon didn't say whether it uses tmux control mode (it isn't running, or it's older than this check)." };
+  }
+  if (!control.requested) {
+    if ((deps.env ?? process.env)["OPENRIG_TMUX_CONTROL"] !== "1") {
+      return { name, status: "skipped", message: "tmux control mode isn't asked for (OPENRIG_TMUX_CONTROL=1 in the daemon's environment)." };
+    }
+    return {
+      name, status: "warn",
+      message: "OPENRIG_TMUX_CONTROL=1 is set in this shell, but the running daemon wasn't started with it, so it spawns a tmux client for every command.",
+      fix: "Set OPENRIG_TMUX_CONTROL=1 in the daemon's own environment (the shell or service that starts it), then restart the daemon.",
+    };
+  }
+  const version = control.serverVersion;
+  if (control.state === "on") {
+    return { name, status: "pass", message: `tmux control mode is on: the daemon's tmux server runs tmux ${version}.` };
+  }
+  if (control.state === "undecided") {
+    return { name, status: "skipped", message: "tmux control mode is asked for, and the daemon hasn't read its tmux server's version yet. It does at its first tmux command while a session runs." };
+  }
+  if (control.state === "allowed") {
+    return {
+      name, status: "warn",
+      message: `tmux control mode is asked for and the server's tmux ${version} allows it, but no control client is connected right now, so tmux commands use a spawned client.`,
+      reason: "The daemon starts a control client at a tmux command while another session runs on the server. One that can't start or attach is tried again after a while, and commands are spawned meanwhile.",
+    };
+  }
+  if (!version) {
+    return { name, status: "warn", message: "tmux control mode is asked for but this daemon doesn't use a control client: it runs on Windows (psmux) or with OPENRIG_TMUX_SHELL=1." };
+  }
+  const known = /^\d+\.\d+[a-z]?$/.test(version);
+  return {
+    name, status: "warn",
+    message: known
+      ? `tmux control mode is asked for but off: the daemon's tmux server runs tmux ${version}, and control mode needs tmux 3.7c or later.`
+      : `tmux control mode is asked for but off: the daemon's tmux server runs tmux ${version}, which isn't a tmux release known to be 3.7c or later.`,
+    reason: "Starting a control client can crash a tmux server older than 3.7c, so the daemon spawns a tmux client for every command instead. The running server's version decides this, not the tmux binary on PATH.",
+    fix: "Run the daemon's sessions on a tmux 3.7c or later server: rig context get reference/tmux-servers.md#moving-an-existing-team-onto-tmux-control-mode",
+  };
 }
 
 /**
@@ -398,6 +484,12 @@ async function buildSpecConformanceCheck(deps: DoctorDeps): Promise<DoctorCheck>
   let liveIds: string[] | null;
   try { liveIds = deps.fetchLiveLogicalIds ? await deps.fetchLiveLogicalIds(rigName) : null; }
   catch (error) {
+    if (error instanceof AmbiguousLiveRigError) return {
+      name, status: "skipped",
+      message: `Multiple live rigs match '${rigName}': ${error.ids.join(", ")}; conformance unknown.`,
+      reason: "The spec name does not identify one live rig, so no topology was compared.",
+      fix: "Inspect the matching rig IDs with rig ps --json; use rig ps --nodes -A --json to inspect nodes.",
+    };
     if (error instanceof ForeignLocalDaemonError) return { name, status: "fail", message: error.message };
     throw error;
   }
@@ -482,22 +574,43 @@ function readTmuxMouseMode(deps: DoctorDeps): "on" | "off" | null {
   }
 }
 
+class AmbiguousLiveRigError extends Error {
+  constructor(readonly ids: string[]) { super("Multiple live rigs share the spec name"); }
+}
+
 /** Raw topology reads retain their existing headers; the owner policy is shared with the client. */
 export async function readLiveLogicalIds(base: string, rigName: string, ownerClient = new DaemonClient(base)): Promise<string[] | null> {
   try {
     await ownerClient.assertLocalOwner();
-    const rigsRes = await fetch(`${base}/api/rigs`);
+    let rigs: Array<{ id?: string; name?: string }> = [];
+    const rigsRes = await fetchWithTimeout(fetch, `${base}/api/rigs`, {}, {
+      timeoutMs: DOCTOR_HTTP_TIMEOUT_MS,
+      timeoutMessage: "Doctor's live rig read timed out.",
+      consumeResponse: async res => {
+        if (res.ok) rigs = (await res.json()) as typeof rigs;
+        else await res.body?.cancel();
+      },
+    });
     if (!rigsRes.ok) return null;
-    const rigs = (await rigsRes.json()) as Array<{ id?: string; name?: string }>;
-    const rig = rigs.find((r) => r.name === rigName);
+    const matches = rigs.filter((r) => r.name === rigName);
+    if (matches.length > 1) throw new AmbiguousLiveRigError(matches.map(r => r.id ?? "(missing id)"));
+    if (matches.length === 0) return null;
+    const rig = matches[0];
     if (!rig?.id) return null;
     await ownerClient.assertLocalOwner();
-    const nodesRes = await fetch(`${base}/api/rigs/${rig.id}/nodes`);
+    let nodes: Array<{ logicalId?: string | null }> = [];
+    const nodesRes = await fetchWithTimeout(fetch, `${base}/api/rigs/${rig.id}/nodes`, {}, {
+      timeoutMs: DOCTOR_HTTP_TIMEOUT_MS,
+      timeoutMessage: "Doctor's live node read timed out.",
+      consumeResponse: async res => {
+        if (res.ok) nodes = (await res.json()) as typeof nodes;
+        else await res.body?.cancel();
+      },
+    });
     if (!nodesRes.ok) return null;
-    const nodes = (await nodesRes.json()) as Array<{ logicalId?: string | null }>;
     return nodes.map((n) => n.logicalId ?? "");
   } catch (error) {
-    if (error instanceof ForeignLocalDaemonError) throw error;
+    if (error instanceof ForeignLocalDaemonError || error instanceof AmbiguousLiveRigError) throw error;
     return null;
   }
 }
@@ -529,7 +642,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
             const base = `http://${formatDaemonHostForUrl(cfg.daemon.host ?? "127.0.0.1")}:${cfg.daemon.port ?? DEFAULT_PORT}`;
             return await readLiveLogicalIds(base, rigName);
           } catch (error) {
-            if (error instanceof ForeignLocalDaemonError) throw error;
+            if (error instanceof ForeignLocalDaemonError || error instanceof AmbiguousLiveRigError) throw error;
             return null;
           }
         },

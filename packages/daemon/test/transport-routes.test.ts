@@ -290,6 +290,42 @@ describe("transport routes", () => {
   //    RESOLVED recipient (the schema's typed+indexed destination_session + per-row delivery_state is a
   //    per-recipient design; a TargetSpec would poison the typed column). Same downstream-of-derivation
   //    shape as /send. ──
+  it("broadcast records an unconfirmed submission after paste as indeterminate", async () => {
+    seedRig();
+    migrate(db, [outboxEntriesSchema]);
+    db.exec("ALTER TABLE outbox_entries ADD COLUMN identity_provenance TEXT");
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux({
+      sendKeys: async () => ({ ok: false as const, code: "session_not_found", message: "Enter result lost" }),
+    }) });
+    const app = createApp({ sessionTransport: transport, outboxHandler: new OutboxHandler(db) });
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ sessions: ["dev-impl@my-rig"], text: "team update" }),
+    });
+    const body = await res.json();
+    expect(body.results[0]).toMatchObject({ ok: false, inputPhase: "written" });
+    expect(outboxRows().map(row => row["delivery_state"])).toEqual(["indeterminate"]);
+  });
+  it("broadcast distinguishes a lost text-write result from another recipient's successful send", async () => {
+    seedRig();
+    migrate(db, [outboxEntriesSchema]);
+    db.exec("ALTER TABLE outbox_entries ADD COLUMN identity_provenance TEXT");
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux({
+      sendText: async target => target.includes("dev-qa")
+        ? { ok: false as const, code: "session_not_found", message: "paste result lost" }
+        : { ok: true as const },
+    }) });
+    const app = createApp({ sessionTransport: transport, outboxHandler: new OutboxHandler(db) });
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ rig: "my-rig", text: "team update" }),
+    });
+    const body = await res.json();
+    expect(body.results.find((result: { sessionName: string }) => result.sessionName === "dev-qa@my-rig"))
+      .toMatchObject({ ok: false, inputPhase: "attempted" });
+    expect(Object.fromEntries(outboxRows().map(row => [row["destination_session"], row["delivery_state"]])))
+      .toEqual({ "dev-impl@my-rig": "delivered", "dev-qa@my-rig": "indeterminate" });
+  });
   it("A3b — a broadcast auto-records N rows, one per RESOLVED recipient (sender=derived, provenance=transport:v1, destination=each session, never the TargetSpec)", async () => {
     seedRig();
     const res = await sendApp().request("/api/transport/broadcast", {
@@ -347,6 +383,36 @@ describe("transport routes", () => {
       expect(row["sender_session"]).toBe("orch@my-rig");
       expect(row["sender_session"]).not.toContain("mallory");
     }
+  });
+
+  it("a header-LESS broadcast carries the delivered-unsigned notice only when something was sent", async () => {
+    seedRig();
+    const post = (body: Record<string, unknown>) => sendApp().request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }, // no X-OpenRig-Session
+      body: JSON.stringify(body),
+    });
+    const missed = (await (await post({ rig: "no-such-rig", text: "hi" })).json()) as { sent: number; warning?: string };
+    expect(missed.sent).toBe(0);
+    expect(missed.warning).toBeUndefined();
+    const sent = (await (await post({ rig: "my-rig", text: "hi" })).json()) as { sent: number; warning?: string };
+    expect(sent.sent).toBeGreaterThan(0);
+    expect(sent.warning).toContain("Delivered without sender identity");
+  });
+
+  it.each([
+    [{ total: 2, sent: 0, retained: 2, failed: 0, results: [] }, "Held for delivery without sender identity"],
+    [{ total: 2, sent: 1, retained: 1, failed: 0, results: [] }, "Delivered without sender identity"],
+  ])("a header-LESS broadcast still advises signing when recipients retain the text (%#)", async (result, notice) => {
+    const app = createApp({ sessionTransport: { broadcast: async () => result } as unknown as SessionTransport });
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }, // no X-OpenRig-Session
+      body: JSON.stringify({ rig: "my-rig", text: "hi" }),
+    });
+    const body = (await res.json()) as { warning?: string };
+    expect(body.warning).toContain(notice);
+    expect(body.warning).toContain("Follow up and sign it");
   });
 
   it("A3b — a header-LESS broadcast auto-records NO rows (no derived sender to attribute)", async () => {

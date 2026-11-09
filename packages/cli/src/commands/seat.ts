@@ -21,6 +21,10 @@ async function defaultReadStdin(): Promise<string> {
 }
 
 interface SeatStatusResponse {
+  permission_stop?: { state: "unavailable"; command: "unavailable"; origin: "unknown" }
+    | { state: "request_observed" | "completed"; command: string; origin: "harness";
+        source: "PermissionRequest"; observed_at: string; actor: "main" | "subagent"; pending: "unknown" | false;
+        suggested_rules?: { state: "missing" | "present" | "unavailable"; entries: unknown[]; unsupported: boolean; size_cut: boolean } };
   seat_ref: string;
   rig_id: string;
   rig_name: string;
@@ -63,6 +67,8 @@ interface SeatStatusResponse {
   };
   session_status: string | null;
   launch_cwd?: string | null;
+  permissions_to?: string | null;
+  runner?: boolean;
   runtime_home?: {
     variable: string;
     home: string | null;
@@ -157,18 +163,30 @@ interface SeatHandoverMutationResult {
   currentStatus: SeatHandoverPlan["currentStatus"];
   handoverAt: string;
   eventSeq: number;
+  /** What the successor was told on taking the seat, such as its held messages. */
+  warnings?: string[];
   /** OPR.0.5.5.5 — per-source execution record (wire mirror of the daemon shape). */
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string } };
-  /** The restore packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
+  /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
   restorePacket?: { status: "unconfirmed"; reason: string };
+  /** #2456: the required startup files the successor started without, where a start would have failed. */
+  startedWithoutRequired?: string[];
   sideEffects: {
     departingSessionKilled: false;
+    /** Absent from an older daemon, whose receipt reported both side effects as a fixed false. */
+    departingProcess?: "ended-graceful" | "ended-forced" | "not-touched";
     startupContextDelivered: boolean;
-    provenanceRecordWritten: false;
+    provenanceRecordWritten: boolean;
   };
 }
+
+const DEPARTING_PROCESS_LINES = {
+  "ended-graceful": "The previous occupant's process exited on TERM; its tmux session was kept, and the successor runs in the same pane.",
+  "ended-forced": "The previous occupant's process didn't exit on TERM and was killed; its tmux session was kept, and the successor runs in the same pane.",
+  "not-touched": "The previous occupant's process wasn't touched: the successor was an existing session.",
+} as const;
 
 interface SeatSwitchClientResponse {
   seat_ref: string;
@@ -194,6 +212,13 @@ const LEVEL_WORDS: Record<string, string> = {
   "sends-only": "Deliberate sends from people and agents type; OpenRig's own notices are held.",
 };
 
+// JSON escapes C0; also escape C1, format/separator and default-ignorable characters.
+// Escaping the serialized representation leaves JSON.parse's rule strings unchanged.
+function terminalJson(value: unknown, space?: number): string {
+  return JSON.stringify(value, null, space).replace(/[\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu,
+    character => character.split("").map(unit => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""));
+}
+
 /** Show configured seat state, including selected account references, without claiming the running login is verified. */
 function printHuman(status: SeatStatusResponse): void {
   console.log(`Seat ${status.seat_ref}`);
@@ -201,6 +226,10 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
+  // Only a runner submits permission requests; a plain seat's own prompts are its harness's.
+  if (status.permissions_to || status.runner) {
+    console.log(`Runner permission requests answered by: ${status.permissions_to === "deny" ? "no one: refused (--deny)" : status.permissions_to ?? "the default person"}`);
+  }
   if (status.runtime_home) {
     const h = status.runtime_home;
     const from = h.source === "member" || h.source === "rig" ? `the seat's own, from its ${h.source} env`
@@ -225,6 +254,24 @@ function printHuman(status: SeatStatusResponse): void {
     else console.log("Hold pauses all automatic input, including writing lifecycle. Changing mode does not replay held messages.");
   }
   console.log(`Session: ${display(status.session_status, "unknown")}`);
+  const stop = status.permission_stop;
+  if (stop && stop.state !== "unavailable") {
+    console.log(`Latest permission observation at ${stop.observed_at}: ${stop.command}; harness permission request (${stop.source}, ${stop.actor})`);
+    console.log(stop.state === "completed" ? "  Displayed actor's tool batch completed; this observation is no longer pending."
+      : "  Displayed actor's pending status: unknown (an observation does not establish a waiting prompt).");
+    console.log("  Other actors' pending state: unknown (only the latest observation is shown).");
+    console.log("  Claude's suggested rules: read-only evidence; not applied or approved, effectiveness unknown.");
+    console.log("  These are neither the exact command nor a complete list of dialog options.");
+    const rules = stop.suggested_rules;
+    if (!rules || rules.state === "unavailable") console.log("  Suggested-rule evidence: unavailable.");
+    else if (rules.state === "missing") console.log("  Suggested-rule field: missing from the observed hook.");
+    else {
+      if (!rules.entries.length) console.log("  Supported suggested-rule entries: empty.");
+      for (const entry of rules.entries) console.log(`  ${terminalJson(entry)}`);
+    }
+    if (rules?.unsupported) console.log("  Unsupported or malformed suggested-rule evidence was withheld.");
+    if (rules?.size_cut) console.log("  Suggested-rule evidence is incomplete because of size bounds.");
+  }
   if (status.compaction) console.log(`Managed compaction (${status.compaction.stage}): ${status.compaction.detail}`);
   const reason = sessionReason(status.session_reason);
   if (reason) console.log(`Reason: ${reason}`);
@@ -309,7 +356,11 @@ function printHumanHandoverPlan(plan: SeatHandoverPlan): void {
 }
 
 function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
-  console.log(`Seat handover complete: ${result.seat.ref}`);
+  // #2456: a successor that started without a required startup file isn't a plain success; a start would have failed.
+  const withoutRequired = result.startedWithoutRequired ?? [];
+  console.log(`Seat handover complete${withoutRequired.length > 0 ? ", degraded" : ""}: ${result.seat.ref}`);
+  for (const file of withoutRequired) console.log(`The successor started without required file ${file}.`);
+  if (withoutRequired.length > 0) console.log("rig ps --nodes shows the seat as needing attention until it's next launched.");
   console.log(`Rig: ${result.seat.rigName}`);
   console.log(`Logical ID: ${result.seat.logicalId}`);
   console.log(`Source: ${result.source.mode}${result.source.ref ? `:${result.source.ref}` : ""}`);
@@ -319,6 +370,14 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
   console.log(`Current occupant: ${result.currentOccupant}`);
   console.log(`Handover result: ${display(result.currentStatus.handoverResult)}`);
   console.log("Seat binding and inventory provenance were updated.");
+  for (const warning of result.warnings ?? []) console.warn(`Warning: ${warning}`);
+  // An older daemon reports both side effects as a fixed false: say nothing rather than misreport them.
+  if (result.sideEffects.departingProcess) {
+    console.log(result.sideEffects.provenanceRecordWritten
+      ? "The handover's lineage record (occupant tenure) was written."
+      : "The handover's lineage record (occupant tenure) was NOT written; check the daemon log, which names the first such failure since the daemon started. The seat is already bound to the successor, so don't run the handover again.");
+    console.log(DEPARTING_PROCESS_LINES[result.sideEffects.departingProcess]);
+  }
   // OPR.0.5.5.5 — the per-source execution record: what actually carried context.
   if (result.sourceOutcome?.mode === "fork") {
     console.log(`Native fork of ${result.sourceOutcome.forkedFrom}: the successor carries the incumbent conversation from its first byte.`);
@@ -327,7 +386,8 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
     const outcome = result.sourceOutcome;
     if (outcome.permissions) console.log(`Codex rebuild permissions: ${outcome.permissions.state}. ${outcome.permissions.detail}`);
     if (outcome.primedArtifacts.length > 0) {
-      console.log(`Rebuild primed from ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
+      const heading = result.restorePacket?.status === "unconfirmed" ? "Rebuild packet includes" : "Rebuild primed from";
+      console.log(`${heading} ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
       for (const artifact of outcome.primedArtifacts) console.log(`  - ${artifact.address} — ${artifact.label}`);
     }
     for (const gap of outcome.gaps) console.log(`  ! declared but missing on disk: ${gap}`);
@@ -343,18 +403,27 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       // live successor agent.
       console.log("The captured startup context (restore packet) was delivered to the successor.");
     }
-    console.log("No conversation continuity, provenance markdown, or session stop was performed.");
+    console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.restorePacket?.status === "unconfirmed") {
     // The packet was pasted and Enter pressed: the successor may already be working on it, so don't send it again.
-    console.log(`The captured startup context (restore packet) was sent to the successor, but its submission is unconfirmed: ${result.restorePacket.reason}.`);
-    console.log("Check the successor's screen before sending the context again; it may already be working on it.");
-    console.log("No conversation continuity, provenance markdown, or session stop was performed.");
+    if (result.source.mode === "rebuild") {
+      console.log(`The rebuild priming packet was sent to the successor, but its submission is unconfirmed: ${result.restorePacket.reason}.`);
+      if (result.restorePacket.reason === "the prompt still looked staged in the input box") {
+        console.log("Check the successor's current screen. Only if that exact packet is still staged, submit the existing packet once. Do not resend blindly or rerun the handover.");
+      } else {
+        console.log("Check the successor's screen before sending the priming packet again; it may already be working on it.");
+      }
+    } else {
+      console.log(`The captured startup context (restore packet) was sent to the successor, but its submission is unconfirmed: ${result.restorePacket.reason}.`);
+      console.log("Check the successor's screen before sending the context again; it may already be working on it.");
+    }
+    console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.source.mode === "fork") {
     console.log("No packet delivery: fork context rides the native conversation itself.");
   } else {
     // discovered handover: the operator-prepared successor is already live, so no
     // separate context delivery is performed.
-    console.log("No conversation continuity, startup context delivery, provenance markdown, or session stop was performed.");
+    console.log("OpenRig delivered no startup context and carried no conversation: the discovered successor was already running.");
   }
 }
 
@@ -439,6 +508,11 @@ when the current input contains a draft or cannot be read. It returns the exact
 reason and held message ID immediately, without automatic retry.
 Off (--enabled false) permits new automatic sends.
 
+This works from an ordinary terminal as well as from a seat's shell. From a
+managed seat's shell (OPENRIG_SESSION_NAME set), the change is recorded under
+that seat. From a terminal with no seat identity, it applies the same way and is
+recorded as "unattributed (no seat identity)".
+
 Between off (always interrupt) and hold (full quiet):
   openrig-urgent  OpenRig's own messages (watchdogs, scheduled wakes, notices) and
                   anything marked urgent type; other agents' messages are held.
@@ -515,7 +589,7 @@ Examples:
       const res = await client.get<SeatStatusResponse | SeatStatusError>(`/api/seat/status/${encodeURIComponent(seat)}`);
 
       if (opts.json) {
-        console.log(JSON.stringify(res.data, null, 2));
+        console.log(terminalJson(res.data, 2));
         if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
         return;
       }
@@ -673,7 +747,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-terminal-policy" | "set-model" | "set-cwd" | "set-effort" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-terminal-policy" | "set-model" | "set-cwd" | "set-effort" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -857,6 +931,49 @@ Examples:
     });
 
   cmd
+    .command("set-permissions-to")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--to <person>", "The registered person who answers this seat's runner permission requests instead of the default person, such as mike@external")
+    .option("--clear", "Remove the override: the default person answers again")
+    .option("--deny", "Opt in to refusing every runner permission request on this seat")
+    .requiredOption("--reason <text>", "Audit reason recorded on the node.permissions_to_changed event")
+    .option("--operator <address>", "Operator recorded on the audit event (required outside a managed seat)")
+    .option("--json", "JSON output for agents")
+    .description("Choose who answers a runner seat's permission requests instead of the default person, or opt in to refusing them (audited)")
+    .addHelpText("after", `
+A runner seat's agent can ask permission for a tool call. The runner sends the
+request to OpenRig, and one person gets an ordinary ask with every option the agent
+offered; the answer goes back to that one request. That person is the default person
+(rig gateway default), unless this override names someone else. When no one can be
+asked, OpenRig's default is to permit the request.
+
+Only a registered person can be chosen (rig gateway human list). A seat address is
+refused. --clear removes the override. --deny is the opt-in for a seat whose requests
+should all be refused. See docs/reference/harness-runner-contract.md, section 7.
+Examples:
+  rig seat set-permissions-to dev-runner@my-rig --to mike@external --reason "Mike approves tool calls"
+  rig seat set-permissions-to dev-runner@my-rig --deny --reason "high-stakes repo: refuse every request"
+  rig seat set-permissions-to dev-runner@my-rig --clear --reason "back to the default person" --json`)
+    .action(async (seat: string, opts: { to?: string; clear?: boolean; deny?: boolean; reason: string; operator?: string; json?: boolean }) => {
+      if ([Boolean(opts.clear), Boolean(opts.deny), opts.to !== undefined].filter(Boolean).length !== 1) {
+        console.error("Pass exactly one of --to <person>, --clear or --deny.");
+        process.exitCode = 1;
+        return;
+      }
+      const body = opts.clear ? { clear: true, reason: opts.reason, operator: opts.operator }
+        : opts.deny ? { deny: true, reason: opts.reason, operator: opts.operator }
+        : { to: opts.to, reason: opts.reason, operator: opts.operator };
+      await runLifecycleVerb("set-permissions-to", seat, body, opts, (data) => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        const name = `${s?.logicalId}@${s?.rigName}`;
+        const owner = (value: unknown) => value === "deny" ? "refused (--deny)" : typeof value === "string" ? value : "the default person";
+        console.log(data["changed"] === false
+          ? `${name}'s permission requests already go to ${owner(data["to"])}. No change recorded.`
+          : `${name}'s permission requests: ${owner(data["from"])} -> ${owner(data["to"])} (audited).`);
+      });
+    });
+
+  cmd
     .command("effort")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--json", "JSON output for agents")
@@ -918,13 +1035,13 @@ resume/successor launch reads it at call time. Examples:
   cmd
     .command("set-runtime")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--runtime <runtime>", "codex or claude-code")
+    .option("--runtime <runtime>", "codex, claude-code or pi")
     .option("--reason <text>", "Why the seat moves; recorded with the switch")
     .option("--model <id>", "Target model; otherwise the seat's agent spec for the target, else the target's default")
     .option("--effort <level>", "Target effort, the target runtime's own level (not translated)")
     .option("--codex-config-profile <name>", "Codex configuration profile for a Codex successor")
     .option("--clear-account-home", "Return to member/rig/daemon/native login selection through a fresh successor")
-    .option("--account-home <path>", "Isolated target CODEX_HOME or CLAUDE_CONFIG_DIR; also permits a fresh successor on the same runtime")
+    .option("--account-home <path>", "Target Codex/Claude home or Pi account directory containing auth.json; also permits a same-runtime successor")
     .option("--token-file <path>", "With a Claude account home, its required subscription token reference")
     .option("--account-label <label>", "With --token-file, the selected account's label")
     .option("--permission-mode <mode>", "Target native permission choice; default: inherit the seat's member and rig policy")
@@ -934,7 +1051,7 @@ resume/successor launch reads it at call time. Examples:
     .option("--note <text>", "With --confirm: what you'll do first")
     .option("--recover", "Finish an interrupted switch from its record")
     .option("--json", "JSON output for agents")
-    .description("Move a live Codex or Claude Code seat to the other runtime, successor first")
+    .description("Move a live Codex, Claude Code or Pi seat to another runtime, successor first")
     .addHelpText("after", `
 The seat keeps its address, connections, queue rows and claims. Its successor
 starts on the target runtime beside the current occupant, reads a handover, and
@@ -948,7 +1065,9 @@ later converge reports a deferred change_runtime); the source runtime's model,
 effort, Codex profile and native permission choice are cleared, not mapped; two
 processes run until cutover; messages sent to the seat during the switch are
 held, not typed, and need sending again afterwards.
-Codex and Claude Code, single-pane seats only. --dry-run lists the details.
+Codex, Claude Code and Pi, single-pane seats only. --dry-run lists the details.
+A seat that has never started has no pane to switch: declare the other runtime for it in its rig spec and bring the team
+up again from that spec. That's a new generation of the seat, without this seat's edges, settings or queued work.
 --clear-account-home returns to configured member/rig/daemon/native selection; it does not restore historical credentials.
 It uses a fresh successor and clears an account-home token reference only after confirmation. Do not combine it with
 --account-home or a new token reference. Anthropic's global active/default profile is not isolated by CLAUDE_CONFIG_DIR.
@@ -1318,10 +1437,16 @@ Examples:
     .option("--json", "JSON output for agents")
     .description("Stop exactly one LIVE managed seat (kills only that seat's tmux session; audited)")
     .addHelpText("after", `
-Siblings are untouched. A dead seat is refused (use rig seat clean); an adopted
-session is refused (use rig unclaim). Stopping ends that agent's session and any
-work in progress: check it first (rig capture <seat>) and stop only a seat you
-own or were asked to stop. rig seat launch <seat> --fresh --reason <text> starts
+Siblings are untouched. A dead seat is refused (use rig seat clean). An adopted
+session is refused: to end only it, run rig unclaim <session> (it releases the
+session and leaves its process running), then end that process in its own
+terminal. rig down <rig> ends every seat in its rig, so it is the route only
+for a one-seat rig.
+A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 still reads
+adopted and is refused too, until its next launched handover or managed launch;
+the refusal says so. Stopping ends that agent's session and any work in progress:
+check it first (rig capture <seat>) and stop only a seat you own or were asked to
+stop. rig seat launch <seat> --fresh --reason <text> starts
 a fresh occupant there; it does not resume the stopped conversation.
 A community harness stop closes its managed pane; its native processes or compute
 may outlive it. Inspect their own lifecycle receipts.

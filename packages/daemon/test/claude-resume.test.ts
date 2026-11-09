@@ -35,6 +35,32 @@ function mockTmux(overrides?: {
 }
 
 describe("ClaudeResumeAdapter", () => {
+  it.each([false, true])("carries the retained executable and wrapper through restore preparation (managed: %s)", async managed => {
+    const tmux = mockTmux();
+    tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+    const command = vi.fn(async (_session: string, text: string, _options: unknown) => text);
+    const prepare = vi.fn(async (_input: unknown, _mode: string) => ({ command: () => "managed-resume", warnings: [] }));
+    const adapter = new ClaudeResumeAdapter(tmux, {
+      seatLaunchEnvironment: { command, resolveLaunchWrapper: () => wrapper } as unknown as SeatLaunchEnvironment,
+      ...(managed ? { claudeManagedLaunch: { prepare } as unknown as ClaudeManagedLaunch } : {}),
+    });
+    const wrapper = ["/wrapper", "--"];
+    await adapter.resume("seat@rig", "claude_id", "original", "/repo", "floor", undefined, managed ? "acceptEdits" : undefined, "node",
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native tools/claude", undefined, wrapper);
+
+    if (managed) {
+      expect(prepare).toHaveBeenCalledWith({ nodeId: "node", cwd: "/repo", session: "seat@rig", executable: "/native tools/claude", launchWrapper: wrapper }, "acceptEdits");
+      expect(command).not.toHaveBeenCalled();
+    } else {
+      expect(command).toHaveBeenCalledWith("seat@rig", expect.stringContaining("exec '/wrapper' '--' '/native tools/claude'"), {
+        runtime: "claude-code", nodeId: "node", launchWrapper: wrapper, claudeShellLookup: false,
+      });
+      expect(prepare).not.toHaveBeenCalled();
+    }
+    expect(tmux.sendShellCommand).toHaveBeenCalledOnce();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])("refuses API resume when the token step cannot run (environment present: %s)", async (hasEnvironment) => {
     const tmux = mockTmux();
     tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
@@ -479,6 +505,31 @@ describe("ClaudeResumeAdapter", () => {
 
       // The process the identity check proved is the launch's record of what it started (#1077).
       expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT, launchedProcess: { pid: 1235, startedAt: "Sat Jan  1 12:00:00 2000" } });
+    });
+
+    // #2508: a classic resume whose launch subshell didn't exec Claude (an rc alias or function, or a launch whose
+    // environment correction fell back) leaves the shell as the pane's label. Before Claude's prompt shows, a proven
+    // Claude naming this resume beneath that subshell is the foreground runtime, as a `claude` label is.
+    it("accepts a proven Claude beneath the launch subshell before its prompt shows", async () => {
+      const tmux = mockTmux({
+        getPanePid: vi.fn(async () => 1234),
+        getPaneCommand: vi.fn(async () => "zsh"),
+        capturePaneContent: vi.fn(async () => ""),
+      });
+      const adapter = new ClaudeResumeAdapter(tmux, {
+        pollMs: 0,
+        maxWaitMs: 0,
+        sleep: async () => {},
+        listProcesses: async () => [
+          { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, command: "-zsh", executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, command: "-zsh", executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 1236, ppid: 1235, pgid: 1235, tpgid: 1235, command: "claude --permission-mode acceptEdits --resume resume-id", executableName: "claude", startedAt: "Sat Jan  1 12:00:00 2000" },
+        ],
+      });
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_id", "resume-id", "/repo");
+
+      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT, launchedProcess: { pid: 1236, startedAt: "Sat Jan  1 12:00:00 2000" } });
     });
 
     it.each([

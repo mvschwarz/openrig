@@ -20,7 +20,7 @@ it never reads an unsupported capability as idle, working, ready or verified.
 | Resume | when declared | `resume: true` with one of the two above (see [Reopening a conversation](#reopening-a-conversation-resume-true)). Without it, a resume says `Resume is unsupported: community harness "<name>" is launch-only`, and a restore stops and asks. |
 | Activity | partly | Read from the screen only; there are no activity hooks. Work and attention the screen shows are kept, but a screen that looks idle reads `unknown`, never idle, because a quiet prompt can be an approval or a pause. A [runner preset](#runner-presets-runner-true)'s own reports decide it instead. |
 | Attention | partly | Read from the screen: a permission question or numbered choice that OpenRig recognizes reads as needing attention, and `rig send` won't type into it. A prompt it doesn't recognize reads `unknown`. |
-| Approval | no | Approvals stay in the harness's own pane. OpenRig relays none, so a person answers them there. |
+| Approval | no | Approvals stay in the harness's own pane. OpenRig relays none, so a person answers them there. A [runner preset](#runner-presets-runner-true) is the exception: its runner submits the agent's permission requests to OpenRig, which asks a person, and the default is permit (section 7 of the [harness and runner contract](harness-runner-contract.md)). |
 | Cancel | no | OpenRig has no verb that cancels a running turn. `rig seat stop` and `rig down` end the seat's tmux session; anything the harness runs outside its pane, such as a gateway, is its own, and the preset's `limits` should say what keeps running. Restarting in place and switching harness are refused. |
 | Transport | yes | The seat is a tmux pane like any other, so `rig capture`, `rig send` and `--host` work as they do for any seat. |
 
@@ -53,6 +53,7 @@ startup_assisted: true           # optional: startup submission needs a person's
 first_input: true                # optional: launcher takes the first turn from OPENRIG_FIRST_INPUT (below)
 # runner: true                  # optional, needs launch_result: the launcher reports the seat's activity (below)
 # passes_model: true            # optional: the launcher takes the seat's declared model from OPENRIG_MODEL (below)
+# launch_wrapper: true          # optional: a runner applies OPENRIG_LAUNCH_WRAPPER to its native child (below)
 ```
 
 - **`command`** is a single program and its arguments. Shell syntax such as `|`, `&&`, `;`, redirections or `$(…)`
@@ -164,6 +165,10 @@ and reports what it's doing, as OpenRig's own Pi runner does. The seat's activit
   unavailable.
 - **Input is as for any seat.** A send pastes the text and presses Enter, so a runner should submit everything up to that
   Enter as one prompt.
+- **`launch_wrapper: true` declares wrapper support and requires `runner: true`.** A member with a wrapper and a runner preset without this flag is refused at preflight and launch (not schema validation):
+  `launch_wrapper unsupported: the community preset "<runtime>" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.` See the
+  [harness and runner contract](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch)
+  for the environment handoff, native-child execution and refusal requirements.
 
 **What the runner posts.** The runner posts each event to `POST /api/activity/hooks` with the local activity hook token,
 one at a time and in order, without making the agent wait. It finds the address and token in `OPENRIG_URL` (or
@@ -311,6 +316,30 @@ on it, not Pi choosing by itself to park or hand work on.
   agent folder.
 
 Copy both and maintain them as your own.
+
+## An example runner: dsh
+
+[`community-harness-examples/dsh/`](community-harness-examples/dsh/) has a runner preset (`runner: true`) and a small runner
+for DeepSeek Harness, which speaks ACP on stdio and has no terminal UI of its own. It's written for dsh 0.2.1-rc.2 and
+checked only against a stand-in agent.
+- **The runner:**
+  - it opens the conversation and writes the launch record;
+  - it turns each submitted block into one prompt;
+  - it reports turn boundaries as activity hooks;
+  - it cancels on `/abort` or Ctrl-C, as the [runner contract](harness-runner-contract.md) describes.
+- **Permissions:** it sends each request to OpenRig, which asks the default person or the seat's override.
+  - **When no one can be asked, or OpenRig can't answer,** it permits with dsh's own allow option (`allow_once`, else
+    `allow_always`), which is OpenRig's default. `allow_always` creates a standing grant in dsh.
+  - **It refuses and holds needs input** only after `--deny`. A person's no when dsh offered no reject option, or a
+    request OpenRig says isn't the current occupant's, is answered cancelled.
+- **Each seat gets its own dsh home,** with dsh's session-log and plugin-list uploads to DeepSeek turned off. Give that
+  home credentials, or put a provider key in the seat's environment.
+- **Resume isn't declared.** The runner reopens a conversation by the method dsh advertises, and reports one missing only
+  on dsh's own not-found error. Declare `resume: true` only after a real dsh has reopened a conversation and refused a
+  missing one.
+
+Its [README](community-harness-examples/dsh/README.md) has the setup and a check you can run without a model. Copy both
+and maintain them as your own.
 
 The launcher is the contributor's code, in the contributor's package. OpenRig runs no code from a preset and loads no
 module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted`, `first_input`, `runner` or `passes_model` is refused by an older

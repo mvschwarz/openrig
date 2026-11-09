@@ -1158,7 +1158,7 @@ describe("node detail reports a guidance block's installed file only from eviden
       declaredTarget: "AGENTS.md", effectiveTarget: path.join(cwd, "CLAUDE.md") }]);
   });
 
-  it("follows the rig's Claude managed-blocks file, Codex's AGENTS.md, and the older block markers", () => {
+  it("follows the rig's Claude managed-blocks file, Codex's and Pi's AGENTS.md, and the older block markers", () => {
     new RigRepository(db).setRigClaudeManagedBlockFile("rig-1", "CLAUDE.local.md");
     fs.writeFileSync(path.join(cwd, "CLAUDE.local.md"), block("role", "RIGGED"));
     expect(installed()[0]).toMatchObject({ targetPath: path.join(cwd, "CLAUDE.local.md"), effectiveTarget: path.join(cwd, "CLAUDE.local.md") });
@@ -1166,11 +1166,24 @@ describe("node detail reports a guidance block's installed file only from eviden
     fs.writeFileSync(path.join(cwd, "AGENTS.md"), block("role"));
     expect(installed("codex", [guidance("CLAUDE.md")])[0]).toMatchObject({ targetPath: path.join(cwd, "AGENTS.md"),
       declaredTarget: "CLAUDE.md", effectiveTarget: path.join(cwd, "AGENTS.md") });
+    db.prepare("DELETE FROM node_startup_context WHERE node_id = 'node-1'").run();
+    expect(installed("pi", [guidance("CLAUDE.md")])[0]).toMatchObject({ targetPath: path.join(cwd, "AGENTS.md"),
+      declaredTarget: "CLAUDE.md", effectiveTarget: path.join(cwd, "AGENTS.md") });
+  });
+
+  it("follows a Pi seat's recorded guidance file in its agent folder, not the repository AGENTS.md (#875)", () => {
+    const agentFile = path.join(cwd, "pi-state", "dev-impl@test-rig", "agent", "AGENTS.md");
+    fs.mkdirSync(path.dirname(agentFile), { recursive: true });
+    fs.writeFileSync(agentFile, block("role"));
+    fs.writeFileSync(path.join(cwd, "AGENTS.md"), block("role")); // a stale repository copy isn't evidence for this seat
+    seedStartupContext(db, "node-1", { runtime: "pi", projectionEntries: [guidance("AGENTS.md")] });
+    db.prepare("UPDATE node_startup_context SET guidance_file = ? WHERE node_id = 'node-1'").run(agentFile);
+    expect(getNodeDetail(db, "rig-1", "dev.impl")!.installedResources[0]).toMatchObject({ targetPath: agentFile, effectiveTarget: agentFile });
   });
 
   it("claims nothing for a runtime with no known guidance file, a merge that writes nothing, or a half-written block", () => {
     fs.writeFileSync(path.join(cwd, "AGENTS.md"), block("role"));
-    expect(installed("pi")[0]).toEqual({ id: "role", category: "guidance", targetPath: "", declaredTarget: "AGENTS.md" });
+    expect(installed("synth")[0]).toEqual({ id: "role", category: "guidance", targetPath: "", declaredTarget: "AGENTS.md" });
     db.prepare("DELETE FROM node_startup_context WHERE node_id = 'node-1'").run();
     fs.writeFileSync(path.join(cwd, "CLAUDE.md"), block("role"));
     expect(installed("claude-code", [guidance(undefined, "append")])[0]).toMatchObject({ targetPath: "" });
@@ -1197,5 +1210,59 @@ describe("node detail reports a guidance block's installed file only from eviden
       expect(installed()[0]).toEqual({ id: "role", category: "guidance", targetPath: "",
         declaredTarget: "AGENTS.md", effectiveTarget: path.join(moved, "CLAUDE.md") });
     } finally { fs.rmSync(moved, { recursive: true, force: true }); }
+  });
+});
+
+describe("Node inventory launchWrapper projection (#2328)", () => {
+  let db: Database.Database;
+  beforeEach(() => { db = createFullTestDb(); });
+  afterEach(() => { db.close(); });
+
+  it.each(["pi", "codex", "claude-code"])("projects %s launchWrapper in inventory and detail, omitting absent or cleared values", runtime => {
+    const repo = new RigRepository(db);
+    const rig = repo.createRig("wrapper-inv-rig");
+    const wrapped = repo.addNode(rig.id, "dev.pi-wrapped", {
+      runtime,
+      cwd: "/project",
+      launchWrapper: ["mtn", "sandbox", "exec", "--seat", "synthetic", "--"],
+    });
+    const unwrapped = repo.addNode(rig.id, "dev.codex-plain", {
+      runtime: "codex",
+      cwd: "/project",
+    });
+
+    const entries = getNodeInventory(db, rig.id);
+    const wrappedEntry = entries.find((e) => e.nodeId === wrapped.id)!;
+    const unwrappedEntry = entries.find((e) => e.nodeId === unwrapped.id)!;
+
+    expect(wrappedEntry.launchWrapper).toEqual(["mtn", "sandbox", "exec", "--seat", "synthetic", "--"]);
+    expect(unwrappedEntry.launchWrapper).toBeUndefined();
+    expect("launchWrapper" in unwrappedEntry).toBe(false);
+
+    const allRigsMap = getNodeInventoryForAllRigs(db);
+    expect(allRigsMap.get(rig.id)?.find((e) => e.nodeId === wrapped.id)?.launchWrapper).toEqual([
+      "mtn", "sandbox", "exec", "--seat", "synthetic", "--",
+    ]);
+    expect("launchWrapper" in (allRigsMap.get(rig.id)?.find((e) => e.nodeId === unwrapped.id) ?? {})).toBe(false);
+
+    const detail = getNodeDetail(db, rig.id, "dev.pi-wrapped");
+    expect(detail?.launchWrapper).toEqual(["mtn", "sandbox", "exec", "--seat", "synthetic", "--"]);
+
+    repo.setNodeLaunchWrapper(wrapped.id, []);
+    const clearedEntry = getNodeInventory(db, rig.id).find((e) => e.nodeId === wrapped.id)!;
+    expect(clearedEntry.launchWrapper).toBeUndefined();
+    expect("launchWrapper" in clearedEntry).toBe(false);
+  });
+
+  it.each(["pi", "codex", "claude-code"])("fails closed when stored %s launch_wrapper is malformed or attached to an unsupported runtime", runtime => {
+    const repo = new RigRepository(db);
+    const rig = repo.createRig("bad-wrapper-inv-rig");
+    const node = repo.addNode(rig.id, "dev.codex", { runtime, cwd: "/project" });
+    db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run("[]", node.id);
+    expect(() => getNodeInventory(db, rig.id)).toThrow(/launch_wrapper/);
+
+    db.prepare("UPDATE nodes SET runtime = 'terminal', launch_wrapper = ? WHERE id = ?")
+      .run('["mtn","--"]', node.id);
+    expect(() => getNodeInventory(db, rig.id)).toThrow(/pi|codex/i);
   });
 });

@@ -443,6 +443,11 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
   const [saveError, setSaveError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<{ currentMtime: string; currentContentHash: string } | null>(null);
   const [savedIndicator, setSavedIndicator] = useState(false);
+  useEffect(() => {
+    if (!savedIndicator) return;
+    const timer = setTimeout(() => setSavedIndicator(false), 2000);
+    return () => clearTimeout(timer);
+  }, [savedIndicator]);
   const write = useFilesWrite();
   const writePending = useRef(write.isPending);
   writePending.current = write.isPending;
@@ -490,7 +495,6 @@ function FileEditor({ root, path, read }: { root: string; path: string; read: Fi
                       ...base, content: draft, mtime: result.newMtime, contentHash: result.newContentHash,
                     } }));
                     setSavedIndicator(true);
-                    setTimeout(() => setSavedIndicator(false), 2000);
                   }
                 },
                 onError: (err) => {

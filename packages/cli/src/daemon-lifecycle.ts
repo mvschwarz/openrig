@@ -39,6 +39,8 @@ export interface DaemonEventLoopEvidence {
 }
 
 export interface DaemonStatus {
+  /** The selected OPENRIG_URL names a non-loopback endpoint. */
+  explicitRemote?: boolean;
   databaseWarnings?: string[];
   /** RULING 1ae863d2 — C3 3-state semantics (canonical: daemon crash-cart-detect.ts, kept in
    *  lockstep): "stopped" requires POSITIVE evidence (connection refused); a probe TIMEOUT or
@@ -62,6 +64,9 @@ export interface DaemonStatus {
   eventLoop?: DaemonEventLoopEvidence;
   /** #275 — the OS code behind a failed health probe (e.g. EPERM when a sandbox blocked it). */
   probeErrorCode?: string;
+  /** T2 — a refused listener under a live start reservation (daemon-start.lock): a launch is in
+   *  progress and not listening yet. `pid` is the live launcher (else child) PID; `since` its start. */
+  startPending?: { pid: number; since?: string };
 }
 
 /** "unknown": the process may exist but this shell can neither signal nor inspect it. */
@@ -134,6 +139,16 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
       fact: `Daemon could not be checked: the health probe was blocked (${status.probeErrorCode}).`,
       consequence: `This command needs a responsive daemon. ${blocked.consequence}`,
       action: blocked.action,
+      ...causeCode,
+    };
+  }
+  // A refused probe under a live start reservation: a launch is in progress and nothing is listening yet.
+  if (status.startPending) {
+    const since = status.startPending.since ? ` since ${status.startPending.since}` : "";
+    return {
+      fact: `Daemon is starting (launch reserved by pid ${status.startPending.pid}${since}); it isn't listening yet.`,
+      consequence: "This command needs a responsive daemon.",
+      action: "Wait, then re-check with 'rig daemon status'.",
       ...causeCode,
     };
   }
@@ -419,9 +434,13 @@ function resolveLifecycleFile(deps: LifecycleDeps, filename: "daemon.json" | "da
  *  - "openrig" — healthz responded (ok or not) → this is our daemon
  *  - "not_openrig" — connection refused → PID is alive but not listening on our port
  *  - "unresponsive" — pid is alive but healthz probe timed out
- *  - "dead" — PID not alive */
-async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openrig" | "not_openrig" | "unresponsive" | "dead"> {
-  if (!deps.isProcessAlive(state.pid)) return "dead";
+ *  - "dead" — PID not alive
+ *  - { blocked } — the OS refused the probe; identity is unknown */
+async function checkPid(state: DaemonState, deps: LifecycleDeps, knownLiveness?: ProcessLiveness): Promise<"openrig" | "not_openrig" | "unresponsive" | "dead" | { blocked: string }> {
+  const liveness = knownLiveness ?? (deps.processLiveness
+    ? deps.processLiveness(state.pid)
+    : deps.isProcessAlive(state.pid) ? "alive" : "dead");
+  if (liveness === "dead") return "dead";
   const host = state.host ?? DEFAULT_HOST;
   try {
     await fetchDaemonProbe(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
@@ -429,6 +448,8 @@ async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openr
     return "openrig";
   } catch (err) {
     if (err instanceof HealthProbeTimeoutError) return "unresponsive";
+    const code = connectionErrorCode(err);
+    if (isBlockedConnectionCode(code)) return { blocked: code };
     // Connection refused → PID alive but not our daemon
     return "not_openrig";
   }
@@ -474,6 +495,13 @@ const ENV_SCRUB_EXACT = new Set([
   "TERM_PROGRAM",
   "TERM_PROGRAM_VERSION",
   "TERMINFO",
+  // The herdr-core terminal this command runs in (HERDR_CORE_TERMINAL_ENV_KEYS in the daemon's
+  // parent-session-env.ts). Core ends every process started with that terminal's HC_SCOPE when the
+  // terminal closes, and it reads the environment the process was started with, so the daemon must
+  // never be started with it: closing the terminal would end the daemon, its tmux server and every seat.
+  "HC_SCOPE",
+  "HC_TERMINAL_ID",
+  "HC_TERMINAL_SOCKET",
 ]);
 
 export function buildDaemonEnv(
@@ -666,6 +694,10 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
   const existing = readState(deps);
   if (existing) {
     const pidState = await checkPid(existing, deps);
+    if (typeof pidState === "object") {
+      const guidance = blockedConnectionGuidance(pidState.blocked);
+      throw new Error(`${guidance.consequence} ${guidance.action}`);
+    }
     if (pidState === "openrig") {
       // Our daemon is running (possibly unhealthy, but alive on our port)
       throw new Error(`Daemon already running (pid ${existing.pid} on port ${existing.port})`);
@@ -680,6 +712,10 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       await fetchDaemonProbe(deps, `http://${formatDaemonHostForUrl(probeHost)}:${port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
       recoveredRunning = true;
     } catch (error) {
+      const code = connectionErrorCode(error);
+      if (isBlockedConnectionCode(code)) {
+        console.warn(`Warning: daemon health probe was blocked (${code}); the port could not be checked and a daemon may already be running.`);
+      }
       // WSL2 can silently drop probes to an unused port. A slow live daemon can
       // also time out: do not run a second child's initialization against its DB.
       if (error instanceof HealthProbeTimeoutError && await deps.isPortOccupied?.(probeHost, port)) {
@@ -959,7 +995,16 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   }
   const stateFile = resolveLifecycleFile(deps, "daemon.json");
 
-  const pidState = await checkPid(state, deps);
+  const liveness = deps.processLiveness
+    ? deps.processLiveness(state.pid)
+    : deps.isProcessAlive(state.pid) ? "alive" : "dead";
+  if (liveness === "unknown") {
+    throw new Error(`Cannot stop safely: PID ${state.pid} liveness is unknown; no signal sent, state preserved.`);
+  }
+  const pidState = await checkPid(state, deps, liveness);
+  if (typeof pidState === "object") {
+    throw new Error(`Cannot stop safely: the identity probe was blocked (${pidState.blocked}); no signal sent, state preserved.`);
+  }
   if (pidState === "not_openrig") {
     throw new Error(`Cannot stop safely: PID ${state.pid} is present but identity is not confirmed at ${check}; no signal sent, state preserved.`);
   }
@@ -1043,6 +1088,40 @@ function findSiblingHome(deps: LifecycleDeps): DaemonStatus["siblingHint"] {
   return undefined;
 }
 
+/** T2 — read-only: the live launcher (else child) PID named by a start reservation, or undefined
+ *  when there is no reservation, it is unreadable, or every PID it names is dead. */
+function liveStartReservation(deps: LifecycleDeps): DaemonStatus["startPending"] {
+  try {
+    const file = path.join(deps.homeDir ?? OPENRIG_DIR, "daemon-start.lock");
+    const raw = deps.exists(file) ? deps.readFile(file) : null;
+    if (!raw) return undefined;
+    let launcherPid: number | undefined;
+    let childPid: number | undefined;
+    let since: string | undefined;
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const rec = JSON.parse(line) as { launcherPid?: unknown; childPid?: unknown; startedAt?: unknown };
+        if (typeof rec.launcherPid === "number") launcherPid = rec.launcherPid;
+        if (typeof rec.childPid === "number") childPid = rec.childPid;
+        if (typeof rec.startedAt === "string") since = rec.startedAt;
+      } catch {
+        // partial line: keep whatever parsed
+      }
+    }
+    for (const pid of [launcherPid, childPid]) {
+      if (pid === undefined) continue;
+      const liveness: ProcessLiveness = deps.processLiveness
+        ? deps.processLiveness(pid)
+        : deps.isProcessAlive(pid) ? "alive" : "dead";
+      if (liveness !== "dead") return { pid, ...(since ? { since } : {}) };
+    }
+  } catch {
+    // best-effort only: a status read must never fail on the reservation
+  }
+  return undefined;
+}
+
 export async function getDaemonStatus(
   deps: LifecycleDeps,
   options: GetDaemonStatusOptions = {},
@@ -1060,7 +1139,9 @@ export async function getDaemonStatus(
     const endpoint = (() => {
       try {
         const url = new URL(openrigUrl);
-        return { port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST };
+        const host = url.hostname || DEFAULT_HOST;
+        const loopback = host.toLowerCase() === "localhost" || host === "[::1]" || host === "::1" || /^127\.\d+\.\d+\.\d+$/.test(host);
+        return { port: Number(url.port) || DEFAULT_PORT, host, ...(!loopback ? { explicitRemote: true } : {}) };
       } catch {
         return {};
       }
@@ -1095,9 +1176,13 @@ export async function getDaemonStatus(
       // 1ae863d2: the resolved home has NO daemon state — before asserting anything,
       // look for a live sibling home / HOME-MOVED marker (the wrong-home class).
       const siblingHint = findSiblingHome(deps);
-      if (siblingHint) return { state: "unverified", siblingHint, ...probeErrorCodeOf(err) };
-      return isRefusedError(err)
-        ? { state: "stopped" }
+      // T2: a refused listener under a live start reservation is a launch in progress, not down.
+      const refused = isRefusedError(err);
+      const startPending = refused ? liveStartReservation(deps) : undefined;
+      if (siblingHint) return { state: "unverified", siblingHint, ...probeErrorCodeOf(err), ...(startPending ? { startPending } : {}) };
+      if (refused && !startPending) return { state: "stopped" };
+      return refused
+        ? { state: "unverified", port: configured.port, host: configured.host, startPending, ...probeErrorCodeOf(err) }
         : { state: "unverified", port: configured.port, host: configured.host, ...probeErrorCodeOf(err) };
     }
   }
@@ -1125,7 +1210,12 @@ export async function getDaemonStatus(
       return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
+      // T2: unless a live start reservation says a launch is in progress.
+      if (isRefusedError(err)) {
+        const startPending = liveStartReservation(deps);
+        return startPending ? { state: "unverified", pid: state.pid, port: state.port, host, startPending, ...probeErrorCodeOf(err) } : { state: "stopped" };
+      }
+      return { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
     }
   }
 

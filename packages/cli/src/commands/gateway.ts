@@ -173,9 +173,9 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
     .command("add <entityId>")
     .description("Add a human fragment (verb-add-only; the fragment is truth, the registry is a GENERATED projection)")
     .requiredOption("--display-name <name>", "Human-readable display name")
-    .requiredOption(
+    .option(
       "--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>",
-      "Connector binding (repeatable); role primary|secondary, EXACTLY ONE primary. connectorRef and secretsRef are config/vault labels (e.g. for Slack: slack:openrig-personal:file:<env-path>:primary:handle=<id>; tokens come from 'rig slack setup --secrets-env-file', never inline). Optional handle=<platform id> makes the binding inbound-resolvable (unique per kind); omit it for outbound-only.",
+      "Connector binding (repeatable); leave it out for a person with no connector, who's reached in the Feed and Steering only. With bindings, role primary|secondary, EXACTLY ONE primary. connectorRef and secretsRef are config/vault labels (e.g. for Slack: slack:openrig-personal:file:<env-path>:primary:handle=<id>; tokens come from 'rig slack setup --secrets-env-file', never inline; or file:<path> for relay: relay:<connectorRef>:file:<absolute-env-file>:primary:handle=<safe-alias>). Optional handle=<platform id> makes the binding inbound-resolvable (unique per kind for Slack, unique per connectorRef+handle for relay); omit it for outbound-only.",
       (v: string, acc: string[] = []) => { acc.push(v); return acc; },
     )
     .requiredOption("--delivery-class <A|B|C|D>", "Notification loudness class (the notifications register selection)")
@@ -188,7 +188,7 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
     .option("--policy <text>", "Readable policy for agents working with this person (text, not enforced)")
     .option("--policy-file <path>", "Read the policy text from a file")
     .option("--default", "Make this person the default: the one escalations, the notice digest and other unaddressed needs go to")
-    .action(async (entityId: string, opts: { displayName: string; binding: string[]; deliveryClass: string; away?: boolean; replace?: boolean; reason: string; actor?: string; organization?: string; group?: string[]; policy?: string; policyFile?: string; default?: boolean }) => {
+    .action(async (entityId: string, opts: { displayName: string; binding?: string[]; deliveryClass: string; away?: boolean; replace?: boolean; reason: string; actor?: string; organization?: string; group?: string[]; policy?: string; policyFile?: string; default?: boolean }) => {
       // LAZY import the narrow daemon surface at invocation (dep rail 2).
       const registry = await import("@openrig/daemon/gateway-human-registry");
       const { addHumanFragment, parseBindingSpec } = registry as unknown as {
@@ -209,7 +209,7 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
         if (unknownGroup) { console.error(`refused: no group "${unknownGroup}" — create it with rig gateway group set ${unknownGroup} --organization … --name …`); process.exitCode = 1; return; }
       }
       const bindings: Record<string, unknown>[] = [];
-      for (const spec of opts.binding) {
+      for (const spec of opts.binding ?? []) {
         const b = parseBindingSpec(spec);
         if (!b.ok) { console.error(`--binding: ${b.error}`); process.exitCode = 1; return; }
         bindings.push(b.binding);
@@ -253,16 +253,24 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
     .addHelpText("after", `
 Binding specification details:
   Format: <kind:connectorRef:secretsRef:role[:handle=<id>]>
-  - kind: Connector kind (e.g. "slack")
-  - connectorRef: Configuration label identifying the connector instance (e.g. "openrig-personal" or "main")
-  - secretsRef: Pointer or label identifying where secrets are resolved (e.g. "file:/path/to/slack.env" or "vault://slack/user").
-    NOTE: Never pass credentials or tokens inline here; credentials (like SLACK_BOT_TOKEN) are loaded from the connector's secrets env file (configured via 'rig slack setup --secrets-env-file').
+  - kind: Connector kind: "slack" or "relay"
+  - connectorRef: Configuration label identifying the connector instance (e.g. "openrig-personal", "main", or "local-bridge")
+  - secretsRef: Pointer or label identifying where secrets are resolved:
+    * For Slack: "file:/path/to/slack.env" or "vault://slack/user". Credentials (like SLACK_BOT_TOKEN) are loaded from the connector's secrets env file (configured via 'rig slack setup --secrets-env-file').
+    * For Relay: "file:<absolute-env-file>" pointing to a chmod 600 file holding OPENRIG_RELAY_URL (HTTP loopback only, e.g. http://127.0.0.1:8088), OPENRIG_RELAY_OUTBOUND_TOKEN, and OPENRIG_RELAY_INBOUND_TOKEN (distinct non-empty values; no environment fallback).
+    NOTE: Never pass credentials or tokens inline here.
   - role: "primary" (exactly one binding must be primary) or "secondary"
-  - handle: Optional platform user identifier (e.g. "handle=U12345678") for inbound routing
+  - handle: Optional platform user identifier (e.g. "handle=U12345678" for Slack, or "handle=<safe-alias>" matching /^[A-Za-z0-9._-]+$/ for relay) for inbound routing. For relay, handles are unique per connectorRef.
 
-Example:
+Examples:
+  # Slack binding
   rig gateway human add alice --display-name "Alice" \\
     --binding "slack:openrig-personal:file:/etc/openrig/slack.env:primary:handle=U12345678" \\
+    --delivery-class B
+
+  # Relay binding (loopback bridge adapter)
+  rig gateway human add bob --display-name "Bob" \\
+    --binding "relay:local-bridge:file:/etc/openrig/relay.env:primary:handle=bob-ops" \\
     --delivery-class B`);
 
   // ── S12 (OPR.0.5.5.12): the fragment lifecycle beyond add. Every verb operates through
@@ -284,8 +292,9 @@ Example:
       if (opts.json) { console.log(JSON.stringify({ ok: true, humans })); return; }
       if (res.humans.length === 0) { console.log("no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …"); return; }
       for (const h of humans) {
-        const inbound = h.bindings.inboundResolvable ? "" : "  [outbound-only]";
-        console.log(`${h.entityId}  "${h.displayName}"  class=${h.deliveryClass}  ${h.availability}  bindings=${h.bindings.count} (primary ${h.bindings.primary.kind}:${h.bindings.primary.connectorRef})  delivery=${h.deliveryReadiness.state}${inbound}`);
+        const inbound = h.bindings.inboundResolvable || !h.bindings.primary ? "" : "  [outbound-only]";
+        const primary = h.bindings.primary ? `primary ${h.bindings.primary.kind}:${h.bindings.primary.connectorRef}` : "no connector: Feed and Steering only";
+        console.log(`${h.entityId}  "${h.displayName}"  class=${h.deliveryClass}  ${h.availability}  bindings=${h.bindings.count} (${primary})  delivery=${h.deliveryReadiness.state}${inbound}`);
         if (!h.deliveryReadiness.ready) console.log(`  delivery: ${h.deliveryReadiness.reason}${h.deliveryReadiness.nextAction ? `; next: ${h.deliveryReadiness.nextAction}` : ""}`);
         console.log(`  ${"unknown" in h.quiet ? `quiet: unknown (${h.quiet.unknown})` : describeQuiet(h.quiet)}`);
       }
@@ -558,9 +567,14 @@ Examples:
 
   human
     .command("set <entityId> <field> <value>")
-    .description("Edit one field through the verb (same validation as add; re-projection immediate). Fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-subscription (the person's Slack subscription: every-ask, the default, posts every ask to Slack too; urgent-only posts only asks created with --alert, the rest wait on Steering and the TUI; or unset), binding.<n>; and, kept in the participant side file: organization (an id, or unset), groups (comma-separated ids, or unset), policy (text, @<path> to read a file, or unset)")
+    .description("Edit one field through the verb (same validation as add; re-projection immediate). Fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-subscription (the person's Slack subscription: every-ask, the default, posts every ask to Slack too; urgent-only posts only asks created with --alert, the rest wait on Steering and the TUI; or unset), binding.<n> (a full kind:connectorRef:secretsRef:role[:handle=<id>] spec, or unset to remove that binding); and, kept in the participant side file: organization (an id, or unset), groups (comma-separated ids, or unset), policy (text, @<path> to read a file, or unset)")
     .option("--reason <reason>", "Reason recorded with connector binding changes", "update human binding")
     .option("--actor <actor>", "Named operator when outside a managed seat")
+    .addHelpText("after", `
+Removing a connector binding (binding.<n> unset):
+  - The one-primary rule stays: no replacement primary is chosen silently. If removing a primary binding would leave other bindings, the command refuses. To replace the primary in place, set its slot to the new primary spec; to promote an existing secondary binding, first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show <entityId> --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show <entityId> --json, since the primary's slot shifts down when a lower-index secondary is removed) and set it to the saved spec with role primary (promotion replaces the former primary binding; its connector reference and inbound handle are not retained as a secondary); to remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show <entityId>, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).
+  - Remaining bindings are printed with their shifted binding.<n> slot indexes (the primary's slot shifts down too when a lower-index secondary is removed). Because indexes shift after removal, do not blindly retry 'binding.0 unset'; check remainingBindings, the receipt, or 'rig gateway human show <entityId>' before retrying.
+  - Removing a binding keeps the person, their preferences, their other bindings and their open questions. Removing the last binding makes the current delivery episode inactive, so new missing-post findings stop (an already-open recovery item for an undelivered notice may remain); the current delivery-outcome display may disappear too, while historical receipt notes remain. It does not answer, close or cancel open questions, cancel or reroute already-prepared deliveries, or retract anything a bridge has already accepted.`)
     .action(async (entityId: string, field: string, value: string, opts: { reason: string; actor?: string }) => {
       const registry = await import("@openrig/daemon/gateway-human-registry");
       if (field === "organization" || field === "groups" || field === "policy") {
@@ -593,7 +607,19 @@ Examples:
               return { value: res, after: { digest }, effect: digest === prior ? "no-op" : "applied" };
             },
           });
-          console.log(JSON.stringify({ ok: true, entityId, field, path: result.value.path, receipt: result.receipt }));
+          console.log(JSON.stringify({
+            ok: true,
+            entityId,
+            field,
+            path: result.value.path,
+            receipt: result.receipt,
+            ...(value === "unset"
+              ? {
+                  remainingBindings: result.value.remainingBindings ?? [],
+                  note: result.value.note,
+                }
+              : {}),
+          }));
         } catch (error) { console.error(`refused: ${(error as Error).message}`); process.exitCode = 1; }
         return;
       }
@@ -731,17 +757,16 @@ Examples:
     .option("--json", "Complete records as JSON, including organizations and groups")
     .action(async (opts: { organization?: string; json?: boolean }) => {
       const registry = await import("@openrig/daemon/gateway-human-registry");
+      if (opts.json) {
+        const result = registry.participantsJsonView(undefined, opts.organization);
+        if (!result.ok) { console.error(`refused: ${result.error}`); process.exitCode = 1; return; }
+        console.log(JSON.stringify(result));
+        return;
+      }
       const view = registry.participantsView();
       if (!view.ok) { console.error(`refused: ${view.error}`); process.exitCode = 1; return; }
       const shown = opts.organization ? view.participants.filter((p) => p.organization?.id === opts.organization) : view.participants;
       const defaultPerson = view.default.person ? { id: view.default.person.entityId, source: view.default.source } : { id: null, reason: view.default.source === "none" ? view.default.reason : null };
-      if (opts.json) {
-        const side = registry.readParticipantsFile();
-        console.log(JSON.stringify({ ok: true, participants: shown, default: defaultPerson,
-          organizations: side.ok ? side.file.organizations : null, groups: side.ok ? side.file.groups : null,
-          warnings: view.warnings, participantFile: view.sideFile }));
-        return;
-      }
       if (!shown.length) console.log(opts.organization ? `no participants in organization "${opts.organization}"` : "no participants yet: rig gateway human add … registers a person, rig gateway channel add … a shared channel");
       for (const p of shown) {
         console.log(`${p.id}  ${p.kind}  "${p.displayName}"  ${p.address}${p.channel ? `  channel ${p.channel.channelId}` : ""}`);

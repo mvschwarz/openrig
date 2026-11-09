@@ -22,4 +22,8 @@ describe("(i-c) wiring pin — startup injects the real target-generation resolv
       /resolvePreDeliveryTerminalReason:\s*\(\{ jobId \}\)\s*=>\s*queueRepoInstance\.resolveWatchdogPreDeliveryTerminalReason\(jobId\)/,
     );
   });
+
+  it("gives scheduled occurrence delivery the daemon's shared durable outbox", () => {
+    expect(src).toMatch(/deliver:\s*makeWatchdogDeliver\(\{\s*sessionTransport,\s*outbox:\s*outboxHandlerInstance/);
+  });
 });

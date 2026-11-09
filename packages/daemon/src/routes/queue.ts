@@ -10,8 +10,9 @@ import type {
   QueuePriority,
   QueueState,
 } from "../domain/queue-repository.js";
-import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure } from "../domain/queue-repository.js";
+import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure, isTypedGateBlocker } from "../domain/queue-repository.js";
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
+import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
 import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
 import { hostname as osHostname } from "node:os";
@@ -30,6 +31,7 @@ import { listProjects, projectCatalogPaths } from "../domain/workspace/project-r
 import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
+import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope } from "../domain/queue-erasure.js";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
@@ -127,6 +129,18 @@ export function queueRoutes(): Hono {
       };
     } catch { return null; }
   }
+  /** #2739: a park on an outside condition (external:, fold:, auth:) with no timed wake. That blocker isn't a row that
+   *  can finish, so no timer or watchdog will wake the owner: the reply says so and names the two existing ways out.
+   *  Read from the row's own waiting view, the one `rig queue show` reports. Context, not a refusal: the park stands. */
+  function parkWithoutWakeAdvisory(item: QueueItem) {
+    if (item.state !== "blocked" || !isTypedGateBlocker(item.blockedOn) || item.waiting?.nextBackstop.mechanism !== NO_TIMED_BACKSTOP) return null;
+    return {
+      code: "park_without_wake",
+      qitemId: item.qitemId,
+      blockedOn: item.blockedOn,
+      message: `No wake is set for this park: nothing wakes ${item.destinationSession} on a timer while ${item.qitemId} waits on ${item.blockedOn}. To add one, park it again with --wake-after <duration> (or --wake-watchdog <job-id>). When ${item.blockedOn} clears, rig queue resolve ${item.qitemId} --decision <evidence> unparks it.`,
+    };
+  }
   function getInbox(c: { get: (key: string) => unknown }): InboxHandler {
     return c.get("inboxHandler" as never) as InboxHandler;
   }
@@ -214,6 +228,8 @@ export function queueRoutes(): Hono {
         // caller id-reuse (a bug, not an idempotent retry) — surface as a
         // conflict, never overwrite.
         : err.code === "qitem_id_reuse" ? 409
+        // Queue erasure deleted this id's row; it isn't created again.
+        : err.code === "qitem_erased" ? 409
         // OPR.0.4.6.MH3 FR-4 (C2): a cross-host source-close re-drive naming a
         // DIFFERENT closure_target than the recorded one — someone else closed
         // the source meanwhile; surfaced, never overwritten.
@@ -496,6 +512,8 @@ export function queueRoutes(): Hono {
         terminalState,
         transitionNote: body.transitionNote,
         identityProvenance: body.identityProvenance ?? null,
+        claimedAtBeforeForward: source.claimedAt ?? null,
+        successorQitemId: successorId,
       });
     } catch (err) {
       return errorResponse(c, err);
@@ -639,6 +657,83 @@ export function queueRoutes(): Hono {
     }
   });
 
+  // POST /erase — queue erasure in one exact scope: account deletion (members, the account's recorded sessions),
+  // explicit ids (a ledger's reapply after a restore), or the routine closed-work windows from this daemon's settings,
+  // run now. A dry run unless apply is true. domain/queue-erasure.ts; docs/reference/queue-erasure.md.
+  app.post("/erase", async (c) => {
+    const body = await c.req.json<{ members?: unknown; rig?: unknown; ids?: unknown; action?: unknown; routine?: unknown; apply?: unknown; actorSession?: string }>()
+      .catch(() => ({} as never));
+    const identity = requireSenderIdentity(c, { verb: "queue erase", bodyClaim: body.actorSession });
+    if (!identity.ok) return identity.response;
+    const refuse = (error: string, message: string) => c.json({ error, message }, 400);
+    const settings = c.get("settingsStore" as never) as { resolveOne(key: string): { value: unknown } } | undefined;
+    const named = [body.members !== undefined, body.ids !== undefined, body.routine !== undefined].filter(Boolean).length;
+    if (named === 0) return refuse("erase_scope_required", "Name one scope: members (account deletion), ids, or routine.");
+    if (named > 1) return refuse("erase_scope_conflict", "Name exactly one scope: members, ids, or routine.");
+    const exactList = (value: unknown): string[] | null =>
+      Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === "string" && entry.length > 0 && entry.trim() === entry)
+        ? value as string[] : null;
+    let scope: EraseScope;
+    if (body.rig !== undefined && (body.members === undefined || typeof body.rig !== "string" || body.rig.length === 0 || body.rig.trim() !== body.rig)) {
+      return refuse("erase_rig_invalid", "rig is the account rig's id, given with members.");
+    }
+    if (body.members !== undefined) {
+      const members = exactList(body.members);
+      if (!members) return refuse("erase_members_invalid", "members must be a non-empty list of exact session names.");
+      scope = { kind: "members", members, ...(typeof body.rig === "string" ? { rig: body.rig } : {}) };
+    } else if (body.ids !== undefined) {
+      // Plain ids take the request's action (delete by default); a report's qitems entries keep their own.
+      const fallback = body.action ?? "delete";
+      const isAction = (value: unknown): value is EraseAction => value === "delete" || value === "scrub";
+      if (!isAction(fallback)) return refuse("erase_action_invalid", "action must be delete or scrub.");
+      const raw = Array.isArray(body.ids) ? body.ids : [];
+      // An erasure ledger's commit and abort lines ({batch, committed}) say which of its batches committed.
+      type Mark = { batch: string; committed: boolean };
+      const isMark = (entry: unknown): entry is Mark => !!entry && typeof entry === "object"
+        && (entry as { qitemId?: unknown }).qitemId === undefined && typeof (entry as { batch?: unknown }).batch === "string"
+        && typeof (entry as { committed?: unknown }).committed === "boolean";
+      const commits = raw.filter(isMark).map(({ batch, committed }) => ({ batch, committed }));
+      const listed = raw.filter((entry) => !isMark(entry));
+      const entries = listed.map((entry) => typeof entry === "string" ? { qitemId: entry, action: fallback as EraseAction }
+        : entry && typeof entry === "object" ? { qitemId: (entry as { qitemId?: unknown }).qitemId, action: (entry as { action?: unknown }).action ?? fallback,
+          batch: (entry as { batch?: unknown }).batch }
+        : null);
+      if (listed.length === 0 || entries.some((entry) => !entry || typeof entry.qitemId !== "string" || entry.qitemId.length === 0
+        || entry.qitemId.trim() !== entry.qitemId || (entry.batch !== undefined && typeof entry.batch !== "string"))) {
+        return refuse("erase_ids_invalid", "ids must be a non-empty list of qitem ids, or of {qitemId, action} entries.");
+      }
+      if (entries.some((entry) => !isAction(entry!.action))) return refuse("erase_action_invalid", "action must be delete or scrub.");
+      scope = { kind: "ids", entries: entries.map((entry) => ({ qitemId: entry!.qitemId as string, action: entry!.action as EraseAction,
+        ...(typeof entry!.batch === "string" ? { batch: entry!.batch } : {}) })), ...(commits.length > 0 ? { commits } : {}) };
+    } else {
+      const days = (key: string): number => {
+        const value = settings?.resolveOne(key).value;
+        return typeof value === "number" ? value : 0;
+      };
+      const contentDays = days("retention.closed_content_days");
+      const metadataDays = days("retention.closed_metadata_days");
+      if (contentDays === 0 && metadataDays === 0) {
+        return refuse("erase_routine_off", "retention.closed_content_days and retention.closed_metadata_days are both 0 (off).");
+      }
+      scope = { kind: "routine", contentDays, metadataDays };
+    }
+    try {
+      const ledger = settings?.resolveOne("retention.erasure_ledger").value;
+      const report = await eraseQueue(c.get("db" as never) as Database.Database, {
+        scope, apply: body.apply === true, nowIso: new Date().toISOString(),
+        ...(typeof ledger === "string" && ledger.length > 0 ? { ledgerPath: ledger } : {}),
+      });
+      console.log(`[queue-erase] ${identity.session} ${scope.kind} ${report.applied ? "applied" : "dry run"}: `
+        + `${report.qitems.length} rows, ${report.mixed.length} mixed, ${report.gaps.length} gaps, complete=${report.complete}, `
+        + `clean=${report.clean}${report.error ? `, stopped at ${report.error.stage}: ${report.error.message}` : ""}`);
+      // A run that stopped on an error still returns what it committed, so its ids reach the caller's ledger.
+      return c.json(report, report.error ? 500 : 200);
+    } catch (err) {
+      if (err instanceof EraseRefusal) return refuse(err.code, err.message);
+      return c.json({ error: "erase_failed", message: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
   // POST /:qitemId/claim
   app.post("/:qitemId/claim", async (c) => {
     const qitemId = c.req.param("qitemId");
@@ -706,6 +801,7 @@ export function queueRoutes(): Hono {
       classificationBinding?: unknown;
       state?: QueueState;
       reopen?: boolean;
+      closureRequiredAt?: string;
       transitionNote?: string;
       closureReason?: string;
       closureTarget?: string;
@@ -733,6 +829,7 @@ export function queueRoutes(): Hono {
         actorSession,
         state: body.state,
         reopen: body.reopen,
+        closureRequiredAt: body.closureRequiredAt,
         transitionNote: body.transitionNote,
         closureReason: body.closureReason,
         closureTarget: body.closureTarget,
@@ -747,7 +844,8 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      return c.json(item);
+      const advisory = body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null;
+      return c.json({ ...item, ...(advisory ? { advisories: [advisory] } : {}) });
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -1005,6 +1103,9 @@ export function queueRoutes(): Hono {
     // catalog hint into a confident wrong-project answer.
     let catalogStatus: "missing" | "usable" | "unavailable" = "missing";
     let projectMissionsRoots = new Map<string, { root: string | null; error?: string }>();
+    // Healthy catalogued project roots, for the refocus trace: a project can live outside
+    // workspace.root, and the trace can only ascend to a root it knows (#2693).
+    let workRoots: string[] = [];
     let catalogPath: string | null = null;
     try {
       catalogPath = projectCatalogPaths(c).catalog;
@@ -1016,10 +1117,12 @@ export function queueRoutes(): Hono {
       const entries = readProjectCatalog(catalogPath);
       if (entries) {
         catalogStatus = "usable";
-        projectMissionsRoots = new Map(listProjects(c).projects.map((project) => [project.id, {
+        const projects = listProjects(c).projects;
+        projectMissionsRoots = new Map(projects.map((project) => [project.id, {
           root: project.error ? null : project.missionsRoot,
           error: project.error,
         }]));
+        workRoots = projects.filter((project) => !project.error).map((project) => project.root);
       }
     } catch {
       catalogStatus = "unavailable";
@@ -1080,11 +1183,11 @@ export function queueRoutes(): Hono {
         },
         missionsRoot,
       );
-      return c.json({ ...position, ...derived, ...choiceField, role,
+      return c.json({ ...position, ...derived, ...choiceField, role, workRoots,
         // heldAndNextTruncated stays for trace scripts that predate the per-list flags.
         workCandidates: { ...workCandidates, heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
-    return c.json({ ...position, ...derived, ...choiceField, role });
+    return c.json({ ...position, ...derived, ...choiceField, role, workRoots });
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.
@@ -1121,6 +1224,17 @@ export function queueRoutes(): Hono {
       loadRegistry: registryLoader,
     });
     return c.json(payload);
+  });
+
+  // Open FYIs are distinct from the receipt-based delivery history below.
+  app.get("/open-human-updates", (c) => {
+    const raw = Number(c.req.query("limit") ?? 20);
+    if (!Number.isInteger(raw) || raw < 1 || raw > 100) return c.json({ error: "limit must be an integer from 1 to 100" }, 400);
+    const { perspective, inView } = feedPerspective(getRepo(c), c.req.query("view"));
+    const window = getRepo(c).listOpenHumanUpdates({ limit: perspective ? 1001 : raw + 1 });
+    const rows = window.filter((row) => inView(row.destinationSession));
+    return c.json({ items: rows.slice(0, raw), limit: raw, truncated: rows.length > raw || (perspective !== undefined && window.length > 1000),
+      ...(perspective ? { perspective } : {}) });
   });
 
   app.get("/human-updates", (c) => {
@@ -1179,6 +1293,7 @@ export function queueRoutes(): Hono {
         activeOnly,
         handedOffFrom,
         updatedSince,
+        sortByUpdated: c.req.query("sort") === "updated",
       });
       return c.json(items);
     }
@@ -1337,6 +1452,8 @@ export function queueRoutes(): Hono {
     const closing = repo.closingTransition(qitemId, item.state);
     return c.json({
       ...item,
+      // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
+      decisionRevision: repo.decisionRevision(item),
       // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
       ...(closing ? { closingTransition: {
         transitionId: closing.transitionId,
@@ -1471,9 +1588,12 @@ export function queueRoutes(): Hono {
 
   app.get("/outbox/list", (c) => {
     const senderSession = c.req.query("senderSession");
-    if (!senderSession) return c.json({ error: "senderSession is required" }, 400);
+    // A rig's messages, sent from or to its seats: the same scope as GET /list?rig=.
+    const rig = c.req.query("rig")?.trim();
+    if (!senderSession && !rig) return c.json({ error: "senderSession or rig is required" }, 400);
     const parsed = queryLimit(c);
     if (!parsed.ok) return parsed.response;
+    if (!senderSession) return c.json(getOutbox(c).listForRig(rig!, parsed.limit));
     const sessions = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
     return c.json(getOutbox(c).listForSender(senderSession, parsed.limit, sessions?.sessionAddresses(senderSession)));
   });

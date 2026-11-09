@@ -149,6 +149,27 @@ describe("POST /api/hosts/add — the narrow named add seam", () => {
     }
   });
 
+  it("GET /api/hosts dials where ssh resolves an ssh host (alias and port), and reads unknown behind a ProxyJump", async () => {
+    const server = net.createServer((sock) => sock.destroy());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const bin = mkdtempSync(join(tmpdir(), "hosts-ssh-bin-"));
+    const savedPath = process.env["PATH"];
+    try {
+      const { port } = server.address() as net.AddressInfo;
+      // A stand-in `ssh -G`: the alias resolves to this listener; the other host sits behind a jump.
+      writeFileSync(join(bin, "ssh"), `#!/bin/sh\ncase "$*" in\n  *devbox*) printf 'hostname 127.0.0.1\\nport ${port}\\n' ;;\n  *) printf 'hostname jumpy\\nport 22\\nproxyjump bastion\\n' ;;\nesac\n`, { mode: 0o755 });
+      process.env["PATH"] = `${bin}:${savedPath}`;
+      writeFileSync(join(home, "hosts.yaml"), "hosts:\n  - id: devbox\n    transport: ssh\n    target: devbox\n  - id: jumpy\n    transport: ssh\n    target: jumpy\n");
+      const res = await app.request("/api/hosts", { headers: auth });
+      const body = (await res.json()) as { hosts: Array<{ id: string; status: string }> };
+      expect(body.hosts.map((h) => [h.id, h.status])).toEqual([["devbox", "reachable"], ["jumpy", "unknown"]]);
+    } finally {
+      process.env["PATH"] = savedPath;
+      rmSync(bin, { recursive: true, force: true });
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("writes a valid entry through the writer twin and the CLI-visible registry file", async () => {
     const res = await app.request("/api/hosts/add", {
       method: "POST",
@@ -448,6 +469,52 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(item.summary).toContain(code);
     expect(item.evidenceRef).toContain("pair-request:");
     expect(item.state).toBe("pending");
+  });
+
+  it("a request stays open as long as its requester waits, and its approval says how long and until when", async () => {
+    const originalNow = Date.now;
+    const t0 = Date.parse("2026-11-07T15:00:00.000Z");
+    const request = async (body: Record<string, unknown>) => (await (await app.request("/api/hosts/pair-request", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    })).json()) as { pairId: string; approvalQitemId: string };
+    const poll = async (pairId: string) => (await app.request(`/api/hosts/pair-request/${pairId}`)).json();
+    try {
+      Date.now = () => t0;
+      // rig host pair --timeout 3600 sends its wait; a requester that doesn't say gets the default 10 minutes.
+      const hour = await request({ requester: "long-wait@laptop", timeoutMs: 3_600_000 });
+      const plain = await request({ requester: "older-cli@laptop" });
+      expect(repo.getById(hour.approvalQitemId)!.body).toContain("This request expires 60 minutes after creation, at 2026-11-07 16:00:00 UTC; expiry persists nothing.");
+      expect(repo.getById(plain.approvalQitemId)!.body).toContain("This request expires 10 minutes after creation, at 2026-11-07 15:10:00 UTC; expiry persists nothing.");
+
+      Date.now = () => t0 + 30 * 60 * 1000;
+      expect(await poll(hour.pairId)).toMatchObject({ status: "pending" });
+      expect(await poll(plain.pairId)).toEqual({ status: "expired" });
+
+      // Past its hour, a new request's prune still keeps it, so its waiting requester reads "expired", not "unknown".
+      Date.now = () => t0 + 61 * 60 * 1000;
+      await request({ requester: "another@laptop" });
+      expect(await poll(hour.pairId)).toEqual({ status: "expired" });
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  it("the approval states the life exactly, and the deadline to the second", async () => {
+    const originalNow = Date.now;
+    try {
+      Date.now = () => Date.parse("2026-11-07T15:00:45.000Z");
+      const said = async (timeoutMs: number) => {
+        const res = await app.request("/api/hosts/pair-request", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requester: "exact@laptop", timeoutMs }),
+        });
+        return repo.getById(((await res.json()) as { approvalQitemId: string }).approvalQitemId)!.body.split("\n").at(-1);
+      };
+      expect(await said(9_000_000)).toBe("This request expires 150 minutes after creation, at 2026-11-07 17:30:45 UTC; expiry persists nothing.");
+      expect(await said(90_000)).toBe("This request expires 90 seconds after creation, at 2026-11-07 15:02:15 UTC; expiry persists nothing.");
+      expect(await said(7_200_000)).toBe("This request expires 2 hours after creation, at 2026-11-07 17:00:45 UTC; expiry persists nothing.");
+    } finally {
+      Date.now = originalNow;
+    }
   });
 
   it("approve (close done) → approved + the bearer token, SINGLE-SHOT; the pairing then dies", async () => {

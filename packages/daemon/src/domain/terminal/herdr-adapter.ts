@@ -73,6 +73,7 @@ import type {
   HerdrTransport,
   HerdrTransportFactory,
 } from "./herdr-transport.js";
+import { blankShellArgv } from "./login-shell.js";
 import { buildTileGrid, planTileLabels, type TileGrid, type TileNodes } from "./tile-layout.js";
 
 /** Sentinel host for herdr-surface degrades (a pane herdr itself failed to render). */
@@ -132,7 +133,7 @@ export async function exitedSeats(
   const liveLabels = live.map((p) => p["label"] as string);
   // A seat whose label is blank can't be matched, and can't be told apart from a filler pane.
   const blankSeats = pagePanes.filter((pane) => normalLabel(pane.label) === "");
-  // Blank filler panes run `sh` and stay. A tab holding exactly the fillers, all blank-labelled, has
+  // Blank filler panes run a shell and stay. A tab holding exactly the fillers, all blank-labelled, has
   // lost every seat pane. Labels are read first: a seat label anywhere means this rule doesn't apply,
   // and neither does a blank-labelled seat, which would look like a filler.
   if (blankSeats.length === 0 && live.length === blanks && liveLabels.every((l) => normalLabel(l) === "")) {
@@ -224,11 +225,11 @@ function herdrResumeArgv(pane: ComposedPane, tile: string): string[] | null {
 const RESUME_REPORT_ROUNDS = 7;
 const RESUME_REPORT_INTERVAL_MS = 500;
 
-/** Herdr's spelling of the shared grid: `right`/`down` splits, and inert `sh` blanks (cmux's blank-surface precedent). */
+/** Herdr's spelling of the shared grid: `right`/`down` splits, and blanks running the person's login shell (cmux's blank-surface precedent). */
 const HERDR_TILE_NODES: TileNodes<HerdrLayoutNode> = {
   // `sh -c` keeps the composed quoting (read-only `-r`, ssh-wrap); a known runtime adds Herdr's detection hint.
   tile: (pane) => ({ type: "pane", label: pane.label, command: ["sh", "-c", herdrPaneCommand(pane)] }),
-  blank: () => ({ type: "pane", label: "", command: ["sh"] }),
+  blank: () => ({ type: "pane", label: "", command: blankShellArgv() }),
   split: (direction, ratio, first, second) => ({ type: "split", direction: direction === "across" ? "right" : "down", ratio, first, second }),
 };
 

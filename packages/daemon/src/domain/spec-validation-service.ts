@@ -24,7 +24,7 @@ export function validateRigSpecImport(yaml: string): ValidationResult {
  * @param yaml - raw agent.yaml content
  * @returns validation result
  */
-export function validateAgentSpecFromYaml(yaml: string): { valid: boolean; errors: string[] } {
+export function validateAgentSpecFromYaml(yaml: string): { valid: boolean; errors: string[]; advisories?: string[] } {
   try {
     const raw = parseAgentSpec(yaml);
     return validateAgentSpec(raw);

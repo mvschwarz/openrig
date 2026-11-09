@@ -204,7 +204,16 @@ export class ContextUsageStore {
 
     const cw = raw.context_window;
     if (!cw || typeof cw.used_percentage !== "number") {
-      return this.unknownUsage("parse_error");
+      // Still unknown, but the conversation the sidecar names is kept: the first sample after a /clear can carry no
+      // percentage yet, and a held compaction for the previous conversation must see that it changed (#2682). The
+      // session name goes with it, so the name guards that read this row (resume-token discovery, session_mismatch)
+      // still apply.
+      const sessionId = typeof raw.session_id === "string" ? raw.session_id : null;
+      return {
+        ...this.unknownUsage("parse_error"),
+        sessionId,
+        sessionName: sessionId !== null && typeof raw.session_name === "string" ? raw.session_name : null,
+      };
     }
 
     const sampledAt = raw.sampled_at ?? null;

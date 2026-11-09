@@ -72,7 +72,7 @@ export function describeDaemonRejection(body: unknown, instanceHint?: string): T
       return {
         fact: "The failed step no longer exists in the cached workflow spec.",
         consequence: "The spec drifted after this instance failed; rebinding would route a step the workflow no longer declares.",
-        action: "Restore the step in the spec (re-validate to refresh the cache) or instantiate a fresh run.",
+        action: "Restore the step in the spec (then re-register it through the workflows-folder scan or an instantiate by path to refresh the cache) or instantiate a fresh run.",
       };
     case "instance_version_conflict":
       return {

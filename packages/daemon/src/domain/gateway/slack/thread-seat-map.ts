@@ -149,14 +149,17 @@ export class ThreadSeatMap {
   }
 
   /** Missed-reply recovery's threads: roots in these channels posted at or after `since` (ISO), by the root's own Slack
-   *  timestamp, or closed at or after it. Never by opened_at: a rebuild from stamps sets that to the rebuild clock. */
-  trackedForRecovery(channels: string[], since: string): Array<{ channel: string; threadTs: string; state: string; closedAt: string | null }> {
+   *  timestamp, or closed at or after it. Never by opened_at: a rebuild from stamps sets that to the rebuild clock.
+   *  `askState` is the state of the queue row the root belongs to (null when that row is gone). The map's own `state`
+   *  says only whether the root can still be posted into; it doesn't follow the ask. */
+  trackedForRecovery(channels: string[], since: string): Array<{ channel: string; threadTs: string; state: string; closedAt: string | null; askState: string | null }> {
     if (!channels.length) return [];
     const rows = this.db
-      .prepare(`SELECT channel, thread_ts, state, closed_at FROM thread_seat_map
-         WHERE channel IN (${channels.map(() => "?").join(", ")}) AND (CAST(thread_ts AS REAL) >= ? OR closed_at >= ?)`)
-      .all(...channels, Date.parse(since) / 1000, since) as Array<{ channel: string; thread_ts: string; state: string; closed_at: string | null }>;
-    return rows.map((r) => ({ channel: r.channel, threadTs: r.thread_ts, state: r.state, closedAt: r.closed_at }));
+      .prepare(`SELECT t.channel, t.thread_ts, t.state, t.closed_at, q.state AS ask_state FROM thread_seat_map t
+         LEFT JOIN queue_items q ON q.qitem_id = t.conversation_id
+         WHERE t.channel IN (${channels.map(() => "?").join(", ")}) AND (CAST(t.thread_ts AS REAL) >= ? OR t.closed_at >= ?)`)
+      .all(...channels, Date.parse(since) / 1000, since) as Array<{ channel: string; thread_ts: string; state: string; closed_at: string | null; ask_state: string | null }>;
+    return rows.map((r) => ({ channel: r.channel, threadTs: r.thread_ts, state: r.state, closedAt: r.closed_at, askState: r.ask_state }));
   }
 
   close(threadTs: string, channel?: string): void {

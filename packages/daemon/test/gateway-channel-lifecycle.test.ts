@@ -12,6 +12,9 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import { addHumanFragment, writeProjection } from "../src/domain/gateway/human-registry.js";
+import { setSharedChannel } from "../src/domain/gateway/participants.js";
+import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
+import { OUTBOUND_OP } from "../src/domain/gateway/slack/outbound-driver.js";
 
 const homes: string[] = [];
 const databases: ReturnType<typeof createDb>[] = [];
@@ -35,9 +38,9 @@ function fixture(opts: { registerHuman?: boolean } = {}) {
   const queueRepo = new QueueRepository(db, new EventBus(db));
   const prepare = vi.spyOn(db, "prepare");
   const selectionCount = () => prepare.mock.calls.filter(([sql]) => /SELECT qitem_id FROM queue_items/.test(sql)).length;
-  const alert = (id: string) => {
+  const alert = (id: string, destination = "alex@external") => {
     db.prepare(`INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,body)
-      VALUES (?, '2026-01-01', '2026-01-01', 'author@rig', 'alex@external', 'pending', 'fixture backlog')`).run(id);
+      VALUES (?, '2026-01-01', '2026-01-01', 'author@rig', ?, 'pending', 'fixture backlog')`).run(id, destination);
     const result = db.prepare(`INSERT INTO queue_transitions(qitem_id,ts,state,actor_session,owner_notification_level,owner_notification_kind)
       VALUES (?, '2026-01-01', 'pending', 'author@rig', 'ALERT', 'human-required')`).run(id);
     return `${id}:${result.lastInsertRowid}`;
@@ -167,5 +170,86 @@ describe("human channel lifecycle at the daemon door", () => {
     expect(response.status).toBe(400);
     expect(loadConfig(f.home).enabled).toBe(false);
     expect(f.restart).not.toHaveBeenCalled();
+  });
+
+  it("seeds only Slack-primary humans and Slack shared channels on enable without seeding Relay-primary episodes or claiming Relay buffer entries as Slack posts", async () => {
+    const f = fixture();
+    expect(
+      addHumanFragment(
+        {
+          entityId: "sam",
+          class: "human",
+          displayName: "Sam",
+          address: "sam@external",
+          connectorBindings: [
+            {
+              kind: "relay",
+              connectorRef: "wa-main",
+              secretsRef: `file:${join(f.home, "relay.env")}`,
+              role: "primary",
+              handle: "sam_wa",
+            },
+          ],
+          prefs: { deliveryClass: "B" },
+        },
+        f.home,
+      ).ok,
+    ).toBe(true);
+    expect(
+      setSharedChannel(
+        "ops-room",
+        {
+          displayName: "Ops Room",
+          channel: {
+            connector: "slack",
+            connectorRef: "main",
+            secretsRef: "env:private-pointer",
+            channelId: "COPSROOM",
+          },
+        },
+        {},
+        f.home,
+      ).ok,
+    ).toBe(true);
+
+    const slackKey = f.alert("slack-backlog", "alex@external");
+    const channelKey = f.alert("channel-backlog", "ops-room@external");
+    const relayKey = f.alert("relay-backlog", "sam@external");
+
+    const buffer = new DispatchBuffer(f.home);
+    buffer.enqueue({
+      kind: "outbound_decision",
+      decisionId: "relay-pending-1",
+      op: OUTBOUND_OP,
+      entityBindingRef: "sam@external",
+      payload: {
+        qitemId: "relay-backlog",
+        notificationKey: relayKey,
+        destinationSession: "sam@external",
+        relayConnectorRef: "wa-main",
+      },
+    });
+    buffer.enqueue({
+      kind: "outbound_decision",
+      decisionId: "slack-pending-1",
+      op: OUTBOUND_OP,
+      entityBindingRef: "alex@external",
+      payload: {
+        qitemId: "earlier-slack",
+        notificationKey: "earlier-slack:1",
+        destinationSession: "alex@external",
+      },
+    });
+
+    const response = await f.post("enable");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean; seeded: number; onlineStatus: string };
+    expect(body.seeded).toBe(2);
+    expect(f.seen().sort()).toEqual([channelKey, slackKey].sort());
+    expect(f.seen()).not.toContain(relayKey);
+    // Scoped buffer read view counts only the 1 Slack decision, never claiming the Relay decision
+    expect(body.onlineStatus).toContain("1 earlier undelivered post(s) wait in the replay buffer");
+    // Both durable buffer entries remain intact on disk
+    expect(buffer.pending().map((d) => d.decisionId)).toEqual(["relay-pending-1", "slack-pending-1"]);
   });
 });

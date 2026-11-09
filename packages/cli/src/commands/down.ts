@@ -88,6 +88,8 @@ interface TeardownResult {
   keptSkills?: string[];
   /** Managed guidance blocks a person edited, kept in their file as `<file>: <block id>`. */
   keptGuidance?: string[];
+  /** Files in a Claude seat's cwd that keep OpenRig's additions because down couldn't safely change them, as `<file>: <why>`. */
+  keptFiles?: string[];
   /** Seats joined with `rig attach` as an external CLI, which OpenRig doesn't stop. */
   leftRunning?: string[];
   paneOnly?: string[];
@@ -145,6 +147,11 @@ Before running it, check who is working (rig ps --nodes --rig <rig>) and that th
 don't stop a team you didn't start unless asked. OpenRig snapshots the rig first (best-effort), and
 rig up <rig> --existing brings it back, resuming each seat's conversation where its harness allows. With
 --delete the rig record is removed too, so it can't be brought back that way.
+Once no live seat uses a working folder, rig down also takes back what OpenRig added there: its
+guidance blocks, and in a Claude seat's folder the status line, activity hooks and context collector.
+It keeps and lists an edited skills-line block, edited team skill files, and settings or a collector
+that don't match what OpenRig wrote or that another seat shares by a link. Any other guidance block
+goes even if someone edited it. rig up <rig> --existing puts the guidance back.
 When your resolved seat belongs to this rig, confirm before stopping it. Without a terminal,
 the command warns and exits without stopping; re-run with --yes to confirm explicitly.`);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -294,6 +301,10 @@ the command warns and exits without stopping; re-run with --yes to confirm expli
       if (result.keptGuidance && result.keptGuidance.length > 0) {
         console.log(`Kept ${result.keptGuidance.length} edited OpenRig block(s) in guidance files; remove them by hand if you don't want them:`);
         for (const block of result.keptGuidance) console.log(`  ${block}`);
+      }
+      if (result.keptFiles && result.keptFiles.length > 0) {
+        console.log(`Kept ${result.keptFiles.length} file(s) that still hold OpenRig's additions; check them by hand:`);
+        for (const file of result.keptFiles) console.log(`  ${file}`);
       }
 
       if (result.leftRunning && result.leftRunning.length > 0) {

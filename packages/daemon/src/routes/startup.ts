@@ -15,7 +15,7 @@ import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
 import type { ResumeMetadataRefresher } from "../domain/resume-metadata-refresher.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { Node, RigWithRelations, Snapshot, SnapshotData } from "../domain/types.js";
-import { defaultProbeRuntimes } from "../domain/kernel-boot.js";
+import { defaultProbeRuntimes, prepareNewKernelCwd } from "../domain/kernel-boot.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
@@ -215,7 +215,7 @@ startupRoutes.post("/kernel", (c) => exclusive(c, "kernel", async () => {
   const root = kernelRoot();
   const source = readFileSync(root + (body.runtime === "codex" ? "rig-codex-only.yaml" : "rig-claude-only.yaml"), "utf8");
   const result = await dep<PodRigInstantiator>(c, "podInstantiator").materialize(source, root, {
-    cwdOverride: new SettingsStore().resolveConfig().workspaceRoot,
+    cwdOverride: prepareNewKernelCwd(new SettingsStore().resolveConfig().workspaceRoot),
   });
   return c.json(result.ok ? { ok: true, rigId: result.result.rigId, message: "Kernel prepared. Choose the seats to start." } : result, result.ok ? 200 : 409);
 }));

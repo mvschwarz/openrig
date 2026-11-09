@@ -233,6 +233,21 @@ describe("GET /api/scope/audit", () => {
     expect(sl!.severity).toBe("low");
   });
 
+  it("says when another mission has a slice of the same name, which the slice list would hide", async () => {
+    for (const mission of ["alpha", "beta"]) {
+      const sliceDir = path.join(missionsRoot, mission, "slices", "01-login");
+      fs.mkdirSync(sliceDir, { recursive: true });
+      fs.writeFileSync(path.join(missionsRoot, mission, "SPEC.md"), "# mission\n", "utf8");
+      fs.writeFileSync(path.join(sliceDir, "SPEC.md"), "# login\n", "utf8");
+    }
+    fs.mkdirSync(path.join(missionsRoot, "alpha", "slices", "02-only-here"), { recursive: true });
+    const res = await app.request("/api/scope/audit?mission=alpha");
+    const body = await res.json() as { ok: boolean; slices: Array<{ name: string; findings: Array<{ kind: string; severity: string; message: string }> }> };
+    const shared = body.slices.find((s) => s.name === "01-login")!.findings.find((f) => f.kind === "slice_name_shared");
+    expect(shared).toMatchObject({ severity: "low", message: expect.stringContaining("beta") });
+    expect(body.slices.find((s) => s.name === "02-only-here")!.findings.some((f) => f.kind === "slice_name_shared")).toBe(false);
+  });
+
   it("says nothing about a node that has only ONE authored file", async () => {
     const missionDir = path.join(missionsRoot, "single-mission");
     fs.mkdirSync(missionDir, { recursive: true });

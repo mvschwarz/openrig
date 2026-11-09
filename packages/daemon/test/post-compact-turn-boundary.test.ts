@@ -121,6 +121,7 @@ describe("through the real send: the turn boundary reaches a just-compacted seat
     sessionRegistry.updateBinding(node.id, { tmuxSession: "worker@my-rig" });
     const tmux = {
       hasSession: async () => true, probeSession: async () => ({ state: "present" as const }),
+      readWindow: async () => null,
       capturePaneContent: async () => pane, getPaneCommand: async () => null, getPanePid: async () => null,
       sendText, sendKeys,
     } as unknown as TmuxAdapter;

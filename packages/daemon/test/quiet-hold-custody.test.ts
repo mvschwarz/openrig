@@ -38,17 +38,32 @@ describe("custody of asks held for quiet hours", () => {
   let failPosts = false;
   let rejectPosts = false; // the connector answers, but refuses the post
   const wires: Array<ReturnType<typeof buildSlackGatewayWire>> = [];
+  let useRelayBinding = false;
+  let relaySecretsPath = "";
   const registry = () => ({ ok: true as const, entities: [{
     entityId: "person", class: "human" as const, displayName: "Person", address: "person@external", prefs,
-    connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UPERSON" }],
+    connectorBindings: useRelayBinding
+      ? [{ kind: "relay" as const, connectorRef: "relay-primary", secretsRef: `file:${relaySecretsPath}`, role: "primary" as const, handle: "person_relay" }]
+      : [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UPERSON" }],
   }] });
 
   beforeEach(() => {
     db = createDb();
     migrate(db, ALL_MIGRATIONS);
     prefs = { deliveryClass: "B", availability: "available" };
+    useRelayBinding = false;
     repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true, loadHumanRegistry: registry as never });
     home = mkdtempSync(join(tmpdir(), "quiet-custody-"));
+    relaySecretsPath = join(home, "relay.env");
+    writeFileSync(
+      relaySecretsPath,
+      [
+        "OPENRIG_RELAY_URL=http://127.0.0.1:44199/outbound",
+        "OPENRIG_RELAY_OUTBOUND_TOKEN=out-secret-token-123456",
+        "OPENRIG_RELAY_INBOUND_TOKEN=in-secret-token-654321",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
     quiet = new HumanQuietStore(db);
     posts.length = 0;
     failPosts = false;
@@ -69,6 +84,12 @@ describe("custody of asks held for quiet hours", () => {
           if (rejectPosts) return new Response(JSON.stringify({ ok: false, error: "channel_not_found" }), { status: 200, headers: { "content-type": "application/json" } });
           return new Response(JSON.stringify({ ok: true, ts: `1724.${100 + posts.length}` }), { status: 200, headers: { "content-type": "application/json" } });
         }
+        if (String(url).includes("127.0.0.1:44199/outbound")) {
+          if (failPosts) throw new Error("relay bridge down before the post");
+          posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          if (rejectPosts) return new Response(JSON.stringify({ ok: false, error: "bridge_rejected" }), { status: 503, headers: { "content-type": "application/json" } });
+          return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+        }
         return new Response(JSON.stringify({ ok: true, messages: [] }), { status: 200, headers: { "content-type": "application/json" } });
       },
     });
@@ -77,15 +98,17 @@ describe("custody of asks held for quiet hours", () => {
     return w;
   }
   let n = 0;
-  const ask = () => repo.create({ sourceSession: "asker@r", destinationSession: "person@external", body: `Question ${++n}: pick one`,
-    summary: `Pick ${n}`, evidenceRef: `/proof/${n}.md`, humanIntent: "decision", humanAlert: true, nudge: false } as never) as Promise<QueueItem>;
+  const ask = (humanIntent: "decision" | "update" = "decision") => repo.create({ sourceSession: "asker@r", destinationSession: "person@external",
+    body: humanIntent === "decision" ? `Question ${++n}: pick one` : `Build ${++n} finished; no decision needed`,
+    summary: humanIntent === "decision" ? `Pick ${n}` : `Build ${n} finished`, evidenceRef: `/proof/${n}.md`,
+    humanIntent, humanAlert: humanIntent === "decision", nudge: false } as never) as Promise<QueueItem>;
   const alertFor = async (row: QueueItem) =>
     (await makeQueuePorts(repo, { loadHumanRegistry: registry } as never).listHumanAlerts({ minimumLevel: "RECORD" })).find((a) => a.qitemId === row.qitemId)!;
   const quietOn = () => { const now = new Date(); quiet.setUntil("person", { until: new Date(now.getTime() + 24 * 3_600_000), timezone: "UTC", setBy: "t", now }); };
   const releaseJobs = () => new WatchdogJobsRepository(db).listActive().filter((j) => j.policy === QUIET_RELEASE_POLICY);
-  async function held(): Promise<QueueItem> {
+  async function held(humanIntent: "decision" | "update" = "decision"): Promise<QueueItem> {
     quietOn();
-    const row = await ask();
+    const row = await ask(humanIntent);
     const w = wire();
     const alert = await alertFor(row);
     w.dispatcher.dispatch(OUTBOUND_OP, alert.destinationSession!, toPayload(alert));
@@ -106,12 +129,15 @@ describe("custody of asks held for quiet hours", () => {
     resolveOrchestrator: () => "orch@r", attemptWake: async () => "verified", log: () => {} });
   const ladderTouched = (row: QueueItem) => repo.listTransitions(row.qitemId).some((t) => t.actorSession === "wake-ladder@system");
 
-  it("a healthy hold aged past the thresholds is held: no stuck finding, and the waiting view says held by quiet hours until the boundary", async () => {
-    const row = await held();
+  it.each(["decision", "update"] as const)("a healthy %s hold aged past the thresholds is held: no stuck finding, and the waiting view says held by quiet hours until the boundary", async (humanIntent) => {
+    const row = await held(humanIntent);
+    const stored = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
     expect(findingFor(await sweep(), row)).toEqual([]);
     const view = repo.waitingView(row.qitemId)!;
     expect(view.nextBackstop).toMatchObject({ mechanism: expect.stringMatching(/^quiet-release:/), dueAt: quiet.quietStateFor("person", new Date()).nextBoundary!.at });
     expect(String((view.nextBackstop as { note?: string }).note)).toMatch(/^Held by quiet hours until /);
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", humanIntent, claimedAt: null });
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(stored);
   });
 
   it("a healthy hold isn't counted as picked up, and the wake ladder leaves it to its release job", async () => {
@@ -146,15 +172,48 @@ describe("custody of asks held for quiet hours", () => {
     }
   });
 
-  it("a hold whose release job was stopped from outside (the only way one loses its job) is found, by the sweep and by the ladder", async () => {
-    const row = await held();
+  it.each(["decision", "update"] as const)("a %s hold whose release job was stopped from outside (the only way one loses its job) is found, by the sweep and by the ladder", async (humanIntent) => {
+    const row = await held(humanIntent);
     asBaton(row);
     new WatchdogJobsRepository(db).markTerminal(releaseJobs()[0]!.jobId, "test: the job went away");
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "orphaned" });
+    const stored = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
     const r = await sweep();
-    expect(findingFor(r, row).length).toBeGreaterThan(0);
-    expect(findingWhy(row)).toMatch(/held for quiet hours .* no release job is live/);
+    expect(r.outcome, r.error).not.toBe("failed");
+    expect.soft(findingFor(r, row).length).toBeGreaterThan(0);
+    expect.soft(findingWhy(row)).toMatch(/held for quiet hours .* no release job is live/);
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(stored);
+    expect(posts).toHaveLength(0);
     await ladder();
     expect(ladderTouched(row), "an orphaned hold isn't pickup, so the ladder takes it up").toBe(true);
+  });
+
+  it("an orphaned update hold keeps its existing unclaimed finding open without informational resolution", async () => {
+    const row = await held("update");
+    new WatchdogJobsRepository(db).markTerminal(releaseJobs()[0]!.jobId, "test: the job went away");
+    expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "orphaned" });
+    expect(repo.deliveryOutcomeFor(row.qitemId)).toBeNull();
+    const finding = await repo.create({ sourceSession: "asker@r", destinationSession: "orch@r", body: "prior unclaimed hold evidence", nudge: false,
+      tags: ["stuck-sweep-finding", `stuck-sweep:unclaimed-obligation:${row.qitemId}`, `recovery-for:${row.qitemId}`] });
+    expect(finding.state).toBe("pending");
+    const history = repo.listTransitions(finding.qitemId);
+    const stored = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    // The finding predates a larger reporting window; falling outside it isn't resolution.
+    const now = LATER();
+    expect(Date.parse(row.tsCreated)).toBeGreaterThan(now.getTime() - 180 * 60_000);
+    const r = await runStuckSweep({ db, queueRepo: repo, unclaimedAgeMinutes: 180, now,
+      resolveOrchestrator: () => "orch@r", log: () => {} });
+    expect(r.outcome, r.error).not.toBe("failed");
+    expect(findingFor(r, row).filter((f) => f.action !== "closed")).toEqual([]);
+    expect.soft(repo.getById(finding.qitemId)?.state).toBe("pending");
+    expect.soft(repo.listTransitions(finding.qitemId).slice(history.length)
+      .some((t) => t.transitionNote?.includes("informational update to a registered human requires no claim"))).toBe(false);
+    expect(repo.getById(finding.qitemId)?.body).toContain(finding.body);
+    expect(repo.listTransitions(finding.qitemId).slice(0, history.length)).toEqual(history);
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(stored);
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", humanIntent: "update", claimedAt: null });
+    expect(repo.deliveryOutcomeFor(row.qitemId)).toBeNull();
+    expect(posts).toHaveLength(0);
   });
 
   it("a release dispatched but never posted whose job is gone is orphaned and found, not left waiting for transport", async () => {
@@ -233,7 +292,7 @@ describe("custody of asks held for quiet hours", () => {
     expect(findingFor(await sweep(), row)).toEqual([]);
   });
 
-  it("an attempted ask kept in flight because quiet hours couldn't be read is neither held nor orphaned: it is ordinary in-flight work", async () => {
+  it("an attempted ask whose quiet hours can't be read at its replay posts, saying so: it's neither held nor orphaned", async () => {
     const row = await ask();
     const w = wire();
     failPosts = true; // attempted, nothing reached Slack
@@ -245,13 +304,14 @@ describe("custody of asks held for quiet hours", () => {
     w.stop();
     const read = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(() => { throw new Error("disk I/O error (test)"); });
     try {
-      wire(); // the replay can't decide, so the attempted decision stays buffered with no hold
+      wire(); // the replay: unreadable quiet hours aren't a quiet window, so it posts and says so
       await settle();
     } finally { read.mockRestore(); }
-    expect(posts).toHaveLength(0);
+    expect(posts).toHaveLength(1);
+    expect(String(posts[0]!.text)).toContain("OpenRig couldn't read your quiet hours.");
     expect(repo.listTransitions(row.qitemId).some((t) => (t.transitionNote ?? "").startsWith("delivery-decision: quiet-hold "))).toBe(false);
     expect(quietHoldCustody(db, row.qitemId)).toBeNull();
-    expect(String((repo.waitingView(row.qitemId)!.nextBackstop as { note?: string }).note ?? "")).not.toMatch(/quiet hours/);
+    expect(repo.waitingView(row.qitemId)!.nextBackstop).toMatchObject({ mechanism: "none (posted to the human; awaiting their decision)" });
   });
 
   // A failed wake on the row, so the sweep's undelivered-wake loop sees it.
@@ -399,5 +459,91 @@ describe("custody of asks held for quiet hours", () => {
     expect(findingFor(r, ordinary).length).toBeGreaterThan(0);
     expect(findingFor(r, digest).length).toBeGreaterThan(0);
     expect(findingWhy(digest)).not.toMatch(/quiet hours/);
+  });
+
+  it("Relay quiet release failure yields release-failed, named in waitingView and sweep, and the ladder takes it up", async () => {
+    useRelayBinding = true;
+    const failedRow = await held();
+    asBaton(failedRow);
+    quiet.end("person", { endedBy: "t", now: new Date() });
+    rejectPosts = true;
+    const w = wires[0]!;
+    const [job] = releaseJobs();
+    await runQuietRelease({
+      queueRepo: repo,
+      jobsRepo: new WatchdogJobsRepository(db),
+      home,
+      jobId: job!.jobId,
+      registry: { loadHumanRegistry: registry as never },
+      dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never),
+    });
+    await settle();
+    expect(posts).toHaveLength(1);
+    expect(
+      repo.listTransitions(failedRow.qitemId).some((t) =>
+        (t.transitionNote ?? "").startsWith("relay-owner-notification-transport-failed "),
+      ),
+    ).toBe(true);
+    expect(quietHoldCustody(db, failedRow.qitemId)).toMatchObject({
+      state: "release-failed",
+      failure: "http-503",
+    });
+    expect(String((repo.waitingView(failedRow.qitemId)!.nextBackstop as { note?: string }).note)).toMatch(
+      /^Released when quiet ended, but its post failed \(http-503\); the release stays queued for redelivery\./,
+    );
+    const rFailed = await sweep();
+    expect(findingFor(rFailed, failedRow)).toHaveLength(1);
+    expect(findingFor(rFailed, failedRow)[0]!.kind).toBe("undelivered-human-notice");
+    expect(findingWhy(failedRow)).toMatch(
+      /released after quiet hours; its post failed \(http-503\); the release stays queued for redelivery/,
+    );
+    await ladder();
+    expect(ladderTouched(failedRow)).toBe(true);
+  });
+
+  it("Relay bridge acceptance resolves quiet-release ownership so the release job retires and custody ends without becoming orphaned", async () => {
+    useRelayBinding = true;
+    const acceptedRow = await held();
+    quiet.end("person", { endedBy: "t", now: new Date() });
+    const w = wires[0]!;
+    const [job] = releaseJobs();
+    // Pass 1 dispatches the release to the relay bridge, which accepts it
+    expect(
+      await runQuietRelease({
+        queueRepo: repo,
+        jobsRepo: new WatchdogJobsRepository(db),
+        home,
+        jobId: job!.jobId,
+        registry: { loadHumanRegistry: registry as never },
+        dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never),
+      }),
+    ).toMatchObject({ state: "pending", released: 1 });
+    await settle();
+    expect(posts).toHaveLength(1);
+    expect(
+      repo.listTransitions(acceptedRow.qitemId).some((t) =>
+        (t.transitionNote ?? "").startsWith("relay-owner-notification-accepted "),
+      ),
+    ).toBe(true);
+    // Pass 2 sees the relay acceptance receipt via resolved(), retires the release job, and leaves custody null (never orphaned)
+    expect(
+      await runQuietRelease({
+        queueRepo: repo,
+        jobsRepo: new WatchdogJobsRepository(db),
+        home,
+        jobId: job!.jobId,
+        registry: { loadHumanRegistry: registry as never },
+        dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never),
+      }),
+    ).toMatchObject({ state: "released", released: 0 });
+    expect(releaseJobs()).toHaveLength(0);
+    expect(new WatchdogJobsRepository(db).getById(job!.jobId)?.terminalReason).toBe(
+      "quiet release complete: every held ask posted, accepted by its bridge, or given a disposition",
+    );
+    expect(quietHoldCustody(db, acceptedRow.qitemId)).toBeNull();
+    expect(repo.waitingView(acceptedRow.qitemId)!.nextBackstop).toMatchObject({
+      mechanism: "none (accepted by the bridge; awaiting their decision)",
+    });
+    expect(findingFor(await sweep(), acceptedRow)).toEqual([]);
   });
 });

@@ -483,6 +483,8 @@ describe("Claude identity with inline settings in ps output", () => {
       permissions: { allow: ["Bash(npm run test:*)"] },
       hooks: { PreToolUse: [{ hooks: [{ type: "command", command: 'node "/fixture with spaces/check.cjs" --label "it\'s fine"', timeout: 5 }] }] },
     })],
+    // #2508: a proxy that writes its settings with spaces between JSON members, as ps shows the argument.
+    ["spaced JSON", '{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8080", "ANTHROPIC_AUTH_TOKEN": "fixture"}}'],
   ];
   function input(args: string) {
     const list = [
@@ -513,6 +515,9 @@ describe("Claude identity with inline settings in ps output", () => {
     `--settings /fixture/settings.json --session-id ${token}`,
     `--settings /fixture/review's-settings.json --session-id ${token}`,
     `--settings /fixture/review"settings.json --session-id ${token}`,
+    // #2508: a brace inside a spaced value's string doesn't end the value.
+    `--settings {"env": {"note": "a } b {"}} --resume ${token}`,
+    `--settings={"env": {"A": "b"}} --session-id=${token}`,
   ])("accepts inline and file settings: %s", async args => {
     expect((await verifyClaudePaneProcess(input(args)))?.process.pid).toBe(21);
     expect((await observeClaudeDelivery(input(args))).state).toBe("verified");
@@ -552,6 +557,35 @@ describe("Claude identity with inline settings in ps output", () => {
     expect(await verifyClaudePaneProcess(input(args))).toBeNull();
     expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
   });
+  // #2044 (from cerebral-work/openrig#54): a seat's plugin channels, one `--channels` and its entries; the option names
+  // no conversation.
+  it.each([
+    `--channels plugin:example-channel@example --session-id ${token}`,
+    `--session-id ${token} --channels plugin:example-channel@example plugin:second@example`,
+    `--channels=plugin:example-channel@example --resume ${token}`,
+    // The form Claude itself uses when it passes the option on: one entry per flag.
+    `--channels plugin:example-channel@example --channels plugin:second@example --session-id ${token}`,
+    `--agent openrig:reviewer --append-system-prompt-file /home/u/.openrig/state/seats/r/dev.impl/claude-code/additions/system-prompt.md --channels plugin:example-channel@example plugin:second@example --resume ${token}`,
+  ])("proves the exact Claude identity beside the plugin channels option: %s", async args => {
+    const actual = input(args);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
+    expect((await observeClaudeDelivery({ ...actual, expectedToken: "different" })).state).toBe("unknown");
+  });
+  it.each([
+    `--channels --session-id ${token}`,
+    `--session-id ${token} --channels`,
+    `--channels plugin:example-channel@example --session-id ${token} --unknown-flag`,
+    // Only the plain plugin entries OpenRig passes: a server entry, or a bare word Claude would also take into the list.
+    `--channels server:example --session-id ${token}`,
+    `--channels plugin:example-channel@example stray --session-id ${token}`,
+    `--channels=server:example --session-id ${token}`,
+    `--channels= --session-id ${token}`,
+  ])("a channels option with no plugin entry, a value that isn't one, or beside an unknown flag proves nothing: %s", async args => {
+    expect(await verifyClaudePaneProcess(input(args))).toBeNull();
+    expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
   it("preserves an apostrophe in the native Claude executable path", async () => {
     const actual = input(`--settings ${settings[0]![1]} --session-id ${token}`);
     const list = (await actual.listProcesses()).map(r => r.pid === 21 ? { ...r,
@@ -565,11 +599,27 @@ describe("Claude identity with inline settings in ps output", () => {
   it.each([
     `--settings ${JSON.stringify({ label: `two words --session-id ${token}` })}`,
     `--settings {"env":{"note":"text --session-id ${token} --model trailing`,
+    // #2508: spaced settings stay one value, so an identity inside them, or after a value that never closes, proves nothing.
+    `--settings {"env": {"note": "text --session-id ${token}"}}`,
+    `--settings {"env": {"note": "x"} --session-id ${token}`,
     `--settings ${settings[0]![1]} --session-id ${token} --session-id different`,
     `--settings ${settings[1]![1]} --session-id ${token} --unknown`,
   ])("does not promote ambiguous argv: %s", async args => {
     expect(await verifyClaudePaneProcess(input(args))).toBeNull();
     expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
+  // #2508: braces group only a `--settings` or `--mcp-config` value. Any other value that opens with `{` still ends at
+  // a space, so the options after it are read as on main.
+  it("keeps a second resume after another option's brace-led value visible", async () => {
+    const actual = input(`--resume ${token} --name {label --resume ${parent}`);
+    expect(await verifyClaudePaneProcess(actual)).toBeNull();
+    expect((await observeClaudeDelivery(actual)).state).not.toBe("verified");
+  });
+  it("reads the identity after another option's brace-led value", async () => {
+    const actual = input(`--name {label --resume ${token}`);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
   });
   it.each([
     `--resume ${parent} --fork-session --session-id ${token}`,

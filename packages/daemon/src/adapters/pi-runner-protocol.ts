@@ -242,6 +242,8 @@ export function buildPiChildEnv(
 // ── Command construction ─────────────────────────────────────────────────────
 
 export interface PiRunnerLaunchOpts {
+  /** Explicit prepared account, never inferred from the shell environment. */
+  accountHome?: string;
   /** Explicit runtime; omitted keeps the original Pi command byte-for-byte. */
   runtime?: RunnerRuntime | string;
   /** Custom executable to spawn inside the runner (e.g. for Pi-fork community harnesses). */
@@ -270,6 +272,8 @@ export interface PiRunnerLaunchOpts {
   forkRef?: string;
   /** Launch-attempt scope stamped into every runner sidecar write. */
   launchId: string;
+  /** Pi only: resolved launch_wrapper argv (wrapper[0] resolved to an absolute path by the daemon). */
+  launchWrapper?: readonly string[];
 }
 
 /** The shape `rig seat set-effort` accepts for an effort level. */
@@ -317,6 +321,12 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
   if (opts.usageFacts && opts.runtime !== "omp") {
     parts.push("--usage-facts");
     if (opts.openRouterCharge) parts.push("--openrouter-charge");
+  }
+  if (opts.accountHome && opts.runtime !== "omp") parts.push("--account-home", shellQuote(opts.accountHome));
+  if (opts.launchWrapper?.length && opts.runtime !== "omp") {
+    for (const arg of opts.launchWrapper) {
+      parts.push("--launch-wrapper-arg", shellQuote(arg));
+    }
   }
   return parts.join(" ");
 }

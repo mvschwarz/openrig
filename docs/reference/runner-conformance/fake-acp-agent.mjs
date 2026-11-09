@@ -16,8 +16,14 @@
 //   stubborn         keep running after a hangup or after input closes; only SIGTERM or SIGKILL ends it
 //   turns            one entry per `session/prompt`, in order (the last one repeats):
 //     holdMs         keep the turn open this long; `session/cancel` ends it early as "cancelled"
-//     ignoreCancel   on `session/cancel`, keep the turn open and end it with stopReason (default end_turn) anyway
-//     permission     ask `session/request_permission` first, then carry on whatever the answer
+//     silent         send no message chunk for this turn, so a held turn is entirely quiet (a long tool or model call)
+//     ignoreCancel   on `session/cancel`, keep the turn open and end it with stopReason (default end_turn) anyway, when
+//                    holdMs runs out or, with endAfterCancelMs, that long after the first cancel if that's sooner
+//     permission     ask `session/request_permission` first, then carry on whatever the answer. As an object:
+//                      options      the options offered (default: allow-once, allow_once; reject-once, reject_once)
+//                      waitMs       stop waiting for the answer after this long, and end the turn
+//                      exitAfterMs  exit with status 3 this long after asking, while the request waits
+//                    A `session/cancel` while the request waits ends the turn "cancelled" once it's answered.
 //     error          answer the prompt with a JSON-RPC error
 //     exit           exit with status 3 instead of answering
 //     stopReason     the stop reason to return (default "end_turn")
@@ -36,7 +42,7 @@ const fail = (id, code, message) => send({ jsonrpc: "2.0", id, error: { code, me
 const exit = (status, why) => { log({ dir: "event", event: "exit", status, why }); process.exit(status); };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-log({ dir: "event", event: "started", pid: process.pid, cwd: process.cwd(), argv: process.argv.slice(2) });
+log({ dir: "event", event: "started", pid: process.pid, cwd: process.cwd(), argv: process.argv.slice(2), launchWrapper: process.env.OPENRIG_LAUNCH_WRAPPER ?? null });
 // Ctrl-C is the runner's to handle, so the agent never takes it as a signal. A stubborn agent also outlives a hangup and
 // its input closing, as some real agents do: only the runner ending it (SIGTERM or SIGKILL) stops it.
 process.on("SIGINT", () => log({ dir: "event", event: "signal", signal: "SIGINT" }));
@@ -49,8 +55,9 @@ let nextId = 1;
 const answers = new Map();
 let cancelTurn = null;
 
+// Numbers, as JSON-RPC agents commonly use. A runner passes one on unchanged, and OpenRig reads it as its decimal string.
 function ask(method, params) {
-  const id = `agent-${nextId++}`;
+  const id = 1000 + nextId++;
   send({ jsonrpc: "2.0", id, method, params });
   return new Promise((resolve) => answers.set(id, resolve));
 }
@@ -60,23 +67,36 @@ async function prompt(id, params) {
   turn += 1;
   if (spec.exit) exit(3, `turn ${turn}`);
   if (spec.error) { fail(id, -32603, "fake agent: this turn fails"); return; }
-  send({ jsonrpc: "2.0", method: "session/update",
+  if (!spec.silent) send({ jsonrpc: "2.0", method: "session/update",
     params: { sessionId: params.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `turn ${turn}` } } } });
+  let stopReason = spec.stopReason ?? "end_turn";
   if (spec.permission) {
-    await ask("session/request_permission", {
+    const p = typeof spec.permission === "object" ? spec.permission : {};
+    const asked = ask("session/request_permission", {
       sessionId: params.sessionId,
       toolCall: { toolCallId: `call-${turn}`, title: "Edit notes.txt", kind: "edit" },
-      options: [
+      options: p.options ?? [
         { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
         { optionId: "reject-once", name: "Reject", kind: "reject_once" },
       ],
     });
+    if (p.exitAfterMs) setTimeout(() => exit(3, "while a permission request waits"), p.exitAfterMs);
+    let cancelled = false;
+    cancelTurn = () => { cancelled = true; };
+    const answer = await (p.waitMs ? Promise.race([asked, sleep(p.waitMs).then(() => null)]) : asked);
+    cancelTurn = null;
+    if (!answer) log({ dir: "event", event: "permission-wait-ended" });
+    if (cancelled) { reply(id, { stopReason: "cancelled" }); return; }
   }
-  let stopReason = spec.stopReason ?? "end_turn";
   if (spec.holdMs) {
     const cancelled = await new Promise((resolve) => {
       const timer = setTimeout(() => { cancelTurn = null; resolve(false); }, spec.holdMs);
-      cancelTurn = () => { if (spec.ignoreCancel) return; clearTimeout(timer); cancelTurn = null; resolve(true); };
+      cancelTurn = () => {
+        if (!spec.ignoreCancel) { clearTimeout(timer); cancelTurn = null; resolve(true); return; }
+        if (spec.endAfterCancelMs === undefined) return;
+        cancelTurn = null;
+        setTimeout(() => { clearTimeout(timer); resolve(false); }, spec.endAfterCancelMs);
+      };
     });
     if (cancelled) stopReason = "cancelled";
   }

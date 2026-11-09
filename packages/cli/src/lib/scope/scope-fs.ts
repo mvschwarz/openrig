@@ -362,31 +362,23 @@ export function listMissions(missionsRoot: string): MissionInfo[] {
     const hasReadme = readmePath !== null;
     if (!hasReadme) continue;
     const frontmatter = readFrontmatter(readmePath);
-    const slicesDir = path.join(absPath, "slices");
-    const closedDir = path.join(absPath, "closed");
-    const activeSliceCount = countSliceDirs(slicesDir);
-    const closedSliceCount = countSliceDirs(closedDir);
     const id = pickIdFromFrontmatter(frontmatter);
-    out.push({
-      name: entry.name,
-      absPath,
-      readmePath: hasReadme ? readmePath : null,
-      frontmatter,
-      id,
-      activeSliceCount,
-      closedSliceCount,
-    });
+    out.push(withSliceCounts({ name: entry.name, absPath, readmePath, frontmatter, id }));
   }
   // Stable order: by mission name.
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
 }
 
-function countSliceDirs(dir: string): number {
-  if (!fs.existsSync(dir)) return 0;
-  return fs.readdirSync(dir, { withFileTypes: true })
-    .filter((e) => e.isDirectory() && SLICE_DIRNAME_RE.test(e.name))
-    .length;
+/** The mission with each of its slices counted once, by its standing (the same one `slice ls` filters on). */
+function withSliceCounts(base: Omit<MissionInfo, "activeSliceCount" | "shippedSliceCount" | "closedSliceCount">): MissionInfo {
+  const mission: MissionInfo = { ...base, activeSliceCount: 0, shippedSliceCount: 0, closedSliceCount: 0 };
+  for (const { standing } of slicesWithStanding(mission)) {
+    if (standing === "active") mission.activeSliceCount++;
+    else if (standing === "shipped") mission.shippedSliceCount++;
+    else mission.closedSliceCount++;
+  }
+  return mission;
 }
 
 function pickIdFromFrontmatter(fm: Record<string, unknown>): string | null {
@@ -418,22 +410,15 @@ export function findMission(missionsRoot: string, identifier: string): MissionIn
   throw new ScopeCliError({
     fact: `Mission "${identifier}" not found under ${missionsRoot}.`,
     consequence: "Command did not run.",
-    action: "List available missions with: rig scope mission ls",
+    action: "List available missions with: rig scope mission ls. "
+      + "For a mission in another workspace, such as a catalog project, select its tree with the parent option: rig scope --workspace <project root> mission <verb> <mission>",
   });
 }
 
 function buildMissionInfo(missionsRoot: string, absPath: string): MissionInfo {
   const readmePath = resolveNodeFile(absPath);
   const frontmatter = readmePath ? readFrontmatter(readmePath) : {};
-  return {
-    name: path.basename(absPath),
-    absPath,
-    readmePath,
-    frontmatter,
-    id: pickIdFromFrontmatter(frontmatter),
-    activeSliceCount: countSliceDirs(path.join(absPath, "slices")),
-    closedSliceCount: countSliceDirs(path.join(absPath, "closed")),
-  };
+  return withSliceCounts({ name: path.basename(absPath), absPath, readmePath, frontmatter, id: pickIdFromFrontmatter(frontmatter) });
 }
 
 // ---------------------------------------------------------------------
@@ -444,35 +429,35 @@ export function listSlices(
   mission: MissionInfo,
   state: SliceState,
 ): SliceInfo[] {
-  const dirs: Array<{ root: string; bucket: "active" | "closed" }> = [];
-  if (state === "active" || state === "shipped" || state === "all") {
-    dirs.push({ root: path.join(mission.absPath, "slices"), bucket: "active" });
-  }
-  if (state === "closed" || state === "all") {
-    dirs.push({ root: path.join(mission.absPath, "closed"), bucket: "closed" });
-  }
-  const out: SliceInfo[] = [];
-  for (const { root } of dirs) {
+  return slicesWithStanding(mission)
+    .filter(({ standing }) => state === "all" || standing === state)
+    .map(({ slice }) => slice);
+}
+
+/** Where a slice stands. In closed/, it's closed. In place: shipped (or done) is delivered; a closed or superseded
+ *  status, or a superseded or retired stage, is an exit, so closed; anything else, blocked work included, is active. */
+export function sliceStanding(slice: SliceInfo, inClosedFolder: boolean): Exclude<SliceState, "all"> {
+  if (inClosedFolder) return "closed";
+  const status = (slice.status ?? "").toLowerCase();
+  const stage = typeof slice.frontmatter.stage === "string" ? slice.frontmatter.stage.toLowerCase() : "";
+  if (status === "done" || status.startsWith("shipped")) return "shipped";
+  if (status.startsWith("closed") || status === "superseded" || stage === "superseded" || stage === "retired") return "closed";
+  return "active";
+}
+
+/** Every slice in the mission (slices/ and closed/), in order, each with its standing. */
+function slicesWithStanding(mission: MissionInfo): Array<{ slice: SliceInfo; standing: Exclude<SliceState, "all"> }> {
+  const out: Array<{ slice: SliceInfo; standing: Exclude<SliceState, "all"> }> = [];
+  for (const [folder, inClosedFolder] of [["slices", false], ["closed", true]] as const) {
+    const root = path.join(mission.absPath, folder);
     if (!fs.existsSync(root)) continue;
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const m = SLICE_DIRNAME_RE.exec(entry.name);
-      if (!m) continue;
-      const sliceInfo = buildSliceInfo(mission, root, entry.name);
-      out.push(sliceInfo);
+      if (!entry.isDirectory() || !SLICE_DIRNAME_RE.test(entry.name)) continue;
+      const slice = buildSliceInfo(mission, root, entry.name);
+      out.push({ slice, standing: sliceStanding(slice, inClosedFolder) });
     }
   }
-  out.sort((a, b) => (a.nn ?? Number.MAX_SAFE_INTEGER) - (b.nn ?? Number.MAX_SAFE_INTEGER) || a.name.localeCompare(b.name));
-  if (state === "active") {
-    // active = not in closed/, and not already delivered in-place.
-    return out.filter((s) => {
-      const st = (s.status ?? "").toLowerCase();
-      return st !== "done" && !st.startsWith("closed") && !st.startsWith("shipped");
-    });
-  }
-  if (state === "shipped") {
-    return out.filter((s) => (s.status ?? "").toLowerCase().startsWith("shipped"));
-  }
+  out.sort((a, b) => (a.slice.nn ?? Number.MAX_SAFE_INTEGER) - (b.slice.nn ?? Number.MAX_SAFE_INTEGER) || a.slice.name.localeCompare(b.slice.name));
   return out;
 }
 
@@ -544,10 +529,15 @@ export function findSlice(
       // Walk up to find the owning mission.
       const owningMissionPath = findOwningMission(missionsRoot, candidate);
       if (!owningMissionPath) {
+        const workspace = workspaceHoldingSlice(missionsRoot, candidate);
         const error = new ScopeCliError({
           fact: `Slice path "${slicePath}" resolved to ${candidate} but no parent mission was found.`,
           consequence: "Cannot determine mission context for this slice.",
-          action: "Ensure the slice lives under <missionsRoot>/<mission>/{slices,closed}/.",
+          action: workspace
+            ? `The slice is in another workspace's missions tree (${workspace.missionsRoot}), not under ${missionsRoot}. `
+              + `Select that tree with the parent --workspace option, for example: rig scope --workspace ${quoteArg(workspace.option)} slice <verb> ${quoteArg(slicePath)}`
+            : "Ensure the slice lives under <missionsRoot>/<mission>/{slices,closed}/. "
+              + "For a slice in another workspace, such as a catalog project, select its tree with the parent option: rig scope --workspace <project root> slice <verb> <slice-path>",
         });
         if (!hintedName) throw error;
         firstContextError ??= error;
@@ -565,6 +555,33 @@ export function findSlice(
     consequence: "Command did not run.",
     action: "Check the path. List slices in a mission with: rig scope slice ls --mission <name>",
   });
+}
+
+/** POSIX single-quoting for a path shown in a command. */
+function quoteArg(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+/**
+ * For a slice directory the selected missions root does not hold, the --workspace value that
+ * selects the nearest missions tree that does: the project root when that resolves to the tree,
+ * else the missions folder itself. Each value is checked with resolveMissionsRoot, so the named
+ * option is one that works. Null when no ancestor is a readable missions tree.
+ */
+function workspaceHoldingSlice(selectedRoot: string, sliceDir: string): { option: string; missionsRoot: string } | null {
+  const selected = path.resolve(selectedRoot);
+  const target = path.resolve(sliceDir);
+  for (let root = path.dirname(target); root !== path.dirname(root); root = path.dirname(root)) {
+    if (root === selected || !walkToMission(root, target)) continue;
+    for (const option of [path.dirname(root), root]) {
+      try {
+        if (path.resolve(resolveMissionsRoot({ override: option, strictOverride: true })) === root) return { option, missionsRoot: root };
+      } catch {
+        // Not a workspace for this tree; try the next form.
+      }
+    }
+  }
+  return null;
 }
 
 function findOwningMission(missionsRoot: string, slicePath: string): string | null {

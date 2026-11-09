@@ -23,7 +23,10 @@ Only the activity axis is served today. The session and resumability values are 
 `activity-taxonomy.ts` but no surface reads them: `rig ps --nodes --full` shows the raw session
 STATUS, both node views show a LIFECYCLE of `running`, `detached`, `recoverable` or `attention_required` (`run`, `det`, `rec`,
 `att`), and node inventory serves `occupantLifecycle` (`active`, `retiring`, `retired`,
-`context_walled`, `compacted`, `crashed`, `unknown`).
+`context_walled`, `compacted`, `crashed`, `unknown`). Node inventory's `sessionStatus` is the
+recorded session status, with two observed corrections: a running session whose pane is verified
+to have exited (identity reason `pane_exited`) reads `exited`, with `startupStatus:
+"attention_required"`, and a running session confirmed missing reads `detached`.
 
 The axes never blend. Reachability is strict; revival optimism is a different field
 (omnigent's strict-liveness split). `unknown` is a first-class honest value — the oracle
@@ -58,6 +61,21 @@ A zero prompt count alone is not an observed clear. Absent arbitration evidence 
 the existing live-hook fallback in effect; lifecycle, startup, held and error signals
 can independently raise attention. A false attention flag means no known trigger, not
 proof that an unobserved input box is clear.
+
+A handover whose successor started without a required file also raises attention. That's
+a projected guidance file or a guidance startup file marked `required` still missing from
+the guidance file, or, for a fresh or rebuild successor, a required `send_text` startup
+file that's missing. The seat serves `startedWithoutRequired` with each file's path, the
+table's reason column names each file, and the handover's own output says it's degraded.
+The mark belongs to that successor's session, so the seat's next launch or handover
+clears it. Time alone never does. Repairing the file in place doesn't clear it either,
+because no route delivers guidance into a running conversation.
+
+A fresh or rebuild successor's first turn opens with the seat's `send_text` startup files,
+the ones a fresh start delivers, as absolute paths with the role first. A pointer asks the
+successor to read the file; it isn't the pasted text a start sends. A fork successor
+carries its parent's conversation and gets no list. `send_text` startup actions, such as
+an `after_ready` preload, aren't run for a successor.
 
 The compact human table's ATTN column renders `yes`, `no`, or `?` when the flag is
 unavailable. Compact JSON retains `needsAttention`; use `--full` or
@@ -116,7 +134,10 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   PER-HARNESS when that harness's hook rung earns trust through a measured agreement
   window in production — never by fixture pass alone (symmetric admission: a fixture
   pass admits a rung to TRIAL, where it is measured but not consulted; production agreement
-  promotes it). Undeclared and partial-coverage rungs are identity-only, which is also where
+  promotes it). For Codex, this fallback also accepts a fresh working status adjacent to
+  the composer, or an advancing counter across two fresh captures when output separates
+  them. This positive evidence expires after five seconds; unrecognized, frozen, old or
+  pre-occupant frames add nothing. It uses the existing pane capture. Undeclared and partial-coverage rungs are identity-only, which is also where
   a degraded rung goes, with one declared exception: for a pi or omp seat or a community
   harness, sampling is positive-only: a changing pane reads working, and a quiet one never reads idle on its
   own, since the pane can be quiet mid-turn.
@@ -185,6 +206,13 @@ LIFECYCLE); see the
 - **Restore outcome:** `resumed`, `fresh-primed`, `awaiting-decision`, `attention_required`,
   `failed` (plus `rebuilt`, `operator_recovered` and the legacy `fresh`). A seat joined with
   `rig attach` as an external CLI reads `left_attached`: restore leaves it as it is.
+  An `attention_required` outcome, or `failed` with a running session, makes the seat's
+  lifecycle `attention_required`, whatever its startup status, so it raises `needsAttention`.
+  After a full restore, the daemon reconciles it to `operator_recovered` when the seat's
+  activity next turns to running or idle (or reads so when the restore completes) and the
+  live seat passes its check, and `rig seat clear-attention <seat>` runs that check on
+  demand; `rig seat continue` doesn't change it
+  ([startup guide](agent-startup-guide.md#after-a-restored-seats-prompt)).
 
 ## Rejected oracles — dated receipts (2026-08-26), so nobody re-derives them expensively
 

@@ -43,6 +43,7 @@ import { realDeps } from "./daemon.js";
 import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import type { StatusDeps } from "./status.js";
+import { reconstructionCommand } from "./context-reconstruction.js";
 
 const contextRuntimeArg = enumArg(["claude-code", "claude", "codex"]);
 
@@ -194,6 +195,7 @@ async function installPackFromUrl(
     // Re-validate the on-disk staged pack, then publish atomically.
     validateContextPackManifestForInstall(join(staging, "manifest.yaml"));
     assertTreeHasNoSymlinks(staging);
+    mkdirSync(dirname(targetDir), { recursive: true });
     renameSync(staging, targetDir);
     return { targetDir, installName };
   } catch (err) {
@@ -250,6 +252,8 @@ Examples:
   rig context trace --rig factory --seat orch-lead --name LEARNED.md
   rig context trace --rig factory --pod dev --seat dev-qa --name LEARNED.md
 `);
+
+  cmd.addCommand(reconstructionCommand());
 
   const getDeps = (): StatusDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),

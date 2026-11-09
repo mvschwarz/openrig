@@ -73,6 +73,7 @@ it("serves a materialized, never-launched caller seat over a grant service on a 
   for (const [name, value] of Object.entries({ ...daemon.readEnv, OPENRIG_DB: dbPath })) if (value !== undefined) env[name] = value;
   let log = "";
   const server: ChildProcess = spawn(process.execPath, [rigBin, "mcp", "serve", "--http", "--bind", `127.0.0.1:${port}`,
+    "--task-destination", LEAD,
     "--grant-service", `http://127.0.0.1:${(service.address() as AddressInfo).port}/api/connector/v1/grant`], { env, stdio: ["ignore", "pipe", "pipe"] });
   server.stdout?.on("data", (chunk) => { log += chunk; });
   server.stderr?.on("data", (chunk) => { log += chunk; });
@@ -98,9 +99,11 @@ it("serves a materialized, never-launched caller seat over a grant service on a 
   };
   // The tools the grant's objects name.
   expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual(["rig_queue_create", "rig_queue_list", "rig_queue_show"]);
-  const created = await call("rig_queue_create", { destination: LEAD, body: "please build it" });
+  const created = await call("rig_queue_create", { body: "please build it" });
   const shown = await call("rig_queue_show", { qitemId: created.qitemId });
   expect(shown.item).toMatchObject({ qitemId: created.qitemId, sourceSession: CALLER, destinationSession: LEAD });
+  const explicit = await call("rig_queue_create", { destination: LEAD, body: "Explicit destination still works" });
+  expect(explicit.destinationSession).toBe(LEAD);
 
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {

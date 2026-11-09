@@ -4,16 +4,22 @@ import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { parseSessionName } from "./session-name.js";
+import { sessionCommunityRunnerSelect } from "./session-registry.js";
 import type { NodeInventoryEntry, SeatIdentityVerdict } from "./types.js";
 import { NativePermissionStore, type StoredNativePermissionSelection, type ResolvedSeatPermission } from "./native-permission-store.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
 import { planPermissionAccount, type PermissionAccount } from "./permission-account.js";
 import { seatAccountHome, RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } from "./seat-runtime-home.js";
 import { claudeSeatTokenFallbackNotice, claudeSeatTokenFileProblem, readClaudeSeatTokenRef } from "./claude-seat-token.js";
+import { unavailablePermissionStop, type PermissionStopStatus } from "./permission-stop-observation.js";
+import type { AgentActivityStore } from "./agent-activity-store.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
 export interface SeatStatus {
+  /** Latest bounded observation across actors, not aggregate pending state or proof a guard ran.
+   * Completion applies only to the displayed actor; other actors' pending state is unknown. */
+  permission_stop?: PermissionStopStatus;
   compaction?: ObservedCompaction & { owedRestore: ReturnType<ClaudeCompactionEnforcer["getOwedRestore"]> };
   seat_ref: string;
   rig_id: string;
@@ -24,6 +30,10 @@ export interface SeatStatus {
   runtime: string | null;
   /** Configured cwd for future launches; an existing process can still use its old cwd. */
   launch_cwd: string | null;
+  /** The registered person who answers this seat's runner permission requests; null when no one is chosen. */
+  permissions_to: string | null;
+  /** Whether the seat's newest session was launched as a community runner, the kind that submits permission requests. */
+  runner: boolean;
   current_occupant: string | null;
   session_status: string | null;
   session_reason: SeatIdentityVerdict["reason"];
@@ -34,10 +44,10 @@ export interface SeatStatus {
   previous_occupant: string | null;
   handover_at: string | null;
   restore_outcome: NodeInventoryEntry["restoreOutcome"];
-  /** Claude and Codex seats: the home (and with it the login) the seat's launches use. Configured, not proof of
+  /** Claude, Codex and Pi seats: the home (and with it the login) the seat's launches use. Configured, not proof of
    *  which login a running process holds. `ignored` is a declared value that isn't an absolute path. */
   runtime_home?: {
-    variable: "CLAUDE_CONFIG_DIR" | "CODEX_HOME";
+    variable: "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "PI_CODING_AGENT_DIR";
     home: string | null;
     source: "member" | "rig" | "account-switch" | "daemon" | "native_default";
     ignored?: { source: "member" | "rig" | "account-switch"; value: string };
@@ -71,8 +81,11 @@ export class SeatStatusService {
   private rigRepo: RigRepository;
   private env: NodeJS.ProcessEnv;
   private compactionEnforcer?: Pick<ClaudeCompactionEnforcer, "recoverSeat" | "observedCompaction" | "getOwedRestore">;
+  private activityStore?: Pick<AgentActivityStore, "getPermissionStopForNode">;
 
-  constructor(deps: { rigRepo: RigRepository; env?: NodeJS.ProcessEnv; compactionEnforcer?: SeatStatusService["compactionEnforcer"] }) {
+  constructor(deps: { rigRepo: RigRepository; env?: NodeJS.ProcessEnv; compactionEnforcer?: SeatStatusService["compactionEnforcer"];
+    activityStore?: SeatStatusService["activityStore"] }) {
+    this.activityStore = deps.activityStore;
     this.compactionEnforcer = deps.compactionEnforcer;
     this.rigRepo = deps.rigRepo;
     this.env = deps.env ?? process.env;
@@ -142,6 +155,7 @@ export class SeatStatusService {
 
   private projectStatus(seatRef: string, entry: NodeInventoryEntry): SeatStatus {
     return {
+      permission_stop: this.permissionStopStatus(entry),
       ...this.compactionStatus(entry),
       seat_ref: seatRef,
       rig_id: entry.rigId,
@@ -151,6 +165,8 @@ export class SeatStatusService {
       pod_namespace: entry.podNamespace ?? null,
       runtime: entry.runtime,
       launch_cwd: entry.cwd,
+      permissions_to: this.rigRepo.getNodePermissionsTo(entry.nodeId),
+      runner: this.launchedAsRunner(entry.nodeId),
       current_occupant: entry.canonicalSessionName,
       session_status: entry.sessionStatus,
       session_reason: entry.identityVerdict?.reason ?? null,
@@ -168,12 +184,28 @@ export class SeatStatusService {
     };
   }
 
+  private permissionStopStatus(entry: NodeInventoryEntry): PermissionStopStatus {
+    try {
+      const observed = entry.canonicalSessionName ? this.activityStore?.getPermissionStopForNode(entry.nodeId, entry.canonicalSessionName) : undefined;
+      return entry.occupantLifecycle === "active" && entry.sessionStatus === "running" ? observed ?? unavailablePermissionStop()
+        : unavailablePermissionStop();
+    }
+    catch { return unavailablePermissionStop(); }
+  }
+
   private compactionStatus(entry: NodeInventoryEntry): Pick<SeatStatus, "compaction"> {
     const enforcer = this.compactionEnforcer, session = entry.canonicalSessionName;
     if (!enforcer || entry.runtime !== "claude-code" || !session) return {};
     enforcer.recoverSeat({ sessionName: session, cwd: entry.cwd, runtime: entry.runtime });
     const observed = enforcer.observedCompaction(session);
     return observed ? { compaction: { ...observed, owedRestore: enforcer.getOwedRestore(session) } } : {};
+  }
+
+  private launchedAsRunner(nodeId: string): boolean {
+    const db = this.rigRepo.db;
+    const row = db.prepare(`SELECT ${sessionCommunityRunnerSelect(db)} AS community_runner FROM sessions s WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`)
+      .get(nodeId) as { community_runner: number | null } | undefined;
+    return row?.community_runner === 1;
   }
 
   private runtimeHomeStatus(nodeId: string, runtime: string | null): Pick<SeatStatus, "runtime_home"> {
@@ -183,10 +215,11 @@ export class SeatStatusService {
     const ignored = own.ignored ? { ignored: own.ignored } : {};
     if (own.home && own.source) return { runtime_home: { variable, home: own.home, source: own.source } };
     // The daemon's explicit value, as its launches pass it on; else the runtime's native default under HOME.
-    const daemon = this.env[variable];
+    const daemon = runtime === "pi" ? undefined : this.env[variable];
     if (daemon) return { runtime_home: { variable, home: daemon, source: "daemon", ...ignored } };
     const home = this.env.HOME;
-    const native = home ? path.join(home, runtime === "codex" ? ".codex" : ".claude") : null;
+    // Unconfigured Pi uses its managed seat directory, not the operator's ~/.pi/agent login.
+    const native = home && runtime !== "pi" ? path.join(home, runtime === "codex" ? ".codex" : ".claude") : null;
     return { runtime_home: { variable, home: native, source: "native_default", ...ignored } };
   }
 

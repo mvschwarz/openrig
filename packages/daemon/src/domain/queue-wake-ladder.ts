@@ -72,6 +72,10 @@ import {
   resolveOperatorSeat,
   resolveSessionNodeId,
 } from "./queue-stuck-sweep.js";
+import {
+  RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
+  RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
+} from "./queue-transition-log.js";
 
 export const WAKE_RETRY_INTERVAL_KEY = "queue.wake_retry_interval_seconds";
 export const DEFAULT_WAKE_RETRY_INTERVAL_SECONDS = 300;
@@ -118,6 +122,7 @@ export const LADDER_SUSPEND_PREFIX = "ladder-suspend:";
 export const LADDER_RESUME_PREFIX = "ladder-resume:";
 
 const LADDER_ACTOR = "wake-ladder@system";
+const UNACCEPTED_CARRIER_REROUTE = "unaccepted wake escalation uses a local carrier; human dispatch still requires readiness";
 
 export interface WakeLadderStatusSnapshot {
   lastTickAt: string | null;
@@ -278,6 +283,14 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
   let resumes = 0;
   for (const r of rows) {
     const note = r.transition_note ?? "";
+    // This unaccepted route changed owners. Its old self-skip/floor did not wake the new fallback.
+    if (note.startsWith("fallback-routed: ") && note.endsWith(`(${UNACCEPTED_CARRIER_REROUTE})`)) {
+      view.orchRung = false;
+      view.orchRungFailed = false;
+      view.exhausted = false;
+      view.exhaustedNote = null;
+      view.lastMarkerTs = null;
+    }
     const isAttempt = note.startsWith(LADDER_ATTEMPT_PREFIX);
     const isRung = note.startsWith(LADDER_RUNG_PREFIX);
     if (isAttempt) view.attempts += 1;
@@ -299,12 +312,16 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
       view.opOutcomeResolved = false;
     }
     // Outcome resolution (AM-F3, R1 B-3, R2 pre-marker discriminator): the S14
-    // posted receipt or the termination record closes the episode ONLY when it
+    // posted receipt, relay-owner-notification-accepted receipt, or the termination record closes the episode ONLY when it
     // (a) follows the dispatch marker chronologically (this loop resets the
     // flag at each dispatch, so pre-marker notes never survive) and (b) carries
     // the dispatched key when the marker is keyed. An unkeyed dispatch
     // (injected legacy ports) keeps the any-following-note shape.
-    if (note.startsWith("slack-owner-notification-posted ") || note.startsWith("delivery-termination:")) {
+    if (
+      note.startsWith("slack-owner-notification-posted ") ||
+      note.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `) ||
+      note.startsWith("delivery-termination:")
+    ) {
       if (view.opEngineKey === null || note.split(/\s+/).includes(`notification_key=${view.opEngineKey}`)) {
         view.opOutcomeResolved = true;
       }
@@ -348,6 +365,8 @@ function hasPickupEvidence(db: Database.Database, row: Pick<QueueItem, "qitemId"
       // a receipt/termination/deferral stamp must not pull the row out of the
       // ladder before the resolution pass reads it.
       note.startsWith("slack-owner-notification-") ||
+      note.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `) ||
+      note.startsWith(`${RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX} `) ||
       note.startsWith("delivery-termination:") ||
       note.startsWith("delivery-deferral-") ||
       // Quiet hours: holding an ask and releasing it are delivery machinery too, never someone picking it up.
@@ -444,15 +463,13 @@ function readSuspension(
   const override = process.env[WAKE_SUSPEND_OVERRIDE_ENV];
   if (override) {
     for (const entry of override.split(",")) {
-      const idx = entry.lastIndexOf(":");
-      const session = entry.slice(0, entry.indexOf(":"));
-      const untilIso = entry.slice(entry.indexOf(":") + 1);
-      void idx;
-      if (session === destination) {
-        const until = Date.parse(untilIso);
-        if (!Number.isNaN(until) && now.getTime() < until) {
-          return { reason: `operator override (${WAKE_SUSPEND_OVERRIDE_ENV}) until ${untilIso}`, until: untilIso };
-        }
+      // Match this destination's own prefix: an external destination can itself hold a colon
+      // (`slack:U...@external`), and the rest is whatever date form Date.parse reads.
+      if (!entry.startsWith(`${destination}:`)) continue;
+      const untilIso = entry.slice(destination.length + 1);
+      const until = Date.parse(untilIso);
+      if (!Number.isNaN(until) && now.getTime() < until) {
+        return { reason: `operator override (${WAKE_SUSPEND_OVERRIDE_ENV}) until ${untilIso}`, until: untilIso };
       }
     }
   }
@@ -743,7 +760,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
     for (const { qitem_id } of [...batonRows, ...parkedOwnerFailureRows]) {
       const row = deps.queueRepo.getById(qitem_id);
-      if (!row) continue;
+      if (!row || recoversEscalationNotice(deps, row)) continue;
       const usagePool = usagePoolBySeat.get(row.destinationSession);
       // OPR.0.5.6.24: the usage-limit PARK mutation applies only to pending
       // batons — a claimed in-progress row is someone's live work and is never
@@ -869,7 +886,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
     // F3 — per-destination aggregation: ONE escalation carrying the row list, refreshed
     // not duplicated (the S02 idempotency shape), and rung markers on every member baton.
     for (const [dest, members] of escalating) {
-      const orch = openEscalationOwner(deps.db, escalationDedupTag(dest)) ?? resolveOrch(dest);
+      const orch = openEscalationOwner(deps, escalationDedupTag(dest)) ?? resolveOrch(dest);
       const route = !deps.resolveOrchestrator
         ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
       const routeReason = route && route.outcome !== "none" && route.outcome !== "parent" ? route.reason : "";
@@ -1026,13 +1043,14 @@ const PROMPT_CLEARED_NOTE = "prompt escalation: the seat's prompt read clear";
  * spares JSON parsing of the rows that cannot match. The alert tag holds no LIKE wildcard. */
 const PROMPT_ALERT_ROWS = `(tags LIKE '%"${PROMPT_ALERT_TAG}"%' OR tags LIKE '%\\%')`;
 
-/** Active watchdog jobs whose last two attempts were both refused at the same target's prompt. A run of refusals starts
+/** Active watchdog jobs whose latest attempt was refused at a target's prompt. A run of refusals starts
  * after the job's latest other entry at that target (looked up past the 50-entry read when the read is all refusals) or
  * after this seat's latest prompt-cleared alert retirement, whichever is later; the key names that boundary, so it stays
  * the same until a reminder lands or the prompt clears. Jobs are found through the refused outcome's index. The
  * parked-owner job's refusals already arrive as notes on the rows it wakes. */
-function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string) => { qitemId: string; at: string } | null):
-  Array<{ jobId: string; dest: string; registeredBy: string; key: string; refusedAt: string; choice: boolean }> {
+function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string) => { qitemId: string; at: string } | null,
+  readAt: (dest: string, refusedAt: string) => "blocked" | "clear" | "unknown"):
+  Array<{ jobId: string; dest: string; registeredBy: string; key: string; refusedAt: string; choice: boolean; choiceSince?: string }> {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'watchdog_history'").get()) return [];
   const jobs = db.prepare(`SELECT job_id, registered_by_session FROM watchdog_jobs WHERE state = 'active' AND policy != ?
     AND job_id IN (SELECT job_id FROM watchdog_history WHERE outcome = 'refused')`).all(PARKED_OWNER_POLICY_NAME) as Array<{ job_id: string; registered_by_session: string }>;
@@ -1040,6 +1058,14 @@ function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string)
     WHERE job_id = ? ORDER BY evaluated_at DESC, history_id DESC LIMIT 50`);
   const before = db.prepare(`SELECT history_id, evaluated_at FROM watchdog_history WHERE job_id = ?
     AND NOT (outcome = 'refused' AND delivery_target_session IS ?) ORDER BY evaluated_at DESC, history_id DESC LIMIT 1`);
+  // Read the choice run oldest first, beyond the 50-entry window, so a clear observed before any alert existed
+  // can discard the old refusals without discarding a returned prompt's first uncleared refusal too.
+  const choiceRun = db.prepare(`WITH boundary AS (SELECT evaluated_at, history_id FROM watchdog_history WHERE job_id = ?
+      AND NOT (outcome = 'refused' AND delivery_target_session IS ? AND COALESCE(evaluation_notes, '') LIKE '%(selection_prompt)%')
+      ORDER BY evaluated_at DESC, history_id DESC LIMIT 1)
+    SELECT evaluated_at AS at FROM watchdog_history WHERE job_id = ?
+      AND (evaluated_at, history_id) > (COALESCE((SELECT evaluated_at FROM boundary), ''), COALESCE((SELECT history_id FROM boundary), ''))
+      AND evaluated_at > ? ORDER BY evaluated_at, history_id`);
   type Entry = { history_id: string; outcome: string; dest: string | null; evaluated_at: string; evaluation_notes?: string | null };
   return jobs.flatMap(({ job_id, registered_by_session }) => {
     const entries = recent.all(job_id) as Entry[];
@@ -1048,12 +1074,19 @@ function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string)
     const end = entries.findIndex(e => e.outcome !== "refused" || e.dest !== dest);
     const run = end === -1 ? entries : entries.slice(0, end);
     const anchor = end !== -1 ? entries[end]! : entries.length === 50 ? before.get(job_id, dest) as Pick<Entry, "history_id" | "evaluated_at"> | undefined : undefined;
-    const retired = run.length < 2 ? null : clearedAlert(dest);
+    const retired = run.length ? clearedAlert(dest) : null;
     const cleared = retired && (!anchor || retired.at > anchor.evaluated_at) ? retired : null;
-    if (run.filter(e => !cleared || e.evaluated_at > cleared.at).length < 2) return [];
+    if (!run.some(e => !cleared || e.evaluated_at > cleared.at)) return [];
     const after = cleared ? `alert:${cleared.qitemId}` : anchor?.history_id ?? "start";
+    const choice = (entries[0]!.evaluation_notes ?? "").includes("(selection_prompt)");
+    let choiceSince: string | undefined;
+    if (choice && readAt(dest, entries[0]!.evaluated_at) !== "clear") {
+      for (const { at } of choiceRun.iterate(job_id, dest, job_id, cleared?.at ?? '') as IterableIterator<{ at: string }>) {
+        if (readAt(dest, at) !== "clear") { choiceSince = at; break; }
+      }
+    }
     return [{ jobId: job_id, dest, registeredBy: registered_by_session, key: `${dest}|watchdog:${job_id}|after:${after}`, refusedAt: entries[0]!.evaluated_at,
-      choice: (entries[0]!.evaluation_notes ?? "").includes("(selection_prompt)") }];
+      choice, choiceSince }];
   });
 }
 
@@ -1083,11 +1116,33 @@ function waitsOnPostedPromptAlert(deps: WakeLadderDeps, row: QueueItem, choiceOn
   return true;
 }
 
+/** Carrier selection skips positively identified people; missing registry data does not turn an agent into a person. */
+function knownPerson(deps: WakeLadderDeps, destination: string): boolean {
+  if (parseSessionName(destination).kind === "external") return true;
+  try {
+    const registry = (deps.loadHumanRegistry ?? (() => loadHumanRegistry()))();
+    return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
+  } catch { return false; }
+}
+
+function gatewayOwnsEscalation(deps: WakeLadderDeps, row: QueueItem): boolean {
+  return readLadder(deps.db, row.qitemId, 0).opEngineDispatched
+    || Boolean(deps.deliveryEngine?.hasAcceptedEscalation?.(row));
+}
+
 // The operator engine owns actual human delivery. Its non-nudged queue carrier
 // must still be locally admissible; cross-host source provenance is not a local destination.
 function humanAlertCarrier(deps: WakeLadderDeps, dest: string, source?: string): string {
   const candidates = [resolveOperatorSeat(), source];
-  return candidates.find((candidate): candidate is string => Boolean(candidate && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
+  return candidates.find((candidate): candidate is string => Boolean(candidate && !knownPerson(deps, candidate) && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
+}
+
+/** A delivery-recovery finding about our own notice stays readable without spawning another notice.
+ * Ordinary human asks still use the existing recovery route; the original obligations are untouched. */
+function recoversEscalationNotice(deps: WakeLadderDeps, row: QueueItem): boolean {
+  const prefix = "stuck-sweep:undelivered-human-notice:";
+  return row.tags?.some(tag => tag.startsWith(prefix)
+    && deps.queueRepo.getById(tag.slice(prefix.length))?.tags?.includes(WAKE_ESCALATION_TAG)) ?? false;
 }
 
 /** Positive refusals enter the existing rungs without ever retrying the blocked
@@ -1140,14 +1195,14 @@ async function advancePromptRefusals(
   };
   for (const { qitem_id, destination_session } of candidates) {
     const primary = readCandidate(qitem_id, destination_session);
-    if (!primary) continue;
+    if (!primary || recoversEscalationNotice(deps, primary)) continue;
     // The shared no-route change is prospective, never a revival of old ladders.
     if (readLadder(deps.db, qitem_id).exhausted) continue;
     for (const episode of openPromptRefusals(deps.queueRepo.listTransitions(qitem_id))) {
       if (!episode.key.startsWith(`${primary.destinationSession}|`)) continue;
       // Ordinary work shares an episode; consumed recoveries retain independent dispositions.
       const rows = episode.ids.map(id => readCandidate(id, primary.destinationSession)).filter((row): row is QueueItem =>
-        Boolean(row && row.destinationSession === primary.destinationSession && ["pending", "in-progress", "blocked"].includes(row.state)
+        Boolean(row && !recoversEscalationNotice(deps, row) && row.destinationSession === primary.destinationSession && ["pending", "in-progress", "blocked"].includes(row.state)
           && !closedEpisode(`${PROMPT_EPISODE_TAG}${episode.key}${hasConsumedEscalationHop(deps.db, row.qitemId) ? `|consumed:${row.qitemId}` : ""}`)));
       if (!rows.length) continue;
       let group = groups.get(primary.destinationSession);
@@ -1173,7 +1228,7 @@ async function advancePromptRefusals(
     }
   }
 
-  // A watchdog reminder refused twice at the same prompt joins its seat's episode; the row carries the job ids. The
+  // A watchdog reminder refused at a prompt joins its seat's episode; the row carries the job ids. The
   // seat's latest alert the ladder marked as retired on a cleared prompt bounds the run; an ended episode doesn't.
   const clearedAlerts = new Map<string, { qitemId: string; at: string } | null>();
   const clearedAlert = (dest: string) => {
@@ -1185,7 +1240,7 @@ async function advancePromptRefusals(
        GROUP BY q.qitem_id ORDER BY at DESC LIMIT 1`).get(`prompt-destination:${dest}`, LADDER_ACTOR, PROMPT_CLEARED_NOTE) as { qitemId: string; at: string } | undefined) ?? null);
     return clearedAlerts.get(dest)!;
   };
-  for (const job of refusedWatchdogJobs(deps.db, clearedAlert)) {
+  for (const job of refusedWatchdogJobs(deps.db, clearedAlert, readAt)) {
     const tag = `${PROMPT_EPISODE_TAG}${job.key}`;
     if (closedEpisode(tag)) continue;
     let group = groups.get(job.dest);
@@ -1195,7 +1250,11 @@ async function advancePromptRefusals(
     group.keys.push(tag);
     group.jobKeys.add(tag);
     group.jobs.set(job.jobId, job.registeredBy);
-    if (job.choice) group.choice = true; else group.other = true;
+    if (job.choice) {
+      group.choice = true;
+      if (job.choiceSince && readAt(job.dest, job.choiceSince) !== "clear"
+        && (!group.choiceSince || Date.parse(job.choiceSince) < Date.parse(group.choiceSince))) group.choiceSince = job.choiceSince;
+    } else group.other = true;
   }
 
   const hookObservations = new Map<string, HookReviewObservation>();
@@ -1353,7 +1412,7 @@ async function advancePromptRefusals(
       members.splice(i, 1);
     }
     if (!members.length && !group.jobs.size && !group.hookReview) continue;
-    const orch = openEscalationOwner(deps.db, `prompt-destination:${dest}`) ?? resolveOrch(dest);
+    const orch = openEscalationOwner(deps, `prompt-destination:${dest}`) ?? resolveOrch(dest);
     const toOperator = orch === null || orch === dest;
     const route = !deps.resolveOrchestrator
       ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
@@ -1397,6 +1456,11 @@ async function advancePromptRefusals(
     // The aggregate ID is the episode. Claiming it does not start a second
     // delivery episode or erase its accepted dispatch/receipt history.
     const view = readLadder(deps.db, row.qitemId, 0);
+    // A crash can leave a durable gateway decision without its ladder marker. Reconcile that custody before any wake.
+    if (!view.opEngineDispatched && deps.deliveryEngine?.hasAcceptedEscalation?.(row)) {
+      if (await operatorRung(deps, row, reason, actions, view, false)) appendExhausted(deps.queueRepo, row, "engine outcome resolved");
+      continue;
+    }
     // The explicit-only floor stopped this alert without a person. If the seat's prompt now needs one (a permission prompt
     // joined it), the permission leg still runs; accepted or deferred delivery stays exactly-once.
     const floorOnly = view.exhausted && !view.opEngineDispatched
@@ -1552,10 +1616,13 @@ async function refreshEscalationRowIfExists(
 }
 
 /** Existing recovery custody takes precedence over a newly resolved topology fallback. */
-function openEscalationOwner(db: Database.Database, dedupTag: string): string | null {
-  return (db.prepare(`SELECT destination_session FROM queue_items WHERE state IN ('pending','in-progress','blocked')
+function openEscalationOwner(deps: WakeLadderDeps, dedupTag: string): string | null {
+  const found = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
     AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?) LIMIT 1`)
-    .get(dedupTag) as { destination_session: string } | undefined)?.destination_session ?? null;
+    .get(dedupTag) as { qitem_id: string } | undefined;
+  const row = found ? deps.queueRepo.getById(found.qitem_id) : null;
+  // An unaccepted legacy person carrier is not an orchestrator; reselect the existing fallback/visible route.
+  return row && (!knownPerson(deps, row.destinationSession) || gatewayOwnsEscalation(deps, row)) ? row.destinationSession : null;
 }
 
 async function ensureEscalationRow(
@@ -1576,6 +1643,12 @@ async function ensureEscalationRow(
     )
     .get(`%"${dedupTag}"%`) as { qitem_id: string } | undefined;
   if (existing) {
+    const row = deps.queueRepo.getById(existing.qitem_id);
+    if (row && knownPerson(deps, row.destinationSession) && !gatewayOwnsEscalation(deps, row)) {
+      deps.queueRepo.routeToFallback(row.qitemId, knownPerson(deps, orch)
+        ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession) : orch,
+        UNACCEPTED_CARRIER_REROUTE);
+    }
     await refreshEscalationRowIfExists(deps, dest, members, dedupTag);
     return { qitemId: existing.qitem_id };
   }
@@ -1591,7 +1664,7 @@ async function ensureEscalationRow(
     ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
   const oneHop = route?.outcome === "routed" && route.owner === orch;
   const created = await deps.queueRepo.create({
-    sourceSession: members[0]?.row.sourceSession ?? [...jobs.values()][0] ?? OPENRIG_SENDER,
+    sourceSession: OPENRIG_SENDER,
     destinationSession: orch,
     body,
     summary: `Wake escalation: ${members.length} baton(s)${jobs.size ? ` and ${jobs.size} watchdog reminder(s)` : ""} stuck at ${dest} — ${reason}`,

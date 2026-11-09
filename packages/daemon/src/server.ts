@@ -219,6 +219,7 @@ export interface AppDeps {
   wakeResolveService?: WakeResolveService;
   chatRepo?: ChatRepository;
   streamStore?: StreamStore;
+  streamIntakeCoordinator?: import("./domain/stream-intake.js").StreamIntakeCoordinator;
   slowOpRecorder?: SlowOperationInstrumentation;
   requestPhaseObserver?: import("./domain/request-phase-observer.js").RequestPhaseObserver;
   queueRepo?: QueueRepository;
@@ -247,6 +248,8 @@ export interface AppDeps {
    *  Optional so test harnesses constructing AppDeps directly need not provide one; the health
    *  route reports honestly when absent. */
   gatewaySubsystem?: import("./domain/gateway/gateway-subsystem.js").GatewaySubsystem;
+  /** Concrete local relay inbound handler (`POST /api/gateway/relay/inbound`). */
+  relayInboundHandler?: import("./domain/gateway/relay-inbound.js").RelayInboundHandler;
   periodicSnapshotScheduler?: import("./domain/periodic-snapshot-scheduler.js").PeriodicSnapshotScheduler;
   workflowRuntime?: WorkflowRuntime;
   /**
@@ -463,6 +466,10 @@ export function createGuestActivityApp(deps: AppDeps): Hono {
     c.set("seatActivityService" as never, deps.seatActivityService);
     c.set("runtimeAdapters" as never, deps.runtimeAdapters ?? {});
     c.set("tmuxAdapter" as never, deps.tmuxAdapter);
+    // Read only by the runner permission routes, the one other thing a grant can do on this router.
+    c.set("queueRepo" as never, deps.queueRepo);
+    c.set("rigRepo" as never, deps.rigRepo);
+    c.set("streamStore" as never, deps.streamStore);
     await next();
   });
   app.route("/api/activity", guestActivityRoutes);
@@ -572,6 +579,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("cmuxAdapter" as never, deps.cmuxAdapter);
     // S10 — the in-daemon gateway subsystem handle (health surface + dispatch seam).
     c.set("gatewaySubsystem" as never, deps.gatewaySubsystem);
+    c.set("relayInboundHandler" as never, deps.relayInboundHandler);
     // Slice 24 — per-rig CMUX workspace launcher wiring.
     c.set(
       "cmuxLayoutService" as never,
@@ -896,7 +904,13 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/health-diagnosis", healthDiagnosisRoutes());
   // S10 — gateway subsystem admin (slack enable/disable with the seeding rule preserved).
   // A shared Slack app's relay carries the token `rig host pair` issued: this daemon's auth bearer.
-  app.route("/api/gateway", gatewayRoutes({ relayBearerToken: deps.missionControlBearerToken ?? null }));
+  app.route(
+    "/api/gateway",
+    gatewayRoutes({
+      relayBearerToken: deps.missionControlBearerToken ?? null,
+      relayInboundHandler: deps.relayInboundHandler,
+    }),
+  );
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
   // Slice 09 (OPR.0.3.2.9) — rig-policy bindings (operator context mode).

@@ -6,10 +6,18 @@ import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
-import { addSeatRuntimeDir } from "../domain/seat-runtime-dir.js";
+import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
+
+/** tmux 3.4 escapes these dollar forms in command output even for show-options -v.
+ * Remove only its added escape; preserve an intentionally preceding backslash. */
+export function decodeTmux34Option(value: string, serverVersion: string): string {
+  return /^3\.4(?:[a-z])?$/.test(serverVersion.trim())
+    ? value.replace(/\\\$(?=[A-Za-z_{])/g, "$")
+    : value;
+}
 
 interface TmuxShellCommandOptions {
   /** Pi can send commands within the terminal byte bound directly. */
@@ -189,6 +197,15 @@ function tmuxReportedError(err: unknown): unknown {
   return typeof stderr === "string" ? new Error(stderr) : err;
 }
 
+/** No server answers on the socket: tmux's "no server running", or a socket that is missing or refuses, read from what
+ *  tmux said (its stderr when the exec kept it, else the message past an exec's "Command failed" line). */
+function isServerMissingError(err: unknown): boolean {
+  const reported = tmuxReportedError(err);
+  if (!(reported instanceof Error)) return false;
+  const said = new Error(tmuxDiagnosticStart(reported.message).trim());
+  return isNoServerError(said) || isTmuxTransportAbsentError(said);
+}
+
 function isSessionAbsenceError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = tmuxDiagnosticStart(err.message).toLowerCase();
@@ -241,6 +258,16 @@ function classifyWriteError(err: unknown): TmuxResult {
   return { ok: false, code: "unknown", message: err.message };
 }
 
+/** tmux 3.7+ refuses every send-keys, `-l` included, while the target client is read-only (`tmux attach -r`). */
+function isReadOnlyClientRefusal(result: TmuxResult): boolean {
+  return !result.ok && /client is read-only/i.test(result.message);
+}
+
+/** The key names that submit staged input; both reach the pane as a carriage return. */
+function isSubmitKey(key: string): boolean {
+  return key === "Enter" || key === "C-m";
+}
+
 /** The launch warning when the parent-session identity cleanup could not finish (#771). */
 function parentSessionEnvWarning(target: string, err: unknown): string {
   const reason = err instanceof Error ? err.message : String(err);
@@ -290,6 +317,28 @@ const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
  *  path — this join only renders them for a shell. */
 function posixJoinArgv(argv: string[]): string {
   return argv.map((a) => (SHELL_SAFE.test(a) ? a : shellQuote(a))).join(" ");
+}
+
+/** The stderr a failed exec kept apart, or "" (a timeout, a spawn error). Never the message: it echoes the command. */
+function execStderrText(error: unknown): string {
+  const e = error as { execStderr?: unknown; stderr?: unknown };
+  return typeof e.execStderr === "string" && e.execStderr.trim() ? e.execStderr
+    : typeof e.stderr === "string" ? e.stderr : "";
+}
+
+/** systemd-run's own refusal of an option it does not have (before 254), read from its stderr only. */
+const NO_EXPAND_ENVIRONMENT = /(?:unrecognized|unknown) option[^\n]*--expand-environment/i;
+/** The user manager's refusal of OOMPolicy= for a scope (before 253), read from systemd-run's stderr only. */
+const NO_OOM_POLICY = /Cannot set property OOMPolicy|Unknown (?:property|assignment)[^\n]*OOMPolicy/i;
+
+/** What a failed exec said, on one line: its stderr when it kept one apart, else its message past the command. */
+function execFailureReason(error: unknown): string {
+  const e = error as { execStderr?: unknown; stderr?: unknown; message?: unknown; code?: unknown };
+  const stderr = typeof e.execStderr === "string" && e.execStderr.trim() ? e.execStderr
+    : typeof e.stderr === "string" && e.stderr.trim() ? e.stderr : "";
+  const text = stderr || tmuxDiagnosticStart(String(e.message ?? error));
+  const reason = text.trim().split(/\r?\n/).map(line => line.trim()).filter(Boolean).join("; ");
+  return reason || `systemd-run failed${e.code !== undefined ? ` (exit ${String(e.code)})` : ""}`;
 }
 
 function parseSessionLine(line: string): TmuxSession | null {
@@ -390,7 +439,15 @@ export class TmuxAdapter {
       // as a first start does, so it gets the same scoped environment as every later seat (#2041).
       if (!shell && (await this.startServer()).ok) shell = await this.getDefaultShell();
       if (!shell) throw new Error("Default shell unavailable");
-      if (command === undefined) command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
+      if (command === undefined) {
+        command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
+        // The server, not the connecting client, formats option output. If its version is unavailable,
+        // retain the readback unchanged rather than guessing about a user's command.
+        try {
+          const serverVersion = await this.run(["tmux", "display-message", "-p", "#{version}"]);
+          command = decodeTmux34Option(command, serverVersion);
+        } catch { /* unknown version: keep the original readback */ }
+      }
       // tmux normally copies these client values from the daemon on new-session.
       // Read its configured names, but never reuse values stored on the server.
       const updated = (await this.run(["tmux", "show-options", "-gv", "update-environment"]))
@@ -445,6 +502,7 @@ export class TmuxAdapter {
     // uses. An id alone is unique only for one server's lifetime.
     let created: { id: string; at: string } | null;
     try {
+      await this.startServerBeforeImplicitStart();
       const out = await this.exec(this.onServer(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`));
       const match = /^(\$\d+) (\d+)$/.exec(out.trim());
       created = match ? { id: match[1]!, at: match[2]! } : null;
@@ -561,6 +619,8 @@ export class TmuxAdapter {
   ) { this.serverArgs = [...serverArgs]; }
 
   private readonly serverArgs: readonly string[];
+  /** #2710: the "no scope tried" reason is logged once per adapter, not at every server start. */
+  private scopeSkipLogged = false;
 
   /** Prefix one adapter-owned tmux invocation, including its chained commands.
    * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
@@ -588,11 +648,30 @@ export class TmuxAdapter {
    * A failed/uncertain call retains its private file: it may not have been consumed yet.
    */
   private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false): Promise<string> {
-    const file = this.fileOps.tmpName();
-    await this.fileOps.writeFile(file, (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n", { mode: 0o600, flag: "wx" });
-    const output = await this.run(["tmux", ...(startServer ? ["start-server", ";"] : []), "source-file", file]);
-    await this.fileOps.unlink(file).catch(() => {});
-    return output;
+    const body = (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n";
+    const source = async (startFirst: boolean): Promise<string> => {
+      const file = this.fileOps.tmpName();
+      await this.fileOps.writeFile(file, body, { mode: 0o600, flag: "wx" });
+      try {
+        const output = await this.run(["tmux", ...(startFirst ? ["start-server", ";"] : []), "source-file", file]);
+        await this.fileOps.unlink(file).catch(() => {});
+        return output;
+      } catch (error) {
+        // No server read it, so the private file was never consumed.
+        if (!startFirst && isServerMissingError(error)) await this.fileOps.unlink(file).catch(() => {});
+        throw error;
+      }
+    };
+    if (!startServer || !this.userScopePossible()) return source(startServer);
+    // #2710: `start-server` would start a missing server in the daemon's cgroup. Try on the running server first;
+    // only when there is none, start it as startServer does (in the user scope) and run the command as before.
+    try {
+      return await source(false);
+    } catch (error) {
+      if (!isServerMissingError(error)) throw error;
+    }
+    await this.startServer();
+    return source(true);
   }
 
   /** Ends the daemon's tmux control client, and with it its session (tmux-control.ts), when tmux is driven through one. */
@@ -603,22 +682,106 @@ export class TmuxAdapter {
   /** Start an empty native terminal server, without inventing a seat/session. */
   async startServer(): Promise<TmuxResult> {
     const probeName = `openrig-startup-${randomUUID()}`;
+    const serverUp = async () => (await this.probeSession(probeName)).state !== "transport_unavailable";
+    const awaitServer = async () => {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        if (await serverUp()) return true;
+      }
+      return false;
+    };
     try {
-      if ((await this.probeSession(probeName)).state !== "transport_unavailable") return { ok: true };
+      if (await serverUp()) return { ok: true };
+      // #2710: on Linux, the server (and with it every seat) goes into a transient systemd --user scope of its own,
+      // so stopping or restarting the daemon's unit no longer takes the seats with it. Any failure keeps the start below.
+      if (await this.startServerInUserScope()) {
+        if (await awaitServer()) return { ok: true };
+        console.warn("[tmux] The systemd user scope was made but the seat terminal server did not answer in time; starting it in the daemon's cgroup as before.");
+      }
       // tmux -D keeps an empty server alive. Stays on the shell-string path
       // deliberately: detach + stdio redirection have no argv equivalent,
       // and server bootstrap is POSIX-specific (psmux auto-starts its own).
       // Native socket ownership arbitrates
       // concurrent starts; the readback below, not shell exit, proves availability.
       await this.exec(this.onServer("tmux -D </dev/null >/dev/null 2>&1 &"));
-      for (let attempt = 0; attempt < 20; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-        if ((await this.probeSession(probeName)).state !== "transport_unavailable") return { ok: true };
-      }
+      if (await awaitServer()) return { ok: true };
       return { ok: false, code: "tmux_unavailable", message: "The terminal server did not become available. Check tmux and its socket permissions." };
     } catch (error) {
       return { ok: false, code: "tmux_unavailable", message: `Terminal server unavailable: ${(error as Error).message}` };
     }
+  }
+
+  /** Linux only: run `tmux -D` as the command of a transient `systemd-run --user --scope`. systemd-run exits once the
+   *  scope holds the backgrounded server, so its exit status says whether the scope was made. True when it was; false,
+   *  with a log line giving the reason, when the start must fall back to the daemon's own cgroup. A start where no scope
+   *  is tried (not a user service, no user manager) says why once per adapter, not at every server start. */
+  private async startServerInUserScope(): Promise<boolean> {
+    if (process.platform !== "linux") return false;
+    const fallback = (reason: string) => {
+      console.warn(`[tmux] Seat terminal server not in a systemd user scope (${reason}); starting it in the daemon's cgroup as before.`);
+      return false;
+    };
+    const unavailable = this.userScopeUnavailable();
+    if (unavailable) {
+      if (this.scopeSkipLogged) return false;
+      this.scopeSkipLogged = true;
+      return fallback(unavailable);
+    }
+    const server = posixJoinArgv(["tmux", ...this.serverArgs, "-D"]);
+    // systemd-run 254+ expands ${VAR} in the command's arguments (by default from 258, also for --scope): the
+    // socket path must reach /bin/sh exactly as given, so expansion is turned off where the option exists.
+    const scoped = (oomPolicy: boolean, literal: boolean) => posixJoinArgv(["systemd-run", "--user", "--scope",
+      "--quiet", "--collect", "--unit", `openrig-tmux-${randomUUID().slice(0, 8)}`,
+      "--description", "OpenRig seat terminal server", ...(literal ? ["--expand-environment=no"] : []),
+      // A scope's default OOM policy stops every process in it when the kernel OOM-kills one: one seat would take all.
+      ...(oomPolicy ? ["-p", "OOMPolicy=continue"] : []),
+      "--", "/bin/sh", "-c", `${server} </dev/null >/dev/null 2>&1 &`]);
+    let oomPolicy = true;
+    let literal = true;
+    const dropped: string[] = [];
+    for (;;) {
+      try {
+        await this.exec(scoped(oomPolicy, literal));
+        if (!oomPolicy) {
+          console.warn(`[tmux] Seat terminal server in a systemd user scope without OOMPolicy=continue (${dropped.join("; ")}).`);
+        }
+        return true;
+      } catch (error) {
+        const reason = execFailureReason(error);
+        // Only systemd's own message on stderr drops an option: a timeout or an unknown failure echoes the whole
+        // command (options included) in its message, and must fall back with the reason, not retry without them.
+        const stderr = execStderrText(error);
+        // systemd before 254 has no --expand-environment (and never expands): retry without it.
+        if (literal && NO_EXPAND_ENVIRONMENT.test(stderr)) { literal = false; dropped.push(reason); continue; }
+        // systemd before 253 has no OOMPolicy= for scopes: the scope is still worth having without it.
+        if (oomPolicy && NO_OOM_POLICY.test(stderr)) { oomPolicy = false; dropped.push(reason); continue; }
+        return fallback(reason);
+      }
+    }
+  }
+
+  /** Before a command that would start a missing server itself (new-session), start it the way startServer does (#2710),
+   *  so that first start also lands in the systemd user scope. Only where such a scope can exist; the caller's start stays. */
+  private async startServerBeforeImplicitStart(): Promise<void> {
+    if (this.userScopePossible()) await this.startServer();
+  }
+
+  /** Where startServer may put the server in a systemd user scope (#2710). */
+  private userScopePossible(): boolean {
+    return this.userScopeUnavailable() === null;
+  }
+
+  /** Why no systemd user scope is tried, or null. Only the environment is read. The scope is for a daemon that is itself
+   *  a service of the systemd user manager (the manager sets MANAGERPID for its services; a process started by hand
+   *  from a shell that inherited it, under such a service, also counts, which is harmless): restarting that unit no longer
+   *  takes the seats along. A daemon started from a login session keeps its seats in that session, as before: there a
+   *  scope under the user manager would die with it when the last session ends without lingering. */
+  private userScopeUnavailable(): string | null {
+    if (process.platform !== "linux") return "not Linux";
+    // systemd-run --user reaches the user manager through $XDG_RUNTIME_DIR; without it there is none to ask.
+    if (seatRuntimeDir(process.env) === undefined) return "no systemd user manager: XDG_RUNTIME_DIR is not an absolute path";
+    if (!process.env.MANAGERPID) return "the daemon is not a systemd user service: MANAGERPID is unset";
+    return null;
   }
 
   async listSessions(): Promise<TmuxSession[]> {
@@ -909,7 +1072,16 @@ export class TmuxAdapter {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
       const checkDraft = guard?.needsInputCheck(identity);
       const policy = checkDraft || options?.beforePaste ? {
-        beforePaste: async () => { if (checkDraft) await guard!.beforeInput(identity, false, text); await options?.beforePaste?.(); },
+        // A paste the guard proves it left unsubmitted (#2429) is submitted first, under this lease, once this send's own
+        // checks pass; they then aren't run a second time.
+        beforePaste: async () => {
+          let checked = false;
+          const checks = async () => { await options?.beforePaste?.(); beforeWrite(); beforeInput?.(); checked = true; };
+          // The synchronous checks run again just before the key: the guard's re-read awaits after `checks`.
+          const enter = async () => { beforeWrite(); beforeInput?.(); return (await this.sendKeysUnchecked(pane, ["Enter"])).ok; };
+          if (checkDraft) await guard!.beforeInput(identity, false, text, { checks, enter });
+          if (!checked) await options?.beforePaste?.();
+        },
         afterPaste: async () => { if (checkDraft) await guard!.notePasted(identity, text); },
       } : undefined;
       return this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }, options?.bracketed, policy);
@@ -1034,11 +1206,21 @@ export class TmuxAdapter {
   async sendKeys(target: string, keys: string[], beforeInput?: () => void, options?: { beforeKeys?: () => Promise<void> }): Promise<TmuxResult> {
     return this.guardedInput(target, async (pane, beforeWrite) => {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
-      const submit = keys.some(key => key === "Enter" || key === "C-m");
-      if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
-      if (options?.beforeKeys) await options.beforeKeys();
+      const submit = keys.some(isSubmitKey);
+      const check = async () => {
+        if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
+        if (options?.beforeKeys) await options.beforeKeys();
+      };
+      await check();
       beforeWrite(); beforeInput?.();
-      const result = await this.sendKeysUnchecked(pane, keys);
+      let result = await this.sendKeysUnchecked(pane, keys);
+      // A read-only client stops send-keys but not load-buffer/paste-buffer (#2090). A lone submit key goes as its
+      // carriage return through the unbracketed paste, once the same checks pass again, so input that changed in
+      // the gap is not submitted.
+      if (keys.length === 1 && isSubmitKey(keys[0]!) && isReadOnlyClientRefusal(result)) {
+        result = await this.sendTextUnchecked(pane, "\r", () => { beforeWrite(); beforeInput?.(); }, false,
+          { beforePaste: check, afterPaste: async () => {} });
+      }
       if (result.ok && submit) this.deliveryGuard?.noteSubmitted(identity);
       return result;
     }, false, "keys");
@@ -1436,9 +1618,25 @@ export class TmuxAdapter {
     }
   }
 
-  /** Leave the pane's current mode (copy mode) with `send-keys -X cancel`, through the same input guard as sendKeys. */
+  /** Leave every mode the pane is in, through the same input guard as sendKeys. Modes stack: copy mode can sit under
+   *  run-shell output (view-mode), a chooser, customize or clock mode, and `send-keys -X cancel` leaves only a copy or
+   *  view mode on top. `copy-mode -q` (tmux 3.1a+) leaves them all and types nothing; older tmux falls back to -X cancel. */
   async cancelPaneMode(target: string): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => { beforeWrite(); return this.sendKeysUnchecked(pane, ["-X", "cancel"]); }, false, "keys");
+    return this.guardedInput(target, async (pane, beforeWrite) => {
+      beforeWrite();
+      try {
+        await this.run(["tmux", "copy-mode", "-q", "-t", pane]);
+        return { ok: true };
+      } catch (error) {
+        // The fallback is a second write: check the guard again, as the read-only Enter fallback does, so input that
+        // arrived while copy-mode -q was pending stops it.
+        beforeWrite();
+        const fallback = await this.sendKeysUnchecked(pane, ["-X", "cancel"]);
+        if (fallback.ok) return fallback;
+        // Both failed: keep both reasons, so the refusal that reports this can name them.
+        return { ...fallback, message: `copy-mode -q: ${error instanceof Error ? error.message : String(error)}; send-keys -X cancel: ${fallback.message}` };
+      }
+    }, false, "keys");
   }
 
   /** A launch metadata read. Callers must never put credential values in terminal input. */

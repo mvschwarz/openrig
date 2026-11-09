@@ -31,9 +31,10 @@ export type HumanAnswers = Record<string, string | TypedHumanReply>;
 export type RecordHumanAnswerResult =
   | { status: "recorded"; answers: HumanAnswers; complete: boolean; questions: HumanQuestion[] }
   /** answerOnRecord: the decision is no longer pending, and this asked human's clicked answer is the one it holds.
-   *  decidedForThem: it was decided on this asked human's behalf, inside their mode's decision room. */
+   *  decidedForThem: it was decided on this asked human's behalf, inside their mode's decision room.
+   *  answeredBy: another person's committed answer is the ask's answer; nothing of this person's was recorded. */
   | { status: "not-applicable"; reason: string; answerOnRecord?: true;
-    decidedForThem?: { decidedBy: string; modeName: string; chose: string; reversible: boolean } };
+    decidedForThem?: { decidedBy: string; modeName: string; chose: string; reversible: boolean }; answeredBy?: string };
 
 export const MAX_HUMAN_QUESTIONS = 4;
 export const MIN_OPTIONS = 2;

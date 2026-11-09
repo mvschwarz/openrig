@@ -10,7 +10,8 @@ export interface GuardedDeliverySummary {
 }
 
 /** Historical attempts contain outcomes, never executable options or callbacks. */
-interface Receipt { ids: string[]; result?: SendResult; expectedIdentity?: import("./expected-conversation.js").ExpectedConversation }
+interface Receipt { ids: string[]; result?: SendResult; expectedIdentity?: import("./expected-conversation.js").ExpectedConversation;
+  watchdog?: { nextAction?: string } }
 type Deliver = (session: string, text: string, opts: SendOpts) => Promise<SendResult>;
 /** Applicability needs the intended queue row and recipient, not a saved delivery receipt. */
 export type QueueWakeFacts = Pick<OutboxEntry, "outboxId" | "auditPointer" | "destinationSession">;
@@ -34,7 +35,7 @@ export class DraftAwareDelivery {
     const entry = this.outbox.getById(id)!;
     const state = entry.deliveryState === "retained" || entry.deliveryState === "retired" ? "held"
       : entry.deliveryState === "delivered" ? "complete" : entry.deliveryState === "sending" ? "sending" : entry.deliveryState === "failed" ? "failed" : "indeterminate";
-    const reason = entry.deliveryState === "retired" ? "message_retired" : receipt.result?.reason
+    const reason = entry.deliveryState === "retired" ? "message_retired" : receipt.result?.reason ?? receipt.watchdog?.nextAction
       ?? (state === "sending" ? "delivery_in_progress" : state === "complete" ? "delivered" : "interrupted_write");
     return { id: receipt.ids[0]!, state, reason };
   }
@@ -63,7 +64,7 @@ export class DraftAwareDelivery {
           this.outbox.retain(entry ? { ...entry, tags: entry.tags ?? undefined, auditPointer: entry.auditPointer ?? undefined }
             : { outboxId: id, senderSession: opts.actorSession ?? "unknown", destinationSession: session, body: text,
               auditPointer: opts.auditPointer, identityProvenance: opts.identityProvenance, identityPrincipal: opts.identityPrincipal, ...(opts.urgent ? { urgency: "urgent" } : {}) },
-            target, !!opts.committedOutboxIds);
+            target, !!opts.committedOutboxIds, { coalesce: false, sameSend: receipt.ids });
           this.db.prepare("UPDATE outbox_entries SET delivery_state='sending',guard_delivery=? WHERE outbox_id=?")
             .run(JSON.stringify(receipt), id);
         }
@@ -74,7 +75,9 @@ export class DraftAwareDelivery {
       /* Legacy bookkeeping cannot veto input; report its absence with the actual result. */
     }
     try {
-      await this.guard.beforeInput(session);
+      // A paste the guard left unsubmitted (#2429) is recognized here, to be submitted ahead of this delivery, unless the
+      // delivery needs an idle seat: submitting it starts a turn, so that delivery is held as before.
+      await this.guard.beforeInput(session, false, undefined, opts.waitForIdleMs === undefined && !opts.preserveInput ? "recognize" : undefined);
       result = await this.deliver(session, text, { ...opts,
         onInputEffect: phase => { inputWritten = true; opts.onInputEffect?.(phase); },
         beforeWrite: () => {
@@ -106,6 +109,9 @@ export class DraftAwareDelivery {
       // A wait-path failure can follow a dispatched native write. Only a positive pre-input result proves no write.
       const { sent: _sent, ...uncertain } = result; result = uncertain;
     }
+    // Whatever became of this delivery's own text, its record says it submitted OpenRig's earlier paste.
+    if (this.guard.submittedOwnLeftover(session)) result = { ...result, ownPasteSubmitted: true,
+      warning: [result.warning, "OpenRig first submitted its own earlier paste, left unsubmitted in this seat's input."].filter(Boolean).join(" ") };
     if (opts.deliveryId && !opts.committedOutboxIds) result = { ...result,
       warning: [result.warning, "Delivery IDs do not deduplicate requests; this is a new input attempt."].filter(Boolean).join(" ") };
     const state = noWrite ? "retained" : result.sent === false ? "failed" : result.ok && (result.verified || !opts.verify) ? "delivered" : "indeterminate";
@@ -116,6 +122,8 @@ export class DraftAwareDelivery {
             this.outbox.finalizeDelivery(id, state);
             this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(JSON.stringify({ ...receipt, result }), id);
           }
+          // Settled as held: only now does it take its sender's place (#2430); a delivered attempt never absorbs held ones.
+          if (state === "retained") for (const id of receipt.ids) this.outbox.coalesceSettled(id, receipt.ids);
         })();
       } catch { recorded = false; }
     }

@@ -286,6 +286,35 @@ describe("late Codex fork identity", () => {
     expect(tmux.sendText).toHaveBeenCalledTimes(1);
     expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
   });
+
+  // #875: a fresh start that chose launch developer instructions and stopped at Codex's first login. Its continuations
+  // claim the attempt before any await, and keep the launch's choice: nothing goes into the repository AGENTS.md.
+  it("consumes a fresh start's pending attempt before concurrent continuations, and keeps its launch guidance choice (#875)", async () => {
+    let screen = fs.readFileSync(new URL("./fixtures/codex-first-login.txt", import.meta.url), "utf8");
+    vi.mocked(tmux.capturePaneContent).mockImplementation(async () => screen);
+    processRows[1] = { ...processRows[1]!, command: "codex", argv: ["codex"] };
+    const written: string[] = [];
+    adapter = new CodexRuntimeAdapter({
+      tmux, codexHome: "/fixture/codex-home",
+      fsOps: { readFile: file => file.endsWith("culture.md") ? "Team culture." : ROLE, exists: file => file.endsWith("role.md") || file.endsWith("culture.md"),
+        writeFile: file => { written.push(file); }, mkdirp: () => {}, listFiles: () => [] },
+      listProcesses: async () => processRows, readThreadIdByPid: () => threadId,
+      readinessSettings: { resolveOne: () => ({ value: readinessSeconds }) } as unknown as Pick<SettingsStore, "resolveOne">,
+      resolveManagedConfigSettings: async () => ({ enabled: false, codexVersion: "0.164.0" }), sleep: async () => {},
+    });
+    const culture = { category: "guidance", effectiveId: "culture.md", sourceSpec: "base", sourcePath: "/fixture", resourcePath: "culture.md",
+      absolutePath: "/fixture/culture.md", mergeStrategy: "managed_block", classification: "safe_projection" };
+    const fresh = { ...input, adapter, forkSource: undefined, plan: { ...input.plan, entries: [culture] } } as unknown as StartupInput;
+    expect(await orch.startNode(fresh)).toMatchObject({ ok: false, startupStatus: "attention_required" });
+    expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]?.[1]).toContain("developer_instructions");
+    screen = "OpenAI Codex (v0.164.0)\n› ";
+    threadId = CHILD;
+    const results = await Promise.all([lifecycle().continueStartup("builder@fork-recovery"), lifecycle().continueStartup("builder@fork-recovery")]);
+    expect(results.filter(result => result.ok)).toHaveLength(1);
+    expect(vi.mocked(tmux.sendText).mock.calls.filter(([, text]) => String(text).includes(ROLE))).toHaveLength(1);
+    expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
+    expect(written.filter(file => file.endsWith("AGENTS.md"))).toEqual([]);
+  });
   describe("with the real Codex record reader", () => {
     const START = lstartToMinTs(STARTED)!;
     let codexHome: string;

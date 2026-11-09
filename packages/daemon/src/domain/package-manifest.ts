@@ -111,6 +111,11 @@ export function parseManifest(yamlString: string): unknown {
 
 // --- Validate ---
 
+// An export source is joined onto the package directory when the plan is built. A forward
+// climb (`../`) is the one shape that leaves the package on every supported platform, so it
+// is refused here; an absolute, drive or UNC source joins as a plain segment under the
+// package and resolves to a missing file there. `join` keeps the base, which is why only the
+// climb needs the guard.
 function hasPathTraversal(source: string): boolean {
   return source.includes("../") || source === ".." || source.endsWith("/..");
 }
@@ -177,7 +182,7 @@ export function validateManifest(raw: unknown): ValidationResult {
         if (!skill["source"] || typeof skill["source"] !== "string") {
           errors.push("Skill export: source is required");
         } else if (hasPathTraversal(skill["source"] as string)) {
-          errors.push(`Skill export source must not contain path traversal: '${skill["source"]}'`);
+          errors.push(`Skill export source must not contain path traversal; it must stay inside the package directory: '${skill["source"]}'`);
         }
         if (!skill["name"] || typeof skill["name"] !== "string") {
           errors.push("Skill export: name is required");
@@ -208,7 +213,7 @@ export function validateManifest(raw: unknown): ValidationResult {
         if (!g["source"] || typeof g["source"] !== "string") {
           errors.push("Guidance export: source is required");
         } else if (hasPathTraversal(g["source"] as string)) {
-          errors.push(`Guidance export source must not contain path traversal: '${g["source"]}'`);
+          errors.push(`Guidance export source must not contain path traversal; it must stay inside the package directory: '${g["source"]}'`);
         }
         if (g["kind"] && !KNOWN_GUIDANCE_KINDS.has(g["kind"] as string)) {
           errors.push(`Unknown guidance kind: '${g["kind"]}'`);
@@ -251,7 +256,7 @@ export function validateManifest(raw: unknown): ValidationResult {
         if (!a["source"] || typeof a["source"] !== "string") {
           errors.push("Agent export: source is required");
         } else if (hasPathTraversal(a["source"] as string)) {
-          errors.push(`Agent export source must not contain path traversal: '${a["source"]}'`);
+          errors.push(`Agent export source must not contain path traversal; it must stay inside the package directory: '${a["source"]}'`);
         }
         const agentName = (a["name"] as string | undefined) ??
           (a["source"] ? (a["source"] as string).replace(/\.[^.]+$/, "").split("/").pop()! : "");
@@ -268,7 +273,7 @@ export function validateManifest(raw: unknown): ValidationResult {
         if (!h["source"] || typeof h["source"] !== "string") {
           errors.push("Hook export: source is required");
         } else if (hasPathTraversal(h["source"] as string)) {
-          errors.push(`Hook export source must not contain path traversal: '${h["source"]}'`);
+          errors.push(`Hook export source must not contain path traversal; it must stay inside the package directory: '${h["source"]}'`);
         }
       }
     }
@@ -278,7 +283,7 @@ export function validateManifest(raw: unknown): ValidationResult {
         if (!mc["source"] || typeof mc["source"] !== "string") {
           errors.push("MCP export: source is required");
         } else if (hasPathTraversal(mc["source"] as string)) {
-          errors.push(`MCP export source must not contain path traversal: '${mc["source"]}'`);
+          errors.push(`MCP export source must not contain path traversal; it must stay inside the package directory: '${mc["source"]}'`);
         }
       }
     }

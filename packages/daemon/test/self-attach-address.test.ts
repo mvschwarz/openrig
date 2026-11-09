@@ -16,6 +16,9 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { SelfAttachService } from "../src/domain/self-attach-service.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
+import { RigLifecycleService } from "../src/domain/rig-lifecycle-service.js";
+import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { WhoamiService } from "../src/domain/whoami-service.js";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
@@ -48,6 +51,80 @@ describe("attached team address preserves physical custody", () => {
   });
   afterEach(() => { db.close(); rmSync(transcriptRoot, { recursive: true, force: true }); });
   const context = (tmuxSession: string) => ({ attachmentType: "tmux" as const, tmuxSession, tmuxWindow: "@12", tmuxPane: "%42" });
+
+  it("keeps a legacy bare name and its work history through unclaim and same-node re-attach", async () => {
+    const rig = rigs.createRig("team"), node = rigs.addNode(rig.id, "people.agent", { runtime: "terminal" });
+    // Persist the pre-fix external attachment format, then use the real release path.
+    sessions.updateBinding(node.id, { attachmentType: "external_cli", externalSessionName: "desk" });
+    const old = sessions.registerClaimedSession(node.id, "desk");
+    const queue = new QueueRepository(db, bus, {
+      validateRig: makeTopologyDestinationCheck({ findRigsByName: name => rigs.findRigsByName(name), loadHumanRegistry: () => { throw new Error("no human address in this fixture"); } }),
+      resolveSessionAddresses: name => sessions.sessionAddresses(name),
+    });
+    const sent = await queue.create({ sourceSession: "desk", destinationSession: "operator@team", body: "retained work", nudge: false });
+    const lifecycle = new RigLifecycleService({ db, rigRepo: rigs, sessionRegistry: sessions, eventBus: bus,
+      discoveryRepo: new DiscoveryRepository(db), queueRepo: queue });
+    expect(await lifecycle.unclaimSession(old.id)).toMatchObject({ ok: true, nodeId: node.id, sessionName: "desk" });
+    expect(sessions.getBindingForNode(node.id)).toBeNull();
+    const released = db.prepare("SELECT * FROM sessions WHERE id=?").get(old.id);
+    expect(released).toMatchObject({ session_name: "desk", status: "detached" });
+    const response = await app.request(`/api/rigs/${rig.id}/attach-self`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ logicalId: node.logicalId, attachmentType: "external_cli", displayName: "desk" }),
+    });
+    expect(response.status).toBe(201);
+    const result = await response.json() as { nodeId: string; sessionId: string; sessionName: string; senderAddress: string; env: { OPENRIG_SESSION_NAME: string } };
+    expect(result.nodeId).toBe(node.id);
+    expect(db.prepare("SELECT * FROM sessions WHERE id=?").get(old.id)).toEqual(released);
+    expect(queue.getById(sent.qitemId)?.sourceSession).toBe("desk");
+    expect(sessions.getBindingForNode(node.id)).toMatchObject({ attachmentType: "external_cli", externalSessionName: "desk" });
+    expect(result).toMatchObject({ sessionName: "desk", senderAddress: "desk", env: { OPENRIG_SESSION_NAME: "desk" } });
+    expect(db.prepare("SELECT session_name FROM sessions WHERE id=?").get(result.sessionId)).toEqual({ session_name: "desk" });
+    expect(queue.whoami(result.env.OPENRIG_SESSION_NAME).asSource.total).toBe(1);
+    // This preserves the legacy limitation, rather than claiming an implicit repair.
+    expect(queue.acceptsDestination(result.senderAddress)).toBe(false);
+  });
+
+  it("keeps the derived default byte-identical for a member containing @", async () => {
+    const rig = rigs.createRig("team"); pods.createPod(rig.id, "people", "People");
+    expect(await attach.attachToPod({ rigId: rig.id, podNamespace: "people", memberName: "a@b", runtime: "terminal" }))
+      .toMatchObject({ ok: true, sessionName: "people-a@b@team", senderAddress: "people-a@b@team" });
+  });
+
+  it.each(["node", "pod"].flatMap(mode => [
+    { mode, displayName: "desk", address: "desk@team" },
+    { mode, displayName: "custom-desk@team", address: "custom-desk@team" },
+    { mode, displayName: undefined, address: "people-agent@team" },
+  ]))("external $mode attach with displayName=$displayName can receive work at its returned identity", async ({ mode, displayName, address }) => {
+    const rig = rigs.createRig("team"), pod = pods.createPod(rig.id, "people", "People");
+    const existing = mode === "node" ? rigs.addNode(rig.id, "people.agent", { runtime: "terminal", podId: pod.id }) : null;
+    const body = { attachmentType: "external_cli", displayName, runtime: "terminal",
+      ...(mode === "node" ? { logicalId: existing!.logicalId } : { podNamespace: "people", memberName: "agent" }) };
+    const response = await app.request(`/api/rigs/${rig.id}/attach-self`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect(response.status).toBe(201);
+    const result = await response.json() as { nodeId: string; sessionName: string; senderAddress: string; env: { OPENRIG_SESSION_NAME: string } };
+    const binding = sessions.getBindingForNode(result.nodeId);
+    expect(binding).toMatchObject({ attachmentType: "external_cli", externalSessionName: result.sessionName });
+    const whoami = new WhoamiService({ db, rigRepo: rigs, sessionRegistry: sessions, transcriptStore: new TranscriptStore({ transcriptsRoot: transcriptRoot }) });
+    expect(whoami.resolve({ nodeId: result.nodeId })?.identity).toMatchObject({ nodeId: result.nodeId, senderAddress: result.env.OPENRIG_SESSION_NAME });
+    expect(whoami.resolve({ sessionName: result.env.OPENRIG_SESSION_NAME })?.identity.nodeId).toBe(result.nodeId);
+    const queue = new QueueRepository(db, bus, {
+      validateRig: makeTopologyDestinationCheck({ findRigsByName: name => rigs.findRigsByName(name), loadHumanRegistry: () => { throw new Error("no human address in this fixture"); } }),
+      resolveSessionAddresses: name => sessions.sessionAddresses(name),
+    });
+    // Use precisely the address attach advertised, with the production gate.
+    const item = await queue.create({ sourceSession: "operator@team", destinationSession: result.env.OPENRIG_SESSION_NAME, body: "work for attached member", nudge: false });
+    expect(queue.claim({ qitemId: item.qitemId, destinationSession: result.env.OPENRIG_SESSION_NAME }).destinationSession).toBe(address);
+    expect(queue.whoami(result.env.OPENRIG_SESSION_NAME).asDestination.inProgress).toBe(1);
+    expect(result).toMatchObject({ sessionName: address, senderAddress: address, env: { OPENRIG_SESSION_NAME: address } });
+    // A second attach does not rename a persisted member, even with a new label.
+    const before = sessions.getSessionsForRig(rig.id);
+    expect(await attach.attachToNode({ rigId: rig.id, logicalId: "people.agent", displayName: "renamed" })).toMatchObject({ ok: false, code: "already_bound" });
+    expect(sessions.getBindingForNode(result.nodeId)).toEqual(binding);
+    expect(sessions.getSessionsForRig(rig.id)).toEqual(before);
+  });
 
   it.each(["0", "person-terminal"])("returns a routable sender and records the display label without renaming %s", async (physical) => {
     const rig = rigs.createRig("sample-team"), node = rigs.addNode(rig.id, "person.agent", { runtime: "terminal" });

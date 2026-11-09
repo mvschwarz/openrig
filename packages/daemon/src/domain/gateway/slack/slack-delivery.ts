@@ -18,7 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, fetchRecentMessageTexts, type FetchImpl } from "./slack-api.js";
 import {
-  buildOutboundMessage, attributionFromSession, reconcileToken, redactSecrets, splitForSlack,
+  buildOutboundMessage, attributionFromSession, CODE_FENCE_ROOM, openFenceAfter, reconcileToken, redactSecrets, splitForSlack,
   HumanMessageShapeError, SLACK_SECTION_CAP, SLACK_TEXT_CAP, type SlackMediaRef,
 } from "./message.js";
 import type { SeenStore } from "./state-store.js";
@@ -241,7 +241,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
       log(`delivery: decision ${decision.decisionId} already delivered — re-ack, no re-post`);
       return { ok: true };
     }
-    const q = (decision.payload ?? {}) as OutboundPostPayload & { media?: SlackMediaRef[] };
+    const q = (decision.payload ?? {}) as DeliveryPart;
     // #192: the channel first, from this post's record when it has one, so the thread below is
     // chosen inside the channel the post actually goes to (and went to, on a retry).
     const pinned = firstAttemptChannel(opts, opts.attempted.load(), decision.decisionId);
@@ -250,8 +250,11 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
       try {
         opts.attempted.mark(`${decision.decisionId}${CHANNEL_DECIDED_PREFIX}${channel}`, "channel-decided");
       } catch (e) {
-        log(`channel record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained, nothing posted`);
-        return { ok: false, class: "channel-unrecorded", detail: (e as Error).message };
+        if (!q.possibleRepeat) {
+          log(`channel record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained, nothing posted`);
+          return { ok: false, class: "channel-unrecorded", detail: (e as Error).message };
+        }
+        log(`channel record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — posting once, marked as a possible repeat`);
       }
     }
     const threadTs = opts.resolveThreadTs?.(q, channel);
@@ -284,9 +287,9 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // Only render before reconciliation when comparing a known rejection. Other
     // attempts still reconcile first, including a landed message that no longer renders (#899).
     // A rejection is recorded against the plain render, so a repeat note can't make a rejected payload look new.
-    const renders = new Map<boolean, ReturnType<typeof buildOutboundMessage>>();
-    const render = (possibleRepeat = false) => {
-      const cached = renders.get(possibleRepeat);
+    const renders = new Map<string, ReturnType<typeof buildOutboundMessage>>();
+    const render = (possibleRepeat = false, stateUnconfirmed = false, quietUnreadable = false) => {
+      const cached = renders.get(`${possibleRepeat}:${stateUnconfirmed}:${quietUnreadable}`);
       if (cached) return cached;
       const { mediaRefs, evidenceLink } = evidenceAttachment(q.media, q.evidenceRef, q.summary);
       const built = buildOutboundMessage(
@@ -302,6 +305,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           state: q.state,
           tags: q.tags,
           evidenceRef: q.evidenceRef,
+          bodyOpenFence: q.bodyOpenFence,
         },
         {
           sourceLabel: opts.sourceLabel,
@@ -317,13 +321,18 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           // the scan above matches: one identity, same bytes, both sides).
           reconcileMarker: reconcileToken(decision.decisionId),
           possibleRepeat,
+          stateUnconfirmed,
+          quietUnreadable,
         },
       );
-      renders.set(possibleRepeat, built);
+      renders.set(`${possibleRepeat}:${stateUnconfirmed}:${quietUnreadable}`, built);
       return built;
     };
-    const postInput = (possibleRepeat = false) => ({ channel, text: render(possibleRepeat).text, blocks: render(possibleRepeat).blocks, thread_ts: threadTs });
-    const payloadHash = () => createHash("sha256").update(JSON.stringify(postInput())).digest("hex");
+    const postInput = (possibleRepeat = false) => {
+      const shown = render(possibleRepeat, q.stateUnconfirmed === true, q.quietUnreadable === true);
+      return { channel, text: shown.text, blocks: shown.blocks, thread_ts: threadTs };
+    };
+    const payloadHash = () => createHash("sha256").update(JSON.stringify({ channel, text: render().text, blocks: render().blocks, thread_ts: threadTs })).digest("hex");
     const failurePrefix = `${decision.decisionId}${TRANSPORT_FAILURE_RECEIPT_PREFIX}`;
     const hasRejection = [...attempted.keys()].some((key) => {
       if (!key.startsWith(failurePrefix) || key.endsWith(TRANSPORT_FAILURE_RECEIPT_REPAIRED)) return false;
@@ -360,7 +369,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // decisionId in a delimited form). Producer and scanner call the same function: one
     // identity, same bytes, both sides.
     const marker = reconcileToken(decision.decisionId);
-    let possibleRepeat = false;
+    let possibleRepeat = q.possibleRepeat === true;
     if (attempted.has(decision.decisionId)) {
       const scan = await fetchRecentMessageTexts(opts.botToken, channel, threadTs, opts.fetchImpl, undefined, undefined, marker);
       const matched = scan.messages.find((m) => m.text.includes(marker));
@@ -410,7 +419,13 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
 
     const input = postInput(possibleRepeat);
     // Marked ATTEMPTED durably BEFORE the post: from here any outcome is ambiguous until 2xx.
-    opts.attempted.mark(decision.decisionId, "attempted");
+    try {
+      opts.attempted.mark(decision.decisionId, "attempted");
+    } catch (e) {
+      // Only a post the gateway already marked as a possible repeat goes on without its attempt record.
+      if (!q.possibleRepeat) throw e;
+      log(`attempt record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — posting once, marked as a possible repeat`);
+    }
     if (hasRejection) {
       // Unique ids preserve attempt order in the store's Set, including retries
       // of the same correction. Ordinary posts need no extra record.
@@ -531,7 +546,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
   };
 }
 
-type DeliveryPart = OutboundPostPayload & { media?: SlackMediaRef[] };
+type DeliveryPart = OutboundPostPayload & { media?: SlackMediaRef[]; bodyOpenFence?: string };
 
 /** #897 — the most Slack messages one ask may post: the primary plus its thread replies. */
 export const MAX_HUMAN_MESSAGE_PARTS = 20;
@@ -609,7 +624,7 @@ function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decis
   // A part's room is what its subject, options, evidence, sender and marker leave of both limits.
   const roomFor = (part: DeliveryPart, index: number, reserve = 0): number => {
     const frame = renderPart(opts, q, { ...part, body: "" }, index, partIdFor(decisionId, 2, index));
-    return Math.min(SLACK_SECTION_CAP, SLACK_TEXT_CAP - frame.text.length - 1) - reserve;
+    return Math.min(SLACK_SECTION_CAP, SLACK_TEXT_CAP - frame.text.length - 1) - reserve - CODE_FENCE_ROOM;
   };
   const primary: DeliveryPart = { ...q, humanDetail: undefined };
   // A retry replays its first attempt's cuts, so no piece moves between the parts already posted and the rest.
@@ -623,10 +638,14 @@ function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decis
   // A brief that fits keeps the usual note; only a brief that continues says so.
   const note = body.length > 1 ? CONTINUES_NOTE : DETAIL_NOTE;
   const parts: DeliveryPart[] = [{ ...primary, body: body[0] ? `${body[0]}\n\n${note}` : note }];
-  for (let k = 1; k < body.length; k++) parts.push({ ...reply(`Continued (${k + 1} of ${body.length})`), body: body[k] });
+  // A piece cut inside a code fence keeps rendering as code in the next part.
+  const fences = (pieces: string[]) => { let open = ""; return pieces.map((piece) => { const start = open; open = openFenceAfter(piece, open); return start; }); };
+  const bodyFences = fences(body);
+  for (let k = 1; k < body.length; k++) parts.push({ ...reply(`Continued (${k + 1} of ${body.length})`), body: body[k], bodyOpenFence: bodyFences[k] });
   // #1013 — a detail piece carries the human's own content, never the agent packet, so the
   // parked-gate state must not ride it (the gate check would eat its body like the packet's).
-  detail.forEach((piece, j) => parts.push({ ...reply(`Supplemental detail (${j + 1} of ${detail.length})`), body: piece, state: null }));
+  const detailFences = fences(detail);
+  detail.forEach((piece, j) => parts.push({ ...reply(`Supplemental detail (${j + 1} of ${detail.length})`), body: piece, state: null, bodyOpenFence: detailFences[j] }));
   if (parts.length > MAX_HUMAN_MESSAGE_PARTS) {
     throw new HumanMessageShapeError(`This brief needs ${parts.length} Slack messages (maximum ${MAX_HUMAN_MESSAGE_PARTS}). Shorten it, or put the long part in a file and link it.`);
   }
@@ -691,7 +710,9 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     const authored = parts;
     /** The parts a plan renders to, preflighted; with no plan, decide one from the real render. */
     const choose = (kept?: DeliveryPlan) => {
-      const mention = kept ? kept.mention : opts.resolveMentionUserId?.(q);
+      // A post marked as made without the person's quiet hours never mentions them, whatever a recovered read or a saved
+      // plan would say: it's permission to deliver, not to alert. The plan's cuts and part ids stay as they are.
+      const mention = q.quietUnreadable ? undefined : kept ? kept.mention : opts.resolveMentionUserId?.(q);
       const planned: SubsystemSlackDeliveryOpts = { ...opts, resolveMentionUserId: () => mention };
       // A kept plan checks only the parts still to post: delivered parts are acknowledged, never rendered again.
       const delivered = kept ? opts.delivered.load() : new Set<string>();
@@ -753,7 +774,11 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     const { planned } = chosen;
     if (!recorded || replanned) {
       try { opts.attempted.mark(`${decision.decisionId}${DELIVERY_PLAN}${Buffer.from(JSON.stringify(chosen.plan)).toString("base64url")}`, "delivery-plan"); }
-      catch (error) { return { ok: false, class: "receipt-failed", detail: `delivery plan not kept: ${(error as Error).message}` }; }
+      catch (error) {
+        // A post the gateway already marked as a possible repeat keeps its plan in memory for this one attempt.
+        if (!q.possibleRepeat) return { ok: false, class: "receipt-failed", detail: `delivery plan not kept: ${(error as Error).message}` };
+        (opts.log ?? (() => {}))(`delivery plan record FAILED for ${q.qitemId ?? decision.decisionId}: ${(error as Error).message} — posting once, marked as a possible repeat`);
+      }
     }
     const partId = (index: number) => partIdFor(decision.decisionId, parts.length, index);
     if (parts.length === 1) return deliverSinglePart(planned)(decision);

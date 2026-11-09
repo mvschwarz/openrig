@@ -26,6 +26,12 @@ export function displayTime(value: unknown, timeZone = DEFAULT_TIME_ZONE): strin
   return `${p("year")}-${p("month")}-${p("day")} ${p("hour")}:${p("minute")}:${p("second")} ${p("timeZoneName")}${zone !== timeZone ? " (timezone fallback)" : ""}`;
 }
 
+/** displayTime's HH:MM, for a row with room only for a clock; "" when the time is unknown. */
+export function displayClock(value: unknown, timeZone = DEFAULT_TIME_ZONE): string {
+  const time = displayTime(value, timeZone);
+  return time === "time unknown" ? "" : time.slice(11, 16);
+}
+
 export function resolveTimeZone(setting: unknown, readWarning = false): { timeZone: string; warning: string | null } {
   const timeZone = validTimeZone(setting) ? setting : DEFAULT_TIME_ZONE;
   return { timeZone, warning: validTimeZone(setting) && !readWarning ? null

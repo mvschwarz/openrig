@@ -3,7 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { createServer } from "node:net";
-import { realDeps } from "../src/commands/daemon.js";
+import { createProcessLiveness, realDeps } from "../src/commands/daemon.js";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import {
@@ -18,6 +18,7 @@ import {
   ensureWorkspaceScaffold,
   daemonNotRunningError,
   printDaemonNotRunning,
+  daemonStatusGuard,
   STATE_FILE,
   LOG_FILE,
   OPENRIG_DIR,
@@ -80,6 +81,57 @@ function writtenState(deps: LifecycleDeps): DaemonState {
 }
 
 describe("Daemon Lifecycle", () => {
+  it.each(["EPERM", "EACCES"])("warns and starts when state is absent and the initial probe is blocked (%s)", async (code) => {
+    let probes = 0;
+    const deps = startableDeps({ fetch: vi.fn(async () => { if (probes++ === 0) throw Object.assign(new Error("probe blocked"), { code }); return startupHealth(); }) });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try { await startDaemon({ port: 7433 }, deps); expect(deps.spawn).toHaveBeenCalledOnce(); expect(warn).toHaveBeenCalled(); } finally { warn.mockRestore(); }
+  });
+
+  it("does not spawn when recorded process liveness is unknown and its probe is blocked", async () => {
+    const state: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
+    const deps = mockDeps({ exists: vi.fn((p: string) => p === STATE_FILE), readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null), isProcessAlive: vi.fn(() => false), processLiveness: vi.fn(() => "unknown"), fetch: vi.fn(async () => { throw Object.assign(new Error("blocked"), { code: "EPERM" }); }) });
+    await expect(startDaemon({ port: 7433 }, deps)).rejects.toThrow(/blocked the connection/i);
+    expect(deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it("continues startup when the recorded process is definitely dead", async () => {
+    const state: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
+    const deps = startableDeps({ exists: vi.fn((p: string) => p === STATE_FILE), readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null), processLiveness: vi.fn(() => "dead") });
+    await startDaemon({ port: 7433 }, deps);
+    expect(deps.spawn).toHaveBeenCalledOnce();
+  });
+
+  it("does not signal or remove state when recorded process liveness is unknown", async () => {
+    const state: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
+    const deps = mockDeps({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null),
+      isProcessAlive: vi.fn(() => false),
+      processLiveness: createProcessLiveness({ signal: () => "not-permitted", readProcessState: () => "S" }),
+      fetch: vi.fn(neverFetch),
+    });
+    await expect(stopDaemon(deps)).rejects.toThrow(/liveness is unknown.*no signal sent.*state preserved/i);
+    expect(deps.fetch).not.toHaveBeenCalled();
+    expect(deps.kill).not.toHaveBeenCalled();
+    expect(deps.removeFile).not.toHaveBeenCalled();
+  });
+
+  it.each(["EPERM", "EACCES"])("preserves a live recorded PID when its identity probe is blocked (%s)", async (code) => {
+    const state: DaemonState = { pid: 999, port: 7433, db: "fixture.db", startedAt: "2026-01-01T00:00:00Z" };
+    const deps = mockDeps({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null),
+      isProcessAlive: vi.fn(() => true),
+      fetch: vi.fn(async () => { throw Object.assign(new Error("probe blocked"), { code }); }),
+    });
+    await expect(startDaemon({ port: 7433 }, deps)).rejects.toThrow(/blocked the connection/i);
+    expect(deps.spawn).not.toHaveBeenCalled();
+    await expect(stopDaemon(deps)).rejects.toThrow(/blocked.*no signal sent/i);
+    expect(deps.kill).not.toHaveBeenCalled();
+    expect(deps.removeFile).not.toHaveBeenCalled();
+  });
+
   // A started child whose own endpoint names its PID and reports `hosts`; `probe` scripts each later
   // request: "ok" answers, any other value throws with that error code.
   function listenerStart(hosts: string[], probe: (url: string) => string) {
@@ -1538,6 +1590,33 @@ describe("buildDaemonEnv", () => {
     expect(result["CMUX_WORKSPACE_ID"]).toBe("workspace:1");
   });
 
+  it("never starts the daemon with the herdr-core terminal it is run from, while keeping HC_SESSION and HC_SOCKET", () => {
+    const result = buildDaemonEnv(
+      {
+        HOME: "/srv/tester",
+        PATH: "/usr/bin",
+        HC_SCOPE: "s-7",
+        HC_TERMINAL_ID: "t7",
+        HC_TERMINAL_SOCKET: "/run/hc.sock",
+        HC_SESSION: "work",
+        HC_SOCKET: "/run/hc/work.sock",
+      },
+      { port: 7433, host: "127.0.0.1", db: "/tmp/test.db" },
+    );
+    expect([result["HC_SCOPE"], result["HC_TERMINAL_ID"], result["HC_TERMINAL_SOCKET"]]).toEqual([undefined, undefined, undefined]);
+    expect([result["HC_SESSION"], result["HC_SOCKET"]]).toEqual(["work", "/run/hc/work.sock"]);
+    expect(result["HOME"]).toBe("/srv/tester");
+  });
+
+  it("keeps explicit core selection and an operator's own HC_* when no terminal scope is present", () => {
+    const result = buildDaemonEnv(
+      { HOME: "/srv/tester", PATH: "/usr/bin", HC_SESSION: "work", HC_SOCKET: "/run/hc/work.sock" },
+      { port: 7433, host: "127.0.0.1", db: "/tmp/test.db" },
+    );
+    expect([result["HC_SESSION"], result["HC_SOCKET"]]).toEqual(["work", "/run/hc/work.sock"]);
+    expect(result["HC_SCOPE"]).toBeUndefined();
+  });
+
   it("explicit opts override inherited OPENRIG_* from base env", () => {
     const baseEnv: Record<string, string> = {
       HOME: "/Users/tester",
@@ -1916,5 +1995,151 @@ describe("daemonNotRunningError / printDaemonNotRunning (AC-4 shared honest erro
       if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
       else delete process.env["OPENRIG_URL"];
     }
+  });
+});
+
+// ===================================================================
+// T2 — `rig daemon status` during a pending start. A start reserves the home with
+// daemon-start.lock (JSON lines: {launcherPid, startedAt}, then {childPid}) before it
+// spawns, and the listener is not up yet. A refused probe under a LIVE reservation is a
+// launch in progress, not "stopped". Reservations with only dead PIDs, no reservation,
+// or an unreadable reservation keep the stopped verdict.
+// Fixture home: a real temp dir; exists/readFile reach the disk only under that dir, so
+// the developer's own ~/.openrig state is never read.
+// ===================================================================
+describe("T2 — start-pending status (daemon-start.lock)", () => {
+  const LAUNCHER_PID = 4242;
+  const CHILD_PID = 5151;
+  const STARTED_AT = "2026-11-01T00:00:00.000Z";
+  let home: string;
+  let savedUrl: string | undefined;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "t2-start-pending-"));
+    savedUrl = process.env["OPENRIG_URL"];
+    delete process.env["OPENRIG_URL"]; // force the no-state config branch
+  });
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+    if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
+  });
+
+  function pendingDeps(opts: { lock?: string; alive: number[]; liveness?: "unknown"; refusal?: Error }): LifecycleDeps {
+    const underHome = (p: string) => p.startsWith(home + path.sep) && fs.existsSync(p);
+    if (opts.lock !== undefined) fs.writeFileSync(path.join(home, "daemon-start.lock"), opts.lock);
+    return mockDeps({
+      homeDir: home,
+      exists: vi.fn((p: string) => underHome(p)),
+      readFile: vi.fn((p: string) => (underHome(p) ? fs.readFileSync(p, "utf8") : null)),
+      isProcessAlive: vi.fn((pid: number) => opts.alive.includes(pid)),
+      processLiveness: opts.liveness
+        ? vi.fn((pid: number) => (opts.alive.includes(pid) ? "unknown" : "dead"))
+        : undefined,
+      sleep: async () => {},
+      fetch: vi.fn(async () => { throw opts.refusal ?? new Error("ECONNREFUSED"); }), // listener refused
+    });
+  }
+
+  it("T2 RED: refused listener + live launcher reservation -> unverified with a start-pending record (not stopped)", async () => {
+    const deps = pendingDeps({ lock: `{"launcherPid":${LAUNCHER_PID},"startedAt":"${STARTED_AT}"}\n`, alive: [LAUNCHER_PID] });
+    const status = await getDaemonStatus(deps, {});
+    expect(status.state).toBe("unverified"); // <-- RED: currently "stopped"
+    expect(status.startPending).toEqual({ pid: LAUNCHER_PID, since: STARTED_AT });
+  });
+
+  it("T2 RED: launcher dead but recorded child alive -> still start-pending, naming the live child", async () => {
+    const lock = `{"launcherPid":${LAUNCHER_PID},"startedAt":"${STARTED_AT}"}\n{"childPid":${CHILD_PID}}\n`;
+    const deps = pendingDeps({ lock, alive: [CHILD_PID] });
+    const status = await getDaemonStatus(deps, {});
+    expect(status.state).toBe("unverified"); // <-- RED: currently "stopped"
+    expect(status.startPending).toEqual({ pid: CHILD_PID, since: STARTED_AT });
+  });
+
+  it("T2 RED: a live reservation pid whose liveness is 'unknown' (cannot signal) still counts as pending", async () => {
+    const deps = pendingDeps({ lock: `{"launcherPid":${LAUNCHER_PID},"startedAt":"${STARTED_AT}"}\n`, alive: [LAUNCHER_PID], liveness: "unknown" });
+    const status = await getDaemonStatus(deps, {});
+    expect(status.state).toBe("unverified"); // <-- RED: currently "stopped"
+    expect(status.startPending?.pid).toBe(LAUNCHER_PID);
+  });
+
+  it("T2 RED (CLI): `rig daemon status` prints the start-pending line during a refused pending start", async () => {
+    const { daemonCommand } = await import("../src/commands/daemon.js");
+    const { Command } = await import("commander");
+    const deps = pendingDeps({ lock: `{"launcherPid":${LAUNCHER_PID},"startedAt":"${STARTED_AT}"}\n`, alive: [LAUNCHER_PID] });
+    const program = new Command();
+    program.addCommand(daemonCommand(deps));
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    try {
+      await program.parseAsync(["node", "rig", "daemon", "status"]);
+    } finally {
+      console.log = origLog;
+    }
+    expect(logs).toContain(`Daemon starting: launch reserved by pid ${LAUNCHER_PID} since ${STARTED_AT}; not listening yet`); // <-- RED: no such line
+    expect(logs.join("\n")).not.toContain("Daemon stopped");
+  });
+
+  it("T2 preserve (GREEN): refused listener + reservation whose pids are all dead -> stopped, unchanged", async () => {
+    const deps = pendingDeps({ lock: `{"launcherPid":${LAUNCHER_PID},"startedAt":"${STARTED_AT}"}\n{"childPid":${CHILD_PID}}\n`, alive: [] });
+    const status = await getDaemonStatus(deps, {});
+    expect(status.state).toBe("stopped");
+    expect(status.startPending).toBeUndefined();
+  });
+
+  it("T2 preserve (GREEN): refused listener + no reservation file -> stopped, unchanged", async () => {
+    const deps = pendingDeps({ alive: [LAUNCHER_PID] });
+    const status = await getDaemonStatus(deps, {});
+    expect(status.state).toBe("stopped");
+    expect(status.startPending).toBeUndefined();
+  });
+
+  it("T2 preserve (GREEN): unreadable reservation (no parseable pid) -> stopped, unchanged", async () => {
+    const deps = pendingDeps({ lock: "not-json\n", alive: [LAUNCHER_PID] });
+    const status = await getDaemonStatus(deps, {});
+    expect(status.state).toBe("stopped");
+    expect(status.startPending).toBeUndefined();
+  });
+
+  // A guarded command must not send its request into a refusing port while a start is pending: it stops with
+  // guidance, as it did when this read "stopped". Node's fetch carries the refusal as cause.code; a refusal named
+  // only in the message is the other shape the probe already reads as refused.
+  const LIVE_LOCK = `{"launcherPid":${LAUNCHER_PID},"startedAt":"${STARTED_AT}"}\n`;
+  const refusals: Array<[string, Error | undefined]> = [
+    ["cause.code ECONNREFUSED", Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } })],
+    ["a refusal named in the message", undefined],
+  ];
+  it.each(refusals)("a guarded command stops with the starting guidance under a live reservation (%s)", async (_shape, refusal) => {
+    const status = await getDaemonStatus(pendingDeps({ lock: LIVE_LOCK, alive: [LAUNCHER_PID], refusal }), {});
+    if (refusal) expect(status.probeErrorCode).toBe("ECONNREFUSED");
+    const errors: string[] = [];
+    const origError = console.error;
+    const origExit = process.exitCode;
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      expect(daemonStatusGuard(status)).toBe(false);
+    } finally {
+      console.error = origError;
+      process.exitCode = origExit;
+    }
+    expect(errors[0]).toBe(`Error: Daemon is starting (launch reserved by pid ${LAUNCHER_PID} since ${STARTED_AT}); it isn't listening yet.`);
+    expect(errors.join("\n")).toContain("Wait, then re-check with 'rig daemon status'.");
+  });
+
+  it("`rig daemon status` during a pending start doesn't call the refused probe inconclusive", async () => {
+    const { daemonCommand } = await import("../src/commands/daemon.js");
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.addCommand(daemonCommand(pendingDeps({ lock: LIVE_LOCK, alive: [LAUNCHER_PID] })));
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    try {
+      await program.parseAsync(["node", "rig", "daemon", "status"]);
+    } finally {
+      console.log = origLog;
+    }
+    expect(logs[0]).toBe(`Daemon starting: launch reserved by pid ${LAUNCHER_PID} since ${STARTED_AT}; not listening yet`);
+    expect(logs.join("\n")).not.toMatch(/timed out or was inconclusive/);
   });
 });

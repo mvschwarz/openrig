@@ -17,6 +17,7 @@ import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
 import { VerbActions } from "../src/components/mission-control/components/VerbActions.js";
 import { buildChatPreamble } from "../src/components/review/chat.js";
+import type { QueueItemDetail } from "../src/hooks/useSlices.js";
 import type { FeedCard as FeedCardModel } from "../src/lib/feed-classifier.js";
 
 // The shared terminal is mocked to a marker so the DOM test proves the CHAT
@@ -114,7 +115,7 @@ describe("For-You quick actions — bare APPROVE + CHAT only (N-1, BR-12)", () =
       source: {
         seq: 7,
         type: "queue.enqueued",
-        payload: { qitem_id: "q-chat-1", source_session: "dev-owner@rig" },
+        payload: { qitem_id: "q-chat-1", source_session: "dev-owner@rig", humanQuestions: null },
       } as unknown as FeedCardModel["source"],
     } as FeedCardModel;
   }
@@ -137,6 +138,81 @@ describe("For-You quick actions — bare APPROVE + CHAT only (N-1, BR-12)", () =
     expect(view.getByText("Action required")).toBeTruthy();
     // rev1-r2 B1: catch BOTH phrasings of the retired-schema copy.
     expect(view.queryByText(/approve,\s*deny,?\s*(?:and|or)\s*route/i)).toBeNull();
+  });
+
+  it.each(["action-required", "approval"] as const)("%s question cards offer Chat without posting approval", async (kind) => {
+    const raw = stubActionFetch();
+    const card = actionCard();
+    card.kind = kind;
+    card.source.payload.humanQuestions = [{ id: "channel", question: "Which channel?", options: [{ id: "stable", label: "Stable" }, { id: "beta", label: "Beta" }] }];
+    const view = withQuery(<FeedCard card={card} />);
+    expect(view.queryByTestId("mc-verb-approve")).toBeNull();
+    fireEvent.click(view.getByTestId("feed-card-chat-queue.enqueued-7"));
+    await waitFor(() => expect(view.getByTestId("shared-progressive-terminal")).toBeTruthy());
+    expect(raw).toHaveLength(0);
+  });
+
+  it.each([true, false])("remote questions name the origin host without suggesting Chat (terminal: %s)", (hasTerminal) => {
+    stubActionFetch();
+    const card = actionCard();
+    card.hostId = "remote-host";
+    card.source.payload.humanQuestions = [{ id: "note", question: "What should change?" }];
+    if (!hasTerminal) delete card.source.payload.source_session;
+    const view = withQuery(<FeedCard card={card} />);
+    expect(view.getByText("This ask has questions. Answer in the TUI on host remote-host (rig tui).")).toBeTruthy();
+    expect(view.queryByText(/or tell .* in Chat/)).toBeNull();
+    expect(view.queryByTestId("mc-verb-approve")).toBeNull();
+    expect(view.getByTestId("feed-card-chat-queue.enqueued-7").hasAttribute("disabled")).toBe(!hasTerminal);
+  });
+
+  it.each([undefined, "local"])("local questions retain TUI and Chat guidance (host: %s)", (hostId) => {
+    stubActionFetch();
+    const card = actionCard();
+    card.hostId = hostId;
+    card.source.payload.humanQuestions = [{ id: "note", question: "What should change?" }];
+    const view = withQuery(<FeedCard card={card} />);
+    expect(view.getByText("This ask has questions. Answer in the TUI (rig tui), or tell dev-owner@rig in Chat.")).toBeTruthy();
+  });
+
+  it.each([undefined, "remote"])("keeps Approve for runner permission questions on host %s", async (hostId) => {
+    const raw = stubActionFetch();
+    const card = actionCard();
+    card.hostId = hostId;
+    card.source.payload.humanQuestions = [{ id: "permission", question: "Allow this tool?" }];
+    card.source.payload.tags = ["runner-permission"];
+    const view = withQuery(<FeedCard card={card} />);
+    fireEvent.click(view.getByTestId("mc-verb-approve"));
+    await waitFor(() => expect(raw).toHaveLength(1));
+    expect(JSON.parse(raw[0]!.body).verb).toBe("approve");
+  });
+
+  it("does not offer approval before queue details establish whether there are questions", () => {
+    stubActionFetch();
+    const card = actionCard();
+    delete card.source.payload.humanQuestions;
+    const view = withQuery(<FeedCard card={card} />);
+    expect(view.queryByTestId("mc-verb-approve")).toBeNull();
+    expect(view.queryByText(/unavailable/i)).toBeNull();
+  });
+
+  it.each([null, []])("keeps one-click approval for hydrated asks without questions (%j)", (humanQuestions) => {
+    stubActionFetch();
+    const card = actionCard();
+    delete card.source.payload.humanQuestions;
+    const queueItem = { qitemId: "q-chat-1", sourceSession: "dev-owner@rig", state: "pending", humanQuestions } as QueueItemDetail;
+    const view = withQuery(<FeedCard card={card} queueItem={queueItem} />);
+    expect(view.getByTestId("mc-verb-approve")).toBeTruthy();
+  });
+
+  it("reads questions from hydration and offers only the TUI when no Chat sender resolves", () => {
+    stubActionFetch();
+    const card = actionCard();
+    delete card.source.payload.source_session;
+    const queueItem = { qitemId: "q-chat-1", state: "pending", humanQuestions: [{ id: "note", question: "What should change?" }] } as QueueItemDetail;
+    const view = withQuery(<FeedCard card={card} queueItem={queueItem} />);
+    expect(view.queryByTestId("mc-verb-approve")).toBeNull();
+    expect(view.getByText("This ask has questions. Answer in the TUI (rig tui).")).toBeTruthy();
+    expect(view.getByTestId("feed-card-chat-queue.enqueued-7").hasAttribute("disabled")).toBe(true);
   });
 
   it("CHAT opens the SHARED ProgressiveTerminal seeded with the pinned preamble (BR-12: terminal, never a chat panel)", async () => {

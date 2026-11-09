@@ -181,6 +181,29 @@ files: []
     lib.unpin(id);
     expect(existsSync(join(userRoot, "p", ".pinned"))).toBe(false);
     expect(lib.list()[0]!.pinned).toBe(false);
+    expect(() => lib.unpin(id)).not.toThrow();
+  });
+
+  it("keeps the image pinned when removing the sentinel fails", () => {
+    writeImage(userRoot, "p", `
+name: p
+version: 1
+runtime: claude-code
+source_seat: x
+source_session_id: s
+source_resume_token: t
+files: []
+`, {});
+    const sentinel = join(userRoot, "p", ".pinned");
+    // A directory cannot be unlinked as a file, on both Windows and Unix.
+    mkdirSync(sentinel);
+    const lib = new AgentImageLibraryService({ roots: [{ path: userRoot, sourceType: "user_file" }] });
+    lib.scan();
+    const id = lib.list()[0]!.id;
+    expect(lib.get(id)!.pinned).toBe(true);
+    expect(() => lib.unpin(id)).toThrow();
+    expect(lib.get(id)!.pinned).toBe(true);
+    expect(existsSync(sentinel)).toBe(true);
   });
 
   it("install writes manifest + stats + supplementary files", () => {

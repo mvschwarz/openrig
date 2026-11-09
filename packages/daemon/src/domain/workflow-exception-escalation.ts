@@ -57,12 +57,14 @@ export interface StuckExceptionDeps {
    *  spec not cached; registered-human selection applies.
    *  OPR.0.4.6.FAC1 (arch Q3): boundRig = the stuck instance's bound
    *  rig (read from workflow_instances at detection time) so the
-   *  orchestrator-role dial position resolves capability-aware. */
+   *  orchestrator-role dial position resolves capability-aware.
+   *  instanceId (#2607) = the stuck instance, so the route comes from the spec that instance runs. */
   resolveRoute: (
     workflowName: string,
     workflowVersion: string,
     exceptionClass: WorkflowExceptionClass,
     boundRig?: string | null,
+    instanceId?: string,
   ) => ExceptionRoute | null;
   humanFallbackSeat?: WorkflowHumanDestination;
   log?: (line: string) => void;
@@ -116,7 +118,7 @@ export function makeEnsureStuckExceptionItem(deps: StuckExceptionDeps): EnsureSt
       detectionBoundRig = row?.bound_rig ?? null;
     }
     const route =
-      deps.resolveRoute(input.workflowName, input.workflowVersion, "stuck_overdue", detectionBoundRig) ?? {
+      deps.resolveRoute(input.workflowName, input.workflowVersion, "stuck_overdue", detectionBoundRig, stuckInstanceId) ?? {
         position: "fallback" as const,
         destinationSession: workflowHumanDestination(deps.humanFallbackSeat),
         tier: "human-gate",

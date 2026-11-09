@@ -72,11 +72,11 @@ verified viewer mapping.
 
 New tiles keep their place when a seat's tmux session is replaced. They wait up
 to 30 seconds for the same session name and managed seat identity to return,
-then reattach with the original read-only setting. This uses the shared tile
-command for Herdr, cmux, Rex and plain tmux, including SSH tiles. In-place
-handover and restart keep the existing attachment.
+then show the new session with the original read-only setting. This uses the
+shared tile command for Herdr, cmux, Rex and plain tmux, including SSH tiles.
+In-place handover and restart keep showing the same session.
 
-A deliberate detach closes the tile after about two seconds. A different seat
+Detaching a tile you typed in returns it to showing the seat. A different seat
 under the old name is never followed. If no replacement returns in time, or a
 session has no managed identity, reopen the rig view with
 `rig terminal open rig:<name> --window` (or your explicit provider). Views
@@ -222,11 +222,26 @@ after a grace period; the agent and its conversation keep running. The
 explanation strip names joins, departures, unavailable terminals and limits.
 The first workspace on an empty provider may become focused.
 
-This increment supports the qualified **Linux Herdr 0.9.5/protocol 22**
-endpoint. Other platforms/providers and other selector kinds retain ordinary
-one-shot open. Use `--provider herdr --json` to operate without opening a
-desktop window, and `--session <name>` to select that endpoint. Opening a tile
-can change the agent's terminal size; `ignore-size` does not guarantee isolation.
+Live following supports **Linux and macOS with Herdr protocol 22**. Admission
+checks the live protocol and selected socket, then confirms each pane's IDs,
+focus state and foreground attachment. A shell startup `cd` does not change
+pane identity; filesystem aliases of the same existing path are accepted.
+If a creation response is lost and shell startup changes the directory, Core
+may be unable to attribute that pane. It reports uncertainty and does not
+repeat the creation.
+The detected Herdr version remains visible in provider status. The native
+qualification version is 0.9.5; a matching release label alone is not proof of
+compatibility, and future protocol numbers are not assumed compatible.
+
+If a new view's platform or protocol cannot support following, Core opens a
+labelled **snapshot** instead and disables automatic following. It will not
+track later owner changes. Incomplete membership prevents that snapshot from
+opening; the result explains why. A failed endpoint/identity read or an existing
+canvas stays unconfirmed, preserving it instead of creating a fallback view.
+Other providers and selector kinds retain ordinary one-shot open. Use
+`--provider herdr --json` to operate without opening a desktop window, and
+`--session <name>` to select that endpoint. Typing in a tile can change the
+agent's terminal size while you type.
 
 ```bash
 rig terminal open qitem:example --follow --provider herdr --json
@@ -284,11 +299,17 @@ operation uses the daemon's existing terminal bearer and browser boundary;
 a bridge must retain its signed-in owner, Origin and expiry controls. It does
 not grant authority based on task membership or accept a caller terminal ID.
 
-On the qualified Linux Herdr 0.9.5/protocol 22 endpoint, it creates one viewer
+On a supported Linux or macOS Herdr protocol-22 endpoint, it creates one viewer
 or reuses an owned, verified `{workspaceId,paneId,terminalId,readOnly}` mapping.
-A repeated/concurrent request does not create another viewer. A lost create
-reply is reconciled before starting anything else; a lost run reply is checked
-against the actual foreground process, never blindly repeated. Unknown or
+A repeated/concurrent request does not create another viewer. Each viewer's
+private `attach.sh` is kept for provider restarts. `--no-follow` preserves the
+workspace and its scripts; stopping Herdr is not proof that its panes are gone.
+Core removes only an exact, unedited owned script after confirming its viewer
+is absent. Old views that are never reconciled again can therefore accumulate
+scripts; there is no cleanup based only on an unreachable provider.
+
+A lost create reply is reconciled before starting anything else; a lost run
+reply is checked against the actual foreground process, never blindly repeated. Unknown or
 changed terminal identity remains unconfirmed. The operation does not relayout,
 close departed viewers, take over control, focus existing panes or launch/stop
 agents. A first workspace on an otherwise empty Herdr server may become focused.
@@ -300,12 +321,27 @@ small presentation provenance, separate from queue membership. Herdr display
 labels are not that provenance. Other providers/platforms remain unsupported
 for ensure-viewer until qualified; ordinary open retains its existing behavior.
 
-Writable tile clients use `tmux attach -f ignore-size`; read-only clients keep
-`-r` (which also implies ignore-size). This can avoid contributing to sizing
-when other clients establish the agent window's dimensions. It is **not resize
-isolation**: opening a tile can change the agent's terminal size when it is the
-only sizing client. Observers of a Herdr terminal do not themselves resize it;
-a controlling browser can. No cross-version resize guarantee is implied.
+A tmux window has one size, and a tmux client narrower than it sees only the
+left part of each line. So a tile shows its seat without attaching to it: about
+once a second it reads the seat's screen with `tmux capture-pane`, redraws only
+after tmux records new activity, and lets the tile's own terminal wrap each
+line. A tile narrower than the agent's window still shows whole lines, and
+showing a seat never changes its size. A rule drawn across the window is cut to
+the tile's width. A read-only tile only shows the seat. In a writable tile, the
+first thing you type or paste attaches the tile and goes through tmux as it
+would in any attached client: a paste arrives as one paste, and tmux's prefix
+works (prefix then `[` to scroll back, for example). The tile sizes the window
+while you use it, as any client you type in does; after 30 seconds without a
+key it detaches and shows the seat again. A tile that's only showing has no
+scrollback of its own. If the seat's tmux server restarts, a tile shows the
+seat again only when the same managed seat returns. The printed manual attach commands
+keep `-f ignore-size`. Observers of a Herdr terminal do not themselves resize
+it; a controlling browser can. No cross-version resize guarantee is implied.
+
+To type into a seat without changing its size, send the text through OpenRig
+(`rig send`, or `POST /api/transport/send`): it is written to the pane with tmux
+buffers and keys, and no client attaches. There is no supported way to attach a
+writable client that is sure never to resize the agent's window.
 
 
 ## Following a slice or mission's current work

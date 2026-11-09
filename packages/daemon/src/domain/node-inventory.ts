@@ -32,6 +32,7 @@ import { communityHarnessLabel } from "./community-harness-presets.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
+import { isLaunchWrapperRuntime, parseStoredLaunchWrapper } from "./launch-wrapper.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 
 // -- Row types for SQL results --
@@ -50,6 +51,7 @@ interface InventoryRow {
   effort_choice: string | null;
   codex_config_profile: string | null;
   claude_mcp: ClaudeMcp | null;
+  launch_wrapper: string | null;
   agent_ref: string | null;
   profile: string | null;
   cwd: string | null;
@@ -654,6 +656,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${nodeColumnOrNull("effort_choice")} as effort_choice,
       ${codexConfigProfileSelect} as codex_config_profile,
       ${nodeColumnOrNull("claude_mcp")} as claude_mcp,
+      ${nodeColumnOrNull("launch_wrapper")} as launch_wrapper,
       n.agent_ref,
       n.profile,
       n.cwd,
@@ -741,6 +744,10 @@ function buildInventoryEntry(
   ctx: InventoryBuildContext,
 ): NodeInventoryEntry {
   const { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts } = ctx;
+  const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.node_id} launch_wrapper`);
+  if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
+    throw new Error(`Seat ${row.node_id} launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
+  }
   const effortResolution = resolveSeatEffort({ effort: row.effort, effortChoice: row.effort_choice });
   // FS-1 W1.3 S1 — O(1) lookup into the once-per-rig restore-outcome map
   // (byte-identical to the prior per-node deriveRestoreOutcome; "n-a" when a node
@@ -790,6 +797,7 @@ function buildInventoryEntry(
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
     ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: row.session_community_runner === 1 }) } : {}),
+    ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
@@ -848,7 +856,26 @@ function buildInventoryEntry(
     // never observed; carries evidence on mismatch/missing.
     identityVerdict,
     heldReason: deriveHeldReason(db, row.rig_id, row.node_id, sessionStatus),
+    ...(row.handover_at ? startedWithoutRequired(db, row.node_id, row.session_id) : {}),
   };
+}
+
+/** #2456: the required startup files the seat's current occupant started without, as its handover recorded them. Only
+ *  the handover whose successor session is still the current one counts, so a later launch or handover clears it. Read
+ *  only for a seat that has had a handover. */
+function startedWithoutRequired(db: Database.Database, nodeId: string, sessionId: string | null): { startedWithoutRequired?: string[] } {
+  if (!sessionId) return {};
+  const row = db.prepare(
+    "SELECT payload FROM events WHERE node_id = ? AND type = 'seat.handover_completed' ORDER BY seq DESC LIMIT 1"
+  ).get(nodeId) as { payload: string } | undefined;
+  if (!row) return {};
+  try {
+    const event = JSON.parse(row.payload) as { startedWithoutRequired?: unknown; successorSessionId?: unknown };
+    const files = Array.isArray(event.startedWithoutRequired) ? event.startedWithoutRequired.filter((f): f is string => typeof f === "string") : [];
+    return event.successorSessionId === sessionId && files.length > 0 ? { startedWithoutRequired: files } : {};
+  } catch {
+    return {};
+  }
 }
 
 /** FS-1 W1.2 — all-rigs batched form of `readRigWorkspaceJson`: one query,
@@ -994,7 +1021,8 @@ export function getNodeDetail(
   // The seat's guidance file as its runtime resolves it now, and what it holds, read once for the guidance entries.
   const guidanceEvidence = (): { file: string | null; content: string | null } => {
     const runtime = (ctxRow as { runtime?: string | null } | undefined)?.runtime ?? entry.runtime;
-    const file = entry.cwd ? seatGuidanceFile(runtime, entry.cwd, new RigRepository(db).getRigClaudeManagedBlockFile(rigId)) : null;
+    const recorded = (ctxRow as { guidance_file?: string | null } | undefined)?.guidance_file;
+    const file = entry.cwd ? seatGuidanceFile(runtime, entry.cwd, new RigRepository(db).getRigClaudeManagedBlockFile(rigId), recorded) : null;
     let content: string | null = null;
     if (file) {
       try { content = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null; } catch { content = null; }
@@ -1216,6 +1244,7 @@ const NEEDS_INPUT_RUNGS: readonly EvidenceRungId[] = ["needs-input-chrome", "lif
  *     and the seat row must not disagree about the same seat.
  *   - a held seat (`heldReason` present)
  *   - a recorded startup error (`latestError` present)
+ *   - an occupant a handover started without a required startup file (`startedWithoutRequired`, #2456)
  */
 export function seatNeedsAttention(
   entry: NodeInventoryEntry,
@@ -1227,7 +1256,8 @@ export function seatNeedsAttention(
     || entry.startupStatus === "failed"
     || (arbitratedNeedsInput ?? activity?.state === "needs_input")
     || entry.heldReason != null
-    || entry.latestError != null;
+    || entry.latestError != null
+    || (entry.startedWithoutRequired?.length ?? 0) > 0;
 }
 
 /**

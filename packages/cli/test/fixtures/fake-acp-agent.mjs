@@ -9,7 +9,9 @@
 //   hang           never answers the prompt
 // FAKE_ACP_LOAD=1 advertises loadSession. FAKE_ACP_COMPANION_PID_FILE starts a detached companion that outlives
 // stdin close (like Hermes's gateway) and writes its pid there. FAKE_ACP_IGNORE_EOF=1 keeps the agent itself running
-// after its stdin closes, with stdout still open.
+// after its stdin closes, with stdout still open. FAKE_ACP_MISSING=claude|codex answers a load of an unknown session the
+// way that adapter does (-32002 with data.sessionId; -32603 with Codex's "no rollout found" text). FAKE_ACP_COST=1 adds
+// a cost to the reply's usage_update, and FAKE_ACP_PROMPT_USAGE=1 a token usage to its prompt response.
 import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -59,8 +61,9 @@ async function prompt(id, { sessionId, prompt }) {
   }
   chunk(sessionId, "working… ");
   chunk(sessionId, arg || "done");
-  update(sessionId, { sessionUpdate: "usage_update", used: 120, size: 1000 });
-  return send({ id, result: { stopReason: "end_turn" } });
+  update(sessionId, { sessionUpdate: "usage_update", used: 120, size: 1000, ...(process.env.FAKE_ACP_COST === "1" ? { cost: { amount: 0.00199, currency: "USD" } } : {}) });
+  const usage = process.env.FAKE_ACP_PROMPT_USAGE === "1" ? { usage: { totalTokens: 1500, inputTokens: 1200, outputTokens: 300 } } : {};
+  return send({ id, result: { stopReason: "end_turn", ...usage } });
 }
 
 function handle(packet) {
@@ -87,9 +90,10 @@ function handle(packet) {
     }
     case "session/load":
       if (process.env.FAKE_ACP_LOAD !== "1") return send({ id, error: { code: -32601, message: "Method not found" } });
-      return sessions.has(params?.sessionId)
-        ? send({ id, result: null })
-        : send({ id, error: { code: -32002, message: `Unknown session ${params?.sessionId}` } });
+      if (sessions.has(params?.sessionId)) return send({ id, result: null });
+      if (process.env.FAKE_ACP_MISSING === "claude") return send({ id, error: { code: -32002, message: "Resource not found", data: { sessionId: params?.sessionId } } });
+      if (process.env.FAKE_ACP_MISSING === "codex") return send({ id, error: { code: -32603, message: "Internal error", data: { details: `no rollout found for thread id ${params?.sessionId}` } } });
+      return send({ id, error: { code: -32002, message: `Unknown session ${params?.sessionId}` } });
     case "session/prompt":
       return void prompt(id, params ?? {});
     case "session/cancel": {

@@ -9,23 +9,23 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: 34fdcb80543903b054a982cc48bb302ae6871682
-last-updated: 2026-10-26
+last-verified-against-source: b29a70f14fc11797d46cbd9f12d4e61a523c3d06
+last-updated: 2026-11-09
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `34fdcb80543903b054a982cc48bb302ae6871682`.
+Verified against source commit `e1dedbf531b6db9961b4c77c0a74564e58274a50`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
-There are **90 top-level registrations**, **410 registered command objects**
+There are **92 top-level registrations**, **439 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,304 explicitly registered option objects**, including the root version
+**1,456 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
-These are counts for that source snapshot, not a claim about a deployed release. The provider-switch and set-runtime rows include the later account-home options; those additions are not included in the snapshot counts.
+These are counts for that source snapshot, not a claim about a deployed release. Every registered family is inside the snapshot: the `exec` and `environment` families, the `roster` and `telemetry` rows, and the `host edit`, `host remove` and `terminal attach` rows that earlier snapshots listed as later additions are all counted here.
 
 ## Reading this reference
 
@@ -188,7 +188,7 @@ the sections that were not read are `null`.
 |---|---|---|
 | `rig gateway` | — | — |
 | `rig gateway human` | — | — |
-| `rig gateway human add <entityId>` | — | `--display-name <name>` **required**<br>`--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>` **required** (repeatable)<br>`--delivery-class <A\|B\|C\|D>` **required**<br>`--away`<br>`--replace`<br>`--reason <reason>`<br>`--actor <actor>`<br>`--organization <id>`<br>`--group <id>` (repeatable)<br>`--policy <text>`<br>`--policy-file <path>`<br>`--default` |
+| `rig gateway human add <entityId>` | — | `--display-name <name>` **required**<br>`--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>` (repeatable; without one, the person is reached in the Feed and Steering only)<br>`--delivery-class <A\|B\|C\|D>` **required**<br>`--away`<br>`--replace`<br>`--reason <reason>`<br>`--actor <actor>`<br>`--organization <id>`<br>`--group <id>` (repeatable)<br>`--policy <text>`<br>`--policy-file <path>`<br>`--default` |
 | `rig gateway human list` | — | `--json` |
 | `rig gateway human quiet` | — | — |
 | `rig gateway human quiet set <entityId>` | — | `--daily <window>`<br>`--until <time>`<br>`--tz <zone>`<br>`--actor <actor>`<br>`--json` |
@@ -226,6 +226,7 @@ the sections that were not read are `null`.
   `groups`, `warnings` and `participantFile`. `default` with no argument prints the current default and its source
   (`chosen` or `only-person`), or `null` with the reason. See `docs/reference/gateway-participants.md`.
 - `human set <entityId> slack-subscription <value>` — sets the person's Slack subscription: `every-ask` (the default) posts every ask to them to Slack; `urgent-only` posts only asks created with `--alert`, and other asks wait on Steering and the TUI; `unset` removes the authored subscription so the default applies. `human show` prints the value with its origin, `authored` or `default` (`slack-subscription: every-ask (default)`); `--json` carries it as `record.slackSubscription` `{ value, source }`.
+- `human set <entityId> binding.<n> <spec|unset>` — replaces `binding.<n>` with a full `kind:connectorRef:secretsRef:role[:handle=<id>]` spec, or removes that slot when `<value>` is `unset`. Removing a binding keeps the person, their preferences, their other bindings and their open questions, and prints `remainingBindings` (with their shifted `binding.<n>` slot indexes; the primary's slot shifts down too when a lower-index secondary is removed) plus `note`. No replacement `primary` is chosen silently: unsetting a `primary` while secondary bindings remain is refused, teaching how to replace the primary slot in place, promote an existing secondary binding (first save that binding's full spec from `rig gateway human show <entityId> --json`, then unset that secondary slot, then find the primary's current slot in `remainingBindings` or `rig gateway human show <entityId> --json` and set it to the saved spec with role `primary` — promotion replaces the former primary binding, and its connector reference and inbound handle are not retained as a secondary), or unset the secondary slots first using their current slot indexes from `remainingBindings` or `rig gateway human show <entityId>` and finish at `binding.0` when removing every binding. Removing the last binding makes the current delivery episode inactive so new missing-post findings stop (an already-open recovery item for an undelivered notice may remain, and the current delivery-outcome display may disappear while historical receipt notes remain); it does not answer, close or cancel open questions, cancel or reroute already-prepared deliveries, or retract anything a bridge has already accepted.
 
 ### parked
 
@@ -350,9 +351,22 @@ the sections that were not read are `null`.
 | `rig host add` | — | `--id <id>` **required**<br>`--transport <transport>` **required**<br>`--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--bearer-env <name>`<br>`--bearer-file <path>`<br>`--notes <text>`<br>`--json` |
 | `rig host select <id>` | — | `--json` |
 | `rig host rename <name>` | — | `--json` |
+| `rig host edit <id>` | — | `--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--notes <text>`<br>`--json` |
+| `rig host remove <id>` | — | `--json` |
 | `rig host pair <url>` | — | `--id <id>`<br>`--timeout <seconds>`<br>`--human <address>`<br>`--json` |
 | `rig host list` | `ls` | `--json` |
 | `rig host doctor <id>` | — | `--posture <profile>`<br>`--public-addr <ip>`<br>`--json` |
+
+`rig host pair` needs the target daemon to run with `OPENRIG_AUTH_BEARER_TOKEN` set,
+even when it is bound to a tailnet address and so starts without one: pairing hands
+over that token. Without it, the target's `POST /api/hosts/pair-request` answers 409
+`pair_target_no_bearer`; it answers 409 `pair_human_required` when no single
+registered person can approve (none, or several with no default; name one with
+`--human`) (`packages/daemon/src/routes/hosts.ts:167-186`).
+
+The request stays open on the target for as long as `--timeout` waits (600 seconds by default), and the person's
+approval says how long and until when, in UTC. A target older than this CLI ignores the timeout and keeps the request
+10 minutes.
 
 Registration makes a host visible in topology; remote FEED attention remains opt-in.
 The human-readable success output of `host add` and `host pair` now includes the FEED
@@ -377,7 +391,7 @@ do not establish connectivity to a live peer.
 |---|---|---|
 | `rig ps` | — | `--json`<br>`--no-cleanup`<br>`--resources`<br>`--nodes`<br>`--full`<br>`--verbose`<br>`--limit <n>`<br>`--fields <list>`<br>`--summary`<br>`--filter <key=value>`<br>`--active`<br>`--running`<br>`-A, --all-rigs`<br>`--rig <name>`<br>`--session <name>`<br>`--include-archived`<br>`--host <id>`<br>`--all-hosts`<br>`--hosts <ids>` |
 
-- `--nodes --json` — each seat carries the daemon's served `needsAttention` flag; the CLI doesn't re-derive it, and it is absent when an older daemon doesn't serve it. `arbitratedNeedsInput` and `needsInputEvidence` (`{ rung, observedAt }` or null) come with `--full`, or by name through `--fields`.
+- `--nodes --json` — each seat carries the daemon's served `needsAttention` flag; the CLI doesn't re-derive it, and it is absent when an older daemon doesn't serve it. `arbitratedNeedsInput` and `needsInputEvidence` (`{ rung, observedAt }` or null) come with `--full`, or by name through `--fields`. `startedWithoutRequired` lists the required startup files a handover's successor started without, and the compact read keeps it.
 
 ### roster
 
@@ -393,7 +407,7 @@ do not establish connectivity to a live peer.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig mcp` | — | — |
-| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>` |
+| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>`<br>`--front-door`<br>`--task-destination <seat>` |
 | `rig mcp token` | — | — |
 | `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
 | `rig mcp token list` | — | `--json` |
@@ -405,8 +419,20 @@ do not establish connectivity to a live peer.
 |---|---|---|
 | `rig acp` | — | — |
 | `rig acp run <qitemId> <agent...>` | — | `--cwd <dir>`<br>`--permissions-to <session>`<br>`--load-session <id>`<br>`--poll-seconds <n>` |
+| `rig acp serve` | — | `--to <member@rig>`<br>`--as <address>`<br>`--poll-seconds <n>` |
 | `rig acp cancel <runId>` | — | — |
 | `rig acp stop <runId> [stopCommand...]` | — | — |
+
+### exec
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig exec` | — | — |
+| `rig exec harnesses` | — | `--json` |
+| `rig exec run <qitemId>` | — | `--harness <name>` **required**<br>`--cwd <dir>`<br>`--permissions-to <session>`<br>`--load-session <id>`<br>`--wait`<br>`--plan`<br>`--again`<br>`--poll-seconds <n>` |
+| `rig exec status <runIdOrQitemId>` | — | `--json` |
+| `rig exec cancel <runId>` | — | — |
+| `rig exec connector <runId>` (hidden) | — | — |
 
 ### agent
 
@@ -453,6 +479,11 @@ do not establish connectivity to a live peer.
 | `rig stream read` | — | `--limit <n>`<br>`--reader <session>`<br>`--json` |
 | `rig stream act <streamItemId>` | — | `--work <qitemId>`<br>`--decline <reason>`<br>`--duplicate <id>`<br>`--reader <session>`<br>`--json` |
 
+Stream intake: the `stream.intake` setting (default `queue.worker`, or a canonical `<seat>@<rig>`) receives each emitted item.
+It opens an intake row for that seat, which wakes it, or adds a note to that seat's intake row still pending; a `critical`
+or interrupting item makes the row urgent. `rig config set stream.intake off` keeps emits passive. A runner's
+default-permit record (tag `runner-permission-permit`) opens no row.
+
 ### queue
 
 | Invocation | Aliases | Declared options |
@@ -461,16 +492,17 @@ do not establish connectivity to a live peer.
 | `rig queue create` | — | `--source <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--body-context <ref>`<br>`--mission <id>`<br>`--slice <id>`<br>`--gate <role>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--expires-at <iso>`<br>`--id <qitemId>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--human-intent <intent>`<br>`--alert`<br>`--human-detail-file <path>`<br>`--reply-to <qitemId>`<br>`--human-questions-file <path>`<br>`--evidence-ref <path>`<br>`--host <id>`<br>`--no-nudge`<br>`--verify`<br>`--full`<br>`--json` |
 | `rig queue claim <qitemId>` | — | `--destination <session>`<br>`--full`<br>`--json` |
 | `rig queue unclaim <qitemId>` | — | `--destination <session>`<br>`--reason <text>`<br>`--full`<br>`--json` |
-| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--full`<br>`--json` |
-| `rig queue block <qitemId>` | — | `--on <blocker>` **required**<br>`--actor <session>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--continuation <text>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--full`<br>`--json` |
+| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--closure-required-at <iso>`<br>`--resolution <text>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--host <id>`<br>`--full`<br>`--json` |
+| `rig queue block <qitemId>` | — | `--on <blocker>` **required**<br>`--actor <session>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--continuation <text>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--host <id>`<br>`--full`<br>`--json` |
 | `rig queue resolve <qitemId>` | — | `--decision <text>` **required**<br>`--actor <session>`<br>`--bearer <token>`<br>`--no-notify`<br>`--json` |
 | `rig queue handoff <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
 | `rig queue handoff-and-complete <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--alert`<br>`--host <id>`<br>`--no-nudge`<br>`--full`<br>`--json` |
 | `rig queue whoami` | — | `--session <session>`<br>`--recent-limit <n>`<br>`--work-candidates`<br>`--json` |
 | `rig queue fallback <qitemId>` | — | `--destination <session>` **required**<br>`--reason <text>`<br>`--json` |
-| `rig queue show <qitemId>` | — | `--full`<br>`--json` |
-| `rig queue transitions <qitemId>` | — | `--json`<br>`--full` |
-| `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--limit <n>`<br>`--json` |
+| `rig queue show <qitemId>` | — | `--full`<br>`--json`<br>`--host <id>` |
+| `rig queue artifact <qitemId>` | — | `--root <name>`<br>`--json` |
+| `rig queue transitions <qitemId>` | — | `--json`<br>`--full`<br>`--host <id>` |
+| `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--limit <n>`<br>`--json`<br>`--host <id>` |
 | `rig queue overdue` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig queue undelivered` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig queue inbox-drop <destinationSession>` | — | `--sender <session>`<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <inboxId>`<br>`--json` |
@@ -479,6 +511,7 @@ do not establish connectivity to a live peer.
 | `rig queue inbox-pending <destinationSession>` | — | `--json` |
 | `rig queue outbox-record` | — | `--sender <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <outboxId>`<br>`--json` |
 | `rig queue outbox-list <senderSession>` | — | `--limit <n>`<br>`--json` |
+| `rig queue erase` | — | `--members <file>`<br>`--rig <id>`<br>`--ids <file>`<br>`--action <action>` (`delete`, `scrub`)<br>`--routine`<br>`--apply`<br>`--actor <session>`<br>`--json` |
 
 ### slack
 
@@ -538,9 +571,10 @@ do not establish connectivity to a live peer.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
+| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--follow`<br>`--no-follow`<br>`--max-tiles <count>`<br>`--pin <seats...>`<br>`--unpin <seats...>`<br>`--suppress <seats...>`<br>`--unsuppress <seats...>`<br>`--suppression-ms <ms>`<br>`--grace-ms <ms>`<br>`--focus-retention-ms <ms>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
 | `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--json` |
+| `rig terminal attach <session>` | — | `--read-only` |
 
 See [named terminal sessions](../reference/terminal-sessions.md) to select a
 Herdr session per request, including session-bound previews and window reuse.
@@ -573,9 +607,10 @@ Herdr session per request, including session-bound previews and window reuse.
 | `rig workflow specs` | — | `--json` |
 | `rig workflow guidance <instanceId>` | — | `--packet <id>`<br>`--component <id>`<br>`--full`<br>`--json` |
 | `rig workflow show <instanceId>` | — | `--json` |
-| `rig workflow trace <instanceId>` | — | `--json` |
+| `rig workflow trace <instanceId>` | — | `--full`<br>`--json` |
 | `rig workflow continue <instanceId>` | — | `--json` |
 | `rig workflow run <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--tags <tags>`<br>`--json` |
+| `rig workflow unregister [spec]` | — | `--prune-missing`<br>`--json` |
 | `rig workflow watch <instanceId>` | — | `--json` |
 | `rig workflow route <instanceId>` | — | `--to <session>` **required**<br>`--actor-session <session>` (only when the caller's session can't be derived)<br>`--packet <qitem-id>`<br>`--reason <text>`<br>`--json` |
 | `rig workflow resume <instanceId>` | — | `--actor-session <session>` (only when the caller's session can't be derived)<br>`--occurrence <failed-qitem-id>`<br>`--decision <text>`<br>`--json` |
@@ -628,7 +663,7 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig specs` | — | — |
-| `rig specs ls` | — | `--kind <kind>`<br>`--json` |
+| `rig specs ls` | — | `--kind <kind>`<br>`--include-builtins`<br>`--json` |
 | `rig specs show <name-or-id>` | — | `--kind <kind>`<br>`--json` |
 | `rig specs preview <name-or-id>` | — | `--kind <kind>`<br>`--json` |
 | `rig specs add <path>` | — | `--json` |
@@ -641,6 +676,9 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig context` | — | — |
+| `rig context reconstruction` | — | — |
+| `rig context reconstruction inspect` | — | `--store <absolute-path>`<br>`--store-map <file>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--cwd <path>`<br>`--item <id>`<br>`--category <name>`<br>`--tag <name>`<br>`--check-sources`<br>`--max-bytes <bytes>`<br>`--json` |
+| `rig context reconstruction view` | — | `--store <absolute-path>`<br>`--store-map <file>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--cwd <path>`<br>`--item <id>`<br>`--category <name>`<br>`--tag <name>`<br>`--check-sources`<br>`--max-bytes <bytes>`<br>`--json` |
 | `rig context work-install` | — | `--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--deliver`<br>`--runtime <runtime>`<br>`--cwd <path>`<br>`--topology <ids>`<br>`--apply-skills`<br>`--json` |
 | `rig context trace` | — | `--rig <rig>` **required**<br>`--pod <pod>`<br>`--seat <seat>`<br>`--name <file>` **required**<br>`--json` |
 | `rig context compose` | — | `--out <ref>` **required**<br>`--from <files...>` **required** |
@@ -696,6 +734,24 @@ Only Claude and Codex tenures can be woken.
 |---|---|---|
 | `rig community-harness` | — | — |
 | `rig community-harness list` | — | `--json` |
+
+### environment
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig environment` | — | — |
+| `rig environment setup` | — | `--directory <path>` **required**<br>`--binding <id>`<br>`--seat <address>`<br>`--rig <name>`<br>`--mcp-url <url>`<br>`--guest-base-url <origin>`<br>`--artifact-root <path>`<br>`--json` |
+| `rig environment create <binding>` | — | `--seat <address>` **required**<br>`--node <id>`<br>`--gateway <ref>` **required**<br>`--workspace <ref>` **required**<br>`--name <name>` **required**<br>`--image <digest>` **required**<br>`--provider <ref>` **required**<br>`--policy <path>` **required**<br>`--guest-base-url <origin>` **required**<br>`--operation <id>`<br>`--json` |
+| `rig environment attach <binding>` | — | `--seat <address>` **required**<br>`--node <id>`<br>`--gateway <ref>` **required**<br>`--workspace <ref>` **required**<br>`--name <name>` **required**<br>`--image <digest>` **required**<br>`--provider <ref>` **required**<br>`--policy <path>` **required**<br>`--guest-base-url <origin>` **required**<br>`--operation <id>`<br>`--json`<br>`--resource-id <id>` **required**<br>`--fingerprint <value>` |
+| `rig environment inspect <binding>` | — | `--live`<br>`--json` |
+| `rig environment connect <binding>` | — | `--generation <id>` **required** |
+| `rig environment export <binding>` | — | `--request <path>` **required**<br>`--json` |
+| `rig environment checkpoint <binding>` | — | `--generation <id>` **required**<br>`--operation <id>` **required**<br>`--json` |
+| `rig environment recreate <binding>` | — | `--request <path>` **required**<br>`--json` |
+| `rig environment completion <binding>` | — | `--request <path>` **required**<br>`--json` |
+| `rig environment effect <binding>` | — | `--effect <name>` **required**<br>`--generation <id>`<br>`--resource-id <id>`<br>`--operation <id>` **required**<br>`--engine-socket <path>`<br>`--json` |
+
+It drives the maintained OpenShell reference; see the [OpenShell example](../reference/community-harness-examples/openshell/README.md).
 
 ### fork
 
@@ -984,6 +1040,7 @@ for input and receipt examples, rollback, and snapshot behavior.
 | `rig seat set-terminal-policy <seat>` | — | `--preset <preset>` **required**<br>`--helper <addresses...>`<br>`--rig-default`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json`<br>`--peer-compaction <decision>`<br>`--peer-model <decision>`<br>`--self-compaction <decision>`<br>`--self-model <decision>`<br>`--openrig-compaction <decision>`<br>`--openrig-model <decision>` |
 | `rig seat set-permissions <seat>` | — | `--mode <mode>`<br>`--rules <file>`<br>`--codex-permissions <file>`<br>`--codex-profile <name>`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-effort <seat>` | — | `--effort <level>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat set-permissions-to <seat>` | — | `--to <person>`<br>`--clear`<br>`--deny`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat effort <seat>` | — | `--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-runtime <seat>` | — | `--runtime <runtime>`<br>`--reason <text>`<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--token-file <path>`<br>`--account-label <label>`<br>`--permission-mode <mode>`<br>`--confirm-timeout <seconds>`<br>`--dry-run`<br>`--confirm <switch-id>`<br>`--note <text>`<br>`--recover`<br>`--json` |

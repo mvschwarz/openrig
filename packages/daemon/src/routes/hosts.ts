@@ -50,10 +50,11 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID, randomInt } from "node:crypto";
 import { connect } from "node:net";
+import { execFile } from "node:child_process";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { getOpenRigHome } from "../openrig-compat.js";
 import { addHostEntry, updateHostEntry, removeHostEntry } from "../domain/hosts/hosts-registry-writer.js";
-import { defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, type HostEntry } from "../domain/hosts/hosts-registry-reader.js";
+import { defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, type HostEntry, type SshHostEntry } from "../domain/hosts/hosts-registry-reader.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import { existsSync } from "node:fs";
@@ -62,6 +63,30 @@ import { resolveDefaultPerson } from "../domain/gateway/participants.js";
 
 const PAIR_TTL_MS = 10 * 60 * 1000;
 const PAIR_PRUNE_GRACE_MS = 60 * 60 * 1000;
+/** The longest a pairing request stays open: the 32-bit millisecond limit Node timers have, which the requester's own
+ *  wait (`rig host pair --timeout`) is already clamped to. */
+const MAX_PAIR_TTL_MS = 2_147_483_647;
+/** An expired request becomes eligible for pruning (at the next issuance) this long after it expires, so a waiting
+ *  client can still read "expired"; a terminal poll consumes it sooner. With the default life, that's the hour after
+ *  creation it always was. */
+const PAIR_EXPIRED_KEPT_MS = PAIR_PRUNE_GRACE_MS - PAIR_TTL_MS;
+
+/** How long a pairing request stays open: as long as its requester waits (`timeoutMs`, sent by `rig host pair`),
+ *  else the default 10 minutes for a requester that doesn't say. */
+function pairTtlMs(requested: unknown): number {
+  return typeof requested === "number" && Number.isFinite(requested) && requested > 0 ? Math.min(Math.round(requested), MAX_PAIR_TTL_MS) : PAIR_TTL_MS;
+}
+
+/** A pairing request's life as its approval states it: exact, in the largest whole unit (only a life that isn't whole
+ *  seconds, which `rig host pair` never sends below its ceiling, is said as about). */
+function describePairTtl(ms: number): string {
+  const count = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
+  if (ms % 86_400_000 === 0 && ms >= 2 * 86_400_000) return count(ms / 86_400_000, "day");
+  if (ms % 3_600_000 === 0 && ms >= 2 * 3_600_000) return count(ms / 3_600_000, "hour");
+  if (ms % 60_000 === 0) return count(ms / 60_000, "minute");
+  if (ms % 1000 === 0) return count(ms / 1000, "second");
+  return `about ${count(Math.round(ms / 1000), "second")}`;
+}
 const PAIR_HTTP_TIMEOUT_MS = 10_000;
 
 const PAIR_SOURCE_SESSION = "host-pair@kernel";
@@ -71,6 +96,7 @@ interface IssuedPair {
   qitemId: string;
   requester: string;
   createdAt: number;
+  expiresAt: number;
 }
 
 interface ClientPair {
@@ -116,13 +142,33 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
   // POINTERS by construction) + `selected` + a bounded coarse `status`.
   // ---------------------------------------------------------------------
 
-  function probeHost(host: HostEntry, timeoutMs = 1500): Promise<"reachable" | "unreachable" | "unknown"> {
+  // Where ssh would connect for this host, from `ssh -G` (reads ssh config, no connection); null when
+  // ssh can't resolve it or a ProxyJump/ProxyCommand sits in between. Twin of the CLI's resolveSshEndpoint.
+  function resolveSshEndpoint(host: SshHostEntry, timeoutMs: number): Promise<{ hostname: string; port: number } | null> {
+    const args = [...(host.user ? ["-l", host.user] : []), "-G", host.target];
+    return new Promise((resolve) => {
+      execFile("ssh", args, { timeout: timeoutMs }, (error, stdout) => {
+        if (error) return resolve(null);
+        const conf = new Map(stdout.split("\n").map((line) => {
+          const i = line.indexOf(" ");
+          return [line.slice(0, i).toLowerCase(), line.slice(i + 1).trim()] as const;
+        }));
+        const proxied = ["proxyjump", "proxycommand"].some((k) => (conf.get(k) ?? "none") !== "none");
+        const hostname = conf.get("hostname");
+        const port = Number(conf.get("port"));
+        resolve(hostname && Number.isInteger(port) && !proxied ? { hostname, port } : null);
+      });
+    });
+  }
+
+  async function probeHost(host: HostEntry, timeoutMs = 1500): Promise<"reachable" | "unreachable" | "unknown"> {
     try {
       let target: string;
       let port: number;
       if (host.transport === "ssh") {
-        target = host.target;
-        port = 22;
+        const endpoint = await resolveSshEndpoint(host, timeoutMs);
+        if (!endpoint) return "unknown";
+        ({ hostname: target, port } = endpoint);
       } else {
         const u = new URL(host.url);
         // WHATWG keeps the brackets on an IPv6 hostname; net.connect wants the bare address.
@@ -136,7 +182,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         sock.on("error", () => { sock.destroy(); resolve("unreachable"); });
       });
     } catch {
-      return Promise.resolve("unknown");
+      return "unknown";
     }
   }
 
@@ -174,7 +220,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         message: "this daemon runs without OPENRIG_AUTH_BEARER_TOKEN; pairing has no credential to issue. Set OPENRIG_AUTH_BEARER_TOKEN on the target daemon and retry.",
       }, 409);
     }
-    const body = (await c.req.json<{ requester?: string; human?: string }>().catch(() => ({}))) as { requester?: string; human?: string };
+    const body = (await c.req.json<{ requester?: string; human?: string; timeoutMs?: number }>().catch(() => ({}))) as { requester?: string; human?: string; timeoutMs?: number };
     const registry = (opts?.humanRegistry ?? loadHumanRegistry)();
     if (!registry.ok) return c.json({ error: "pair_human_registry_unavailable", message: registry.error }, 409);
     // Named, or else the default person (chosen, or the only one); never the first of several.
@@ -189,7 +235,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     // so waiting polling clients receive { status: "expired" } instead of 404 pair_unknown).
     const now = Date.now();
     for (const [id, rec] of issued.entries()) {
-      if (now - rec.createdAt > PAIR_PRUNE_GRACE_MS) {
+      if (now > rec.expiresAt + PAIR_EXPIRED_KEPT_MS) {
         issued.delete(id);
       }
     }
@@ -199,7 +245,9 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     const code = String(randomInt(100000, 1000000));
 
     // Retain the request while its approval item is being created; remove it on failure.
-    issued.set(pairId, { code, qitemId: "", requester, createdAt: Date.now() });
+    const ttlMs = pairTtlMs(body.timeoutMs);
+    const createdAt = Date.now();
+    issued.set(pairId, { code, qitemId: "", requester, createdAt, expiresAt: createdAt + ttlMs });
 
     let qitemId: string;
     try {
@@ -217,7 +265,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
           `APPROVE: rig queue update <this-qitem-id> --state done --closure-reason no-follow-on`,
           `DENY:    rig queue update <this-qitem-id> --state denied`,
           `Approval hands this daemon's bearer token to the requester (full API access).`,
-          `This request expires ${Math.round(PAIR_TTL_MS / 60000)} minutes after creation; expiry persists nothing.`,
+          `This request expires ${describePairTtl(ttlMs)} after creation, at ${new Date(createdAt + ttlMs).toISOString().slice(0, 19).replace("T", " ")} UTC; expiry persists nothing.`,
         ].join("\n"),
       });
       qitemId = item.qitemId;
@@ -237,7 +285,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     const rec = issued.get(pairId);
     if (!rec) return c.json({ error: "pair_unknown", message: "unknown or already-consumed pairing request" }, 404);
 
-    if (Date.now() - rec.createdAt > PAIR_TTL_MS) {
+    if (Date.now() > rec.expiresAt) {
       issued.delete(pairId);
       return c.json({ status: "expired" });
     }

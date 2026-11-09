@@ -51,8 +51,8 @@ describe("Wave-O B2 — parked diagnosis is RIG-SCOPED with the scope named", ()
 
     // The obligation face: ONLY dev-b@rig-b owes work.
     const queueRepo = {
-      list: (opts: { destinationSession?: string }) =>
-        opts.destinationSession === "dev-b@rig-b"
+      listOpenObligations: (destinationSession: string) =>
+        destinationSession === "dev-b@rig-b"
           ? [{ qitemId: "qitem-b-1", state: "pending", summary: "owed in rig-b" }]
           : [],
     };

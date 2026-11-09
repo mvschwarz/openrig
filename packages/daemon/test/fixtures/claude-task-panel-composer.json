@@ -1,0 +1,11 @@
+{
+  "provenance": "Claude Code idle seat with the background task panel open below the mode footer (OpenRig #2700), captured live and read-only on 2026-11-07 with the captureComposerSnapshot protocol (cursor, capture-pane -e -p, cursor; the cursor did not move). Transcript omitted: rows 15-24 of 24 kept; cursor y adjusted for crop. Same-length replacements: the seat label on the top rule and the two task names. sha256 of the uncropped capture: 451621b14ec1d83747dd22cbdd4dfa112313040cd295469665d9c6f6a5b60e99.",
+  "screen": "\u001b[38;5;246m✻\u001b[39m \u001b[38;5;246mWaiting for \u001b[1m2\u001b[0m\u001b[38;5;246m dynamic workflows to finish\u001b[39m\n\n\u001b[38;5;244m─────────────────────────────────────────────────────── worker-seat@example-ab ─\n\u001b[39m❯ \n\u001b[38;5;244m────────────────────────────────────────────────────────────────────────────────\n\u001b[39m  \u001b[38;5;211m⏵⏵ bypass permissions on\u001b[38;5;246m · \u001b[38;5;44m5 shells, 1 monitor\u001b[39m\n\n\u001b[38;5;246m \u001b[39m \u001b[38;5;246m◯\u001b[39m \u001b[38;5;246mdraft-task-name-number\u001b[39m  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\u001b[38;5;246m▱▱▱▱▱\u001b[39m  \u001b[38;5;246m4h55m\u001b[39m \u001b[38;5;246m·\u001b[39m \u001b[38;5;246m↓\u001b[39m \u001b[38;5;246m908.0k\u001b[39m \u001b[38;5;246mtokens\u001b[39m\n\u001b[38;5;246m \u001b[39m \u001b[38;5;246m◯\u001b[39m \u001b[38;5;246mdraft-task-name-second\u001b[39m  \u001b[38;5;246m▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱\u001b[39m  \u001b[38;5;246m33m05s · ↓ 445.7k tokens\u001b[39m\n\n",
+  "cursor": {
+    "x": 2,
+    "y": 3,
+    "width": 80,
+    "height": 24
+  },
+  "inMode": false
+}

@@ -510,7 +510,7 @@ describe("refocus hook — OPENRIG_REFOCUS_WORK_PACKET switch", () => {
       const v = world();
       const offRun = fire(v, { OPENRIG_REFOCUS_WORK_PACKET: off }, runtime);
       expect(v.calls()).not.toContain("--work-candidates");
-      expect(offRun.argv).toBe(`${TRACE} --trees work --depth light --check --work-start ${v.slice}\n`);
+      expect(offRun.argv).toBe(`${TRACE} --trees work --depth light --check --unresolved-work-advisory --work-start ${v.slice}\n`);
       expect(offRun.stdin).toBe("");
     }
   });

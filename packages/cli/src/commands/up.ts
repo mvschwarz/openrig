@@ -11,6 +11,7 @@ import { getDaemonStatus, getDaemonUrl, startDaemon, type LifecycleDeps, daemonS
 import { shouldAutoStartDaemon } from "../daemon-reachability.js";
 import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
 import { freshSeatCommand, launchFreshSeat } from "../fresh-seat-command.js";
+import { launchStatusRunning } from "./launch.js";
 import type { StartOptions } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -120,6 +121,17 @@ snapshot, resuming seats where their harness allows; it refuses while any of its
 whose rig name already exists starts a new team in place of the stopped one, which
 is archived, and refuses if the old one may still be running. To bring a stopped
 team back with its conversations, run rig up <rig-name> --existing, not the spec.
+
+After a restore, rig up exits 0 only when the rig came back whole (rigResult
+fully_restored). It exits 1 when it didn't (partially_restored, failed or
+not_attempted), including when every seat is running but some started fresh
+without their conversation, or came back with a guidance or restore gap. With
+--json, read rigResult and each node's status, noConversation, guidanceGaps and
+restoreGaps to tell these apart: a seat with a gap keeps its own status, such as
+resumed, and a fresh seat marked noConversation (a terminal seat) lost nothing.
+A refused request exits 1 for a conflict (HTTP 409, such as a rig still running
+or a restore not attempted) and 2 for any other refusal (400, 404 or 500, such
+as no rig by that name or a failed boot).
 `);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
@@ -706,7 +718,7 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
         }
         console.log(`Rig "${rigName ?? rigId}" restored (ID: ${rigId})`);
         if (rigResult) console.log(`Result: ${rigResult}`);
-        const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string }>) ?? [];
+        const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string; noConversation?: true; guidanceGaps?: string[]; restoreGaps?: string[] }>) ?? [];
         for (const n of nodes) {
           // OPR.0.3.4.2 — the five-term vocabulary renders distinctly; the
           // awaiting-decision reason is part of the line (not a dead end), and so is a failed seat's (such as a seat held
@@ -716,6 +728,16 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
           } else {
             console.log(`  ${n.logicalId}: ${n.status}`);
           }
+        }
+        // Every seat running still exits 1 when the restore isn't whole; say why, so nobody retries a start that worked.
+        if (rigResult === "partially_restored" && nodes.length > 0 && nodes.every((n) => launchStatusRunning(n.status))) {
+          const fresh = nodes.filter((n) => (n.status === "fresh" || n.status === "fresh-primed") && !n.noConversation).length;
+          const gapped = nodes.filter((n) => (n.guidanceGaps?.length ?? 0) > 0 || (n.restoreGaps?.length ?? 0) > 0).map((n) => n.logicalId);
+          const reasons = [
+            ...(fresh > 0 ? [`${fresh} started fresh without their conversation`] : []),
+            ...(gapped.length > 0 ? [`${gapped.join(", ")} came back with a gap named in a warning`] : []),
+          ];
+          console.log(`${nodes.length === 1 ? "The one seat is" : `All ${nodes.length} seats are`} running${reasons.length > 0 ? `; ${reasons.join("; ")}` : ""}. The restore isn't whole, so rig up exits 1.`);
         }
         const warnings = (res.data["warnings"] as string[]) ?? [];
         for (const w of warnings) {

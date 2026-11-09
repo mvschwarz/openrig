@@ -13,8 +13,9 @@ import {
 // truth at ~/.openrig/config.json. Resolution stays env > file > default.
 
 export interface RiggedConfig {
-  launch: { nonInterruptive: boolean };
-  daemon: { port: number; host: string; dbConflict?: "warn" | "stop" };
+  specs: { builtinsVisible: boolean };
+  launch: { nonInterruptive: boolean; codexLoginShell: boolean };
+  daemon: { port: number; host: string; dbConflict?: "warn" | "stop"; seatPollIntervalMs?: number };
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer.
   // OPR.0.4.6.MH1 FR-4 — the own-host display name (default "localhost").
   host: { selected: string; name: string };
@@ -198,6 +199,8 @@ export interface RiggedConfig {
   transport: {
     verifyInputBox: boolean;
     localUserGuard: boolean;
+    // Whether an ordinary send or work notice reaches a seat whose prompt holds a person's draft (default deliver; refuse opts out).
+    draftDelivery: "refuse" | "deliver";
   };
   // Slice 22 (OPR.0.7.2.22) — typed decisions (OpenRouter + Jev), off until enabled; read by the
   // invoking rig process. templateDir holds optional <name>.yaml templates. Lockstep with the daemon twin.
@@ -206,6 +209,8 @@ export interface RiggedConfig {
     consumers: string;
     templateDir: string;
   };
+  // rig acp serve's receiver when --to isn't given (an ACP registry launch has no args). Lockstep with the daemon twin.
+  acp: { to: string };
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (twin of the daemon
   // settings-store): enabled + the four bounded numeric tunables.
   retention: {
@@ -215,6 +220,10 @@ export interface RiggedConfig {
     watchdogKeepPerJob: number;
     streamDays: number;
     streamMaxItems: number;
+    eventsDays: number;
+    closedContentDays: number;
+    closedMetadataDays: number;
+    erasureLedger: string;
     batchSize: number;
   };
   // S04 (OPR.0.5.5.4) — pickup-receipt stall threshold (twin of the daemon settings-store).
@@ -228,6 +237,10 @@ export interface RiggedConfig {
     wakeUnconfirmedWindowMinutes: number;
     wakeSwapGraceSeconds: number;
     wakeHumanRung: string;
+  };
+  // Issue #1856 — stream intake setting
+  stream: {
+    intake: string;
   };
 }
 
@@ -262,8 +275,8 @@ const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigP
 );
 
 const DEFAULTS = {
-  launch: { nonInterruptive: false },
-  daemon: { port: 7433, host: "127.0.0.1", dbConflict: "warn" },
+  launch: { nonInterruptive: false, codexLoginShell: false },
+  daemon: { port: 7433, host: "127.0.0.1", dbConflict: "warn", seatPollIntervalMs: 1000 },
   // OPR.0.4.6.MH1 FR-1 — "local" ≡ no remote selection (LOCAL_HOST_ID).
   // FR-4 — own-host display name; default "localhost" (PRD-named).
   host: { selected: "local", name: "localhost" },
@@ -283,6 +296,7 @@ const DEFAULTS = {
   topology: { root: getDefaultOpenRigPath("topology") },
   // OPR.0.5.9.5 Wave B — canonical addressable context library.
   context: { root: getDefaultOpenRigPath("context"), systemWorld: "default" },
+  specs: { builtinsVisible: true },
   skills: { root: getDefaultOpenRigPath("skills"), routerLine: { enabled: false } },
   onboarding: { defaultPack: { enabled: true } },
   health: { contextPressure: { warningPercent: 95, criticalPercent: 99 } },
@@ -381,12 +395,19 @@ const DEFAULTS = {
   transport: {
     verifyInputBox: false,
     localUserGuard: false,
+    draftDelivery: "deliver",
   },
   // Slice 22 — typed decisions OFF, no consumers, shipped templates only.
   decisions: {
     enabled: false,
     consumers: "",
     templateDir: "",
+  },
+  // No ACP receiver: rig acp serve needs --to until one is set.
+  acp: { to: "" },
+  // Issue #1856 — stream intake default queue.worker; read live by the stream intake coordinator.
+  stream: {
+    intake: "queue.worker",
   },
   // OPR.0.4.6.FS-1 W2 — retention defaults (twin of daemon getDefaultValue).
   retention: {
@@ -396,6 +417,10 @@ const DEFAULTS = {
     watchdogKeepPerJob: 50,
     streamDays: 30,
     streamMaxItems: 20000,
+    eventsDays: 0,
+    closedContentDays: 0,
+    closedMetadataDays: 0,
+    erasureLedger: "",
     batchSize: 500,
   },
   // S04 — pickup-receipt stall threshold default (twin of daemon getDefaultValue).
@@ -415,6 +440,8 @@ export const VALID_KEYS = [
   "daemon.port",
   "daemon.host",
   "daemon.db_conflict",
+  // #2687: the seat pollers' cadence; startup-only (read once when the daemon starts). Twin of the daemon key.
+  "daemon.seat_poll_interval_ms",
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer (the
   // kubectl current-context shape). ONE static key, lockstep with the
   // daemon settings-store twin (parity test pins both). Registry-
@@ -454,11 +481,13 @@ export const VALID_KEYS = [
   // OPR.0.5.9.5 Wave B — canonical context library; old key is refused.
   "context.root",
   "context.system_world",
+  "specs.builtins_visible",
   "skills.root",
   // OPR.0.7.0.13 (router): the person's recorded yes to OpenRig's one-line seat-skills bootstrap in AGENTS.md / CLAUDE.md.
   "skills.router_line.enabled",
   "onboarding.default_pack.enabled",
   "launch.non_interruptive",
+  "launch.codex_login_shell",
   "health.context_pressure.warning_percent",
   "health.context_pressure.critical_percent",
   "files.allowlist",
@@ -524,10 +553,13 @@ export const VALID_KEYS = [
   "usage.pi_openrouter_charge",
   "transport.verify_input_box",
   "transport.local_user_guard",
+  "transport.draft_delivery",
   // Slice 22 — typed decisions (OpenRouter + Jev), off by default; lockstep with the daemon twin.
   "decisions.enabled",
   "decisions.consumers",
   "decisions.template_dir",
+  // rig acp serve's receiver when --to isn't given; lockstep with the daemon twin.
+  "acp.to",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
   // lockstep with the daemon settings-store SETTINGS_VALID_KEYS.
   "retention.enabled",
@@ -537,6 +569,15 @@ export const VALID_KEYS = [
   // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
   "retention.stream_days",
   "retention.stream_max_items",
+  // The history-only event types of `events` older than N days, 0 (default) keeps them; lockstep with the daemon twin.
+  "retention.events_days",
+  // Closed queue work: content erased N days after it closed, then the row (only its id kept); 0 (default) keeps them;
+  // lockstep with the daemon twin.
+  "retention.closed_content_days",
+  "retention.closed_metadata_days",
+  // Queue erasure's ledger file (JSON lines of erased ids and actions); empty keeps none; lockstep with the daemon twin.
+  "retention.erasure_ledger",
+  "stream.intake",
   "retention.batch_size",
   // S04 — pickup-receipt stall threshold; lockstep with the daemon settings-store twin.
   "queue.pickup_stall_threshold_minutes",
@@ -567,6 +608,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "workflow.exception_routing": { primary: "OPENRIG_WORKFLOW_EXCEPTION_ROUTING" },
   "daemon.host": { primary: "OPENRIG_HOST", legacy: "RIGGED_HOST" },
   "daemon.db_conflict": { primary: "OPENRIG_DAEMON_DB_CONFLICT" },
+  "daemon.seat_poll_interval_ms": { primary: "OPENRIG_SEAT_POLL_INTERVAL_MS" },
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
   "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
   "transcripts.path": { primary: "OPENRIG_TRANSCRIPTS_PATH", legacy: "RIGGED_TRANSCRIPTS_PATH" },
@@ -581,10 +623,12 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   "context.root": { primary: "OPENRIG_CONTEXT_ROOT" },
   "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
+  "specs.builtins_visible": { primary: "OPENRIG_SPECS_BUILTINS_VISIBLE" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "skills.router_line.enabled": { primary: "OPENRIG_SKILLS_ROUTER_LINE_ENABLED" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   "launch.non_interruptive": { primary: "OPENRIG_LAUNCH_NON_INTERRUPTIVE" },
+  "launch.codex_login_shell": { primary: "OPENRIG_LAUNCH_CODEX_LOGIN_SHELL" },
   "health.context_pressure.warning_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT" },
   "health.context_pressure.critical_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_CRITICAL_PERCENT" },
   // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
@@ -642,9 +686,11 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "usage.pi_openrouter_charge": { primary: "OPENRIG_USAGE_PI_OPENROUTER_CHARGE" },
   "transport.local_user_guard": { primary: "OPENRIG_TRANSPORT_LOCAL_USER_GUARD" },
   "transport.verify_input_box": { primary: "OPENRIG_TRANSPORT_VERIFY_INPUT_BOX" },
+  "transport.draft_delivery": { primary: "OPENRIG_TRANSPORT_DRAFT_DELIVERY" },
   "decisions.enabled": { primary: "OPENRIG_DECISIONS_ENABLED" },
   "decisions.consumers": { primary: "OPENRIG_DECISIONS_CONSUMERS" },
   "decisions.template_dir": { primary: "OPENRIG_DECISIONS_TEMPLATE_DIR" },
+  "acp.to": { primary: "OPENRIG_ACP_TO" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -652,6 +698,11 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.stream_days": { primary: "OPENRIG_RETENTION_STREAM_DAYS" },
   "retention.stream_max_items": { primary: "OPENRIG_RETENTION_STREAM_MAX_ITEMS" },
+  "retention.events_days": { primary: "OPENRIG_RETENTION_EVENTS_DAYS" },
+  "retention.closed_content_days": { primary: "OPENRIG_RETENTION_CLOSED_CONTENT_DAYS" },
+  "retention.closed_metadata_days": { primary: "OPENRIG_RETENTION_CLOSED_METADATA_DAYS" },
+  "retention.erasure_ledger": { primary: "OPENRIG_RETENTION_ERASURE_LEDGER" },
+  "stream.intake": { primary: "OPENRIG_STREAM_INTAKE" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
   "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
   "queue.stuck_sweep_interval_seconds": { primary: "OPENRIG_QUEUE_STUCK_SWEEP_INTERVAL_SECONDS" },
@@ -674,6 +725,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "workflow.exception_routing": ["workflow", "exceptionRouting"],
   "daemon.host": ["daemon", "host"],
   "daemon.db_conflict": ["daemon", "dbConflict"],
+  "daemon.seat_poll_interval_ms": ["daemon", "seatPollIntervalMs"],
   "db.path": ["db", "path"],
   "transcripts.enabled": ["transcripts", "enabled"],
   "transcripts.path": ["transcripts", "path"],
@@ -688,10 +740,12 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "topology.root": ["topology", "root"],
   "context.root": ["context", "root"],
   "context.system_world": ["context", "systemWorld"],
+  "specs.builtins_visible": ["specs", "builtinsVisible"],
   "skills.root": ["skills", "root"],
   "skills.router_line.enabled": ["skills", "routerLine", "enabled"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "launch.non_interruptive": ["launch", "nonInterruptive"],
+  "launch.codex_login_shell": ["launch", "codexLoginShell"],
   "health.context_pressure.warning_percent": ["health", "contextPressure", "warningPercent"],
   "health.context_pressure.critical_percent": ["health", "contextPressure", "criticalPercent"],
   "files.allowlist": ["files", "allowlist"],
@@ -741,15 +795,22 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "usage.pi_openrouter_charge": ["usage", "piOpenRouterCharge"],
   "transport.local_user_guard": ["transport", "localUserGuard"],
   "transport.verify_input_box": ["transport", "verifyInputBox"],
+  "transport.draft_delivery": ["transport", "draftDelivery"],
   "decisions.enabled": ["decisions", "enabled"],
   "decisions.consumers": ["decisions", "consumers"],
   "decisions.template_dir": ["decisions", "templateDir"],
+  "acp.to": ["acp", "to"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.stream_days": ["retention", "streamDays"],
   "retention.stream_max_items": ["retention", "streamMaxItems"],
+  "retention.events_days": ["retention", "eventsDays"],
+  "retention.closed_content_days": ["retention", "closedContentDays"],
+  "retention.closed_metadata_days": ["retention", "closedMetadataDays"],
+  "retention.erasure_ledger": ["retention", "erasureLedger"],
+  "stream.intake": ["stream", "intake"],
   "retention.batch_size": ["retention", "batchSize"],
   "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
   "queue.stuck_sweep_interval_seconds": ["queue", "stuckSweepIntervalSeconds"],
@@ -964,6 +1025,16 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "daemon.db_conflict": (raw) => {
     if (raw !== "warn" && raw !== "stop") throw new Error("daemon.db_conflict must be warn or stop");
   },
+  "daemon.seat_poll_interval_ms": (raw, value) => {
+    // Startup-only: the seat pollers read it once when the daemon starts. Only slower than the 1 s default, up to the
+    // ceiling the structural observation's expiry allows (seat-activity-service.ts MAX_SEAT_POLL_INTERVAL_MS).
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1000 || value > 2000) {
+      throw new Error("Invalid daemon.seat_poll_interval_ms: must be a whole number of milliseconds in [1000, 2000]");
+    }
+  },
+  "transport.draft_delivery": (raw) => {
+    if (raw !== "refuse" && raw !== "deliver") throw new Error(`Invalid value for transport.draft_delivery: must be "refuse" or "deliver", got "${raw}"`);
+  },
   "transcripts.lines": (raw, value) => {
     if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
       throw new Error("Invalid transcripts.lines: must be an integer in [1, 1000000]");
@@ -1113,6 +1184,36 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for retention.stream_max_items: must be an integer >= 1, got "${raw}"`);
     }
   },
+  "stream.intake": (raw) => {
+    const val = (raw ?? "").trim();
+    if (val !== "off" && val !== "queue.worker" && !/^[a-zA-Z0-9\-_.]+@[a-zA-Z0-9\-_.]+$/.test(val)) {
+      throw new Error(`Invalid value for stream.intake: must be "queue.worker", a canonical session (<seat>@<rig>), or "off", got "${raw}"`);
+    }
+  },
+  // 0 (the default) keeps these events; a positive day count turns their pruning on.
+  "retention.events_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
+      throw new Error(`Invalid value for retention.events_days: must be an integer >= 0 (0 keeps the events), got "${raw}"`);
+    }
+  },
+  // 0 (the default) keeps closed work; a positive day count turns its erasure on (queue-erasure).
+  "retention.closed_content_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
+      throw new Error(`Invalid value for retention.closed_content_days: must be an integer >= 0 (0 keeps the content), got "${raw}"`);
+    }
+  },
+  "retention.closed_metadata_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
+      throw new Error(`Invalid value for retention.closed_metadata_days: must be an integer >= 0 (0 keeps the rows), got "${raw}"`);
+    }
+  },
+  // Empty (the default) keeps no erasure ledger; otherwise an absolute file path, kept outside the backed-up data.
+  "retention.erasure_ledger": (raw) => {
+    const value = (raw ?? "").trim();
+    if (value !== "" && !value.startsWith("/")) {
+      throw new Error(`Invalid value for retention.erasure_ledger: must be empty or an absolute file path, got "${raw}"`);
+    }
+  },
   "retention.batch_size": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.batch_size: must be an integer >= 1, got "${raw}"`);
@@ -1131,6 +1232,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "decisions.template_dir": (_raw, value) => {
     if (typeof value !== "string" || (value !== "" && (!isAbsolute(value) || value.includes("\0")))) {
       throw new Error("Invalid decisions.template_dir: use an absolute path, or an empty string for the shipped templates only");
+    }
+  },
+  // rig acp serve's receiver when --to isn't given: a team seat, member@rig, or empty for none.
+  "acp.to": (_raw, value) => {
+    if (typeof value !== "string" || (value !== "" && !/^[^@\s]+@[^@\s]+$/.test(value))) {
+      throw new Error("Invalid acp.to: use the seat that receives your ACP tasks as member@rig, or an empty string for none");
     }
   },
 };
@@ -1229,6 +1336,7 @@ export class ConfigStore {
         port: v("daemon.port") as number,
         host: v("daemon.host") as string,
         dbConflict: v("daemon.db_conflict") as "warn" | "stop",
+        seatPollIntervalMs: v("daemon.seat_poll_interval_ms") as number,
       },
       host: {
         selected: v("host.selected") as string,
@@ -1259,6 +1367,7 @@ export class ConfigStore {
         root: v("context.root") as string,
         systemWorld: v("context.system_world") as string,
       },
+      specs: { builtinsVisible: v("specs.builtins_visible") as boolean },
       skills: {
         root: v("skills.root") as string,
         routerLine: { enabled: v("skills.router_line.enabled") as boolean },
@@ -1306,7 +1415,7 @@ export class ConfigStore {
           auditLog: v("feed.subscriptions.audit_log") as boolean,
         },
       },
-      launch: { nonInterruptive: v("launch.non_interruptive") as boolean },
+      launch: { nonInterruptive: v("launch.non_interruptive") as boolean, codexLoginShell: v("launch.codex_login_shell") as boolean },
       runtime: {
         readinessTimeoutSeconds: v("runtime.readiness_timeout_seconds") as number,
         codex: {
@@ -1360,12 +1469,14 @@ export class ConfigStore {
       transport: {
         localUserGuard: v("transport.local_user_guard") as boolean,
         verifyInputBox: v("transport.verify_input_box") as boolean,
+        draftDelivery: v("transport.draft_delivery") as "refuse" | "deliver",
       },
       decisions: {
         enabled: v("decisions.enabled") as boolean,
         consumers: v("decisions.consumers") as string,
         templateDir: v("decisions.template_dir") as string,
       },
+      acp: { to: v("acp.to") as string },
       retention: {
         enabled: v("retention.enabled") as boolean,
         transitionsDays: v("retention.transitions_days") as number,
@@ -1373,6 +1484,10 @@ export class ConfigStore {
         watchdogKeepPerJob: v("retention.watchdog_keep_per_job") as number,
         streamDays: v("retention.stream_days") as number,
         streamMaxItems: v("retention.stream_max_items") as number,
+        eventsDays: v("retention.events_days") as number,
+        closedContentDays: v("retention.closed_content_days") as number,
+        closedMetadataDays: v("retention.closed_metadata_days") as number,
+        erasureLedger: v("retention.erasure_ledger") as string,
         batchSize: v("retention.batch_size") as number,
       },
       queue: {
@@ -1384,6 +1499,9 @@ export class ConfigStore {
         wakeUnconfirmedWindowMinutes: v("queue.wake_unconfirmed_window_minutes") as number,
         wakeSwapGraceSeconds: v("queue.wake_swap_grace_seconds") as number,
         wakeHumanRung: v("queue.wake_human_rung") as string,
+      },
+      stream: {
+        intake: v("stream.intake") as string,
       },
     };
   }
@@ -1525,7 +1643,7 @@ export class ConfigStore {
       const critical = getNestedValue(fileConfig, KEY_TO_PATH["health.context_pressure.critical_percent"])
         ?? getDefaultValue("health.context_pressure.critical_percent", workspaceRoot);
       if ((warning as number) >= (critical as number)) {
-        throw new Error(`Invalid context-pressure policy: warning (${warning}) must be less than critical (${critical})`);
+        throw new Error(`Invalid context-pressure policy for the config-file pair: warning (${warning}) must be less than critical (${critical}). Unset file values use defaults; environment overrides apply when each process resolves configuration and are not part of this check.`);
       }
     }
     mkdirSync(dirname(this.configPath), { recursive: true });
@@ -1577,7 +1695,7 @@ export class ConfigStore {
         const critical = getNestedValue(fileConfig, KEY_TO_PATH["health.context_pressure.critical_percent"])
           ?? getDefaultValue("health.context_pressure.critical_percent", workspaceRoot);
         if ((warning as number) >= (critical as number)) {
-          throw new Error(`Invalid context-pressure policy: warning (${warning}) must be less than critical (${critical})`);
+          throw new Error(`Invalid context-pressure policy for the config-file pair: warning (${warning}) must be less than critical (${critical}). Unset file values use defaults; environment overrides apply when each process resolves configuration and are not part of this check.`);
         }
       }
       pruneEmptyAncestors(fileConfig, parentParts);

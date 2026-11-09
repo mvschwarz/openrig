@@ -3,6 +3,7 @@ import path from "node:path";
 import { InstallPlanner } from "../src/domain/install-planner.js";
 import { PackageResolver, type FsOps } from "../src/domain/package-resolver.js";
 import { parseManifest, normalizeManifest } from "../src/domain/package-manifest.js";
+import { isPathInsideRoot } from "../src/domain/cwd-resolution.js";
 
 const BASIC_MANIFEST = `
 schema_version: 1
@@ -760,3 +761,53 @@ describe("InstallPlanner export-name containment", () => {
   });
 });
 
+
+/** Plans a manifest whose single skill export uses the given source verbatim, and reports the
+ *  path the planner names when the file is missing, so a test can assert where it resolved. */
+function planWithSkillSource(source: string) {
+  const { fsOps, pkgRoot } = realFs();
+  const targetRoot = fs.mkdtempSync(path.join(os.tmpdir(), "planner-source-"));
+  try {
+    const yaml = `schema_version: 1\nname: p\nversion: 1.0.0\nsummary: s\ncompatibility: { runtimes: [claude-code, codex] }\nexports:\n  skills:\n    - source: ${JSON.stringify(source)}\n      name: x\n`;
+    const resolved = {
+      sourceKind: "local_path" as const,
+      sourceRef: pkgRoot,
+      manifest: normalizeManifest(parseManifest(yaml)),
+      manifestHash: "x",
+      rawManifestYaml: "",
+    };
+    new InstallPlanner(fsOps).plan(resolved, targetRoot, "claude-code");
+    return { threw: false, error: "", pkgRoot };
+  } catch (err) {
+    return { threw: true, error: (err as Error).message, pkgRoot };
+  } finally {
+    fs.rmSync(pkgRoot, { recursive: true, force: true });
+    fs.rmSync(targetRoot, { recursive: true, force: true });
+  }
+}
+
+describe("InstallPlanner export-source resolution", () => {
+  // The planner reads an export from join(packageRoot, source), and join keeps the base: on
+  // macOS, Linux and WSL2 an absolute, drive-prefixed or UNC-shaped source is a plain segment
+  // under the package, so the plan is not refused and the missing-file check names that inside
+  // path. (On a native-Windows host a drive-shaped segment resolves as drive-absolute; that
+  // platform is not supported, so only the joined name is pinned everywhere.)
+  it("keeps an absolute, drive or UNC source under the package and fails as missing there", () => {
+    const shapes = ["/etc", "C:\\Users\\victim\\secrets", "\\\\server\\share\\x"];
+    for (const source of shapes) {
+      const { threw, error, pkgRoot } = planWithSkillSource(source);
+      expect(threw, `${source} should reach the missing-file check`).toBe(true);
+      const expected = path.join(pkgRoot, source, "SKILL.md");
+      expect(error, `${source} names the joined path`).toContain(expected);
+      if (path.sep === "/") {
+        expect(isPathInsideRoot(path.resolve(expected), path.resolve(pkgRoot)), `${source} stays inside the package`).toBe(true);
+      }
+    }
+  });
+
+  it("plans a relative source inside the package directory", () => {
+    const { threw, error } = planWithSkillSource("skills/x");
+    expect(threw, "skills/x should plan").toBe(false);
+    expect(error).toBe("");
+  });
+});

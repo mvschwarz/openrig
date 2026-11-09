@@ -52,6 +52,11 @@ the complete node and notes bodies. The script resolves `topology.root` and `wor
 `rig config get`. When a known current node must be supplied, pass `--work-start` or
 `--topology-start` with its literal absolute path in the same plain command. Do not
 substitute the project root for a mission or slice node and claim that mission was traced.
+A catalogued project's root can sit outside `workspace.root`. The refocus hook passes the daemon's
+catalogued project roots as `--work-root`, and the work trace ascends to the deepest known root that
+contains the node. Run by hand, pass the project root with `--work-root` (repeatable) or
+`OPENRIG_REFOCUS_WORK_ROOT`. Don't point `OPENRIG_WORKSPACE_ROOT` at the project instead: the CLI reads
+that variable as `workspace.root` too.
 
 The trace walks the topology and work trees. For the project's own declared context (intent, context files,
 skills), `rig context work-install` lists it; read what the next action needs.

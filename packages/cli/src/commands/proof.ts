@@ -163,9 +163,17 @@ checkboxes do not accept an item under the selected proof policy.
     if (cmd.opts().workspace) throw new Error("--workspace applies to proof add. Select the judgment daemon using OPENRIG_URL; proof show reports its scope basis.");
     return new DaemonClient();
   };
-  const response = async (r: { status: number; data: unknown }): Promise<Record<string, any>> => {
+  // A path_escape response names the supported routes to another workspace's tree.
+  const projectSelected = (project: unknown, scope: unknown) => Boolean(project) || /^[^/:]+:/.test(typeof scope === "string" ? scope : "");
+  const escapeHint = (project: boolean) => project
+    ? "\nThe scope is outside that project's missions root; name a mission/slice path inside it."
+    : "\nThe scope is outside the selected daemon workspace. For a catalog project, pass --project <id> or prefix the scope with <project>:."
+      + " To use another daemon's workspace, select that daemon with OPENRIG_URL.";
+  const response = async (r: { status: number; data: unknown }, project = false): Promise<Record<string, any>> => {
     const data = r.data as Record<string, any>;
-    if (r.status >= 400) throw new Error(`${data.error ?? r.status}: ${data.message ?? "Read the named source and retry"}`);
+    if (r.status >= 400) {
+      throw new Error(`${data.error ?? r.status}: ${data.message ?? "Read the named source and retry"}${data.error === "path_escape" ? escapeHint(project) : ""}`);
+    }
     return data;
   };
   const projectHelp = "Workspace-catalog project id; resolves the scope under that project's missions root (same as a <project>:<scope> prefix)";
@@ -175,7 +183,7 @@ checkboxes do not accept an item under the selected proof policy.
     .action(async (scope, opts) => {
       try {
         const query = new URLSearchParams({ ...(opts.project ? { project: opts.project } : {}), ...(scope ? { scope } : {}) }).toString();
-        const data = await response(await client().get(`/api/proof${query ? `?${query}` : ""}`));
+        const data = await response(await client().get(`/api/proof${query ? `?${query}` : ""}`), projectSelected(opts.project, scope));
         console.log(opts.json ? JSON.stringify(data) : JSON.stringify(data, null, 2));
       } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exitCode = 1; }
     });
@@ -196,7 +204,7 @@ checkboxes do not accept an item under the selected proof policy.
         const refs = [...new Set<string>([...opts.evidence, ...(opts.comparison ? [opts.comparison] : [])])];
         const query = new URLSearchParams({ ...(opts.project ? { project: opts.project } : {}), scope });
         for (const ref of refs) query.append("evidence", ref);
-        const c = client(), view = await response(await c.get(`/api/proof?${query}`));
+        const c = client(), view = await response(await c.get(`/api/proof?${query}`), projectSelected(opts.project, scope));
         const items = view.items as Array<{ id: string; text: string; index: number; revision: string; judgment: { id: string } | null }> | undefined;
         const item = selector ? items?.find(i => i.id === selector || i.text === selector || String(i.index) === selector) : items?.length === 1 ? items[0] : undefined;
         if (!item) throw new Error("Select one current item with scope#item; rig proof show lists IDs, text and indices");
@@ -209,7 +217,7 @@ checkboxes do not accept an item under the selected proof policy.
           operationId: opts.operationId, replace: opts.replace === true, ...(opts.project ? { project: opts.project } : {}),
           // Pin the project root the prepared read resolved; the daemon refuses (409 project_changed) if it moved.
           ...((view.project as { root?: string } | undefined)?.root ? { projectRoot: (view.project as { root: string }).root } : {}) };
-        const result = await response(await c.post("/api/proof/judge", body));
+        const result = await response(await c.post("/api/proof/judge", body), projectSelected(opts.project, scope));
         console.log(opts.json ? JSON.stringify(result) : JSON.stringify(result, null, 2));
       } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exitCode = 1; }
     });

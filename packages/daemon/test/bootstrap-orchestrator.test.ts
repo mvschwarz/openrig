@@ -1437,6 +1437,10 @@ exports:
 
     // Bootstrap from bundle
     const bundleResolver = new BundleSourceResolver({ fsOps: realFsOps() });
+    const resolveBundle = bundleResolver.resolve.bind(bundleResolver);
+    vi.spyOn(bundleResolver, "resolve").mockImplementation(async source => ({
+      ...await resolveBundle(source), warnings: ["legacy resolver mode warning"],
+    }));
     const exec = createMockExec({
       "tmux -V": "tmux 3.4",
       "claude --version": "claude 1.0.0",
@@ -1464,6 +1468,7 @@ exports:
     const result = await orch.bootstrap({ mode: "plan", sourceRef: bundlePath, sourceKind: "rig_bundle" });
 
     expect(result.status).toBe("planned");
+    expect(result.warnings).toContain("legacy resolver mode warning");
     expect(result.stages.some((s) => s.stage === "resolve_spec" && s.status === "ok")).toBe(true);
     expect(result.stages.some((s) => s.stage === "resolve_packages" && s.status === "ok")).toBe(true);
 

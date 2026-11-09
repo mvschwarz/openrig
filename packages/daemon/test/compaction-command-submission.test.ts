@@ -19,7 +19,7 @@ afterEach(() => { vi.restoreAllMocks(); for (const h of homes.splice(0)) rmSync(
 function fixture(compactInstruction = '') {
   const policyRef = {compactInstruction};
   const home = mkdtempSync(join(tmpdir(), 'compaction-command-')); homes.push(home);
-  let clock = 10_000, activity = 'idle';
+  let clock = 10_000, activity = 'idle', body = '';
   // What a runtime hook says, when it differs from the pane (null: the hook agrees with the pane).
   let hookActivity: string | null = null;
   let onSleep: (() => void) | undefined;
@@ -40,8 +40,8 @@ function fixture(compactInstruction = '') {
     probeSession: vi.fn(async () => ({state: 'present'})),
     isPaneInMode: vi.fn(async () => paneInMode),
     cancelPaneMode: vi.fn(async () => undefined),
-    sendText: vi.fn(async (_: string, text: string, _before?: unknown, options?: {bracketed?: boolean}) => { events.push({kind: 'text', text, bracketed: options?.bracketed !== false}); return onText?.(text) ?? {ok: true}; }),
-    sendKeys: vi.fn(async (_: string, keys: string[]) => { const receipt = onKeys?.(keys); events.push({kind: 'keys', keys}); return receipt ?? {ok: true}; }),
+    sendText: vi.fn(async (_: string, text: string, _before?: unknown, options?: {bracketed?: boolean}) => { events.push({kind: 'text', text, bracketed: options?.bracketed !== false}); body += text; return onText?.(text) ?? {ok: true}; }),
+    sendKeys: vi.fn(async (_: string, keys: string[]) => { const receipt = onKeys?.(keys); events.push({kind: 'keys', keys}); if (keys.includes('Enter') && receipt?.ok !== false) body = ''; return receipt ?? {ok: true}; }),
   };
   Object.assign(tmux, {deliveryGuard: new SeatDeliveryGuard(db, () => ({nodeId: 'node-one', session: seat, pane: '%1', occupant: generation}))});
   // The enforcer and transport share one clock, including the transport's Date.now idle deadline.
@@ -53,6 +53,7 @@ function fixture(compactInstruction = '') {
   // A send that asks for pane-only readiness reads the pane; any other send may be decided by the hook.
   (transport as any).classifySendReadiness = async (q: {readinessFromPaneOnly?: boolean}) => ({state: !q.readinessFromPaneOnly && hookActivity !== null ? hookActivity : activity, reason: 'fixture', evidenceSource: 'fixture'});
   (transport as any).diagnoseProducerLink = async () => 'fixture';
+  (transport as any).capture = async () => ({ok: true, sessionName: seat, content: body, inputBox: {status: body ? 'typed' : 'empty'}});
   const e = new ClaudeCompactionEnforcer({resolveClaudeCompactionPolicy: () => policy} as any, transport, {openrigHome: home, manualPrepWaitMs: 1000, compactSendIdleWaitMs: 20, now: () => clock, sleep: async (ms) => { clock += ms; onSleep?.(); }, resolveOccupantGeneration: () => generation});
   const stageMap = () => {
     const a = e.getPreparationState(seat)!; mkdirSync(dirname(a.mapPath), {recursive: true});
@@ -61,7 +62,7 @@ function fixture(compactInstruction = '') {
   const compactIndex = () => events.findIndex((ev) => ev.kind === 'text' && ev.text.startsWith('/compact'));
   const texts = () => events.filter((ev): ev is {kind: 'text'; text: string; bracketed: boolean} => ev.kind === 'text').map((ev) => ev.text);
   const compactText = () => (events[compactIndex()] as {text?: string} | undefined)?.text;
-  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, onText: (fn: (text: string) => {ok: boolean; code?: string; message?: string} | void) => { onText = fn; }, onKeys: (fn: ((keys: string[]) => {ok: boolean; code?: string; message?: string} | void) | undefined) => { onKeys = fn; }, metaThrows: (v: boolean) => { metaThrows = v; }, paneInMode: (v: boolean) => { paneInMode = v; }, advance2: (ms: number) => { clock += ms; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
+  return {e, transport, tmux, events, body: () => body, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, onText: (fn: (text: string) => {ok: boolean; code?: string; message?: string} | void) => { onText = fn; }, onKeys: (fn: ((keys: string[]) => {ok: boolean; code?: string; message?: string} | void) | undefined) => { onKeys = fn; }, metaThrows: (v: boolean) => { metaThrows = v; }, paneInMode: (v: boolean) => { paneInMode = v; }, advance2: (ms: number) => { clock += ms; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
 }
 
 const LONGEST_PATH = '/' + 'p'.repeat(4095); // PATH_MAX on Linux
@@ -133,15 +134,15 @@ it('automatic: a map that is ready while the seat is mid-turn waits for idle ins
   expect(f.compactIndex()).toBeGreaterThan(-1);
 });
 
-it('automatic: a seat that never goes idle is disarmed by the existing preparation deadline, never sent to', async () => {
+it('automatic: a completed map that never reaches idle is held at the bounded idle deadline (#2682), not expired', async () => {
   const f = fixture();
   await f.e.maybeAutoCompact(input);
   f.stageMap();
   f.activity('running');
   await f.e.maybeAutoCompact(input);
-  f.advance(AUTO_PREP_WAIT_MS_DEFAULT + 1);
+  f.advance(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1);
   await f.e.maybeAutoCompact(input);
-  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', reason: 'preparation_incomplete', compact: 'not_sent'});
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'waiting', prepared: true, preparedReason: 'map_complete_seat_never_idle', compact: 'not_sent'});
   expect(f.compactIndex()).toBe(-1);
 });
 
@@ -325,7 +326,7 @@ for (const end of ['deadline', 'cancel'] as const) {
     f.stageMap();
     f.onText((text) => {
       if (!text.startsWith('/compact')) return;
-      if (end === 'deadline') f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + 1); else f.e.cancelPreparation(seat);
+      if (end === 'deadline') f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1); else f.e.cancelPreparation(seat);
     });
     await f.e.maybeAutoCompact(input);
     expect(compactWrites(f)).toBe(1);
@@ -341,14 +342,15 @@ for (const end of ['deadline', 'cancel'] as const) {
   });
 }
 
-it('deadline case before the first paste (not a transport refusal): zero writes and not sent', async () => {
+it('deadline case before the first paste (not a transport refusal): the completed map is held (#2682), zero writes and not sent', async () => {
   const f = fixture();
   await f.e.maybeAutoCompact(input);
   f.stageMap();
-  f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + 1);
-  await f.e.maybeAutoCompact(input);
+  f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1);
+  // The monitor's poll that reaches the deadline.
+  f.e.reconcilePreparations();
   expect(compactWrites(f)).toBe(0);
-  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'not_sent'});
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'waiting', prepared: true, compact: 'not_sent'});
   expect((await stateRoute(f)()).compact).toMatch(/^not sent/);
 });
 
@@ -404,20 +406,21 @@ it('a draft_* receipt from the paste stage is classified not_sent (the guard\'s 
   f.stageMap();
   f.onText((text) => (text.startsWith('/compact') ? {ok: false, code: 'draft_input_busy', message: 'The seat has an unsubmitted input.'} : undefined));
   await f.e.maybeAutoCompact(input);
-  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'not_sent'});
+  // The completed map is held for a window (#2682), not stopped.
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'waiting', prepared: true, preparedReason: 'draft_input_busy', compact: 'not_sent'});
 });
 
 for (const code of ['draft_input_busy', 'draft_input_unknown', 'draft_input_changed']) {
-  it(`automatic: a ${code} hold is labeled not_reached by the transport, and still stops as not sent instead of waiting for idle`, async () => {
+  it(`automatic: a ${code} hold is labeled not_reached by the transport, and holds the completed map as not sent (#2682) instead of stopping`, async () => {
     const f = fixture();
     await armed(f);
     const real = f.transport.send.bind(f.transport);
     const results: unknown[] = [];
     vi.spyOn(f.transport, 'send').mockImplementation(async (s: string, text: string, opts?: any) => { const r = await real(s, text, opts); if (text.startsWith('/compact')) results.push(r); return r; });
     f.onText((text) => (text.startsWith('/compact') ? {ok: false, code, message: 'The seat has an unsubmitted input.'} : undefined));
-    expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'send_failed'});
+    expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'prepared_awaiting_window'});
     expect(results[0]).toMatchObject({ok: false, reason: code, sent: false, inputPhase: 'not_reached'});
-    expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', reason: code, compact: 'not_sent'});
+    expect(f.e.getPreparationState(seat)).toMatchObject({status: 'waiting', prepared: true, preparedReason: code, compact: 'not_sent'});
   });
 }
 
@@ -433,24 +436,19 @@ it('automatic: a draft hold of the preparation prompt (a not_reached receipt) is
   expect(f.texts().filter((t) => !t.startsWith('/compact'))).toHaveLength(2);
 });
 
-it('automatic: once a draft hold clears, the next poll before the cooldown does not reuse the stopped attempt; after it, a fresh one begins', async () => {
+it('automatic: once a draft hold clears, the next poll sends the held attempt\'s /compact with the same map; no fresh attempt or request (#2682)', async () => {
   const f = fixture();
   await armed(f);
   f.onText((text) => (text.startsWith('/compact') ? {ok: false, code: 'draft_input_busy', message: 'The seat has an unsubmitted input.'} : undefined));
   await f.e.maybeAutoCompact(input);
-  const stopped = f.e.getPreparationState(seat)!;
-  expect(stopped).toMatchObject({status: 'stopped', compact: 'not_sent'});
+  const held = f.e.getPreparationState(seat)!;
+  expect(held).toMatchObject({status: 'waiting', prepared: true, compact: 'not_sent'});
   f.onText(() => undefined);
-  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'preparation_stopped'});
-  // The fake records the refused call, so one /compact call exists; the cleared poll adds none.
-  expect(compactWrites(f)).toBe(1);
-  expect(f.e.getPreparationState(seat)).toMatchObject({attemptId: stopped.attemptId, status: 'stopped'});
-  f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT);
-  await f.e.maybeAutoCompact(input);
-  const fresh = f.e.getPreparationState(seat)!;
-  expect(fresh.attemptId).not.toBe(stopped.attemptId);
-  expect(fresh).toMatchObject({status: 'waiting', compact: 'not_sent'});
-  expect(compactWrites(f)).toBe(1);
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: true});
+  // The fake records the refused call too: one refused /compact call and the one that went in.
+  expect(compactWrites(f)).toBe(2);
+  expect(f.e.getPreparationState(seat)).toMatchObject({attemptId: held.attemptId, status: 'compact-sent', compact: 'submitted_unconfirmed'});
+  expect(f.texts().filter((t) => !t.startsWith('/compact'))).toHaveLength(1);
 });
 
 it('--skip-map with only the temporary map written: the restore request names the .tmp that carries the marker', async () => {
@@ -473,14 +471,17 @@ async function noSecondWrite(f: ReturnType<typeof fixture>) {
   for (let i = 0; i < 3; i++) await f.e.maybeAutoCompact(input);
 }
 
-it('deadline case (not a transport refusal): the attempt stops before any send, so not sent and no /compact write', async () => {
+it('deadline case (not a transport refusal): the completed map is held before any send (#2682), and the next idle poll writes /compact exactly once', async () => {
   const f = fixture();
   await armed(f);
-  f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + 1);
-  await f.e.maybeAutoCompact(input);
-  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'not_sent'});
-  await noSecondWrite(f);
+  f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1);
+  // The monitor's poll that reaches the deadline.
+  f.e.reconcilePreparations();
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'waiting', prepared: true, compact: 'not_sent'});
   expect(compactWrites(f)).toBe(0);
+  await noSecondWrite(f);
+  expect(compactWrites(f)).toBe(1);
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'compact-sent'});
 });
 
 it('an issued write that throws (the adapter rejects after the paste was handed over) disarms as uncertain', async () => {
@@ -489,7 +490,10 @@ it('an issued write that throws (the adapter rejects after the paste was handed 
   f.onText((text) => { if (text.startsWith('/compact')) throw new Error('paste-buffer: connection reset'); });
   await f.e.maybeAutoCompact(input);
   expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'uncertain'});
+  const written = f.body(); expect(written).toMatch(/^\/compact /);
   await noSecondWrite(f);
+  expect(f.body()).toBe(written);
+  expect(f.e.getOwedRestore(seat)).toMatchObject({stage: 'turn_boundary', held: true});
   expect(compactWrites(f)).toBe(1);
   expect(entersAfterCompact(f)).toBe(0);
 });
@@ -567,7 +571,7 @@ it('an Enter receipt with no code is read without throwing: still submit_failed,
   expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'uncertain'});
 });
 
-it('a real zero-input refusal through the transport (the pane is stuck in a tmux mode): 0 writes, 0 Enters, not sent; clearing it sends nothing more', async () => {
+it('a real zero-input refusal through the transport (the pane is stuck in a tmux mode): 0 writes, 0 Enters, not sent; clearing it sends the held /compact once (#2682)', async () => {
   const f = fixture();
   await armed(f);
   f.paneInMode(true);
@@ -578,11 +582,12 @@ it('a real zero-input refusal through the transport (the pane is stuck in a tmux
   expect(compactWrites(f)).toBe(0);
   expect(entersAfterCompact(f)).toBe(0);
   expect(f.events.filter((ev) => ev.kind === 'keys')).toHaveLength(1); // only the preparation prompt's Enter
-  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'not_sent'});
-  // Clear the fault and keep polling: the stopped attempt owes no /compact, and none is written.
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'waiting', prepared: true, preparedReason: 'pane_in_mode', compact: 'not_sent'});
+  // Clear the fault and keep polling: the held attempt's /compact goes in once, with no new preparation request.
   f.paneInMode(false);
   for (let i = 0; i < 3; i++) await f.e.maybeAutoCompact(input);
-  expect(compactWrites(f)).toBe(0);
+  expect(compactWrites(f)).toBe(1);
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'compact-sent'});
 });
 
 
@@ -696,3 +701,72 @@ for (const completedStages of [1, 2]) {
     expect(f.events).toEqual(before);
   });
 }
+
+
+it('automatic: completed map survives the prep deadline and sends once at the next idle boundary without re-preparing', async () => {
+  const f = fixture(); await f.e.maybeAutoCompact(input); f.stageMap();
+  const first = f.e.getPreparationState(seat)!;
+  f.activity('running'); f.advance(AUTO_PREP_WAIT_MS_DEFAULT + 1);
+  f.e.reconcilePreparations();
+  expect(f.e.getPreparationState(seat)).toMatchObject({attemptId: first.attemptId, status: 'waiting',
+    deadlineAt: first.deadlineAt, idleDeadlineAt: first.deadlineAt! + AUTO_RETRY_AFTER_STOP_MS_DEFAULT});
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'waiting_for_idle'});
+  expect(f.texts()).toHaveLength(1);
+  f.activity('idle'); expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: true});
+  expect(f.texts().filter(t => t.startsWith('/compact'))).toHaveLength(1);
+  expect(f.e.getPreparationState(seat)).toMatchObject({attemptId: first.attemptId, status: 'compact-sent'});
+});
+
+// #2682: an attempt whose context dropped below the threshold BEFORE it was held is never held; it stops as it did before
+// the hold existed, and a held map is never sent into a context that already dropped.
+for (const how of ['draft at the stale drain', 'idle grace running out'] as const) {
+  it(`automatic: a fresh below-threshold sample before the hold (${how}) means the attempt is never held; it stops as before and sends nothing (#2682)`, async () => {
+    const f = fixture();
+    await armed(f);
+    const attemptId = f.e.getPreparationState(seat)!.attemptId;
+    expect(await f.e.maybeAutoCompact({...input, usedPercentage: 30})).toEqual({triggered: false, reason: 'below_threshold'});
+    if (how === 'draft at the stale drain') {
+      f.onText((text) => (text.startsWith('/compact') ? {ok: false, code: 'draft_input_busy', message: 'The seat has an unsubmitted input.'} : undefined));
+      await f.e.drainPendingPreparedCompact({sessionName: seat, runtime: 'claude-code'});
+      f.onText(() => undefined);
+    } else {
+      f.activity('running');
+      f.advance(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1);
+      f.e.reconcilePreparations();
+      f.activity('idle');
+    }
+    const before = compactWrites(f);
+    const state = f.e.getPreparationState(seat)!;
+    expect(state).toMatchObject({attemptId, status: 'stopped', compact: 'not_sent',
+      reason: how === 'draft at the stale drain' ? 'draft_input_busy' : 'map_complete_seat_never_idle'});
+    expect(state.prepared).toBeUndefined();
+    // Neither the monitor's stale drain nor a fresh sample back above sends the old map; the retry cooldown holds.
+    expect(await f.e.drainPendingPreparedCompact({sessionName: seat, runtime: 'claude-code'})).toEqual({triggered: false, reason: 'no_pending_stage'});
+    expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'preparation_stopped'});
+    expect(compactWrites(f)).toBe(before);
+    expect(f.texts().filter((t) => !t.startsWith('/compact'))).toHaveLength(1);
+  });
+}
+
+it('automatic: the idle grace running out while the drain waits for the delivery lease stops an attempt whose context dropped, instead of holding it; nothing is written (#2682)', async () => {
+  const f = fixture();
+  await armed(f);
+  const attemptId = f.e.getPreparationState(seat)!.attemptId;
+  expect(await f.e.maybeAutoCompact({...input, usedPercentage: 30})).toEqual({triggered: false, reason: 'below_threshold'});
+  const guard = (f.transport as any).deliveryGuard;
+  const real = guard.lifecycle.bind(guard);
+  let first = true;
+  vi.spyOn(guard, 'lifecycle').mockImplementation(async (ids: any, fn: any) => {
+    // The lease is taken only after the grace has run out.
+    if (first) { first = false; f.advance(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1); }
+    return real(ids, fn);
+  });
+  const before = compactWrites(f);
+  expect(await f.e.drainPendingPreparedCompact({sessionName: seat, runtime: 'claude-code'})).toEqual({triggered: false, reason: 'send_failed'});
+  expect(compactWrites(f)).toBe(before);
+  const state = f.e.getPreparationState(seat)!;
+  expect(state).toMatchObject({attemptId, status: 'stopped', reason: 'map_complete_seat_never_idle', compact: 'not_sent'});
+  expect(state.prepared).toBeUndefined();
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'preparation_stopped'});
+  expect(compactWrites(f)).toBe(before);
+});

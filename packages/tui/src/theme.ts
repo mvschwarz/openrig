@@ -57,7 +57,7 @@ const PALETTE: Record<Token, [[number, number, number], number, number]> = {
   bright: [[232, 234, 240], 254, 97],
   // S19 MR5b: one-step contrast bump (founder: 'a little more noticeable')
   chrome: [[78, 105, 145], 60, 90],
-  selection: [[34, 52, 82], 236, 40],
+  selection: [[34, 52, 82], 236, 30], // black, painted as background 40
   actActive: [[152, 195, 121], 108, 32],
   actIdle: [[110, 142, 170], 109, 34],
   actDetached: [[109, 116, 128], 243, 90],
@@ -68,6 +68,10 @@ const PALETTE: Record<Token, [[number, number, number], number, number]> = {
   markBg: [[12, 10, 9], 233, 30],
   codexBlue: [[104, 103, 170], 61, 34],
 };
+
+// #2498: these light inks vanish on a light terminal. On the terminal's own background they use its default
+// foreground (SGR 39), which reads on either; on a background the TUI paints itself, they keep the ink chosen for it.
+const TERMINAL_INK: ReadonlySet<Token> = new Set(["bright", "markInk"]);
 
 export interface Style {
   /** wrap text in the token's SGR (plus bold/inverse); identity in "none" mode */
@@ -83,7 +87,8 @@ export function createStyle(mode: ColorMode = detectColorMode()): Style {
     if (opts?.blink) parts.push("5");
     if (opts?.inverse) parts.push("7");
     const [rgb, x256, basic] = PALETTE[token];
-    if (mode === "truecolor") parts.push(`38;2;${rgb[0]};${rgb[1]};${rgb[2]}`);
+    if (!opts?.bg && TERMINAL_INK.has(token)) parts.push("39");
+    else if (mode === "truecolor") parts.push(`38;2;${rgb[0]};${rgb[1]};${rgb[2]}`);
     else if (mode === "256") parts.push(`38;5;${x256}`);
     else parts.push(String(basic));
     if (opts?.bg) {

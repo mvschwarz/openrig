@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { execute, paths } = vi.hoisted(() => ({ execute: vi.fn(), paths: vi.fn() }));
 vi.mock("node:child_process", () => ({ execFile: Object.assign(vi.fn(), { [Symbol.for("nodejs.util.promisify.custom")]: execute }) }));
 vi.mock("../src/domain/native-process-executable.js", () => ({ readNativeExecutablePaths: paths }));
-import { listNativeProcesses } from "../src/domain/native-process-lineage.js";
+import { listNativeProcesses, observeClaudePaneProcess, verifyClaudePaneProcess } from "../src/domain/native-process-lineage.js";
 import { restoreProc, serveFakeProc, type FakeProcess } from "./helpers/fake-proc.js";
 const row = (pid: number, name: string, command: string): FakeProcess => ({ pid, ppid: 10, pgid: 11, tpgid: 11, name, startedAt: "Sun Oct  4 15:21:03 2026", command });
 // The process table's two sources: ps off Linux, /proc on Linux.
@@ -44,6 +44,29 @@ describe.each(Object.entries(SOURCES))("from %s", (source, serve) => {
     expect(paths).toHaveBeenCalledExactlyOnceWith([30]);
     expect(rows.find(r => r.pid === 30)?.executablePath).toBe(installed);
     expect(rows.find(r => r.pid === 31)?.executablePath).toBeUndefined();
+  });
+  // #2341: a launch that froze a native file is proved by argv[0] when argv[0] is that file, as before; only a Claude
+  // spelling argv[0] another way (the installer's symlink) needs the OS path. The path helper can time out (on macOS
+  // it starts a subprocess), so an exact launch must not depend on it.
+  const token = "00000000-0000-4000-8000-000000002371";
+  const observation = (frozen: string) => ({ target: "%1", tmux: { getPanePid: async () => 10 }, expectedToken: token,
+    selectedExecutable: frozen, scriptLaunch: false });
+  it("proves an exact launch without the OS path, so a helper that times out and then recovers keeps it admitted", async () => {
+    const native = "/opt/native/bin/claude";
+    serve([row(10, "zsh", "-zsh"), row(11, "claude", `${native} --session-id ${token}`)]);
+    // The first helper times out (no witness), and every later one succeeds.
+    paths.mockResolvedValueOnce(new Map()).mockResolvedValue(new Map([[11, native]]));
+    const pinned = await observeClaudePaneProcess(observation(native));
+    expect(pinned?.process.pid).toBe(11);
+    expect((await verifyClaudePaneProcess(observation(native)))?.fingerprint).toBe(pinned?.fingerprint);
+    expect(paths).not.toHaveBeenCalled();
+  });
+  it("still reads the OS path of a Claude spelled through the installer's symlink when a launch froze a file", async () => {
+    const installed = "/x/.local/share/claude/versions/2.1.316";
+    serve([row(10, "zsh", "-zsh"), row(11, "claude", `/x/.local/bin/claude --session-id ${token}`)]);
+    paths.mockResolvedValue(new Map([[11, installed]]));
+    expect((await verifyClaudePaneProcess(observation(installed)))?.process.executablePath).toBe(installed);
+    expect(paths).toHaveBeenCalledWith([11]);
   });
   it("reads the OS path for a Nix-wrapped Claude whose ucomm is the truncated `.claude-unwrapped`", async () => {
     serve([row(20, ".claude-unwrapp", "claude --session-id token"), row(21, ".claude-wrapped", "/nix/store/x-claude-code-2.1.280/bin/claude"),

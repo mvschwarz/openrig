@@ -126,6 +126,49 @@ describe("rig stream CLI", () => {
     expect((call!.body as { streamItemId: string }).streamItemId).toBe("stream-fixed-id");
   });
 
+  it("an emit whose reply is late or unreadable names the retry that can't add a second item", async () => {
+    const { runProgram } = await import("../src/cli-error.js");
+    const { DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } = await import("../src/client.js");
+    const run = async (error: Error, extra: string[]) => {
+      const deps: StreamDeps = {
+        lifecycleDeps: {} as StreamDeps["lifecycleDeps"],
+        clientFactory: () => ({ post: vi.fn(async () => { throw error; }) }) as unknown as ReturnType<StreamDeps["clientFactory"]>,
+      };
+      const lines: string[] = [];
+      let code = 0;
+      await runProgram(createProgram({ streamDeps: deps }),
+        ["node", "rig", "stream", "emit", "--source", "alice@rig", "--body", "x", ...extra],
+        { out: (l) => lines.push(l), err: (l) => lines.push(l), exit: (c) => { code = c; } });
+      return { text: lines.join("\n"), code };
+    };
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-06T20:00:00.000Z"));
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    try {
+      const withId = await run(new DaemonTimeoutError("Request to http://localhost:7433/api/stream/emit timed out after 5000ms"), ["--id", "obs-1"]);
+      expect(withId.text).toContain("repeat the same emit with --id 'obs-1'; the daemon keeps one item per ID");
+      expect(withId.text).toContain("rig stream show 'obs-1'");
+      expect(withId.code).toBe(1);
+
+      const withoutId = await run(new DaemonTimeoutError("Request to http://localhost:7433/api/stream/emit timed out after 5000ms"), []);
+      expect(withoutId.text).toContain("this emit had no --id, so emitting again can add a second item");
+      expect(withoutId.text).toContain("rig stream list --source 'alice@rig' --since 2026-11-06T19:55:00.000Z");
+      expect(withoutId.text).toContain("Pass a stable --id on emits so a later retry is safe.");
+
+      // The daemon records the seat env's session, not --source, so the check names that seat.
+      vi.stubEnv("OPENRIG_SESSION_NAME", "bob@rig");
+      const unreadable = await run(new DaemonResponseError(502, ""), []);
+      expect(unreadable.text).toContain("rig stream list --source 'bob@rig' --since 2026-11-06T19:55:00.000Z");
+
+      // A refused connection delivered nothing: no "may still land".
+      const refused = await run(new DaemonConnectionError("connect ECONNREFUSED 127.0.0.1:7433", "ECONNREFUSED"), []);
+      expect(refused.text).not.toContain("may still land");
+    } finally {
+      now.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("list GETs /api/stream/list with limit + sourceSession query", async () => {
     const { deps, calls } = makeDeps({
       routes: { "GET /api/stream/list?sourceSession=bob%40rig&limit=20": { status: 200, data: [] } },

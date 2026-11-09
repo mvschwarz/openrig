@@ -2,6 +2,8 @@ import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { specClaudeTokenRef } from "./claude-seat-token.js";
 import { validateClaudeMcp } from "./claude-mcp.js";
+import { isLaunchWrapperRuntime, validateLaunchWrapper } from "./launch-wrapper.js";
+import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type {
   LegacyRigSpec,
@@ -66,9 +68,9 @@ const RIG_KEYS = new Set([
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "cwd", "restore_policy",
+  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
-  "agent_file", "append_system_prompt_file", "plugin_dirs",
+  "agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
 
@@ -550,6 +552,13 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     try { validateCodexMemberPermissions(member["codex_permissions"], `${prefix}.codex_permissions`); }
     catch (error) { errors.push((error as Error).message); }
   }
+  if (member["launch_wrapper"] !== undefined) {
+    if (!isLaunchWrapperRuntime(member["runtime"])) {
+      errors.push(`${prefix}.launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
+    }
+    try { validateLaunchWrapper(member["launch_wrapper"], `${prefix}.launch_wrapper`); }
+    catch (error) { errors.push((error as Error).message); }
+  }
   if (member["codex_config_profile"] !== undefined) {
     if (typeof member["codex_config_profile"] !== "string" || !member["codex_config_profile"].trim()) {
       errors.push(`${prefix}.codex_config_profile: must be a non-empty string`);
@@ -605,7 +614,7 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   }
 
   if (member["env"] !== undefined) errors.push(...validateSeatEnv(member["env"], `${prefix}.env`));
-  errors.push(...validateClaudeAdditions(member, prefix));
+  errors.push(...validateClaudeAdditions(member, prefix, advisories));
 
   // Terminal sentinel validation: exact triple required
   const isTerminalRuntime = member["runtime"] === "terminal";
@@ -1232,10 +1241,11 @@ function normalizeSessionSource(raw: unknown): import("./types.js").SessionSourc
   return undefined;
 }
 
-/** OPR.0.7.0.9 — a Claude member's own agent file, appended prompt file and plugin folders: paths beside the spec. */
-function validateClaudeAdditions(member: Record<string, unknown>, prefix: string): string[] {
+/** OPR.0.7.0.9 — a Claude member's own agent file, appended prompt file and plugin folders: paths beside the spec.
+ *  #2044 — and its plugin channels, passed as Claude's `--channels`. */
+function validateClaudeAdditions(member: Record<string, unknown>, prefix: string, advisories: string[]): string[] {
   const errors: string[] = [];
-  for (const key of ["agent_file", "append_system_prompt_file", "plugin_dirs"]) {
+  for (const key of ["agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels"]) {
     if (member[key] !== undefined && member["runtime"] !== "claude-code") {
       errors.push(`${prefix}.${key}: only for Claude members (runtime claude-code)`);
     }
@@ -1269,6 +1279,28 @@ function validateClaudeAdditions(member: Record<string, unknown>, prefix: string
       });
     }
   }
+  const channels = member["plugin_channels"];
+  if (channels !== undefined) {
+    if (!Array.isArray(channels)) {
+      errors.push(`${prefix}.plugin_channels: must be a list of plugin:<name>@<marketplace> entries`);
+    } else {
+      channels.forEach((entry, i) => {
+        const label = `${prefix}.plugin_channels[${i}]`;
+        if (!isClaudePluginChannel(entry)) {
+          errors.push(typeof entry === "string" && entry.startsWith("server:")
+            ? `${label}: "${entry}" is a server entry; only plugin:<name>@<marketplace> entries are supported`
+            : `${label}: must be plugin:<name>@<marketplace>, each name letters, digits, . _ - (got ${JSON.stringify(entry)})`);
+        } else if (channels.indexOf(entry) !== i) {
+          errors.push(`${label}: listed twice ("${entry}")`);
+        }
+      });
+      // `claude_mcp: none` starts Claude with only an empty MCP server set, plugin servers left out too, so no channel
+      // could register.
+      if (channels.length > 0 && member["claude_mcp"] === "none") {
+        advisories.push(`${prefix}.plugin_channels: claude_mcp is "none", which starts Claude without MCP servers (plugin servers included), so no channel could register; remove claude_mcp: none to use the channels, or remove plugin_channels to keep the MCP opt-out`);
+      }
+    }
+  }
   return errors;
 }
 
@@ -1289,6 +1321,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     ...(m["claude_token"] === undefined ? {} : { claudeTokenRef: specClaudeTokenRef(m["claude_token"], "claude_token") }),
     ...(m["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(m["claude_mcp"]) }),
     ...(m["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(m["codex_permissions"]) }),
+    ...(m["launch_wrapper"] === undefined ? {} : { launchWrapper: validateLaunchWrapper(m["launch_wrapper"]) }),
     env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
@@ -1306,6 +1339,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     ...(typeof m["agent_file"] === "string" ? { agentFile: m["agent_file"] } : {}),
     ...(typeof m["append_system_prompt_file"] === "string" ? { appendSystemPromptFile: m["append_system_prompt_file"] } : {}),
     ...(Array.isArray(m["plugin_dirs"]) ? { pluginDirs: m["plugin_dirs"] as string[] } : {}),
+    ...(Array.isArray(m["plugin_channels"]) ? { pluginChannels: m["plugin_channels"] as string[] } : {}),
   }));
 
   const edges = Array.isArray(raw["edges"])
@@ -1425,6 +1459,13 @@ export class LegacyRigSpecSchema {
           try { validateCodexMemberPermissions(node["codex_permissions"], `nodes.${nodeWhere}.codex_permissions`); }
           catch (error) { errors.push((error as Error).message); }
         }
+        if (node["launch_wrapper"] !== undefined) {
+          if (!isLaunchWrapperRuntime(node["runtime"])) {
+            errors.push(`nodes.${nodeWhere}.launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
+          }
+          try { validateLaunchWrapper(node["launch_wrapper"], `nodes.${nodeWhere}.launch_wrapper`); }
+          catch (error) { errors.push((error as Error).message); }
+        }
         if (node["effort"] !== undefined) {
           if (typeof node["effort"] !== "string" || !node["effort"].trim()) {
             advisories.push(`nodes.${nodeWhere}.effort: non-string value "${node["effort"]}" ignored; effort must be a text value`);
@@ -1493,6 +1534,7 @@ export class LegacyRigSpecSchema {
       ...(n["claude_token"] === undefined ? {} : { claudeTokenRef: specClaudeTokenRef(n["claude_token"], "claude_token") }),
       ...(n["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(n["claude_mcp"]) }),
       ...(n["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(n["codex_permissions"]) }),
+      ...(n["launch_wrapper"] === undefined ? {} : { launchWrapper: validateLaunchWrapper(n["launch_wrapper"]) }),
       cwd: (n["cwd"] as string) ?? undefined,
       surfaceHint: (n["surface_hint"] as string) ?? undefined,
       workspace: (n["workspace"] as string) ?? undefined,

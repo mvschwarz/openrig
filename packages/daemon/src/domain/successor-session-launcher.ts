@@ -79,6 +79,7 @@ export interface SuccessorNode {
   /** OPR.0.7.0.9: the seat's own launch additions (copies in its seat storage), populated by the caller. The successor
    *  is the same seat, so its launch passes them as an original launch does; absent = none. */
   launchAdditions?: import("./seat-launch-additions.js").SeatLaunchAdditions;
+  launchWrapper?: readonly string[];
 }
 
 /** Slice 16: what a staged runtime-switch successor's launch adds to an ordinary successor launch. */
@@ -98,6 +99,8 @@ export type SuccessorLaunchResult =
       resumeToken?: string;
       resumeType?: string;
       appliedLaunch?: AppliedLaunchObservation;
+      /** How the departing occupant's process ended at the cutover: it exited on TERM, or was killed after the TERM window. */
+      retireeExit: "graceful" | "forced";
       /**
        * OPR.0.4.6.02 S1 — non-fatal tmux option-default warnings from the
        * fresh successor's launch (mouse/status/clipboard). Present only when
@@ -315,6 +318,7 @@ export class SuccessorSessionLauncher {
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
       appliedLaunch: started.appliedLaunch,
+      retireeExit: terminated.path,
       ...(respawned.warnings ? { warnings: respawned.warnings } : {}),
     };
   }
@@ -429,6 +433,7 @@ export class SuccessorSessionLauncher {
       codexConfigProfile: node.codexConfigProfile ?? undefined,
       codexRebuildPermissions: node.codexRebuildPermissions,
       ...(node.launchAdditions ? { launchAdditions: node.launchAdditions } : {}),
+      ...(node.launchWrapper?.length ? { launchWrapper: node.launchWrapper } : {}),
       ...(staged?.binding ?? {}),
     };
 

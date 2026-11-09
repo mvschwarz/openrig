@@ -267,7 +267,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     // No pane is confirmed, so the service preserves its existing route to the live seat sessions.
     expect(res.notes).toEqual([
       "In a new terminal on the daemon's host, attach directly using one of these commands:",
-      ...rows.map(row => `${row.logicalId}: env -u TMUX tmux attach -f ignore-size -t '${row.tmuxSession}'`),
+      ...rows.map(row => `${row.logicalId}: env -u TMUX tmux attach -t '${row.tmuxSession}'`),
       "Each labelled command above opens a different seat. When sharing how to join this team, include every command in full, unchanged, including env -u TMUX, paths and quoting.",
       TEAM_HANDOFF_NOTE,
       HERDR_PANES_UNCONFIRMED_NOTE,

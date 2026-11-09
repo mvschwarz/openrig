@@ -422,7 +422,7 @@ describe("queue write receipt (output.compact)", () => {
     it("a --host create to another daemon names the host and the remote read", async () => {
       const out = await createVia(["--host", "far"], row(), { status: 200, data: { selfHostId: "here" } });
       expect(out).toContain("host: far (the row lives on that daemon)");
-      expect(out).toContain("OPENRIG_URL='<daemon-url of host far>' rig queue show 'qitem-20261010180000-aaaa' --full --json");
+      expect(out).toContain("rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json");
     });
 
     it("a --host naming this daemon's own host id is local, as the daemon resolves it: no remote host, a local read", async () => {
@@ -446,7 +446,7 @@ describe("queue write receipt (output.compact)", () => {
 
     it("an unconfirmed --host offers both reads as alternatives, in the footer and in --json, for a create and a handoff's new row", async () => {
       const local = "rig queue show 'qitem-20261010180000-aaaa' --full --json";
-      const remote = "OPENRIG_URL='<daemon-url of host far>' rig queue show 'qitem-20261010180000-aaaa' --full --json";
+      const remote = "rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json";
       const out = await createVia(["--host", "far"], row(), { status: 503, data: {} });
       expect(out).toContain(`full row: ${local} if this daemon is host far, otherwise ${remote}, or add --full to the create`);
       logs = [];
@@ -458,12 +458,12 @@ describe("queue write receipt (output.compact)", () => {
       const routes = { [v.route]: { status: v.status, data: v.data }, "GET /healthz": { status: 503, data: {} } };
       logs = [];
       const plain = await run([...v.argv, "--host", "far"], routes);
-      expect(plain).toContain(`rig queue show 'qitem-20261010180000-aaaa' --full --json · rig queue show '${newId}' --full --json if this daemon is host far, otherwise OPENRIG_URL='<daemon-url of host far>' rig queue show '${newId}' --full --json, or add --full to the handoff`);
+      expect(plain).toContain(`rig queue show 'qitem-20261010180000-aaaa' --full --json · rig queue show '${newId}' --full --json if this daemon is host far, otherwise rig queue show '${newId}' --host 'far' --full --json, or add --full to the handoff`);
       logs = [];
       const hj = JSON.parse(await run([...v.argv, "--host", "far", "--json"], routes)) as Row;
       expect(hj.receipt).toMatchObject({
         fullCommands: ["rig queue show 'qitem-20261010180000-aaaa' --full --json", `rig queue show '${newId}' --full --json`],
-        createdFullCommandOnHost: `OPENRIG_URL='<daemon-url of host far>' rig queue show '${newId}' --full --json`,
+        createdFullCommandOnHost: `rig queue show '${newId}' --host 'far' --full --json`,
       });
     });
 

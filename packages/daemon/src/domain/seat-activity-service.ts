@@ -15,10 +15,71 @@ import type {
 import { COMMUNITY_HARNESS_RUNG_INVENTORY, COMMUNITY_RUNNER_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
 import { sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { hookPrecedes } from "./agent-activity-store.js";
+import type { SeatStructuralActivityService } from "./seat-structural-activity-service.js";
+import { DEFAULT_STRUCTURAL_STALE_MS } from "./seat-structural-activity-service.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
- *  1Hz polling gives at-most ~1s freshness lag on the cached observation. */
+ *  1Hz polling gives at-most ~1s freshness lag on the cached observation (a slower cadence from
+ *  daemon.seat_poll_interval_ms adds to that lag and to the idle debounce, which counts ticks). */
 export const DEFAULT_POLL_INTERVAL_MS = 1000;
+/** daemon.seat_poll_interval_ms only slows the pollers down: below the default it would cost more CPU, not less. */
+export const MIN_SEAT_POLL_INTERVAL_MS = DEFAULT_POLL_INTERVAL_MS;
+/** The ceiling of daemon.seat_poll_interval_ms (the settings store's bound too). The structural observation and the proofs read from it (the Codex
+ *  working frame, node inventory, the idle-at-prompt fallback) expire after DEFAULT_STRUCTURAL_STALE_MS (5000 ms).
+ *  The sampler can hold a working-frame proof for about two intervals before the next one replaces it, so
+ *  2 x ceiling must stay below that expiry, with the rest as margin for event-loop lag. Separately, the single-flight
+ *  guard skips a tick that lands while a sweep runs, and the working-frame proof expires 5 s after the capture that
+ *  produced it, so a slower cadence leaves less room for slow tmux, not more: at 2000 ms a structural sweep slower
+ *  than about 2 s (about 3 s at the default) can let a working Codex seat briefly read idle. */
+export const MAX_SEAT_POLL_INTERVAL_MS = 2000;
+/** The setting behind the cadence: `daemon.seat_poll_interval_ms`, mapped from OPENRIG_SEAT_POLL_INTERVAL_MS. */
+export const SEAT_POLL_INTERVAL_KEY = "daemon.seat_poll_interval_ms";
+type ReadSeatPollSetting = () => { value: unknown; source?: string };
+/** The cadence of the seat-activity and structural-activity pollers, from the typed setting
+ *  `daemon.seat_poll_interval_ms` (config.json, or OPENRIG_SEAT_POLL_INTERVAL_MS; `rig config` shows it with its
+ *  source). STARTUP-ONLY: read once when the daemon starts; changing it takes a daemon restart. Each tick both read
+ *  tmux for the running seats (the sampler in one batch when it can, the structural poller by listing the windows and
+ *  capturing panes); on a large fleet those spawned tmux clients are a large share of the daemon's CPU, and a slower
+ *  cadence trades activity freshness for that load. Unset keeps the 1 s default. The settings store validates the
+ *  value: `rig config set` refuses one outside MIN..MAX, and an env value outside it is dropped with a warning on
+ *  stderr (the default is used). A value that still reaches here outside MIN..MAX (a hand-edited config.json the store
+ *  could not check) keeps the default, with a warning. */
+export function resolveSeatPollIntervalMs(
+  read: ReadSeatPollSetting = () => new SettingsStore().resolveOne(SEAT_POLL_INTERVAL_KEY as never),
+  warn: (message: string) => void = (message) => console.warn(message),
+): number {
+  let setting: { value: unknown; source?: string };
+  try {
+    setting = read();
+  } catch (err) {
+    warn(`[seat-activity] ${SEAT_POLL_INTERVAL_KEY} could not be read (${err instanceof Error ? err.message : String(err)});`
+      + ` using ${DEFAULT_POLL_INTERVAL_MS} ms`);
+    return DEFAULT_POLL_INTERVAL_MS;
+  }
+  const ms = Number(setting.value);
+  if (!Number.isSafeInteger(ms) || ms < MIN_SEAT_POLL_INTERVAL_MS || ms > MAX_SEAT_POLL_INTERVAL_MS) {
+    warn(`[seat-activity] ${SEAT_POLL_INTERVAL_KEY}=${JSON.stringify(setting.value)} is not a whole number of milliseconds`
+      + ` in ${MIN_SEAT_POLL_INTERVAL_MS}..${MAX_SEAT_POLL_INTERVAL_MS}; using ${DEFAULT_POLL_INTERVAL_MS} ms`);
+    return DEFAULT_POLL_INTERVAL_MS;
+  }
+  return ms;
+}
+/** Starts both seat pollers on the cadence of `daemon.seat_poll_interval_ms` (read once, here) and returns it. */
+export function startSeatPollers(
+  pollers: {
+    activity?: { start(db: Database.Database, intervalMs?: number): void };
+    structural?: { start(db: Database.Database, intervalMs?: number): void };
+  },
+  db: Database.Database,
+  read?: ReadSeatPollSetting,
+  warn?: (message: string) => void,
+): number {
+  const ms = resolveSeatPollIntervalMs(read, warn);
+  pollers.activity?.start(db, ms);
+  pollers.structural?.start(db, ms);
+  return ms;
+}
 /** Allow automatic review to settle before checking the visible human prompt. */
 export const PERMISSION_REQUEST_GRACE_MS = 3_000;
 
@@ -49,6 +110,8 @@ export interface SeatActivityServiceDeps {
   permissionPromptChanged?: (sessionName: string, confirmed: boolean, runtime: string) => void;
   /** Claude pid.json, consulted for seats declaring self-report. */
   selfReportReader?: (sessionName: string, seatNodeId: string) => ActivityEvidence | null;
+  /** Existing bounded pane observations; only a fresh Codex working frame contributes activity. */
+  structuralActivity?: Pick<SeatStructuralActivityService, "getStructuralActivity">;
   /** A runner seat's last recorded hook, restored when its inventory is declared with no hook evidence yet (after a
    *  daemon restart). Null when nothing qualifies: another generation or session, or nothing recorded. */
   restoreHookEvidence?: (seat: { seatNodeId: string; sessionName: string }, runtime: string) => ActivityEvidence | null;
@@ -68,8 +131,10 @@ export class SeatActivityService {
   // seat-structural-activity-service (MUST-FIX 2). A slowed tmux can never accumulate
   // overlapping whole-fleet sweeps — at most one sweep's worth is ever in flight.
   private sweeping = false;
+  private samplingAuthorityWindowMs = SAMPLING_AUTHORITY_WINDOW_MS;
   private readonly permissionPromptReader?: SeatActivityServiceDeps["permissionPromptReader"];
   private readonly permissionPromptChanged?: SeatActivityServiceDeps["permissionPromptChanged"];
+  private readonly structuralActivity?: SeatActivityServiceDeps["structuralActivity"];
 
   private readonly selfReportReader: ((sessionName: string, seatNodeId: string) => ActivityEvidence | null) | null;
 
@@ -78,6 +143,7 @@ export class SeatActivityService {
   constructor(deps: SeatActivityServiceDeps) {
     this.permissionPromptReader = deps.permissionPromptReader;
     this.permissionPromptChanged = deps.permissionPromptChanged;
+    this.structuralActivity = deps.structuralActivity;
     this.tmux = deps.tmux;
     this.defaultWindowSeconds = deps.defaultWindowSeconds;
     this.eventBus = deps.eventBus ?? null;
@@ -119,7 +185,12 @@ export class SeatActivityService {
       }
     }
     await this.pollPermissionPrompt(paneId);
-    if (lastActivityEpochSeconds === null) return null;
+    if (lastActivityEpochSeconds === null) {
+      const seatNodeId = this.sessionToSeat.get(paneId);
+      const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+      if (seat) this.arbitrate(seat);
+      return null;
+    }
 
     const observedAt = this.now();
     const ageSeconds = observedAt.getTime() / 1000 - lastActivityEpochSeconds;
@@ -148,16 +219,32 @@ export class SeatActivityService {
     if (seatNodeId) {
       const seq = (this.samplerSeqBySession.get(paneId) ?? 0) + 1;
       this.samplerSeqBySession.set(paneId, seq);
+      const seat = this.ladder.get(seatNodeId);
+      let codexFrameWorking = false;
+      let codexFrameProofAt: string | undefined;
+      if (seat?.inventory?.runtime === "codex" && this.structuralActivity) {
+        const frame = this.structuralActivity.getStructuralActivity(paneId);
+        const capturedAt = frame ? Date.parse(frame.observedAt) : NaN;
+        const frameStarted = frame?.codexWorkingFrame ? Date.parse(frame.codexWorkingFrame.captureStartedAt) : NaN;
+        const proofAt = frame?.codexWorkingFrame ? Date.parse(frame.codexWorkingFrame.proofAt) : NaN;
+        const previousStarted = frame?.codexWorkingFrame?.previousCaptureStartedAt;
+        codexFrameWorking = frame !== null && frame?.state !== "attention" && Number.isFinite(capturedAt)
+          && Number.isFinite(frameStarted) && frameStarted >= seat.inventorySinceMs
+          && (previousStarted === undefined || Date.parse(previousStarted) >= seat.inventorySinceMs)
+          && Number.isFinite(proofAt) && proofAt <= capturedAt && proofAt <= observedAt.getTime()
+          && observedAt.getTime() - proofAt < DEFAULT_STRUCTURAL_STALE_MS && frameStarted <= proofAt;
+        if (codexFrameWorking) codexFrameProofAt = frame!.codexWorkingFrame!.proofAt;
+      }
+      const paneOverridesQuietWindow = codexFrameWorking && !isActiveWithinWindow;
       this.reportEvidence({
         seatNodeId,
         sessionName: paneId,
         rung: "window-sampling",
-        sourceId: "tmux:window-activity",
+        sourceId: paneOverridesQuietWindow ? "codex:working-frame-fallback" : "tmux:window-activity",
         seq,
-        observedAt: record.lastObservedAt,
-        activity: isActiveWithinWindow ? "working" : "idle-at-prompt",
+        observedAt: paneOverridesQuietWindow ? codexFrameProofAt! : record.lastObservedAt,
+        activity: isActiveWithinWindow || codexFrameWorking ? "working" : "idle-at-prompt",
       });
-      const seat = this.ladder.get(seatNodeId);
       if (this.selfReportReader && seat?.inventory?.rungs.some((r) => r.rung === "self-report")) {
         const evd = this.selfReportReader(paneId, seatNodeId);
         if (evd) this.reportEvidence(evd); // null = unreadable ⇒ the rung simply stales
@@ -367,6 +454,7 @@ export class SeatActivityService {
    */
   start(db: Database.Database, intervalMs: number = DEFAULT_POLL_INTERVAL_MS): void {
     if (this.timer) return;
+    this.samplingAuthorityWindowMs = Math.max(SAMPLING_AUTHORITY_WINDOW_MS, intervalMs * 3);
     this.timer = setInterval(() => {
       void this.pollAllRunningTmuxSeats(db);
     }, intervalMs);
@@ -406,6 +494,7 @@ export class SeatActivityService {
     seat.retired = false;
     this.sessionToSeat.set(binding.sessionName, binding.seatNodeId);
     seat.inventory = inventory;
+    seat.inventorySinceMs = this.now().getTime();
     seat.trust.clear();
     for (const decl of inventory.rungs) seat.trust.set(decl.rung, decl.initialTrust);
     seat.promotion.clear();
@@ -500,6 +589,7 @@ export class SeatActivityService {
       activity: "unknown",
       needsInput: { count: 0, reason: null },
       needsInputEvidence: null,
+      backgroundWork: null, // a new occupant never inherits the old one's shell
       decidedBy: null,
       seq: seat.arbitrated.seq + 1, // the swap IS a visible event
       changedAt: at,
@@ -569,6 +659,7 @@ export class SeatActivityService {
         sessionName,
         retired: false,
         inventory: null,
+        inventorySinceMs: this.now().getTime(),
         sources: new Map(),
         permissions: new Map(),
         claudeToolBatches: new Map(),
@@ -585,6 +676,7 @@ export class SeatActivityService {
           activity: "unknown",
           needsInput: { count: 0, reason: null },
           needsInputEvidence: null,
+          backgroundWork: null,
           decidedBy: null,
           seq: 0,
           changedAt: this.now().toISOString(),
@@ -668,13 +760,19 @@ export class SeatActivityService {
       if (trust !== "authoritative" && trust !== "positive-only") continue;
       const evd = this.latestByRung(seat, rung, "activity");
       if (!evd || evd.activity === undefined) continue;
+      if (rung === "window-sampling" && nowMs - Date.parse(evd.observedAt) > this.samplingAuthorityWindowMs) continue;
+      // A working frame only overrides the quiet window while its proof is fresh, even if polling stops.
+      if (rung === "window-sampling" && evd.sourceId === "codex:working-frame-fallback"
+          && nowMs - Date.parse(evd.observedAt) >= DEFAULT_STRUCTURAL_STALE_MS) return { ...evd, activity: "idle-at-prompt" };
       // A positive-only rung answers only "working"; its silence leaves the state to the rungs below, or unknown.
       if (trust === "positive-only" && evd.activity !== "working") continue;
       // A durable rung's idle or attention boundary holds; a bare working boundary still expires, then falls to the
       // rungs below, so a turn whose end was lost can't read working forever.
+      // A runner's counted working beat lasts its own livenessSeconds instead (the runner contract §4).
       if (rung === "lifecycle-hooks" && !(this.durableBoundaries(seat, rung) && (evd.activity !== "working"
           || (this.latestByRung(seat, rung)?.needsInput?.count ?? 0) > 0))
-          && nowMs - Date.parse(evd.observedAt) > HOOK_AUTHORITY_WINDOW_MS) continue;
+          && nowMs - Date.parse(evd.observedAt) > (evd.activity === "working" && evd.workingLivenessSeconds
+            ? evd.workingLivenessSeconds * 1000 : HOOK_AUTHORITY_WINDOW_MS)) continue;
       // An idle boundary whose source promised to keep reporting holds for two reports. A source that goes quiet (a runner
       // killed or out of memory) stops reading idle, but only when nothing is waiting on a person: attention holds.
       if (rung === "lifecycle-hooks" && evd.activity === "idle-at-prompt" && evd.livenessSeconds
@@ -736,7 +834,8 @@ export class SeatActivityService {
     const nowMs = this.now().getTime();
     const hookFresh = hook && hook.activity !== undefined
       && nowMs - Date.parse(hook.observedAt) <= HOOK_AUTHORITY_WINDOW_MS;
-    const contradicts = hookFresh && hook!.activity === "working"
+    const samplerFresh = sampler && nowMs - Date.parse(sampler.observedAt) <= this.samplingAuthorityWindowMs;
+    const contradicts = hookFresh && hook!.activity === "working" && samplerFresh
       && sampler?.activity === "idle-at-prompt"
       && this.rungTrust(seat, "window-sampling") === "authoritative";
     if (!contradicts) {
@@ -834,6 +933,13 @@ export class SeatActivityService {
       this.permissionPromptChanged?.(seat.sessionName, Boolean(confirmedCount), seat.inventory!.runtime);
     }
     const needsInputEvidence = permissionTracked ? seat.permissionEvidence : decider ? { rung: decider.rung, observedAt: decider.observedAt } : null;
+    // #2661 (b): the latest self-report says a background shell outlives the turn. Kept beside activity (never an
+    // ActivityValue), anchored at the first observation of this shell so a consumer's grace cannot slide, and left
+    // out of `changed`: it moves no seq, wakes no waiter and restarts no waiting grace.
+    const backgroundWork = nextActivity === "idle-at-prompt" && selfEv?.backgroundWork
+      && this.rungTrust(seat, "self-report") === "authoritative"
+      ? { rung: selfEv.rung, observedAt: seat.arbitrated.backgroundWork?.observedAt ?? selfEv.observedAt }
+      : null;
 
     // Which rung answers is part of the answer: default zero → observed zero changes what
     // consumers may conclude, so it advances seq and pushes like a count change.
@@ -846,6 +952,7 @@ export class SeatActivityService {
       activity: nextActivity,
       needsInput,
       needsInputEvidence,
+      backgroundWork,
       decidedBy,
       seq: changed ? seat.arbitrated.seq + 1 : seat.arbitrated.seq,
       changedAt: changed ? this.now().toISOString() : seat.arbitrated.changedAt,
@@ -907,6 +1014,7 @@ interface SeatLadderState {
   sessionName: string;
   retired: boolean;
   inventory: AdapterRungInventory | null;
+  inventorySinceMs: number;
   sources: Map<string, { latest: ActivityEvidence; latestActivity: ActivityEvidence | null }>;
   trust: Map<EvidenceRungId, RungTrust>;
   promotion: Map<EvidenceRungId, Map<EvidenceRoute | "untagged", PromotionRun>>;
@@ -920,6 +1028,8 @@ interface SeatLadderState {
 // requires the numbers recorded; rationale in the GREEN commit + reference doc):
 /** Hook evidence older than this no longer decides working/idle (time-bounded authority). */
 export const HOOK_AUTHORITY_WINDOW_MS = 15_000;
+/** Sampling is refreshed once per second by default; old evidence must not be an oracle forever if polling stops. */
+export const SAMPLING_AUTHORITY_WINDOW_MS = 15_000;
 /** Persistent hook-vs-sampler contradiction beyond this window degrades the hook rung. */
 export const CROSS_RUNG_CONTRADICTION_WINDOW_MS = 10_000;
 /** Sampling-decided working→idle needs this many consecutive idle evaluations… */

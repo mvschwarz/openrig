@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import {
   createRunnerInput, inOrder, MAX_PI_INPUT_BYTES, RunnerCore, mapPiEvent, parseRunnerArgs,
-  prepareRunnerSidecar,
+  prepareRunnerSidecar, startHeartbeatTimer,
   type RunnerIo,
 } from "../src/adapters/pi-runner.js";
 import { PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, buildPiRunnerCommand, buildPiChildArgs, type PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
@@ -144,10 +144,10 @@ describe("idle heartbeat", () => {
     expect(c.beats()).toHaveLength(1);
   });
 
-  // agent_start is not the only way a turn runs: turn_start, compaction and auto-retry report the agent working
-  // without setting `streaming`, and a beat in those stretches would read idle mid-turn.
+  // agent_start is not the only way a turn runs, but turn_start DOES open the streaming flag:
+  // a turn opened by turn_start alone gets beats. Compaction and auto-retry report the agent
+  // working without opening a turn, and a beat in those stretches would read idle mid-turn.
   it.each([
-    ["a turn opened by turn_start alone", { type: "turn_start" }],
     ["a compaction", { type: "compaction_start" }],
     ["an automatic retry", { type: "auto_retry_start" }],
   ])("stays quiet during %s, and resumes after agent_end", (_name, event) => {
@@ -203,6 +203,213 @@ describe("idle heartbeat", () => {
     ready(c.core);
     c.core.heartbeat();
     expect(c.beats()).toEqual([]);
+  });
+});
+
+// ── Streaming heartbeat: the runner contract's working beat (section 4), `active` / `liveness` ──
+
+describe("streaming heartbeat", () => {
+  function clocked(runtime?: "pi" | "omp") {
+    const f = fakeIo();
+    let t = Date.parse("2026-07-06T10:00:00Z");
+    f.io.now = () => new Date(t).toISOString();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, nodeId: "node-1", launchId: "launch-77" }, runtime ? { runtime } : undefined);
+    core.start();
+    const beats = () => f.activity.filter(a => a.subtype === "liveness");
+    return { core, f, beats, advance: (ms: number) => { t += ms; } };
+  }
+  const ready = (core: RunnerCore) => core.handlePiLine(JSON.stringify({
+    type: "response", id: "pi-runner-get-state", data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" } }));
+
+  // A silent inference leaves no events for the daemon; without a beat, a `running` hook older than
+  // the freshness window decays to `unknown` minutes into the turn it saw start.
+  it("re-asserts working behind a turn that runs silently, at most once per interval", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([expect.objectContaining({ sessionName: SESSION, hookEvent: "active", subtype: "liveness", runtime: "pi",
+      turnId: "1", livenessSeconds: 30 })]);
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(2);
+  });
+
+  // CodeRabbit 2336 — some turn paths omit agent_start; turn_start alone opens the turn.
+  it("keeps beating on a turn opened by turn_start alone", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "turn_start" }));
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([expect.objectContaining({ subtype: "liveness", turnId: "1" })]);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1); // closed: idle branch resumes
+  });
+
+  it("stays quiet while real events keep arriving, then spaces the beat behind the newest one", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    for (let i = 0; i < 10; i++) { c.advance(1_000); c.core.handlePiLine(JSON.stringify({ type: "tool_execution_start", toolName: "bash" })); }
+    c.core.heartbeat();
+    expect(c.beats()).toEqual([]); // the newest post (a tool call) is 1s old — well inside the interval
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1);
+  });
+
+  it("stops when agent_end closes the turn, and after the pi child exits", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.advance(20_000);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.advance(20_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.core.handlePiExit(1);
+    c.advance(20_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+  });
+
+  it("says nothing before the runner is ready", () => {
+    const c = clocked();
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.advance(20_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+  });
+
+  it("is a Pi-only behaviour", () => {
+    const c = clocked("omp");
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.advance(20_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+    expect(c.f.activity.filter(a => a.hookEvent === "UserPromptSubmit")).toEqual([]);
+  });
+
+  // A beat counts only for the latest accepted turn (contract section 4). Pi's runs start from the runner's prompts, so
+  // each run that opens posts its accepted turn first; a prompt Pi handles without a run opens none.
+  it("posts one accepted turn per run, before the run's first post, and its beats name that turn", () => {
+    const c = clocked();
+    ready(c.core);
+    const turns = () => c.f.activity.filter(a => a.hookEvent === "UserPromptSubmit");
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.core.handlePiLine(JSON.stringify({ type: "turn_start" })); // the same run's next model call opens no turn
+    expect(turns()).toEqual([expect.objectContaining({ subtype: "accepted", turnId: "1", runtime: "pi" })]);
+    const opened = c.f.activity.findIndex(a => a.hookEvent === "UserPromptSubmit");
+    expect(c.f.activity[opened + 1]).toMatchObject({ hookEvent: "active", subtype: "agent_start" });
+    c.advance(10_000); c.core.heartbeat();
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.core.handlePiLine(JSON.stringify({ type: "turn_start" })); // a run opened by turn_start alone
+    c.advance(10_000); c.core.heartbeat();
+    expect(turns().map(a => a.turnId)).toEqual(["1", "2"]);
+    expect(c.beats().map(a => a.turnId)).toEqual(["1", "2"]);
+    const sequences = c.f.activity.map(a => Number(a.sequence)).filter(Number.isFinite);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+  });
+
+  // Section 4: each prompt the runner submits is accepted with its own number. One submitted while a run is open (a
+  // steer, or a follow-up) is posted as it's sent, and the open run's agent_end ends it.
+  it("posts an accepted turn for each prompt or follow-up submitted while a run is open, and its beats name it", () => {
+    const c = clocked();
+    ready(c.core);
+    const turns = () => c.f.activity.filter(a => a.hookEvent === "UserPromptSubmit").map(a => a.turnId);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.core.handleUserBlock("look at b.txt too");
+    expect(turns()).toEqual(["1", "2"]);
+    c.advance(10_000); c.core.heartbeat();
+    c.core.handleUserBlock("/followup then c.txt");
+    c.core.handleUserBlock("/abort");
+    expect(turns()).toEqual(["1", "2", "3"]);
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats().map(a => a.turnId)).toEqual(["2", "3"]);
+    const sequences = c.f.activity.map(a => Number(a.sequence)).filter(Number.isFinite);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+  });
+
+  it("opens no turn for a prompt Pi handles without a run, so the idle beat goes on", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" })); // idle, with a Stop posted
+    c.core.handleUserBlock("/model some-model");
+    c.advance(180_000); c.core.heartbeat();
+    expect(c.f.activity.filter(a => a.hookEvent === "UserPromptSubmit")).toEqual([]);
+    expect(c.f.activity.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "idle_heartbeat" });
+  });
+});
+
+// ── The real heartbeat scheduler (CodeRabbit 2336: the first cut's tests called
+// heartbeat() by hand and never drove the interval, hiding that a 15s tick landed the
+// streaming beat at the edge of HOOK_AUTHORITY_WINDOW_MS). Fake timers run the actual
+// startHeartbeatTimer wiring, and io.now follows the faked clock so age checks are real.
+
+describe("heartbeat scheduler cadence", () => {
+  function scheduledCore() {
+    vi.useFakeTimers({ now: Date.parse("2026-07-06T10:00:00Z") });
+    const f = fakeIo();
+    f.io.now = () => new Date().toISOString();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, nodeId: "node-1", launchId: "launch-77" });
+    core.start();
+    core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    const timer = startHeartbeatTimer(core, "pi");
+    const beats = () => f.activity.filter(a => a.subtype === "liveness");
+    return { f, core, timer, beats, advance: (ms: number) => vi.advanceTimersByTime(ms) };
+  }
+  const after = (c: ReturnType<typeof scheduledCore>) => { c.timer.stop(); vi.useRealTimers(); };
+
+  it("lands the first streaming beat 5–10s after the turn opens, then every ~5s — inside the 15s authority window", () => {
+    const c = scheduledCore();
+    try {
+      c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+      c.advance(4_000);
+      expect(c.beats()).toEqual([]); // too young
+      c.advance(1_000); // t+5s: the tick fires, the age gate passes
+      expect(c.beats()).toHaveLength(1);
+      c.advance(5_000); // t+10s
+      expect(c.beats()).toHaveLength(2);
+      c.advance(5_000); // t+15s: still inside the authority window per beat
+      expect(c.beats()).toHaveLength(3);
+    } finally { after(c); }
+  });
+
+  it("spaces the beat behind the newest real event, not just behind the turn", () => {
+    const c = scheduledCore();
+    try {
+      c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+      c.advance(5_000);
+      expect(c.beats()).toHaveLength(1); // 5s after agent_start
+      c.core.handlePiLine(JSON.stringify({ type: "tool_execution_start", toolName: "bash" }));
+      c.advance(4_000);
+      expect(c.beats()).toHaveLength(1); // tool event only 4s old — age gate holds the beat
+      c.advance(1_000); // 5s after the tool event
+      expect(c.beats()).toHaveLength(2);
+    } finally { after(c); }
+  });
+
+  it("the idle beat still keeps its 3-minute interval under the 5s tick", () => {
+    const c = scheduledCore();
+    try {
+      const idles = () => c.f.activity.filter(a => a.subtype === "idle_heartbeat");
+      c.advance(3 * 60_000);
+      const first = idles().length; // 1: the very first tick posts (nothing older than the gate yet)
+      expect(first).toBe(1);
+      c.advance(4_000); // total 184s since open: 179s since the first beat — the age gate holds
+      expect(idles()).toHaveLength(first);
+      c.advance(1_000); // total 185s = 180s after the first beat
+      expect(idles()).toHaveLength(first + 1);
+    } finally { after(c); }
+  });
+
+  it("a non-pi runtime starts no timer", () => {
+    const f = fakeIo();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, nodeId: "node-1", launchId: "launch-77" }, { runtime: "omp" });
+    core.start();
+    const timer = startHeartbeatTimer(core, "omp");
+    timer.stop(); // noop, and nothing threw
+    expect(true).toBe(true);
   });
 });
 
@@ -507,6 +714,14 @@ describe("mapPiEvent", () => {
     });
   });
 
+  // Some turn paths omit agent_start; turn_start alone opens the turn, so it must open the
+  // streaming flag too — the beat's only in-flight signal — or that path still goes blind.
+  it("turn_start opens streaming for pi", () => {
+    expect(mapPiEvent({ type: "turn_start" })).toMatchObject({
+      streaming: true, activity: { hookEvent: "active", subtype: "turn_start" },
+    });
+  });
+
   it("pre-0.84 message_update appends only the delta, never the cumulative message", () => {
     const partial = { ...PI_REPLY, content: [{ type: "text", text: "Hello from the" }], stopReason: "pending" };
     const legacy = mapPiEvent({
@@ -528,6 +743,22 @@ describe("mapPiEvent", () => {
   it("compaction and retry map to their honest states", () => {
     expect(mapPiEvent({ type: "compaction_start" }).activity).toEqual({ hookEvent: "active", subtype: "compaction" });
     expect(mapPiEvent({ type: "auto_retry_start" }).activity).toEqual({ hookEvent: "active", subtype: "auto_retry" });
+  });
+
+  // Pi's compaction_end (its docs/rpc.md): `aborted` when it was cancelled, otherwise `errorMessage` when it failed and no
+  // summary was written (#2521). The JSON line carries no `result` then.
+  it("reports a compaction's end the way Pi does: cancelled, failed with Pi's reason, or done", () => {
+    const done = { type: "compaction_end", reason: "threshold", result: { summary: "s", firstKeptEntryId: "e1", tokensBefore: 150000 }, aborted: false, willRetry: false };
+    const failed = { type: "compaction_end", reason: "threshold", aborted: false, willRetry: false,
+      errorMessage: "Auto-compaction failed: Summarization failed: generation hit the token cap and the summary is incomplete" };
+    const cancelled = { type: "compaction_end", reason: "manual", aborted: true, willRetry: false };
+    expect(mapPiEvent(done).mirrorLines).toEqual(["[pi] compaction done"]);
+    expect(mapPiEvent(failed).mirrorLines).toEqual(["[pi] compaction failed: Auto-compaction failed: Summarization failed: generation hit the token cap and the summary is incomplete"]);
+    expect(mapPiEvent(cancelled).mirrorLines).toEqual(["[pi] compaction cancelled"]);
+    expect(mapPiEvent({ ...failed, errorMessage: "Compaction failed: \u001b[31mquota\u001b[0m\nexceeded" }).mirrorLines)
+      .toEqual(["[pi] compaction failed: Compaction failed: quota exceeded"]);
+    // An end that names neither a cancel nor a failure keeps reading done, as before.
+    expect(mapPiEvent({ type: "compaction_end" }, "omp").mirrorLines).toEqual(["[omp] compaction done"]);
   });
 
   it("leaves auto_compaction_* unmapped for Pi so an idle seat never reads as running", () => {
@@ -815,6 +1046,46 @@ describe("parseRunnerArgs", () => {
     const parsed = parseRunnerArgs([...base, "--runtime", "omp", "--approval-mode", "yolo", "--model", "--approve"]);
     expect(parsed.model).toBe("--approve");
     expect(parsed.trust).toBe("approve");
+  });
+
+  it("parses repeated --launch-wrapper-arg tokens with literal spaces, quotes, leading --, and empty strings", () => {
+    const wrapper = ["/abs/bin/wrapper", "space arg", "quote's", "$UNEXPANDED", "--", "--approve", "--runtime", ""];
+    const argv = [...base, "--no-approve", ...wrapper.flatMap((arg) => ["--launch-wrapper-arg", arg])];
+    const parsed = parseRunnerArgs(argv);
+    expect(parsed.launchWrapper).toEqual(wrapper);
+    expect(parsed.trust).toBe("no-approve");
+  });
+
+  it.each([
+    ["dangling flag without value", [...base, "--no-approve", "--launch-wrapper-arg"], /--launch-wrapper-arg requires a value/],
+    ["OMP runtime with wrapper", [...base, "--runtime", "omp", "--approval-mode", "yolo", "--launch-wrapper-arg", "/bin/sh"], /only supported for the Pi runtime/],
+    ["relative bare wrapper[0]", [...base, "--no-approve", "--launch-wrapper-arg", "bare-wrapper"], /absolute/],
+    ["relative dot wrapper[0]", [...base, "--no-approve", "--launch-wrapper-arg", "./wrapper"], /absolute/],
+    ["empty wrapper[0]", [...base, "--no-approve", "--launch-wrapper-arg", ""], /non-empty/],
+    ["whitespace wrapper[0]", [...base, "--no-approve", "--launch-wrapper-arg", "   "], /non-empty/],
+    ["NUL in wrapper arg", [...base, "--no-approve", "--launch-wrapper-arg", "/bin/sh", "--launch-wrapper-arg", "bad\0arg"], /NUL, CR, or LF/],
+    ["LF in wrapper arg", [...base, "--no-approve", "--launch-wrapper-arg", "/bin/sh", "--launch-wrapper-arg", "bad\narg"], /NUL, CR, or LF/],
+  ])("rejects malformed --launch-wrapper-arg (%s)", (_label, argv, pattern) => {
+    expect(() => parseRunnerArgs(argv)).toThrow(pattern);
+  });
+});
+
+describe("buildPiRunnerCommand launchWrapper", () => {
+  const cmdBase = { runnerEntryPath: "/r.js", sessionName: SESSION, stateRoot: "/sr", cwd: "/work", trust: "no-approve" as const, launchId: "L1" };
+
+  it("keeps unconfigured and empty launchWrapper byte-identical and serializes repeated --launch-wrapper-arg tokens for Pi only", () => {
+    const baseline = buildPiRunnerCommand(cmdBase);
+    expect(buildPiRunnerCommand({ ...cmdBase, launchWrapper: [] })).toBe(baseline);
+    expect(baseline).not.toContain("--launch-wrapper-arg");
+
+    const wrapper = ["/abs/wrapper", "space arg", "quote's", "--", "--flag", ""];
+    const wrappedCmd = buildPiRunnerCommand({ ...cmdBase, launchWrapper: wrapper });
+    expect(wrappedCmd).toBe(
+      `${baseline} --launch-wrapper-arg '/abs/wrapper' --launch-wrapper-arg 'space arg' --launch-wrapper-arg 'quote'"'"'s' --launch-wrapper-arg '--' --launch-wrapper-arg '--flag' --launch-wrapper-arg ''`,
+    );
+
+    const ompBaseline = buildPiRunnerCommand({ ...cmdBase, runtime: "omp" });
+    expect(buildPiRunnerCommand({ ...cmdBase, runtime: "omp", launchWrapper: wrapper })).toBe(ompBaseline);
   });
 });
 

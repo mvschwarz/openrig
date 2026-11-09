@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { execFileSync, spawn } from "node:child_process";
 import http from "node:http";
 import { Command } from "commander";
-import { writeTextAtomically } from "../src/atomic-text-write.js";
+import { writeNewText, writeTextAtomically } from "../src/atomic-text-write.js";
 import { exportCommand } from "../src/commands/export.js";
 import { STATE_FILE } from "../src/daemon-lifecycle.js";
 import { allowFetchTarget, resetFetchAllowlist } from "./fetch-guard.js";
@@ -34,6 +34,23 @@ it("preserves an existing export and removes staging after a partial failed writ
   expect(() => writeTextAtomically(target, "name: replacement\n", "export")).toThrow(/no space left/);
   expect(fs.readFileSync(target, "utf8")).toBe("name: original\n");
   expect(fs.readdirSync(dir)).toEqual(["rig.yaml"]);
+});
+it("writeNewText creates a file but never replaces one, even a dangling link", () => {
+  dir = fs.mkdtempSync(join(tmpdir(), "export-atomic-"));
+  const target = join(dir, "rig.yaml"), link = join(dir, "link.yaml");
+  writeNewText(target, "name: first\n");
+  expect(fs.readFileSync(target, "utf8")).toBe("name: first\n");
+  expect(() => writeNewText(target, "name: second\n")).toThrow(expect.objectContaining({ code: "EEXIST" }));
+  expect(fs.readFileSync(target, "utf8")).toBe("name: first\n");
+  fs.symlinkSync(join(dir, "missing.yaml"), link);
+  expect(() => writeNewText(link, "name: second\n")).toThrow(expect.objectContaining({ code: "EEXIST" }));
+  expect(fs.existsSync(join(dir, "missing.yaml"))).toBe(false);
+});
+it("writeNewText leaves nothing behind after a failed write", () => {
+  dir = fs.mkdtempSync(join(tmpdir(), "export-atomic-"));
+  failure.active = true;
+  expect(() => writeNewText(join(dir, "rig.yaml"), "name: new\n")).toThrow(/no space left/);
+  expect(fs.readdirSync(dir)).toEqual([]);
 });
 it("retains export symlinks and target permissions on successful replacement", () => {
   dir = fs.mkdtempSync(join(tmpdir(), "export-atomic-"));

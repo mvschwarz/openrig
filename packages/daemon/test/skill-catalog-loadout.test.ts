@@ -1,7 +1,8 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { reconcileSkillLoadout, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "../src/domain/skill-catalog.js";
 
@@ -39,6 +40,145 @@ function commit(root: string): string {
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+type GitRead = "root" | "status" | "head" | "show";
+type GitFixtureMode = "normal" | "missing" | "error" | "hang";
+
+function treeBytes(root: string): unknown[] {
+  return readdirSync(root).sort().map((name) => {
+    const path = join(root, name), stat = lstatSync(path);
+    return [name, stat.mode, stat.isDirectory() ? treeBytes(path) : readFileSync(path).toString("base64")];
+  });
+}
+
+/** Runs the real catalog resolver behind a separate supervisor: an unbounded sync Git cannot hang Vitest. */
+async function catalogWithSupervisedGit(f: ReturnType<typeof fixture>, mode: GitFixtureMode, site: GitRead) {
+  const bin = join(f.root, "fake-bin");
+  mkdirSync(bin);
+  const callsPath = join(f.root, "git-calls.jsonl");
+  const pendingPath = join(f.root, "pending-git.json");
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8", timeout: 5000 }).trim();
+  const fakeGit = join(bin, "git");
+  if (mode !== "missing") {
+    writeFileSync(fakeGit, `#!${process.execPath}
+import { appendFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+const site = args.includes("--show-toplevel") ? "root" : args.includes("status") ? "status"
+  : args.includes("HEAD") ? "head" : args.includes("show") ? "show" : "other";
+const record = { site, args, pid: process.pid, parentPid: process.ppid };
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(record) + "\\n");
+if (site === ${JSON.stringify(site)} && ${JSON.stringify(mode)} === "hang") {
+  writeFileSync(${JSON.stringify(pendingPath)}, JSON.stringify(record));
+  process.on("SIGTERM", () => process.exit(73));
+  setInterval(() => {}, 1000);
+} else if (site === ${JSON.stringify(site)} && ${JSON.stringify(mode)} === "error") {
+  process.stderr.write("fixture git refused " + site + "\\n");
+  process.exit(73);
+} else {
+  const result = spawnSync(${JSON.stringify(realGit)}, args, { encoding: "utf8", timeout: 5000 });
+  process.stdout.write(result.stdout ?? "");
+  process.stderr.write(result.stderr ?? "");
+  process.exit(result.status ?? 74);
+}
+`);
+    chmodSync(fakeGit, 0o700);
+  }
+  const worker = join(f.root, "catalog-worker.mjs");
+  const catalogModule = fileURLToPath(new URL("../dist/domain/skill-catalog.js", import.meta.url));
+  // The normal package tests import source; this supervised subprocess needs the same checkout's daemon build.
+  expect(existsSync(catalogModule), "build this worktree's daemon before running the supervised catalog cases").toBe(true);
+  writeFileSync(worker, `import { resolveSkillLoadout } from ${JSON.stringify(pathToFileURL(catalogModule).href)};
+console.log(JSON.stringify(resolveSkillLoadout({ catalogRoot: ${JSON.stringify(f.catalog)}, projectSkills: ["known", "committed-name"] })));
+`);
+  const env: NodeJS.ProcessEnv = {
+    PATH: bin, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, XDG_STATE_HOME: process.env.XDG_STATE_HOME,
+    XDG_DATA_HOME: process.env.XDG_DATA_HOME, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
+    GIT_CONFIG_NOSYSTEM: "1", LANG: "C", NO_COLOR: "1",
+  };
+  const child = spawn(process.execPath, [worker], { env, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "", stderr = "", supervisorExpired = false, cleanupError: string | null = null;
+  child.stdout.on("data", (bytes: Buffer) => { stdout += bytes; });
+  child.stderr.on("data", (bytes: Buffer) => { stderr += bytes; });
+  let emergency: ReturnType<typeof setTimeout> | undefined;
+  const supervisor = setTimeout(() => {
+    supervisorExpired = true;
+    try {
+      const pending = JSON.parse(readFileSync(pendingPath, "utf8")) as { pid: number; parentPid: number; site: string };
+      if (pending.parentPid !== child.pid || pending.site !== site || !Number.isInteger(pending.pid) || pending.pid <= 1) {
+        throw new Error("owned Git child identity did not match the supervised resolver");
+      }
+      // Only the direct fixture child recorded by our fake Git is signalled; its sync parent reaps it normally.
+      process.kill(pending.pid, "SIGTERM");
+    } catch (error) {
+      cleanupError = String(error);
+    }
+    emergency = setTimeout(() => { child.kill("SIGKILL"); }, 5000);
+  }, 15000);
+  let exit: { code: number | null; signal: NodeJS.Signals | null };
+  try {
+    exit = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+  } finally {
+    clearTimeout(supervisor);
+    if (emergency) clearTimeout(emergency);
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+  const calls = existsSync(callsPath)
+    ? readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { site: string; pid: number })
+    : [];
+  const childrenGone = calls.every(({ pid }) => {
+    try { process.kill(pid, 0); return false; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  });
+  return { ...exit, stdout, stderr, supervisorExpired, cleanupError, childrenGone, calls,
+    result: stdout.trim() ? JSON.parse(stdout) as ReturnType<typeof resolveSkillLoadout> : null };
+}
+
+describe.skipIf(process.platform === "win32")("catalog Git read deadlines with owned local processes", () => {
+  it.each([
+    ["normal", "show"], ["missing", "root"],
+    ...(["root", "status", "head", "show"] as const).map((site) => ["error", site] as const),
+    ...(["root", "status", "head", "show"] as const).map((site) => ["hang", site] as const),
+  ] as ReadonlyArray<readonly [GitFixtureMode, GitRead]>)("%s Git at %s finishes before external cleanup and keeps catalog/target state", async (mode, site) => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "known");
+    writeSkill(f.catalog, "folder-alias", "committed-name");
+    const userFile = join(f.project, "operator-note");
+    writeFileSync(userFile, "keep this exact user content\n", { mode: 0o640 });
+    const revision = commit(f.root);
+    writeSkill(f.catalog, "folder-alias", "working-name", "# uncommitted rename\n");
+    const beforeCatalog = treeBytes(f.catalog), beforeTarget = treeBytes(f.project);
+    const beforeStatus = git(f.root, "status", "--porcelain=v1", "--", "skills");
+    const observed = await catalogWithSupervisedGit(f, mode, site);
+    expect(observed.cleanupError).toBeNull();
+    expect(observed.childrenGone, "the fixture Git children must be reaped before deleting scratch").toBe(true);
+    expect(treeBytes(f.catalog)).toEqual(beforeCatalog);
+    expect(treeBytes(f.project)).toEqual(beforeTarget);
+    expect(git(f.root, "status", "--porcelain=v1", "--", "skills")).toBe(beforeStatus);
+    expect(git(f.root, "rev-parse", "HEAD")).toBe(revision);
+    console.info("ISSUE161_GIT_READ", { mode, site, ...observed });
+    // This is a completion/failure contract, not a wall-clock performance assertion or an option-value check.
+    expect(observed.supervisorExpired, "catalog Git must end on its own deadline, before the outside supervisor cleans it up").toBe(false);
+    expect(observed).toMatchObject({ code: 0, signal: null });
+    expect(observed.stderr).toBe(mode === "error" && site !== "show" ? `fixture git refused ${site}\n` : "");
+    if (mode !== "missing") expect(observed.calls.some((call) => call.site === site)).toBe(true);
+    if (mode === "normal") {
+      expect(observed.result).toMatchObject({ ok: true, loadout: { catalogRevision: revision,
+        entries: [{ id: "known" }], skipped: [expect.objectContaining({ id: "committed-name", selectedBy: ["project"] })] } });
+    } else if (site === "show") {
+      // An unreadable committed name stays unknown, rather than pretending the selected old name is clean.
+      expect(observed.result).toMatchObject({ ok: false, errors: [{ code: "selected_skill_missing" }] });
+    } else {
+      expect(observed.result).toMatchObject({ ok: false, errors: [{ code: "catalog_unavailable" }] });
+      if (site === "root") expect(observed.result).toMatchObject({ errors: [expect.objectContaining({ message: expect.stringContaining("not inside a readable Git repository") })] });
+      if (mode === "error" && site !== "root") expect(observed.result).toMatchObject({ errors: [expect.objectContaining({ message: expect.stringContaining(`fixture git refused ${site}`) })] });
+    }
+  }, 30000);
 });
 
 describe("managed skill catalog and composable loadouts", () => {

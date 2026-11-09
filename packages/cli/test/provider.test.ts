@@ -90,6 +90,15 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
     expect(seen.length).toBe(before);
   });
 
+  it.each([false, true])("preflights and submits a Pi account change (clear=%s)", async clear => {
+    const before = seen.length;
+    const result = await run(["switch", "--seat", "pi-seat@rig", ...(clear ? ["--clear-account-home"] : ["--to-account", "work", "--account-home", "/accounts/pi"]), "--reason", "Pi budget", "--json"], runningDeps(port));
+    expect(result.exitCode ?? 0).toBe(0);
+    const calls = seen.slice(before);
+    expect(JSON.parse(calls.find(c => c.url.startsWith("/api/seat/set-runtime/"))!.body)).toMatchObject({ runtime: "pi", dryRun: true });
+    expect(JSON.parse(calls.find(c => c.url === "/api/provider/switch")!.body)).toMatchObject(clear ? { clearAccountHome: true } : { accountHome: "/accounts/pi" });
+  });
+
   it("switches to a selected account home without sending credential values", async () => {
     const result = await run(["switch", "--seat", "dev-a@rig", "--to-account", "api-account", "--account-home", "/accounts/api",
       "--reason", "Plan limit", "--model", "gpt-5.5", "--json"], runningDeps(port));
@@ -195,7 +204,7 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
       seen.push({ url: req.url ?? "", method: req.method ?? "", body });
       const send = (code: number, obj: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
       const path = (req.url ?? "").split("?")[0];
-      if (path?.startsWith("/api/seat/status/")) return send(200, { runtime: "codex" });
+      if (path?.startsWith("/api/seat/status/")) return send(200, { runtime: path.includes("pi-seat") ? "pi" : "codex" });
       if (path?.startsWith("/api/seat/set-runtime/")) {
         const request = JSON.parse(body);
         if (path.includes("old-daemon")) return send(200, { ok: true, dryRun: true });
@@ -391,5 +400,12 @@ describe("rig provider switch --seat tells the person what follows", () => {
     expect(after.exitCode).toBe(1);
     expect(after.logs).toContain("recovery: rig launch rig dev.a --snapshot-id snap-1");
     expect(after.logs).toContain("If the pane shows no running Claude, stop the seat first.");
+  });
+
+  it("a Claude seat's switch prints which effort its relaunch used, and why", async () => {
+    const effort = "kept the running effort high: the seat has no effort choice of its own.";
+    const kept = switchDeps(async () => ({ status: 200, data: { outcome: "rebind_in_progress", message: "Relaunched dev-a@rig in its own pane.",
+      seat: { account: "work", tokenFile: "/tokens/work", conversation: "conv-1", loginChanged: true, tokenApplied: true, effort, undo: null, peers: [] } } }));
+    expect((await run(["switch", "--seat", "dev-a@rig", "--to-account", "work", "--token-file", "/tokens/work"], kept)).logs).toContain(`effort: ${effort}`);
   });
 });

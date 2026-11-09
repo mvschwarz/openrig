@@ -30,7 +30,7 @@ function makeApp(opts: { withDeps: boolean; rows?: Array<{ qitemId: string; stat
   app.use("*", async (c, next) => {
     if (opts.withDeps) {
       c.set("seatActivityService" as never, svc as never);
-      c.set("queueRepo" as never, { list: () => opts.rows ?? [] } as never);
+      c.set("queueRepo" as never, { listOpenObligations: () => opts.rows ?? [] } as never);
       c.set("rigRepo" as never, { db: { prepare: (sql: string) => ({
         get: () => ({ id: "rig-1", name: "v-openrig-build" }),
         all: () => (sql.includes("SELECT name FROM rigs") ? [] : [{ node_id: SEAT, session_name: SESSION }]),

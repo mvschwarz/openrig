@@ -1,0 +1,39 @@
+{
+  "name": "openrig",
+  "version": "0.1.0",
+  "description": "Work with your OpenRig team from your coding agent: hand it work, follow that work, answer its questions and read what it returns.",
+  "author": {
+    "name": "Mike Schwarz",
+    "url": "https://github.com/mvschwarz"
+  },
+  "homepage": "https://github.com/mvschwarz/openrig",
+  "repository": "github:mvschwarz/openrig",
+  "license": "Apache-2.0",
+  "keywords": [
+    "openrig",
+    "agents",
+    "team",
+    "delegation",
+    "mcp"
+  ],
+  "skills": "./skills",
+  "interface": {
+    "displayName": "OpenRig",
+    "shortDescription": "Work with your OpenRig team",
+    "longDescription": "Hand your OpenRig team work from this agent, follow it, answer the team's questions and read what it returns, through OpenRig's MCP server. Tools and guidance only: it adds no panel, and nothing wakes a chat when the team finishes.",
+    "developerName": "Mike Schwarz",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/mvschwarz/openrig",
+    "defaultPrompt": [
+      "Ask my OpenRig team to look into the failing tests and tell me what they find.",
+      "How is the work I gave my OpenRig team going?",
+      "Does my OpenRig team have any questions waiting for me?"
+    ],
+    "logo": "./assets/logo.svg",
+    "composerIcon": "./assets/logo.svg"
+  }
+}

@@ -529,6 +529,21 @@ files:
 
   const R4_MANIFEST = "name: url-pack\nversion: 1.0.0\ntaxonomy: world\nfiles:\n  - path: SKILL.md\n    role: instruction\n";
 
+  it("add <url>: creates a missing namespace for a path-like install name", async () => {
+    const pack = await startPackServer({ "manifest.yaml": R4_MANIFEST, "SKILL.md": "# nested\n" });
+    try {
+      await withContextRoot(async (root) => {
+        const { exitCode } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}manifest.yaml`, "--name", "packs/example"]);
+        });
+        expect(exitCode).toBeUndefined();
+        expect(readFileSync(join(root, "packs", "example", "SKILL.md"), "utf-8")).toBe("# nested\n");
+      });
+    } finally {
+      pack.close();
+    }
+  });
+
   it("add <url>: installs into the OPENRIG_CONTEXT_ROOT landing zone (config-resolved, no hardcoded path)", async () => {
     const pack = await startPackServer({ "manifest.yaml": R4_MANIFEST, "SKILL.md": "# hello\nbody\n" });
     try {

@@ -86,7 +86,13 @@ mkdir -p "$CLI_DIR/daemon/dist"
 cp -r "$DAEMON_DIR/dist/"* "$CLI_DIR/daemon/dist/"
 
 if [ -d "$DAEMON_DIR/assets" ]; then
-  cp -r "$DAEMON_DIR/assets" "$CLI_DIR/daemon/assets"
+  node --input-type=module -e '
+    import { cp } from "node:fs/promises";
+    await cp(process.argv[1], process.argv[2], {
+      recursive: true,
+      verbatimSymlinks: true,
+    });
+  ' "$DAEMON_DIR/assets" "$CLI_DIR/daemon/assets"
   SUBSTANCE_SURFACE_ROOTS+=("daemon/assets")
 fi
 
@@ -166,4 +172,4 @@ echo "Daemon docs:     $(find "$CLI_DIR/daemon/docs" -type f 2>/dev/null | wc -l
 echo "UI dist:         $(find "$CLI_DIR/ui/dist" -type f | wc -l | tr -d ' ') files"
 echo "TUI dist:        $(find "$CLI_DIR/tui/dist" -type f | wc -l | tr -d ' ') files"
 echo ""
-echo "Ready to publish: cd packages/cli && npm publish --access public"
+echo "Next: npm run pack:release -- <directory> packs the CLI and the ACP launcher at one version, with their hashes."

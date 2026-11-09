@@ -52,6 +52,15 @@ const ALL_FRESH_PLAN = {
 describe("RigStatusCard — consumes the backend verdict in the render (19/21 lesson)", () => {
   afterEach(cleanup);
 
+  it.each([true, false])("uses a theme surface for kernel=%s without changing the light surface", (isKernel) => {
+    renderWithClient(<RigStatusCard rigId="theme" rigName={isKernel ? "kernel" : "project"}
+      isKernel={isKernel} status="untracked" seatsRunning={0} seatsTotal={0}
+      recoverable={false} src={["boot skipped"]} primaryLabel="Restore" />);
+    const card = screen.getByTestId("rig-status-card-theme");
+    expect(card.className).toContain("bg-surface-lowest");
+    expect(card.className).toContain("dark:border-outline");
+  });
+
   it("renders a non-green verdict for a blocked rig (does not default to green)", () => {
     renderWithClient(
       <RigStatusCard

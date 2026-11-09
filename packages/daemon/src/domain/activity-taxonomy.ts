@@ -132,7 +132,13 @@ export interface ActivityEvidence {
   /** How often the source promises to report while idle. A durable idle boundary holds for two of these, then lapses to
    *  unknown: a runner that died without saying so stops reading idle. Absent: the boundary holds until the next. */
   livenessSeconds?: number;
+  /** A counted working beat from a runner (the runner contract §4): how long it counts as working, 5-60 s, in place of
+   *  the hook window a bare working post has. */
+  workingLivenessSeconds?: number;
   activity?: ActivityValue;
+  /** The turn is over but a background shell lives (Claude Code's self-report status `shell`). Orthogonal to
+   *  `activity`, never an ActivityValue: the seat still reads idle-at-prompt. */
+  backgroundWork?: boolean;
   needsInput?: NeedsInput;
   permissionRequest?: { id: string; hookAgentId?: string | null };
   permissionResolved?: boolean;
@@ -165,6 +171,9 @@ export interface ArbitratedSeatState {
    *  was observed. Null when no rung answered and `needsInput` is only the default zero — a
    *  declared rung that never reported is not an observation that the seat is clear. */
   needsInputEvidence: { rung: EvidenceRungId; observedAt: string } | null;
+  /** A background shell outlives the turn (self-report `shell`) while `activity` is idle-at-prompt: the rung and
+   *  when the shell was first seen (the anchor of any grace a consumer gives it). Null or absent otherwise. */
+  backgroundWork?: { rung: EvidenceRungId; observedAt: string } | null;
   /** Which rung decided `activity` — confidence made visible. */
   decidedBy: EvidenceRungId | null;
   /** Monotonic arbitrated-state sequence (wait-after-seq consumes it). */

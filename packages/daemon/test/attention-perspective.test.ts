@@ -142,6 +142,16 @@ describe("the Feed shows one person's queue, or everyone's, and acts with the pr
     expect(await updates("&view=ana")).toEqual([]);
   });
 
+  it("open updates follow the same view without requiring delivery", async () => {
+    register("mike", "sarah");
+    for (const person of ["mike", "sarah"]) {
+      db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,priority,body,summary,human_intent) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .run(`${person}-open`, "2026-10-25T10:00:00Z", "2026-10-25T10:00:00Z", "worker@rig", `${person}@external`, "pending", "routine", "Update", `${person}'s update`, "update");
+    }
+    const result = await get("/api/queue/open-human-updates?view=sarah") as { items: Array<{ qitemId: string }> };
+    expect(result.items.map(i => i.qitemId)).toEqual(["sarah-open"]);
+  });
+
   it("with no registered person there is no perspective, and the Feed is as before", async () => {
     await askTo("human@host", "A seat's ask");
     const r = await read("?view=default");

@@ -56,6 +56,8 @@ describe("#822: replies answer only the current posted question", () => {
       inboundMaxConnects: 1,
       fetchImpl: async (url, init) => {
         if (url.endsWith("apps.connections.open")) return reply({ ok: true, url: "wss://fake-slack/ws" });
+        // This reply-routing fixture keeps post requests, not original Slack blocks. Settlement reads are unavailable.
+        if (url.includes("conversations.history") || url.includes("conversations.replies")) return reply({ ok: true, messages: [] });
         const post = JSON.parse(String(init?.body));
         posts.push(post);
         const overridden = await postHook?.(post);

@@ -461,6 +461,23 @@ in the current update window. Current-update coverage is independent of the
 receipt window, so an unavailable current reader cannot retain closed delivery
 history beyond a successful history read. Both reads leave queue state intact.
 
+Clients that need only current FYIs can use `GET /api/queue/open-human-updates`.
+It returns `{items, limit, truncated}` with open human-addressed updates, ordered
+critical then urgent then routine, without requiring a delivery receipt. `limit`
+defaults to 20 and accepts integers from 1 to 100. Optional `view` follows the
+same person perspective as `/api/attention`; a perspective read scans at most
+1000 rows and signals `truncated` when the window may omit matching items.
+
+A finished item's result file is its `evidenceRef`, read through the daemon's
+shared roots with `rig_artifact_read` (MCP) or `rig queue artifact <qitemId>
+--json` (CLI). For a code result, the assignee writes a JSON file of kind
+`openrig.code-result/v1`, with `repo` (an absolute path or a URL), `base` and
+`revision` (full commit ids, SHA-1 or SHA-256), and optionally `paths`, `branch`
+and `fetch: {remote, ref}`. Both reads then add `codeResult`, the exact pair a
+client can diff. A manifest whose base or revision isn't a full commit id gets
+`codeResultIssue` instead. `branch` and `fetch` are hints for finding the commits,
+never the revision. Other files read as before.
+
 - `/api/stream` (`server.ts:783`) — `POST /emit` (`routes/stream.ts:56`),
   `GET /list` (`:91`, including `sourceSession`, `hintDestination`, `hintTag`,
   `since`, `until` and `direction` filters), `GET /watch` + `/sse` SSE

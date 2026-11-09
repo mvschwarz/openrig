@@ -24,7 +24,7 @@ describe("S06 installed presentation contracts", () => {
     const line = lines.find(l => l.includes("application unverified"))!;
     expect(line).toBeTruthy();
     expect(line).not.toContain("38;2;152;195;121");
-    expect(line).toContain("38;2;232;234;240");
+    expect(line).toContain("\x1b[39m");
   });
   it.each([[140, 42], [80, 24]])("keeps every selected Help command and its registry example visible at %ix%i", (cols, rows) => {
     const snap = emptySnapshot();

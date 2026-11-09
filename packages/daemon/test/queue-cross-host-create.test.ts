@@ -15,6 +15,8 @@ import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
@@ -51,8 +53,9 @@ function makeApp(opts: {
   bus: EventBus;
   fetchImpl?: typeof fetch;
   registry?: HostRegistry;
+  repo?: QueueRepository;
 }): Hono {
-  const queueRepo = new QueueRepository(opts.db, opts.bus, { validateRig: () => true });
+  const queueRepo = opts.repo ?? new QueueRepository(opts.db, opts.bus, { validateRig: () => true });
   const app = new Hono();
   app.use("*", async (c, next) => {
     const set = c.set.bind(c) as (k: string, v: unknown) => void;
@@ -152,6 +155,45 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
   // stamp the RECEIVER's host onto a bare member@rig — sender-identity FORGERY on
   // exactly the cross-host path this slice exists to make honest (replies would
   // route to the wrong host). The not-bare guard then protects it at the remote.
+  it("a forwarded human create reaches the receiver with an origin-qualified queue reply hint", async () => {
+    const receiverDb = createDb(); migrate(receiverDb, ALL_MIGRATIONS);
+    const receiverBus = new EventBus(receiverDb);
+    const receiverRepo = new QueueRepository(receiverDb, receiverBus, { validateRig: () => true });
+    const sends: Array<{ session: string; text: string }> = [];
+    receiverRepo.attachTransport({ async send(session, text) { sends.push({ session, text }); return { ok: true, verified: true }; } });
+    receiverRepo.attachOutbox(new OutboxHandler(receiverDb));
+    const receiver = makeApp({ db: receiverDb, bus: receiverBus, repo: receiverRepo });
+    const forwarded: Record<string, unknown>[] = [];
+    setSelfHostId("host-origin");
+    try {
+      const app = makeApp({ db, bus, fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+        forwarded.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        setSelfHostId("host-receiver");
+        try { return await receiver.request(String(url), init); }
+        finally { setSelfHostId("host-origin"); }
+      }) as typeof fetch });
+      const body = "Please check the result.\nKeep my words.";
+      const response = await post(app, { ...BASE, sourceSession: "human@kernel", body, hostId: "vps-b" });
+      expect(response.status).toBe(201);
+      expect(forwarded).toHaveLength(1);
+      expect(forwarded[0]).toMatchObject({ sourceSession: "human@kernel@host-origin", body });
+      expect(forwarded[0]).not.toHaveProperty("hostId");
+      expect(rowCount(db)).toBe(0);
+      const item = await response.json() as { qitemId: string };
+      expect(receiverRepo.getById(item.qitemId)).toMatchObject({ sourceSession: "human@kernel@host-origin", body });
+      await vi.waitFor(() => expect(sends).toHaveLength(1));
+      expect(sends[0]!.session).toBe("dev@rig-b");
+      expect(sends[0]!.text).toContain("From: human@kernel@host-origin\nTo: dev@rig-b");
+      expect(sends[0]!.text).toContain("Queue handoff: " + item.qitemId + " - check your queue.");
+      expect(sends[0]!.text).not.toContain("human@kernel@host-receiver");
+      expect(sends[0]!.text.split("\n").at(-1)).toBe('↩ Reply if needed: rig queue create --destination human@kernel@host-origin --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify');
+    } finally {
+      setSelfHostId(null);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      receiverDb.close();
+    }
+  });
+
   it("cross-host create STAMPS the ORIGIN self-id onto sourceSession at FORWARD (never the receiver)", async () => {
     setSelfHostId("host-origin");
     try {

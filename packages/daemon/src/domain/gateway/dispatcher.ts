@@ -18,6 +18,8 @@ export interface DispatcherDeps {
   send: (decision: OutboundDecision) => void;
   /** Injectable id source (tests pin decisionIds; prod = a UUID). */
   newDecisionId?: () => string;
+  /** Optional synchronous preparation seam run BEFORE durable enqueue (e.g. to freeze relay envelope/refs on the decision payload). */
+  prepare?: (decision: OutboundDecision) => OutboundDecision | void;
 }
 
 export type DispatchResult =
@@ -54,7 +56,20 @@ export class GatewayDispatcher {
     if (opts?.decisionId && this.deps.buffer.pending().some((d) => d.decisionId === decisionId)) {
       return { ok: true, decisionId }; // idempotent accept: already durably enqueued; replay owns the redrive
     }
-    const decision: OutboundDecision = { kind: "outbound_decision", decisionId, op, entityBindingRef, payload };
+    let payloadToEnqueue = payload;
+    if (this.deps.prepare) {
+      const prepared = this.deps.prepare({ kind: "outbound_decision", decisionId, op, entityBindingRef, payload });
+      if (prepared && prepared.payload !== undefined) {
+        payloadToEnqueue = prepared.payload;
+      }
+    }
+    const decision: OutboundDecision = {
+      kind: "outbound_decision",
+      decisionId,
+      op,
+      entityBindingRef,
+      payload: payloadToEnqueue,
+    };
     this.deps.buffer.enqueue(decision); // durable BEFORE dispatch
     this.deps.send(decision);
     return { ok: true, decisionId };

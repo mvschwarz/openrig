@@ -2,13 +2,17 @@ import type { AttentionRead, AttentionItem } from "@openrig/daemon/attention";
 import type { Action, FleetSnapshot, ViewState } from "../types.js";
 import { listItem, wrapDetailLines, type ContentLine } from "../detail.js";
 
-/** The bounded, confirmed-delivery projection served by S02; no client classification. */
+/** The bounded, confirmed-delivery or bridge-acceptance projection served by S02; no client classification. */
 export interface DeliveredHumanUpdates {
   items: Array<{ qitemId: string; summary: string | null; body: string; humanDetail: string | null;
     destinationSession: string; sourceSession: string; tags: string[] | null; evidenceRef: string | null;
-    deliveredAt: string; deliveryReceipt: string }>;
+    deliveredAt: string; deliveryReceipt: string; deliveryOutcome?: "posted" | "accepted" | null }>;
   limit: number;
   truncated: boolean;
+}
+
+function isBridgeAcceptedUpdate(q: DeliveredHumanUpdates["items"][number]): boolean {
+  return q.deliveryOutcome === "accepted" || q.deliveryReceipt.startsWith("relay-owner-notification-accepted");
 }
 
 export function composeHumanUpdates(attention: AttentionRead | null, updates: DeliveredHumanUpdates | null, wanted?: string | null): AttentionRead | null {
@@ -17,19 +21,30 @@ export function composeHumanUpdates(attention: AttentionRead | null, updates: De
     scope: "instance", readAt: new Date().toISOString(), items: [], detail: null, detailError: null,
     sources: [{ source: "queue", state: "unavailable", detail: "Human requests have not answered." }, { source: "outcomes and health", state: "unavailable", detail: "Feed source unavailable." }],
   };
+  const hasAccepted = Boolean(updates?.items.some(isBridgeAcceptedUpdate));
+  const hasPosted = Boolean(updates?.items.some(q => !isBridgeAcceptedUpdate(q)));
+  const sourceDetail = !updates
+    ? "Delivered updates have not answered."
+    : hasAccepted && !hasPosted
+      ? `Latest ${updates.limit} updates accepted by the bridge; retained receipt window${updates.truncated ? ", more omitted" : ""}.`
+      : hasAccepted
+        ? `Latest ${updates.limit} confirmed delivered or accepted-by-bridge updates; retained receipt window${updates.truncated ? ", more omitted" : ""}.`
+        : `Latest ${updates.limit} confirmed delivered updates; retained receipt window${updates.truncated ? ", more omitted" : ""}.`;
   read.sources.push({ source: "delivered updates", state: !updates ? "unavailable" : updates.truncated ? "partial" : "available",
-    detail: updates ? `Latest ${updates.limit} confirmed delivered updates; retained receipt window${updates.truncated ? ", more omitted" : ""}.` : "Delivered updates have not answered." });
+    detail: sourceDetail });
   for (const q of updates?.items ?? []) {
+    const accepted = isBridgeAcceptedUpdate(q);
     const projects = [...new Set((q.tags ?? []).filter(t => t.startsWith("project:")).map(t => t.slice(8)))];
-    const item: AttentionItem = { id: `human-update:${q.qitemId}`, kind: "update", summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Delivered update",
+    const baseScope = projects.length === 1 ? `project ${projects[0]} (queue tag)` : "instance · project unknown";
+    const item: AttentionItem = { id: `human-update:${q.qitemId}`, kind: "update", summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || (accepted ? "Accepted by bridge" : "Delivered update"),
       recipient: q.destinationSession, urgency: "update", unblocks: null, at: q.deliveredAt,
-      scope: projects.length === 1 ? `project ${projects[0]} (queue tag)` : "instance · project unknown", project: null,
+      scope: accepted ? `${baseScope} · accepted by bridge` : baseScope, project: null,
       source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
     if (!read.items.some(current => current.id === `queue-update:${q.qitemId}`)) read.items.push(item);
     if (wanted === item.id && read.detail?.item.id !== item.id) {
       read.detailError = null;
       read.detail = { item, lines: [q.body, ...(q.humanDetail ? ["Supplemental detail:", q.humanDetail] : []),
-        `From: ${q.sourceSession}`, `Delivered: ${q.deliveredAt}`, `Delivery receipt: ${q.deliveryReceipt}`, `Queue: ${q.qitemId}`, `Evidence: ${q.evidenceRef ?? "none recorded"}`],
+        `From: ${q.sourceSession}`, accepted ? `Accepted by bridge: ${q.deliveredAt}` : `Delivered: ${q.deliveredAt}`, `Delivery receipt: ${q.deliveryReceipt}`, `Queue: ${q.qitemId}`, `Evidence: ${q.evidenceRef ?? "none recorded"}`],
         files: q.evidenceRef?.startsWith("/") ? [{ label: "Update evidence", path: q.evidenceRef }] : [] };
     }
   }
@@ -123,9 +138,13 @@ export function answerRequest(action: Extract<Action, { type: "act"; act: "answe
   return { ...input, authority: "primary-user" as const };
 }
 
-/** Who an act on the Feed is recorded as: the primary user once anyone is registered, else the served actor, as before. */
-export function actingAs(read: AttentionRead | null | undefined, served: string): string {
-  return read?.perspective ? read.perspective.actingAs.person ?? "the primary user" : served;
+/** What a terminal act is recorded as: the terminal names no responder, so it's unattributed. */
+const UNATTRIBUTED_AT_TERMINAL = "human@host (unattributed)";
+
+/** Who an act on the Feed is recorded as: unattributed, since the terminal names no responder (the served actor is the
+ *  asked person's address, not who typed), whoever is registered. */
+export function actingAs(_read: AttentionRead | null | undefined, _served: string): string {
+  return UNATTRIBUTED_AT_TERMINAL;
 }
 
 /** The TUI opens on the default person's Feed only when the participants file chose one, and only while the person hasn't
@@ -139,7 +158,7 @@ function feedTitle(p: AttentionRead["perspective"]): string {
   if (!p) return "FEED · Instance / All humans";
   const viewing = p.basis === "unknown" ? `no registered person "${p.requested}"` : p.viewing ?? "everyone";
   // One person's queue leaves others' asks out of view: say how to see everyone's.
-  return `FEED · Viewing ${viewing} · you act as ${p.actingAs.person ?? "the primary user"}${p.viewing ? " · whose all shows everyone" : ""}`;
+  return `FEED · Viewing ${viewing} · you act as ${UNATTRIBUTED_AT_TERMINAL}${p.viewing ? " · whose all shows everyone" : ""}`;
 }
 
 /** The `reply` command on the open request: the person's own words, answered on that row as the person the Feed served. */

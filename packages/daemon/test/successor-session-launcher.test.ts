@@ -354,7 +354,8 @@ describe("SuccessorSessionLauncher", () => {
 
     it("OPR.0.7.0.9 (K2): the seat's launch additions reach the successor's launch, fresh and fork", async () => {
       checkReady.mockImplementation(async () => ({ ready: true }));
-      const launchAdditions = { agent: "openrig:reviewer", appendSystemPromptFile: "/seat/additions/system-prompt.md", pluginDirs: [] };
+      const launchAdditions = { agent: "openrig:reviewer", appendSystemPromptFile: "/seat/additions/system-prompt.md", pluginDirs: [],
+        pluginChannels: ["plugin:example-channel@example"] }; // #2044: a seat's plugin channels travel with the rest
       for (const forkSource of [undefined, { kind: "native_id" as const, value: "parent-1" }]) {
         launchHarness.mockClear();
         const res = await timedLauncher().createSuccessor({
@@ -629,6 +630,35 @@ describe("SuccessorSessionLauncher", () => {
       expect(res.ok).toBe(true);
       const [, command] = respawnPane.mock.calls[0]!;
       expect(command).toBe("/bin/sh");
+    });
+  });
+
+  describe("launch_wrapper forwarding", () => {
+    it.each(["codex", "claude-code"])("forwards %s node.launchWrapper on binding for createSuccessor and stageSuccessor", async runtime => {
+      const created = await launcher().createSuccessor({
+        node: { id: "node-1", runtime, cwd: "/w", launchWrapper: ["rtk", "--succ"] },
+        departingSessionName: "dev-impl@rig",
+      });
+      expect(created.ok).toBe(true);
+      expect(launchHarness.mock.calls[0]?.[0]).toMatchObject({
+        nodeId: "node-1",
+        launchWrapper: ["rtk", "--succ"],
+      });
+
+      launchHarness.mockClear();
+      const staged = await launcher().stageSuccessor({
+        node: { id: "node-1", runtime, cwd: "/w", launchWrapper: ["rtk", "--staged"] },
+        canonicalSession: "dev-impl@rig",
+        stagingSession: "openrig-switch-1",
+        occupantGeneration: "gen-1",
+        onPaneCreated: () => {},
+        staged: { prepare: async () => [] },
+      });
+      expect(staged.ok).toBe(true);
+      expect(launchHarness.mock.calls[0]?.[0]).toMatchObject({
+        nodeId: "node-1",
+        launchWrapper: ["rtk", "--staged"],
+      });
     });
   });
 });

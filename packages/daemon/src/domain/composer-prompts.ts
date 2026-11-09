@@ -137,6 +137,8 @@ export interface ComposerInput {
   state: "empty" | "text" | "unknown";
   rows: string[];
   columns: number;
+  /** How many columns short of `columns` the harness may wrap its text: a row boundary at a width in that range is a wrap. */
+  wrapSlack?: number;
   /** Conservative visible capacity of the recognized Codex fullscreen composer. */
   pasteViewport?: { columns: number; rows: number };
   cursor?: ComposerSnapshot["cursor"];
@@ -158,6 +160,7 @@ export const COMPOSER_COLLAPSED_PASTE_PATTERN = /^\[Pasted text #\d+ \+(\d+) lin
 export function composerContainsOwnedText(input: ComposerInput, expected: string): boolean {
   if (input.state !== "text" || !input.cursorAtEnd || input.collapsedPaste || !input.rows.length) return false;
   const text = expected.replace(/\r\n/g, "\n");
+  const narrowest = input.columns - (input.wrapSlack ?? 0);
   let offsets = new Set([0]);
   for (let index = 0; index < input.rows.length; index++) {
     const row = input.rows[index]!;
@@ -167,10 +170,10 @@ export function composerContainsOwnedText(input: ComposerInput, expected: string
       const end = offset + row.length;
       if (index === input.rows.length - 1) { if (end === text.length) return true; continue; }
       if (text[end] === "\n") next.add(end + 1);
-      if (stringWidth(row) >= input.columns) next.add(end);
+      if (stringWidth(row) >= narrowest) next.add(end);
       if (text[end] === " ") {
         const word = /^\S+/.exec(text.slice(end + 1))?.[0] ?? "";
-        if (word && stringWidth(row + " " + word) > input.columns) next.add(end + 1);
+        if (word && stringWidth(row + " " + word) > narrowest) next.add(end + 1);
       }
     }
     offsets = next;
