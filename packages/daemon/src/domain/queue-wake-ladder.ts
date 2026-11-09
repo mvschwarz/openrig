@@ -431,8 +431,8 @@ function findWakeRecovery(db: Database.Database, qitemId: string) {
   const endedPrompt = Boolean(db.prepare(`SELECT 1 FROM queue_items q WHERE q.qitem_id = ?
         AND json_valid(q.tags) AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
         AND EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = q.qitem_id
-          AND t.actor_session = q.source_session AND t.transition_note = ?)`)
-        .get(recovery.qitemId, PROMPT_ALERT_TAG, PROMPT_RETIRED_NOTE));
+          AND t.actor_session = q.source_session AND t.transition_note IN (?, ?))`)
+        .get(recovery.qitemId, PROMPT_ALERT_TAG, PROMPT_RETIRED_NOTE, LEGACY_PROMPT_RETIRED_NOTE));
   return endedPrompt ? null : recovery;
 }
 
@@ -1034,9 +1034,10 @@ export function makePromptStateReader(deps: {
 /** Marks the row that asks a person to resolve a seat stuck at a permission or approval prompt. */
 export const PROMPT_ALERT_TAG = "wake-prompt-refusal";
 const PROMPT_EPISODE_TAG = "prompt-episode:";
-const PROMPT_RETIRED_NOTE = "prompt escalation retired: prompt cleared or original episode ended; not a delivery receipt";
-/** The ladder's own transition on a prompt alert it retires because its seat's prompt read clear, and the only thing that
- *  ends a watchdog refusal run. A transition, not the resolution: a fallback route may already hold that field's text. */
+const LEGACY_PROMPT_RETIRED_NOTE = "prompt escalation retired: prompt cleared or original episode ended; not a delivery receipt";
+const PROMPT_RETIRED_NOTE = "prompt escalation retired: the seat's prompt read clear; not a delivery receipt";
+/** The ladder's positive-clear boundary, independent of whether the alert's owner still holds its custody.
+ * A transition, not the resolution: a fallback route may already hold that field's text. */
 const PROMPT_CLEARED_NOTE = "prompt escalation: the seat's prompt read clear";
 /** Rows whose tag text could hold the prompt alert tag: valid JSON stores a string verbatim or with backslash
  * escapes, so this superset (LIKE also ignores case) loses no row the exact json_each test below accepts. It only
@@ -1180,17 +1181,28 @@ async function advancePromptRefusals(
       AND json_valid(a.tags) AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = ?)
       AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = 'recovery-for:' || q.qitem_id)))`)
     .all(`${REFUSED_PREFIX}%`, PROMPT_ALERT_TAG) as Array<{ qitem_id: string; destination_session: string }>;
-  // Every tag value of every closed (terminal) prompt alert, read once per tick when the first episode needs it,
+  // Every tag value of every final prompt disposition, read once per tick when the first episode needs it,
   // rather than one scan of all terminal rows per open episode. The row predicates are the per-episode lookup's;
   // membership is the same exact json_each value equality; and nothing below writes before the last episode is
   // checked, so every episode sees the snapshot its own lookup would have read.
   let closedAlertTags: Set<unknown> | undefined;
   const closedEpisode = (episodeTag: string): boolean => {
-    closedAlertTags ??= new Set((deps.db.prepare(`WITH closed AS MATERIALIZED (
-        SELECT tags FROM queue_items WHERE ${PROMPT_ALERT_ROWS} AND state NOT IN ('pending','in-progress','blocked')
-          AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))
+    closedAlertTags ??= new Set((deps.db.prepare(`WITH alerts AS MATERIALIZED (
+        SELECT qitem_id, tags, state, source_session, handed_off_from FROM queue_items WHERE ${PROMPT_ALERT_ROWS}
+          AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)),
+      closed AS MATERIALIZED (
+        SELECT tags FROM alerts q WHERE state NOT IN ('pending','in-progress','blocked')
+          AND (state != 'handed-off' OR NOT EXISTS (
+            SELECT 1 FROM alerts successor WHERE successor.handed_off_from = q.qitem_id))
+          -- A tagged local successor carries custody; replaced tags or no local successor leave a final disposition.
+          -- Older automatic retirements without a clear
+          -- marker likewise cannot silence a prompt that is still positively blocked. Manual closes stay final.
+          AND NOT EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = q.qitem_id
+            AND t.actor_session = q.source_session AND t.transition_note = ?
+            AND NOT EXISTS (SELECT 1 FROM queue_transitions c WHERE c.qitem_id = q.qitem_id
+              AND c.actor_session = ? AND c.transition_note = ?)))
       SELECT j.value FROM closed, json_each(closed.tags) j`)
-      .all(PROMPT_ALERT_TAG) as Array<{ value: unknown }>).map(row => row.value));
+      .all(PROMPT_ALERT_TAG, LEGACY_PROMPT_RETIRED_NOTE, LADDER_ACTOR, PROMPT_CLEARED_NOTE) as Array<{ value: unknown }>).map(row => row.value));
     return closedAlertTags.has(episodeTag);
   };
   for (const { qitem_id, destination_session } of candidates) {
@@ -1229,12 +1241,12 @@ async function advancePromptRefusals(
   }
 
   // A watchdog reminder refused at a prompt joins its seat's episode; the row carries the job ids. The
-  // seat's latest alert the ladder marked as retired on a cleared prompt bounds the run; an ended episode doesn't.
+  // seat's latest positive-clear marker bounds the run, even while its owner holds the alert; an ended episode doesn't.
   const clearedAlerts = new Map<string, { qitemId: string; at: string } | null>();
   const clearedAlert = (dest: string) => {
     if (!clearedAlerts.has(dest)) clearedAlerts.set(dest, (deps.db.prepare(`SELECT q.qitem_id AS qitemId, MAX(t.ts) AS at
         FROM queue_items q JOIN queue_transitions t ON t.qitem_id = q.qitem_id
-       WHERE ${PROMPT_ALERT_ROWS} AND q.state NOT IN ('pending','in-progress','blocked') AND json_valid(q.tags)
+       WHERE ${PROMPT_ALERT_ROWS} AND json_valid(q.tags)
          AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
          AND t.actor_session = ? AND t.transition_note = ?
        GROUP BY q.qitem_id ORDER BY at DESC LIMIT 1`).get(`prompt-destination:${dest}`, LADDER_ACTOR, PROMPT_CLEARED_NOTE) as { qitemId: string; at: string } | undefined) ?? null);
@@ -1302,10 +1314,10 @@ async function advancePromptRefusals(
     }
   }
 
-  const promptState = (dest: string): "blocked" | "clear" | "unknown" => {
+  const promptState = (dest: string, since?: string): "blocked" | "clear" | "unknown" => {
     const group = groups.get(dest);
     if (group?.hookReview) return hookObservations.get(dest)?.state ?? "unknown";
-    const state = readAt(dest, group?.refusedAt ?? now.toISOString());
+    const state = readAt(dest, group?.refusedAt ?? since ?? now.toISOString());
     // A choice prompt no hook announces leaves the seat's own evidence unknown, and the transport's refusal is a read of
     // that prompt. While the latest refusal is at a choice prompt, one held one retry interval with nothing newer clearing
     // it reads blocked; one answered within seconds never escalates, and a current non-choice refusal keeps its own rule.
@@ -1331,9 +1343,27 @@ async function advancePromptRefusals(
     if (tags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|hook-review:`))
       && (!hookObservations.has(dest) || hookObservations.get(dest)?.state === "unknown")) continue;
     const sameEpisode = group?.keys.some(key => tags.includes(key));
-    const cleared = promptState(dest) === "clear";
-    if (!sameEpisode || cleared) {
-      if (cleared) appendMarker(deps.queueRepo, aggregate, PROMPT_CLEARED_NOTE);
+    const state = promptState(dest, aggregate.tsCreated);
+    const cleared = state === "clear";
+    // Keep the prompt boundary without closing the owner's hold. A later refusal is a new episode even if
+    // no reminder was delivered between them; repeated clear ticks do not move that boundary forward.
+    if (cleared && !deps.queueRepo.listTransitions(qitem_id).some(t => t.actorSession === LADDER_ACTOR
+      && t.transitionNote === PROMPT_CLEARED_NOTE && Date.parse(t.ts) >= Date.parse(group?.refusedAt ?? aggregate.tsCreated))) {
+      appendMarker(deps.queueRepo, aggregate, PROMPT_CLEARED_NOTE);
+    }
+    // Missing work/episode membership says nothing about the seat's prompt. Keep an explicit owner's hold
+    // (including its wake) even on a positive clear; only its owner can dispose of that custody.
+    const retained = cleared && aggregate.state === "blocked"
+      ? "the seat's prompt read clear; owner hold and wake retained"
+      : !sameEpisode && !cleared ? `original episode ended; prompt ${state}; not evidence of clearing`
+        : state === "unknown" ? "prompt state unknown; not evidence of clearing" : null;
+    if (retained) {
+      const note = `prompt escalation retained: ${retained}`;
+      if (!deps.queueRepo.listTransitions(qitem_id).some(t => t.actorSession === LADDER_ACTOR && t.transitionNote === note)) {
+        appendMarker(deps.queueRepo, aggregate, note);
+      }
+    }
+    if (cleared && aggregate.state !== "blocked") {
       await deps.queueRepo.update({ qitemId: qitem_id, actorSession: aggregate.sourceSession, state: "done",
         closureReason: "no-follow-on", transitionNote: PROMPT_RETIRED_NOTE });
     }
@@ -1429,7 +1459,7 @@ async function advancePromptRefusals(
       toOperator ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession ?? [...group.jobs.values()][0]) : orch!, members, reason,
       `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...keys], group.jobs);
     const row = deps.queueRepo.getById(aggregate.qitemId);
-    if (!row) continue;
+    if (!row || row.state === "blocked") continue; // The explicit owner hold owns its next wake and disposition.
     const addedKeys = keys.filter(key => !row.tags?.includes(key));
     // A reminder's run keeps its key while its latest refusal changes kind, so the kind is recomputed on its own too.
     const kindChanged = choiceOnly !== Boolean(row.tags?.includes(PROMPT_CHOICE_TAG));
