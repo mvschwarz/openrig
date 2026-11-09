@@ -881,6 +881,132 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     expect(releasedKeys).toEqual(["q-seen-1:1"]);
   });
 
+  it("retains pull-mode decisions in DispatchBuffer without HTTP POST or transport-failed notes, ignores receipts from other deliveries of a shared digest member on replay, and finishes partial digest receipts tied to this deliveryId", async () => {
+    const fsx = memFs();
+    const attempted = new SeenStore("/state/relay-attempted-decisions.jsonl", fsx);
+    const delivered = new SeenStore("/state/relay-delivered-decisions.jsonl", fsx);
+    const outboundSeen = new SeenStore("/state/slack-outbound-seen.jsonl", fsx);
+    const bridge = recordingBridgeFixture();
+    const receipts: RelayAcceptedReceiptInfo[] = [];
+    const releasedKeys: string[] = [];
+    const failedNotes: Array<{ failureClass: string; detail: string }> = [];
+    const acceptedInDb = new Map<string, string>();
+
+    const transport = createRelayOutboundTransport({
+      attempted,
+      delivered,
+      outboundSeen,
+      fetchImpl: bridge.fetchImpl,
+      resolveProfile: (connectorRef) => ({
+        ok: true,
+        connectorRef,
+        mode: "pull",
+        url: null,
+        outboundToken: null,
+      }),
+      hasAcceptedReceipt: ({ qitemId, notificationKey, deliveryId }) => {
+        const recordedDeliveryId = acceptedInDb.get(`${qitemId}:${notificationKey}`);
+        if (recordedDeliveryId === undefined) return false;
+        return deliveryId === undefined || recordedDeliveryId === deliveryId;
+      },
+      onAccepted: (info) => {
+        receipts.push(info);
+        acceptedInDb.set(`${info.qitemId}:${info.notificationKey}`, info.deliveryId);
+      },
+      onTransportFailed: (_p, failureClass, detail) => failedNotes.push({ failureClass, detail }),
+      release: (key) => releasedKeys.push(key),
+    });
+
+    const wire = buildInProcessWire({
+      home,
+      ops: [OUTBOUND_OP],
+      deliver: (d) => transport.deliver(d),
+    });
+
+    const digestPayload: RelayPayloadCarry & OutboundPostPayload = {
+      deliveryDigestPost: true,
+      digestId: "pull-dig-1",
+      qitemId: "q-pull-1",
+      notificationKey: "digest:alice@external:pull",
+      ownerNotificationKind: "human-required",
+      ownerNotificationLevel: "INFO",
+      humanIntent: "update",
+      destinationSession: "alice@external",
+      summary: "Pull digest summary",
+      body: "Item 1\nItem 2",
+      relayConnectorRef: "wa-pull",
+      relayEnvelope: {
+        v: 1,
+        deliveryId: "dec-pull-dig-1",
+        recipient: { handle: "alice_wa" },
+        intent: "update",
+        outcome: "digest",
+        summary: "Pull digest summary",
+        body: "Item 1\nItem 2",
+        replyRef: null,
+        items: [
+          {
+            qitemId: "q-pull-1",
+            notificationKey: "q-pull-1:1",
+            summary: "Item 1",
+            body: "Item 1 body",
+            replyRef: null,
+          },
+          {
+            qitemId: "q-pull-2",
+            notificationKey: "q-pull-2:1",
+            summary: "Item 2",
+            body: "Item 2 body",
+            replyRef: null,
+          },
+        ],
+      },
+      memberReceipts: [
+        { qitemId: "q-pull-1", notificationKey: "q-pull-1:1", level: "INFO" },
+        { qitemId: "q-pull-2", notificationKey: "q-pull-2:1", level: "INFO" },
+      ],
+    };
+
+    wire.dispatcher.dispatch(OUTBOUND_OP, "alice@external", digestPayload, {
+      decisionId: "dec-pull-dig-1",
+    });
+    await tick();
+
+    expect(bridge.callCount()).toBe(0);
+    expect(failedNotes).toEqual([]);
+    expect(receipts).toHaveLength(0);
+    expect(attempted.load().has("dec-pull-dig-1")).toBe(true);
+    expect(delivered.load().has("dec-pull-dig-1")).toBe(false);
+    expect(new DispatchBuffer(home).pending()).toHaveLength(1);
+
+    // 1. A retained single decision for shared member q-pull-1 is acknowledged under a different deliveryId:
+    //    replay must NOT treat that foreign receipt as partial completion of dec-pull-dig-1 or drain q-pull-2 unacknowledged.
+    acceptedInDb.set("q-pull-1:q-pull-1:1", "dec-retained-single-1");
+    wire.startServices?.();
+    await tick();
+
+    expect(bridge.callCount()).toBe(0);
+    expect(failedNotes).toEqual([]);
+    expect(receipts).toHaveLength(0);
+    expect(acceptedInDb.has("q-pull-2:q-pull-2:1")).toBe(false);
+    expect(delivered.load().has("dec-pull-dig-1")).toBe(false);
+    expect(new DispatchBuffer(home).pending().map((d) => d.decisionId)).toEqual(["dec-pull-dig-1"]);
+
+    // 2. Simulate partial receipt from a prior interrupted ack of THIS digest (deliveryId === "dec-pull-dig-1"):
+    //    replay finishes the remaining member receipt and drains dec-pull-dig-1.
+    acceptedInDb.set("q-pull-1:q-pull-1:1", "dec-pull-dig-1");
+    wire.startServices?.();
+    await tick();
+
+    expect(bridge.callCount()).toBe(0);
+    expect(failedNotes).toEqual([]);
+    expect(receipts.map((r) => `${r.qitemId}:${r.notificationKey}`)).toEqual(["q-pull-2:q-pull-2:1"]);
+    expect(acceptedInDb.get("q-pull-1:q-pull-1:1")).toBe("dec-pull-dig-1");
+    expect(acceptedInDb.get("q-pull-2:q-pull-2:1")).toBe("dec-pull-dig-1");
+    expect(delivered.load().has("dec-pull-dig-1")).toBe(true);
+    expect(new DispatchBuffer(home).pending()).toHaveLength(0);
+  });
+
   describe("resolvePrimaryRelayBinding exact address requirements", () => {
     const reg = {
       ok: true as const,

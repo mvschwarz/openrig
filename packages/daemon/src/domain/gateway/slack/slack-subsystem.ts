@@ -809,12 +809,13 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       return {
         ok: true,
         connectorRef: profile.connectorRef,
+        mode: profile.mode,
         url: profile.credentials.url,
         outboundToken: profile.credentials.outboundToken,
       };
     },
-    hasAcceptedReceipt: ({ qitemId, notificationKey }) =>
-      opts.queueRepo.hasRelayOwnerNotificationReceipt(qitemId, notificationKey),
+    hasAcceptedReceipt: ({ qitemId, notificationKey, deliveryId }) =>
+      opts.queueRepo.hasRelayOwnerNotificationReceipt(qitemId, notificationKey, deliveryId),
     onAccepted: (info) => {
       opts.queueRepo.recordRelayOwnerNotificationAccepted({
         qitemId: info.qitemId,
@@ -1486,6 +1487,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   return {
     dispatcher: wire.dispatcher,
     ...(acceptForwarded ? { acceptForwarded } : {}),
+    releaseOutboundKey: (key: string) => releaseRef(key),
     startServices: () => {
       if (servicesLive) return; // idempotent — a double post-bind start must not double-poll
       servicesLive = true;

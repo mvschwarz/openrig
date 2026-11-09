@@ -1258,4 +1258,182 @@ describe("Capability 3 gateway relay — whole-capability production HTTP integr
     expect(bridge.getSanitizedStats().unauthorizedCount).toBe(1);
     expect(bridge.getCustodyRecords()).toHaveLength(0);
   });
+
+  it("operates end-to-end in pull mode (OPENRIG_RELAY_MODE=pull without push URL): reports ready, stages ask and update in DispatchBuffer without transport-failed notes, serves GET /api/gateway/relay/outbox, commits custody on POST /api/gateway/relay/outbox/ack, and resolves inbound replies", async () => {
+    const inboundToken = "sec-relay-in-pull-integration-06";
+    const dbPath = join(testScratchDir, "daemon-pull-mode.sqlite");
+    const envFilePath = join(testScratchDir, "relay-pull.env");
+    writeFileSync(
+      envFilePath,
+      `OPENRIG_RELAY_MODE=pull\nOPENRIG_RELAY_INBOUND_TOKEN=${inboundToken}\n`,
+      { mode: 0o600 },
+    );
+    chmodSync(envFilePath, 0o600);
+
+    registerRelayPerson({
+      entityId: "alice-ops",
+      displayName: "Alice Ops",
+      connectorRef: "pull-bridge",
+      envFilePath,
+      handle: "alice_ops",
+    });
+
+    const running = await bootProductionDaemon({ dbPath, startPostBind: true });
+    running.daemon.deps.rigRepo.createRig("ops-rig");
+
+    const readinessRes = await fetch(
+      `${running.baseUrl}/api/gateway/human/alice-ops/readiness`,
+    );
+    expect(readinessRes.status).toBe(200);
+    expect(await readinessRes.json()).toMatchObject({
+      ok: true,
+      readiness: {
+        state: "ready",
+        ready: true,
+        connector: { kind: "relay", ref: "pull-bridge" },
+      },
+    });
+
+    const ask = await running.daemon.deps.queueRepo!.create({
+      sourceSession: "planner@ops-rig",
+      destinationSession: "alice-ops@external",
+      summary: "Pull-mode production rollout approval",
+      body: "Approve pull-mode rollout?",
+      humanIntent: "decision",
+      humanAlert: true,
+      humanQuestions: [
+        {
+          id: "q-pull",
+          header: "Rollout",
+          question: "Ship pull mode?",
+          options: [
+            { id: "yes", label: "Yes", description: "Proceed" },
+            { id: "no", label: "No", description: "Hold" },
+          ],
+        },
+      ],
+      nudge: false,
+    });
+
+    const update = await running.daemon.deps.queueRepo!.create({
+      sourceSession: "planner@ops-rig",
+      destinationSession: "alice-ops@external",
+      summary: "Pull-mode status update",
+      body: "Canary metrics are green.",
+      humanIntent: "update",
+      nudge: false,
+    });
+
+    await sweepOutboundOnce(running.daemon);
+    await waitForCondition(() => new DispatchBuffer(OPENRIG_HOME).pending().length === 2);
+
+    // Pull profile is never treated as a failed push destination
+    const askNotes = running.daemon.deps
+      .queueRepo!.listTransitions(ask.qitemId)
+      .map((t) => t.transitionNote ?? "");
+    expect(
+      askNotes.some((n) => n.startsWith("relay-owner-notification-transport-failed")),
+    ).toBe(false);
+    expect(
+      running.daemon.deps.queueRepo!.hasRelayOwnerNotificationReceipt(ask.qitemId),
+    ).toBe(false);
+
+    // Connector polls GET /api/gateway/relay/outbox (read-only)
+    const outboxRes1 = await fetch(`${running.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${inboundToken}` },
+    });
+    expect(outboxRes1.status).toBe(200);
+    const outbox1 = (await outboxRes1.json()) as {
+      ok: boolean;
+      connectorRef: string;
+      deliveries: Array<{
+        deliveryId: string;
+        intent: "decision" | "update";
+        summary: string;
+        body: string;
+        replyRef: string | null;
+      }>;
+    };
+    expect(outbox1.ok).toBe(true);
+    expect(outbox1.connectorRef).toBe("pull-bridge");
+    expect(outbox1.deliveries).toHaveLength(2);
+
+    const askEnv = outbox1.deliveries.find((d) => d.intent === "decision")!;
+    const updateEnv = outbox1.deliveries.find((d) => d.intent === "update")!;
+    expect(askEnv.replyRef).toBeTruthy();
+    expect(updateEnv.replyRef).toBeNull();
+
+    // Acknowledge custody of both envelopes
+    for (const env of [askEnv, updateEnv]) {
+      const ackRes = await fetch(`${running.baseUrl}/api/gateway/relay/outbox/ack`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${inboundToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ deliveryId: env.deliveryId }),
+      });
+      expect(ackRes.status).toBe(200);
+      expect(await ackRes.json()).toEqual({
+        ok: true,
+        deliveryId: env.deliveryId,
+        connectorRef: "pull-bridge",
+        alreadyAccepted: false,
+      });
+    }
+
+    // Duplicate ack returns alreadyAccepted: true
+    const dupAckRes = await fetch(`${running.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${inboundToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ deliveryId: askEnv.deliveryId }),
+    });
+    expect(dupAckRes.status).toBe(200);
+    expect(await dupAckRes.json()).toEqual({
+      ok: true,
+      deliveryId: askEnv.deliveryId,
+      connectorRef: "pull-bridge",
+      alreadyAccepted: true,
+    });
+
+    // Outbox is now empty, update is closed as delivered (accepted), ask remains pending until answered
+    const outboxAfterAck = await fetch(`${running.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${inboundToken}` },
+    });
+    expect(((await outboxAfterAck.json()) as { deliveries: unknown[] }).deliveries).toEqual([]);
+    expect(running.daemon.deps.queueRepo!.getById(update.qitemId)?.state).toBe("done");
+    expect(running.daemon.deps.queueRepo!.getById(ask.qitemId)?.state).toBe("pending");
+
+    const updatesRes = await fetch(
+      `${running.baseUrl}/api/queue/human-updates`,
+    );
+    expect(updatesRes.status).toBe(200);
+    const updatesBody = (await updatesRes.json()) as {
+      items: Array<{ qitemId: string; deliveryOutcome: string }>;
+    };
+    expect(
+      updatesBody.items.find((u) => u.qitemId === update.qitemId)?.deliveryOutcome,
+    ).toBe("accepted");
+
+    // Answer the ask via POST /api/gateway/relay/inbound
+    const inboundRes = await fetch(`${running.baseUrl}/api/gateway/relay/inbound`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${inboundToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "evt-pull-answer-1",
+        sender: { handle: "alice_ops" },
+        replyRef: askEnv.replyRef,
+        text: "Yes, ship pull mode.",
+        ordering: "after-question",
+      }),
+    });
+    expect(inboundRes.status).toBe(200);
+    expect(running.daemon.deps.queueRepo!.getById(ask.qitemId)?.state).toBe("done");
+  });
 });
