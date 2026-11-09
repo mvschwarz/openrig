@@ -173,7 +173,9 @@ port (normally 7433)."
 - **Terminal tiles** show whole lines at any width without resizing the seat: a
   tile reads its seat about once a second, a writable tile attaches when someone
   types and goes back to showing after 30 seconds without a key, and a detach
-  shows the seat again instead of closing the tile.
+  shows the seat again instead of closing the tile. With a tmux server older
+  than 3.5, a tmux prefix typed as a tile's very first key reaches the seat
+  instead of acting as the prefix.
 - **A Claude seat launched with `--settings` JSON written with spaces** can be
   verified again.
 - **`view.changed` is no longer stored,** and `/api/events` no longer sends it.

@@ -224,7 +224,10 @@ to end: see Known limits.
   reads its seat's screen about once a second instead of attaching, so a tile
   narrower than the seat no longer shows only its left part. A writable tile
   attaches when someone types or pastes and goes back to showing after 30
-  seconds without a key; a read-only tile only shows. ([#2757](https://github.com/mvschwarz/openrig/pull/2757))
+  seconds without a key; a read-only tile only shows. With a tmux server older
+  than 3.5, a tile's first keys go to the seat before the tile attaches, so a
+  tmux prefix typed as the very first key reaches the seat instead of acting as
+  the prefix. ([#2757](https://github.com/mvschwarz/openrig/pull/2757), [#2821](https://github.com/mvschwarz/openrig/pull/2821))
 - **Herdr follow views** work on macOS too (protocol 22), open a labelled
   snapshot where live following isn't supported, and show a cleaner strip. ([#2663](https://github.com/mvschwarz/openrig/pull/2663), [#2706](https://github.com/mvschwarz/openrig/pull/2706))
 - **Closing the herdr-core terminal that started OpenRig** no longer ends the
