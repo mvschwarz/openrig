@@ -368,7 +368,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     db.close();
   });
 
-  it.each(["pi", "codex", "claude-code"])("persists non-empty launchWrapper on %s seat and omits when absent or []", (runtime) => {
+  it.each(["pi", "codex", "claude-code", "synth"])("persists non-empty launchWrapper on %s seat and omits when absent or []", (runtime) => {
     const rig = repo.createRig("wrapper-rig");
     const wrapped = repo.addNode(rig.id, `wrapped-${runtime}`, {
       runtime,
@@ -393,9 +393,9 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     expect(readSeatLaunchWrapper(db, absent.id)).toBeUndefined();
   });
 
-  it("supports setNodeLaunchWrapper update and clear (via null or []) to canonical SQL NULL", () => {
+  it.each(["codex", "synth"])("supports setNodeLaunchWrapper update and clear (via null or []) to canonical SQL NULL on %s", runtime => {
     const rig = repo.createRig("wrapper-set-rig");
-    const node = repo.addNode(rig.id, "worker", { runtime: "codex" });
+    const node = repo.addNode(rig.id, "worker", { runtime });
     expect(repo.setNodeLaunchWrapper(node.id, ["mtn", "--"])).toBe(true);
     expect(repo.getRig(rig.id)!.nodes[0]!.launchWrapper).toEqual(["mtn", "--"]);
     expect(readSeatLaunchWrapper(db, node.id)).toEqual(["mtn", "--"]);
@@ -412,7 +412,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     expect(readSeatLaunchWrapper(db, node.id)).toBeUndefined();
   });
 
-  it.each(["omp", "terminal"])("rejects launchWrapper on %s at addNode and setNodeLaunchWrapper", (runtime) => {
+  it.each(["omp", "terminal", "stub", "openshell-claude"])("rejects launchWrapper on %s at addNode and setNodeLaunchWrapper", (runtime) => {
     const rig = repo.createRig("bad-runtime-rig");
     expect(() => repo.addNode(rig.id, "bad-nonempty", { runtime, launchWrapper: ["mtn"] })).toThrow(/pi|codex/i);
     expect(() => repo.addNode(rig.id, "bad-empty", { runtime, launchWrapper: [] })).toThrow(/pi|codex/i);
@@ -442,7 +442,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     }
   });
 
-  it.each(["pi", "codex", "claude-code"].flatMap(runtime => [
+  it.each(["pi", "codex", "claude-code", "synth"].flatMap(runtime => [
     "[]",
     "corrupt-json",
     '{"cmd":"mtn"}',
@@ -467,7 +467,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     expect(() => repo.getRig(rig.id)).toThrow(/pi|codex/i);
   });
 
-  it("validates launchWrapper in stored launch_recipe_json via getNodeLaunchRecipe", () => {
+  it.each(["codex", "synth"])("validates launchWrapper in stored %s launch_recipe_json via getNodeLaunchRecipe", runtime => {
     const rig = repo.createRig("recipe-rig");
     const baseSpec = {
       version: "0.2",
@@ -479,7 +479,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
           id: "worker",
           agentRef: "local:agents/worker",
           profile: "default",
-          runtime: "codex",
+          runtime,
           cwd: ".",
           launchWrapper: ["mtn", "--"],
         }],
@@ -488,7 +488,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
       edges: [],
     };
     const node = repo.addNode(rig.id, "dev.worker", {
-      runtime: "codex",
+      runtime,
       launchWrapper: ["mtn", "--"],
       launchRecipe: { version: 1, rigRoot: "/tmp", rigSpec: baseSpec },
     });

@@ -247,7 +247,7 @@ describe("owned Herdr viewer", () => {
     // Both attaches are the typing path's: a plain one (also after a paste), and one that carries the first keys.
     expect(rw.match(/attach -t/g)).toEqual(['attach -t', 'attach -t']);
     expect(rw).toContain('then pz=1; put "$@"; fi;');
-    expect(rw).toContain('then go "$@"; else "$@" attach -t "$t"; fi;');
+    expect(rw).toContain('then if [ -n "$kk" ]; then ng=; go "$@"; else kz 0 $(($(wc -c < "$f"))) "$@"; fi; fi; [ -z "$ng" ] || "$@" attach -t "$t";');
     expect(rw).toContain('go() { set -- "$@" attach -t "$t";');
     // The first input's files are readable by this user alone.
     expect(rw.startsWith("umask 077;")).toBe(true);

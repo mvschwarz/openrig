@@ -204,7 +204,7 @@ describe("rig slack post-open-asks through the gateway", () => {
     expect(new DispatchBuffer(home).pending()).toHaveLength(1);
   });
 
-  it("an ask whose delivery policy can't be read posts, and its row and the command say the policy was unconfirmed", async () => {
+  it("an ask whose quiet hours can't be read posts, saying so, and its row and the command say the quiet-hours setting was unconfirmed", async () => {
     const row = await park();
     await enable();
     const w = wire();
@@ -212,11 +212,13 @@ describe("rig slack post-open-asks through the gateway", () => {
     const unreadable = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(() => { throw new Error("database is locked"); });
     try {
       const result = await run(w);
-      expect(resultFor(result, row)).toMatchObject({ outcome: "posted", reshown: true, detail: "posted; the person's delivery policy was unconfirmed" });
+      expect(resultFor(result, row)).toMatchObject({ outcome: "posted", reshown: true, detail: "posted; the person's quiet-hours setting was unconfirmed" });
       expect(posts).toHaveLength(1);
+      expect(String(posts[0]!.text)).toContain("OpenRig couldn't read your quiet hours.");
       expect(new DispatchBuffer(home).pending(), "nothing is left queued").toHaveLength(0);
       expect(notes(row).some((n) => n.startsWith("slack-re-present-state-unavailable "))).toBe(false);
-      expect(notes(row).find((n) => n.startsWith(`slack-re-present-unconfirmed notification_key=${keyOf(row)} what=policy `))).toMatch(/database is locked/);
+      expect(notes(row).some((n) => n.startsWith("slack-re-present-unconfirmed ")), "decided past the quiet read, not the broad catch").toBe(false);
+      expect(notes(row).find((n) => n.startsWith(`slack-quiet-unreadable notification_key=${keyOf(row)} `))).toMatch(/database is locked/);
     } finally { unreadable.mockRestore(); }
     expect((await run(w)).counts, "a later run doesn't post it again").toEqual({ "already-posted": 1 });
   });

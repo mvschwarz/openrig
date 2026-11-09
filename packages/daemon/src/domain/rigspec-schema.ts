@@ -554,7 +554,7 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   }
   if (member["launch_wrapper"] !== undefined) {
     if (!isLaunchWrapperRuntime(member["runtime"])) {
-      errors.push(`${prefix}.launch_wrapper: only valid when runtime is "pi", "codex" or "claude-code"`);
+      errors.push(`${prefix}.launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
     }
     try { validateLaunchWrapper(member["launch_wrapper"], `${prefix}.launch_wrapper`); }
     catch (error) { errors.push((error as Error).message); }
@@ -1461,7 +1461,7 @@ export class LegacyRigSpecSchema {
         }
         if (node["launch_wrapper"] !== undefined) {
           if (!isLaunchWrapperRuntime(node["runtime"])) {
-            errors.push(`nodes.${nodeWhere}.launch_wrapper: only valid when runtime is "pi", "codex" or "claude-code"`);
+            errors.push(`nodes.${nodeWhere}.launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
           }
           try { validateLaunchWrapper(node["launch_wrapper"], `nodes.${nodeWhere}.launch_wrapper`); }
           catch (error) { errors.push((error as Error).message); }

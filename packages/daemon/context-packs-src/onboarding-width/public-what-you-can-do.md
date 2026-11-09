@@ -138,8 +138,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   (`transport.draft_delivery` `deliver`): the message is pasted at the cursor and the combined input
   submitted as one prompt, and the result says when it joined a draft OpenRig saw. Tell the person.
   `rig config set transport.draft_delivery refuse` brings back the refusal (`prompt_draft`) from the
-  next send. Menus, permission prompts, a seat's typing guard, managed compaction and
-  `--wait-for-idle` refuse or wait under either value. Draft detection isn't complete.
+  next send. Menus and permission prompts still refuse ordinary input under either value.
+  A seat's typing guard and `--wait-for-idle` retain their checks. Managed compaction follows the
+  ordinary draft default and explicit operator protections; it separately reconciles its own
+  uncertain `/compact` write before sending restore input. Draft detection isn't complete.
 - **`rig send --raw`** — send exact text or keystrokes without the From/To envelope;
   the interactive-prompt guard still applies. To deliberately drive an interactive prompt,
   **`--dangerously-interact --reason "<why>"`** is the explicit override and implies raw text.

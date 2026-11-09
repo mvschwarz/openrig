@@ -10,8 +10,9 @@ import type {
   QueuePriority,
   QueueState,
 } from "../domain/queue-repository.js";
-import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure } from "../domain/queue-repository.js";
+import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure, isTypedGateBlocker } from "../domain/queue-repository.js";
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
+import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
 import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
 import { hostname as osHostname } from "node:os";
@@ -126,6 +127,18 @@ export function queueRoutes(): Hono {
         message: `${sessionRef} is a shared channel: its replies come back to you as correspondence from the channel, never as an answer, so nothing there will answer or close this. Read the replies and close it yourself; to answer someone or post a notice, send an update (--human-intent update, with --reply-to to stay in their thread).`,
       };
     } catch { return null; }
+  }
+  /** #2739: a park on an outside condition (external:, fold:, auth:) with no timed wake. That blocker isn't a row that
+   *  can finish, so no timer or watchdog will wake the owner: the reply says so and names the two existing ways out.
+   *  Read from the row's own waiting view, the one `rig queue show` reports. Context, not a refusal: the park stands. */
+  function parkWithoutWakeAdvisory(item: QueueItem) {
+    if (item.state !== "blocked" || !isTypedGateBlocker(item.blockedOn) || item.waiting?.nextBackstop.mechanism !== NO_TIMED_BACKSTOP) return null;
+    return {
+      code: "park_without_wake",
+      qitemId: item.qitemId,
+      blockedOn: item.blockedOn,
+      message: `No wake is set for this park: nothing wakes ${item.destinationSession} on a timer while ${item.qitemId} waits on ${item.blockedOn}. To add one, park it again with --wake-after <duration> (or --wake-watchdog <job-id>). When ${item.blockedOn} clears, rig queue resolve ${item.qitemId} --decision <evidence> unparks it.`,
+    };
   }
   function getInbox(c: { get: (key: string) => unknown }): InboxHandler {
     return c.get("inboxHandler" as never) as InboxHandler;
@@ -751,7 +764,8 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      return c.json(item);
+      const advisory = body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null;
+      return c.json({ ...item, ...(advisory ? { advisories: [advisory] } : {}) });
     } catch (err) {
       return errorResponse(c, err);
     }

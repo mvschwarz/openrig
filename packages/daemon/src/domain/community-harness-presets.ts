@@ -16,7 +16,7 @@ import { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime } from "./built-in-runtime
 export { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime };
 
 export const COMMUNITY_HARNESS_PRESET_FORMAT = 1;
-const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted", "first_input", "runner", "passes_model"] as const;
+const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted", "first_input", "runner", "passes_model", "launch_wrapper"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 export interface CommunityHarnessPreset {
@@ -36,6 +36,8 @@ export interface CommunityHarnessPreset {
   firstInput: boolean;
   /** The launcher takes the seat's declared model from OPENRIG_MODEL and maps it into its harness's own setting. */
   passesModel: boolean;
+  /** The runner applies OPENRIG_LAUNCH_WRAPPER to its native child, keeping itself outside the wrapper. */
+  launchWrapper: boolean;
   /** The command is an OpenRig-aware runner: it submits each pasted block as one prompt and posts the seat's turn
    *  boundaries as activity hooks, so its seat's activity reads from those hooks. Requires `launch_result`. */
   runner: boolean;
@@ -79,8 +81,10 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   if (raw.startup_assisted !== undefined && typeof raw.startup_assisted !== "boolean") return bad("startup_assisted must be true or false");
   if (raw.first_input !== undefined && typeof raw.first_input !== "boolean") return bad("first_input must be true or false");
   if (raw.passes_model !== undefined && typeof raw.passes_model !== "boolean") return bad("passes_model must be true or false");
+  if (raw.launch_wrapper !== undefined && typeof raw.launch_wrapper !== "boolean") return bad("launch_wrapper must be true or false");
   if (raw.names_conversation !== undefined && typeof raw.names_conversation !== "boolean") return bad("names_conversation must be true or false");
   if (raw.runner !== undefined && typeof raw.runner !== "boolean") return bad("runner must be true or false");
+  if (raw.launch_wrapper === true && raw.runner !== true) return bad("launch_wrapper needs runner: true: only a runner consumes OPENRIG_LAUNCH_WRAPPER");
   if (raw.runner === true && raw.launch_result !== true) {
     return bad("runner needs launch_result: true: a runner reports the conversation it opened in its launch record");
   }
@@ -92,7 +96,8 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   }
   return { ok: true, preset: { name, command: raw.command as string, maintainer: raw.maintainer as string, limits: limits as string[],
     launchResult: raw.launch_result === true, namesConversation: raw.names_conversation === true, resume: raw.resume === true,
-    startupAssisted: raw.startup_assisted === true, firstInput: raw.first_input === true, runner: raw.runner === true, passesModel: raw.passes_model === true, path } };
+    startupAssisted: raw.startup_assisted === true, firstInput: raw.first_input === true, runner: raw.runner === true, passesModel: raw.passes_model === true,
+    launchWrapper: raw.launch_wrapper === true, path } };
 }
 
 /** The first shell construct in a preset command, or null when it's one program with its arguments. The command is

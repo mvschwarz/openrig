@@ -1082,12 +1082,12 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     return { jobId, record };
   }
 
-  it("a reminder refused twice at the prompt reaches the seat's orchestrator, and the alert stands down once one lands", async () => {
+  it("a reminder refused at a confirmed prompt reaches the seat's orchestrator without waiting for its next scheduled attempt", async () => {
     const posts: unknown[] = []; const port = engine(posts); const wakes: string[] = [];
     const opts = { resolveOrchestrator: () => "lead@fixture", attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } };
     const { jobId, record } = reminder(["refused"]);
     await tick(port, opts);
-    expect(alerts()).toEqual([]);
+    expect(alerts()).toHaveLength(1);
     record("refused");
     await tick(port, opts);
     expect(alerts()).toHaveLength(1);
@@ -1123,7 +1123,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(wakes).toEqual(["lead@fixture"]);
   });
 
-  it.each([-1, 0])("a prompt that clears and comes back between reminders raises a new alert after two new refusals (last old refusal at clear %i ms)", async lastOldOffset => {
+  it.each([-1, 0])("a prompt that clears and comes back between reminders gets a fresh choice age (last old refusal at clear %i ms)", async lastOldOffset => {
     const clearAt = Date.parse("2030-01-01T00:00:00Z");
     const at = (offset: number) => new Date(clearAt + offset).toISOString();
     vi.useFakeTimers({ toFake: ["Date"], now: clearAt - 3 });
@@ -1137,11 +1137,11 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       const [first] = alerts();
       state = "clear"; await tick(port, toLead(wakes));
       expect(alerts()).toEqual([]);
-      state = "blocked"; await tick(port, toLead(wakes));
+      state = "unknown"; await tick(port, toLead(wakes));
       vi.setSystemTime(clearAt + 1);
-      record("refused", "selection_prompt", at(1)); await tick(port, toLead(wakes));
+      record("refused", "selection_prompt", at(1)); await tick(port, { ...toLead(wakes), now: new Date(clearAt + 1) });
       expect(alerts()).toEqual([]);
-      record("refused", "selection_prompt", at(1)); await tick(port, toLead(wakes));
+      await tick(port, { ...toLead(wakes), now: new Date(clearAt + 60_001) });
       expect(alerts()).toHaveLength(1);
       expect(alerts()[0]?.qitemId).not.toBe(first!.qitemId);
       expect(wakes).toEqual(["lead@fixture", "lead@fixture"]);
@@ -1208,6 +1208,72 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   // #81: a Claude seat at a choice prompt no hook announces (its weekly usage-limit dialog) holds open rows. Its own
   // evidence stays unknown, so before this only the transport's refusal knew, and nothing escalated.
   const choiceRefusal = `Refused: '${seat}' is at an interactive prompt (selection_prompt). A message must not select or approve it.`;
+
+  it.each([1, 2])("a watchdog-only choice refusal reaches an owner after the bounded interval with %i recorded attempts and no hook", async count => {
+    const { jobId } = reminder(Array(count).fill("refused")); state = "unknown";
+    const posts: unknown[] = []; const to: string[] = []; const port = engine(posts, true, to);
+    await tick(port, { now: new Date() });
+    expect(alerts()).toEqual([]);
+    await tick(port);
+    expect(alerts()).toHaveLength(1);
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(to).toEqual(["human-owner@external"]);
+    expect(JSON.stringify(posts)).toContain(jobId);
+  });
+
+  it("frequent watchdog choice refusals keep their original age beyond the retained history window", async () => {
+    const now = Date.now(); const { record } = reminder([]);
+    for (let i = 69; i >= 0; i--) record("refused", "selection_prompt", new Date(now - i * 1000).toISOString());
+    state = "unknown"; const posts: unknown[] = []; const port = engine(posts);
+    await tick(port, { now: new Date(now + 1) });
+    expect(alerts()).toHaveLength(1);
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+  });
+
+  it.each([1, 70])("a choice returning after a clear without a prior alert ages from its first uncleared refusal (%i returns)", async count => {
+    const initial = Date.now() - 120_000; const clearAt = initial + 1_000; const returnedAt = clearAt + 1_000;
+    const { jobId, record } = reminder([]); const posts: unknown[] = []; const port = engine(posts);
+    let observedClear = false;
+    const readPromptState = (_dest: string, refusedAt: string) => observedClear ? classifyPromptAfterRefusal({
+      activity: "idle-at-prompt", needsInput: { count: 0, reason: null },
+      needsInputEvidence: { rung: "lifecycle-hooks", observedAt: new Date(clearAt).toISOString() },
+    }, refusedAt) : "unknown";
+    record("refused", "selection_prompt", new Date(initial).toISOString());
+    await tick(port, { readPromptState, now: new Date(initial) });
+    observedClear = true;
+    await tick(port, { readPromptState, now: new Date(clearAt) });
+    expect(alerts()).toEqual([]); // Nothing existed for the clear tick to retire.
+    for (let i = 0; i < count; i++) record("refused", "selection_prompt", new Date(returnedAt + i * 10).toISOString());
+    await tick(port, { readPromptState, now: new Date(returnedAt + 59_999) });
+    expect(alerts()).toEqual([]); expect(posts).toEqual([]);
+    await tick(port, { readPromptState, now: new Date(returnedAt + 60_000) });
+    expect(alerts()).toHaveLength(1);
+    const alertId = alerts()[0]!.qitemId;
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts)).toContain(jobId);
+    await tick(port, { readPromptState, now: new Date(returnedAt + 120_000) });
+    expect(alerts().map(a => a.qitemId)).toEqual([alertId]); expect(posts).toHaveLength(1);
+  });
+
+  it("a watchdog choice refusal with current clearing evidence stays quiet", async () => {
+    reminder(["refused"]); state = "clear"; const posts: unknown[] = [];
+    await tick(engine(posts));
+    expect(alerts()).toEqual([]); expect(posts).toEqual([]);
+  });
+
+  it("a watchdog's other refusal with unknown evidence cannot borrow a choice refusal's age", async () => {
+    const now = Date.now(); const { record } = reminder([]);
+    record("refused", "selection_prompt", new Date(now - 120_000).toISOString());
+    record("refused", "permission_prompt", new Date(now - 1).toISOString());
+    state = "unknown"; const posts: unknown[] = []; const port = engine(posts);
+    await tick(port, { now: new Date(now) });
+    expect(alerts()).toEqual([]);
+    record("refused", "selection_prompt", new Date(now).toISOString());
+    await tick(port, { now: new Date(now + 1) });
+    expect(alerts()).toEqual([]); expect(posts).toEqual([]);
+    await tick(port, { now: new Date(now + 60_000) });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+  });
 
   it("#81: a choice prompt no hook announces reaches the registry's first human after one retry interval, never the seat", async () => {
     const row = await refusal(1, choiceRefusal); state = "unknown";

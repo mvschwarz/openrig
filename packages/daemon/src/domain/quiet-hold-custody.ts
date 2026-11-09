@@ -12,7 +12,7 @@
 // An ask that has posted (or been accepted by a relay bridge, which ends local quiet custody without claiming
 // downstream person delivery), or whose release gave it a disposition, isn't quiet custody any more (null), and neither is
 // any row without a quiet-hold note: digest-held and ordinary rows read exactly as before, and so does an attempted
-// ask kept in the dispatch buffer because quiet hours couldn't be read (it has no hold; it is ordinary in-flight work).
+// relay's ask kept in the dispatch buffer because quiet hours couldn't be read (it has no hold; it is ordinary in-flight work).
 import type Database from "better-sqlite3";
 import { HumanQuietStore } from "./gateway/human-quiet-windows.js";
 import { hasToken, parseQuietHoldNote, releaseJobWindowSpec } from "./policies/quiet-release.js";

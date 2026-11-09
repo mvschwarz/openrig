@@ -3,7 +3,7 @@
 // is the preparation turn's Stop (idle). These tests compose the real monitor, usage store,
 // enforcer, activity store and SessionTransport over an inert tmux adapter.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
@@ -19,6 +19,7 @@ import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { SessionTransport, classifyPaneActivity } from "../src/domain/session-transport.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 
 // A synthetic busy pane: proves the mechanism (an active pane blocks the drain), not Claude's screen.
 const COMPACTING_PANE = "⠋ Compacting conversation\nesc to interrupt";
@@ -46,7 +47,7 @@ const COMPACTED_PANE = [
   "  ⏵⏵ accept edits on (shift+tab to cycle)",
 ].join("\n");
 
-describe("post-compact drain readiness", () => {
+describe.each([false, true])("post-compact drain readiness (guarded=%s)", (guarded) => {
   let db: Database.Database;
   let home: string;
   let monitor: ContextMonitor;
@@ -64,6 +65,7 @@ describe("post-compact drain readiness", () => {
   let pane: string;
   let deliver: boolean;
   let preparation: string[];
+  let restoreNotice: ReturnType<typeof vi.fn>;
 
   const sidecar = () => join(home, "state", "context-usage", `${sessionName}.json`);
   const usage = (value: number | null, ageMs = 0) => writeFileSync(sidecar(), JSON.stringify({
@@ -98,9 +100,13 @@ describe("post-compact drain readiness", () => {
     sessionRegistry.updateStatus(session.id, "running");
     sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
     clock = Date.now();
+    // Keep the enforcer, transport and idle deadline on the same simulated clock.
+    // Host scheduling pauses must not consume this fixture's 40 ms idle budget.
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
     pane = COMPACTING_PANE;
     deliver = false;
     preparation = [];
+    restoreNotice = vi.fn(async () => undefined);
     activity = new AgentActivityStore({
       db, eventBus: new EventBus(db), now: () => new Date(clock),
       resolveOccupantGeneration: () => "gen-1", isRegisteredOccupantGeneration: () => true,
@@ -118,12 +124,14 @@ describe("post-compact drain readiness", () => {
       listWindows: async () => [],
       listPanes: async () => [],
     };
+    if (guarded) Object.assign(tmux, { deliveryGuard: new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name)) });
     realTransport = new SessionTransport({
       db, rigRepo, sessionRegistry, tmuxAdapter: tmux, agentActivityStore: activity,
       now: () => new Date(clock), sleep: async (ms: number) => { clock += ms; }, waitForIdlePollMs: 10,
     } as never);
     // Preparation and /compact go to a recording fake; after /compact the real transport delivers.
     const transport = {
+      deliveryGuard: realTransport.deliveryGuard,
       send: async (name: string, text: string, opts: unknown) => {
         if (deliver) return realTransport.send(name, text, opts as never);
         preparation.push(text);
@@ -142,6 +150,7 @@ describe("post-compact drain readiness", () => {
     settings.set("policies.claude_compaction.threshold_percent", "80");
     enforcer = new ClaudeCompactionEnforcer(settings, transport, {
       openrigHome: home, resolveOccupantGeneration: () => "gen-1", postCompactSendWaitMs: 40,
+      onRestoreDeliveryFailure: restoreNotice,
     });
     monitor = new ContextMonitor(db, new ContextUsageStore(db, { stateDir: home, codexHomeDir: home }), undefined, enforcer);
   });
@@ -270,14 +279,65 @@ describe("post-compact drain readiness", () => {
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
-  it("an unreadable pane with only the old idle hook keeps waiting", async () => {
+  it.each(["missing", "high"])("an unreadable pane with %s usage drains each owed stage after two unknown polls and reports it", async (sample) => {
+    await compact();
+    hook("Stop", 30_000);
+    if (sample === "missing") rmSync(sidecar(), { force: true });
+    pane = "";
+    const map = JSON.parse(preparation[0]!.match(/Write this attempt's complete restore map to ("(?:[^"\\]|\\.)*")/)![1]!) as string;
+    for (const [index, stage] of ["turn_boundary", "restore_prompt", "compliance_prompt"].entries()) {
+      for (let poll = 0; poll < 2; poll++) {
+        await monitor.pollOnce();
+        expect(tmux.sendText).toHaveBeenCalledTimes(index);
+        expect(enforcer.getOwedRestore(sessionName)?.lastDelivery?.reason).toBe("target_activity_unknown");
+      }
+      await monitor.pollOnce();
+      expect(tmux.sendText).toHaveBeenCalledTimes(index + 1);
+      expect(tmux.sendKeys).toHaveBeenCalledTimes(index + 1);
+      const record = JSON.parse(readFileSync(join(dirname(map), "COMPACTION-STATE.json"), "utf8"));
+      expect(record.lastDelivery).toMatchObject({ stage, ok: true, reason: "delivered_over_unreadable_pane", activity: { state: "unknown" } });
+      if (index < 2) expect(enforcer.getOwedRestore(sessionName)?.detail).toContain("over a pane OpenRig couldn't read");
+      await Promise.resolve();
+      expect(restoreNotice.mock.calls.some(([failure]) => failure.lastDelivery.stage === stage && failure.lastDelivery.reason === "delivered_over_unreadable_pane")).toBe(true);
+    }
+    expect(enforcer.hasPendingPostCompactStage(sessionName)).toBe(false);
+    await monitor.pollOnce();
+    expect(tmux.sendText).toHaveBeenCalledTimes(3);
+  });
+
+  it("an unreadable pane observation that exceeds the wait still gets bounded restore delivery", async () => {
+    await compact();
+    hook("Stop", 30_000);
+    rmSync(sidecar(), { force: true });
+    pane = "";
+    tmux.capturePaneContent.mockImplementation(async () => {
+      await new Promise(resolve => setTimeout(resolve, 70));
+      return pane;
+    });
+    await monitor.pollOnce();
+    await monitor.pollOnce();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    await monitor.pollOnce();
+    expect(boundaryWrites()).toHaveLength(1);
+    expect(enforcer.getOwedRestore(sessionName)?.lastDelivery?.reason).toBe("delivered_over_unreadable_pane");
+  });
+
+  it("positive busy evidence still holds after two unknown polls and breaks their run", async () => {
     await compact();
     hook("Stop", 30_000);
     rmSync(sidecar(), { force: true });
     pane = "";
     await monitor.pollOnce();
+    await monitor.pollOnce();
+    pane = COMPACTING_PANE;
+    await monitor.pollOnce();
     expect(tmux.sendText).not.toHaveBeenCalled();
-    expect(enforcer.hasPendingPostCompactStage(sessionName)).toBe(true);
+    pane = "";
+    await monitor.pollOnce();
+    await monitor.pollOnce();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    await monitor.pollOnce();
+    expect(boundaryWrites()).toHaveLength(1);
   });
 
   it("ordinary wait-for-idle sends keep trusting a fresh idle hook", async () => {

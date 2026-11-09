@@ -42,7 +42,7 @@ const fail = (id, code, message) => send({ jsonrpc: "2.0", id, error: { code, me
 const exit = (status, why) => { log({ dir: "event", event: "exit", status, why }); process.exit(status); };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-log({ dir: "event", event: "started", pid: process.pid, cwd: process.cwd(), argv: process.argv.slice(2) });
+log({ dir: "event", event: "started", pid: process.pid, cwd: process.cwd(), argv: process.argv.slice(2), launchWrapper: process.env.OPENRIG_LAUNCH_WRAPPER ?? null });
 // Ctrl-C is the runner's to handle, so the agent never takes it as a signal. A stubborn agent also outlives a hangup and
 // its input closing, as some real agents do: only the runner ending it (SIGTERM or SIGKILL) stops it.
 process.on("SIGINT", () => log({ dir: "event", event: "signal", signal: "SIGINT" }));

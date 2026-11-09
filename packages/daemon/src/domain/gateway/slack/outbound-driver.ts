@@ -52,6 +52,9 @@ export interface OutboundPostPayload {
   possibleRepeat?: boolean;
   /** Set by the gateway when it posts an ask whose current state it couldn't check: the post says so. */
   stateUnconfirmed?: boolean;
+  /** Set by the gateway when it posts although the person's quiet hours couldn't be read: the post says so. Decided at
+   *  each post from a fresh read, never part of a buffered decision. */
+  quietUnreadable?: boolean;
 }
 
 export interface OutboundDriverDeps {
