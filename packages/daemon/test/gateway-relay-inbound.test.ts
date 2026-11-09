@@ -33,6 +33,7 @@ import {
   type RelayReplyRefPayload,
 } from "../src/domain/gateway/relay-outbound.js";
 import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
+import { nodeSecretFs } from "../src/domain/gateway/slack/secrets.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import {
   RELAY_INBOUND_SEEN_FILE,
@@ -3066,6 +3067,24 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
         (d) => d.deliveryId,
       ),
     ).toEqual([sharedDigestId]);
+  });
+
+  it("loads relay profiles once per listing, not once per pull-routed item", async () => {
+    const f = await createRelayFixture({
+      mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
+    });
+    const asks = [];
+    for (const n of [1, 2, 3]) {
+      asks.push(await createAskWithAcceptedRelayRef(f, { summary: `Pull ask ${n}`, recordViaPendingBufferOnly: true }));
+    }
+    const secretSpy = vi.spyOn(nodeSecretFs, "readFileSync");
+    try {
+      const listed = f.daemon.queueRepo.list({ limit: 100 }).map((it) => it.qitemId);
+      for (const ask of asks) expect(listed).toContain(ask.qitemId);
+      expect(secretSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      secretSpy.mockRestore();
+    }
   });
 
   it("acknowledges a listed deliveryId over 512 characters: a quiet-release of an ask with a long supplied queue id round-trips", async () => {

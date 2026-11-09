@@ -4,8 +4,8 @@ import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js"
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
-import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, slackSubscriptionFor, withHumanAlertTag, type LoadResult } from "./gateway/human-registry.js";
-import { loadRelayProfiles } from "./gateway/relay-config.js";
+import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, slackSubscriptionFor, withHumanAlertTag, type HumanFragment, type LoadResult } from "./gateway/human-registry.js";
+import { loadRelayProfiles, type LoadRelayProfilesResult } from "./gateway/relay-config.js";
 import { sharedChannelAddresses } from "./gateway/participants.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
@@ -5120,6 +5120,7 @@ export class QueueRepository {
     item: LedgerItem,
     owners: QueueTransition[],
     loadRegistry: () => LoadResult,
+    loadProfiles: (entities: readonly HumanFragment[]) => LoadRelayProfilesResult,
   ): { notificationKey: string; startedAt: string; quiet?: true } | "inactive" | null {
     let transition = owners[0];
     if (!transition) return null;
@@ -5153,7 +5154,7 @@ export class QueueRepository {
     const primary = entity?.connectorBindings.find((b) => b.role === "primary") ?? entity?.connectorBindings[0];
     const pullRelay = primary?.kind === "relay"
       && (() => {
-        const p = loadRelayProfiles(undefined, { entities: registry.entities }).get(primary.connectorRef);
+        const p = loadProfiles(registry.entities).get(primary.connectorRef);
         return p?.ready === true && p.mode === "pull";
       })();
     // An ask placed on Steering without an alert (RECORD) owes no post: its ledger reports a real receipt (a posting
@@ -5260,9 +5261,11 @@ export class QueueRepository {
     let notes = receiptsAfterEpisodes ? undefined : this.receiptNotesFor(qitemIds);
     let registry: LoadResult | undefined;
     const loadRegistry = () => (registry ??= this.loadHumanRegistryFn());
+    let relayProfiles: LoadRelayProfilesResult | undefined;
+    const loadProfiles = (entities: readonly HumanFragment[]) => (relayProfiles ??= loadRelayProfiles(undefined, { entities }));
     const episodes = rows.map((row) => {
       const item = ledgerItem(row);
-      return { item, episode: this.currentDeliveryEpisode(item, owners.get(row.qitem_id) ?? [], loadRegistry) };
+      return { item, episode: this.currentDeliveryEpisode(item, owners.get(row.qitem_id) ?? [], loadRegistry, loadProfiles) };
     });
     notes ??= this.receiptNotesFor(qitemIds);
     for (const { item, episode } of episodes) {
