@@ -221,6 +221,89 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     if (loaded.ok) expect(loaded.entities[0]!.prefs.deliveryClass).toBe("D");
   });
 
+  it("set binding.<n> unset refuses primary removal when secondary bindings exist, then unsets secondary and sole primary with remainingBindings + note", async () => {
+    const addRes = addHumanFragment(
+      {
+        entityId: "ana",
+        class: "human",
+        displayName: "Ana",
+        address: "ana@external",
+        connectorBindings: [
+          { kind: "slack", connectorRef: "main", secretsRef: "vault://slack/ana-secret", role: "primary", handle: "U0ANA" },
+          { kind: "slack", connectorRef: "backup", secretsRef: "vault://slack/ana-backup-secret", role: "secondary" },
+        ],
+        prefs: { deliveryClass: "A" },
+      },
+      home,
+    );
+    expect(addRes.ok).toBe(true);
+
+    // 1. Refuse unsetting primary binding.0 while binding.1 remains
+    errSpy.mockClear();
+    const p1 = program();
+    p1.exitOverride();
+    await p1.parseAsync(["node", "rig", "gateway", "human", "set", "ana", "binding.0", "unset", "--reason", "try remove primary"]);
+    expect(process.exitCode).toBe(1);
+    const refusal = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(refusal).toContain("no replacement is chosen silently");
+    expect(refusal).toContain('To replace the primary, set binding.0 to the new primary spec: rig gateway human set ana binding.0 "<kind:connectorRef:secretsRef:primary[:handle=<id>]>"');
+    expect(refusal).toContain("To promote one of the other bindings (binding.1), first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show ana --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show ana --json, since unsetting a lower slot shifts the primary down) and set it to the saved spec with role primary (promotion replaces the former primary binding; its connector reference and inbound handle are not retained as a secondary).");
+    expect(refusal).toContain("To remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show ana, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).");
+    expect(refusal).not.toContain("--replace");
+
+    // 2. Unset secondary binding.1 -> succeeds, prints remainingBindings[0] = binding.0 and note without secrets
+    process.exitCode = undefined;
+    logSpy.mockClear();
+    const p2 = program();
+    p2.exitOverride();
+    await p2.parseAsync(["node", "rig", "gateway", "human", "set", "ana", "binding.1", "unset", "--reason", "drop backup binding"]);
+    expect(process.exitCode).toBeUndefined();
+    const out1Raw = logSpy.mock.calls.at(-1)![0] as string;
+    expect(out1Raw).not.toContain("ana-secret");
+    const out1 = JSON.parse(out1Raw) as {
+      ok: boolean;
+      entityId: string;
+      field: string;
+      receipt: { effect: string };
+      remainingBindings: Array<Record<string, unknown>>;
+      note: string;
+    };
+    expect(out1.ok).toBe(true);
+    expect(out1.entityId).toBe("ana");
+    expect(out1.field).toBe("binding.1");
+    expect(out1.receipt.effect).toBe("applied");
+    expect(out1.remainingBindings).toEqual([
+      { slot: "binding.0", kind: "slack", connectorRef: "main", role: "primary", handle: "U0ANA", inboundResolvable: true },
+    ]);
+    expect(out1.note).toContain("Remaining binding(s): binding.0: slack:main role=primary handle=U0ANA");
+    expect(out1.note).toContain("Binding slot indexes shift after removal");
+
+    // 3. Unset sole remaining primary binding.0 -> succeeds, leaves connectorBindings: []
+    logSpy.mockClear();
+    const p3 = program();
+    p3.exitOverride();
+    await p3.parseAsync(["node", "rig", "gateway", "human", "set", "ana", "binding.0", "unset", "--reason", "remove last binding"]);
+    expect(process.exitCode).toBeUndefined();
+    const out2 = JSON.parse(logSpy.mock.calls.at(-1)![0] as string) as {
+      ok: boolean;
+      remainingBindings: unknown[];
+      note: string;
+    };
+    expect(out2.ok).toBe(true);
+    expect(out2.remainingBindings).toEqual([]);
+    expect(out2.note).toContain("Remaining bindings: none");
+    expect(out2.note).toContain("Removing the last binding makes the current delivery episode inactive, so new missing-post findings stop (an already-open recovery item for an undelivered notice may remain)");
+    expect(out2.note).toContain("It does not answer, close or cancel open questions, cancel or reroute already-prepared deliveries, or retract anything a bridge has already accepted");
+
+    const loaded = loadHumanRegistry(home);
+    expect(loaded.ok).toBe(true);
+    if (loaded.ok) {
+      const ana = loaded.entities.find((e) => e.entityId === "ana")!;
+      expect(ana.connectorBindings).toEqual([]);
+      expect(ana.prefs.deliveryClass).toBe("A");
+    }
+  });
+
   it("set with a bad enum exits 1 and names the allowed set", async () => {
     const p = program();
     p.exitOverride();

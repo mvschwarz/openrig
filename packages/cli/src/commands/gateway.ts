@@ -567,9 +567,14 @@ Examples:
 
   human
     .command("set <entityId> <field> <value>")
-    .description("Edit one field through the verb (same validation as add; re-projection immediate). Fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-subscription (the person's Slack subscription: every-ask, the default, posts every ask to Slack too; urgent-only posts only asks created with --alert, the rest wait on Steering and the TUI; or unset), binding.<n>; and, kept in the participant side file: organization (an id, or unset), groups (comma-separated ids, or unset), policy (text, @<path> to read a file, or unset)")
+    .description("Edit one field through the verb (same validation as add; re-projection immediate). Fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-subscription (the person's Slack subscription: every-ask, the default, posts every ask to Slack too; urgent-only posts only asks created with --alert, the rest wait on Steering and the TUI; or unset), binding.<n> (a full kind:connectorRef:secretsRef:role[:handle=<id>] spec, or unset to remove that binding); and, kept in the participant side file: organization (an id, or unset), groups (comma-separated ids, or unset), policy (text, @<path> to read a file, or unset)")
     .option("--reason <reason>", "Reason recorded with connector binding changes", "update human binding")
     .option("--actor <actor>", "Named operator when outside a managed seat")
+    .addHelpText("after", `
+Removing a connector binding (binding.<n> unset):
+  - The one-primary rule stays: no replacement primary is chosen silently. If removing a primary binding would leave other bindings, the command refuses. To replace the primary in place, set its slot to the new primary spec; to promote an existing secondary binding, first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show <entityId> --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show <entityId> --json, since the primary's slot shifts down when a lower-index secondary is removed) and set it to the saved spec with role primary (promotion replaces the former primary binding; its connector reference and inbound handle are not retained as a secondary); to remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show <entityId>, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).
+  - Remaining bindings are printed with their shifted binding.<n> slot indexes (the primary's slot shifts down too when a lower-index secondary is removed). Because indexes shift after removal, do not blindly retry 'binding.0 unset'; check remainingBindings, the receipt, or 'rig gateway human show <entityId>' before retrying.
+  - Removing a binding keeps the person, their preferences, their other bindings and their open questions. Removing the last binding makes the current delivery episode inactive, so new missing-post findings stop (an already-open recovery item for an undelivered notice may remain); the current delivery-outcome display may disappear too, while historical receipt notes remain. It does not answer, close or cancel open questions, cancel or reroute already-prepared deliveries, or retract anything a bridge has already accepted.`)
     .action(async (entityId: string, field: string, value: string, opts: { reason: string; actor?: string }) => {
       const registry = await import("@openrig/daemon/gateway-human-registry");
       if (field === "organization" || field === "groups" || field === "policy") {
@@ -602,7 +607,19 @@ Examples:
               return { value: res, after: { digest }, effect: digest === prior ? "no-op" : "applied" };
             },
           });
-          console.log(JSON.stringify({ ok: true, entityId, field, path: result.value.path, receipt: result.receipt }));
+          console.log(JSON.stringify({
+            ok: true,
+            entityId,
+            field,
+            path: result.value.path,
+            receipt: result.receipt,
+            ...(value === "unset"
+              ? {
+                  remainingBindings: result.value.remainingBindings ?? [],
+                  note: result.value.note,
+                }
+              : {}),
+          }));
         } catch (error) { console.error(`refused: ${(error as Error).message}`); process.exitCode = 1; }
         return;
       }
