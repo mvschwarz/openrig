@@ -25,7 +25,8 @@ import type Database from "better-sqlite3";
  * selected row (no index serves a payload match, and one statement over a large table would hold the daemon), then
  * erases batch by batch, yielding between steps. Each batch is one transaction (better-sqlite3 commits a transaction
  * on return and rolls it back on a throw): it rechecks its rows, since anything may have changed them since selection
- * (a reopened row is open work again), writes their ledger lines, then changes their events, copies and rows. A run
+ * (a reopened row is open work again; a rerouted one may no longer be the account's), writes their ledger lines, then
+ * changes their events, copies and rows. A row an unreadable event names is kept, so reruns keep reporting it. A run
  * that stops, by its batch limit or an error, returns only what it committed; a rerun picks up the rest.
  */
 
@@ -74,7 +75,7 @@ export interface EraseOptions {
 
 type Stage = "ledger" | "select" | "events" | "rows" | "unlinked" | "rig";
 type CopyTable = "outbox_entries" | "inbox_entries" | "stream_reader_actions" | "stream_dispositions";
-export type EraseGap = { code: "workflow-reference" | "not-found" | "changed-during-run"; qitemId: string };
+export type EraseGap = { code: "workflow-reference" | "not-found" | "changed-during-run" | "unreadable-event"; qitemId: string };
 
 export interface EraseReport {
   ok: true;
@@ -91,14 +92,16 @@ export interface EraseReport {
   qitems: Array<{ qitemId: string; action: EraseAction; state: string }>;
   /** members scope: rows with exactly one member endpoint, left untouched */
   mixed: Array<{ qitemId: string; memberEndpoint: "source" | "destination" }>;
-  /** rows not erased, and why: a workflow references them, (ids scope) no such row to scrub, or the row changed after
-   *  selection so it no longer qualifies (reopened, or written to out of its window) */
+  /** rows not erased, and why: a workflow references them; (ids scope) no such row to scrub; the row changed after
+   *  selection so it no longer qualifies (reopened, rerouted out of the account, written to out of its window, or an
+   *  absent id created since); or an event naming it can't be read */
   gaps: EraseGap[];
   /** ids scope, delete: rows already gone whose id marker is (re)written; listed once the marker is committed */
   alreadyAbsent: string[];
   /** an erased row's copies held with someone else: mixed (one of their sessions is the owner's) or foreign (none) */
   keptCopies: Array<{ table: CopyTable; id: string; qitemId: string; ownership: "mixed" | "foreign" }>;
-  /** events naming a selected row whose payload can't be read: kept, since what they hold can't be inspected */
+  /** events naming a selected row whose payload can't be read: kept, since what they hold can't be inspected. The
+   *  rows they name are kept too (gap unreadable-event), so every rerun finds them again until they're resolved */
   unreadableEvents: Array<{ seq: number; qitemIds: string[] }>;
   /** copies erased with the rows, or that would be */
   linked: { transitions: number; archivedTransitions: number; outbox: number; inbox: number; events: number; streamActions: number; missionControl: number };
@@ -170,7 +173,7 @@ function workflowReferenced(st: Statements, ids: string[]): Set<string> {
 
 type Candidate = { qitemId: string; state: string; action: EraseAction; source: string; destination: string };
 type Copy = { table: CopyTable; id: string; qitemId: string; sessions: Array<string | null> };
-type Current = { qitemId: string; state: string; tsUpdated: string; erasedAt: string | null };
+type Current = { qitemId: string; state: string; tsUpdated: string; erasedAt: string | null; source: string; destination: string };
 
 /** The copies of these rows that another party holds, each found through its own indexed link. */
 function linkedCopies(st: Statements, ids: string[]): Copy[] {
@@ -433,7 +436,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       .all({ after, limit: batchSize }) as Array<Omit<Candidate, "action"> & { tsUpdated: string; erasedAt: string | null }>;
     const rows: Candidate[] = [];
     for (const { tsUpdated, erasedAt, ...row } of found) {
-      const action = routineAction({ qitemId: row.qitemId, state: row.state, tsUpdated, erasedAt });
+      const action = routineAction({ ...row, tsUpdated, erasedAt });
       if (action !== null) rows.push({ ...row, action });
     }
     return { rows, last: found.at(-1)?.qitemId ?? null, seen: found.length };
@@ -502,10 +505,12 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
 
     // One batch, read at the moment it's erased: each row is rechecked, since anything may have changed it after
     // selection (a reopen makes it open work again; a workflow may have taken it up), then its copies and events.
+    const unreadableAtWalk = new Set(events.unreadable.flatMap((event) => event.qitemIds));
     const planBatch = (chunk: Candidate[]): BatchPlan => {
       const chunkIds = chunk.map((row) => row.qitemId);
-      const current = new Map((st.get(`SELECT qitem_id AS qitemId, state, ts_updated AS tsUpdated, content_erased_at AS erasedAt
-          FROM queue_items WHERE qitem_id IN ${IDS}`).all({ ids: JSON.stringify(chunkIds) }) as Current[]).map((row) => [row.qitemId, row]));
+      const current = new Map((st.get(`SELECT qitem_id AS qitemId, state, ts_updated AS tsUpdated, content_erased_at AS erasedAt,
+          source_session AS source, destination_session AS destination FROM queue_items WHERE qitem_id IN ${IDS}`)
+        .all({ ids: JSON.stringify(chunkIds) }) as Current[]).map((row) => [row.qitemId, row]));
       const referenced = workflowReferenced(st, chunkIds);
       const plan: BatchPlan = { rows: [], absent: [], dropped: [], owned: { scrub: [], delete: [] }, kept: [],
         counts: { transitions: 0, archivedTransitions: 0, missionControl: 0 }, events: { rewrite: [], remove: [], seqs: [] }, unreadable: [] };
@@ -517,11 +522,41 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
           else plan.dropped.push({ code: "changed-during-run", qitemId: candidate.qitemId });
         } else if (referenced.has(candidate.qitemId)) {
           plan.dropped.push({ code: "workflow-reference", qitemId: candidate.qitemId });
+        } else if (scope.kind === "members" && !(memberSet.has(now.source) && memberSet.has(now.destination))) {
+          // Rerouted since selection (a fallback, say): no longer the account's own row.
+          plan.dropped.push({ code: "changed-during-run", qitemId: candidate.qitemId });
         } else if (scope.kind === "routine" && routineAction(now) !== candidate.action) {
           plan.dropped.push({ code: "changed-during-run", qitemId: candidate.qitemId });
         } else {
-          plan.rows.push({ ...candidate, state: now.state });
+          // The current endpoints decide whose the row's copies are.
+          plan.rows.push({ ...candidate, state: now.state, source: now.source, destination: now.destination });
         }
+      }
+      if (plan.rows.length === 0) return plan;
+      // The walk's events for these rows, plus any written since it began. A row an unreadable event names is kept:
+      // what that event holds can't be inspected, and keeping the row means every rerun finds the event and reports
+      // it until it's resolved.
+      const seqs = [...new Set(plan.rows.flatMap((row) => events.seqs.get(row.qitemId) ?? []))];
+      const fetched = new Map<number, string>();
+      for (const event of eventsAt.all({ seqs: JSON.stringify(seqs), top: events.top }) as Array<{ seq: number; payload: string }>) {
+        fetched.set(event.seq, event.payload);
+      }
+      const blocked = new Set(plan.rows.map((row) => row.qitemId).filter((id) => unreadableAtWalk.has(id)));
+      const readable: Array<[number, EventPayload]> = [];
+      for (const [seq, text] of fetched) {
+        const payload = parsePayload(text);
+        if (payload !== null) {
+          readable.push([seq, payload]);
+          continue;
+        }
+        const named = plan.rows.map((row) => row.qitemId).filter((id) => text.includes(id));
+        if (named.length === 0) continue;
+        plan.unreadable.push({ seq, qitemIds: named });
+        for (const id of named) blocked.add(id);
+      }
+      if (blocked.size > 0) {
+        plan.dropped.push(...[...blocked].sort().map((qitemId) => ({ code: "unreadable-event" as const, qitemId })));
+        plan.rows = plan.rows.filter((row) => !blocked.has(row.qitemId));
       }
       const ids = plan.rows.map((row) => row.qitemId);
       if (ids.length === 0) return plan;
@@ -538,29 +573,19 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
         archivedTransitions: st.count(`SELECT COUNT(*) AS n FROM queue_transitions_archive WHERE qitem_id IN ${IDS}`, params),
         missionControl: st.count(`SELECT COUNT(*) AS n FROM mission_control_actions WHERE qitem_id IN ${IDS}`, params),
       };
-      // The walk's events for these rows, plus any written since it began. An event naming two rows is deleted if
-      // either is deleted; one naming rows of a later batch is changed again there.
-      const seqs = [...new Set(ids.flatMap((id) => events.seqs.get(id) ?? []))];
-      const seen = new Set<number>();
-      for (const event of eventsAt.all({ seqs: JSON.stringify(seqs), top: events.top }) as Array<{ seq: number; payload: string }>) {
-        if (seen.has(event.seq)) continue;
-        seen.add(event.seq);
-        const payload = parsePayload(event.payload);
-        if (payload === null) {
-          const named = ids.filter((id) => event.payload.includes(id));
-          if (named.length > 0) plan.unreadable.push({ seq: event.seq, qitemIds: named });
-          continue;
-        }
+      // An event naming two rows is deleted if either is deleted; one naming rows of a later batch is changed again
+      // there.
+      for (const [seq, payload] of readable) {
         const actions = namedIds(payload).map((id) => byId.get(id)?.action).filter((action): action is EraseAction => action !== undefined);
         if (actions.length === 0) continue;
-        plan.events.seqs.push(event.seq);
+        plan.events.seqs.push(seq);
         if (actions.includes("delete")) {
-          plan.events.remove.push(event.seq);
+          plan.events.remove.push(seq);
         } else {
           for (const key of EVENT_CONTENT_KEYS) delete payload[key];
           if (!keepsClosureTarget(payload.closureReason, payload.closureTarget)) delete payload.closureTarget;
           payload.contentErased = true;
-          plan.events.rewrite.push([JSON.stringify(payload), event.seq]);
+          plan.events.rewrite.push([JSON.stringify(payload), seq]);
         }
       }
       return plan;
@@ -606,14 +631,21 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       await yieldToLoop();
     }
     if (absentAtSelect.length > 0) {
-      if (opts.apply) {
-        db.transaction(() => {
-          ledger(absentAtSelect.map((qitemId) => ({ qitemId, action: "delete" as const })));
+      // Rechecked as the markers are written: an id created since selection is live work, never certified absent.
+      const certify = () => {
+        const present = new Set((st.get(`SELECT qitem_id AS id FROM queue_items WHERE qitem_id IN ${IDS}`)
+          .all({ ids: JSON.stringify(absentAtSelect) }) as Array<{ id: string }>).map((row) => row.id));
+        const absent = absentAtSelect.filter((id) => !present.has(id));
+        if (opts.apply && absent.length > 0) {
+          ledger(absent.map((qitemId) => ({ qitemId, action: "delete" as const })));
           st.get(`INSERT OR IGNORE INTO queue_erased_ids (qitem_id, erased_at, reason) SELECT value, @now, @reason FROM json_each(@ids)`)
-            .run({ ids: JSON.stringify(absentAtSelect), now: opts.nowIso, reason });
-        })();
-      }
-      report.alreadyAbsent.push(...absentAtSelect);
+            .run({ ids: JSON.stringify(absent), now: opts.nowIso, reason });
+        }
+        return { absent, created: absentAtSelect.filter((id) => present.has(id)) };
+      };
+      const { absent, created } = opts.apply ? db.transaction(certify)() : certify();
+      report.gaps.push(...created.map((qitemId) => ({ code: "changed-during-run" as const, qitemId })));
+      report.alreadyAbsent.push(...absent);
     }
 
     // 4. Account deletion's other passes, once every row is done.

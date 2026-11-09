@@ -571,16 +571,26 @@ describe("round 2 controls", () => {
     expect(payloads()).toContain("secret-l-one");
   });
 
-  it("K3: an event that names a row but can't be read is kept and reported, and the run isn't clean", async () => {
+  it("K3, L3: an event that names a row but can't be read is reported with its row kept, on every rerun until it's resolved", async () => {
     await row("u-row", A, B, [{ state: "done", daysAgo: 2 }]);
-    db.prepare("INSERT INTO events (type, payload) VALUES ('queue.updated', ?)").run('{"qitemId":"u-row","summary":"secret-truncated');
+    await row("u-other", A, B, [{ state: "done", daysAgo: 2 }]);
+    const bad = db.prepare("INSERT INTO events (type, payload) VALUES ('queue.updated', ?)").run('{"qitemId":"u-row","summary":"secret-truncated');
     const dry = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: false, nowIso: NOW });
     const report = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW });
     expect({ ...report, applied: false }).toEqual(dry);
-    expect(report.unreadableEvents).toEqual([{ seq: expect.any(Number), qitemIds: ["u-row"] }]);
+    expect(report.unreadableEvents).toEqual([{ seq: Number(bad.lastInsertRowid), qitemIds: ["u-row"] }]);
+    expect(report.gaps).toEqual([{ code: "unreadable-event", qitemId: "u-row" }]);
     expect([report.complete, report.clean]).toEqual([true, false]);
-    expect(exists("u-row")).toBe(false);
+    expect([exists("u-row"), exists("u-other")]).toEqual([true, false]);
+    // An identical rerun (after a lost response, say) finds it again.
+    const again = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW });
+    expect(again.unreadableEvents).toEqual(report.unreadableEvents);
+    expect(again.clean).toBe(false);
     expect(payloads()).toContain("secret-truncated");
+    // Once the event is resolved, the next run erases the row and is clean.
+    db.prepare("DELETE FROM events WHERE seq = ?").run(bad.lastInsertRowid);
+    const resolved = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW });
+    expect([resolved.clean, exists("u-row")]).toEqual([true, false]);
   });
 
   it("K4: a successor reason keeps its target only when it names a session or a queue row", async () => {
@@ -619,5 +629,42 @@ describe("round 2 controls", () => {
     expect({ ...applied, applied: false }).toEqual(dry);
     expect(dry.keptCopies).toEqual([{ table: "outbox_entries", id: "o-m", qitemId: "m-row", ownership: "mixed" }]);
     expect(dry.unlinked).toMatchObject({ mixedEntries: 0 });
+  });
+});
+
+describe("round 3 controls", () => {
+  // The run yields after each events window. With a window of 1, a write queued now lands during the walk, after
+  // selection and before the batches.
+  const duringWalk = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("L1: a row rerouted out of the account after selection is kept with its events and reported", async () => {
+    await row("l1-moved", A, B, [{ state: "done", daysAgo: 2 }]);
+    await row("l1-stays", A, B, [{ state: "done", daysAgo: 2 }]);
+    const run = eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW, eventsWindow: 1 });
+    await duringWalk();
+    repo.routeToFallback("l1-moved", OUT, "owner unavailable");
+    const report = await run;
+    expect(report.qitems.map((q) => q.qitemId)).toEqual(["l1-stays"]);
+    expect(report.gaps).toEqual([{ code: "changed-during-run", qitemId: "l1-moved" }]);
+    expect(report.clean).toBe(false);
+    expect(db.prepare("SELECT destination_session AS d, body FROM queue_items WHERE qitem_id = 'l1-moved'").get())
+      .toEqual({ d: OUT, body: "secret-l1-moved body" });
+    expect(marker("l1-moved")).toBeUndefined();
+    expect(payloads()).toContain("secret-l1-moved");
+  });
+
+  it("L2: an id absent at selection but created during the run is reported, never certified absent", async () => {
+    await row("l2-old", A, B, [{ state: "done", daysAgo: 2 }]);
+    const run = eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "l2-new", action: "delete" }, { qitemId: "l2-old", action: "delete" }] },
+      apply: true, nowIso: NOW, eventsWindow: 1 });
+    await duringWalk();
+    await repo.create({ qitemId: "l2-new", sourceSession: A, destinationSession: B, body: "secret-l2-new body" });
+    const report = await run;
+    expect(report.qitems.map((q) => q.qitemId)).toEqual(["l2-old"]);
+    expect(report.alreadyAbsent).toEqual([]);
+    expect(report.gaps).toEqual([{ code: "changed-during-run", qitemId: "l2-new" }]);
+    expect(report.clean).toBe(false);
+    expect(marker("l2-new")).toBeUndefined();
+    expect(everything()).toContain("secret-l2-new body");
   });
 });

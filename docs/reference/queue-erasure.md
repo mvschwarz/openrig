@@ -44,7 +44,7 @@ A file is one entry per line (blank lines and `#` comments are skipped; a line s
 
 **Account deletion is exact.**
 - The members file is the account's recorded membership: the exact session names of its seats, including departed ones. List every address form the account used, such as a host-suffixed form. Names are compared as given, never by pattern, so a row addressed through an unlisted form is neither erased nor reported.
-- **Mixed rows:** a row with exactly one member endpoint is reported under `mixed` (with which endpoint is the member) and left untouched. Deciding who owns it is a separate decision.
+- **Mixed rows:** a row with exactly one member endpoint is reported under `mixed` (with which endpoint is the member) and left untouched. Deciding who owns it is a separate decision. A row rerouted out of the account while the run is under way (by a fallback, say) is kept too, and reported as `changed-during-run`.
 - **After the rows:** account deletion also removes outbox and inbox entries between two members that no row owns, and the members' stream items. An entry with one member endpoint, or a stream item something still references, is counted and left.
 
 **The account's rig.** A rig's own records outlive the rig. Events are kept past rig and node deletion by design, and snapshots, node and seat records and watchdog jobs have no key that cascades. `--rig <id>`, given with `--members`, erases them:
@@ -58,7 +58,7 @@ Records that name the account but also belong elsewhere are counted under `rig.l
 - **While the rig exists,** its sessions and the members must match both ways, or the run is refused (`erase_rig_mismatch`). Every member's session name must carry the rig's name (departed members included), and every current session of the rig must be a member, so the rig holds no one else's seat.
 - **On that verified run,** the rig's id and name are recorded with a digest of the membership.
 - **Once the rig is removed,** the same command, with the same membership, uses that record to erase what's left under the rig's id. This includes the events the removal wrote, and the record still lets it count records bound to the rig's name.
-- **When nothing of the rig is left,** the record becomes a completion receipt: the rig's name is cleared, and its id, the membership digest and the time stay. An identical rerun, after a lost response say, still verifies and reports the same clean result, with `rig.completedAt`.
+- **When nothing of the rig is left,** the record becomes a completion receipt: the rig's name is cleared, and its id, the membership digest and the time stay. An identical rerun, after a lost response say, still verifies and reports the same clean result, with `rig.completedAt`. The receipt is kept for good. It holds no content.
 - **A removed rig's id that was never verified** with this membership erases nothing keyed by it. Those records are counted under `rig.left`, the name-bound tables are listed under `rig.unknown`, and the run isn't clean.
 
 **Retention windows** (`rig config set …`, read at the daily sweep and at daemon start):
@@ -67,7 +67,7 @@ Records that name the account but also belong elsewhere are counted under `rig.l
 |---|---|---|
 | `retention.closed_content_days` | `0` (off) | Scrub closed rows this many days after they closed |
 | `retention.closed_metadata_days` | `0` (off) | Delete closed rows, keeping only their ids, this many days after they closed |
-| `retention.erasure_ledger` | empty (none) | An absolute file path. Every applied erasure, by the sweep or the command, appends each row's id and action there, one JSON line each, before anything in its batch changes. A path that can't be written stops the run before it changes anything |
+| `retention.erasure_ledger` | empty (none) | An absolute file path, on local disk, since each batch appends to it while it holds the daemon. Every applied erasure, by the sweep or the command, appends each row's id and action there, one JSON line each, before anything in its batch changes. A path that can't be written stops the run before it changes anything |
 
 - **Closed** means `done`, `canceled`, `denied` or `handed-off`. `failed` and open work are never touched by the windows.
 - **Age:** a row's age counts from when it entered its final closed state. A note on a closed row doesn't restart it, and a row reopened and closed again counts from its latest close.
@@ -96,9 +96,9 @@ The command prints one JSON report (`--json` makes it a single line):
 | `qitems` | each row erased (or that would be), with its `action` and `state` |
 | `mixed` | members scope: rows with one member endpoint, left untouched |
 | `keptCopies` | copies of erased rows held with someone else, kept: `table`, `id`, `qitemId`, `ownership` (`mixed` or `foreign`) |
-| `gaps` | rows not erased and why: `workflow-reference`; `not-found` for an id to scrub that doesn't exist; `changed-during-run` for a row that no longer qualified when its batch ran (reopened, or written to so it left its window) |
-| `alreadyAbsent` | ids to delete with no row; their erased-id record is written (again), and they're listed once it's committed |
-| `unreadableEvents` | events naming an erased row whose payload can't be read: `seq` and the row ids found in its text. They're kept, since what they hold can't be inspected, and the run isn't clean |
+| `gaps` | rows not erased and why: `workflow-reference`; `not-found` for an id to scrub that doesn't exist; `changed-during-run` for a row that no longer qualified when its batch ran (reopened, rerouted out of the account, or written to so it left its window) or an absent id created since selection; `unreadable-event` for a row an unreadable event names |
+| `alreadyAbsent` | ids to delete with no row; their erased-id record is written (again), and they're listed once it's committed. They're rechecked as the record is written, so an id created during the run is reported as `changed-during-run` instead |
+| `unreadableEvents` | events naming a selected row whose payload can't be read: `seq` and the row ids found in its text. They're kept, since what they hold can't be inspected, and so are the rows they name, so every rerun reports them again until the event is repaired or removed. The run isn't clean |
 | `linked` | counts of the copies erased with the rows |
 | `unlinked` | members scope: entries and stream items erased that no row owned, plus those left (`mixedEntries`, `referencedStreamItems`) |
 | `rig` | members scope with `--rig`: `found`, `verified`, records erased per table (`erased`, counted as each chunk commits), records left (`left`), tables that can't be counted (`unknown`), and `completedAt` once the rig's erasure is complete |
@@ -106,9 +106,13 @@ The command prints one JSON report (`--json` makes it a single line):
 **How a run works:**
 - **Selection:** a run selects everything first and writes nothing.
 - **Events:** it reads the events table once, in small windows, to find each row's events.
-- **Batches:** each batch, of up to 100 rows, is one transaction. It rechecks its rows, writes their ledger lines, then changes their events, copies and rows. The recheck drops a row that a workflow has taken up, and in a routine run one that was reopened or no longer falls in the same window; each dropped row is reported in `gaps`.
-- **Stopping:** the daemon is never held for long. A run that stops leaves whole batches done, events included. A rerun picks up the rest, and erasing a row a second time changes nothing.
-- **A ledger line without its batch:** if a batch's transaction fails after its lines are written, the ledger lists rows that weren't erased. Replaying it erases rows that qualified at that moment, which the rerun would erase too.
+- **Batches:** each batch, of up to 100 rows, is one transaction. It rechecks its rows, writes their ledger lines, then changes their events, copies and rows.
+  - **The recheck drops** a row that a workflow has taken up, or that an unreadable event names. For account deletion, it also drops a row that is no longer between two members. For a routine run, it drops one that was reopened or no longer falls in the same window.
+  - **Each dropped row** is reported in `gaps`.
+  - **The current endpoints** decide whose its copies are.
+- **How long it holds the daemon:** the batch caps rows, not events or copies, so a row with many of either makes its batch longer. On a copy of a store with 2.4 million events, the longest single hold in a first routine run was about 0.25 s.
+- **Stopping:** a run that stops leaves whole batches done, events included. A rerun picks up the rest, and erasing a row a second time changes nothing.
+- **Ledger lines are recorded intentions:** if a batch's transaction fails after its lines are written, the ledger lists rows that weren't erased. A replay erases those ids as listed, whatever happened to the rows since.
 
 **Refusals**, with nothing erased:
 
