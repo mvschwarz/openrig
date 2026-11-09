@@ -1035,13 +1035,13 @@ resume/successor launch reads it at call time. Examples:
   cmd
     .command("set-runtime")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--runtime <runtime>", "codex or claude-code")
+    .option("--runtime <runtime>", "codex, claude-code or pi")
     .option("--reason <text>", "Why the seat moves; recorded with the switch")
     .option("--model <id>", "Target model; otherwise the seat's agent spec for the target, else the target's default")
     .option("--effort <level>", "Target effort, the target runtime's own level (not translated)")
     .option("--codex-config-profile <name>", "Codex configuration profile for a Codex successor")
     .option("--clear-account-home", "Return to member/rig/daemon/native login selection through a fresh successor")
-    .option("--account-home <path>", "Isolated target CODEX_HOME or CLAUDE_CONFIG_DIR; also permits a fresh successor on the same runtime")
+    .option("--account-home <path>", "Target Codex/Claude home or Pi account directory containing auth.json; also permits a same-runtime successor")
     .option("--token-file <path>", "With a Claude account home, its required subscription token reference")
     .option("--account-label <label>", "With --token-file, the selected account's label")
     .option("--permission-mode <mode>", "Target native permission choice; default: inherit the seat's member and rig policy")
@@ -1051,7 +1051,7 @@ resume/successor launch reads it at call time. Examples:
     .option("--note <text>", "With --confirm: what you'll do first")
     .option("--recover", "Finish an interrupted switch from its record")
     .option("--json", "JSON output for agents")
-    .description("Move a live Codex or Claude Code seat to the other runtime, successor first")
+    .description("Move a live Codex, Claude Code or Pi seat to another runtime, successor first")
     .addHelpText("after", `
 The seat keeps its address, connections, queue rows and claims. Its successor
 starts on the target runtime beside the current occupant, reads a handover, and
@@ -1065,7 +1065,7 @@ later converge reports a deferred change_runtime); the source runtime's model,
 effort, Codex profile and native permission choice are cleared, not mapped; two
 processes run until cutover; messages sent to the seat during the switch are
 held, not typed, and need sending again afterwards.
-Codex and Claude Code, single-pane seats only. --dry-run lists the details.
+Codex, Claude Code and Pi, single-pane seats only. --dry-run lists the details.
 A seat that has never started has no pane to switch: declare the other runtime for it in its rig spec and bring the team
 up again from that spec. That's a new generation of the seat, without this seat's edges, settings or queued work.
 --clear-account-home returns to configured member/rig/daemon/native selection; it does not restore historical credentials.
@@ -1437,12 +1437,16 @@ Examples:
     .option("--json", "JSON output for agents")
     .description("Stop exactly one LIVE managed seat (kills only that seat's tmux session; audited)")
     .addHelpText("after", `
-Siblings are untouched. A dead seat is refused (use rig seat clean); an adopted
-session is refused (use rig unclaim). A seat handed over (fresh, fork or rebuild)
-before OpenRig 0.7.9 still reads adopted and is refused too, until its next launched
-handover or managed launch; the refusal says so. Stopping ends that agent's session and any
-work in progress: check it first (rig capture <seat>) and stop only a seat you
-own or were asked to stop. rig seat launch <seat> --fresh --reason <text> starts
+Siblings are untouched. A dead seat is refused (use rig seat clean). An adopted
+session is refused: to end only it, run rig unclaim <session> (it releases the
+session and leaves its process running), then end that process in its own
+terminal. rig down <rig> ends every seat in its rig, so it is the route only
+for a one-seat rig.
+A seat handed over (fresh, fork or rebuild) before OpenRig 0.7.9 still reads
+adopted and is refused too, until its next launched handover or managed launch;
+the refusal says so. Stopping ends that agent's session and any work in progress:
+check it first (rig capture <seat>) and stop only a seat you own or were asked to
+stop. rig seat launch <seat> --fresh --reason <text> starts
 a fresh occupant there; it does not resume the stopped conversation.
 A community harness stop closes its managed pane; its native processes or compute
 may outlive it. Inspect their own lifecycle receipts.

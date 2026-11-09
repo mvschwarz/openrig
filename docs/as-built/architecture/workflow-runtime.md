@@ -84,6 +84,15 @@ Diagnostic-only rows, moved sources, and versions retained for unfinished
 work have separate paths in `readThrough`, `writeDiagnostic`, and
 `isPinnedByUnfinishedWork`.
 
+Only instantiate (and `rig workflow run`, which posts to the same route) and
+the workflows-folder scan register specs through `readThrough`.
+`WorkflowRuntime.validate` (`rig workflow validate`, `POST /validate`) reads
+the file with `WorkflowSpecCache.readFromDisk`: the same file and parse
+checks, in memory, with no `workflow_specs` write. A spec that was only
+validated from outside the workflows folder is not listed by
+`rig workflow specs` and is not found by its bare name; its path still
+instantiates (#2726).
+
 ## Durable state
 
 The migration files record the storage evolution; they are not a count of

@@ -225,6 +225,12 @@ export class SeatLaunchEnvironment {
         ].join("\n");
       }
       const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`));
+      // A long Pi command is exec'd from a staged script, and exec takes one command: `exec unset …; …` started no agent.
+      // Its account step goes to env as -u instead (the selected home is already an assignment above).
+      if (target.runtime === "pi" && accountStep) {
+        const unset = [...(clearing && homeVar ? [homeVar] : []), ...(accountHome || selectedPiHome ? scrub : [])];
+        return `/usr/bin/env ${unset.map((name) => `-u ${name}`).join(" ")} ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${target.launcherPrefix ?? ""}${prefix}${command}`;
+      }
       return `${accountStep}/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${target.launcherPrefix ?? ""}${prefix}${command}`;
     } catch {
       // This best-effort correction is not a new launch admission gate. Do not

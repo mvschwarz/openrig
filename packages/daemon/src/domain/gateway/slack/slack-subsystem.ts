@@ -64,7 +64,7 @@ import {
 } from "../delivery-rules-engine.js";
 import { armDeliveryDeferral } from "../../policies/delivery-deferral.js";
 import { confirmReleaseAtPost, currentAskVerdict, holdForQuiet } from "../../policies/quiet-release.js";
-import { noteRePresentNotPosted, RE_PRESENT_DECISION_PREFIX } from "./open-asks.js";
+import { noteRePresentNotPosted, noteRePresentUnconfirmed, rePresentMarks, RE_PRESENT_DECISION_PREFIX, type RePresentUnconfirmed } from "./open-asks.js";
 import { quietHoldFor } from "../human-quiet-windows.js";
 import { WatchdogJobsRepository } from "../../watchdog-jobs-repository.js";
 import { loadRelayProfiles } from "../relay-config.js";
@@ -879,6 +879,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // Decisions already in the dispatch buffer when this wire is built are retained from an earlier
   // run: posts that failed or never finished, which startServices() replays.
   const replayedAtStart = new Set(new DispatchBuffer(opts.home).pending().map((d) => d.decisionId));
+  /** The marks a later post of a re-shown ask carries, from its row (see `rePresentMarks`); empty for any other ask. */
+  const rowMarks = (qitemId: string | undefined, key: string | undefined): ReturnType<typeof rePresentMarks> =>
+    qitemId && key ? rePresentMarks(opts.queueRepo.listTransitions(qitemId).map((t) => t.transitionNote ?? ""), key) : {};
   // A replayed notification for a row that has since left the active states is history, not news
   // (a post that failed, retried a day later): it posts nothing, and the row says why, unless the
   // episode already has its posted receipt. Returning ok drains it from the dispatch buffer.
@@ -958,7 +961,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       holdForQuiet({ queueRepo: opts.queueRepo, jobsRepo, qitemId: m.qitemId, entityId: recipient, hold: { ...quiet!, notificationKey: m.notificationKey } });
       return false;
     });
-    if (kept.length === members.length) return targetDeliver(decision); // unchanged: the original, as it is
+    if (kept.length === members.length) {
+      // A digest holding a re-shown ask whose earlier attempt may be in Slack says it may repeat, and an attempt log that
+      // can't be read doesn't hold it. A kept digest decides the same when it comes back here.
+      const repeat = !relay && members.some((m) => rowMarks(m.qitemId, m.notificationKey).possibleRepeat);
+      return targetDeliver(repeat ? { ...decision, payload: { ...p, possibleRepeat: true } } : decision); // the original, as it is
+    }
     if (kept.length === 0 || !aggregate) return { ok: true as const }; // nothing left to post under it
     const keptIds = new Set(kept.map((m) => m.qitemId));
     const body = String(p.body ?? "").split("\n").filter((line) => [...keptIds].some((id) => line.endsWith(`[${id}]`))).join("\n");
@@ -972,7 +980,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   };
 
   const engineDeliver: SubsystemDeliverFn = async (decision) => {
-    const p = ((decision as { payload?: unknown }).payload ?? {}) as OutboundPostPayload & { deliveryDeferralFire?: boolean };
+    let p = ((decision as { payload?: unknown }).payload ?? {}) as OutboundPostPayload & { deliveryDeferralFire?: boolean };
     const relay = isRelayDecision(decision, p);
     const targetDeliver = targetDeliverFor(decision, p);
     if (relay) {
@@ -1024,7 +1032,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         qitemId: p.qitemId,
         notificationKey: key,
       });
-      if (verdict === "post") return targetDeliver(decision);
+      if (verdict === "post") {
+        // A re-shown ask whose earlier attempt may be in Slack keeps saying so when its release posts it, and an attempt
+        // log that still can't be read doesn't hold the release. (The release has just re-checked its state.)
+        const { possibleRepeat } = relay ? {} : rowMarks(p.qitemId, key);
+        return targetDeliver(possibleRepeat ? { ...decision, payload: { ...p, possibleRepeat } } : decision);
+      }
       // Declined (the row says why) or couldn't be checked (nothing written): either way nothing posts now. Acking is
       // safe because the window's release job owns redelivery until the ask has a receipt or a disposition; keeping it
       // buffered would wait for a restart and block the job's own re-dispatch of the same decision id.
@@ -1042,16 +1055,17 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         return { ok: true as const };
       }
       // Whether an earlier attempt can be in Slack is read from the attempt log, which the landing check below reads
-      // leniently. A log that exists but can't be read is unknown, not "never attempted": the decision stays in the buffer,
-      // with no post (delivery's reconcile reads the same log) and no not-posted record, until it reads.
+      // leniently. A log that exists but can't be read is unknown, not "never attempted": it counts as an earlier attempt
+      // that may be in Slack, and never as a reason to write a not-posted record.
+      let attemptLogUnreadable: string | null = null;
       try {
         (relay ? relayAttempted : attempted).statuses();
       } catch (error) {
-        log(`re-shown ${decision.decisionId} retained: the attempt log couldn't be read (${(error as Error).message})`);
-        return { ok: false as const, class: "re-present-attempt-log-unreadable", detail: (error as Error).message };
+        attemptLogUnreadable = (error as Error).message;
       }
       // An earlier attempt of this decision found in Slack goes to delivery, which records it.
-      const landing = !relay && "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<string> }).landing(decision) : "unattempted";
+      const landing = attemptLogUnreadable ? "maybe"
+        : !relay && "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<string> }).landing(decision) : "unattempted";
       if (landing === "found" || landing === "partial") return targetDeliver(decision);
       const regForVerdict = registrySurface.loadHumanRegistry(opts.home);
       const alertsForVerdict =
@@ -1067,17 +1081,47 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         notificationKey: key,
         ...(alertsForVerdict ? { alerts: alertsForVerdict } : {}),
       });
-      if (verdict.kind !== "post") {
-        // One whose earlier attempt Slack couldn't rule out may already be posted: it's never recorded as not posted, and
-        // it stays in the buffer, so its replay decides again (and reconciles) instead of the uncertainty being dropped.
+      // A definite verdict is positive evidence: this is no longer the person's current ask, so it doesn't post. One whose
+      // earlier attempt Slack couldn't rule out may already be posted: it's never recorded as not posted, and it stays in
+      // the buffer, so its replay decides again (and reconciles) instead of the uncertainty being dropped.
+      if (verdict.kind === "disposition") {
         if (landing === "maybe") {
-          const why = verdict.kind === "unavailable" ? verdict.detail : verdict.reason;
-          log(`re-shown ${decision.decisionId} retained: an earlier attempt may be in Slack, and it can't go on now (${why})`);
-          return { ok: false as const, class: "re-present-earlier-attempt-unconfirmed", detail: why };
+          log(`re-shown ${decision.decisionId} retained: an earlier attempt may be in Slack, and it can't go on now (${verdict.reason})`);
+          return attemptLogUnreadable
+            ? { ok: false as const, class: "re-present-attempt-log-unreadable", detail: attemptLogUnreadable }
+            : { ok: false as const, class: "re-present-earlier-attempt-unconfirmed", detail: verdict.reason };
         }
         noteRePresentNotPosted(opts.queueRepo, p.qitemId, key, verdict);
         releaseRef(key);
         return { ok: true as const };
+      }
+      // What OpenRig can't tell isn't a reason to hold the ask: it goes on through the person's delivery settings (a
+      // readable quiet window still holds it), and the post says what couldn't be checked. An attempt log that can't be
+      // read can't record the new attempt either, so the bound is the process: a kept decision replays only when the
+      // gateway starts, and the dispatcher takes a pending id once. The relay posts no such line, so it waits, as before.
+      const unconfirmed: RePresentUnconfirmed[] = [
+        ...(attemptLogUnreadable || (landing === "maybe" && verdict.kind === "unavailable") ? ["attempt" as const] : []),
+        ...(verdict.kind === "unavailable" ? ["state" as const] : []),
+      ];
+      if (unconfirmed.length > 0 && relay) {
+        if (landing === "maybe") {
+          const why = attemptLogUnreadable ?? (verdict.kind === "unavailable" ? verdict.detail : "an earlier attempt may be in Slack");
+          log(`re-shown ${decision.decisionId} retained: an earlier attempt may be in Slack, and it can't go on now (${why})`);
+          return attemptLogUnreadable
+            ? { ok: false as const, class: "re-present-attempt-log-unreadable", detail: attemptLogUnreadable }
+            : { ok: false as const, class: "re-present-earlier-attempt-unconfirmed", detail: why };
+        }
+        noteRePresentNotPosted(opts.queueRepo, p.qitemId, key, verdict as Exclude<typeof verdict, { kind: "post" }>);
+        releaseRef(key);
+        return { ok: true as const };
+      }
+      if (unconfirmed.length > 0) {
+        const why = [attemptLogUnreadable ? `the attempt log couldn't be read (${attemptLogUnreadable})` : null,
+          verdict.kind === "unavailable" ? `the ask's state couldn't be checked (${verdict.detail})` : null].filter(Boolean).join("; ");
+        log(`re-shown ${decision.decisionId} goes on to delivery, marked: ${why}`);
+        noteRePresentUnconfirmed(opts.queueRepo, p.qitemId, key, unconfirmed, why);
+        p = { ...p, ...(unconfirmed.includes("attempt") ? { possibleRepeat: true } : {}), ...(unconfirmed.includes("state") ? { stateUnconfirmed: true } : {}) };
+        decision = { ...decision, payload: p };
       }
     }
     if (p.deliveryDeferralFire) {
@@ -1086,7 +1130,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         releaseRef(p.qitemId);
         return { ok: true as const };
       }
-      return targetDeliver(decision);
+      // A deferred re-shown ask keeps its marks when the fire posts it: the fire checks nothing again.
+      const marks = relay ? {} : rowMarks(p.qitemId, fireKey);
+      return targetDeliver(Object.keys(marks).length > 0 ? { ...decision, payload: { ...p, ...marks } } : decision);
     }
     // A post confirmed partly in Slack finishes without consulting quiet hours, so it is resolved before the decision
     // (which reads them). Only a started multipart post is checked here, from the stores first, so an ordinary
@@ -1100,6 +1146,15 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     try {
       ruled = p.qitemId ? decideForPayload(p) : null;
     } catch (error) {
+      // A re-shown ask is seen, so no sweep offers it again. When the person's delivery settings can't be read, it posts and
+      // says so on its row rather than waiting for a run that can read them (the same bound as above: once per run).
+      if (decision.decisionId.startsWith(RE_PRESENT_DECISION_PREFIX) && p.qitemId && !relay) {
+        const attempted = "attempted" in deliver && (deliver as { attempted: (d: typeof decision) => boolean }).attempted(decision);
+        log(`re-shown ${decision.decisionId} posting: its delivery settings couldn't be read (${(error as Error).message})`);
+        noteRePresentUnconfirmed(opts.queueRepo, p.qitemId, p.notificationKey ?? p.qitemId, attempted ? ["attempt", "policy"] : ["policy"],
+          `the delivery settings couldn't be read (${(error as Error).message})`);
+        return targetDeliver(attempted ? { ...decision, payload: { ...p, possibleRepeat: true } } : decision);
+      }
       // An attempted decision (it may be partly or wholly in Slack) is retained and nothing posts: acking it would drop
       // the post's missing parts and let the sweep offer the ask again under a new id, posting it from the start. Its
       // replay decides again once the quiet state reads. A store check only: no Slack read on a failure path.

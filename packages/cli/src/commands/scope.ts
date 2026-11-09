@@ -2186,6 +2186,17 @@ function sharedSliceNameFinding(missionsRoot: string, missionName: string, slice
   };
 }
 
+/** Show the inherited workspace route because Commander lists a parent option only in the parent's help. */
+export function scopeWorkspaceHelp(tier: "slice" | "mission", verb?: string): string {
+  return `
+Workspace: the parent option --workspace selects the missions root this command reads.
+  rig scope --workspace <project root> ${tier} ${verb ?? "<verb>"} ...
+A project root uses its project.yaml missions.root, else its missions/ folder; a
+folder named missions is used as is. Use it for a catalog project, for example
+$(rig config get workspace.projects_root)/<project>. Without --workspace,
+OPENRIG_WORK_ROOT applies, then the configured workspace.slices_root.`;
+}
+
 export function scopeCommand(): Command {
   const cmd = new Command("scope")
     .description("Scope tree primitive: missions, slices, sub-slices (per conventions/scope-and-versioning)")
@@ -2216,6 +2227,10 @@ export function scopeCommand(): Command {
   mission.addCommand(buildMissionVerifiedCommand());
   mission.addCommand(buildApproveCommand("mission"));
   cmd.addCommand(mission);
+  for (const [tier, group] of [["slice", slice], ["mission", mission]] as const) {
+    group.addHelpText("after", scopeWorkspaceHelp(tier));
+    for (const verb of group.commands) verb.addHelpText("after", scopeWorkspaceHelp(tier, verb.name()));
+  }
   cmd.addCommand(buildResolveNotesCommand());
   cmd.addCommand(buildAuditCommand());
 

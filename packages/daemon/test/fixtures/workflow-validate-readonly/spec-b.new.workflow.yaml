@@ -1,0 +1,17 @@
+workflow:
+  id: wf-validate-ro-new
+  version: 1
+  entry:
+    role: producer
+  roles:
+    producer:
+      preferred_targets:
+        - producer@rig
+  steps:
+    - id: produce
+      actor_role: producer
+      allowed_exits:
+        - done
+  invariants:
+    allowed_exits:
+      - done

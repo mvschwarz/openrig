@@ -1264,8 +1264,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   fs.mkdirSync(paths.sessionsDir, { recursive: true });
   if (runtime === "pi") {
     try { preparePiAccount(paths.agentDir, args.accountHome); }
-    catch {
-      console.error(`${PI_RUNNER_ERROR_MARKER} Pi account preparation failed for ${JSON.stringify(nodePath.join(args.accountHome ?? paths.agentDir, "auth.json"))}; provide a readable prepared account file and keep any existing seat login intact, then retry the account operation.`);
+    catch (err) {
+      // Say what actually failed: a login that isn't a managed link, a missing or unreadable file, or an I/O error.
+      // Name the seat's own login file, and the declared account file when there is one.
+      const seatAuth = JSON.stringify(nodePath.join(paths.agentDir, "auth.json"));
+      const accountAuth = args.accountHome ? JSON.stringify(nodePath.join(args.accountHome, "auth.json")) : null;
+      console.error(`${PI_RUNNER_ERROR_MARKER} Pi account preparation failed (seat login file ${seatAuth}${accountAuth && accountAuth !== seatAuth ? `, account file ${accountAuth}` : ""}): ${(err as Error).message}. Resolve that, then retry the account operation.`);
       process.exitCode = 2;
       return;
     }

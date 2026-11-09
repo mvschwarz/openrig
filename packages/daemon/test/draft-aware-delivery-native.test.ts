@@ -132,4 +132,45 @@ describe.skipIf(process.platform === "win32")("native draft-aware terminal deliv
       db.close(); rmSync(scratch, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("submits a multiline paste under a combined update footer through real tmux", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "draft-banner-"));
+    const socket = join(scratch, "s");
+    const env = { ...process.env }; delete env.TMUX; delete env.TMUX_TMPDIR;
+    const tmux = async (args: string[]) => (await run("tmux", ["-S", socket, ...args], { env })).stdout;
+    const stateFile = join(scratch, "state.json");
+    const state = () => JSON.parse(readFileSync(stateFile, "utf8")) as { input: string; submissions: string[] };
+    const db = new Database(":memory:");
+    let transport: SessionTransport | undefined;
+    try {
+      const command = [process.execPath, composer, "claude", stateFile, "update-banner"].map(shellQuote).join(" ");
+      const pane = (await tmux(["-f", "/dev/null", "new-session", "-d", "-P", "-F", "#{pane_id}", "-x", "120", "-y", "40", "-s", "worker@test", command])).trim();
+      await vi.waitFor(() => expect(state().input).toBe(""), { timeout: 5000 });
+      migrate(db, ALL_MIGRATIONS);
+      db.exec(`INSERT INTO rigs(id,name) VALUES ('rig','test');
+        INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('a','rig','worker','terminal');
+        INSERT INTO sessions(id,node_id,session_name,status) VALUES ('sa','a','worker@test','running');
+        INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('ga','a',1,'g1','fresh');`);
+      db.prepare("INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES ('binding','a','worker@test',?)").run(pane);
+      const adapter = new TmuxAdapter(async () => { throw new Error("Fixture requires argv execution"); }, undefined,
+        async args => tmux(args.slice(1)));
+      const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name)); adapter.deliveryGuard = guard;
+      transport = new SessionTransport({ db, tmuxAdapter: adapter, rigRepo: new RigRepository(db), sessionRegistry: new SessionRegistry(db) });
+      await guard.set("a", { mode: "draft-aware" }, "human@test", "protect fixture input");
+      await vi.waitFor(async () => expect(inspectComposerInput(await adapter.captureComposerSnapshot(pane), "claude-code").state).toBe("empty"));
+      const text = "first line\nsecond line\nlast line";
+      const result = await transport.send("worker@test", text, { deliveryId: "banner", actorSession: "sender@test", verify: false });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+      await vi.waitFor(() => expect(state()).toEqual({ input: "", submissions: [text] }));
+      await tmux(["send-keys", "-t", pane, "-l", "person's draft"]);
+      await vi.waitFor(() => expect(state().input).toBe("person's draft"));
+      expect(await transport.send("worker@test", "another message", { deliveryId: "draft", verify: false }))
+        .toMatchObject({ outcome: "retained", sent: false });
+      expect(state()).toEqual({ input: "person's draft", submissions: [text] });
+    } finally {
+      await transport?.guardedDelivery?.stop();
+      await tmux(["kill-server"]).catch(() => {});
+      db.close(); rmSync(scratch, { recursive: true, force: true });
+    }
+  }, 15_000);
 });

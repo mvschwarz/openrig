@@ -61,7 +61,7 @@ import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverable
 // (daintree #3938) cite Claude 1-3s / Codex 3-5s inter-tool-call gaps with a 6s idle debounce. A 15s
 // window comfortably spans one inter-tool gap (so a mid-turn reading stays trusted) while refusing to
 // authorize a send from a reading tens of seconds old. (EXA: agtx#14, daintree#3938.)
-const SEND_READINESS_FRESHNESS_MS = 15_000;
+export const SEND_READINESS_FRESHNESS_MS = 15_000;
 
 // transport.verify_input_box: each extra input-box read gives up after this long and reads `unavailable`. A deadline
 // budget, not a guarantee: the pre-Enter read comes after the existing 200 ms wait and can add about this much before
@@ -1386,27 +1386,43 @@ export function hasExpectedStagedText(pane: string | null, expected: string, run
   return stagedEvidence;
 }
 
-/** An interaction may consume its answer immediately. Only add Enter when the
- * complete answer is still visible in a bounded current text input, never a
- * numbered choice or a partial prefix. Unknown rendering is not consumption. */
-function promptAnswerStaged(pane: string | null, answer: string, runtime: string | null): boolean {
-  if (!pane || !answer.trim() || /[\r\n\x1b]/.test(answer)) return false;
-  // Fail closed for an unknown runtime: with no scoped glyph set there is no way to
-  // say which prompt line is the live input (the pre-shared-matcher check did the same).
-  if (runtime !== "codex" && runtime !== "claude-code") return false;
+/** An interaction may consume its answer immediately, so Enter is added for the complete answer still visible in a
+ *  bounded current text input (`staged`), never a numbered choice or a partial prefix. `not_staged` is positive
+ *  evidence against it: a recognized box holding something else, a numbered choice, a menu whose key-hint row ends
+ *  the current screen, or no Enter by contract. A screen that couldn't be read (`unreadable`), or one with no input box
+ *  the parser recognizes (`unrecognized`), is unknown, not evidence: unknown rendering is not consumption. */
+function promptAnswerStaged(pane: string | null, answer: string, runtime: string | null): "staged" | "not_staged" | "unreadable" | "unrecognized" {
+  // The caller's own keys (CR, LF, Esc) or an empty answer never get an added Enter.
+  if (!answer.trim() || /[\r\n\x1b]/.test(answer)) return "not_staged";
+  // A runtime with no scoped glyph set has no known input line; there the caller puts CR in the payload.
+  if (runtime !== "codex" && runtime !== "claude-code") return "not_staged";
+  if (!pane) return "unreadable";
   const promptClass = composerPromptClassForRuntime(runtime);
   const lines = pane.split("\n");
   // Only the LAST prompt line of this runtime's glyph set can be the current input;
   // everything above it is transcript history, and another harness's glyph is not ours.
   const inputIndex = findComposerInputLineIndex(lines, promptClass);
-  if (inputIndex < 0) return false;
-  const input = lines[inputIndex]!.trimStart();
   // A numbered choice (`.` or `)`), e.g. `» 1)` or `❯ 1.`, is a menu selection, never the answer.
-  if (composerNumberedChoicePattern(promptClass).test(input)) return false;
+  if (inputIndex >= 0 && composerNumberedChoicePattern(promptClass).test(lines[inputIndex]!.trimStart())) return "not_staged";
   // Where the input ends: Codex closes the composer on a blank line, Claude Code on a rule line.
-  const end = lines.findIndex((line, index) => index > inputIndex && (runtime === "codex"
+  const end = inputIndex < 0 ? -1 : lines.findIndex((line, index) => index > inputIndex && (runtime === "codex"
     ? line.trim() === "" : /^[─═-]{10,}$/.test(line.trim())));
-  return end > inputIndex && lines.slice(inputIndex, end).join("\n").trimStart().slice(1).trim() === answer.trim();
+  if (end <= inputIndex) return currentMenuKeyHint(lines) ? "not_staged" : "unrecognized";
+  return lines.slice(inputIndex, end).join("\n").trimStart().slice(1).trim() === answer.trim() ? "staged" : "not_staged";
+}
+
+/** Whether the current screen ends in a list or menu's key-hint row, where Enter acts on the focused item and Esc
+ *  dismisses it: `Enter to select · Esc to cancel`, `Space to select · Enter to confirm · Esc to reject all`, or
+ *  `t trust all · enter review · esc close`. Like the native menu recognizers, it reads only the last row (below
+ *  OpenRig's seat rule, if drawn), so an old hint in the transcript holds nothing. A send or newline hint, or Esc to
+ *  interrupt work, is a composer's or a busy seat's, not a menu's. */
+function currentMenuKeyHint(lines: string[]): boolean {
+  const rows = lines.map((line) => line.trim()).filter(Boolean);
+  if (/^─{3,} [\w.-]+@[\w.-]+ ─+$/.test(rows.at(-1) ?? "")) rows.pop();
+  const segments = (rows.at(-1) ?? "").split(/\s+·\s+/);
+  return segments.length > 1
+    && segments.some((segment) => /^(?:enter\b|⏎|↵)\s*(?:to\s+)?(?:select|confirm|choose|review|open|accept)\b/i.test(segment))
+    && segments.some((segment) => /^esc\b\s*(?:to\s+)?(?:cancel|close|reject|dismiss|exit)\b/i.test(segment));
 }
 
 // Codex 0.160 input box: the last prompt line plus indented continuation rows, one blank row, then a footer
@@ -1699,7 +1715,6 @@ const SEAT_IDLE_SHAPES: {
   claude: {
     openingRules: { plain: RegExp; named: (sessionName: string) => RegExp };
     footers: Record<"bypassPermissions" | "acceptEdits" | "auto" | "dontAsk" | "plan" | "default", string>;
-    statusLineRows: string[];
     boxes: RegExp[];
     notices: string[];
     statusSlot: Record<"finishedTurn" | "freshSession", RowShape>;
@@ -1734,11 +1749,13 @@ const SEAT_IDLE_SHAPES: {
       plan: "⏸ plan mode on (shift+tab to cycle) · ← for agents",
       default: "⏸ manual mode on · ← for agents",
     },
-    // The rows OpenRig's statusLine collector (provisionContextCollector, assets/claude-statusline-context.cjs) draws
-    // between the closing rule and the footer: none. It prints nothing to stdout, and Claude Code 2.1.296 draws no
-    // row for an empty statusLine in the classic renderer OpenRig launches with (CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1).
-    // A statusLine that prints anything (a person's own command) is not on this list.
-    statusLineRows: [],
+    // No rows list the statusLine between the closing rule and the footer. OpenRig's collector
+    // (provisionContextCollector, assets/claude-statusline-context.cjs) prints nothing to stdout, and Claude Code
+    // 2.1.296 draws no row for an empty statusLine in the classic renderer OpenRig launches with
+    // (CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1), so the footer sits right under the closing rule. A person's own
+    // statusLine command (kept by provisionContextCollector) prints rows there that no list can name, so
+    // claudeSeatIdle trusts them by position, as findClaudeComposer does since #2703, except the rows it rules out
+    // (CLAUDE_NOT_STATUS_LINE_ROW: blank, prompt-, menu- or dialog-shaped) (#2798).
     // The one row between the box's two rules: empty (after-enter-15s.J), or the Try suggestion (idle-fresh-suggestion).
     boxes: [/^❯$/, /^❯\s+Try "[^"]*"$/],
     // The row just above the opening rule: blank (after-enter-15s.J), the effort row (idle-fresh-suggestion), or a
@@ -1792,18 +1809,28 @@ const SEAT_IDLE_SHAPES: {
   },
 };
 
+// A row between the closing rule and the footer that a statusLine does not print, or that a menu, picker or dialog
+// could be drawing: blank (a fullscreen renderer reserves a row for a statusLine that prints nothing), a prompt glyph
+// anywhere, a numbered choice past a border or gutter, a box corner, or a row framed by side borders.
+const CLAUDE_NOT_STATUS_LINE_ROW = /^\s*$|[❯›»╭╮╰╯┌┐└┘]|^[\s│┃⎿]*\d+[.)]\s|^\s*[│┃].*[│┃]\s*$/;
+
 function claudeSeatIdle(lines: string[], sessionName?: string): boolean {
   const idle = SEAT_IDLE_SHAPES.claude;
   let footer = lines.length - 1;
   while (footer >= 0 && !lines[footer]!.trim()) footer--;
-  const closing = footer - 1 - idle.statusLineRows.length;
-  if (closing < 4) return false;
+  if (footer < 0 || !Object.values(idle.footers).includes(lines[footer]!.trim())) return false;
+  // The closing rule is the first rule above the footer. The rows between them are a statusLine's (#2798), trusted
+  // by position, as findClaudeComposer trusts them (#2703): the frame above must check out below, and none of them
+  // may be a row a statusLine does not print or a menu could draw (CLAUDE_NOT_STATUS_LINE_ROW); a rule among them is
+  // taken as the closing rule, so the frame check fails there.
+  let closing = footer - 1;
+  while (closing >= 0 && !rule(lines[closing]!)) closing--;
+  if (closing < 4 || lines.slice(closing + 1, footer).some((row) => CLAUDE_NOT_STATUS_LINE_ROW.test(row))) return false;
   const width = (row: string) => [...row].length;
   const plainRule = (row: string) => idle.openingRules.plain.test(row);
   const openingRule = (row: string) => plainRule(row)
     || (!!sessionName && idle.openingRules.named(sessionName).test(row) && width(row) === width(lines[closing]!));
-  return Object.values(idle.footers).includes(lines[footer]!.trim())
-    && idle.statusLineRows.every((row, i) => lines[closing + 1 + i]!.trim() === row) && plainRule(lines[closing]!)
+  return plainRule(lines[closing]!)
     && idle.boxes.some((box) => box.test(lines[closing - 1]!)) && openingRule(lines[closing - 2]!)
     && idle.notices.includes(lines[closing - 3]!.trim()) && claudeStatusSlotIdle(lines, closing - 4);
 }
@@ -2099,6 +2126,8 @@ export interface SendResult {
   pastedOverInputBox?: InputBoxAnnotation["status"];
   /** A `preserveInput` hold: the input box reading it held on. */
   heldInputBox?: InputBoxAnnotation["status"];
+  /** The existing preserve-input reading, without the draft or suggestion text. No extra capture. */
+  heldInputBoxReading?: Pick<InputBoxAnnotation, "status" | "confidence" | "evidence" | "cursor">;
 }
 
 /** One reading of a Claude Code or Codex input box: `exact` (the sent text, word boundaries kept), `ambiguous`
@@ -3035,11 +3064,12 @@ export class SessionTransport {
     } : null;
     let existingInput: ExistingInput | undefined;
     let pastedOverInputBox: InputBoxAnnotation["status"] | undefined, heldInputBox: InputBoxAnnotation["status"] | undefined;
+    let heldInputBoxReading: SendResult["heldInputBoxReading"];
     let overrideBeforePaste: (() => Promise<void>) | undefined;
     const observe = (result: SendResult): SendResult => {
       if (checkedIdentity) result = { ...result, checkedIdentity, identityContract: 1 };
       if (pastedOverInputBox) result = { ...result, pastedOverInputBox };
-      if (heldInputBox && !result.ok) result = { ...result, heldInputBox };
+      if (heldInputBox && !result.ok) result = { ...result, heldInputBox, ...(heldInputBoxReading ? { heldInputBoxReading } : {}) };
       if (existingInput) result = { ...result, existingInput };
       if (result.ok && runtimeAdvisory) result = { ...result, warning: [runtimeAdvisory, result.warning].filter(Boolean).join(" ") };
       if (observed && this.captureObserver) {
@@ -3374,6 +3404,8 @@ export class SessionTransport {
     let draftAdvised = false;
     // Broadcast can carry wait + override: after waiting, it still uses the same deliberate-input boundary.
     const promptOverride = Boolean(opts?.dangerouslyInteract);
+    // Positive evidence of an interactive prompt: there an Enter after a consumed answer lands in the next prompt.
+    let overrideAtPrompt = false;
     if (waitForIdleMs === undefined || promptOverride) {
       const readiness = await this.classifySendReadiness({
         sessionName,
@@ -3385,6 +3417,7 @@ export class SessionTransport {
       // Explicit interaction selects key input even when readiness cannot recognize the prompt.
       // Only bypassing a positive picker requires a successful audit; other states already sent.
       if (opts?.dangerouslyInteract) {
+        overrideAtPrompt = readiness.state === "needs_input";
         if (readiness.state === "needs_input" && (!opts.reason || opts.reason.trim().length === 0)) {
           return {
             ok: false,
@@ -3408,14 +3441,16 @@ export class SessionTransport {
             existingInput = { target, classification, rows: input?.rows ?? [], suggestionRows: input?.suggestionRows ?? [],
               cursor: input?.cursor ?? null, fullContentsVisible: !!input && input.state !== "unknown" && !input.collapsedPaste,
               ...(input?.unknownReason ? { reason: input.unknownReason } : {}), cleared: false };
-            const stopped = classification === "typed_or_pasted" || classification === "unreadable";
+            // Only seen typed or pasted text stops the override. An input that can't be read is not
+            // evidence of text, so the override delivers and says it couldn't read the input.
+            const stopped = classification === "typed_or_pasted";
             const audit = this.recordPromptOverride({ ...auditInput, input: { classification, visibleRows: existingInput.rows.length,
               suggestionRows: existingInput.suggestionRows.length, choice: unchecked ? "type_without_checking" : "inspect",
               outcome: stopped ? "stopped" : "proceed", clearAttempted: false } });
             if (!audit.ok) sendAdvisory = `prompt-override: audit unavailable (${audit.reason}).`;
-            if (stopped) throw new DeliveryGuardError(classification === "unreadable" ? "override_input_unknown" : "override_input_present",
-              classification === "unreadable" ? "Input could not be read. Nothing was typed. Inspect the native terminal, deliberately clear its prompt with native/tmux controls, then retry; or explicitly choose --type-without-checking (does not clear)."
-                : "Existing typed or pasted input (author unknown). Nothing was typed. Inspect the shown input, deliberately clear the prompt with native/tmux controls, then retry. Manual clearing is outside OpenRig's lease and observation checks and is not recorded.");
+            if (stopped) throw new DeliveryGuardError("override_input_present",
+              "Existing typed or pasted input (author unknown). Nothing was typed. Inspect the shown input, deliberately clear the prompt with native/tmux controls, then retry. Manual clearing is outside OpenRig's lease and observation checks and is not recorded.");
+            if (classification === "unreadable") sendAdvisory = [sendAdvisory, "Input could not be read and was not cleared; this send may join or submit existing text."].filter(Boolean).join(" ");
             if (unchecked) sendAdvisory = [sendAdvisory, "Input was not checked or cleared; this send may join or submit existing text."].filter(Boolean).join(" ");
           };
         }
@@ -3547,6 +3582,10 @@ export class SessionTransport {
       const typed = box?.status === "typed" || box?.status === "typed-with-suggestion";
       if (!clear && (opts?.preserveInput !== "typed" || typed)) {
         heldInputBox = box?.status ?? "unknown";
+        if (box) {
+          const { status, confidence, evidence, cursor } = box;
+          heldInputBoxReading = { status, confidence, evidence, cursor };
+        }
         throw new DeliveryGuardError(box?.status === "typed" ? "draft_input_busy" : "draft_input_unknown",
           `Managed input waits for an empty composer (it reads ${box?.status ?? "unknown"}). Your draft was left untouched; inspect the pane before retrying.`);
       }
@@ -3620,11 +3659,19 @@ export class SessionTransport {
         const pane = await this.runStage("session_transport.prompt_override_pre_submit_capture",
           () => this.tmuxAdapter.capturePaneContent(readTarget, 50)).catch(() => null);
         if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
-        if (!promptAnswerStaged(pane, text, runtime)) {
+        const staged = promptAnswerStaged(pane, text, runtime);
+        // A screen that couldn't be read, or one with no input box the parser recognizes, is not evidence the answer
+        // was consumed or joined: outside a recognized prompt, submit it and say so. Visible evidence, or a
+        // recognized prompt, still withholds Enter.
+        if (staged === "not_staged" || (staged !== "staged" && overrideAtPrompt)) {
           return observe({ ok: true, sessionName, sent: true, verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified",
             warning: [sendAdvisory, "prompt-override: answer sent as unbracketed input; submission unverified. No trailing Enter: the complete answer is not visibly staged (it may have been consumed, the prompt changed, or observation is unavailable)."].filter(Boolean).join(" ") });
         }
-        sendAdvisory = [sendAdvisory, "prompt-override: answer sent as unbracketed input; Enter submitted the complete still-staged answer."].filter(Boolean).join(" ");
+        sendAdvisory = [sendAdvisory, staged === "staged"
+          ? "prompt-override: answer sent as unbracketed input; Enter submitted the complete still-staged answer."
+          : staged === "unreadable"
+            ? "prompt-override: answer sent as unbracketed input; the screen couldn't be read, so Enter was sent without confirming the staged answer."
+            : "prompt-override: answer sent as unbracketed input; no input box was recognized on the screen, so Enter was sent without confirming the staged answer."].filter(Boolean).join(" ");
       }
 
       // 5. Submit (Enter)

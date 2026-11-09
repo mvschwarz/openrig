@@ -153,11 +153,15 @@ drive a recognized native menu as before. Otherwise, with the delivery guard
 attached, it reads the visible composer under the seat's lease immediately before
 pasting, after buffer preparation. Empty input proceeds. A recognized dim
 suggestion is displayed separately and counts as empty; typed or pasted text
-(author unknown) stops the send with `override_input_present`. An unreadable input
-stops with `override_input_unknown`, never an empty-input claim. Both return single-send HTTP
+(author unknown) stops the send with `override_input_present`: single-send HTTP
 409, `sent: false`, and caller-only `existingInput` evidence (visible rows, suggestion
 rows, cursor/dimensions and target binding). A collapsed paste shows its label,
 not the hidden contents. OpenRig neither holds nor retries this stopped override.
+
+An input that can't be read doesn't stop the override. The answer is typed and
+nothing is cleared. The result reports `existingInput` with classification
+`unreadable`, never empty, and a warning that the answer may join or submit
+existing text.
 
 Inspect the shown input in the native terminal, deliberately clear the prompt with
 native/tmux controls, then issue the send again. Manual clearing runs outside
@@ -356,7 +360,10 @@ accounting. Historical outbox receipts do not suppress a lone reminder or preven
 message tells its recipient that delivery may repeat after an unconfirmed attempt. Its job history records the
 current transport result; an unknown write is not proof that nothing arrived.
 
-The transport still protects approval/question prompts, human drafts and recipient identity. Scheduler timing,
+The transport still protects approval/question prompts and recipient identity. Under the default
+`transport.draft_delivery` (`deliver`), an ordinary send or work notice that meets a person's draft at a Claude Code or
+Codex prompt is pasted into it and the combined input is submitted, unless the seat's typing guard holds input
+(`draft-aware`, `openrig-urgent`, `urgent-only` or `hold`). With `refuse`, a draft refuses the send. Scheduler timing,
 current parked-row eligibility and stop checks still apply. This changes message retries, not the idempotence of
 structured continuity actions such as creating a cutover baton.
 

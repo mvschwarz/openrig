@@ -619,21 +619,31 @@ export class WorkflowSpecCache {
   }
 
   /**
+   * #2726: read and parse a workflow spec file without touching the cache.
+   * Same file checks and parse errors as readThrough (spec_file_missing,
+   * the parser's spec_* errors), but no workflow_specs row is inserted,
+   * updated or cleared. `rig workflow validate` reads specs this way, so
+   * validating a draft never registers it or replaces a registered
+   * name@version; instantiate/run and the workflows-folder scan still go
+   * through readThrough and register as before.
+   */
+  readFromDisk(sourcePath: string): { spec: WorkflowSpec; sourcePath: string; sourceHash: string } {
+    const { spec, sourceHash } = readSpecFile(sourcePath);
+    return {
+      // Same default readThrough stores in the row's column and returns.
+      spec: { ...spec, coordination_terminal_turn_rule: spec.coordination_terminal_turn_rule ?? "hot_potato" },
+      sourcePath,
+      sourceHash,
+    };
+  }
+
+  /**
    * Read a workflow spec from disk through the cache. Returns the
    * cached row (re-caching if source_hash differs OR if the spec was
    * not previously cached).
    */
   readThrough(sourcePath: string): WorkflowSpecRow {
-    if (!existsSync(sourcePath)) {
-      throw new WorkflowSpecError(
-        "spec_file_missing",
-        `workflow spec file not found at ${sourcePath}`,
-        { sourcePath },
-      );
-    }
-    const raw = readFileSync(sourcePath, "utf-8");
-    const sourceHash = createHash("sha256").update(raw).digest("hex");
-    const spec = parseWorkflowSpec(raw, sourcePath);
+    const { spec, sourceHash } = readSpecFile(sourcePath);
     const named = this.db
       .prepare(
         `SELECT * FROM workflow_specs WHERE name = ? AND version = ?`,
@@ -1102,8 +1112,21 @@ function warnLegacyRehydrationOnce(name: string, version: string): void {
   if (warnedLegacyRehydrations.has(key)) return;
   warnedLegacyRehydrations.add(key);
   console.warn(
-    `workflow spec ${key} rehydrated WITHOUT full fidelity (pre-050 cache row: loop_guards/invariants/closure/entry unavailable at projection). Re-validate the spec file (rig workflow validate <path>) to heal the cache row.`,
+    `workflow spec ${key} rehydrated WITHOUT full fidelity (pre-050 cache row: loop_guards/invariants/closure/entry unavailable at projection). Re-register the spec file to heal the cache row: touch it in the workflows folder so the next scan re-reads it, or instantiate it by path (rig workflow validate is read-only and does not heal it).`,
   );
+}
+
+function readSpecFile(sourcePath: string): { spec: WorkflowSpec; sourceHash: string } {
+  if (!existsSync(sourcePath)) {
+    throw new WorkflowSpecError(
+      "spec_file_missing",
+      `workflow spec file not found at ${sourcePath}`,
+      { sourcePath },
+    );
+  }
+  const raw = readFileSync(sourcePath, "utf-8");
+  const sourceHash = createHash("sha256").update(raw).digest("hex");
+  return { spec: parseWorkflowSpec(raw, sourcePath), sourceHash };
 }
 
 function rowToWorkflowSpec(row: SpecRow, parsedSpec?: WorkflowSpec): WorkflowSpecRow {

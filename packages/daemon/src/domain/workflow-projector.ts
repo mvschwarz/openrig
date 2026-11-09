@@ -259,7 +259,7 @@ export class WorkflowProjector {
     if (!specRow) {
       throw new WorkflowProjectorError(
         "spec_not_cached",
-        `workflow spec ${instance.workflowName}@${instance.workflowVersion} is not in the spec cache. Re-run validate to refresh the cache.`,
+        `workflow spec ${instance.workflowName}@${instance.workflowVersion} is not in the spec cache. Re-register its file (touch it in the workflows folder for the next scan, or instantiate it by path) to refresh the cache.`,
         { workflowName: instance.workflowName, workflowVersion: instance.workflowVersion },
       );
     }

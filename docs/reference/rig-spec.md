@@ -587,9 +587,13 @@ rig provider switch --seat pi-worker@my-rig --to-account work \
 rig provider switch --seat pi-worker@my-rig --clear-account-home --reason "Return to configured login"
 ```
 
+When switching into Pi with `--clear-account-home`, OpenRig restores the seat's original Pi login only if no effective member or rig Pi account home is configured. A member's `PI_CODING_AGENT_DIR` shadows the rig's value; if the member value is relative, it is ignored and the rig home does not take effect.
+
 Pi account changes work with or without `launch_wrapper`. The wrapper receives the successor's managed Pi directory;
-it must preserve the selected credentials if you want OpenRig's account choice to apply. Switching a seat between Pi
-and another runtime is not supported by this account-home feature.
+it must preserve the selected credentials if you want OpenRig's account choice to apply.
+Use `rig seat set-runtime <seat> --runtime <runtime> --reason "Change provider"` with `pi`, `codex` or `claude-code` for cross-runtime switches.
+Those resolve the target's settings afresh rather than keeping the source model or effort;
+see [runtime switching](getting-started.md#move-a-seat-to-the-other-runtime).
 
 This switch starts a fresh conversation with a handover, even when the runtime stays the same. The existing
 subscription-login switch preserves the conversation. Once the successor confirms, OpenRig commits its home, runtime,
@@ -917,7 +921,9 @@ This requires a Claude Code version that supports `--advisor`. OpenRig never wri
 choose different Advisors. When Advisor is unset, no flag is emitted and Claude's
 own defaults/settings apply. Other runtimes ignore this field.
 
-### Launch wrapper (`runtime: pi` and `codex`)
+<a id="launch-wrapper-runtime-pi-and-codex"></a>
+
+### Launch wrapper (`runtime: pi`, `codex` and `claude-code`)
 
 Set `launch_wrapper` on a local `pi`, `codex`, `claude-code` or community-harness member to prefix its native executable and arguments with a literal argv vector:
 

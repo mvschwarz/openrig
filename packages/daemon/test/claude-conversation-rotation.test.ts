@@ -46,7 +46,7 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     const rig = rigRepo.createRig("rotation");
     const node = rigRepo.addNode(rig.id, "test.c", { runtime: "claude-code" });
     // resume-stale-generation: an earlier occupant of this seat, registered and no longer current (#2341 keeps an
-    // unregistered generation from moving the token; a real earlier occupant's hook keeps today's write).
+    // unregistered generation from moving the token; #2768 refuses a real earlier occupant's hook, so it writes nothing).
     const earlier = mode === "resume-stale-generation" ? registry.mintOccupantTenure(node.id, "initial").generationUuid : undefined;
     const session = registry.registerSession(node.id, name);
     registry.updateStatus(session.id, "running");
@@ -90,8 +90,10 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
         headers: { "content-type": "application/json", "x-openrig-activity-token": "fixture" },
         body: JSON.stringify({ eventFamily: "session_identity", sessionName: name, runtime: "claude-code", sessionId: token, occurredAt, hookPid: 111, ...evidence }),
       });
-      expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ tokenPersisted: true });
+      // #2768: a hook from an earlier occupant (a registered generation that isn't current) is refused and writes nothing.
+      const earlierOccupant = evidence.generation !== undefined && evidence.generation !== generation;
+      expect(response.status).toBe(earlierOccupant ? 409 : 200);
+      expect(await response.json()).toMatchObject({ tokenPersisted: !earlierOccupant });
     };
     await hook(original);
     // These mismatched fixtures never rotate: even an initial hook is not proof
@@ -267,7 +269,17 @@ describe("a resumed conversation that changed its id, with the hook's evidence (
     expect(calls).toEqual(["text", "enter"]);
   });
 
-  it.each(["clear-sourced", "resume-then-clear", "startup-sourced", "compact-sourced", "resume-stale-generation", "resume-no-source",
+  it("resume-stale-generation: an earlier occupant's hook is refused (#2768), so the seat keeps its own conversation and verifies", async () => {
+    const { result, calls, stored, observed, strict } = await sendAfterHook("resume-stale-generation");
+    expect(stored.resume_token).toBe(original);
+    expect(observed.state).toBe("verified");
+    expect(strict).not.toBeNull();
+    expect(result.ok).toBe(true);
+    expect(result.warning ?? "").not.toContain("without verified native identity");
+    expect(calls).toEqual(["text", "enter"]);
+  });
+
+  it.each(["clear-sourced", "resume-then-clear", "startup-sourced", "compact-sourced", "resume-no-source",
     "resume-no-marker", "resume-other-marker", "resume-after-launch-hook", "resume-clear-resume", "resume-child-missed-parent",
     "resume-in-process-missed-first"] as const)(
     "%s keeps today's warning: the conversation is unverified", async mode => {
