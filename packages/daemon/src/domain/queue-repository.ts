@@ -662,6 +662,12 @@ function defaultIsHostedMember(destination: string): boolean {
   }
 }
 
+/** A session's latest read of its own pending inbox: when it was seen, never seen, or unknown (the record can't be read). */
+export type InboxCheckIn = { state: "seen"; at: string } | { state: "never" } | { state: "unknown" };
+
+/** A session's check-in is written at most this often; the stuck sweep reads it in units of its unclaimed age. */
+const INBOX_CHECKIN_WRITE_INTERVAL_MS = 60_000;
+
 export class QueueRepositoryError extends Error {
   readonly code: string;
   readonly meta: Record<string, unknown> | undefined;
@@ -1095,6 +1101,9 @@ export class QueueRepository {
   /** Whether the rosters list an address as a hosted member, trigger or not. */
   private readonly hostedMemberFn: (destination: string) => boolean;
   private readonly hostedWakeFetch: typeof fetch | undefined;
+  /** When this process last wrote each session's inbox check-in, so a seat that polls often writes at most once a minute. */
+  private readonly inboxCheckInWrittenAt = new Map<string, number>();
+  private inboxCheckInWriteFailed = false;
   /** OPR.0.4.6.WF3 FR-6 — injected by startup (never imported): the
    *  workflow domain's is-live-frontier-packet predicate. */
   private readonly workflowFrontierPredicate:
@@ -5069,6 +5078,57 @@ export class QueueRepository {
       const registry = this.loadHumanRegistryFn();
       return registry.ok && resolveRegisteredHumanAddress(row.destinationSession, registry.entities) !== null;
     } catch { return false; }
+  }
+
+  /** Whether the rosters list this address as a hosted member on this host, trigger or not. An unreadable roster reads
+   *  false. */
+  isHostedMember(destination: string): boolean {
+    try {
+      return this.hostedMemberFn(destination);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Whether two addresses name the same session (one of its canonical or physical names). */
+  isSameSession(a: string, b: string): boolean {
+    if (a === b) return true;
+    try {
+      return this.resolveSessionAddresses(a).includes(b) || this.resolveSessionAddresses(b).includes(a);
+    } catch {
+      return false;
+    }
+  }
+
+  /** A session's successful read of its own pending inbox, as the list route decides: availability, never a receipt,
+   *  claim or answer for any row. Written at most once a minute per session; a failed write is logged once and never
+   *  fails the read that made it. */
+  recordInboxCheckIn(session: string, at: Date = new Date()): void {
+    const last = this.inboxCheckInWrittenAt.get(session);
+    if (last !== undefined && at.getTime() >= last && at.getTime() - last < INBOX_CHECKIN_WRITE_INTERVAL_MS) return;
+    try {
+      this.db.prepare(`INSERT INTO queue_inbox_checkins (session, checked_at) VALUES (?, ?)
+        ON CONFLICT(session) DO UPDATE SET checked_at = excluded.checked_at WHERE excluded.checked_at > queue_inbox_checkins.checked_at`)
+        .run(session, at.toISOString());
+      this.inboxCheckInWrittenAt.set(session, at.getTime());
+    } catch (err) {
+      if (!this.inboxCheckInWriteFailed) {
+        console.error(`[queue] inbox check-in not recorded for ${session}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      this.inboxCheckInWriteFailed = true;
+    }
+  }
+
+  /** This session's latest recorded check-in under any of its names. */
+  lastInboxCheckIn(session: string): InboxCheckIn {
+    try {
+      const names = [...new Set([session, ...this.resolveSessionAddresses(session)])];
+      const row = this.db.prepare(`SELECT MAX(checked_at) AS at FROM queue_inbox_checkins WHERE session IN (${names.map(() => "?").join(", ")})`)
+        .get(...names) as { at: string | null } | undefined;
+      return row?.at ? { state: "seen", at: row.at } : { state: "never" };
+    } catch {
+      return { state: "unknown" };
+    }
   }
 
   classifyDestinationOf(destinationSession: string): DestinationClass {
