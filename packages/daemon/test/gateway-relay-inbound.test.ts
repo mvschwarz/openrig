@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { serve, type ServerType } from "@hono/node-server";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -2523,7 +2523,11 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     expect(crossAckRes.status).toBe(404);
     expect(await crossAckRes.json()).toMatchObject({ error: "unknown_delivery" });
 
-    // Closed schema validation and unknown deliveryId check
+    // Closed schema validation and unknown deliveryId check (answered without scanning queue_transitions)
+    const findReceiptSpy = vi.spyOn(
+      f.daemon.queueRepo,
+      "findRelayOwnerNotificationReceiptByDeliveryId",
+    );
     const extraKeyAck = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
       method: "POST",
       headers: {
@@ -2544,6 +2548,7 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     });
     expect(unknownAck.status).toBe(404);
     expect(await unknownAck.json()).toMatchObject({ error: "unknown_delivery" });
+    expect(findReceiptSpy).not.toHaveBeenCalled();
 
     // Acknowledge mainAsk (decision) and mainUpdate (informational update)
     const ackAskRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
@@ -2601,6 +2606,7 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     ).toEqual([secAsk.payload.decisionId]);
 
     // Duplicate ack after transition archival still reconciles idempotently (alreadyAccepted: true)
+    // and answers directly from deliveredStore + attemptedStore without scanning history
     const oldIso = "2025-01-01T00:00:00.000Z";
     f.db.prepare("UPDATE queue_items SET ts_updated = ? WHERE qitem_id = ?").run(oldIso, mainUpdate.qitemId);
     f.db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(oldIso, mainUpdate.qitemId);
@@ -2608,6 +2614,7 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
       archiveAgedTerminalTransitions(f.db, { nowIso: "2026-11-07T00:00:00.000Z" }).archivedQitems,
     ).toBeGreaterThanOrEqual(1);
 
+    findReceiptSpy.mockClear();
     const dupUpdateAck = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
       method: "POST",
       headers: {
@@ -2623,8 +2630,9 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
       connectorRef: "relay-main",
       alreadyAccepted: true,
     });
+    expect(findReceiptSpy).not.toHaveBeenCalled();
 
-    // Cross-connector duplicate ack for relay-main's already-accepted deliveryId is still rejected with 404
+    // Cross-connector duplicate ack for relay-main's already-accepted deliveryId is still rejected with 404 without scanning history
     const crossAcceptedAck = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
       method: "POST",
       headers: {
@@ -2635,6 +2643,8 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     });
     expect(crossAcceptedAck.status).toBe(404);
     expect(await crossAcceptedAck.json()).toMatchObject({ error: "unknown_delivery" });
+    expect(findReceiptSpy).not.toHaveBeenCalled();
+    findReceiptSpy.mockRestore();
 
     // Non-loopback TCP peers are rejected with 403 loopback_peer_required on /relay/outbox, /relay/outbox/ack, and /relay/inbound
     const nonLoopbackEnv = { incoming: { socket: { remoteAddress: "198.51.100.42" } } };

@@ -168,6 +168,14 @@ function extractBearerToken(header: string | undefined): string | null {
   return match[1];
 }
 
+function parseAttemptedConnectorRef(status: string | undefined): string | null {
+  if (typeof status !== "string" || !status.startsWith("attempted:")) return null;
+  const rest = status.slice("attempted:".length);
+  const lastColon = rest.lastIndexOf(":");
+  if (lastColon <= 0) return null;
+  return rest.slice(0, lastColon);
+}
+
 function parseInboundEnvelope(
   rawBody: string,
 ): { ok: true; envelope: RelayInboundEnvelope } | { ok: false; status: number; code: string; message: string } {
@@ -1149,7 +1157,22 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
           };
         }
 
-        // Not in DispatchBuffer for this connector: check durable accepted receipts (live + archive)
+        // Not in DispatchBuffer for this connector: answer duplicate or unknown acks from the seen stores first
+        const attemptedConnector = parseAttemptedConnectorRef(attemptedMap.get(deliveryId));
+        if (attemptedConnector !== null && attemptedConnector !== authenticatedConnectorRef) {
+          return errResponse(404, "unknown_delivery", "deliveryId is not pending or previously accepted for this relay profile");
+        }
+        if (attemptedConnector === authenticatedConnectorRef && deliveredMap.has(deliveryId)) {
+          return {
+            status: 200,
+            body: { ok: true, deliveryId, connectorRef: authenticatedConnectorRef, alreadyAccepted: true },
+          };
+        }
+        if (attemptedConnector === null && !deliveredMap.has(deliveryId)) {
+          return errResponse(404, "unknown_delivery", "deliveryId is not pending or previously accepted for this relay profile");
+        }
+
+        // Fallback when local seen state is partial: check durable accepted receipts (live + archive)
         let receipt: (RelayOwnerNotificationReceipt & { qitemId: string }) | null = null;
         try {
           receipt = deps.queueRepo.findRelayOwnerNotificationReceiptByDeliveryId?.(deliveryId) ?? null;
