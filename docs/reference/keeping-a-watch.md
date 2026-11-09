@@ -59,7 +59,9 @@ rig queue block <task> --on external:<what you check> --wake-after 1h \
 ```
 
 `--on` is always required; `external:<what>` names the outside thing you're waiting on. The timer first fires after
-the interval, not now.
+the interval, not now. Left without `--wake-after` (or `--wake-watchdog`), the task is still set aside, but nothing
+will wake you, and the reply says so with a `park_without_wake` advisory. Set it aside again with `--wake-after` to add
+the timer.
 
 **4. Say back what you set, in one or two plain lines:** what you'll check, how often, how they'll be told, and when
 it stops. For example: "I'll check the release PR every hour and message you here once it merges. Then I'll stop."
