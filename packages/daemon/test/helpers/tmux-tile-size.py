@@ -237,12 +237,17 @@ def writable_first_input(server):
     server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
     # A key and, at once, a paste: the paste is still framed, and both arrive in order.
     server.wait_for(lambda: server.seen(tile).rfind("\x1b[?2004h") > server.seen(tile).rfind("[detached"), "the tile shows again")
+    mark = len(server.seen(tile))
     os.write(tile[1], b"A")
     time.sleep(0.03)
     framed = server.seen(tile).rfind("\x1b[?2004h") > server.seen(tile).rfind("\x1b[?2004l")
     os.write(tile[1], b"\x1b[200~" + paste + b"\x1b[201~" if framed else paste)
     expected += b"A\x1b[200~" + paste + b"\x1b[201~"
     server.wait_for(lambda: received(server) == expected, "a key then a paste arrive in order, the paste framed")
+    # From the first key until tmux takes the terminal, its paste framing stays on: a paste in that gap stays one paste.
+    server.wait_for(lambda: "\x1b[?2004h" in server.seen(tile)[mark:], "tmux takes the tile's terminal")
+    gap = server.seen(tile)[mark:].split("\x1b[?2004h", 1)[0]
+    assert "\x1b[?2004l" not in gap, "the tile turned paste framing off before tmux attached: " + repr(gap[-80:])
     server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
     # A run of text that ends in ; keeps it, through the client and before a paste alike.
     os.write(tile[1], b"ls;\r")

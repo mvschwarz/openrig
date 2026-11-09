@@ -16,6 +16,16 @@ const helper = async (shell: string, ...more: string[]) => JSON.parse((await pro
   JSON.stringify(tileAttachArgv("tmux", ["-S", "TILE_SOCKET"], "seat", true, 1, 2)),
   ...more,
 ], { encoding: "utf8", timeout: 150000 })).stdout);
+// tmux 3.4 and later turn paste framing on only when a client starts, so a framing-off write between the first key and
+// the attach leaves a paste in that gap unframed: each of its lines would reach the agent as Enter.
+it("a writable tile turns paste framing off only on the return that doesn't attach", () => {
+  const script = tileAttachArgv("tmux", ["-S", "TILE_SOCKET"], "seat", true, 1, 2).find((arg) => arg.includes("use()")) ?? "";
+  const use = script.slice(script.indexOf("use()"), script.indexOf("take()"));
+  expect(use.length).toBeGreaterThan(0);
+  expect(use.split("\\033[?2004l").length - 1).toBe(1);
+  expect(use).toContain(`then printf "\\033[?2004l"; stty sane 2>/dev/null;`);
+});
+
 describe.skipIf(!available)("a tile views its seat without sizing it, and attaches only while the person types", () => {
   it.each(shells)("under %s: whole lines, the seat's own size, keys reaching the seat, and back to the view when idle", async (shell) => {
     expect(await helper(shell)).toEqual({
