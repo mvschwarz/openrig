@@ -144,7 +144,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
   text**, and shows you that text, apart from a recognised dim suggestion; it types nothing. Clear
   the box and retry, or add `--type-without-checking`, which reads and clears nothing and may join
   or submit the existing text. Keys for a recognised native menu are sent as before, and collapsed
-  paste contents or an unrecognised input can't be read. Not yet checked on a live seat whose box
+  paste contents or an unrecognised input can't be read. An input it can't read doesn't stop it: it
+  types, clears nothing, and says the input couldn't be read. Not yet checked on a live seat whose box
   holds only a suggestion, or typed text beside one. Don't use it to type over a half-written box:
   to reach a seat with something that can't wait, use `--urgent` where its typing-guard level lets
   urgent input through.

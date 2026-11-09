@@ -332,7 +332,10 @@ pasted text stops the send and is shown only to you, separately from recognized
 dim suggestions. Collapsed paste contents and unrecognized inputs are not known.
 Inspect the native terminal, deliberately clear its prompt with native/tmux
 controls, then retry. Manual clearing runs outside OpenRig's lease and observation
-checks and is not recorded. --type-without-checking explicitly skips this read;
+checks and is not recorded. An input that can't be read doesn't stop the send:
+the answer is typed, nothing is cleared, the result says the input couldn't be
+read, and the answer may join or submit what is there.
+--type-without-checking explicitly skips this read;
 it does not clear anything and may join or submit existing text. Human typing
 can still race a capture and paste; the check is not atomic.
 

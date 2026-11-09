@@ -3408,14 +3408,16 @@ export class SessionTransport {
             existingInput = { target, classification, rows: input?.rows ?? [], suggestionRows: input?.suggestionRows ?? [],
               cursor: input?.cursor ?? null, fullContentsVisible: !!input && input.state !== "unknown" && !input.collapsedPaste,
               ...(input?.unknownReason ? { reason: input.unknownReason } : {}), cleared: false };
-            const stopped = classification === "typed_or_pasted" || classification === "unreadable";
+            // Only seen typed or pasted text stops the override. An input that can't be read is not
+            // evidence of text, so the override delivers and says it couldn't read the input.
+            const stopped = classification === "typed_or_pasted";
             const audit = this.recordPromptOverride({ ...auditInput, input: { classification, visibleRows: existingInput.rows.length,
               suggestionRows: existingInput.suggestionRows.length, choice: unchecked ? "type_without_checking" : "inspect",
               outcome: stopped ? "stopped" : "proceed", clearAttempted: false } });
             if (!audit.ok) sendAdvisory = `prompt-override: audit unavailable (${audit.reason}).`;
-            if (stopped) throw new DeliveryGuardError(classification === "unreadable" ? "override_input_unknown" : "override_input_present",
-              classification === "unreadable" ? "Input could not be read. Nothing was typed. Inspect the native terminal, deliberately clear its prompt with native/tmux controls, then retry; or explicitly choose --type-without-checking (does not clear)."
-                : "Existing typed or pasted input (author unknown). Nothing was typed. Inspect the shown input, deliberately clear the prompt with native/tmux controls, then retry. Manual clearing is outside OpenRig's lease and observation checks and is not recorded.");
+            if (stopped) throw new DeliveryGuardError("override_input_present",
+              "Existing typed or pasted input (author unknown). Nothing was typed. Inspect the shown input, deliberately clear the prompt with native/tmux controls, then retry. Manual clearing is outside OpenRig's lease and observation checks and is not recorded.");
+            if (classification === "unreadable") sendAdvisory = [sendAdvisory, "Input could not be read and was not cleared; this send may join or submit existing text."].filter(Boolean).join(" ");
             if (unchecked) sendAdvisory = [sendAdvisory, "Input was not checked or cleared; this send may join or submit existing text."].filter(Boolean).join(" ");
           };
         }

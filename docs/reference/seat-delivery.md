@@ -153,11 +153,15 @@ drive a recognized native menu as before. Otherwise, with the delivery guard
 attached, it reads the visible composer under the seat's lease immediately before
 pasting, after buffer preparation. Empty input proceeds. A recognized dim
 suggestion is displayed separately and counts as empty; typed or pasted text
-(author unknown) stops the send with `override_input_present`. An unreadable input
-stops with `override_input_unknown`, never an empty-input claim. Both return single-send HTTP
+(author unknown) stops the send with `override_input_present`: single-send HTTP
 409, `sent: false`, and caller-only `existingInput` evidence (visible rows, suggestion
 rows, cursor/dimensions and target binding). A collapsed paste shows its label,
 not the hidden contents. OpenRig neither holds nor retries this stopped override.
+
+An input that can't be read doesn't stop the override. The answer is typed and
+nothing is cleared. The result reports `existingInput` with classification
+`unreadable`, never empty, and a warning that the answer may join or submit
+existing text.
 
 Inspect the shown input in the native terminal, deliberately clear the prompt with
 native/tmux controls, then issue the send again. Manual clearing runs outside
