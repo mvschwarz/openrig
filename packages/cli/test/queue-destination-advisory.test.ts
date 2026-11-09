@@ -152,7 +152,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     fs.rmSync(scratch, { recursive: true, force: true });
   });
 
-  async function create(app: Hono, args: string[], json: boolean, id = "qitem-create-contract", clientFactory?: QueueDeps["clientFactory"]): Promise<void> {
+  async function create(app: Hono, args: string[], json: boolean, id = "qitem-create-contract", clientFactory?: QueueDeps["clientFactory"], destination = "worker@scope"): Promise<void> {
     stdout.length = 0;
     stderr.length = 0;
     const deps: QueueDeps = {
@@ -168,7 +168,7 @@ describe("queue create scope advisories preserve admission and output", () => {
         },
       }) as unknown as ReturnType<QueueDeps["clientFactory"]>),
     };
-    await queueCommand(deps).parseAsync(["create", "--destination", "worker@scope",
+    await queueCommand(deps).parseAsync(["create", "--destination", destination,
       "--body", "scope contract body", "--summary", "scope contract", "--id", id,
       "--no-nudge", "--full", ...args, ...(json ? ["--json"] : [])], { from: "user" });
   }
@@ -255,23 +255,29 @@ describe("queue create scope advisories preserve admission and output", () => {
   }
 
   function recoveredClient(app: Hono, target: Fixture, typedLoss: boolean) {
-    const calls = { posts: [] as string[], readbacks: [] as Array<{ base: string; url: string }>, postStatuses: [] as number[] };
+    const calls = { posts: [] as string[], readbacks: [] as Array<{ base: string; url: string }>, postStatuses: [] as number[],
+      postBodies: [] as unknown[], committedBeforeLoss: [] as unknown[], healthReads: 0 };
     const factory: QueueDeps["clientFactory"] = (base: string) => ({
       senderIdentity: async () => ({ session: "writer@scope", originUnknown: false }),
       post: async (url: string, body: unknown) => {
         calls.posts.push(url);
+        calls.postBodies.push(body);
         const response = await app.request(url, { method: "POST",
           headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
           body: JSON.stringify(body) });
         calls.postStatuses.push(response.status);
         if (typedLoss) {
           await response.text();
+          calls.committedBeforeLoss.push(target.daemon.deps.queueRepo.getById((body as { qitemId: string }).qitemId));
           throw new DaemonResponseError(response.status, "fixture lost committed response body");
         }
         return { status: response.status, data: await response.json(), headers: response.headers };
       },
       get: async (url: string) => {
-        if (url === "/healthz") return { status: 200, data: { selfHostId: source.hostId } };
+        if (url === "/healthz") {
+          calls.healthReads++;
+          return { status: 200, data: { selfHostId: source.hostId } };
+        }
         calls.readbacks.push({ base, url });
         const row = target.daemon.deps.queueRepo.getById(decodeURIComponent(url.slice("/api/queue/".length)));
         return row ? { status: 200, data: row } : { status: 404, data: { error: "not_found" } };
@@ -368,6 +374,42 @@ describe("queue create scope advisories preserve admission and output", () => {
       expect.soft(scopeLines()).toMatch(/\boutcome\b|\bresult\b/i);
       expect.soft(scopeLines()).not.toMatch(/resolves to 0|checked.*unresolved/i);
     } else expect(scopeLines()).toBe("");
+  });
+
+  it.each(["--host", "qualified destination"] as const)("keeps recovered own-host %s advice local after a committed response is lost", async form => {
+    expect(source.hostId).toEqual(expect.any(String));
+    expect(source.hostId).not.toBe("local");
+    expect(getSelfHostId()).toBe(source.hostId);
+    const health = await source.daemon.app.request("/healthz");
+    expect(health.status).toBe(200);
+    expect(await health.json()).toMatchObject({ selfHostId: source.hostId });
+    const unchanged = preserveAuthored(source);
+    const { factory, calls } = recoveredClient(source.app, source, true);
+    const args = ["--mission", "missing-mission", "--tags", "project:alpha"];
+    if (form === "--host") args.push("--host", source.hostId!);
+    const destination = form === "qualified destination" ? "worker@scope@" + source.hostId : "worker@scope";
+    await create(source.app, args, true, "qitem-create-contract", factory, destination);
+    const tags = ["mission:missing-mission", "project:alpha"];
+    committed(source, "qitem-create-contract", tags);
+    const stored = source.daemon.deps.queueRepo.getById("qitem-create-contract");
+    expect(stored?.sourceSession).toBe("writer@scope");
+    expect(stored?.destinationSession).toBe("worker@scope");
+    expect(stored?.tags).toEqual(tags);
+    expect(source.daemon.db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE body = ?").get("scope contract body")).toEqual({ n: 1 });
+    expect(calls.posts).toEqual(["/api/queue/create"]);
+    expect(calls.postStatuses).toEqual([201]);
+    expect(calls.postBodies).toEqual([expect.objectContaining({ hostId: source.hostId,
+      destinationSession: "worker@scope", qitemId: "qitem-create-contract", tags })]);
+    expect(calls.committedBeforeLoss).toEqual([stored]);
+    expect(calls.healthReads).toBeGreaterThan(0);
+    expect(calls.readbacks.map(call => call.url)).toEqual(["/api/queue/qitem-create-contract"]);
+    expect(stderr.join("\n")).toContain("committed after all: row qitem-create-contract");
+    unchanged();
+    expect.soft(scopeLines()).toContain("mission:missing-mission");
+    expect.soft(scopeLines()).toMatch(/\bunavailable\b/i);
+    expect.soft(scopeLines()).toMatch(/\boutcome\b|\bresult\b/i);
+    expect.soft(scopeLines()).toMatch(/response recovery/i);
+    expect.soft(scopeLines()).not.toMatch(/\bskipped\b|cross-host|\bforwarded\b/i);
   });
 
   it("reconciles a forwarded indeterminate commit with SKIPPED and destination provenance", async () => {
