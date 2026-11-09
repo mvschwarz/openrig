@@ -123,7 +123,7 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       const adapters = (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? {};
       // The effort restore's launch selected, and why, heard on every relaunch.
       const heard: { effort?: LaunchEffortSelection } = {};
-      const result = await restore.launchSingleNode(rigId, logicalId, { snapshotId, adapters, fsOps: { exists: (p: string) => fs.existsSync(p) }, keepPane: true,
+      const result = await restore.launchSingleNode(rigId, logicalId, { snapshotId, adapters, fsOps: { exists: (p: string) => fs.existsSync(p) }, keepPane: true, keepClaudeLaunch: true,
         onLaunchEffort: (selected: LaunchEffortSelection) => { heard.effort = selected; },
         ...(relaunchOpts?.effort ? { keepEffort: relaunchOpts.effort } : {}) });
       const effort = heard.effort ? { effort: heard.effort } : {};

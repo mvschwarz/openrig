@@ -35,6 +35,21 @@ function mockTmux(overrides?: {
 }
 
 describe("ClaudeResumeAdapter", () => {
+  it("an in-place provider continuation keeps custom settings, config dir, model and extra env", async () => {
+    const tmux = mockTmux();
+    tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+    const nativeCommand = vi.fn(() => "retained-launch");
+    const prepare = vi.fn(async () => ({ command: nativeCommand, warnings: [], assertCurrent: () => {} }));
+    const adapter = new ClaudeResumeAdapter(tmux, { claudeManagedLaunch: { prepare } as unknown as ClaudeManagedLaunch });
+    const launch = { args: ["--settings", "/custom rules/settings.json", "--model", "opus", "--permission-mode", "auto", "--name", "seat@rig"],
+      env: { CLAUDE_CONFIG_DIR: "/custom config", CUSTOM_SETTING: "kept" }, warnings: [] };
+    await adapter.resume("seat@rig", "claude_id", "same-conversation", "/repo", "auto", "sonnet", "auto", "node",
+      "high", undefined, undefined, undefined, undefined, undefined, undefined, undefined, "/native/claude", undefined, undefined, launch);
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ continuationEnv: launch.env }), "auto");
+    expect(nativeCommand).toHaveBeenCalledWith([...launch.args, "--effort", "high", "--resume", "same-conversation"], { ...launch.env, OPENRIG_RESUME_LAUNCH: "same-conversation" });
+    expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
+  });
+
   it.each([false, true])("carries the retained executable and wrapper through restore preparation (managed: %s)", async managed => {
     const tmux = mockTmux();
     tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
