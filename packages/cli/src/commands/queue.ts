@@ -1253,7 +1253,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             console.error(`Warning: queue create scope check: ${record.tag} has an empty value; row was created.`);
             return;
           }
-          if (record.status === "conflict" && Array.isArray(record.tags) && record.tags.length >= 2 && record.tags.length <= 8) {
+          // Producer truncation/deduplication can coalesce distinct long inputs into one bounded display representative.
+          if (record.status === "conflict" && Array.isArray(record.tags) && record.tags.length > 0 && record.tags.length <= 8) {
             const validTags = record.tags.filter(nonEmptySafeTag);
             if (validTags.length !== record.tags.length) return;
             console.error(`Warning: queue create scope check: conflicting scope tags (${validTags.join(", ")}); row was created.`);
