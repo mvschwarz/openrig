@@ -6,6 +6,13 @@ import { describe, expect, it } from "vitest";
 import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 
 const available = spawnSync("tmux", ["-V"]).status === 0 && spawnSync("python3", ["--version"]).status === 0;
+// From tmux 3.5 a tile's first keys go through the attaching client, so a prefix typed first acts as the prefix. Below
+// 3.5 they go to the pane, so Ctrl-b d typed first reaches the seat (two more bytes), and the prefix-then-PgUp case is
+// skipped.
+const tmuxVersion = String(spawnSync("tmux", ["-V"], { encoding: "utf8" }).stdout ?? "").trim().replace(/^tmux /, "");
+const tmuxMinor = /^(\d+)\.(\d+)/.exec(tmuxVersion);
+const throughClient = /^(next-|master$)/.test(tmuxVersion)
+  || (tmuxMinor !== null && (Number(tmuxMinor[1]) > 3 || (Number(tmuxMinor[1]) === 3 && Number(tmuxMinor[2]) >= 5)));
 // Linux's /bin/sh is often dash, whose background commands read /dev/null unless given another input.
 const shells = ["/bin/sh", ...(existsSync("/bin/dash") ? ["/bin/dash"] : [])];
 // The helper runs for many seconds; running it without blocking keeps the test worker able to report to vitest.
@@ -32,7 +39,7 @@ describe.skipIf(!available)("a tile views its seat without sizing it, and attach
       readOnlyAlone: { window: "160x20" },
       readOnlyBesideAnother: { window: "160x20" },
       writable: { used: "40x30" },
-      firstInput: { bytes: 183 },
+      firstInput: { bytes: throughClient ? 183 : 185 },
       firstInputWindow: { bytes: 3 },
     });
   }, 180000);
