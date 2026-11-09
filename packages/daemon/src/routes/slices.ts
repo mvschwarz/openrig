@@ -133,7 +133,7 @@ export function slicesRoutes(): Hono {
   app.get("/:name/proof-asset/*", (c) => {
     const name = c.req.param("name");
     const selected = selectSliceDeps(c, name);
-    if (selected instanceof Response) return selected;
+    if ("response" in selected) return selected.response;
     const { deps, qualified } = selected;
     let slice = qualified ? null : deps.indexer.get(name);
     if (!qualified && (!slice || !slice.proofPacket)) {
@@ -165,7 +165,7 @@ export function slicesRoutes(): Hono {
   app.get("/:name/doc/*", (c) => {
     const name = c.req.param("name");
     const selected = selectSliceDeps(c, name);
-    if (selected instanceof Response) return selected;
+    if ("response" in selected) return selected.response;
     const { deps } = selected;
     const fullPath = c.req.path;
     const marker = `/doc/`;
@@ -184,7 +184,7 @@ export function slicesRoutes(): Hono {
   app.get("/:name", (c) => {
     const name = c.req.param("name");
     const selected = selectSliceDeps(c, name);
-    if (selected instanceof Response) return selected;
+    if ("response" in selected) return selected.response;
     const { deps } = selected;
     const slice = deps.indexer.get(name);
     if (!slice) return c.json({ error: "slice_not_found", name }, 404);
@@ -198,20 +198,20 @@ export function slicesRoutes(): Hono {
 function selectSliceDeps(
   c: Context,
   name: string,
-): { deps: SlicesRoutesDeps; qualified: boolean } | Response {
+): { deps: SlicesRoutesDeps; qualified: boolean } | { response: Response } {
   let deps = getDeps(c);
-  if (!deps) return c.json({ error: "slices_indexer_unavailable" }, 503);
+  if (!deps) return { response: c.json({ error: "slices_indexer_unavailable" }, 503) };
   try {
     const project = selectedProject(c);
     if (!project) return { deps, qualified: false };
     const mission = c.req.query("mission");
-    if (!mission || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) return c.json({ error: "exact_mission_and_slice_required" }, 400);
+    if (!mission || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) return { response: c.json({ error: "exact_mission_and_slice_required" }, 400) };
     const dir = projectMission(project, mission);
     workSource(project.root, path.join(dir, "slices", name));
     const indexer = new SliceIndexer({ db: deps.indexer.db, slicesRoot: project.missionsRoot, dogfoodEvidenceRoot: null, projectId: project.id, missionId: mission });
     deps = { indexer, projector: deps.projector.withIndexer(indexer) };
     return { deps, qualified: true };
-  } catch (err) { return projectReadResponse(err); }
+  } catch (err) { return { response: projectReadResponse(err) }; }
 }
 
 function getDeps(c: { get: (key: string) => unknown }): SlicesRoutesDeps | null {
