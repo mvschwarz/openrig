@@ -368,7 +368,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     db.close();
   });
 
-  it.each(["pi", "codex"])("persists non-empty launchWrapper on %s seat and omits when absent or []", (runtime) => {
+  it.each(["pi", "codex", "claude-code"])("persists non-empty launchWrapper on %s seat and omits when absent or []", (runtime) => {
     const rig = repo.createRig("wrapper-rig");
     const wrapped = repo.addNode(rig.id, `wrapped-${runtime}`, {
       runtime,
@@ -412,7 +412,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     expect(readSeatLaunchWrapper(db, node.id)).toBeUndefined();
   });
 
-  it.each(["claude-code", "omp", "terminal"])("rejects launchWrapper on %s at addNode and setNodeLaunchWrapper", (runtime) => {
+  it.each(["omp", "terminal"])("rejects launchWrapper on %s at addNode and setNodeLaunchWrapper", (runtime) => {
     const rig = repo.createRig("bad-runtime-rig");
     expect(() => repo.addNode(rig.id, "bad-nonempty", { runtime, launchWrapper: ["mtn"] })).toThrow(/pi|codex/i);
     expect(() => repo.addNode(rig.id, "bad-empty", { runtime, launchWrapper: [] })).toThrow(/pi|codex/i);
@@ -442,7 +442,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     }
   });
 
-  it.each([
+  it.each(["pi", "codex", "claude-code"].flatMap(runtime => [
     "[]",
     "corrupt-json",
     '{"cmd":"mtn"}',
@@ -451,9 +451,9 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     '[""]',
     '["./rel"]',
     '["mtn","bad\\narg"]',
-  ])("throws on malformed or non-canonical stored launch_wrapper %s instead of silently unwrapping", (corrupt) => {
+  ].map(corrupt => [runtime, corrupt] as const)))("throws on malformed or non-canonical stored %s launch_wrapper %s instead of silently unwrapping", (runtime, corrupt) => {
     const rig = repo.createRig("corrupt-rig");
-    const node = repo.addNode(rig.id, "worker", { runtime: "codex", launchWrapper: ["mtn"] });
+    const node = repo.addNode(rig.id, "worker", { runtime, launchWrapper: ["mtn"] });
     db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(corrupt, node.id);
     expect(() => readSeatLaunchWrapper(db, node.id)).toThrow();
     expect(() => repo.getRig(rig.id)).toThrow();
@@ -461,7 +461,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
 
   it("throws when stored launch_wrapper is present on an unsupported runtime row", () => {
     const rig = repo.createRig("corrupt-runtime-rig");
-    const node = repo.addNode(rig.id, "claude-worker", { runtime: "claude-code" });
+    const node = repo.addNode(rig.id, "terminal-worker", { runtime: "terminal" });
     db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run('["mtn","--"]', node.id);
     expect(() => readSeatLaunchWrapper(db, node.id)).toThrow(/pi|codex/i);
     expect(() => repo.getRig(rig.id)).toThrow(/pi|codex/i);
@@ -495,7 +495,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     expect(repo.getNodeLaunchRecipe(node.id)?.rigSpec.pods[0]!.members[0]!.launchWrapper).toEqual(["mtn", "--"]);
 
     const badRuntimeSpec = structuredClone(baseSpec);
-    badRuntimeSpec.pods[0]!.members[0]!.runtime = "claude-code";
+    badRuntimeSpec.pods[0]!.members[0]!.runtime = "terminal";
     db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?")
       .run(JSON.stringify({ version: 1, rigRoot: "/tmp", rigSpec: badRuntimeSpec }), node.id);
     expect(repo.getNodeLaunchRecipe(node.id)).toBeNull();

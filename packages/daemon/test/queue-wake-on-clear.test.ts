@@ -14,14 +14,15 @@ const destination = "worker@demo";
 const databases: ReturnType<typeof createDb>[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
-function fixture(resolveSessionAddresses?: (name: string) => string[]) {
+function fixture(resolveSessionAddresses?: (name: string) => string[], hasPendingPostCompactStage?: (name: string) => boolean) {
   const db = createDb(); databases.push(db); migrate(db, ALL_MIGRATIONS);
   const bus = new EventBus(db), outbox = new OutboxHandler(db);
   let refused = true;
   const send = vi.fn(async () => refused
     ? { ok: false, sent: false, reason: "target_needs_input", error: `Refused: '${destination}' is at an interactive prompt (selection_prompt). No text was sent.` }
     : { ok: true, verified: true });
-  const queue = new QueueRepository(db, bus, { transport: { send }, resolveSessionAddresses, loadHumanRegistry: () => ({ ok: true, entities: [] }) });
+  const queue = new QueueRepository(db, bus, { transport: { send }, resolveSessionAddresses, hasPendingPostCompactStage,
+    loadHumanRegistry: () => ({ ok: true, entities: [] }) });
   queue.attachOutbox(outbox);
   const observe = async (state: AgentActivity["state"] | undefined, paneNeedsInput = false) => queue.retryPromptWakesOnClear(destination, state, paneNeedsInput);
   const handoff = async () => {
@@ -45,6 +46,21 @@ it("a refused handoff retries once on a clear, reusing its committed wake and fr
   await f.observe("running"); await f.observe("idle");
   expect(f.send).toHaveBeenCalledTimes(2);
   expect(f.queue.list({ limit: 100 })).toHaveLength(2);
+});
+
+// #2575: "Compacted" reads as a clear too. While the compaction still owes the turn boundary, restore or audit, the retried
+// wake ("Recovered queue notification") would reach the agent before its restore; it waits, and the next clear sends it.
+it("a prompt-clear retry waits while a managed compaction owes the seat a post-compaction step", async () => {
+  let owed = true;
+  const f = fixture(undefined, name => owed && name === destination);
+  await f.observe("needs_input"); const id = await f.handoff();
+  f.clear(); await f.observe("idle"); await f.observe("running");
+  expect(f.send).toHaveBeenCalledTimes(1);
+  expect(f.outbox.getById(WAKE_INTENT_PREFIX + id)?.deliveryState).toBe("failed");
+  owed = false; await f.observe("idle");
+  expect(f.send).toHaveBeenCalledTimes(2);
+  expect(f.send.mock.calls[1][1]).toContain("Recovered queue notification");
+  expect(f.outbox.getById(WAKE_INTENT_PREFIX + id)?.deliveryState).toBe("delivered");
 });
 
 it("a retry refused by a returning prompt stops after that one attempt", async () => {

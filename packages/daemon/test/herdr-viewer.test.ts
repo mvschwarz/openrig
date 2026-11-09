@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { HerdrViewer, type HerdrViewerRun } from "../src/domain/terminal/herdr-viewer.js";
 import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
-import { tileAttachArgv078, tileAttachArgv079 } from "../src/domain/terminal/earlier-tile-attach.js";
+import { tileAttachArgv078, tileAttachArgv079, tileAttachArgv0710 } from "../src/domain/terminal/earlier-tile-attach.js";
 import { composeView } from "../src/domain/terminal/view-composer.js";
 import { Hono } from "hono";
 import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
@@ -22,6 +22,7 @@ function fixture() {
   let ids = { workspace_id: "w1", pane_id: "w1:p1", terminal_id: "term_001", cwd: "" };
   let label = "", running = false, uncertainCreate = false, uncertainRun = false, idless = false;
   let gone = false, enumerable = true, unreadable = false, attachFlags = ["-f", "ignore-size"];
+  let foreground: string[] | undefined;
   let workspaceInventory: unknown[] | undefined, paneInventory: Record<string, unknown> | undefined;
   let canonicalCreateCwd = false, changedCreateCwd = false, canonicalLimit = 0;
   const inspect = async () => ({ sessionId: "$1", nodeId: key.nodeId });
@@ -50,7 +51,7 @@ function fixture() {
       return "";
     }
     if (command === "pane process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: running
-      ? ["/usr/bin/tmux", "-S", "/tmp/own-tmux.sock", "attach", ...attachFlags, "-t", "$1"] : ["/bin/bash"] }] } } });
+      ? foreground ?? ["/usr/bin/tmux", "-S", "/tmp/own-tmux.sock", "attach", ...attachFlags, "-t", "$1"] : ["/bin/bash"] }] } } });
     throw new Error(`Unexpected provider operation ${args}`);
   };
   const viewer = (viewerRoot = root, platform: NodeJS.Platform = "linux", status = {}) => new HerdrViewer(socket, async args => args[0] === "status" ? JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket, ...status }) : run(args), platform, viewerRoot, inspect);
@@ -62,7 +63,8 @@ function fixture() {
     loseChanged: () => { gone = false; enumerable = false; },
     setEnumeration: (workspaces: unknown[], panes: Record<string, unknown>) => { workspaceInventory = workspaces; paneInventory = panes; },
     setCreateLost: () => { uncertainCreate = true; }, setRunLost: () => { uncertainRun = true; }, setIdless: () => { idless = true; }, exit: () => { running = false; },
-    setAttachFlags: (flags: string[]) => { attachFlags = flags; } };
+    setAttachFlags: (flags: string[]) => { attachFlags = flags; },
+    setForeground: (argv: string[]) => { foreground = argv; } };
 }
 
 describe("owned Herdr viewer", () => {
@@ -240,14 +242,30 @@ describe("owned Herdr viewer", () => {
     expect(await new HerdrViewer(socket, async () => { throw new Error("should not run"); }, "win32", f.root).ensure(key, f.target)).toMatchObject({ ok: false, code: "viewer_unsupported" });
     expect(await new HerdrViewer(socket, async () => JSON.stringify({ running: true, version: "0.9.5", protocol: 22, socket: "/other.sock" }), "linux", f.root).ensure(key, f.target)).toMatchObject({ ok: false });
   });
-  it("sizes writable initial/fallback/replacement attaches and recovery, and preserves read-only", () => {
+  it("a writable tile attaches, sizing, only from its one typing path; a read-only tile never attaches; recovery still attaches", () => {
     const rw = tileAttachArgv("tmux", [], "a@team", false)[2]!;
-    expect(rw.match(/attach -t/g)).toHaveLength(4);
+    // Both attaches are the typing path's: a plain one (also after a paste), and one that carries the first keys.
+    expect(rw.match(/attach -t/g)).toEqual(['attach -t', 'attach -t']);
+    expect(rw).toContain('then pz=1; put "$@"; fi;');
+    expect(rw).toContain('then go "$@"; else "$@" attach -t "$t"; fi;');
+    expect(rw).toContain('go() { set -- "$@" attach -t "$t";');
+    // The first input's files are readable by this user alone.
+    expect(rw.startsWith("umask 077;")).toBe(true);
+    expect(rw.match(/open "/g)).toHaveLength(4);
     expect(rw).not.toContain("ignore-size");
     const ro = tileAttachArgv("tmux", [], "a@team", true)[2]!;
-    expect(ro.match(/attach -r -t/g)).toHaveLength(4);
+    expect(ro).toContain('open() { t=$1; shift; stty -echo -isig -ixon 2>/dev/null; view "$t" "" "$@"; };');
+    expect(ro).not.toMatch(/attach -r|while use/);
     expect(ro).not.toContain("pick");
     const f = fixture(); expect(f.target.recoveryCommand).toContain("attach -t");
+  });
+  it("verifies a tile by its own script in the foreground, as when it views the seat, but not another seat's script", async () => {
+    const f = fixture(); f.setForeground(f.target.attachArgv!);
+    expect(await f.viewer().ensure(key, f.target)).toMatchObject({ ok: true });
+    const g = fixture(); g.setForeground(tileAttachArgv("/usr/bin/tmux", ["-S", "/tmp/own-tmux.sock"], "other@team", false));
+    expect(await g.viewer().ensure(key, g.target)).toMatchObject({ ok: false });
+    const h = fixture(); h.setForeground([...h.target.attachArgv!, "extra"]);
+    expect(await h.viewer().ensure(key, h.target)).toMatchObject({ ok: false });
   });
   it("verifies a writable viewer that sized its session (no ignore-size), but not a read-only spelling", async () => {
     const f = fixture(); f.setAttachFlags([]);
@@ -317,7 +335,7 @@ describe("viewers kept from an earlier release", () => {
     return () => JSON.parse(readFileSync(file, "utf8")).entries[id] as { command: string; argv: string[] };
   }
 
-  it.each([["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
+  it.each([["0.7.10", tileAttachArgv0710], ["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
     "keeps a writable viewer recorded by %s and moves it to the current script", async (_, make) => {
       const f = fixture(); expect((await f.viewer().ensure(key, f.target)).ok).toBe(true);
       const stored = keepFrom(f, make, false);
@@ -328,7 +346,7 @@ describe("viewers kept from an earlier release", () => {
       expect(f.calls.filter(a => a[1] === "create")).toHaveLength(1);
     });
 
-  it.each([["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
+  it.each([["0.7.10", tileAttachArgv0710], ["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
     "keeps a read-only viewer recorded by %s", async (_, make) => {
       const f = fixture(); f.setAttachFlags(["-r"]); const target = readOnlyTarget();
       expect((await f.viewer().ensure(key, target)).ok).toBe(true);

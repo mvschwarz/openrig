@@ -11,7 +11,7 @@ import type { ViewerPane } from "../src/domain/terminal/herdr-viewer.js";
 import { inspectComposerInput } from "../src/domain/session-transport.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
-import { tileAttachArgv078, tileAttachArgv079 } from "../src/domain/terminal/earlier-tile-attach.js";
+import { tileAttachArgv078, tileAttachArgv079, tileAttachArgv0710 } from "../src/domain/terminal/earlier-tile-attach.js";
 
 const roots: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -569,7 +569,7 @@ it("keeps a real empty mission workspace enabled through Core with a mission wai
 
 describe("follow views kept from an earlier release", () => {
   const quote = (s: string) => "'" + s.replace(/'/g, "'\"'\"'") + "'";
-  it.each([["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
+  it.each([["0.7.10", tileAttachArgv0710], ["0.7.9", tileAttachArgv079], ["0.7.8", tileAttachArgv078]] as const)(
     "a writable follow view kept from %s still adds and closes tiles, and moves to the current script", async (_, make) => {
       const f = fixture(); expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
       // Rewrite the saved canvas and the viewer journal as that release left them.

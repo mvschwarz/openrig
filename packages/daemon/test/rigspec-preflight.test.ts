@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import nodePath from "node:path";
 import os from "node:os";
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -12,6 +13,8 @@ import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.
 import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { RigSpecPreflight } from "../src/domain/rigspec-preflight.js";
+import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { LegacyRigSpec as RigSpec } from "../src/domain/types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
@@ -673,7 +676,7 @@ describe("seat login-shell PATH warning", () => {
     } finally { db.close(); }
   });
 
-  it("validates launch_wrapper[0] against daemon PATH for pi and codex members", async () => {
+  it.each(["pi", "codex", "claude-code"])("validates launch_wrapper[0] against daemon PATH for %s members", async runtime => {
     const files: Record<string, string> = {
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
     };
@@ -688,7 +691,7 @@ describe("seat login-shell PATH warning", () => {
             id: "impl",
             agentRef: "local:agents/impl",
             profile: "default",
-            runtime: "codex",
+            runtime,
             cwd: ".",
             launchWrapper: [badExec, "--flag"],
           }],
@@ -717,7 +720,7 @@ describe("seat login-shell PATH warning", () => {
             id: "impl",
             agentRef: "local:agents/impl",
             profile: "default",
-            runtime: "pi",
+            runtime,
             cwd: ".",
             launchWrapper: wrapper,
           }],
@@ -733,8 +736,10 @@ describe("seat login-shell PATH warning", () => {
       expect(validResult.ready, JSON.stringify(validResult.errors)).toBe(true);
       expect(validResult.errors).toEqual([]);
     }
+  });
 
-    // 3. Relative PATH entry in process.env.PATH resolves against daemon process.cwd(), not member cwd
+  it.each(["codex", "claude-code"] as const)("preflight and %s launch resolve a relative wrapper PATH against daemon cwd, never member cwd", async runtime => {
+    const files: Record<string, string> = { [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl") };
     const tmpRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-preflight-wrapper-cwd-"));
     const origCwd = process.cwd();
     const origPath = process.env.PATH;
@@ -760,7 +765,7 @@ describe("seat login-shell PATH warning", () => {
             id: "impl",
             agentRef: "local:agents/impl",
             profile: "default",
-            runtime: "codex",
+            runtime,
             cwd: memberDir,
             launchWrapper: ["daemon-only-wrapper", "--"],
           }],
@@ -775,6 +780,22 @@ describe("seat login-shell PATH warning", () => {
       });
       expect(daemonScopedResult.ready, JSON.stringify(daemonScopedResult.errors)).toBe(true);
       expect(daemonScopedResult.errors).toEqual([]);
+      const launch = new SeatLaunchEnvironment(mockTmux(), { PATH: process.env.PATH }, daemonDir);
+      expect(launch.resolveLaunchWrapper(["daemon-only-wrapper", "--"])).toEqual([daemonWrapper, "--"]);
+      let claudeLaunch: SeatLaunchEnvironment | undefined;
+      if (runtime === "claude-code") {
+        fs.writeFileSync(daemonWrapper, "#!/bin/sh\nshift\nexec \"$@\"\n");
+        const tmux = mockTmux();
+        tmux.getPaneCommand = async () => "bash";
+        const identity: Record<string, string> = { OPENRIG_NODE_ID: "impl", OPENRIG_SESSION_NAME: "seat" };
+        tmux.getSessionEnv = async (_session, key) => identity[key];
+        claudeLaunch = new SeatLaunchEnvironment(tmux, { PATH: process.env.PATH, OPENRIG_HOME: nodePath.join(tmpRoot, "home") }, daemonDir, daemonWrapper);
+        fs.writeFileSync(nodePath.join(daemonDir, "rel-bin", "claude"), "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\"\n", { mode: 0o755 });
+        const command = await claudeLaunch.command("seat", "claude --resume 'same-id'", { runtime, nodeId: "impl", launchWrapper: ["daemon-only-wrapper", "--"] });
+        expect(command).toContain(shellQuote(daemonWrapper));
+        const observed = await promisify(execFile)("/bin/sh", ["-c", command], { cwd: memberDir, env: { PATH: `${nodePath.join(daemonDir, "rel-bin")}${nodePath.delimiter}${origPath ?? ""}` }, encoding: "utf8" });
+        expect(observed.stdout.trim().split("\n")).toEqual([memberDir, "--resume", "same-id"]);
+      }
 
       const memberScopedYaml = makeRigYaml({
         pods: [{
@@ -784,7 +805,7 @@ describe("seat login-shell PATH warning", () => {
             id: "impl",
             agentRef: "local:agents/impl",
             profile: "default",
-            runtime: "codex",
+            runtime,
             cwd: memberDir,
             launchWrapper: ["member-only-wrapper", "--"],
           }],
@@ -801,6 +822,11 @@ describe("seat login-shell PATH warning", () => {
       expect(memberScopedResult.errors).toContain(
         "dev.impl: Seat launch requires member-only-wrapper on the daemon launch PATH.",
       );
+      expect(() => launch.resolveLaunchWrapper(["member-only-wrapper", "--"])).toThrow("Seat launch requires member-only-wrapper on the daemon launch PATH.");
+      if (claudeLaunch) {
+        const command = await claudeLaunch.command("seat", "claude --resume 'same-id'", { runtime, nodeId: "impl", launchWrapper: ["member-only-wrapper", "--"] });
+        expect(command).toBe("printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false");
+      }
     } finally {
       process.chdir(origCwd);
       if (origPath === undefined) delete process.env.PATH;

@@ -115,7 +115,7 @@ describe("SeatHandoverService", () => {
     return { runtime: "codex", launchHarness, checkReady } as unknown as RuntimeAdapter;
   }
 
-  function newService(adapter: TmuxAdapter = tmux(), occupantInvalidator: OccupantInvalidator = { invalidateRetiringOccupant }): SeatHandoverService {
+  function newService(adapter: TmuxAdapter = tmux(), occupantInvalidator: OccupantInvalidator = { invalidateRetiringOccupant }, runtime = "codex"): SeatHandoverService {
     return new SeatHandoverService({
       codexPermissions: { currentCodexPermissions },
       db,
@@ -126,7 +126,7 @@ describe("SeatHandoverService", () => {
       tmuxAdapter: adapter,
       now: () => new Date("2026-04-24T18:30:00.000Z"),
       newSuccessorId: () => "01SUCCID0",
-      runtimeAdapters: { codex: codexAdapter() },
+      runtimeAdapters: { [runtime]: { ...codexAdapter(), runtime } },
       contextUsageStore: { readSidecar } as never,
       resumeTokenCapturer: { captureCodexThreadId } as never,
       ...(claudeProcessStartedAt ? { claudeProcessStartedAt } : {}),
@@ -1955,8 +1955,14 @@ describe("SeatHandoverService", () => {
     expect((launchHarness.mock.calls[0]![0] as { effort?: string }).effort).toBe("high");
   });
 
-  it("carries the seat's persisted launch_wrapper onto the handover successor binding", async () => {
-    const { node } = seedSeat({ runtime: "codex" });
+  it.each(["codex", "claude-code"])("carries the %s seat's persisted launch_wrapper onto the handover successor binding", async runtime => {
+    const { node } = seedSeat({ runtime });
+    if (runtime === "claude-code") {
+      launchHarness.mockImplementation(async () => ({ ok: true, resumeToken: "claude-successor-tok", resumeType: "claude_id" }));
+      capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
+      claudeProcessStartedAt = async () => "2026-04-24T18:29:59.000Z";
+    }
+    service = newService(undefined, undefined, runtime);
     rigRepo.setNodeLaunchWrapper(node.id, ["rtk", "--handover"]);
     const result = await service.handover({
       seatRef: "dev-impl@seat-rig",

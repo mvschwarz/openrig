@@ -18,7 +18,7 @@ import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { readSeatClaudeMcp } from "./claude-mcp.js";
-import { readSeatLaunchWrapper } from "./launch-wrapper.js";
+import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
 import { settleOwnStartupPaste, startupSubmissionEvidence, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, STARTUP_UNCONFIRMED_REASON, waitForClaudeInputBox, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
@@ -362,7 +362,7 @@ export class StartupOrchestrator {
       if (input.adapter.runtime === "claude-code") {
         input = { ...input, binding: { ...input.binding, claudeMcp: readSeatClaudeMcp(this.db, input.nodeId) } };
       }
-      if (input.adapter.runtime === "pi" || input.adapter.runtime === "codex") {
+      if (isLaunchWrapperRuntime(input.adapter.runtime)) {
         const launchWrapper = readSeatLaunchWrapper(this.db, input.nodeId);
         const { launchWrapper: _prior, ...restBinding } = input.binding;
         input = { ...input, binding: launchWrapper ? { ...restBinding, launchWrapper } : restBinding };

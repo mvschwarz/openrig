@@ -143,12 +143,8 @@ describe("workflow routes (PL-004 Phase D)", () => {
   it("POST /instantiate resolves a seeded spec BY NAME (AC-3 reachability), not just a literal path", async () => {
     // Seed the spec into the cache the way the starter-spec-loader does at seed
     // time: a readThrough caches `routes-fixture` by name with its sourcePath.
-    const seed = await app.request("/api/workflow/validate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ specPath }),
-    });
-    expect(seed.status).toBe(200);
+    // (POST /validate no longer seeds: it is read-only since #2726.)
+    runtime.specCache.readThrough(specPath);
     // Instantiate by the discovered NAME (no path).
     const res = await app.request("/api/workflow/instantiate", {
       method: "POST",

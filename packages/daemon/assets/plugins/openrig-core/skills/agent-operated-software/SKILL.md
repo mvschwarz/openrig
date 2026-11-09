@@ -68,7 +68,11 @@ When a tool produces an artifact, do not make every consumer invent a completene
 3. Flush and atomically rename the partial artifact to its final path.
 4. Write the manifest, then a `.done` sentinel last.
 
-Consumers fail closed on the shared proof. A filename or exit code is not content verification.
+Consumers of an artifact fail closed on the shared proof: don't read a file before its sentinel exists,
+because it may be half-written. A filename or exit code is not content verification. This rule is for
+artifact integrity only. For delivery, routing and checks, uncertainty fails open: deliver, and report
+what couldn't be checked. The hard lines are the exception: when a change can't tell whether it would
+expose a credential, delete someone's data, spend money or publish, it stops and asks.
 
 ## Build with an agent SDLC
 

@@ -129,6 +129,10 @@ and nothing else is offered:
   - It reads the items it sent and the items addressed to it from those seats, never the team's internal items.
   - With `queue`/`claim` and `queue`/`update`, it claims and closes only items addressed to its own seat that it can read,
     and waits (blocked) only on an item it names and can read. Its answers hide what reading the item hides.
+- **A first task without a seat address:** with `--task-destination <member@rig>` on the same `rig mcp serve`, a
+  `rig_queue_create` that leaves out `destination` goes to that receiver. The operator sets it; a caller can't. It must be
+  exactly one existing local node within that request's grant, or nothing is written. An explicit `destination` works as
+  before.
 - **Two assistants together:** a grant with `team`/`list` sees its rigs' seats with `rig_team`, and may address and hear from
   another connected assistant's seat. A grant without it never reaches a seat in the service's caller form
   (`cus-<id>-<connection>@<rig>`), so an existing connection keeps the reach it had.
@@ -148,7 +152,8 @@ pair, the person's assistant can read the team's questions waiting on them and s
 Steering. The caller's seat is never taken for a person: without `person`, the `question` pair offers nothing, and an
 unusable `person` withholds only these two tools while the grant's other tools keep working.
 
-- **Register the person** on the instance, once: `rig gateway human add <entity_id> --display-name "<name>" --default`.
+- **Register the person** on the instance, once:
+  `rig gateway human add <entity_id> --display-name "<name>" --delivery-class B --default`.
   Without `--binding`, they're asked in the Feed and on Steering only. As the default person, today's asks addressed to no
   registered person (such as `human@host`) are theirs too.
 - **`rig_question_list`** shows what Steering shows that person as answerable: an ask addressed to them, or a row parked on

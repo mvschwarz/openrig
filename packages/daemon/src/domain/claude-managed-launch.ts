@@ -3,7 +3,7 @@ import { accessSync, closeSync, constants, openSync, readSync, realpathSync, sta
 import path from "node:path";
 import type Database from "better-sqlite3";
 import type { RigEvent } from "./types.js";
-import { publicSeatEnvironment } from "./seat-launch-environment.js";
+import { publicSeatEnvironment, resolveLaunchWrapperArgv } from "./seat-launch-environment.js";
 import { SEAT_ENV_KEYS_VAR, parseStoredSeatEnv, validateSeatEnvName } from "./seat-env.js";
 import { CLAUDE_PLUGIN_DIRS_ENV, SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCorePluginDir } from "./claude-core-plugin-env.js";
 import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
@@ -29,6 +29,8 @@ export interface ClaudeLaunchTarget {
   /** The staged successor's isolated account home, before it is committed. */
   accountHome?: string | null;
   accountToken?: ClaudeSeatTokenRef | null;
+  /** The seat's `launch_wrapper`: resolved on the launch PATH here, and placed in front of the frozen executable. */
+  launchWrapper?: readonly string[];
   /** Slice 16: a Claude successor staged beside the seat's current occupant on another runtime (from #1214 by
    *  Aschenbath). The seat still records that occupant until the switch commits; it must still be bound exactly. */
   runtimeSwitch?: { fromRuntime: string; session: string; pane: string; generation: string };
@@ -329,6 +331,12 @@ export class ClaudeManagedLaunch {
     if (accountHome) this.assertAccountHome(target.nodeId, accountHome, target.accountHome ? target.accountToken ?? null : undefined);
     const credentialKeys: readonly string[] = accountHome ? ACCOUNT_HOME_PROVIDER_ENV : [];
     const context = this.context(cwd, target.nodeId, accountHome, target.executable);
+    // Resolved as the classic launch and preflight do (daemon PATH and daemon cwd). A missing or invalid wrapper refuses the launch; there is no unwrapped fallback.
+    let wrapper: string[] = [];
+    if (target.launchWrapper?.length) {
+      try { wrapper = resolveLaunchWrapperArgv(target.launchWrapper, this.sessionEnv.PATH ?? "", process.cwd()); }
+      catch { throw new Error("launch_wrapper unavailable; no agent started."); }
+    }
     // This is the existing managed session channel, not arbitrary shell variables.
     // Filter out the explicit capability environment and overwrite launch identity.
     const inherited = Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
@@ -409,7 +417,7 @@ export class ClaudeManagedLaunch {
       const clear = `__openrig_remove=$(/usr/bin/env -0 | /usr/bin/env -i ${shellQuote(process.execPath)} -e ${shellQuote(removalArgs)}) && eval "$__openrig_remove"`;
       return `${WAYLAND_DISPLAY_ASSIGNMENT}; cd ${shellQuote(cwd)} && {
 ${[...assignments, ...forwarded, ...seatForwarded, ...projectForwarded, ...terminal, ...runtimeDir, ...launch].join("\n")}
-${clear} && ${tokenStep}exec /usr/bin/env "$@" ${[shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}
+${clear} && ${tokenStep}exec /usr/bin/env "$@" ${[...wrapper.map(shellQuote), shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}
 }`;
     } });
   }

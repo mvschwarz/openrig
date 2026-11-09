@@ -25,26 +25,37 @@ export type NativeRuntime = "claude-code" | "codex";
 function tokens(command: string): string[] {
   // ps flattens argv: inline settings JSON retains its string delimiters.
   // A quote inside a name or filename is literal, not a shell span delimiter.
+  // A `--settings` or `--mcp-config` JSON value keeps the spaces between its members too, as in
+  // `{"env": {"A": "b"}}`: it stays one token until its braces balance. Braces inside its strings don't count, and
+  // a brace that opens any other option's value is literal (#2508).
   const result: string[] = [];
   let start = 0;
   let quote: string | null = null;
+  let depth = 0;
   const append = (end: number) => {
     if (start === end) return;
     const token = command.slice(start, end);
     result.push(token[0] === '"' && token.at(-1) === '"'
       ? token.slice(1, -1) : token);
   };
+  const structured = () => command.startsWith('"{', start) || command[start] === "{"
+    || command.startsWith("'{", start) || command.startsWith("--settings={", start)
+    || command.startsWith('--settings="', start) || command.startsWith("--mcp-config={", start)
+    || command.startsWith('--mcp-config="', start);
+  const jsonValue = () => command.startsWith("--settings={", start) || command.startsWith("--mcp-config={", start)
+    || (command[start] === "{" && (result.at(-1) === "--settings" || result.at(-1) === "--mcp-config"));
   for (let index = 0; index < command.length; index += 1) {
     const char = command[index]!;
     if (quote !== null) {
       if (quote === '"' && char === "\\") { index += 1; continue; }
       if (char === quote) quote = null;
-    } else if (char === '"' && (command.startsWith('"{', start) || command[start] === "{"
-      || command.startsWith("'{", start) || command.startsWith("--settings={", start)
-      || command.startsWith('--settings="', start) || command.startsWith("--mcp-config={", start)
-      || command.startsWith('--mcp-config="', start))) {
+    } else if (char === '"' && structured()) {
       quote = char;
-    } else if (/\s/.test(char)) {
+    } else if (char === "{" && jsonValue()) {
+      depth += 1;
+    } else if (char === "}" && depth > 0) {
+      depth -= 1;
+    } else if (/\s/.test(char) && depth === 0) {
       append(index);
       start = index + 1;
     }
@@ -127,8 +138,11 @@ function needsClaudeExecutablePath(row: NativeProcessRow): boolean {
 function claudeProcessAfterScript(row: NativeProcessRow): boolean {
   const path = row.executablePath;
   if (!path || !path.startsWith("/") || path.split("/").some(part => part === "." || part === "..")) return false;
+  // The OS name is the file's own name, or `claude`, which the native installer's versioned binary sets for itself when
+  // a launcher execs it through its `claude` symlink (#2341).
+  const osName = executableName(row.executableName ?? "");
   return claudeExecutable(tokens(row.command)[0] ?? "") && claudeExecutable(path)
-    && executableName(path) === executableName(row.executableName ?? "");
+    && (executableName(path) === osName || osName === "claude");
 }
 
 // The rows whose OS path the script rule reads: a foreground process whose argv[0] is a path named `claude` and
@@ -312,6 +326,10 @@ function claudeArgvIdentity(ids: ClaudeArgvIds, fork: boolean): string | null | 
 }
 
 // Managed fresh/resume/fork launches name the current Claude identity explicitly.
+// Claude flags that take no value, so a launcher can add them without hiding the session it names (#2341: a seat's
+// launcher that adds --no-chrome). Claude's own help lists both as switches (2.1.282).
+const CLAUDE_SWITCH_FLAGS: ReadonlySet<string> = new Set(["--chrome", "--no-chrome"]);
+
 function claudeSessionToken(args: string[]): string | null {
   const ids: ClaudeArgvIds = { resume: null, "session-id": null };
   let fork = false;
@@ -334,7 +352,8 @@ function claudeSessionToken(args: string[]): string | null {
     }
     if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
-      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
+      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions"
+      || CLAUDE_SWITCH_FLAGS.has(arg)) continue;
     const mcpEnd = claudeMcpValueEnd(args, index);
     if (mcpEnd === null) return null;
     if (mcpEnd !== undefined) { index = mcpEnd; continue; }
@@ -380,7 +399,8 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
       continue;
     }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
-      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
+      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions"
+      || CLAUDE_SWITCH_FLAGS.has(arg)) continue;
     const mcpEnd = claudeMcpValueEnd(args, index);
     if (mcpEnd === null) return unparsed;
     if (mcpEnd !== undefined) { index = mcpEnd; continue; }

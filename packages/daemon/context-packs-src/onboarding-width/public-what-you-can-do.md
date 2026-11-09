@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Ninety-two top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.7.10`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.7.11`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
 `rig context get reference/whats-new.md`.
@@ -134,6 +134,12 @@ unseen — which makes messages the one delivery channel that never gets skipped
   `caller_cancelled` and never types later. **`--urgent`** marks a message urgent, as does a row
   at priority `urgent` or `critical`: its wake starts `Urgent (marked by …):`, and it gets through a
   seat whose typing guard lets only urgent input type (`openrig-urgent` or `urgent-only`, below).
+  **A seat whose prompt holds a person's typed draft gets the message joined to it** by default
+  (`transport.draft_delivery` `deliver`): the message is pasted at the cursor and the combined input
+  submitted as one prompt, and the result says when it joined a draft OpenRig saw. Tell the person.
+  `rig config set transport.draft_delivery refuse` brings back the refusal (`prompt_draft`) from the
+  next send. Menus, permission prompts, a seat's typing guard, managed compaction and
+  `--wait-for-idle` refuse or wait under either value. Draft detection isn't complete.
 - **`rig send --raw`** — send exact text or keystrokes without the From/To envelope;
   the interactive-prompt guard still applies. To deliberately drive an interactive prompt,
   **`--dangerously-interact --reason "<why>"`** is the explicit override and implies raw text.
@@ -208,6 +214,15 @@ unseen — which makes messages the one delivery channel that never gets skipped
   judge and close. Each permission request is a row to `--permissions-to` (default: you). The guide
   is `docs/reference/acp-agents.md` in the source repo, and `docs/reference/a2a-agents.md` covers
   A2A agents.
+- **`rig acp serve --to <member@rig>`** — the other direction: the team as an agent inside an ACP
+  app that launches a custom agent over stdio (Zed's `agent_servers`, T3 Code). A prompt becomes a
+  queue row, each row the work reaches shows as a step, and the closing resolution is the reply.
+  The team's questions reach the app as a permission request or a one-choice form, and the choice
+  is recorded as the person's answer; one left unanswered there stays open in the TUI and Slack.
+  `acp.to` sets the default receiver. Nothing runs until an app starts it, and it uses the daemon
+  `rig` uses (`OPENRIG_URL` can name another). The `@openrig/acp` launcher runs the matching
+  CLI's `rig acp serve` for the ACP registry's `npx` launch. A cancel stops waiting; the work
+  carries on. It's been checked in T3 Code and with a scripted client.
 - **`rig exec run <row> --harness claude|codex`** — a finite task for Claude Code or Codex without
   building a seat: the same single turn through that harness's ACP adapter, run by a detached
   connector that outlives the command, so closing the terminal or leaving `--wait` doesn't stop it.
@@ -228,7 +243,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   wait for a phrase like “show me my agents”; the same command brings their agents back later. No
   YAML, herdr when installed or plain tmux. The layout follows the terminal's width: on a narrow
   one the operator gets the first tab; on a wide one the dashboard and operator sit side by side
-  and the advisor gets its own tab. A `kernel` view the person saved still wins. Inside herdr it
+  and the advisor gets its own tab. A `kernel` view the person saved still wins.
+  Tiles show their seat's screen without attaching, so whole lines show at any tile width; a
+  writable tile attaches when someone types or pastes and goes back to showing after 30 seconds
+  without a key. Inside herdr it
   opens a focused `openrig kernel` space. It opens where the caller is: Terminal gets a window and
   Ghostty a tab; from Claude Desktop, iTerm or VS Code on a Mac it opens a new Ghostty or Terminal
   window, and only then say that clicking macOS's Allow is fine. Herdr is visible only in a
@@ -348,6 +366,10 @@ your context, your compaction and your replacement — and it is the only thing 
   everything.
 - **`rig queue show`** — what a row *actually says*. The header is not the body. On a closed row,
   `--full` adds `closingTransition`: how it ended, who closed it and the closing note.
+  `rig queue show`, `list`, `transitions`, `update` and `block` take `--host <id>` for a row on
+  another host, as `create` and `handoff` do; `claim` doesn't, since only the destination seat
+  claims, on its own host. `rig queue artifact <qitemId>` (and MCP `rig_artifact_read`) returns the
+  exact commit pair from an `openrig.code-result/v1` manifest set as the row's `evidenceRef`.
 - **`rig queue claim` / `unclaim`** — is this mine and running, or still pending where two agents
   might double-work it. Put it down honestly when it is not yours.
 - **`rig queue update`** — record what happened in a form the rest of the system can act on. A
@@ -468,7 +490,9 @@ relay is a reason to inspect the available routing, not to surrender judgment to
   inspect `rig gateway human list --json`; when several people are registered, choose a default
   with `rig gateway default <id>`, or name one in `workspace.operator_seat_name`, which is read first.
 - **`rig workflow show` / `trace`** — what this instance is, and every step, actor and exit that
-  got it here.
+  got it here. `trace --full` returns the whole trail, and `show`, `trace` and `status` print the run's
+  `objective:`. **`rig workflow unregister <name>[@<version>]`** (or `--prune-missing`) removes
+  registered versions; a running instance keeps the spec it started with.
 - **`rig workflow revise <instance>`** — compare the bound graph with current authored
   inputs before changing a progressed run. Ordinary show and TUI inspection distinguish
   source-only edits (such as a catalog address) from executable changes. Preview names
@@ -580,6 +604,14 @@ not have to tear one down to change it, and you rarely have to start from nothin
   selects only the tmux server: home, credentials, filesystem and network stay shared.
   **`rig up <spec> --name <rig>`** runs one spec as another rig under that name; the rig keeps the
   name for `--existing`, snapshots and restore, and the spec file isn't changed.
+- **`launch_wrapper`** on a local Claude Code, Pi or Codex member is an argv prefix whose launcher
+  prepares the environment and execs the agent; a wrapped seat never starts unwrapped. It hasn't
+  run with zsh or with a real installed Claude.
+- **A person can work with the team from their own Claude Code or Codex** through the `openrig`
+  plugin, shipped beside openrig-core (its README in the installed package has the install
+  steps): hand it work, follow it, answer the team's questions in their own words, and read the
+  result. VS Code, Copilot CLI and Cursor load it with no seat: give the app its own
+  `rig mcp serve --front-door` server with `OPENRIG_SESSION_NAME` set and turn the plugin's off.
 - **A Claude member can bring its own setup** in the rig spec: `agent_file`,
   `append_system_prompt_file`, `plugin_dirs` and `advisor` (an Advisor model). They're copied into
   that seat's own storage, never the project, so one seat in a shared repository can have its own
@@ -720,6 +752,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   Stop distinguishes process/listener exit from a clean asynchronous drain: inspect the matching
   `daemon-shutdown.json` and log when completion is incomplete or unverified. No target is a
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
+  On Linux, when the daemon runs as a systemd user service, the seats' tmux server starts in its
+  own user scope, so stopping or restarting the daemon's unit keeps the seats; otherwise it starts
+  as before, with one log line giving the reason.
   Startup brings back a kernel that this start found down (what a reboot leaves). A kernel that
   was already down before this start stays down: `rig start` and `rig daemon start
   --wait-for-kernel` say so, and `rig up kernel --existing` brings it back.
@@ -1367,8 +1402,8 @@ your circumstances is configuration, and the ones that are not, another agent ca
   tested with stubs, not real accounts, before 0.7.2: check a moved seat's account and conversation
   yourself after the first move.
 - **Move to an existing account home** with `rig provider switch --seat <seat> --to-account <name>
-  --account-home <dir>` (preview with `--dry-run`). It starts a fresh conversation with a handover
-  and retains the seat's address and work. `--clear-account-home` returns to configured defaults.
+  --account-home <dir> --reason "<why>"` (preview with `--dry-run`). It starts a fresh conversation with a handover
+  and retains the seat's address and work. `--clear-account-home --reason "<why>"` returns to configured defaults.
 - **Claude subscription/API-key switching resumes the same conversation and interrupts work:**
   `rig provider switch --seat <seat> --to-account api --api-key-file <abs>`; return with
   `--to-account plan --token-file <abs>`. The API-key path remains unqualified; verify the resulting
@@ -1383,9 +1418,11 @@ your circumstances is configuration, and the ones that are not, another agent ca
   stop them without killing the rig.
 - **`rig environment`** — not `rig env`: places a worker seat in an NVIDIA OpenShell sandbox and returns
   verified result files (`setup`, `create` or `attach`, `export`; reference in the packaged
-  `daemon/assets/openshell/README.md`). In 0.7.8's release testing the worker never became usable;
-  0.7.10 fixes in the source the two problems that stopped it in 0.7.9, but it hasn't run end to
-  end. Read the installed version's release notes before relying on it.
+  `daemon/assets/openshell/README.md`). In 0.7.8's release testing the worker never became usable.
+  In 0.7.11, on OpenShell 0.1.6, the maintained cleanup works for a custom image, and recreate
+  and an exact resume passed in native testing; a restored guest still receives its startup text
+  again, and the worker isn't end to end. Read the installed version's release notes before
+  relying on it.
 - **`rig setup`** — what OpenRig would change about this machine, shown before it touches anything.
   It installs herdr by default on macOS and Linux (`--no-herdr` declines; if the install fails,
   views fall back to plain tmux) and on a Mac offers Ghostty once (`--ghostty` / `--no-ghostty`).
@@ -1476,6 +1513,12 @@ your circumstances is configuration, and the ones that are not, another agent ca
   get a standard challenge; the key and its grant still decide what a caller may do. The rows a
   granted caller's actions write record whose grant acted: attribution, not authentication.
   Clients on MCP protocol revision 2026-07-28 and on the 2025 revisions share the same endpoint.
+  With a grant service (experimental and off by default; you serve it to the internet behind
+  your own tunnel), `--task-destination <member@rig>` names where a caller's `rig_queue_create`
+  goes when it gives no destination, and a seat's name alone resolves within the grant's team. A
+  grant that names a person adds `rig_question_list` and `rig_question_answer`, so that person
+  answers the team's questions from their assistant, recorded as their answer through that
+  connection.
   **An assistant connected this way can be a hosted member of a rig:** mark its roster entry
   `"hosted": true` and `rig_team` lists it with its declared capabilities and caveat, activity
   `unknown`. The server's instructions teach it the loop: its inbox, claiming, closing or handing

@@ -483,6 +483,8 @@ describe("Claude identity with inline settings in ps output", () => {
       permissions: { allow: ["Bash(npm run test:*)"] },
       hooks: { PreToolUse: [{ hooks: [{ type: "command", command: 'node "/fixture with spaces/check.cjs" --label "it\'s fine"', timeout: 5 }] }] },
     })],
+    // #2508: a proxy that writes its settings with spaces between JSON members, as ps shows the argument.
+    ["spaced JSON", '{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8080", "ANTHROPIC_AUTH_TOKEN": "fixture"}}'],
   ];
   function input(args: string) {
     const list = [
@@ -513,6 +515,9 @@ describe("Claude identity with inline settings in ps output", () => {
     `--settings /fixture/settings.json --session-id ${token}`,
     `--settings /fixture/review's-settings.json --session-id ${token}`,
     `--settings /fixture/review"settings.json --session-id ${token}`,
+    // #2508: a brace inside a spaced value's string doesn't end the value.
+    `--settings {"env": {"note": "a } b {"}} --resume ${token}`,
+    `--settings={"env": {"A": "b"}} --session-id=${token}`,
   ])("accepts inline and file settings: %s", async args => {
     expect((await verifyClaudePaneProcess(input(args)))?.process.pid).toBe(21);
     expect((await observeClaudeDelivery(input(args))).state).toBe("verified");
@@ -594,11 +599,27 @@ describe("Claude identity with inline settings in ps output", () => {
   it.each([
     `--settings ${JSON.stringify({ label: `two words --session-id ${token}` })}`,
     `--settings {"env":{"note":"text --session-id ${token} --model trailing`,
+    // #2508: spaced settings stay one value, so an identity inside them, or after a value that never closes, proves nothing.
+    `--settings {"env": {"note": "text --session-id ${token}"}}`,
+    `--settings {"env": {"note": "x"} --session-id ${token}`,
     `--settings ${settings[0]![1]} --session-id ${token} --session-id different`,
     `--settings ${settings[1]![1]} --session-id ${token} --unknown`,
   ])("does not promote ambiguous argv: %s", async args => {
     expect(await verifyClaudePaneProcess(input(args))).toBeNull();
     expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
+  // #2508: braces group only a `--settings` or `--mcp-config` value. Any other value that opens with `{` still ends at
+  // a space, so the options after it are read as on main.
+  it("keeps a second resume after another option's brace-led value visible", async () => {
+    const actual = input(`--resume ${token} --name {label --resume ${parent}`);
+    expect(await verifyClaudePaneProcess(actual)).toBeNull();
+    expect((await observeClaudeDelivery(actual)).state).not.toBe("verified");
+  });
+  it("reads the identity after another option's brace-led value", async () => {
+    const actual = input(`--name {label --resume ${token}`);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
   });
   it.each([
     `--resume ${parent} --fork-session --session-id ${token}`,
