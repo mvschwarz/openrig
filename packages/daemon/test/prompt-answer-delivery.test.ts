@@ -179,11 +179,25 @@ describe("explicit prompt answer delivery", () => {
   });
 
   it.each(["Enter to select · Esc to cancel", "Space to select · Enter to confirm · Esc to reject all",
-    "t trust all · enter review · esc close"])("withholds Enter on a list whose hint row offers Enter and Esc (%j)", async hints => {
+    "t trust all · enter review · esc close", "⏎ to select · esc to cancel"])("withholds Enter on a list whose key-hint row ends the current screen (%j)", async hints => {
     const f = fixture("ordinary"); f.state.capture = `Pick one\n❯ Focused item\n  Other item\n${hints}`;
     const result = await f.transport.send(f.name, "green", { dangerouslyInteract: true, reason: "answer an ordinary input" });
     expect(result).toMatchObject({ ok: true, sent: true, promptInteraction: "unverified" });
     expect(f.state.commands.some(a => a[1] === "send-keys")).toBe(false);
+  });
+
+  it("submits under an old menu hint left in the transcript above the current box", async () => {
+    const f = fixture("ordinary"); f.state.capture = "Pick one\n  Earlier item\nEnter to select · Esc to cancel\n\n❯ green";
+    const result = await f.transport.send(f.name, "green", { dangerouslyInteract: true, reason: "answer an ordinary input" });
+    expect(result).toMatchObject({ ok: true, promptInteraction: "enter-sent" });
+    expect(f.state.commands.filter(a => a[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", f.name, "Enter"]]);
+  });
+
+  it.each(["✻ Working… (esc to interrupt)", "⏎ send · esc to interrupt", "enter to submit · esc to interrupt"])("submits under a working or idle footer, not a menu (%j)", async footer => {
+    const f = fixture("ordinary"); f.state.capture = `❯ green\n${footer}`;
+    const result = await f.transport.send(f.name, "green", { dangerouslyInteract: true, reason: "answer an ordinary input" });
+    expect(result).toMatchObject({ ok: true, promptInteraction: "enter-sent" });
+    expect(f.state.commands.filter(a => a[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", f.name, "Enter"]]);
   });
 
   it("keeps ordinary bracketed delivery and its Enter unchanged", async () => {

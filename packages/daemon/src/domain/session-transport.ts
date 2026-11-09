@@ -1388,8 +1388,8 @@ export function hasExpectedStagedText(pane: string | null, expected: string, run
 
 /** An interaction may consume its answer immediately, so Enter is added for the complete answer still visible in a
  *  bounded current text input (`staged`), never a numbered choice or a partial prefix. `not_staged` is positive
- *  evidence against it: a recognized box holding something else, a numbered choice, a menu whose hint row offers
- *  Enter and Esc, or no Enter by contract. A screen that couldn't be read (`unreadable`), or one with no input box
+ *  evidence against it: a recognized box holding something else, a numbered choice, a menu whose key-hint row ends
+ *  the current screen, or no Enter by contract. A screen that couldn't be read (`unreadable`), or one with no input box
  *  the parser recognizes (`unrecognized`), is unknown, not evidence: unknown rendering is not consumption. */
 function promptAnswerStaged(pane: string | null, answer: string, runtime: string | null): "staged" | "not_staged" | "unreadable" | "unrecognized" {
   // The caller's own keys (CR, LF, Esc) or an empty answer never get an added Enter.
@@ -1407,16 +1407,22 @@ function promptAnswerStaged(pane: string | null, answer: string, runtime: string
   // Where the input ends: Codex closes the composer on a blank line, Claude Code on a rule line.
   const end = inputIndex < 0 ? -1 : lines.findIndex((line, index) => index > inputIndex && (runtime === "codex"
     ? line.trim() === "" : /^[─═-]{10,}$/.test(line.trim())));
-  if (end <= inputIndex) return lines.some(isMenuKeyHintRow) ? "not_staged" : "unrecognized";
+  if (end <= inputIndex) return currentMenuKeyHint(lines) ? "not_staged" : "unrecognized";
   return lines.slice(inputIndex, end).join("\n").trimStart().slice(1).trim() === answer.trim() ? "staged" : "not_staged";
 }
 
-/** A list or menu's key-hint row, such as `Enter to select · Esc to cancel` or `t trust all · enter review · esc
- *  close`: Enter acts on the focused item and Esc dismisses it. A composer's own hints offer no Esc to dismiss. */
-function isMenuKeyHintRow(line: string): boolean {
-  const segments = line.trim().split(/\s+·\s+/);
-  return segments.length > 1 && segments.some((segment) => /^(enter|⏎|↵)\b/i.test(segment))
-    && segments.some((segment) => /^esc\b/i.test(segment));
+/** Whether the current screen ends in a list or menu's key-hint row, where Enter acts on the focused item and Esc
+ *  dismisses it: `Enter to select · Esc to cancel`, `Space to select · Enter to confirm · Esc to reject all`, or
+ *  `t trust all · enter review · esc close`. Like the native menu recognizers, it reads only the last row (below
+ *  OpenRig's seat rule, if drawn), so an old hint in the transcript holds nothing. A send or newline hint, or Esc to
+ *  interrupt work, is a composer's or a busy seat's, not a menu's. */
+function currentMenuKeyHint(lines: string[]): boolean {
+  const rows = lines.map((line) => line.trim()).filter(Boolean);
+  if (/^─{3,} [\w.-]+@[\w.-]+ ─+$/.test(rows.at(-1) ?? "")) rows.pop();
+  const segments = (rows.at(-1) ?? "").split(/\s+·\s+/);
+  return segments.length > 1
+    && segments.some((segment) => /^(?:enter\b|⏎|↵)\s*(?:to\s+)?(?:select|confirm|choose|review|open|accept)\b/i.test(segment))
+    && segments.some((segment) => /^esc\b\s*(?:to\s+)?(?:cancel|close|reject|dismiss|exit)\b/i.test(segment));
 }
 
 // Codex 0.160 input box: the last prompt line plus indented continuation rows, one blank row, then a footer
