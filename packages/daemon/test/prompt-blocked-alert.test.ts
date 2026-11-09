@@ -1230,6 +1230,31 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     await vi.waitFor(() => expect(posts).toHaveLength(1));
   });
 
+  it.each([1, 70])("a choice returning after a clear without a prior alert ages from its first uncleared refusal (%i returns)", async count => {
+    const initial = Date.now() - 120_000; const clearAt = initial + 1_000; const returnedAt = clearAt + 1_000;
+    const { jobId, record } = reminder([]); const posts: unknown[] = []; const port = engine(posts);
+    let observedClear = false;
+    const readPromptState = (_dest: string, refusedAt: string) => observedClear ? classifyPromptAfterRefusal({
+      activity: "idle-at-prompt", needsInput: { count: 0, reason: null },
+      needsInputEvidence: { rung: "lifecycle-hooks", observedAt: new Date(clearAt).toISOString() },
+    }, refusedAt) : "unknown";
+    record("refused", "selection_prompt", new Date(initial).toISOString());
+    await tick(port, { readPromptState, now: new Date(initial) });
+    observedClear = true;
+    await tick(port, { readPromptState, now: new Date(clearAt) });
+    expect(alerts()).toEqual([]); // Nothing existed for the clear tick to retire.
+    for (let i = 0; i < count; i++) record("refused", "selection_prompt", new Date(returnedAt + i * 10).toISOString());
+    await tick(port, { readPromptState, now: new Date(returnedAt + 59_999) });
+    expect(alerts()).toEqual([]); expect(posts).toEqual([]);
+    await tick(port, { readPromptState, now: new Date(returnedAt + 60_000) });
+    expect(alerts()).toHaveLength(1);
+    const alertId = alerts()[0]!.qitemId;
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts)).toContain(jobId);
+    await tick(port, { readPromptState, now: new Date(returnedAt + 120_000) });
+    expect(alerts().map(a => a.qitemId)).toEqual([alertId]); expect(posts).toHaveLength(1);
+  });
+
   it("a watchdog choice refusal with current clearing evidence stays quiet", async () => {
     reminder(["refused"]); state = "clear"; const posts: unknown[] = [];
     await tick(engine(posts));

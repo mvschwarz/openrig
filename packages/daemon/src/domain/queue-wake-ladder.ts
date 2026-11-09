@@ -1048,7 +1048,8 @@ const PROMPT_ALERT_ROWS = `(tags LIKE '%"${PROMPT_ALERT_TAG}"%' OR tags LIKE '%\
  * after this seat's latest prompt-cleared alert retirement, whichever is later; the key names that boundary, so it stays
  * the same until a reminder lands or the prompt clears. Jobs are found through the refused outcome's index. The
  * parked-owner job's refusals already arrive as notes on the rows it wakes. */
-function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string) => { qitemId: string; at: string } | null):
+function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string) => { qitemId: string; at: string } | null,
+  readAt: (dest: string, refusedAt: string) => "blocked" | "clear" | "unknown"):
   Array<{ jobId: string; dest: string; registeredBy: string; key: string; refusedAt: string; choice: boolean; choiceSince?: string }> {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'watchdog_history'").get()) return [];
   const jobs = db.prepare(`SELECT job_id, registered_by_session FROM watchdog_jobs WHERE state = 'active' AND policy != ?
@@ -1057,14 +1058,14 @@ function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string)
     WHERE job_id = ? ORDER BY evaluated_at DESC, history_id DESC LIMIT 50`);
   const before = db.prepare(`SELECT history_id, evaluated_at FROM watchdog_history WHERE job_id = ?
     AND NOT (outcome = 'refused' AND delivery_target_session IS ?) ORDER BY evaluated_at DESC, history_id DESC LIMIT 1`);
-  // Preserve the first choice refusal even when frequent attempts push it past the 50-entry read. A different
-  // refusal kind or delivered reminder resets this age; a cleared alert below also bounds the episode.
-  const choiceStart = db.prepare(`WITH boundary AS (SELECT evaluated_at, history_id FROM watchdog_history WHERE job_id = ?
+  // Read the choice run oldest first, beyond the 50-entry window, so a clear observed before any alert existed
+  // can discard the old refusals without discarding a returned prompt's first uncleared refusal too.
+  const choiceRun = db.prepare(`WITH boundary AS (SELECT evaluated_at, history_id FROM watchdog_history WHERE job_id = ?
       AND NOT (outcome = 'refused' AND delivery_target_session IS ? AND COALESCE(evaluation_notes, '') LIKE '%(selection_prompt)%')
       ORDER BY evaluated_at DESC, history_id DESC LIMIT 1)
-    SELECT MIN(evaluated_at) AS at FROM watchdog_history WHERE job_id = ?
+    SELECT evaluated_at AS at FROM watchdog_history WHERE job_id = ?
       AND (evaluated_at, history_id) > (COALESCE((SELECT evaluated_at FROM boundary), ''), COALESCE((SELECT history_id FROM boundary), ''))
-      AND evaluated_at > ?`);
+      AND evaluated_at > ? ORDER BY evaluated_at, history_id`);
   type Entry = { history_id: string; outcome: string; dest: string | null; evaluated_at: string; evaluation_notes?: string | null };
   return jobs.flatMap(({ job_id, registered_by_session }) => {
     const entries = recent.all(job_id) as Entry[];
@@ -1078,7 +1079,12 @@ function refusedWatchdogJobs(db: Database.Database, clearedAlert: (dest: string)
     if (!run.some(e => !cleared || e.evaluated_at > cleared.at)) return [];
     const after = cleared ? `alert:${cleared.qitemId}` : anchor?.history_id ?? "start";
     const choice = (entries[0]!.evaluation_notes ?? "").includes("(selection_prompt)");
-    const choiceSince = choice ? (choiceStart.get(job_id, dest, job_id, cleared?.at ?? '') as { at: string | null }).at ?? undefined : undefined;
+    let choiceSince: string | undefined;
+    if (choice && readAt(dest, entries[0]!.evaluated_at) !== "clear") {
+      for (const { at } of choiceRun.iterate(job_id, dest, job_id, cleared?.at ?? '') as IterableIterator<{ at: string }>) {
+        if (readAt(dest, at) !== "clear") { choiceSince = at; break; }
+      }
+    }
     return [{ jobId: job_id, dest, registeredBy: registered_by_session, key: `${dest}|watchdog:${job_id}|after:${after}`, refusedAt: entries[0]!.evaluated_at,
       choice, choiceSince }];
   });
@@ -1234,7 +1240,7 @@ async function advancePromptRefusals(
        GROUP BY q.qitem_id ORDER BY at DESC LIMIT 1`).get(`prompt-destination:${dest}`, LADDER_ACTOR, PROMPT_CLEARED_NOTE) as { qitemId: string; at: string } | undefined) ?? null);
     return clearedAlerts.get(dest)!;
   };
-  for (const job of refusedWatchdogJobs(deps.db, clearedAlert)) {
+  for (const job of refusedWatchdogJobs(deps.db, clearedAlert, readAt)) {
     const tag = `${PROMPT_EPISODE_TAG}${job.key}`;
     if (closedEpisode(tag)) continue;
     let group = groups.get(job.dest);
