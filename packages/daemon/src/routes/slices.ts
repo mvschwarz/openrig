@@ -1,5 +1,5 @@
 import type { EventBus } from "../domain/event-bus.js";
-import { selectedProject, projectMission, workSource, projectReadResponse } from "../domain/workspace/project-read.js";
+import { listProjects, selectedProject, projectMission, workSource, projectReadResponse } from "../domain/workspace/project-read.js";
 // Slice Story View v0 — HTTP routes.
 //
 // Endpoints:
@@ -95,9 +95,17 @@ export function slicesRoutes(): Hono {
       // Sort by lastActivityAt DESC (most recently touched first); slices
       // without activity sort to the end.
       filtered.sort(compareByActivityDesc);
+      const queueCountsByPath = deps.indexer.observedQueueCounts(
+        filtered,
+        resolveSliceProjectLookup(c, deps.indexer),
+      );
       const authored = deps.indexer.missionAuthoredStatuses();
       return c.json({
-        slices: filtered.map(s => ({ ...s, readiness: readSliceReadiness(s.slicePath) })),
+        slices: filtered.map((s) => ({
+          ...s,
+          queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
+          readiness: readSliceReadiness(s.slicePath),
+        })),
         totalCount: filtered.length,
         filter,
         boundToWorkflow: boundDiagnostic,
@@ -219,6 +227,51 @@ function getDeps(c: { get: (key: string) => unknown }): SlicesRoutesDeps | null 
   const projector = c.get("sliceDetailProjector" as never) as SliceDetailProjector | undefined;
   if (!indexer || !projector) return null;
   return { indexer, projector };
+}
+
+function safeRealpath(targetPath: string): string {
+  try {
+    return fs.realpathSync(targetPath);
+  } catch {
+    return path.resolve(targetPath);
+  }
+}
+
+function isInsideDir(parentDir: string, childPath: string): boolean {
+  const rel = path.relative(parentDir, childPath);
+  return rel === "" || (!path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`));
+}
+
+function resolveSliceProjectLookup(
+  c: { get: (key: string) => unknown },
+  indexer: SliceIndexer,
+): (slicePath: string) => string | null {
+  if (typeof indexer.projectId === "string" && indexer.projectId.length > 0) {
+    const explicit = indexer.projectId;
+    return () => explicit;
+  }
+  let projects: Array<{ id: string; root: string; missionsRoot: string; error?: string }> = [];
+  try {
+    projects = listProjects(c as never).projects.map((p) => ({
+      id: p.id,
+      root: safeRealpath(p.root),
+      missionsRoot: safeRealpath(p.missionsRoot),
+      error: p.error,
+    }));
+  } catch {
+    return () => null;
+  }
+  if (projects.length === 0) return () => null;
+  return (slicePath: string): string | null => {
+    const actualSlicePath = safeRealpath(slicePath);
+    const matching = projects.filter(
+      (p) => isInsideDir(p.root, actualSlicePath) || isInsideDir(p.missionsRoot, actualSlicePath),
+    );
+    if (matching.length !== 1) return null;
+    const only = matching[0]!;
+    if (only.error || !isInsideDir(only.missionsRoot, actualSlicePath)) return null;
+    return only.id;
+  };
 }
 
 function compareByActivityDesc(a: SliceListEntry, b: SliceListEntry): number {

@@ -22,6 +22,70 @@ import { resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
 
 export type SliceStatus = "active" | "done" | "blocked" | "draft";
 
+const QUEUE_COUNT_STATES = [
+  "pending",
+  "in-progress",
+  "done",
+  "blocked",
+  "failed",
+  "denied",
+  "canceled",
+  "handed-off",
+] as const;
+
+export type ObservedQueueState = (typeof QUEUE_COUNT_STATES)[number];
+export type SliceQueueCounts = Record<ObservedQueueState, number>;
+
+const KNOWN_QUEUE_STATES = new Set<string>(QUEUE_COUNT_STATES);
+
+function zeroQueueCounts(): SliceQueueCounts {
+  return {
+    pending: 0,
+    "in-progress": 0,
+    done: 0,
+    blocked: 0,
+    failed: 0,
+    denied: 0,
+    canceled: 0,
+    "handed-off": 0,
+  };
+}
+
+function parseTypedQueueScope(rawTags: string | null | undefined): {
+  projects: Set<string>;
+  missions: Set<string>;
+  slices: Set<string>;
+} | null {
+  if (rawTags == null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawTags);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const projects = new Set<string>();
+  const missions = new Set<string>();
+  const slices = new Set<string>();
+  for (const element of parsed) {
+    if (typeof element !== "string") continue;
+    for (const rawToken of element.split(",")) {
+      const token = rawToken.trim();
+      if (token.startsWith("project:")) {
+        const value = token.slice("project:".length);
+        if (value) projects.add(value);
+      } else if (token.startsWith("mission:")) {
+        const value = token.slice("mission:".length);
+        if (value) missions.add(value);
+      } else if (token.startsWith("slice:")) {
+        const value = token.slice("slice:".length);
+        if (value) slices.add(value);
+      }
+    }
+  }
+  return { projects, missions, slices };
+}
+
 export interface SliceQitemRef {
   qitemId: string;
   state: string;
@@ -102,6 +166,7 @@ export interface SliceListEntry {
    *  `rawStatus === "candidate"` slices. null when absent. */
   description: string | null;
   qitemCount: number;
+  queueCounts?: SliceQueueCounts | null;
   hasProofPacket: boolean;
   lastActivityAt: string | null;
   /** PL-007 — absolute filesystem path of the slice folder. UI resolves
@@ -297,6 +362,7 @@ export class SliceIndexer {
   private membershipIndex: MembershipIndex | null = null;
   // Slice id <-> directory name map, built once per cache window (same TTL as the listing).
   private idAliases: SliceIdAliases | null = null;
+  private missionAliases: SliceIdAliases | null = null;
   // Depth of open withMembershipBatch scopes.
   private batchDepth = 0;
   private compositionBasis: string | null = null;
@@ -357,6 +423,7 @@ export class SliceIndexer {
     this.missionStatusCache = null;
     this.membershipIndex = null;
     this.idAliases = null;
+    this.missionAliases = null;
   }
 
   /** VM-005 B1 (the narrow C-vii exception; arch ruling b8d91aee…) — the
@@ -502,6 +569,91 @@ export class SliceIndexer {
     return id ? [name, id] : [name];
   }
 
+  /** The `mission:` tag values that name this mission: its directory name and, when
+   *  its node file declares one that no other mission shares, its frontmatter id. */
+  missionTagKeys(missionId: string): string[] {
+    const id = this.missionIdAliases().idByName.get(missionId);
+    return id ? [missionId, id] : [missionId];
+  }
+
+  /**
+   * Observed per-state queue counts (#2729) for `GET /api/slices`.
+   * Evaluates exact typed `project:` + `mission:` + `slice:` membership across
+   * `entries` in a single shared `queue_items` scan, with no 500-row cap and
+   * without mutating or relying on the 60s listing cache for row states.
+   */
+  observedQueueCounts(
+    entries: ReadonlyArray<Pick<SliceListEntry, "name" | "missionId" | "slicePath">>,
+    resolveProjectId: (slicePath: string) => string | null = () => this.projectId ?? null,
+  ): Map<string, SliceQueueCounts | null> {
+    const result = new Map<string, SliceQueueCounts | null>();
+    interface TargetScope {
+      projectId: string;
+      missionKeys: Set<string>;
+      sliceKeys: Set<string>;
+      counts: SliceQueueCounts;
+    }
+    const targetsBySliceToken = new Map<string, TargetScope[]>();
+
+    for (const entry of entries) {
+      const projectId = entry.missionId ? resolveProjectId(entry.slicePath) : null;
+      if (!projectId || !entry.missionId) {
+        result.set(entry.slicePath, null);
+        continue;
+      }
+      const counts = zeroQueueCounts();
+      result.set(entry.slicePath, counts);
+      const missionKeys = new Set(this.missionTagKeys(entry.missionId));
+      const sliceKeys = new Set(this.sliceTagKeys(entry.name));
+      const target: TargetScope = { projectId, missionKeys, sliceKeys, counts };
+      for (const token of sliceKeys) {
+        const list = targetsBySliceToken.get(token);
+        if (list) list.push(target);
+        else targetsBySliceToken.set(token, [target]);
+      }
+    }
+
+    if (targetsBySliceToken.size === 0) return result;
+
+    const columns = this.db.prepare(`PRAGMA table_info(queue_items)`).all() as Array<{ name: string }>;
+    if (columns.length === 0 || !columns.some((c) => c.name === "tags")) {
+      return result;
+    }
+
+    const stmt = this.db.prepare(`SELECT state, tags FROM queue_items WHERE tags LIKE '%slice:%'`);
+    for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
+      if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
+      const scope = parseTypedQueueScope(row.tags);
+      if (!scope || scope.projects.size !== 1 || scope.missions.size === 0 || scope.slices.size === 0) continue;
+      const rowProject = scope.projects.values().next().value!;
+      const firstSlice = scope.slices.values().next().value!;
+      const candidates = targetsBySliceToken.get(firstSlice);
+      if (!candidates) continue;
+      for (const target of candidates) {
+        if (target.projectId !== rowProject) continue;
+        let allSlicesMatch = true;
+        for (const s of scope.slices) {
+          if (!target.sliceKeys.has(s)) {
+            allSlicesMatch = false;
+            break;
+          }
+        }
+        if (!allSlicesMatch) continue;
+        let allMissionsMatch = true;
+        for (const m of scope.missions) {
+          if (!target.missionKeys.has(m)) {
+            allMissionsMatch = false;
+            break;
+          }
+        }
+        if (!allMissionsMatch) continue;
+        target.counts[row.state as ObservedQueueState]++;
+      }
+    }
+
+    return result;
+  }
+
   // --- internals ---
 
   private readSliceLocations(): SliceLocation[] {
@@ -588,6 +740,46 @@ export class SliceIndexer {
     }
     this.idAliases = { nameById, idByName, expiresAt: now + this.cacheTtlMs };
     return this.idAliases;
+  }
+
+  private missionIdAliases(): SliceIdAliases {
+    const now = Date.now();
+    if (this.missionAliases && this.missionAliases.expiresAt > now) return this.missionAliases;
+    const missionNames = new Set<string>();
+    const idOfMission = new Map<string, string | null>();
+    const claims = new Map<string, Set<string>>();
+    for (const root of this.sliceRoots()) {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+        const entryPath = path.join(root, entry.name);
+        if (!this.isDirectory(path.join(entryPath, "slices"))) continue;
+        missionNames.add(entry.name);
+        if (!idOfMission.has(entry.name)) {
+          idOfMission.set(entry.name, this.readSliceId(entryPath));
+        }
+      }
+    }
+    for (const [missionName, id] of idOfMission) {
+      if (!id || missionNames.has(id)) continue;
+      const claimants = claims.get(id) ?? new Set<string>();
+      claimants.add(missionName);
+      claims.set(id, claimants);
+    }
+    const nameById = new Map<string, string>();
+    const idByName = new Map<string, string>();
+    for (const [missionName, id] of idOfMission) {
+      if (!id || missionNames.has(id) || claims.get(id)?.size !== 1) continue;
+      nameById.set(id, missionName);
+      idByName.set(missionName, id);
+    }
+    this.missionAliases = { nameById, idByName, expiresAt: now + this.cacheTtlMs };
+    return this.missionAliases;
   }
 
   /** The `id:` the slice's node file declares, read the way the execution view reads it. */
