@@ -8,7 +8,7 @@ const homes: string[] = [];
 afterEach(() => { for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true }); });
 const input = { sessionName: "writer@test", runtime: "claude-code", usedPercentage: 90 };
 function fixture() {
-  let clock = 10000, generation = "g1";
+  let clock = 10000, generation = "g1", restarts = 0;
   const home = mkdtempSync(join(tmpdir(), "prep-notice-")); homes.push(home);
   const send = vi.fn(async (): Promise<any> => { clock++; return { ok: false, sent: false, inputPhase: "not_reached", reason: "draft_input_busy" }; });
   const notice = vi.fn(async (_failure: PreparationFailure) => {});
@@ -19,7 +19,7 @@ function fixture() {
   let e = new ClaudeCompactionEnforcer({ resolveClaudeCompactionPolicy: () => policy } as any, transport, opts);
   return { get e() { return e; }, send, notice, advance: (n = 2) => { clock += n; },
     generation: (s: string) => { generation = s; },
-    restart: () => { e = new ClaudeCompactionEnforcer({ resolveClaudeCompactionPolicy: () => policy } as any, transport, { ...opts, daemonInstance: "restarted" }); } };
+    restart: () => { e = new ClaudeCompactionEnforcer({ resolveClaudeCompactionPolicy: () => policy } as any, transport, { ...opts, daemonInstance: `restarted-${++restarts}` }); } };
 }
 async function end(f: ReturnType<typeof fixture>) {
   for (let i = 0; i < 4; i++) {
@@ -67,4 +67,20 @@ it("a notice callback cannot restore a run that cancellation cleared", async () 
   const saved = JSON.parse(readFileSync(join(dirname(state.mapPath), COMPACTION_RECORD_FILE), "utf8"));
   expect(saved.preparationFailures).toBeUndefined();
   await f.e.maybeAutoCompact(input); expect(f.notice).toHaveBeenCalledTimes(1);
+});
+
+it("cancelling a recovered ended record resets the run across another restart", async () => {
+  const f = fixture(); await end(f); await end(f);
+  const state = f.e.getPreparationState(input.sessionName)!;
+  const file = join(dirname(state.mapPath), COMPACTION_RECORD_FILE);
+  f.restart(); f.e.recoverAfterRestart(input, null);
+  expect(f.e.getPreparationState(input.sessionName)).toBeNull();
+  f.e.cancelPreparation(input.sessionName);
+  expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({ reason: "preparation_cancelled" });
+  expect(JSON.parse(readFileSync(file, "utf8")).preparationFailures).toBeUndefined();
+  f.restart(); await end(f); await end(f);
+  await f.e.maybeAutoCompact(input); expect(f.notice).not.toHaveBeenCalled();
+  await end(f); await f.e.maybeAutoCompact(input);
+  expect(f.notice).toHaveBeenCalledTimes(1);
+  expect(f.notice).toHaveBeenCalledWith(expect.objectContaining({ endedAttempts: 3 }));
 });

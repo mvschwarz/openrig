@@ -274,17 +274,30 @@ describe("managed restore uses ordinary draft defaults", () => {
     expect(owed.detail).not.toContain("goes in anyway");
   });
 
-  it("does not replay an uncertain compact, while owed restore follows default delivery", async () => {
+  it("reconciles its own written compact before restoring, then resumes ordinary delivery", async () => {
     const f = await fixture({ pane: "%1", mode: "off" }); const real = f.transport.send.bind(f.transport);
     let commands = 0;
     vi.spyOn(f.transport, "send").mockImplementation(async (s: string, text: string, opts?: any) => {
-      if (text.startsWith("/compact")) { commands++; return { ok: false, sessionName: s, sent: false, inputPhase: "written", reason: "submit_failed" } as any; }
+      if (text.startsWith("/compact")) { commands++; f.draft(text); return { ok: false, sessionName: s, sent: true, inputPhase: "written", reason: "submit_failed" } as any; }
       return real(s, text, opts);
     });
     await f.e.triggerManualCompact(input, { operatorInitiated: true, skipMap: true });
     expect(f.e.getPreparationState(seat)).toMatchObject({ compact: "uncertain" });
-    vi.spyOn(f.tmux, "getPaneCursorPosition").mockResolvedValue(null);
-    for (let i = 0; i < 3; i++) expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: true });
+    const written = f.body(); expect(written).toMatch(/^\/compact /);
+    const before = f.writes.length;
+    for (let i = 0; i < 3; i++) expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false });
+    expect(f.body()).toBe(written); expect(f.writes.length).toBe(before);
+    expect(f.e.getOwedRestore(seat)).toMatchObject({ stage: "turn_boundary", held: true });
+    // Even after a clear read, the final input check protects a write that appears before the paste.
+    f.draft(""); f.onStage(() => f.draft(written));
+    expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: false });
+    expect(f.body()).toBe(written); expect(f.writes.length).toBe(before);
+    expect(f.e.getOwedRestore(seat)).toMatchObject({ stage: "turn_boundary", held: true });
+    // External resolution of the original write, not a speculative Enter from the enforcer.
+    f.onStage(() => {}); f.draft("");
+    expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: true });
+    f.draft("unrelated ordinary draft");
+    for (let i = 0; i < 2; i++) expect(await f.e.maybeAutoCompact(input)).toMatchObject({ triggered: true });
     expect(commands).toBe(1); expect(f.e.getOwedRestore(seat)).toBeNull();
   });
 });
