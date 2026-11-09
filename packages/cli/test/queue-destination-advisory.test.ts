@@ -7,7 +7,9 @@ import { createDaemon } from "../../daemon/src/startup.js";
 import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-store.js";
 import { queueRoutes } from "../../daemon/src/routes/queue.js";
 import { getSelfHostId, setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
+import { deriveCurrentWork, resolveWorkNodeDirs } from "../../daemon/src/domain/current-work.js";
 import { queueCommand, type QueueDeps } from "../src/commands/queue.js";
+import { DaemonResponseError } from "../src/client.js";
 
 describe("queue destination advisory through CLI and route", () => {
   it("prints the accepted typo unchanged for create and both handoffs", async () => {
@@ -150,13 +152,13 @@ describe("queue create scope advisories preserve admission and output", () => {
     fs.rmSync(scratch, { recursive: true, force: true });
   });
 
-  async function create(app: Hono, args: string[], json: boolean, id = "qitem-create-contract"): Promise<void> {
+  async function create(app: Hono, args: string[], json: boolean, id = "qitem-create-contract", clientFactory?: QueueDeps["clientFactory"]): Promise<void> {
     stdout.length = 0;
     stderr.length = 0;
     const deps: QueueDeps = {
       lifecycleDeps: { readFile: () => null, exists: () => false,
         fetch: async () => ({ ok: true }) } as QueueDeps["lifecycleDeps"],
-      clientFactory: () => ({
+      clientFactory: clientFactory ?? (() => ({
         post: async (url: string, body: unknown) => {
           const response = await app.request(url, { method: "POST",
             headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
@@ -164,7 +166,7 @@ describe("queue create scope advisories preserve admission and output", () => {
           responseHeaders.push(response.headers);
           return { status: response.status, data: await response.json(), headers: response.headers };
         },
-      }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
+      }) as unknown as ReturnType<QueueDeps["clientFactory"]>),
     };
     await queueCommand(deps).parseAsync(["create", "--destination", "worker@scope",
       "--body", "scope contract body", "--summary", "scope contract", "--id", id,
@@ -184,6 +186,273 @@ describe("queue create scope advisories preserve admission and output", () => {
 
   const scopeLines = () => stderr.join("\n").split("\n")
     .filter(line => /\bscope\b|mission:|slice:/i.test(line)).join("\n");
+
+  function preserveAuthored(f: Fixture): () => void {
+    const read = fs.readFileSync.bind(fs);
+    const stat = fs.statSync.bind(fs);
+    const list = fs.readdirSync.bind(fs);
+    const snapshot = (): Record<string, string> => {
+      const files: Record<string, string> = {};
+      const visit = (file: string): void => {
+        if (stat(file).isDirectory()) {
+          for (const child of list(file).sort()) visit(path.join(file, child));
+        } else files[path.relative(f.root, file)] = read(file, "utf8");
+      };
+      for (const file of ["workspace.yaml", "alpha/project.yaml", "alpha/missions"]) visit(path.join(f.root, file));
+      return files;
+    };
+    const before = snapshot();
+    return () => expect(snapshot()).toEqual(before);
+  }
+
+  function observeSenderScopeReads(): string[] {
+    const reads: string[] = [];
+    for (const method of ["readdirSync", "readFileSync", "statSync", "existsSync"] as const) {
+      const original = fs[method].bind(fs) as (...args: unknown[]) => unknown;
+      vi.spyOn(fs, method).mockImplementation(((...args: unknown[]) => {
+        if (String(args[0]) === path.join(source.root, "workspace.yaml")
+          || String(args[0]) === source.missions || String(args[0]).startsWith(source.missions + path.sep)) {
+          reads.push(method + ":" + String(args[0]));
+        }
+        return original(...args);
+      }) as never);
+    }
+    return reads;
+  }
+
+  function forwardingApp(receiver: Fixture, loseResponse = false) {
+    const observation = { forwards: 0, committedStatuses: [] as number[] };
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      const set = c.set.bind(c) as (key: string, value: unknown) => void;
+      for (const key of ["eventBus", "queueRepo", "inboxHandler", "outboxHandler", "rigRepo"] as const) set(key, source.daemon.deps[key]);
+      set("settingsStore", new SettingsStore(path.join(source.root, "settings.json")));
+      set("hostRegistryLoader", () => ({ ok: true, registry: { hosts: [
+        { id: "remote-fixture", transport: "http", url: "http://remote-fixture.invalid:39001" },
+      ] } }));
+      set("remoteFetchImpl", async (_url: unknown, init: RequestInit) => {
+        observation.forwards++;
+        const body = JSON.parse(String(init.body));
+        const previous = getSelfHostId();
+        setSelfHostId(receiver.hostId);
+        try {
+          const response = await receiver.app.request("/api/queue/create", { ...init,
+            headers: { "Content-Type": "application/json", "X-OpenRig-Session": body.sourceSession } });
+          observation.committedStatuses.push(response.status);
+          if (loseResponse) {
+            await response.text();
+            return new Response(new ReadableStream({ start(controller) {
+              controller.error(new Error("fixture lost receiver body after commit"));
+            } }), { status: response.status, headers: response.headers });
+          }
+          return response;
+        } finally { setSelfHostId(previous); }
+      });
+      await next();
+    });
+    app.route("/api/queue", queueRoutes());
+    return { app, observation };
+  }
+
+  function recoveredClient(app: Hono, target: Fixture, typedLoss: boolean) {
+    const calls = { posts: [] as string[], readbacks: [] as Array<{ base: string; url: string }>, postStatuses: [] as number[] };
+    const factory: QueueDeps["clientFactory"] = (base: string) => ({
+      senderIdentity: async () => ({ session: "writer@scope", originUnknown: false }),
+      post: async (url: string, body: unknown) => {
+        calls.posts.push(url);
+        const response = await app.request(url, { method: "POST",
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
+          body: JSON.stringify(body) });
+        calls.postStatuses.push(response.status);
+        if (typedLoss) {
+          await response.text();
+          throw new DaemonResponseError(response.status, "fixture lost committed response body");
+        }
+        return { status: response.status, data: await response.json(), headers: response.headers };
+      },
+      get: async (url: string) => {
+        if (url === "/healthz") return { status: 200, data: { selfHostId: source.hostId } };
+        calls.readbacks.push({ base, url });
+        const row = target.daemon.deps.queueRepo.getById(decodeURIComponent(url.slice("/api/queue/".length)));
+        return row ? { status: 200, data: row } : { status: 404, data: { error: "not_found" } };
+      },
+    }) as unknown as ReturnType<QueueDeps["clientFactory"]>;
+    return { factory, calls };
+  }
+
+  it.each(["SLICE.ONE", "MISSING.SLICE"])("reports slice-only %s as unavailable without mission context", async slice => {
+    const unchanged = preserveAuthored(source);
+    await create(source.app, ["--slice", slice, "--tags", "project:alpha"], true);
+    committed(source, "qitem-create-contract", ["slice:" + slice, "project:alpha"]);
+    unchanged();
+    expect.soft(scopeLines()).toContain("slice:" + slice);
+    expect.soft(scopeLines()).toMatch(/\bunavailable\b/i);
+    expect.soft(scopeLines()).toMatch(/\bmission\b/i);
+    expect.soft(scopeLines()).toMatch(/absent|missing|need|requir|without|not supplied/i);
+    expect.soft(scopeLines()).not.toMatch(/resolves to 0|checked.*unresolved|not found/i);
+  });
+
+  it.each([
+    { label: "mission alone", tags: ["mission:"], empty: "mission:", valid: null },
+    { label: "slice alone", tags: ["slice:"], empty: "slice:", valid: null },
+    { label: "mission beside valid slice", tags: ["mission:", "slice:SLICE.ONE"], empty: "mission:", valid: "slice:SLICE.ONE" },
+    { label: "slice beside valid mission", tags: ["mission:release", "slice:"], empty: "slice:", valid: "mission:release" },
+  ])("identifies the empty value for $label without blaming the other tag", async row => {
+    const unchanged = preserveAuthored(source);
+    const tags = [...row.tags, "project:alpha"];
+    await create(source.app, ["--tags", tags.join(",")], true);
+    committed(source, "qitem-create-contract", tags);
+    unchanged();
+    expect.soft(scopeLines()).toContain(row.empty);
+    expect.soft(scopeLines()).toMatch(/\bempty\b/i);
+    expect.soft(scopeLines()).not.toMatch(/resolves to 0|checked.*unresolved/i);
+    if (row.valid) expect.soft(scopeLines()).not.toContain(row.valid + " is unresolved");
+  });
+
+  it.each(["mission:", "slice:"])("keeps remote empty-only %s SKIPPED without sender scope reads", async empty => {
+    const receiver = await fixture("receiver");
+    const sourceUnchanged = preserveAuthored(source);
+    const receiverUnchanged = preserveAuthored(receiver);
+    const { app, observation } = forwardingApp(receiver);
+    const senderReads = observeSenderScopeReads();
+    setSelfHostId(source.hostId);
+    await create(app, ["--host", "remote-fixture", "--tags", empty + ",project:alpha"], true);
+    const tags = [empty, "project:alpha", "cross-host", "from-host:" + os.hostname()];
+    committed(receiver, "qitem-create-contract", tags);
+    expect(source.daemon.deps.queueRepo.getById("qitem-create-contract")).toBeNull();
+    expect(receiver.daemon.deps.queueRepo.getById("qitem-create-contract")?.sourceSession).toBe("writer@scope@" + source.hostId);
+    expect(observation.forwards).toBe(1);
+    expect(observation.committedStatuses).toEqual([201]);
+    expect(senderReads).toEqual([]);
+    sourceUnchanged();
+    receiverUnchanged();
+    expect.soft(scopeLines()).toMatch(/\bskipped\b/i);
+    expect.soft(scopeLines()).toContain(empty);
+    expect.soft(scopeLines()).not.toMatch(/unresolved|unavailable|resolves to 0/i);
+  });
+
+  it.each(["mission", "slice"] as const)("checks an exact-name regular file at %s level as unresolved", async level => {
+    const parent = level === "mission" ? source.missions : path.join(source.missions, "release", "slices");
+    const wanted = level === "mission" ? "release" : "build";
+    const target = path.join(parent, wanted);
+    fs.rmSync(target, { recursive: true });
+    fs.writeFileSync(target, "a regular file is not a work directory");
+    expect(fs.statSync(target).isFile()).toBe(true);
+    // Historical current-work resolution stays permissive; this advisory has a stricter directory contract.
+    expect(resolveWorkNodeDirs(parent, wanted)).toEqual([{ dir: wanted, form: "directory name" }]);
+    const unchanged = preserveAuthored(source);
+    const args = level === "mission" ? ["--mission", wanted] : ["--mission", "release", "--slice", wanted];
+    const tags = level === "mission" ? ["mission:release", "project:alpha"] : ["mission:release", "slice:build", "project:alpha"];
+    await create(source.app, [...args, "--tags", "project:alpha"], true);
+    committed(source, "qitem-create-contract", tags);
+    unchanged();
+    expect.soft(scopeLines()).toContain(level + ":" + wanted);
+    expect.soft(scopeLines()).toMatch(/\bunresolved\b/i);
+    expect.soft(scopeLines()).not.toMatch(/unavailable|skipped/i);
+  });
+
+  it.each([true, false])("reconciles a real local commit once with scope-tagged=%s", async tagged => {
+    const unchanged = preserveAuthored(source);
+    const { factory, calls } = recoveredClient(source.app, source, true);
+    const args = tagged ? ["--mission", "missing-mission", "--tags", "project:alpha"] : [];
+    await create(source.app, args, true, "qitem-create-contract", factory);
+    committed(source, "qitem-create-contract", tagged ? ["mission:missing-mission", "project:alpha"] : null);
+    expect(calls.posts).toEqual(["/api/queue/create"]);
+    expect(calls.postStatuses).toEqual([201]);
+    expect(calls.readbacks.map(call => call.url)).toEqual(["/api/queue/qitem-create-contract"]);
+    expect(stderr.join("\n")).toContain("committed after all: row qitem-create-contract");
+    unchanged();
+    if (tagged) {
+      expect.soft(scopeLines()).toContain("mission:missing-mission");
+      expect.soft(scopeLines()).toMatch(/\bunavailable\b/i);
+      expect.soft(scopeLines()).toMatch(/\boutcome\b|\bresult\b/i);
+      expect.soft(scopeLines()).not.toMatch(/resolves to 0|checked.*unresolved/i);
+    } else expect(scopeLines()).toBe("");
+  });
+
+  it("reconciles a forwarded indeterminate commit with SKIPPED and destination provenance", async () => {
+    const receiver = await fixture("receiver");
+    const sourceUnchanged = preserveAuthored(source);
+    const receiverUnchanged = preserveAuthored(receiver);
+    const { app, observation } = forwardingApp(receiver, true);
+    const { factory, calls } = recoveredClient(app, receiver, false);
+    const home = path.join(scratch, "cli-home");
+    fs.mkdirSync(home);
+    fs.writeFileSync(path.join(home, "hosts.yaml"), "hosts:\n  - id: remote-fixture\n    transport: http\n    url: http://remote-fixture.invalid:39001\n");
+    vi.stubEnv("OPENRIG_HOME", home);
+    const senderReads = observeSenderScopeReads();
+    setSelfHostId(source.hostId);
+    await create(app, ["--host", "remote-fixture", "--mission", "release", "--slice", "SLICE.ONE", "--tags", "project:alpha"], true,
+      "qitem-create-contract", factory);
+    committed(receiver, "qitem-create-contract", ["mission:release", "slice:SLICE.ONE", "project:alpha", "cross-host", "from-host:" + os.hostname()]);
+    expect(source.daemon.deps.queueRepo.getById("qitem-create-contract")).toBeNull();
+    expect(receiver.daemon.deps.queueRepo.getById("qitem-create-contract")?.sourceSession).toBe("writer@scope@" + source.hostId);
+    expect(calls.posts).toEqual(["/api/queue/create"]);
+    expect(calls.postStatuses).toEqual([502]);
+    expect(observation.forwards).toBe(1);
+    expect(observation.committedStatuses).toEqual([201]);
+    expect(calls.readbacks).toEqual([{ base: "http://remote-fixture.invalid:39001", url: "/api/queue/qitem-create-contract" }]);
+    expect(stderr.join("\n")).toContain("committed after all: row qitem-create-contract on host 'remote-fixture'");
+    expect(senderReads).toEqual([]);
+    sourceUnchanged();
+    receiverUnchanged();
+    expect.soft(scopeLines()).toMatch(/\bskipped\b/i);
+    expect.soft(scopeLines()).toContain("mission:release");
+    expect.soft(scopeLines()).toContain("slice:SLICE.ONE");
+    expect.soft(scopeLines()).not.toMatch(/unavailable|unresolved|resolves to 0/i);
+  });
+
+  it.each([
+    { level: "mission", tags: ["mission:release", "mission:MISSION.ONE", "slice:SLICE.ONE", "project:alpha"] },
+    { level: "slice", tags: ["mission:release", "slice:SLICE.ONE", "slice:build", "project:alpha"] },
+  ])("reports distinct $level inputs as a conflict, not a directory count", async row => {
+    const unchanged = preserveAuthored(source);
+    const old = deriveCurrentWork([{ qitemId: "input-conflict", state: "in-progress", tags: row.tags }], source.missions);
+    expect(old.currentWork).toBeNull();
+    expect(old.currentWorkBasis).toContain("conflicting typed tags:");
+    expect(old.currentWorkBasis).toContain("2 distinct " + row.level + " tags");
+    await create(source.app, ["--tags", row.tags.join(",")], true);
+    committed(source, "qitem-create-contract", row.tags);
+    unchanged();
+    expect.soft(scopeLines()).toMatch(/\bconflict(?:ing)?\b/i);
+    expect.soft(scopeLines()).toContain(row.level + ":");
+    expect.soft(scopeLines()).not.toMatch(/resolves to \d+ directories/i);
+  });
+
+  it.each([
+    { level: "mission", code: "EACCES", wanted: "DUP.MISSION" },
+    { level: "slice", code: "EIO", wanted: "DUP.SLICE" },
+  ])("reports unavailable for two $level matches plus unreadable extra SPEC ($code)", async row => {
+    const lookup = row.level === "mission" ? source.missions : path.join(source.missions, "release", "slices");
+    for (const child of ["duplicate-a", "duplicate-b"]) {
+      expect(fs.statSync(path.join(lookup, child)).isDirectory()).toBe(true);
+      expect(fs.readFileSync(path.join(lookup, child, "SPEC.md"), "utf8")).toContain("id: " + row.wanted);
+    }
+    const extra = path.join(lookup, "unreadable-extra");
+    spec(extra, "EXTRA");
+    const file = path.join(extra, "SPEC.md");
+    expect(fs.statSync(file).isFile()).toBe(true);
+    const unchanged = preserveAuthored(source);
+    const read = fs.readFileSync.bind(fs);
+    let faults = 0;
+    vi.spyOn(fs, "readFileSync").mockImplementation(((...args: unknown[]) => {
+      if (String(args[0]) === file) {
+        faults++;
+        throw Object.assign(new Error("fixture extra SPEC read failed"), { code: row.code });
+      }
+      return (read as (...input: unknown[]) => unknown)(...args);
+    }) as typeof fs.readFileSync);
+    const args = row.level === "mission" ? ["--mission", row.wanted] : ["--mission", "release", "--slice", row.wanted];
+    const tags = row.level === "mission"
+      ? ["mission:DUP.MISSION", "project:alpha"] : ["mission:release", "slice:DUP.SLICE", "project:alpha"];
+    await create(source.app, [...args, "--tags", "project:alpha"], true);
+    committed(source, "qitem-create-contract", tags);
+    expect(faults).toBeGreaterThan(0);
+    unchanged();
+    expect.soft(scopeLines()).toContain(row.level + ":" + row.wanted);
+    expect.soft(scopeLines()).toMatch(/\bunavailable\b/i);
+    expect.soft(scopeLines()).not.toMatch(/resolves to \d+ directories/i);
+  });
 
   it.each([false, true])("keeps valid project scope successful with unchanged JSON (json=%s)", async json => {
     await create(source.app, ["--mission", "release", "--slice", "SLICE.ONE", "--tags", "project:alpha"], json);
