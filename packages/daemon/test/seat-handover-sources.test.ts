@@ -480,9 +480,107 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
+  function seedForeignPaneClaim(opts: { archived: boolean; status: "running" | "exited" }) {
+    const rig = rigRepo.createRig("seat-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", cwd: "/project" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
+    sessionRegistry.updateStatus(session.id, opts.status);
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9" });
+    const discovered = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
+    discoveryRepo.markClaimed(discovered.id, node.id);
+    if (opts.archived) rigRepo.archiveRig(rig.id);
+    return { rig, node, session, discovered };
+  }
+
+  it.each(["fresh", "fork:dev-impl@seat-rig", "rebuild"])("%s reclaims the pane from an exited owner in an archived rig (#2861)", async (source) => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    const { node, sessionId } = seedSeat({ resumeToken: "native-abc" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true, currentStatus: { handoverResult: "complete" } } });
+    expect(liveSessionId(node.id)).not.toBe(sessionId);
+    expect(sessionRegistry.getBindingForNode(node.id)).toMatchObject({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9" });
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)).toMatchObject({ status: "claimed", claimedNodeId: node.id });
+  });
+
+  it("an archived claim owner with a newer running session still refuses (#2861)", async () => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    const running = sessionRegistry.registerSession(previous.node.id, "dev-impl@seat-rig");
+    sessionRegistry.updateStatus(running.id, "running");
+    const { node, sessionId } = seedSeat();
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(previous.node.id);
+  });
+
+  it("an exited owner outside an archived rig still refuses (#2861)", async () => {
+    const { rig, node, sessionId } = seedSeat();
+    const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex" });
+    const exited = sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
+    sessionRegistry.updateStatus(exited.id, "exited");
+    const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
+    discoveryRepo.markClaimed(row.id, other.id);
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(row.id)?.claimedNodeId).toBe(other.id);
+  });
+
+  it("discovered-source adoption does not reclaim an archived owner's pane (#2861)", async () => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    const { node, sessionId } = seedSeat();
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "adopt", source: `discovered:${previous.discovered.id}` });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(previous.node.id);
+  });
+
+  it("does not reclaim when the archived owner resumes during the presence probe (#2861)", async () => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    const { node, sessionId } = seedSeat();
+    hasSession.mockImplementation(async () => {
+      sessionRegistry.updateStatus(previous.session.id, "running");
+      return true;
+    });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(previous.node.id);
+  });
+
+  it("does not overwrite a live node's new claim during the presence probe (#2861)", async () => {
+    const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
+    const { rig, node, sessionId } = seedSeat();
+    const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex" });
+    const running = sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
+    sessionRegistry.updateStatus(running.id, "running");
+    hasSession.mockImplementation(async () => {
+      discoveryRepo.markClaimed(previous.discovered.id, other.id);
+      return true;
+    });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(other.id);
+  });
+
   it("a seat-pane discovery row claimed by another node still refuses the handover (#237 holds)", async () => {
     const { rig, node, sessionId } = seedSeat();
     const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex", cwd: "/project" });
+    const running = sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
+    sessionRegistry.updateStatus(running.id, "running");
     const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
     discoveryRepo.markClaimed(row.id, other.id);
 

@@ -823,12 +823,12 @@ export class SeatHandoverService {
     }
     // #981: a composer-launched successor respawns into the seat's own pane, whose discovery row the
     // previous handover claimed for this same node, and a rescan keeps that claim (#237). That claim is
-    // this seat's own, so commit re-claims it. A row claimed by any other node, or a discovered-source
-    // successor, still needs an active, unclaimed record.
+    // this seat's own, so commit re-claims it. #2861: an exited owner in an archived earlier rig can
+    // also leave that pane claimed. Other owners and discovered-source successors still refuse.
     const ownPaneClaim = input.reportedSource.mode !== "discovered"
       && discovered.status === "claimed"
-      && discovered.claimedNodeId === input.node.id
-      && discovered.tmuxSession === input.latestSession.session_name;
+      && discovered.tmuxSession === input.latestSession.session_name
+      && (discovered.claimedNodeId === input.node.id || this.isArchivedExitedNode(discovered.claimedNodeId));
     if (discovered.status !== "active" && !ownPaneClaim) {
       return fail({
         ok: false,
@@ -1240,6 +1240,14 @@ export class SeatHandoverService {
     return findOtherSessionOwner(this.db, tmuxSession, targetNodeId, { ignoreArchived });
   }
 
+  private isArchivedExitedNode(nodeId: string | null): boolean {
+    return this.db.prepare(`
+      SELECT 1 FROM nodes n JOIN rigs r ON r.id = n.rig_id
+      WHERE n.id = ? AND r.archived_at IS NOT NULL
+        AND (SELECT status FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1) = 'exited'
+    `).pluck().get(nodeId) === 1;
+  }
+
   private commit(input: {
     seatRef: string;
     status: SeatStatus;
@@ -1261,6 +1269,15 @@ export class SeatHandoverService {
   }): SeatHandoverResult {
     const handoverAt = this.now().toISOString();
     const tx = this.db.transaction(() => {
+      // The presence probe awaited after validation. Reclaim only the same still-stale foreign claim,
+      // inside the transaction that assigns it, so a resumed owner or a new claimant cannot be overwritten.
+      if (input.discovered.status === "claimed" && input.discovered.claimedNodeId !== input.node.id) {
+        const current = this.discoveryRepo.getDiscoveredSession(input.discovered.id);
+        if (current?.status !== "claimed" || current.claimedNodeId !== input.discovered.claimedNodeId
+          || !this.isArchivedExitedNode(current.claimedNodeId)) {
+          return null;
+        }
+      }
       const rows = this.db.prepare(
         "SELECT id FROM sessions WHERE node_id = ? AND status NOT IN ('superseded', 'detached', 'exited') ORDER BY id"
       ).all(input.node.id) as Array<{ id: string }>;
@@ -1376,7 +1393,16 @@ export class SeatHandoverService {
 
     let committed: { newSessionId: string; previousSessionIdsSuperseded: string[]; event: PersistedEvent; provenanceRecordWritten: boolean };
     try {
-      committed = tx();
+      const outcome = tx();
+      if (outcome === null) {
+        return {
+          ok: false,
+          code: "discovered_not_active",
+          message: `Discovery record "${input.discovered.id}" no longer has a stale archived-owner claim.`,
+          guidance: "Inspect the current discovery owner and successor state before retrying.",
+        };
+      }
+      committed = outcome;
       // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
       // oracle sees the swap as its own event, keyed by the durable node id, identified
       // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
