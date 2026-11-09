@@ -37,7 +37,7 @@ describe("a community harness whose launcher reports its conversation", () => {
     const { app, sendShellCommand, presets } = seat(good);
     expect(await app.launchHarness(binding, { name: "w@r" }))
       .toEqual({ ok: true, resumeToken: "chat-123", resumeType: "community:synth", resumeProvenance: "launcher" });
-    expect(sendShellCommand.mock.calls[0]![1]).toMatch(/^\/usr\/bin\/env OPENRIG_LAUNCH_RESULT='[^']+\.json' OPENRIG_LAUNCH_ATTEMPT=\S+ synth-launch --serve$/);
+    expect(sendShellCommand.mock.calls[0]![1]).toMatch(/^\/usr\/bin\/env OPENRIG_LAUNCH_RESULT='[^']+\.json' OPENRIG_LAUNCH_ATTEMPT=\S+ \/usr\/bin\/env -u OPENRIG_LAUNCH_WRAPPER synth-launch --serve$/);
     expect(communityHarnessLabel("synth", presets, { resumeType: "community:synth", resumeToken: "chat-123", resumeProvenance: "launcher" }))
       .toMatchObject({ identity: "reported by its launcher, not observed", reportedConversation: "chat-123" });
     expect(communityHarnessLabel("synth", presets, { resumeType: "community:synth", resumeToken: "chat-123", resumeProvenance: null }))
@@ -76,7 +76,7 @@ describe("a community harness whose launcher reports its conversation", () => {
     expect(await app.launchHarness(binding, { name: "w@r" }))
       .toEqual({ ok: true, warnings: [expect.stringContaining("its launch identity is unavailable: its launch-result folder couldn't be made")] });
     expect(sendShellCommand).toHaveBeenCalledTimes(1);
-    expect(sendShellCommand.mock.calls[0]![1]).toBe("synth-launch --serve");
+    expect(sendShellCommand.mock.calls[0]![1]).toBe("/usr/bin/env -u OPENRIG_LAUNCH_WRAPPER synth-launch --serve");
   });
 
   it("doesn't read a record larger than 64 KiB", async () => {
@@ -105,7 +105,7 @@ describe("a community harness whose launcher can reopen a reported conversation"
     const { app, sendShellCommand } = seat(good, RESUMABLE);
     expect(await app.launchHarness(binding, { name: "w@r", resumeToken: "chat-123", resumeType: "community:synth" }))
       .toEqual({ ok: true, resumeToken: "chat-123", resumeType: "community:synth", resumeProvenance: "launcher" });
-    expect(sendShellCommand.mock.calls[0]![1]).toContain(" OPENRIG_RESUME_REF='chat-123' synth-launch --serve");
+    expect(sendShellCommand.mock.calls[0]![1]).toContain(" OPENRIG_RESUME_REF='chat-123' /usr/bin/env -u OPENRIG_LAUNCH_WRAPPER synth-launch --serve");
   });
 
   it("starts nothing, and never a new conversation, when the launcher says the conversation is gone", async () => {

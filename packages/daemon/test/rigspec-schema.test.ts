@@ -778,7 +778,7 @@ describe("member launch_wrapper (#2328)", () => {
     edges: [],
   });
 
-  it.each(["pi", "codex", "claude-code"])("accepts literal argv with bare or absolute executable, empty non-executable args, spaces and metacharacters on %s", (runtime) => {
+  it.each(["pi", "codex", "claude-code", "synth"])("accepts literal argv with bare or absolute executable, empty non-executable args, spaces and metacharacters on %s", (runtime) => {
     const argv = ["mtn", "sandbox", "exec", "", "--flag='quoted $VAR ; | &'", "--"];
     const spec = withMember(runtime, { launch_wrapper: argv });
     expect(RigSpecSchema.validate(spec)).toEqual({ valid: true, errors: [] });
@@ -796,7 +796,7 @@ describe("member launch_wrapper (#2328)", () => {
     expect(RigSpecSchema.normalize(dotSegmentSpec).pods[0]!.members[0]!.launchWrapper).toEqual(dotSegmentArgv);
   });
 
-  it.each(["pi", "codex", "claude-code"])("accepts [] as explicit clear on %s and retains [] in normalize", (runtime) => {
+  it.each(["pi", "codex", "claude-code", "synth"])("accepts [] as explicit clear on %s and retains [] in normalize", (runtime) => {
     const spec = withMember(runtime, { launch_wrapper: [] });
     expect(RigSpecSchema.validate(spec)).toEqual({ valid: true, errors: [] });
     const member = RigSpecSchema.normalize(spec).pods[0]!.members[0]!;
@@ -811,7 +811,7 @@ describe("member launch_wrapper (#2328)", () => {
     expect("launchWrapper" in member).toBe(false);
   });
 
-  it.each(["omp", "terminal", "stub"])("rejects launch_wrapper (including []) on unsupported runtime %s", (runtime) => {
+  it.each(["omp", "terminal", "stub", "openshell-claude"])("rejects launch_wrapper (including []) on unsupported runtime %s", (runtime) => {
     for (const value of [["mtn", "--"], []]) {
       const result = RigSpecSchema.validate(withMember(runtime, { launch_wrapper: value }));
       expect(result.valid).toBe(false);
@@ -929,11 +929,11 @@ describe("legacy flat node launch_wrapper (#2328)", () => {
     expect("launchWrapper" in node).toBe(false);
   });
 
-  it.each(["omp", "terminal", "stub"])("rejects launch_wrapper (including []) on unsupported flat runtime %s", (runtime) => {
+  it.each(["omp", "terminal", "stub", "openshell-claude"])("rejects launch_wrapper (including []) on unsupported flat runtime %s", (runtime) => {
     for (const value of [["mtn", "--"], []]) {
       const result = LegacyRigSpecSchema.validate(withLegacyNode(runtime, { launch_wrapper: value }));
       expect(result.valid).toBe(false);
-      expect(result.errors).toContain('nodes.worker.launch_wrapper: only valid when runtime is "pi", "codex" or "claude-code"');
+      expect(result.errors).toContain('nodes.worker.launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness');
     }
   });
 

@@ -26,6 +26,9 @@ import Database from "better-sqlite3";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { seatCommand } from "../../cli/src/commands/seat.js";
+import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
+import type { EnvironmentStartup } from "../src/domain/environment-startup.js";
 
 const dirs: string[] = [];
 const dbs: Database.Database[] = [];
@@ -57,11 +60,28 @@ it.each([true, false])("loads first_input=%s independently from other declaratio
   expect(loadCommunityHarnessPreset("synth", dir)).toMatchObject({ ok: false, message: expect.stringContaining("first_input must be true or false") });
 });
 
+it.each([true, false])("loads launch_wrapper=%s as a runner capability", value => {
+  const dir = presets({ "synth.yaml": GOOD + `runner: true\nlaunch_result: true\nlaunch_wrapper: ${value}\n` });
+  expect(loadCommunityHarnessPreset("synth", dir)).toMatchObject({ ok: true, preset: { launchWrapper: value } });
+});
+
+it.each(["yes", "[]", "null", "1"])("rejects invalid launch_wrapper=%s", invalid => {
+  const dir = presets({ "synth.yaml": GOOD + `launch_wrapper: ${invalid}\n` });
+  expect(loadCommunityHarnessPreset("synth", dir)).toMatchObject({ ok: false,
+    message: expect.stringContaining("launch_wrapper must be true or false") });
+});
+
+it.each(["", "runner: false\n"])("rejects launch_wrapper capability without a runner (%s)", declaration => {
+  const dir = presets({ "synth.yaml": GOOD + declaration + "launch_wrapper: true\n" });
+  expect(loadCommunityHarnessPreset("synth", dir)).toMatchObject({ ok: false,
+    message: expect.stringContaining("launch_wrapper needs runner: true") });
+});
+
 describe("community harness presets", () => {
   it("loads a preset with the fields this format reads", () => {
     const dir = presets({ "synth.yaml": GOOD });
     expect(loadCommunityHarnessPreset("synth", dir)).toEqual({ ok: true, preset: {
-      name: "synth", command: "synth-harness --serve", maintainer: "Example Maintainer", limits: ["resume unsupported"], launchResult: false, namesConversation: false, resume: false, startupAssisted: false, firstInput: false, runner: false, passesModel: false, path: join(dir, "synth.yaml") } });
+      name: "synth", command: "synth-harness --serve", maintainer: "Example Maintainer", limits: ["resume unsupported"], launchResult: false, namesConversation: false, resume: false, startupAssisted: false, firstInput: false, runner: false, passesModel: false, launchWrapper: false, path: join(dir, "synth.yaml") } });
   });
 
   it.each([
@@ -140,16 +160,196 @@ describe("the community harness adapter", () => {
   it("types the preset's command into the seat's pane", async () => {
     const { tmux, app } = adapter(presets({ "synth.yaml": GOOD }));
     expect(await app.launchHarness(binding, { name: "w@r" })).toEqual({ ok: true });
-    expect(tmux.sendShellCommand).toHaveBeenCalledWith("w@r", "synth-harness --serve", undefined, { stageIfLong: true, execInScript: true });
+    expect(tmux.sendShellCommand).toHaveBeenCalledWith("w@r", "/usr/bin/env -u OPENRIG_LAUNCH_WRAPPER synth-harness --serve", undefined, { stageIfLong: true, execInScript: true });
   });
 
   it("types the command through the seat's launch environment, as a real daemon does", async () => {
     const { tmux } = adapter(presets({ "synth.yaml": GOOD }));
-    const command = vi.fn(async (_session: string, cmd: string, target?: { runtime?: string }) => `/usr/bin/env OPENRIG_RUNTIME=${target?.runtime} ${cmd}`);
-    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: { command }, presetsDir: () => presets({ "synth.yaml": GOOD }) });
+    const command = vi.fn(async (_session: string, cmd: string, target?: { runtime?: string; launcherPrefix?: string }) => `/usr/bin/env OPENRIG_RUNTIME=${target?.runtime} ${target?.launcherPrefix ?? ""}${cmd}`);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: { command, resolveLaunchWrapper: wrapper => [...wrapper] }, presetsDir: () => presets({ "synth.yaml": GOOD }) });
     expect(await app.launchHarness(binding, { name: "w@r" })).toEqual({ ok: true });
-    expect(command).toHaveBeenCalledWith("w@r", "synth-harness --serve", { runtime: "synth" });
-    expect(tmux.sendShellCommand).toHaveBeenCalledWith("w@r", "/usr/bin/env OPENRIG_RUNTIME=synth synth-harness --serve", undefined, { stageIfLong: true, execInScript: true });
+    expect(command).toHaveBeenCalledWith("w@r", "synth-harness --serve", { runtime: "synth", nodeId: undefined, launcherPrefix: "/usr/bin/env -u OPENRIG_LAUNCH_WRAPPER " });
+    expect(tmux.sendShellCommand).toHaveBeenCalledWith("w@r", "/usr/bin/env OPENRIG_RUNTIME=synth /usr/bin/env -u OPENRIG_LAUNCH_WRAPPER synth-harness --serve", undefined, { stageIfLong: true, execInScript: true });
+  });
+
+  it.each(["", "runner: false\n"])("forwards a runner-less wrapper at the existing command seam (%s)", async declaration => {
+    const dir = presets({ "synth.yaml": GOOD + declaration });
+    const { tmux } = adapter(dir);
+    const command = vi.fn(async (_session: string, program: string, target?: { launcherPrefix?: string }) => (target?.launcherPrefix ?? "") + program);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: { command, resolveLaunchWrapper: wrapper => [...wrapper] }, presetsDir: () => dir });
+    const launchWrapper = ["wrapper", "space arg", "--"];
+    expect(await app.launchHarness({ ...binding, nodeId: "node-1", launchWrapper }, { name: "w@r" })).toEqual({ ok: true });
+    expect(command).toHaveBeenCalledWith("w@r", "synth-harness --serve", { runtime: "synth", nodeId: "node-1", launchWrapper, failClosed: true, launcherPrefix: "/usr/bin/env -u OPENRIG_LAUNCH_WRAPPER " });
+  });
+
+  it("forwards the wrapper for a named runner-less conversation and its resume", async () => {
+    const dir = presets({ "synth.yaml": GOOD + "names_conversation: true\nresume: true\n" });
+    const { tmux } = adapter(dir);
+    const command = vi.fn(async (_session: string, program: string, target?: { launcherPrefix?: string }) => (target?.launcherPrefix ?? "") + program);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: { command, resolveLaunchWrapper: wrapper => [...wrapper] }, presetsDir: () => dir });
+    const launchWrapper = ["wrapper", "--"];
+    for (const resume of [false, true]) {
+      expect((await app.launchHarness({ ...binding, nodeId: "node-1", launchWrapper }, { name: "w@r",
+        ...(resume ? { resumeToken: "saved", resumeType: "community:synth" } : {}) })).ok).toBe(true);
+      expect(command).toHaveBeenLastCalledWith("w@r", "synth-harness --serve",
+        { runtime: "synth", nodeId: "node-1", launchWrapper, failClosed: true,
+          launcherPrefix: expect.stringContaining(resume ? "OPENRIG_RESUME_REF='saved'" : "OPENRIG_CONVERSATION=") });
+    }
+  });
+
+  it("passes resolved wrapper argv to a capable runner while leaving its command unwrapped", async () => {
+    const dir = presets({ "synth.yaml": GOOD + "runner: true\nlaunch_result: true\nlaunch_wrapper: true\n" });
+    const { tmux } = adapter(dir);
+    const command = vi.fn(async (_session: string, program: string, target?: { launcherPrefix?: string }) => (target?.launcherPrefix ?? "") + program);
+    const resolveLaunchWrapper = vi.fn(() => ["/resolved/wrapper", "space arg", "'literal", "--"]);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: { command, resolveLaunchWrapper }, presetsDir: () => dir,
+      launchResultRoot: () => join(dir, "results"), launchResultWait: { timeoutMs: 0 } });
+    await app.launchHarness({ ...binding, nodeId: "node-1", launchWrapper: ["wrapper", "space arg", "'literal", "--"] }, { name: "w@r" });
+    expect(resolveLaunchWrapper).toHaveBeenCalledWith(["wrapper", "space arg", "'literal", "--"]);
+    expect(command).toHaveBeenCalledWith("w@r", "synth-harness --serve", { runtime: "synth", nodeId: "node-1", failClosed: true,
+      launcherPrefix: expect.stringContaining("OPENRIG_LAUNCH_WRAPPER=") });
+    const program = command.mock.calls[0]![2]!.launcherPrefix;
+    expect(program).toContain('/resolved/wrapper');
+    expect(program).toContain('space arg');
+    expect(command.mock.calls[0]![1]).toBe("synth-harness --serve");
+  });
+
+  it.each(["", "launch_wrapper: false\n"])("fails closed before dispatch when a runner lacks wrapper support (%s)", async capability => {
+    const dir = presets({ "synth.yaml": GOOD + "runner: true\nlaunch_result: true\n" + capability });
+    const { tmux } = adapter(dir);
+    const command = vi.fn(async (_session: string, program: string, target?: { launcherPrefix?: string }) => (target?.launcherPrefix ?? "") + program);
+    const resolveLaunchWrapper = vi.fn(() => ["/resolved/wrapper"]);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: { command, resolveLaunchWrapper }, presetsDir: () => dir });
+    expect(await app.launchHarness({ ...binding, launchWrapper: ["wrapper"] }, { name: "w@r", firstInputText: "never sent" }))
+      .toEqual({ ok: false, error: 'launch_wrapper unsupported: the community preset "synth" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.' });
+    expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+    expect(command).not.toHaveBeenCalled();
+    expect(resolveLaunchWrapper).not.toHaveBeenCalled();
+  });
+
+  it("fails closed without a launch environment or when runner wrapper resolution fails", async () => {
+    for (const runner of [false, true]) {
+      const dir = presets({ "synth.yaml": GOOD + (runner ? "runner: true\nlaunch_result: true\nlaunch_wrapper: true\n" : "") });
+      const { tmux, app } = adapter(dir);
+      expect(await app.launchHarness({ ...binding, launchWrapper: ["missing-wrapper"] }, { name: "w@r" }))
+        .toEqual({ ok: false, error: "launch_wrapper unavailable; no agent started." });
+      const command = vi.fn(async (_session: string, program: string, target?: { launcherPrefix?: string }) => (target?.launcherPrefix ?? "") + program);
+      {
+        const failing = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir, seatLaunchEnvironment: { command,
+          resolveLaunchWrapper: () => { throw new Error("missing wrapper"); } } });
+        expect(await failing.launchHarness({ ...binding, launchWrapper: ["missing-wrapper"] }, { name: "w@r" }))
+          .toEqual({ ok: false, error: "launch_wrapper unavailable; no agent started." });
+      }
+      expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(["plain", "reported", "named", "resume", "runner"])("refuses wrapped %s command failures before recording any input or identity", async mode => {
+    const declarations = mode === "runner" ? "runner: true\nlaunch_result: true\nlaunch_wrapper: true\n"
+      : mode === "reported" ? "launch_result: true\n" : mode === "plain" ? "" : "names_conversation: true\nresume: true\n";
+    const dir = presets({ "synth.yaml": GOOD + declarations + "first_input: true\npasses_model: true\n" });
+    const { tmux } = adapter(dir);
+    const command = vi.fn(async () => {
+      throw new Error("private environment detail");
+    });
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir,
+      seatLaunchEnvironment: { command, resolveLaunchWrapper: () => ["/bin/echo", "--"] },
+      launchResultRoot: () => join(dir, "results"), launchResultWait: { timeoutMs: 0 } });
+    expect(await app.launchHarness({ ...binding, launchWrapper: ["/bin/echo", "--"], model: "model-a" },
+      { name: "w@r", firstInputText: "never handed off", ...(mode === "resume" ? { resumeToken: "saved", resumeType: "community:synth" } : {}) }))
+      .toEqual({ ok: false, error: "launch_wrapper unavailable; no agent started." });
+    expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+  });
+
+  it("preserves transport uncertainty after a wrapped command was prepared", async () => {
+    const dir = presets({ "synth.yaml": GOOD });
+    const { tmux } = adapter(dir);
+    tmux.sendShellCommand.mockRejectedValueOnce(new Error("terminal connection lost"));
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir,
+      seatLaunchEnvironment: { command: async (_session, command) => command, resolveLaunchWrapper: () => ["/bin/echo"] } });
+    await expect(app.launchHarness({ ...binding, launchWrapper: ["/bin/echo"] }, { name: "w@r" }))
+      .rejects.toThrow("terminal connection lost");
+  });
+
+  it.each([false, true])("fails closed on actual wrapped launch environment errors (runner=%s)", async runner => {
+    for (const failure of ["shell", "identity", "rig-bin"]) {
+      const dir = presets({ "synth.yaml": GOOD + "first_input: true\npasses_model: true\n"
+        + (runner ? "runner: true\nlaunch_result: true\nlaunch_wrapper: true\n" : "") });
+      const { tmux } = adapter(dir);
+      tmux.getPaneCommand.mockResolvedValue(failure === "shell" ? "fish" : "bash");
+      const launchTmux = { ...tmux, getSessionEnv: async (_session: string, key: string) =>
+        key === "OPENRIG_NODE_ID" ? (failure === "identity" ? "wrong-node" : "node-1") : "w@r" } as unknown as TmuxAdapter;
+      const launch = new SeatLaunchEnvironment(launchTmux, { PATH: process.env.PATH, OPENRIG_HOME: dir }, dir,
+        failure === "rig-bin" ? join(dir, "missing-cli") : process.execPath);
+      const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: launch, presetsDir: () => dir,
+        launchResultRoot: () => join(dir, "results"), launchResultWait: { timeoutMs: 0 } });
+      expect(await app.launchHarness({ ...binding, nodeId: "node-1", launchWrapper: ["/bin/echo"], model: "model-a" },
+        { name: "w@r", firstInputText: "never handed off" }))
+        .toEqual({ ok: false, error: "launch_wrapper unavailable; no agent started." });
+      expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(["plain", "reported", "named", "resume"])("places the wrapper immediately before the native %s command after all launcher assignments", async mode => {
+    const declarations = mode === "reported" ? "launch_result: true\n" : mode === "plain" ? "" : "names_conversation: true\nresume: true\n";
+    const dir = presets({ "synth.yaml": GOOD + declarations + "first_input: true\npasses_model: true\n" });
+    const { tmux } = adapter(dir);
+    tmux.getPaneCommand.mockResolvedValue("bash");
+    const launchTmux = { ...tmux, getSessionEnv: async (_session: string, key: string) => key === "OPENRIG_NODE_ID" ? "node-1" : "w@r" } as unknown as TmuxAdapter;
+    const launch = new SeatLaunchEnvironment(launchTmux, { PATH: process.env.PATH, OPENRIG_HOME: dir }, dir, process.execPath);
+    const baseline = await launch.command("w@r", "synth-harness --serve", { runtime: "synth", nodeId: "node-1" });
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: launch, presetsDir: () => dir,
+      launchResultRoot: () => join(dir, "results"), launchResultWait: { timeoutMs: 0 } });
+    const result = await app.launchHarness({ ...binding, nodeId: "node-1", launchWrapper: ["/bin/echo", "literal ' arg", "--"], model: "model-a" },
+      { name: "w@r", firstInputText: "hello", ...(mode === "resume" ? { resumeToken: "saved", resumeType: "community:synth" } : {}) });
+    let prefix = "";
+    const command = tmux.sendShellCommand.mock.calls[0]![1];
+    if (mode === "reported") {
+      const attempt = command.match(/OPENRIG_LAUNCH_ATTEMPT=([a-f0-9-]+)/)![1]!;
+      prefix = `/usr/bin/env OPENRIG_LAUNCH_RESULT=${shellQuote(join(dir, "results", "w@r", `${attempt}.json`))} OPENRIG_LAUNCH_ATTEMPT=${attempt} `;
+    } else if (mode !== "plain") {
+      prefix = `/usr/bin/env ${mode === "resume" ? "OPENRIG_RESUME_REF" : "OPENRIG_CONVERSATION"}=${shellQuote(result.resumeToken!)} `;
+    }
+    prefix += `/usr/bin/env -u OPENRIG_LAUNCH_WRAPPER /usr/bin/env OPENRIG_MODEL='model-a' /usr/bin/env OPENRIG_FIRST_INPUT=${shellQuote(result.firstInput!.path)} `;
+    expect(command).toBe(baseline.replace("synth-harness --serve", prefix + ["/bin/echo", "literal ' arg", "--"].map(shellQuote).join(" ") + " synth-harness --serve"));
+  });
+
+  it.each([false, true])("scrubs inherited wrapper environment before a plain native launch (selected=%s)", async selected => {
+    const dir = presets({});
+    const record = join(dir, "child-wrapper-env");
+    const native = `${shellQuote(process.execPath)} -e 'require("node:fs").writeFileSync(process.argv[1], process.env.OPENRIG_LAUNCH_WRAPPER ?? "unset")' ${shellQuote(record)}`;
+    writeFileSync(join(dir, "synth.yaml"), GOOD.replace("command: synth-harness --serve", `command: ${JSON.stringify(native)}`));
+    const { tmux } = adapter(dir);
+    const launchTmux = { ...tmux, getPaneCommand: async () => "bash", getSessionEnv: async (_session: string, key: string) => key === "OPENRIG_NODE_ID" ? "node-1" : "w@r" } as unknown as TmuxAdapter;
+    const launch = new SeatLaunchEnvironment(launchTmux, { PATH: process.env.PATH, OPENRIG_HOME: dir }, dir, process.execPath);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: launch, presetsDir: () => dir });
+    expect(await app.launchHarness({ ...binding, nodeId: "node-1", ...(selected ? { launchWrapper: ["/usr/bin/env"] } : {}) }, { name: "w@r" })).toEqual({ ok: true });
+    await promisify(execFile)("/bin/sh", ["-c", tmux.sendShellCommand.mock.calls[0]![1]],
+      { env: { ...process.env, OPENRIG_LAUNCH_WRAPPER: '["must-not-leak"]' } });
+    expect(readFileSync(record, "utf8")).toBe("unset");
+  });
+
+  it("clears an inherited wrapper for a runner with no node wrapper selected", async () => {
+    const dir = presets({ "synth.yaml": GOOD + "runner: true\nlaunch_result: true\nlaunch_wrapper: true\n" });
+    const { tmux } = adapter(dir);
+    const command = vi.fn(async (_session: string, program: string, target?: { launcherPrefix?: string }) => (target?.launcherPrefix ?? "") + program);
+    const resolveLaunchWrapper = vi.fn(() => ["/resolved/wrapper"]);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir, seatLaunchEnvironment: { command, resolveLaunchWrapper },
+      launchResultRoot: () => join(dir, "results"), launchResultWait: { timeoutMs: 0 } });
+    await app.launchHarness({ ...binding, launchWrapper: [] }, { name: "w@r" });
+    expect(command.mock.calls[0]![2]!.launcherPrefix).toContain("/usr/bin/env -u OPENRIG_LAUNCH_WRAPPER ");
+    expect(resolveLaunchWrapper).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before delegating a wrapper to the separate OpenShell environment path", async () => {
+    const { tmux } = adapter(presets({}));
+    const launch = vi.fn();
+    const environmentStartup = { launch } as unknown as EnvironmentStartup;
+    const app = new CommunityHarnessRuntimeAdapter("openshell-claude", { tmux, environmentStartup });
+    expect(await app.launchHarness({ ...binding, launchWrapper: ["wrapper"] }, { name: "w@r" }))
+      .toEqual({ ok: false, error: "launch_wrapper unavailable; no agent started." });
+    expect(launch).not.toHaveBeenCalled();
+    expect(tmux.sendShellCommand).not.toHaveBeenCalled();
   });
 
   it("gives each launch a private first-input file, including separate session folders", async () => {
@@ -239,7 +439,7 @@ describe("the community harness adapter", () => {
     expect(await app.listInstalled(binding)).toEqual([]);
     expect(tmux.sendShellCommand).not.toHaveBeenCalled();
     expect(await app.launchHarness({ ...binding, cwd: dir }, { name: "w@r" })).toEqual({ ok: true });
-    expect(tmux.sendShellCommand).toHaveBeenCalledExactlyOnceWith("w@r", "synth-harness --serve", undefined,
+    expect(tmux.sendShellCommand).toHaveBeenCalledExactlyOnceWith("w@r", "/usr/bin/env -u OPENRIG_LAUNCH_WRAPPER synth-harness --serve", undefined,
       { stageIfLong: true, execInScript: true });
     expect(readdirSync(dir, { recursive: true })).toEqual(before);
     expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe('{"approval":"ask"}\n');
@@ -262,7 +462,7 @@ describe("the community harness adapter", () => {
     const before = readdirSync(dir, { recursive: true });
     expect(await app.launchHarness({ ...binding, cwd: dir, model: "seat-model-must-not-leak", effort: "high" }, { name: "w@r" }))
       .toEqual({ ok: true });
-    expect(tmux.sendShellCommand).toHaveBeenCalledWith("w@r", "synth-harness --serve --model harness-owned", undefined,
+    expect(tmux.sendShellCommand).toHaveBeenCalledWith("w@r", "/usr/bin/env -u OPENRIG_LAUNCH_WRAPPER synth-harness --serve --model harness-owned", undefined,
       { stageIfLong: true, execInScript: true });
     expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe('{"model":"harness-owned"}\n');
     expect(readdirSync(dir, { recursive: true })).toEqual(before);
