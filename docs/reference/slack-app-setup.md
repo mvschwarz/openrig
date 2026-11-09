@@ -69,10 +69,11 @@ not fill in; if so, follow the form.
     a possible repeat. An ask OpenRig can't fully check still posts, once per gateway run, through the
     person's delivery rules, so a readable quiet window still holds it. That's an ask whose attempt
     record can't be read, whose state can't be checked, or whose person's quiet hours can't be read.
-    The post says what couldn't be checked ("Delivery may repeat after an earlier unconfirmed
-    attempt.", "OpenRig couldn't check that this ask is still open."), and the command reports it as
-    posted with what was unconfirmed. An ask that is no longer open isn't posted. `--wait <seconds>`
-    (default 10) is how long it waits for Slack receipts.
+    The Slack post can show "Delivery may repeat after an earlier unconfirmed attempt." and "OpenRig
+    couldn't check that this ask is still open." These supplementary notes are omitted if they do not
+    fit. The row and command also report when the person's delivery policy could not be checked. An
+    ask that is no longer open isn't posted. `--wait <seconds>` (default 10) is how long it waits for
+    Slack receipts.
 
 ## What the app asks for
 

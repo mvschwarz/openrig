@@ -64,7 +64,7 @@ import {
 } from "../delivery-rules-engine.js";
 import { armDeliveryDeferral } from "../../policies/delivery-deferral.js";
 import { confirmReleaseAtPost, currentAskVerdict, holdForQuiet } from "../../policies/quiet-release.js";
-import { noteRePresentNotPosted, noteRePresentUnconfirmed, RE_PRESENT_DECISION_PREFIX, type RePresentUnconfirmed } from "./open-asks.js";
+import { noteRePresentNotPosted, noteRePresentUnconfirmed, rePresentAttemptUnconfirmed, RE_PRESENT_DECISION_PREFIX, type RePresentUnconfirmed } from "./open-asks.js";
 import { quietHoldFor } from "../human-quiet-windows.js";
 import { WatchdogJobsRepository } from "../../watchdog-jobs-repository.js";
 import { loadRelayProfiles } from "../relay-config.js";
@@ -1024,7 +1024,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         qitemId: p.qitemId,
         notificationKey: key,
       });
-      if (verdict === "post") return targetDeliver(decision);
+      if (verdict === "post") {
+        // A re-shown ask whose earlier attempt may be in Slack keeps saying so when its release posts it, and an attempt
+        // log that still can't be read doesn't hold the release.
+        const repeat = p.qitemId && rePresentAttemptUnconfirmed(opts.queueRepo.listTransitions(p.qitemId).map((t) => t.transitionNote ?? ""), key);
+        return targetDeliver(repeat ? { ...decision, payload: { ...p, possibleRepeat: true } } : decision);
+      }
       // Declined (the row says why) or couldn't be checked (nothing written): either way nothing posts now. Acking is
       // safe because the window's release job owns redelivery until the ask has a receipt or a disposition; keeping it
       // buffered would wait for a restart and block the job's own re-dispatch of the same decision id.

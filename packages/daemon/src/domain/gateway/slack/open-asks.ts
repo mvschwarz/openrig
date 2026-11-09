@@ -84,8 +84,8 @@ const UNCONFIRMED_WORDS: Record<RePresentUnconfirmed, string> = {
   attempt: "an earlier attempt", state: "the ask's state", policy: "the person's delivery policy",
 };
 
-/** "posted; an earlier attempt was unconfirmed", from every unconfirmed record for this ask; null when there is none. */
-function postedUnconfirmed(notes: string[], key: string): string | null {
+/** Everything this ask's unconfirmed records say OpenRig couldn't confirm. */
+function unconfirmedOf(notes: string[], key: string): Set<RePresentUnconfirmed> {
   const what = new Set<RePresentUnconfirmed>();
   for (const note of notes) {
     if (!hasToken(note, UNCONFIRMED, key)) continue;
@@ -93,6 +93,18 @@ function postedUnconfirmed(notes: string[], key: string): string | null {
       if (item in UNCONFIRMED_WORDS) what.add(item as RePresentUnconfirmed);
     }
   }
+  return what;
+}
+
+/** Whether an earlier attempt of this re-shown ask may be in Slack, by its row: a later post of it (a quiet release, say)
+ *  says it may repeat. */
+export function rePresentAttemptUnconfirmed(notes: string[], key: string): boolean {
+  return unconfirmedOf(notes, key).has("attempt");
+}
+
+/** "posted; an earlier attempt was unconfirmed", from every unconfirmed record for this ask; null when there is none. */
+function postedUnconfirmed(notes: string[], key: string): string | null {
+  const what = unconfirmedOf(notes, key);
   const words = (["attempt", "state", "policy"] as const).filter((item) => what.has(item)).map((item) => UNCONFIRMED_WORDS[item]);
   if (words.length === 0) return null;
   const list = words.length === 1 ? words[0] : `${words.slice(0, -1).join(", ")} and ${words.at(-1)}`;

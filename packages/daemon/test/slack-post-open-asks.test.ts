@@ -219,7 +219,7 @@ describe("rig slack post-open-asks through the gateway", () => {
     expect((await run(w)).counts, "a later run doesn't post it again").toEqual({ "already-posted": 1 });
   });
 
-  it("an attempt log it can't read doesn't skip a readable quiet window: the ask is held, and nothing records it as not posted", async () => {
+  it("an attempt log it can't read doesn't skip a readable quiet window: held, then released once with the repeat line", async () => {
     const row = await park();
     await enable();
     const [open] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listOpenAsks({ minimumLevel: "NOTICE" });
@@ -234,6 +234,16 @@ describe("rig slack post-open-asks through the gateway", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(posts, "held for the person's quiet hours").toHaveLength(0);
     expect(notes(row).some((n) => n.startsWith("slack-re-present-state-unavailable ") || n.startsWith("slack-re-present-disposition "))).toBe(false);
+
+    // Quiet ends with the attempt log still unreadable: the release posts it once, still saying it may repeat.
+    new HumanQuietStore(db).end(HUMAN, { endedBy: "test", now: new Date() });
+    const [job] = new WatchdogJobsRepository(db).listActive().filter((j) => j.policy === QUIET_RELEASE_POLICY);
+    await runQuietRelease({ queueRepo: repo, jobsRepo: new WatchdogJobsRepository(db), home, jobId: job!.jobId,
+      registry: { loadHumanRegistry: () => registry }, dispatch: (op, ref, payload, opts) => w.dispatcher.dispatch(op, ref, payload, opts as never) });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts[0])).toContain("Delivery may repeat after an earlier unconfirmed attempt.");
+    await vi.waitFor(() => expect(new DispatchBuffer(home).pending(), "the release isn't held by the unreadable log").toHaveLength(0));
+    expect((await run(w, 0)).counts).toEqual({ "already-posted": 1 });
   });
 
   it("an ask whose state can't be checked, with no earlier attempt, posts once with that line and is reported posted, state unconfirmed", async () => {
