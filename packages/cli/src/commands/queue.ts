@@ -559,7 +559,7 @@ async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: st
     reader = deps.clientFactory(match.host.url);
     if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
   }
-  return { reader, options };
+  return { reader, options, remote };
 }
 
 /** Where a verb that names an existing row (show, transitions, list, claim, update, block) sends its request with
@@ -623,7 +623,7 @@ function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: stri
 
 /** A create whose answer didn't arrive, or arrived unreadable, may still have committed. Read the row back once by the ID it
  *  was sent with, from the daemon that holds it. Only this create's row counts; it never sends the create again. */
-async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string }> {
+async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{ row: Record<string, unknown> | null; note: string; remote?: string }> {
   const remote = remoteHostOf(hostId);
   const where = remote ? ` on host '${remote}'` : "";
   const target = await queueReadTarget(deps, client, hostId);
@@ -638,7 +638,7 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
       if (differs) {
         return { row: null, note: `Row ${qitemId}${where} exists but isn't this create (its ${differs} differs), so the outcome is still unknown. Don't reuse this ID for other work.` };
       }
-      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).` };
+      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).`, remote: target.remote };
     }
     if (res.status === 404) return { row: null, note: `No row ${qitemId}${where} yet (read back once by its ID); it may still commit.` };
     return { row: null, note: `Reading row ${qitemId}${where} back answered ${res.status}, so the outcome is still unknown.` };
@@ -1285,7 +1285,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             }
           }
         };
-        const emitRecoveredScopeAdvisory = async () => {
+        const emitRecoveredScopeAdvisory = (recoveredRemote: boolean) => {
           const recoveredTags: string[] = [];
           for (const raw of tags ?? []) {
             if (recoveredTags.length >= 8) break;
@@ -1296,19 +1296,18 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             if (!recoveredTags.includes(sanitized)) recoveredTags.push(sanitized);
           }
           if (recoveredTags.length === 0) return;
-          // A --host naming the selected daemon's own id took the local path (resolvesToLocalHost),
-          // and an unreadable selfHostId is not proof of forwarding.
-          const selfHostId = sent.remoteHost !== undefined ? await daemonSelfHostId(client) : null;
-          if (sent.remoteHost !== undefined && selfHostId !== undefined && selfHostId !== sent.remoteHost) {
+          // Use the locality settled when readBackCreate selected its target and matched the stored row,
+          // so a later /healthz change cannot overturn a proven local or remote recovery.
+          if (recoveredRemote) {
             console.error(`Note: queue create scope check skipped for cross-host write (${recoveredTags.join(", ")}); row was forwarded.`);
           } else {
             console.error(`Warning: queue create scope check outcome unavailable after response recovery (${recoveredTags.join(", ")}): original scope check result was lost with the create response; row was created.`);
           }
         };
         // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
-        const finish = async (created: Record<string, unknown>, status: number, headers?: Headers, recovered = false) => {
+        const finish = async (created: Record<string, unknown>, status: number, headers?: Headers, recovered?: "local" | "remote") => {
           if (status < 400) {
-            if (recovered) await emitRecoveredScopeAdvisory();
+            if (recovered) emitRecoveredScopeAdvisory(recovered === "remote");
             else emitScopeAdvisory(headers);
           }
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
@@ -1340,7 +1339,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
             console.error(late.note);
             if (late.row) {
-              await finish(late.row, 200, undefined, true);
+              await finish(late.row, 200, undefined, late.remote ? "remote" : "local");
               return;
             }
           }
@@ -1357,7 +1356,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
           if (late.row) {
-            await finish(late.row, 200, undefined, true);
+            await finish(late.row, 200, undefined, late.remote ? "remote" : "local");
             return;
           }
           // Preserve that failure and expose the same recovery ID.
