@@ -2850,7 +2850,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket, wakeRecovery };
 }
 
-/** Watch `hc events` for this daemon's viewer terminals, retrying after exit or a spawn error. */
 /**
  * herdr-app: one provider per client (app home), created on first use. Viewers carry this instance's label, so a second
  * OpenRig daemon never claims them; one `hc events` watcher brings every client's layout in line when a viewer ends
@@ -2949,6 +2948,7 @@ export async function createHerdrAppProviders(opts: {
   return { resolve, recovered, stop };
 }
 
+/** Watch `hc events` for this daemon's viewer terminals, retrying after exit or a spawn error. */
 export function createHerdrAppWatcher(opts: {
   daemonInstance: string;
   env: NodeJS.ProcessEnv;
