@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, closeSync, openSync, readSync, statSync } from "node:fs";
 import type Database from "better-sqlite3";
 
 /**
@@ -26,7 +26,9 @@ import type Database from "better-sqlite3";
  * erases batch by batch, yielding between steps. Each batch is one transaction (better-sqlite3 commits a transaction
  * on return and rolls it back on a throw): it rechecks its rows, since anything may have changed them since selection
  * (a reopened row is open work again; a rerouted one may no longer be the account's), writes their ledger lines, then
- * changes their events, copies and rows. A row an unreadable event names is kept, so reruns keep reporting it. A run
+ * changes their events, copies and rows. A row an unreadable event names is kept, so reruns keep reporting it. With a
+ * ledger, a batch's lines carry its id, the database records that id in the batch's own transaction, and a commit line
+ * follows the commit (an abort line a rollback), so a replay after a restore applies exactly what committed. A run
  * that stops, by its batch limit or an error, returns only what it committed; a rerun picks up the rest.
  */
 
@@ -48,7 +50,9 @@ function keepsClosureTarget(reason: unknown, target: unknown): boolean {
 export type EraseAction = "scrub" | "delete";
 export type EraseScope =
   | { kind: "members"; members: readonly string[]; rig?: string }
-  | { kind: "ids"; entries: ReadonlyArray<{ qitemId: string; action: EraseAction }> }
+  | { kind: "ids"; entries: ReadonlyArray<{ qitemId: string; action: EraseAction; batch?: string }>;
+      /** an erasure ledger's commit and abort lines: which of its batches committed */
+      commits?: ReadonlyArray<{ batch: string; committed: boolean }> }
   | { kind: "routine"; contentDays: number; metadataDays: number };
 
 /** A scope that can't be erased exactly; nothing was written. */
@@ -68,14 +72,15 @@ export interface EraseOptions {
   maxBatches?: number;
   /** events rows (by seq) read per step of the events walk */
   eventsWindow?: number;
-  /** append each erased row's {qitemId, action, reason, erasedAt} here, one JSON line each, before its batch changes
-   *  anything; the file is opened before the run writes anything at all */
+  /** append each erased row's {qitemId, action, reason, erasedAt, batch} here, one JSON line each, before its batch
+   *  changes anything, then {batch, committed} once the batch commits or rolls back. The file is opened before the run
+   *  writes anything at all */
   ledgerPath?: string;
 }
 
 type Stage = "ledger" | "select" | "events" | "rows" | "unlinked" | "rig";
 type CopyTable = "outbox_entries" | "inbox_entries" | "stream_reader_actions" | "stream_dispositions";
-export type EraseGap = { code: "workflow-reference" | "not-found" | "changed-during-run" | "unreadable-event"; qitemId: string };
+export type EraseGap = { code: "workflow-reference" | "not-found" | "changed-during-run" | "unreadable-event" | "ledger-unresolved"; qitemId: string };
 
 export interface EraseReport {
   ok: true;
@@ -98,6 +103,12 @@ export interface EraseReport {
   gaps: EraseGap[];
   /** ids scope, delete: rows already gone whose id marker is (re)written; listed once the marker is committed */
   alreadyAbsent: string[];
+  /** ids scope, a ledger replay: entries whose batch rolled back, so not replayed */
+  skipped?: Array<{ qitemId: string; batch: string }>;
+  /** an applied run with a ledger: batches this database recorded as committed whose commit line was missing (lost
+   *  after the commit), written now. A batch with neither a line nor a record surfaces only on a replay, as the gap
+   *  ledger-unresolved */
+  ledger?: { reconciled: string[] };
   /** an erased row's copies held with someone else: mixed (one of their sessions is the owner's) or foreign (none) */
   keptCopies: Array<{ table: CopyTable; id: string; qitemId: string; ownership: "mixed" | "foreign" }>;
   /** events naming a selected row whose payload can't be read: kept, since what they hold can't be inspected. The
@@ -332,6 +343,44 @@ type BatchPlan = {
   unreadable: Array<{ seq: number; qitemIds: string[] }>;
 };
 
+/** The batches this database recorded as committed (each batch with ledger lines records its id in its own
+ *  transaction). */
+function recordedBatches(st: Statements, batches: string[]): Set<string> {
+  if (batches.length === 0) return new Set();
+  return new Set((st.get("SELECT batch_id AS id FROM queue_erasure_batches WHERE batch_id IN (SELECT value FROM json_each(@ids))")
+    .all({ ids: JSON.stringify(batches) }) as Array<{ id: string }>).map((row) => row.id));
+}
+
+/** Before a run writes to the ledger: a last line cut short (a full disk, say) is closed off, so it can't fuse with the
+ *  next one. A cut-short line is safe to delete by hand: an entry line's batch rolled back when its append failed, and
+ *  a commit line is written again from the record. */
+function endLedgerLine(path: string): void {
+  const size = statSync(path).size;
+  if (size === 0) return;
+  const last = Buffer.alloc(1);
+  const fd = openSync(path, "r");
+  try {
+    readSync(fd, last, 0, 1, size - 1);
+  } finally {
+    closeSync(fd);
+  }
+  if (last[0] !== 0x0a) appendFileSync(path, "\n");
+}
+
+/** Batches this database recorded as committed whose commit line isn't in the ledger yet (lost after the commit): the
+ *  line is written now, from the record, without reading the ledger. A batch with neither a line nor a record isn't
+ *  decided here or anywhere: on a restored database, one committed after the backup looks exactly like one that rolled
+ *  back, so only its own line can say which, and a replay reports it. */
+function reconcileLedger(st: Statements, path: string, nowIso: string): { reconciled: string[] } {
+  const reconciled = (st.get("SELECT batch_id AS id FROM queue_erasure_batches WHERE line_at IS NULL ORDER BY rowid").all() as Array<{ id: string }>)
+    .map((row) => row.id);
+  if (reconciled.length === 0) return { reconciled };
+  appendFileSync(path, reconciled.map((batch) => JSON.stringify({ batch, committed: true, at: nowIso, reconciled: true })).join("\n") + "\n");
+  st.get("UPDATE queue_erasure_batches SET line_at = @now WHERE batch_id IN (SELECT value FROM json_each(@ids))")
+    .run({ now: nowIso, ids: JSON.stringify(reconciled) });
+  return { reconciled };
+}
+
 /** Erase queue rows in one scope. With apply false it reports exactly what an apply would erase and writes nothing. */
 export async function eraseQueue(db: Database.Database, opts: EraseOptions): Promise<EraseReport> {
   const st = new Statements(db);
@@ -376,8 +425,26 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   const ledgerReason = (action: EraseAction) => scope.kind === "routine" && action === "scrub" ? "retention-content" : reason;
   const memberSet = new Set(scope.kind === "members" ? scope.members : []);
   const members = JSON.stringify([...memberSet]);
+  // A ledger replay applies only the batches that committed, by their own commit line or this database's record of
+  // them. A rolled-back batch is skipped; one that is neither is reported and never replayed.
+  let listed = scope.kind === "ids" ? scope.entries : [];
+  if (scope.kind === "ids" && listed.some((entry) => entry.batch !== undefined)) {
+    const marks = new Map((scope.commits ?? []).map(({ batch, committed }) => [batch, committed]));
+    const recorded = recordedBatches(st, [...new Set(listed.flatMap((entry) => entry.batch !== undefined && !marks.has(entry.batch) ? [entry.batch] : []))]);
+    const unresolved = new Set<string>();
+    report.skipped = [];
+    listed = listed.filter((entry) => {
+      if (entry.batch === undefined) return true;
+      const committed = marks.get(entry.batch) ?? (recorded.has(entry.batch) ? true : undefined);
+      if (committed === true) return true;
+      if (committed === false) report.skipped!.push({ qitemId: entry.qitemId, batch: entry.batch });
+      else unresolved.add(entry.qitemId);
+      return false;
+    });
+    for (const qitemId of [...unresolved].sort()) report.gaps.push({ code: "ledger-unresolved", qitemId });
+  }
   const entries = scope.kind === "ids"
-    ? [...new Map(scope.entries.map((entry) => [entry.qitemId, entry.action])).entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    ? [...new Map(listed.map((entry) => [entry.qitemId, entry.action])).entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     : [];
   const contentCutoff = scope.kind === "routine" && scope.contentDays > 0 ? cutoffIso(opts.nowIso, scope.contentDays) : null;
   const metadataCutoff = scope.kind === "routine" && scope.metadataDays > 0 ? cutoffIso(opts.nowIso, scope.metadataDays) : null;
@@ -462,16 +529,62 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
     }
     report.unreadableEvents = [...unreadable.entries()].sort(([a], [b]) => a - b).map(([seq, ids]) => ({ seq, qitemIds: [...ids].sort() }));
   };
-  const ledger = (rows: Array<{ qitemId: string; action: EraseAction }>) => {
-    if (!opts.apply || !opts.ledgerPath || rows.length === 0) return;
+  // Batches whose lines were written; each records its id in its own transaction, which is the commit's proof.
+  const written = new Set<string>();
+  const ledger = (rows: Array<{ qitemId: string; action: EraseAction }>, batch: string | null) => {
+    if (!opts.ledgerPath || batch === null || rows.length === 0) return;
     appendFileSync(opts.ledgerPath, rows.map((row) => JSON.stringify({ qitemId: row.qitemId, action: row.action,
-      reason: ledgerReason(row.action), erasedAt: opts.nowIso })).join("\n") + "\n");
+      reason: ledgerReason(row.action), erasedAt: opts.nowIso, batch })).join("\n") + "\n");
+    st.get("INSERT OR IGNORE INTO queue_erasure_batches (batch_id, committed_at) VALUES (?, ?)").run(batch, opts.nowIso);
+    written.add(batch);
+  };
+  const mark = (batch: string, committed: boolean) => {
+    appendFileSync(opts.ledgerPath!, JSON.stringify({ batch, committed, at: opts.nowIso }) + "\n");
+  };
+  // One batch's work: in a dry run, read only; applied, one transaction. With a ledger, a commit line follows the
+  // commit and an abort line a rollback. A commit line that can't be written stops the run once the committed batch is
+  // reported; the next run writes the line from the record. An abort line is best effort: without it, the batch stays
+  // unresolved and is never replayed.
+  let commitLineError: unknown = null;
+  const afterBatch = () => {
+    if (commitLineError === null) return;
+    stage = "ledger";
+    throw commitLineError;
+  };
+  const inBatch = <T>(work: (batch: string | null) => T): T => {
+    if (!opts.apply) return work(null);
+    const batch = opts.ledgerPath ? randomUUID() : null;
+    let result: T;
+    try {
+      result = db.transaction(() => work(batch))();
+    } catch (err) {
+      if (batch !== null && written.has(batch)) {
+        try {
+          mark(batch, false);
+        } catch { /* left unresolved */ }
+      }
+      throw err;
+    }
+    if (batch !== null && written.has(batch)) {
+      try {
+        mark(batch, true);
+        st.get("UPDATE queue_erasure_batches SET line_at = ? WHERE batch_id = ?").run(opts.nowIso, batch);
+      } catch (err) {
+        commitLineError = err;
+      }
+    }
+    return result;
   };
 
   let stage: Stage = "ledger";
   try {
-    // 0. A ledger that can't be written stops the run before anything changes.
-    if (opts.apply && opts.ledgerPath) appendFileSync(opts.ledgerPath, "");
+    // 0. A ledger that can't be written stops the run before anything changes. Batches missing their commit line are
+    //    settled from this database's record where it has one.
+    if (opts.apply && opts.ledgerPath) {
+      appendFileSync(opts.ledgerPath, "");
+      endLedgerLine(opts.ledgerPath);
+      report.ledger = reconcileLedger(st, opts.ledgerPath, opts.nowIso);
+    }
 
     // 1. Select every candidate, writing nothing.
     stage = "select";
@@ -597,21 +710,20 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
     const perTransaction = Math.min(batchSize, ROWS_PER_TRANSACTION);
     for (let start = 0; start < candidates.length; start += perTransaction) {
       const chunk = candidates.slice(start, start + perTransaction);
-      const plan = opts.apply
-        ? db.transaction(() => {
-          const planned = planBatch(chunk);
-          ledger([...planned.rows, ...planned.absent.map((qitemId) => ({ qitemId, action: "delete" as const }))]);
-          for (const [payload, seq] of planned.events.rewrite) rewriteEvent.run(payload, seq);
-          for (const seq of planned.events.remove) removeEvent.run(seq);
-          eraseCopies(st, planned.owned.scrub, "scrub");
-          eraseCopies(st, planned.owned.delete, "delete");
-          const scrub = planned.rows.filter((row) => row.action === "scrub").map((row) => row.qitemId);
-          const remove = [...planned.rows.filter((row) => row.action === "delete").map((row) => row.qitemId), ...planned.absent];
-          if (scrub.length > 0) scrubRows(st, scrub, opts.nowIso);
-          if (remove.length > 0) deleteRows(st, remove, opts.nowIso, reason);
-          return planned;
-        })()
-        : planBatch(chunk);
+      const plan = inBatch((batch) => {
+        const planned = planBatch(chunk);
+        if (!opts.apply) return planned;
+        ledger([...planned.rows, ...planned.absent.map((qitemId) => ({ qitemId, action: "delete" as const }))], batch);
+        for (const [payload, seq] of planned.events.rewrite) rewriteEvent.run(payload, seq);
+        for (const seq of planned.events.remove) removeEvent.run(seq);
+        eraseCopies(st, planned.owned.scrub, "scrub");
+        eraseCopies(st, planned.owned.delete, "delete");
+        const scrub = planned.rows.filter((row) => row.action === "scrub").map((row) => row.qitemId);
+        const remove = [...planned.rows.filter((row) => row.action === "delete").map((row) => row.qitemId), ...planned.absent];
+        if (scrub.length > 0) scrubRows(st, scrub, opts.nowIso);
+        if (remove.length > 0) deleteRows(st, remove, opts.nowIso, reason);
+        return planned;
+      });
       const all = [...plan.owned.scrub, ...plan.owned.delete];
       report.linked.transitions += plan.counts.transitions;
       report.linked.archivedTransitions += plan.counts.archivedTransitions;
@@ -628,24 +740,26 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       report.gaps.push(...plan.dropped);
       report.alreadyAbsent.push(...plan.absent);
       report.qitems.push(...plan.rows.map(({ qitemId, action, state }) => ({ qitemId, action, state })));
+      afterBatch();
       await yieldToLoop();
     }
     if (absentAtSelect.length > 0) {
       // Rechecked as the markers are written: an id created since selection is live work, never certified absent.
-      const certify = () => {
+      const certify = (batch: string | null) => {
         const present = new Set((st.get(`SELECT qitem_id AS id FROM queue_items WHERE qitem_id IN ${IDS}`)
           .all({ ids: JSON.stringify(absentAtSelect) }) as Array<{ id: string }>).map((row) => row.id));
         const absent = absentAtSelect.filter((id) => !present.has(id));
         if (opts.apply && absent.length > 0) {
-          ledger(absent.map((qitemId) => ({ qitemId, action: "delete" as const })));
+          ledger(absent.map((qitemId) => ({ qitemId, action: "delete" as const })), batch);
           st.get(`INSERT OR IGNORE INTO queue_erased_ids (qitem_id, erased_at, reason) SELECT value, @now, @reason FROM json_each(@ids)`)
             .run({ ids: JSON.stringify(absent), now: opts.nowIso, reason });
         }
         return { absent, created: absentAtSelect.filter((id) => present.has(id)) };
       };
-      const { absent, created } = opts.apply ? db.transaction(certify)() : certify();
+      const { absent, created } = inBatch(certify);
       report.gaps.push(...created.map((qitemId) => ({ code: "changed-during-run" as const, qitemId })));
       report.alreadyAbsent.push(...absent);
+      afterBatch();
     }
 
     // 4. Account deletion's other passes, once every row is done.

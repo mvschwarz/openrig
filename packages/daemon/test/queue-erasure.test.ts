@@ -273,6 +273,19 @@ describe("POST /api/queue/erase", () => {
     expect(await res.json()).toMatchObject({ complete: false, error: { stage: "rows" } });
   });
 
+  it("takes a ledger's commit and abort lines with its entries, and replays only committed batches", async () => {
+    await row("p-kept", A, B, [{ state: "done", daysAgo: 2 }]);
+    await row("p-gone", A, B, [{ state: "done", daysAgo: 2 }]);
+    const res = await post(app(), { apply: true, ids: [
+      { qitemId: "p-kept", action: "delete", batch: "b-aborted" }, { batch: "b-aborted", committed: false },
+      { qitemId: "p-gone", action: "delete", batch: "b-committed" }, { batch: "b-committed", committed: true },
+    ] });
+    expect(await res.json()).toMatchObject({ qitems: [{ qitemId: "p-gone" }], skipped: [{ qitemId: "p-kept", batch: "b-aborted" }], gaps: [] });
+    expect([exists("p-kept"), exists("p-gone")]).toEqual([true, false]);
+    const bad = await post(app(), { ids: [{ qitemId: "p-kept", batch: 7 }] });
+    expect([bad.status, ((await bad.json()) as { error: string }).error]).toEqual([400, "erase_ids_invalid"]);
+  });
+
   it("routine reads this daemon's own windows", async () => {
     await row("p-old", A, B, [{ state: "done", daysAgo: 40 }]);
     const res = await post(app({ "retention.closed_content_days": 30 }), { routine: true, apply: true });
@@ -521,12 +534,13 @@ describe("round 1 controls: the account rig after removal, and a restore across 
     repo.update({ qitemId: "l-row", actorSession: B, state: "done", closureReason: "no-follow-on" });
     db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = 'l-row'").run(ago(40));
     await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW, ledgerPath });
-    const lines = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { qitemId: string; action: "scrub" });
-    expect(lines).toEqual([{ qitemId: "l-row", action: "scrub", reason: "retention-content", erasedAt: NOW }]);
+    const lines = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { qitemId: string; action: "scrub"; batch: string });
+    expect(lines).toEqual([{ qitemId: "l-row", action: "scrub", reason: "retention-content", erasedAt: NOW, batch: expect.any(String) },
+      { batch: lines[0].batch, committed: true, at: NOW }]);
     db.close();
     open(new Database(backup));
     expect(everything()).toContain("secret-l-row body");
-    await eraseQueue(db, { scope: { kind: "ids", entries: lines }, apply: true, nowIso: NOW });
+    await eraseQueue(db, { scope: { kind: "ids", entries: [lines[0]], commits: [{ batch: lines[0].batch, committed: true }] }, apply: true, nowIso: NOW });
     await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW });
     const all = everything();
     expect(all).not.toContain("secret-l-row");

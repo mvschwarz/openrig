@@ -78,13 +78,14 @@ describe("rig queue erase", () => {
     ]);
   });
 
-  it("reads an erasure ledger's JSON lines as entries that keep their action", async () => {
+  it("reads an erasure ledger's JSON lines as given: entries that keep their action and batch, and commit lines", async () => {
     const ledger = path.join(dir, "ledger.jsonl");
-    fs.writeFileSync(ledger, '{"qitemId":"qitem-1","action":"scrub","reason":"retention-metadata","erasedAt":"t"}\n# a comment\n{"qitemId":"qitem-2","action":"delete"}\n');
+    fs.writeFileSync(ledger, '{"qitemId":"qitem-1","action":"scrub","reason":"retention-content","erasedAt":"t","batch":"b1"}\n{"batch":"b1","committed":true,"at":"t"}\n# a comment\n{"qitemId":"qitem-2","action":"delete"}\n');
     const { deps, posts } = makeDeps();
     await run(deps, "--ids", ledger, "--apply");
     expect(posts).toEqual([{ path: "/api/queue/erase", body: { apply: true, ids: [
-      { qitemId: "qitem-1", action: "scrub", reason: "retention-metadata", erasedAt: "t" }, { qitemId: "qitem-2", action: "delete" },
+      { qitemId: "qitem-1", action: "scrub", reason: "retention-content", erasedAt: "t", batch: "b1" }, { batch: "b1", committed: true, at: "t" },
+      { qitemId: "qitem-2", action: "delete" },
     ] } }]);
     fs.writeFileSync(ledger, '{"qitemId": broken\n');
     process.exitCode = undefined;
