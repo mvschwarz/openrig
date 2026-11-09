@@ -156,8 +156,8 @@ describe("Claude composer with the background task panel below its footer (#2700
 });
 
 // Case 10, the #2605 banner and its near misses, the nested prompt and the warning-footer matrix, stays covered by
-// composer-input.test.ts and claude-warning-footer-readiness.test.ts; case 13, readSeatBeforePaste staying unknown with a
-// statusLine, by input-box-reading.test.ts. They run in the same focused command and are not repeated here.
+// composer-input.test.ts and claude-warning-footer-readiness.test.ts; case 13, readSeatBeforePaste with a statusLine
+// (idle since #2798), by input-box-reading.test.ts. They run in the same focused command and are not repeated here.
 
 describe("Claude composer edges next to the box (#2700)", () => {
   it.each(RUNTIMES)("case 14: keeps a \"❯ item\" row drawn right under the closing rule unrecognized (runtime %s)", runtime => {
