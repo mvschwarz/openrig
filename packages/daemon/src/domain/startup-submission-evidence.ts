@@ -44,10 +44,13 @@ export function composerRegion(pane: string | null, runtime: string | null = nul
     // are read by position, as claudeSeatIdle reads them, and none may be a row a statusLine does not print (#2798).
     for (let i = lines.length - 1; i > inputAt; i--) {
       if (!/^[─═-]{10,}$/.test(lines[i]!.trim())) continue;
-      const below = lines.slice(i + 1).map((next) => next.trim()).filter((next) => next);
-      const footer = below.findIndex((row) => isComposerFooter(row));
-      if (footer === 0 || (footer > 0 && runtime === "claude-code"
-        && !below.slice(0, footer).some((row) => CLAUDE_NOT_STATUS_LINE_ROW.test(row)))) end = i;
+      const below = lines.slice(i + 1);
+      const footer = below.findIndex((row) => row.trim() !== "" && isComposerFooter(row.trim()));
+      const gap = footer < 0 ? [] : below.slice(0, footer);
+      // Only blank rows above the footer: as before. With statusLine rows there, every row of the gap, blank ones too,
+      // must pass the rule (a blank row between them is what a fullscreen renderer or a menu could leave).
+      if (footer >= 0 && (gap.every((row) => !row.trim())
+        || (runtime === "claude-code" && !gap.some((row) => CLAUDE_NOT_STATUS_LINE_ROW.test(row))))) end = i;
       break;
     }
   }

@@ -619,6 +619,11 @@ describe("readSeatBeforePaste: verified needs a seat proven idle before the past
       expect(readSeatBeforePaste(withStatusLine(claude("after-enter-15s.J"), rows), "claude-code")).toBe("idle");
     });
 
+    it("only blank rows above the footer, no statusLine: read as on main", () => {
+      expect(readInputBox(withStatusLine(claude("staged-short.raw"), [""]), "claude-code", texts.short)).toBe("exact");
+      expect(readInputBox(withStatusLine(claude("after-enter-15s.J"), ["", "  "]), "claude-code", texts.short)).toBe("empty");
+    });
+
     it("a running turn after Enter with a statusLine row: queued, as without it", () => {
       const running = withStatusLine(claude("after-enter-0.4s.J"), [STATUS]);
       expect(readInputBox(running, "claude-code", texts.short, editLine(running, claudeBoxRow, `❯\u00a0${texts.short}`))).toBe("queued");
@@ -639,6 +644,9 @@ describe("readSeatBeforePaste: verified needs a seat proven idle before the past
       ["a choice behind a heavy border", ["┃ 2) No"]],
       ["a row starting with ❯", ["❯ resume the last session"]],
       ["numbered choices selected by colour only", ["  1. Yes", "  2. No"]],
+      // Revisão cruzada S1: a blank row among statusLine rows, as the idle check rules it out.
+      ["a blank row above a statusLine row", ["", STATUS]],
+      ["a whitespace-only row under a statusLine row", [STATUS, "   "]],
     ])("unrecognized: %s between the closing rule and the footer", (_name, rows) => {
       expect(readInputBox(withStatusLine(claude("staged-short.raw"), rows), "claude-code", texts.short)).toBe("unrecognized");
       expect(readInputBox(withStatusLine(claude("after-enter-15s.J"), rows), "claude-code", texts.short)).toBe("unrecognized");

@@ -150,6 +150,7 @@ describe("Claude's startup composer with a person's own statusLine between the c
     ["a selected choice behind a side border", ["│ ❯ 1. Yes │"]],
     ["a numbered choice", ["  1. Yes"]],
     ["a box corner", ["╭──────────────╮"]],
+    ["a blank row above a statusLine row", ["", STATUS]],
   ])("keeps the composer unverified with %s where the statusLine goes", (_name, rows) => {
     expect(inspectStartupStagedText(framed(expected, rows), expected, "claude-code")).toBe("unverified");
   });
