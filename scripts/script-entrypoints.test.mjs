@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -64,4 +64,21 @@ for (const file of entrypoints) {
       assert.equal(result.stderr, "");
     });
   }
+}
+
+for (const [file, args, error] of [
+  ["check-docs-guard.mjs", [], /not a git repository/],
+  ["check-internal-leak-guard.mjs", ["--repo", ".", "--rules", "missing.json", "--mode", "full"], /Rules file not found/],
+  ["mirror-skills.mjs", ["--check"], /ENOENT.*skill-edge-layout\.generated\.json/],
+]) {
+  test(`${file} runs through a preserved symlink`, (t) => {
+    const { root } = fixture(t);
+    const link = join(root, "scripts", "linked.mjs");
+    symlinkSync(file, link);
+    const result = spawnSync(process.execPath, ["--preserve-symlinks-main", link, ...args], {
+      cwd: root, encoding: "utf8",
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, error);
+  });
 }
