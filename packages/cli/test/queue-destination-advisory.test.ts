@@ -159,7 +159,7 @@ describe("queue create scope advisories preserve admission and output", () => {
           const response = await app.request(url, { method: "POST",
             headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
             body: JSON.stringify(body) });
-          return { status: response.status, data: await response.json() };
+          return { status: response.status, data: await response.json(), headers: response.headers };
         },
       }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
     };
