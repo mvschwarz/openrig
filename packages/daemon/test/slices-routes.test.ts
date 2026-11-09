@@ -13,6 +13,9 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
+import { getRequestListener } from "@hono/node-server";
+import { once } from "node:events";
+import { createServer } from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -28,10 +31,22 @@ import { missionControlActionsSchema } from "../src/db/migrations/037_mission_co
 import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../src/domain/slices/slice-detail-projector.js";
 import { slicesRoutes } from "../src/routes/slices.js";
+import { browserBoundary } from "../src/middleware/browser-boundary.js";
 
-function buildApp(opts: { indexer: SliceIndexer; projector: SliceDetailProjector }): Hono {
+function buildApp(opts: { indexer: SliceIndexer; projector: SliceDetailProjector; workspaceRoot?: string; guardBrowser?: boolean }): Hono {
   const app = new Hono();
+  if (opts.guardBrowser) {
+    app.use("/api/*", browserBoundary({
+      webUiEnabled: false, bearerTokens: ["fixture-read-token"],
+      hostName: () => "fixture.local", discoverSelfNames: async () => [], warn: () => {},
+    }));
+  }
   app.use("*", async (c, next) => {
+    if (opts.workspaceRoot) {
+      c.set("settingsStore" as never, { resolveOne: (key: string) => ({
+        value: key === "workspace.root" ? opts.workspaceRoot : path.join(opts.workspaceRoot!, "workspace.yaml"),
+      }) });
+    }
     c.set("sliceIndexer" as never, opts.indexer);
     c.set("sliceDetailProjector" as never, opts.projector);
     await next();
@@ -342,6 +357,179 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       writeSlice(slicesRoot, "doc-trav", { "README.md": "---\n---\n" });
       const res = await app.request("/api/slices/doc-trav/doc/..%2F..%2Fetc%2Fpasswd");
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe("#2487 document and proof reads use the detail route's project selection", () => {
+    let workspaceRoot: string;
+
+    beforeEach(() => {
+      workspaceRoot = path.join(cleanupDir, "catalog");
+      fs.mkdirSync(workspaceRoot);
+      fs.writeFileSync(path.join(workspaceRoot, "workspace.yaml"), "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n");
+      for (const project of ["alpha", "beta"]) {
+        const projectRoot = path.join(workspaceRoot, project);
+        writeSlice(workspaceRoot, project, {
+          "project.yaml": `metadata:\n  id: ${project}\n`, "SPEC.md": `# ${project} project\n`,
+        });
+        for (const mission of ["a-first", "z-later"]) {
+          writeSlice(path.join(projectRoot, "missions"), mission, { "SPEC.md": `# ${mission}\n` });
+          writeSlice(path.join(projectRoot, "missions", mission, "slices"), "same-slice", {
+            "SPEC.md": `# ${project}/${mission}\n`, "notes/a b.md": `${project}/${mission} nested document\n`,
+          });
+        }
+        const proofDir = path.join(dogfoodRoot, `same-slice-${project}`);
+        fs.mkdirSync(path.join(proofDir, "screenshots"), { recursive: true });
+        fs.writeFileSync(path.join(proofDir, "screenshots/scope.png"), `${project.toUpperCase()}-PROOF\n`);
+        fs.utimesSync(proofDir, project === "alpha" ? 1600000001 : 1600000000, project === "alpha" ? 1600000001 : 1600000000);
+      }
+      slicesRoot = path.join(workspaceRoot, "alpha/missions");
+      indexer = new SliceIndexer({ slicesRoot, dogfoodEvidenceRoot: dogfoodRoot, db });
+      projector = new SliceDetailProjector({ db, indexer });
+      app = buildApp({ indexer, projector, workspaceRoot });
+    });
+
+    it.each([
+      { project: "alpha", literal: "# alpha/a-first\n" },
+      { project: "beta", literal: "# beta/a-first\n" },
+    ])("detail selects $project independently and has no qualified proof discovery", async ({ project, literal }) => {
+      const detail = await app.request(`/api/slices/same-slice?project=${project}&mission=a-first`);
+      expect(detail.status).toBe(200);
+      const body = await detail.json();
+      expect(body.slicePath).toBe(path.join(workspaceRoot, project, "missions/a-first/slices/same-slice"));
+      expect(fs.readFileSync(path.join(body.slicePath, "SPEC.md"), "utf8")).toBe(literal);
+      expect(body.missionId).toBe("a-first");
+      expect(body.tests.proofPackets).toEqual([]);
+      expect(body.tests.aggregate).toEqual({ passCount: 0, failCount: 0 });
+    });
+
+    it.each([
+      { query: "project=alpha&mission=a-first", rel: "SPEC.md", literal: "# alpha/a-first\n" },
+      { query: "project=beta&mission=a-first", rel: "SPEC.md", literal: "# beta/a-first\n" },
+      { query: "project=%62eta&mission=a-first", rel: "notes/a%20b.md", literal: "beta/a-first nested document\n" },
+    ])("doc returns the selected literal bytes for $query and $rel", async ({ query, rel, literal }) => {
+      const response = await app.request(`/api/slices/same-slice/doc/${rel}?${query}`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ relPath: decodeURIComponent(rel), content: literal });
+    });
+
+    it.each(["alpha", "beta"])("qualified proof for %s does not substitute the injected legacy packet", async (project) => {
+      const response = await app.request(`/api/slices/same-slice/proof-asset/screenshots/scope.png?project=${project}&mission=a-first`);
+      expect({ status: response.status, text: await response.text() }).toEqual({
+        status: 404, text: JSON.stringify({ error: "proof_packet_not_found" }),
+      });
+    });
+
+    it("records detail's existing later-duplicate mission absence without inventing a successful lookup", async () => {
+      expect(fs.readFileSync(path.join(workspaceRoot, "alpha/missions/z-later/slices/same-slice/SPEC.md"), "utf8")).toBe("# alpha/z-later\n");
+      const detail = await app.request("/api/slices/same-slice?project=alpha&mission=z-later");
+      expect(detail.status).toBe(404);
+      expect(await detail.json()).toEqual({ error: "slice_not_found", name: "same-slice" });
+    });
+
+    it("doc preserves the detail route's current missing later-duplicate selection", async () => {
+      const response = await app.request("/api/slices/same-slice/doc/SPEC.md?project=alpha&mission=z-later");
+      const body = await response.json();
+      expect({ status: response.status, content: body.content }).toEqual({ status: 404, content: undefined });
+      expect(body).toEqual({ error: "doc_not_found" });
+    });
+
+    it.each([
+      { route: "detail", endpoint: "" },
+      { route: "doc", endpoint: "/doc/SPEC.md" },
+      { route: "proof", endpoint: "/proof-asset/screenshots/scope.png" },
+    ])("returns project_not_found from $route through the default Node adapter", async ({ endpoint }) => {
+      const originalRequest = globalThis.Request;
+      const originalResponse = globalThis.Response;
+      const requestDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Request")!;
+      const responseDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Response")!;
+      let server: ReturnType<typeof createServer> | undefined;
+      try {
+        // Exercise the adapter defaults that replace the request and response globals.
+        server = createServer(getRequestListener(app.fetch));
+        server.listen(0, "127.0.0.1");
+        await once(server, "listening");
+        expect(globalThis.Request).not.toBe(originalRequest);
+        expect(globalThis.Response).not.toBe(originalResponse);
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("fixture did not bind a TCP port");
+        expect(address.address).toBe("127.0.0.1");
+        expect(address.port).toBeGreaterThanOrEqual(32768);
+        const response = await fetch(`http://127.0.0.1:${address.port}/api/slices/same-slice${endpoint}?project=missing&mission=a-first`, {
+          headers: { Connection: "close" },
+        });
+        const body = await response.text();
+        expect(response.status).toBe(409);
+        expect(JSON.parse(body)).toMatchObject({ error: "project_not_found" });
+      } finally {
+        try {
+          if (server) {
+            server.closeAllConnections();
+            await new Promise<void>((resolve, reject) => server!.close(err => err ? reject(err) : resolve()));
+          }
+        } finally {
+          Object.defineProperty(globalThis, "Request", requestDescriptor);
+          Object.defineProperty(globalThis, "Response", responseDescriptor);
+          expect(Object.getOwnPropertyDescriptor(globalThis, "Request")).toEqual(requestDescriptor);
+          expect(Object.getOwnPropertyDescriptor(globalThis, "Response")).toEqual(responseDescriptor);
+          expect(globalThis.Request).toBe(originalRequest);
+          expect(globalThis.Response).toBe(originalResponse);
+          expect(server?.listening ?? false).toBe(false);
+          expect(server?.address() ?? null).toBeNull();
+        }
+      }
+    });
+
+    it.each(["", "?mission=z-later"])("unqualified ambiguous reads preserve the literal first-name selection for %s", async (query) => {
+      const detail = await app.request(`/api/slices/same-slice${query}`);
+      expect(detail.status).toBe(200);
+      const body = await detail.json();
+      expect(body.missionId).toBe("a-first");
+      expect(body.slicePath).toBe(path.join(workspaceRoot, "alpha/missions/a-first/slices/same-slice"));
+      const doc = await app.request(`/api/slices/same-slice/doc/SPEC.md${query}`);
+      expect(doc.status).toBe(200);
+      expect(await doc.json()).toEqual({ relPath: "SPEC.md", content: "# alpha/a-first\n" });
+      const proof = await app.request(`/api/slices/same-slice/proof-asset/screenshots/scope.png${query}`);
+      expect(proof.status).toBe(200);
+      expect(await proof.text()).toBe("ALPHA-PROOF\n");
+    });
+
+    it.each([
+      { query: "project=missing&mission=a-first", status: 409, error: "project_not_found" },
+      { query: "project=alpha", status: 400, error: "exact_mission_and_slice_required" },
+      { query: "project=alpha&mission=..%2Fbeta", status: 409, error: "invalid_mission" },
+      { query: "project=alpha&mission=a-first&projectRoot=not-current-root", status: 409, error: "project_changed" },
+    ].flatMap(row => ["doc/SPEC.md", "proof-asset/screenshots/scope.png"].map(endpoint => ({ ...row, endpoint }))))(
+      "$endpoint keeps detail selection error $error for $query", async ({ query, status, error, endpoint }) => {
+        const detail = await app.request(`/api/slices/same-slice?${query}`);
+        expect(detail.status).toBe(status);
+        expect(await detail.json()).toMatchObject({ error });
+        const response = await app.request(`/api/slices/same-slice/${endpoint}?${query}`);
+        expect(response.status).toBe(status);
+        expect(await response.json()).toMatchObject({ error });
+      },
+    );
+
+    it.each([
+      { endpoint: "doc/..%2F..%2Foutside.md", error: "doc_path_invalid" },
+      { endpoint: "proof-asset/..%2F..%2Foutside.png", error: "proof_asset_path_invalid" },
+    ])("keeps the existing path guard for $endpoint", async ({ endpoint, error }) => {
+      const response = await app.request(`/api/slices/same-slice/${endpoint}?project=beta&mission=a-first`);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error });
+    });
+
+    it.each(["", "/doc/SPEC.md", "/proof-asset/screenshots/scope.png"])("preserves the production browser boundary and token exception for %s", async (endpoint) => {
+      const guarded = buildApp({ indexer, projector, workspaceRoot, guardBrowser: true });
+      const url = `/api/slices/same-slice${endpoint}`;
+      const refused = await guarded.request(url, { headers: { Host: "other.invalid" } });
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({ code: "untrusted_host" });
+      const accepted = await guarded.request(url, { headers: { Host: "other.invalid", Authorization: "Bearer fixture-read-token" } });
+      expect(accepted.status).toBe(200);
+      const origin = await guarded.request(url, { headers: { Host: "localhost", Origin: "http://other.invalid", Authorization: "Bearer fixture-read-token" } });
+      expect(origin.status).toBe(403);
+      expect(await origin.json()).toMatchObject({ code: "browser_origin_refused" });
     });
   });
 
