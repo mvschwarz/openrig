@@ -894,6 +894,46 @@ describe("GET /api/slices observed queue counts", () => {
     });
   });
 
+  it.each([
+    { first: "primary", second: "extra" },
+    { first: "extra", second: "primary" },
+  ] as const)("rejects one authored mission ID shared across roots of one project ($first then $second)", async ({ first, second }) => {
+    const shippingPath = addSlice("alpha", "shipping", "shipping-work");
+    const roots = {
+      primary: path.join(root, "alpha", "missions"),
+      extra: path.join(root, "alpha", "extra-missions"),
+    };
+    write(path.join(roots.primary, "shipping", "SPEC.md"), "---\nid: M.SHARED\nstatus: active\n---\n# Shipping\n");
+    write(path.join(roots.extra, "support", "SPEC.md"), "---\nid: M.SHARED\nstatus: active\n---\n# Support\n");
+    const supportPath = path.join(roots.extra, "support", "slices", "support-work");
+    write(path.join(supportPath, "SPEC.md"), "---\nid: support-work\nstatus: active\n---\n# Support work\n");
+    row("shipping-directory", "done", ["project:alpha", "mission:shipping", "slice:shipping-work"]);
+    row("support-directory", "blocked", ["project:alpha", "mission:support", "slice:support-work"]);
+    for (let i = 0; i < 2; i++) {
+      row("shipping-ambiguous-id-" + i, "failed", ["project:alpha", "mission:M.SHARED", "slice:shipping-work"]);
+    }
+    for (let i = 0; i < 3; i++) {
+      row("support-ambiguous-id-" + i, "denied", ["project:alpha", "mission:M.SHARED", "slice:support-work"]);
+    }
+
+    const { app, indexer } = route("alpha", true, roots[first], [roots[second]]);
+    expect(indexer.projectId).toBe("alpha");
+    const entries = await list(app);
+    expect(entries.map(s => [s.name, s.missionId, s.slicePath]).sort()).toEqual([
+      ["shipping-work", "shipping", shippingPath],
+      ["support-work", "support", supportPath],
+    ]);
+    authoredUnchanged();
+    const shipping = entries.find(s => s.slicePath === shippingPath)!;
+    const support = entries.find(s => s.slicePath === supportPath)!;
+    expect.soft(shipping.queueCounts, "shipping: directory form only, shared ID is not unique").toEqual({
+      pending: 0, "in-progress": 0, done: 1, blocked: 0, failed: 0, denied: 0, canceled: 0, "handed-off": 0,
+    });
+    expect.soft(support.queueCounts, "support: directory form only, shared ID is not unique").toEqual({
+      pending: 0, "in-progress": 0, done: 0, blocked: 1, failed: 0, denied: 0, canceled: 0, "handed-off": 0,
+    });
+  });
+
   it("counts beyond the existing 500-row display bucket without changing qitemCount", async () => {
     addSlice("alpha", "shipping", "busy");
     db.transaction(() => {
