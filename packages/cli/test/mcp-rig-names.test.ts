@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer } from "../src/mcp-server.js";
+import { type McpAccess, createMcpServer } from "../src/mcp-server.js";
 import { DaemonClient, type DaemonResponse } from "../src/client.js";
 
 const RIG_ID = "01M5F0YZQXETQ4YVH3MJVQPQXQ";
@@ -14,7 +14,7 @@ const REMOVED_ID = "01M5F0REMOVEDRIGIDXXXXXXXX";
 let close: (() => Promise<void>) | undefined;
 afterEach(async () => { await close?.(); close = undefined; });
 
-async function connect(rigs: Array<{ id: string; name: string }>) {
+async function connect(rigs: Array<{ id: string; name: string }>, access?: McpAccess) {
   const requests: string[] = [];
   const snapshots: Record<string, unknown[]> = { [RIG_ID]: [{ id: "snap-1" }], [REMOVED_ID]: [{ id: "snap-old" }] };
   const known = new Set(rigs.map((r) => r.id));
@@ -24,6 +24,8 @@ async function connect(rigs: Array<{ id: string; name: string }>) {
     if (path.startsWith("/api/rigs/summary")) return { status: 200, data: rigs.map((r) => ({ ...r, archivedAt: null })) };
     const snaps = /^\/api\/rigs\/([^/]+)\/snapshots$/.exec(path);
     if (snaps) return { status: 200, data: snapshots[snaps[1]!] ?? [] };
+    const detail = /^\/api\/rigs\/([^/]+)$/.exec(path);
+    if (detail && known.has(detail[1]!)) return { status: 200, data: { rig: rigs.find(r => r.id === detail[1]), representative: null } };
     const nodes = /^\/api\/rigs\/([^/]+)\/nodes$/.exec(path);
     if (nodes && known.has(nodes[1]!)) return { status: 200, data: [{ logicalId: "work.worker" }] };
     return { status: 404, data: { error: "Rig not found" } };
@@ -35,7 +37,7 @@ async function connect(rigs: Array<{ id: string; name: string }>) {
     return { status: 404, data: { error: "Rig not found" } };
   }) as DaemonClient["post"];
 
-  const server = createMcpServer(client);
+  const server = createMcpServer(client, { access });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const mcp = new Client({ name: "test", version: "1.0.0" });
   await server.connect(serverTransport);
@@ -45,7 +47,7 @@ async function connect(rigs: Array<{ id: string; name: string }>) {
     const result = await mcp.callTool({ name, arguments: args }) as { content: Array<{ text: string }>; isError?: boolean };
     return { text: result.content[0]!.text, isError: result.isError === true };
   };
-  return { call, requests };
+  return { call, requests, instructions: mcp.getInstructions(), tools: (await mcp.listTools()).tools };
 }
 
 describe("MCP rig tools accept a rig name", () => {
@@ -91,5 +93,61 @@ describe("MCP rig tools accept a rig name", () => {
     const { call, requests } = await connect([{ id: RIG_ID, name: "solo" }]);
     await call("rig_rig_nodes", { rigId: RIG_ID });
     expect(requests).toContain(`GET /api/rigs/${RIG_ID}/nodes`);
+  });
+});
+
+const external = (rigs: string[]): McpAccess => ({ principal: "fixture-caller@solo", owner: false, rigs, roots: [], workspace: false, external: { objects: { team: ["list"] } } });
+
+describe("external team discovery within the grant", () => {
+  it.each([["solo"], ["solo", "solo"]])("uses a sole granted rig without a name (scope %j)", async (...rigs) => {
+    const { call, instructions, tools } = await connect([{ id: RIG_ID, name: "solo" }, { id: OTHER_ID, name: "outside" }], external(rigs));
+    const result = await call("rig_team", {});
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(result.text).rig).toEqual({ id: RIG_ID, name: "solo" });
+    expect(result.text).not.toContain("outside");
+    expect(instructions?.slice(0, 512)).toContain("rig_team without rigId");
+    expect(tools.map(t => t.name)).toEqual(["rig_team"]);
+  });
+
+  it("offers only the granted names when a choice is needed, without looking up other rigs", async () => {
+    const { call, requests } = await connect([{ id: RIG_ID, name: "solo" }, { id: OTHER_ID, name: "outside" }], external(["solo", "second"]));
+    const result = await call("rig_team", {});
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(result.text).rigs).toEqual(["solo", "second"]);
+    expect(result.text).not.toContain("outside");
+    expect(requests).toEqual([]);
+  });
+
+  it("names an empty grant scope without guessing another rig", async () => {
+    const { call, requests } = await connect([{ id: RIG_ID, name: "outside" }], external([]));
+    const result = await call("rig_team", {});
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(result.text)).toMatchObject({ rigs: [], message: expect.stringContaining("no rigs") });
+    expect(result.text).not.toContain("outside");
+    expect(requests).toEqual([]);
+  });
+
+  it("names an unresolved sole grant and does not read a different rig", async () => {
+    const { call, requests } = await connect([{ id: OTHER_ID, name: "outside" }], external(["missing"]));
+    const result = await call("rig_team", {});
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("missing");
+    expect(result.text).not.toContain("outside");
+    expect(requests).not.toContain(`GET /api/rigs/${OTHER_ID}`);
+  });
+
+  it("still asks an unscoped owner for a rig rather than guessing one", async () => {
+    const { call, requests } = await connect([{ id: RIG_ID, name: "solo" }]);
+    const result = await call("rig_team", {});
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("Pass a rig name or identifier");
+    expect(requests).toEqual([]);
+  });
+
+  it("keeps explicit granted reads and out-of-scope refusal unchanged", async () => {
+    const { call, requests } = await connect([{ id: RIG_ID, name: "solo" }, { id: OTHER_ID, name: "outside" }], external(["solo"]));
+    expect((await call("rig_team", { rigId: "solo" })).isError).toBe(false);
+    expect((await call("rig_team", { rigId: "outside" })).isError).toBe(true);
+    expect(requests).not.toContain(`GET /api/rigs/${OTHER_ID}`);
   });
 });
