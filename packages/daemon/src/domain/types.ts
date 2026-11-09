@@ -156,6 +156,7 @@ export type RigEvent =
   | { type: "node.terminal_policy_changed"; rigId: string; nodeId: string; scope: "seat" | "rig_default"; config: unknown; actor: string; reason: string }
   | { type: "node.model_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.cwd_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
+  | { type: "node.terminal_substrate_changed"; rigId: string; nodeId: string; logicalId: string; from: string; to: string; reason: string; operator: string | null }
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }

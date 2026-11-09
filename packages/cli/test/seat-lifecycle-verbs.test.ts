@@ -202,6 +202,27 @@ describe("rig seat set-permissions", () => {
   });
 });
 
+describe("rig seat set-substrate", () => {
+  it("posts the substrate and reason and prints how to resume the rig there", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, seat: { logicalId: "dev.impl", rigName: "proj" },
+      from: "tmux", to: "herdr", changed: true, effect: "next_launch", next: "rig up proj --existing" } }, calls);
+    const { logs, exitCode } = await captureLogs(() => makeCommand(deps)
+      .parseAsync(["node", "rig", "seat", "set-substrate", "dev-impl@proj", "herdr", "--reason", "move"]).then(() => {}));
+    expect(calls).toEqual([{ path: "/api/seat/set-substrate/dev-impl%40proj", body: { substrate: "herdr", reason: "move", operator: undefined } }]);
+    expect(logs.join("\n")).toContain("tmux -> herdr");
+    expect(logs.join("\n")).toContain("rig up proj --existing");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("requires a reason before contacting the daemon", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    await expect(makeCommand(makeDeps({ status: 200, data: {} }, calls))
+      .parseAsync(["node", "rig", "seat", "set-substrate", "dev.impl", "herdr"])).rejects.toThrow(/--reason/);
+    expect(calls).toEqual([]);
+  });
+});
+
 describe("rig seat set-cwd", () => {
   const args = ["node", "rig", "seat", "set-cwd", "planner@project", "--cwd", "/srv/remote/space dir/../planner", "--reason", "isolate planning"];
 

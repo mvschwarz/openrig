@@ -13,6 +13,7 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { EFFORT_SHAPE, piThinkingValue } from "../adapters/pi-runner-protocol.js";
 import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
+import { isTerminalSubstrate, readStoredSubstrate, TERMINAL_SUBSTRATES, type TerminalSubstrate } from "./terminal-substrate.js";
 import { deriveSessionName, parseSessionName } from "./session-name.js";
 import type { NodeLauncher } from "./node-launcher.js";
 import type { PendingStartupContext, StartupOrchestrator } from "./startup-orchestrator.js";
@@ -155,7 +156,9 @@ export interface SeatRefusal {
     | "stop_uncertain"
     | "missing_permissions_to"
     | "permissions_to_not_a_person"
-    | "permissions_to_unavailable";
+    | "permissions_to_unavailable"
+    | "invalid_terminal_substrate"
+    | "substrate_persistence_failed";
   message: string;
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
@@ -213,6 +216,11 @@ export interface EffortReport {
   precedence: { decided: boolean; detail: string };
   summary: string;
 }
+
+/** The result of moving a stopped seat to another terminal substrate (it takes effect at the seat's next launch). */
+export type SetTerminalSubstrateResult =
+  | { ok: true; seat: SeatDescriptor; from: string; to: TerminalSubstrate; changed: boolean; effect: "next_launch"; next: string }
+  | SeatRefusal;
 
 export type SetEffortResult =
   | {
@@ -584,6 +592,57 @@ export class SeatLifecycleService {
     }
     if (persisted) this.eventBus.notifySubscribers(persisted);
     return { ok: true, seat, from, to, changed, effect: "next_launch", warnings };
+  }
+
+  /** Move one seat to another terminal substrate (tmux or herdr) for its next launch. Only a seat with no live session
+   *  can move: the terminal router sends a seat's calls to its stored substrate, so flipping a running seat would aim
+   *  send/capture at a session that isn't there. The supported move is `rig down <rig>`, this for each seat, then
+   *  `rig up <rig> --existing`, which resumes each conversation in the new substrate. Audited; nothing is launched. */
+  async setTerminalSubstrate(input: { seatRef: string; substrate: string; reason: string; operator?: string | null }): Promise<SetTerminalSubstrateResult> {
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    const to = input.substrate?.trim() ?? "";
+    if (!isTerminalSubstrate(to)) {
+      return { ok: false, code: "invalid_terminal_substrate", message: `Unknown terminal substrate "${to}"; use one of: ${TERMINAL_SUBSTRATES.join(", ")}.` };
+    }
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    const rigName = seat.rigName;
+    const next = `rig up ${rigName} --existing`;
+    const row = this.db.prepare("SELECT terminal_substrate FROM nodes WHERE id = ?").get(seat.nodeId) as { terminal_substrate?: string | null } | undefined;
+    if (!row) return { ok: false, code: "seat_not_found", message: "The seat no longer exists.", guidance: SEAT_LOOKUP_GUIDANCE };
+    const stored = readStoredSubstrate(row.terminal_substrate);
+    const from = stored.kind === "unknown" ? stored.value : stored.kind;
+    if (from === to) return { ok: true, seat, from, to, changed: false, effect: "next_launch", next };
+
+    const stopFirst = `Stop the whole rig first (rig down ${rigName}), set the substrate, then run ${next} to resume its conversations.`;
+    const session = this.latestSession(seat.nodeId);
+    if (session && !TERMINAL_SESSION_STATUSES.has(session.status)) {
+      return { ok: false, code: "session_live", message: `Seat ${seat.logicalId}@${rigName} has a live session (${session.session_name}, ${session.status}); its substrate can only change while it is stopped.`, guidance: stopFirst };
+    }
+    // A session row can say exited while its terminal is still open; look on the substrate it is on now.
+    const name = session?.session_name ?? deriveCanonicalFromEntry(resolved.entry);
+    if (stored.kind !== "unknown" && name) {
+      const probe = await this.probeLiveness(name, "the substrate was not changed");
+      if ("code" in probe) return probe;
+      if (probe.state === "present") {
+        return { ok: false, code: "session_live", message: `Seat ${seat.logicalId}@${rigName}'s terminal session ${name} is still open on ${from}; the substrate was not changed.`, guidance: stopFirst };
+      }
+    }
+
+    let persisted: PersistedEvent | null = null;
+    try {
+      this.db.transaction(() => {
+        if (!this.rigRepo.setNodeTerminalSubstrate(seat.nodeId, to)) throw new Error("The seat's node row was not updated.");
+        persisted = this.eventBus.persistWithinTransaction({ type: "node.terminal_substrate_changed", rigId: seat.rigId,
+          nodeId: seat.nodeId, logicalId: seat.logicalId, from, to, reason: input.reason.trim(), operator: input.operator ?? null });
+      })();
+    } catch (error) {
+      return { ok: false, code: "substrate_persistence_failed", message: `The terminal substrate was not changed: ${(error as Error).message}` };
+    }
+    if (persisted) this.eventBus.notifySubscribers(persisted);
+    return { ok: true, seat, from, to, changed: true, effect: "next_launch", next };
   }
 
   /** OPR.0.7.0.7 — save one seat's effort for its next managed continuation. Like set-model it
