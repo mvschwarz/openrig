@@ -116,7 +116,9 @@ describe("DaemonClient response body deadline", () => {
   it("uses the per-request deadline through the complete body", async () => {
     const endpoint = await slowBodyServer(100);
     const client = new DaemonClient(endpoint.url, { timeoutMs: 20 });
-    await expect(client.get("/read", { timeoutMs: 1_000 })).resolves.toEqual({ status: 200, data: { ok: true } });
+    const response = await client.get("/read", { timeoutMs: 1_000 });
+    expect(response).toEqual({ status: 200, data: { ok: true }, headers: expect.any(Headers) });
+    expect(response.headers?.get("content-type")).toBe("application/json");
     expect(endpoint.requests()).toBe(1);
     expect(endpoint.closedBeforeEnd()).toBe(0);
   });
