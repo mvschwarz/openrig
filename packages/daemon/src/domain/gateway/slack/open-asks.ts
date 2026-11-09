@@ -68,14 +68,36 @@ export function noteRePresentNotPosted(queueRepo: QueueRepository, qitemId: stri
   queueRepo.update({ qitemId, actorSession: "daemon@kernel", transitionNote: note });
 }
 
-/** The gateway's record that it posted a re-shown ask once although whether an earlier attempt reached Slack couldn't be
- *  told (the post says it may repeat). Written before the post; what became of the post is its own receipt. */
-export function noteRePresentUnconfirmed(queueRepo: QueueRepository, qitemId: string, notificationKey: string, why: string): void {
+/** What OpenRig couldn't confirm when it went on to post a re-shown ask: whether an earlier attempt reached Slack, the
+ *  ask's current state, or the person's delivery settings. */
+export type RePresentUnconfirmed = "attempt" | "state" | "policy";
+
+/** The gateway's record that it went on to post a re-shown ask although it couldn't confirm `what`. Written before the
+ *  post; what became of the post is its own receipt. */
+export function noteRePresentUnconfirmed(queueRepo: QueueRepository, qitemId: string, notificationKey: string,
+  what: RePresentUnconfirmed[], why: string): void {
   queueRepo.update({ qitemId, actorSession: "daemon@kernel",
-    transitionNote: `${UNCONFIRMED} notification_key=${notificationKey} detail=${why.replace(/\s+/g, " ").trim()}` });
+    transitionNote: `${UNCONFIRMED} notification_key=${notificationKey} what=${what.join(",")} detail=${why.replace(/\s+/g, " ").trim()}` });
 }
 
-const POSTED_UNCONFIRMED = "posted once, marked as possibly repeating an earlier attempt that couldn't be confirmed";
+const UNCONFIRMED_WORDS: Record<RePresentUnconfirmed, string> = {
+  attempt: "an earlier attempt", state: "the ask's state", policy: "the person's delivery policy",
+};
+
+/** "posted; an earlier attempt was unconfirmed", from every unconfirmed record for this ask; null when there is none. */
+function postedUnconfirmed(notes: string[], key: string): string | null {
+  const what = new Set<RePresentUnconfirmed>();
+  for (const note of notes) {
+    if (!hasToken(note, UNCONFIRMED, key)) continue;
+    for (const item of (/\bwhat=(\S+)/.exec(note)?.[1] ?? "attempt").split(",")) {
+      if (item in UNCONFIRMED_WORDS) what.add(item as RePresentUnconfirmed);
+    }
+  }
+  const words = (["attempt", "state", "policy"] as const).filter((item) => what.has(item)).map((item) => UNCONFIRMED_WORDS[item]);
+  if (words.length === 0) return null;
+  const list = words.length === 1 ? words[0] : `${words.slice(0, -1).join(", ")} and ${words.at(-1)}`;
+  return `posted; ${list} ${words.length === 1 ? "was" : "were"} unconfirmed`;
+}
 
 const DISPOSITION_OUTCOME: Record<ReleaseDisposition, { outcome: OpenAskOutcome; detail?: string }> = {
   "row-not-active": { outcome: "no-longer-active" },
@@ -87,7 +109,8 @@ const DISPOSITION_OUTCOME: Record<ReleaseDisposition, { outcome: OpenAskOutcome;
 /** The latest delivery fact a row records for this episode, oldest notes first. A posted receipt wins whenever it is. */
 function deliveryFact(notes: string[], key: string): { outcome: OpenAskOutcome; detail?: string } | null {
   if (notes.some((n) => hasToken(n, "slack-owner-notification-posted", key))) {
-    return notes.some((n) => hasToken(n, UNCONFIRMED, key)) ? { outcome: "posted", detail: POSTED_UNCONFIRMED } : { outcome: "posted" };
+    const detail = postedUnconfirmed(notes, key);
+    return detail ? { outcome: "posted", detail } : { outcome: "posted" };
   }
   for (const note of [...notes].reverse()) {
     if (hasToken(note, "slack-owner-notification-transport-failed", key)) {
@@ -186,8 +209,8 @@ export async function postOpenAsks(input: PostOpenAsksInput): Promise<PostOpenAs
       summary: item.summary ?? null, outcome: "uncertain", reshown: false };
     results.push(result);
     if (posted) {
-      Object.assign(result, { outcome: "already-posted",
-        ...(notesOf(item.qitemId).some((n) => hasToken(n, UNCONFIRMED, key)) ? { detail: POSTED_UNCONFIRMED } : {}) });
+      const detail = postedUnconfirmed(notesOf(item.qitemId), key);
+      Object.assign(result, { outcome: "already-posted", ...(detail ? { detail } : {}) });
       continue;
     }
     if (!eligible) {

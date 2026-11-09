@@ -66,10 +66,13 @@ not fill in; if so, follow the form.
     asked at RECORD stays on Steering and the Feed without a post. Running it again reuses each ask's
     one decision rather than making another, so an ask whose post is confirmed isn't posted again. As
     with any Slack post, one whose earlier attempt Slack couldn't confirm may post once more, marked as
-    a possible repeat. That includes an ask whose attempt record can't be read, or whose state can't be
-    checked while an earlier attempt may be in Slack: it posts once per gateway run, marked, and the
-    command then reports it as already posted, with the earlier attempt unconfirmed. An ask that is
-    no longer open isn't posted. `--wait <seconds>` (default 10) is how long it waits for Slack receipts.
+    a possible repeat. An ask OpenRig can't fully check still posts, once per gateway run, through the
+    person's delivery rules, so a readable quiet window still holds it. That's an ask whose attempt
+    record can't be read, whose state can't be checked, or whose person's quiet hours can't be read.
+    The post says what couldn't be checked ("Delivery may repeat after an earlier unconfirmed
+    attempt.", "OpenRig couldn't check that this ask is still open."), and the command reports it as
+    posted with what was unconfirmed. An ask that is no longer open isn't posted. `--wait <seconds>`
+    (default 10) is how long it waits for Slack receipts.
 
 ## What the app asks for
 
@@ -384,7 +387,8 @@ Quiet hours hold a person's routine asks while they're on, and post them once th
   the posting level.
 - **A post that may already be in Slack**, confirmed or only partly sent, isn't held: it finishes as itself, in its own
   thread.
-- **If quiet hours can't be read,** nothing is posted to that person until they can.
+- **If quiet hours can't be read,** nothing is posted to that person until they can, except an ask re-shown by
+  `rig slack post-open-asks`, which posts and records that the person's delivery policy was unconfirmed.
 
 ## Reconnect recovery and status
 

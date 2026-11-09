@@ -49,6 +49,8 @@ export interface OutboundPostPayload {
   /** Set by the gateway when it posts once although it can't tell whether an earlier attempt landed: the post says it
    *  may repeat, and an attempt record that can't be written doesn't stop it. Never part of a buffered decision. */
   possibleRepeat?: boolean;
+  /** Set by the gateway when it posts an ask whose current state it couldn't check: the post says so. */
+  stateUnconfirmed?: boolean;
 }
 
 export interface OutboundDriverDeps {

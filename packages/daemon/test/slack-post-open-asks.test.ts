@@ -202,22 +202,57 @@ describe("rig slack post-open-asks through the gateway", () => {
     expect(new DispatchBuffer(home).pending()).toHaveLength(1);
   });
 
-  it("an ask whose delivery state can't be read before any attempt reads state unavailable, not posted or queued; a later run posts it", async () => {
+  it("an ask whose delivery policy can't be read posts, and its row and the command say the policy was unconfirmed", async () => {
     const row = await park();
     await enable();
     const w = wire();
     // The delivery rules can't read the person's quiet hours. (A missing table reads as no quiet hours, so the read throws.)
     const unreadable = vi.spyOn(HumanQuietStore.prototype, "quietStateFor").mockImplementation(() => { throw new Error("database is locked"); });
-    const result = await run(w);
-    expect(resultFor(result, row)).toMatchObject({ outcome: "state-unavailable", detail: "not posted: database is locked" });
-    expect(posts).toHaveLength(0);
-    expect(new DispatchBuffer(home).pending(), "nothing is left queued").toHaveLength(0);
-    expect(notes(row).some((n) => n.startsWith(`slack-re-present-state-unavailable notification_key=${keyOf(row)} detail=`))).toBe(true);
+    try {
+      const result = await run(w);
+      expect(resultFor(result, row)).toMatchObject({ outcome: "posted", reshown: true, detail: "posted; the person's delivery policy was unconfirmed" });
+      expect(posts).toHaveLength(1);
+      expect(new DispatchBuffer(home).pending(), "nothing is left queued").toHaveLength(0);
+      expect(notes(row).some((n) => n.startsWith("slack-re-present-state-unavailable "))).toBe(false);
+      expect(notes(row).find((n) => n.startsWith(`slack-re-present-unconfirmed notification_key=${keyOf(row)} what=policy `))).toMatch(/database is locked/);
+    } finally { unreadable.mockRestore(); }
+    expect((await run(w)).counts, "a later run doesn't post it again").toEqual({ "already-posted": 1 });
+  });
 
-    unreadable.mockRestore();
-    const again = await run(w);
-    expect(resultFor(again, row)).toMatchObject({ outcome: "posted", reshown: true });
-    expect(posts).toHaveLength(1);
+  it("an attempt log it can't read doesn't skip a readable quiet window: the ask is held, and nothing records it as not posted", async () => {
+    const row = await park();
+    await enable();
+    const [open] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listOpenAsks({ minimumLevel: "NOTICE" });
+    const decisionId = rePresentDecisionId(keyOf(row));
+    new DispatchBuffer(home).enqueue({ kind: "outbound_decision", decisionId, op: OUTBOUND_OP, entityBindingRef: `${HUMAN}@external`, payload: toPayload(open!.item) });
+    mkdirSync(join(home, "state", "slack-attempted-decisions.jsonl"), { recursive: true }); // the attempt log exists, can't be read
+    const now = new Date();
+    new HumanQuietStore(db).setUntil(HUMAN, { until: new Date(now.getTime() + 3_600_000), timezone: "UTC", setBy: "test", now });
+    const w = wire();
+    w.startServices?.(); // replays the kept decision
+    await vi.waitFor(() => expect(new WatchdogJobsRepository(db).listActive().filter((j) => j.policy === QUIET_RELEASE_POLICY)).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(posts, "held for the person's quiet hours").toHaveLength(0);
+    expect(notes(row).some((n) => n.startsWith("slack-re-present-state-unavailable ") || n.startsWith("slack-re-present-disposition "))).toBe(false);
+  });
+
+  it("an ask whose state can't be checked, with no earlier attempt, posts once with that line and is reported posted, state unconfirmed", async () => {
+    const row = await park();
+    await enable();
+    const readable = registry;
+    const w = wire();
+    w.startServices?.();
+    const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry });
+    const [open] = await ports.listOpenAsks({ minimumLevel: "NOTICE" });
+    registry = { ok: false, error: "the human registry couldn't be read" } as never; // the ask's state can't be checked at post time
+    w.dispatcher.dispatch(OUTBOUND_OP, `${HUMAN}@external`, toPayload(open!.item), { decisionId: rePresentDecisionId(keyOf(row)) });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts[0])).toContain("OpenRig couldn't check that this ask is still open.");
+    expect(JSON.stringify(posts[0]), "no earlier attempt, so no repeat line").not.toContain("Delivery may repeat");
+    await vi.waitFor(() => expect(new DispatchBuffer(home).pending()).toHaveLength(0));
+    expect(notes(row).some((n) => n.startsWith("slack-re-present-state-unavailable "))).toBe(false);
+    registry = readable;
+    expect(resultFor(await run(w, 0), row)).toMatchObject({ outcome: "already-posted", detail: expect.stringMatching(/^posted; the ask's state/) });
   });
 
   it("an earlier decision still waiting for delivery is reported queued and isn't offered under a second id", async () => {
@@ -283,6 +318,7 @@ describe("rig slack post-open-asks through the gateway", () => {
     w.startServices?.(); // replays the kept decision
     await vi.waitFor(() => expect(posts).toHaveLength(1));
     expect(JSON.stringify(posts[0]), "the post says it may repeat").toContain("Delivery may repeat after an earlier unconfirmed attempt.");
+    expect(JSON.stringify(posts[0]), "and that the ask's state couldn't be checked").toContain("OpenRig couldn't check that this ask is still open.");
     await vi.waitFor(() => expect(new DispatchBuffer(home).pending()).toHaveLength(0));
     expect(notes(row).some((n) => n.startsWith("slack-re-present-state-unavailable ") || n.startsWith("slack-re-present-disposition ")),
       "no not-posted record for an ask that may be in Slack").toBe(false);
@@ -291,7 +327,7 @@ describe("rig slack post-open-asks through the gateway", () => {
     registry = readable;
     const result = await run(w, 0);
     expect(resultFor(result, row)).toMatchObject({ outcome: "already-posted", reshown: false,
-      detail: "posted once, marked as possibly repeating an earlier attempt that couldn't be confirmed" });
+      detail: expect.stringMatching(/^posted; an earlier attempt and the ask's state/) });
   });
 
   it("X-F3: on replay, an attempt log that can't be read posts the ask once, marked, and never records it as not posted", async () => {
@@ -307,6 +343,7 @@ describe("rig slack post-open-asks through the gateway", () => {
     w.startServices?.(); // replays the kept decision
     await vi.waitFor(() => expect(posts).toHaveLength(1));
     expect(JSON.stringify(posts[0]), "the post says it may repeat").toContain("Delivery may repeat after an earlier unconfirmed attempt.");
+    expect(JSON.stringify(posts[0]), "and that the ask's state couldn't be checked").toContain("OpenRig couldn't check that this ask is still open.");
     await vi.waitFor(() => expect(new DispatchBuffer(home).pending()).toHaveLength(0));
     expect(notes(row).some((n) => n.startsWith("slack-re-present-state-unavailable ") || n.startsWith("slack-re-present-disposition ")),
       "no not-posted record while whether it was attempted is unknown").toBe(false);
@@ -315,7 +352,7 @@ describe("rig slack post-open-asks through the gateway", () => {
     registry = readable;
     const result = await run(w, 0);
     expect(resultFor(result, row)).toMatchObject({ outcome: "already-posted", reshown: false,
-      detail: "posted once, marked as possibly repeating an earlier attempt that couldn't be confirmed" });
+      detail: expect.stringMatching(/^posted; an earlier attempt and the ask's state/) });
   });
 
   it("with the attempt log unreadable, a re-shown ask makes one attempt per gateway run: a failed post waits for the next run", async () => {

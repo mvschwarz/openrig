@@ -287,9 +287,9 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // Only render before reconciliation when comparing a known rejection. Other
     // attempts still reconcile first, including a landed message that no longer renders (#899).
     // A rejection is recorded against the plain render, so a repeat note can't make a rejected payload look new.
-    const renders = new Map<boolean, ReturnType<typeof buildOutboundMessage>>();
-    const render = (possibleRepeat = false) => {
-      const cached = renders.get(possibleRepeat);
+    const renders = new Map<string, ReturnType<typeof buildOutboundMessage>>();
+    const render = (possibleRepeat = false, stateUnconfirmed = false) => {
+      const cached = renders.get(`${possibleRepeat}:${stateUnconfirmed}`);
       if (cached) return cached;
       const { mediaRefs, evidenceLink } = evidenceAttachment(q.media, q.evidenceRef, q.summary);
       const built = buildOutboundMessage(
@@ -321,13 +321,17 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           // the scan above matches: one identity, same bytes, both sides).
           reconcileMarker: reconcileToken(decision.decisionId),
           possibleRepeat,
+          stateUnconfirmed,
         },
       );
-      renders.set(possibleRepeat, built);
+      renders.set(`${possibleRepeat}:${stateUnconfirmed}`, built);
       return built;
     };
-    const postInput = (possibleRepeat = false) => ({ channel, text: render(possibleRepeat).text, blocks: render(possibleRepeat).blocks, thread_ts: threadTs });
-    const payloadHash = () => createHash("sha256").update(JSON.stringify(postInput())).digest("hex");
+    const postInput = (possibleRepeat = false) => {
+      const shown = render(possibleRepeat, q.stateUnconfirmed === true);
+      return { channel, text: shown.text, blocks: shown.blocks, thread_ts: threadTs };
+    };
+    const payloadHash = () => createHash("sha256").update(JSON.stringify({ channel, text: render().text, blocks: render().blocks, thread_ts: threadTs })).digest("hex");
     const failurePrefix = `${decision.decisionId}${TRANSPORT_FAILURE_RECEIPT_PREFIX}`;
     const hasRejection = [...attempted.keys()].some((key) => {
       if (!key.startsWith(failurePrefix) || key.endsWith(TRANSPORT_FAILURE_RECEIPT_REPAIRED)) return false;
