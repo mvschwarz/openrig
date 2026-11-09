@@ -174,8 +174,9 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
      the rows a person's own statusLine prints, trusted only by position, as
      the composer reader trusts them (#2703, #2798): the closing rule is the
      first rule above the footer, the frame above it must check out, and no
-     row between them may be prompt-shaped (`❯`, `›`, `»` or a numbered
-     choice); a blank, effort or tmux-notice row above the box; and above
+     row between them may be blank or look like a menu or dialog (`❯`, `›` or
+     `»` anywhere, a numbered choice past a border or gutter, a box corner, or
+     side borders); a blank, effort or tmux-notice row above the box; and above
      that, in the status slot, the completion row of the seat's last turn
      (`✻ <verb> for <duration> · done <time>` at column 0, matched by the
      Claude Code 2.1.296 bundle's grammar: one of its eight past-tense verbs,
@@ -208,8 +209,10 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
      status row, `esc to interrupt`, `paste again to expand`, a queued label,
      Codex's pending-input headers or `↳` rows, a spinner). Any other frame,
      including every running, streaming, steer-preview, paste-hint or unknown
-     layout, another seat's name, a rule or a prompt-shaped row between the
-     closing rule and the footer and a background shell in the footer, reads
+     layout, another seat's name, a rule or a blank, prompt-, menu- or
+     dialog-shaped row between the closing rule and the footer (so a
+     fullscreen renderer that reserves a blank row for the statusLine reads
+     as before), and a background shell in the footer, reads
      `seat: not-idle` or `unknown`, and the send reads unconfirmed. This holds when a running turn
      hides its signal (Codex hides its `• Working` row while it streams;
      Claude Code shows only `paste again to expand` in its footer for 8 s

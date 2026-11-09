@@ -496,9 +496,9 @@ describe("readSeatBeforePaste: verified needs a seat proven idle before the past
       expect(readSeatBeforePaste(screen([STATUS, "  ~/work · main · 2 files changed"]), "claude-code")).toBe("idle");
     });
 
-    it("a blank statusLine row: idle, as the composer reader skips it", () => {
-      expect(readSeatBeforePaste(screen([""]), "claude-code")).toBe("idle");
-      expect(readSeatBeforePaste(screen(["", STATUS]), "claude-code")).toBe("idle");
+    it("a statusLine with separators that are not box drawing: idle", () => {
+      expect(readSeatBeforePaste(screen(["  model · ctx 1k/2k (50.0%) · folder | main"]), "claude-code")).toBe("idle");
+      expect(readSeatBeforePaste(screen(["  Opus │ ctx 12% │ ~/work"]), "claude-code")).toBe("idle");
     });
 
     it("a real idle frame with a statusLine row (edit): idle, as it is without one", () => {
@@ -545,6 +545,17 @@ describe("readSeatBeforePaste: verified needs a seat proven idle before the past
       ["a dashed rule", ["  ------------"]],
       ["an item row and a rule opening under the box", ["❯ item", RULE, STATUS]],
       ["a second empty box drawn under the first", ["❯", RULE, STATUS]],
+      // Adversarial review: a menu, picker or dialog drawn there, and the blank row a fullscreen renderer reserves for a
+      // statusLine that prints nothing (unknown on main too, so a seat with no statusLine row reads as before).
+      ["a blank row", [""]],
+      ["a blank row above a statusLine row", ["", STATUS]],
+      ["a dialog in a box with a selected choice", ["╭──────────────────────╮", "│ Do you want to proceed? │", "│ ❯ 1. Yes │", "│   2. No │", "╰──────────────────────╯"]],
+      ["a dialog's rows framed by side borders, without corners", ["│ Do you want to proceed? │"]],
+      ["a box's top and bottom borders with nothing else", ["╭──────────────────────╮", "╰─ 1 of 2 ─╯"]],
+      ["a choice behind the tool-output gutter", ["  ⎿ ❯ 1. Yes"]],
+      ["numbered choices selected by colour only", ["  1. Yes", "  2. No"]],
+      ["a choice behind a side border", ["│ 2) No"]],
+      ["a prompt glyph inside the row", [`${STATUS} ❯ next`]],
     ])("unknown: %s between the closing rule and the footer", (_name, rows) => {
       expect(readSeatBeforePaste(screen(rows), "claude-code")).toBe("unknown");
     });
