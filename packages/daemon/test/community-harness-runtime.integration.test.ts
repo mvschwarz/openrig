@@ -4,6 +4,7 @@ import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } f
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prepareHermeticEnv, type HermeticScaffold } from "./helpers/hermetic-env.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import { runRig, spawnScenarioDaemon, type ScenarioDaemon } from "./helpers/scenario-daemon.js";
 
 // One community harness end to end, through the real CLI, daemon, SQLite and a private tmux server: a synthetic
@@ -53,7 +54,7 @@ describe("a community harness from a data preset", () => {
     mkdirSync(rigRoot);
     cpSync(agents, join(rigRoot, "agents"), { recursive: true });
     writePreset("synth-harness.yaml", [
-      "format: 1", "name: synth-harness", `command: node ${appScript}`, "maintainer: Example Maintainer",
+      "format: 1", "name: synth-harness", `command: node ${shellQuote(appScript)}`, "maintainer: Example Maintainer",
       "limits:", "  - resume unsupported", "  - fork unsupported", "  - no approval-prompt detection", "",
     ].join("\n"));
     const previousDir = join(scaffold.env.OPENRIG_HOME!, ["agent", "apps"].join("-"));
@@ -84,7 +85,7 @@ exec "$@"
   }
 
   it("prefixes a runner-less preset with resolved literal wrapper argv", async () => {
-    writePreset("wrapped-plain.yaml", `format: 1\nname: wrapped-plain\ncommand: node ${appScript}\nmaintainer: Example\n`);
+    writePreset("wrapped-plain.yaml", `format: 1\nname: wrapped-plain\ncommand: node ${shellQuote(appScript)}\nmaintainer: Example\n`);
     const wrapper = recordingWrapper("plain");
     const up = await rig(["up", specFor("wrapped-plain-rig", "wrapped-plain", wrapper.argv), "--cwd", rigRoot, "--json", "--yes"], 120_000);
     expect(up.code, JSON.stringify(up)).toBe(0);
@@ -95,7 +96,7 @@ exec "$@"
   it("keeps a capable runner outside the wrapper and wraps its real native child", async () => {
     const runner = resolve(here, "fixtures/runner-conformance/minimal-acp-runner.mjs");
     const agent = resolve(here, "../../../docs/reference/runner-conformance/fake-acp-agent.mjs");
-    writePreset("wrapped-runner.yaml", `format: 1\nname: wrapped-runner\ncommand: node ${runner} --agent 'node ${agent}'\nmaintainer: Example\nrunner: true\nlaunch_result: true\nlaunch_wrapper: true\n`);
+    writePreset("wrapped-runner.yaml", `format: 1\nname: wrapped-runner\ncommand: node ${shellQuote(runner)} --agent ${shellQuote(`node ${shellQuote(agent)}`)}\nmaintainer: Example\nrunner: true\nlaunch_result: true\nlaunch_wrapper: true\n`);
     const wrapper = recordingWrapper("runner");
     const up = await rig(["up", specFor("wrapped-runner-rig", "wrapped-runner", wrapper.argv), "--cwd", rigRoot, "--json", "--yes"], 120_000);
     expect(up.code, JSON.stringify(up)).toBe(0);
@@ -112,7 +113,7 @@ exec "$@"
     const marker = join(rigRoot, "incapable-started");
     const launcher = join(rigRoot, "incapable.mjs");
     writeFileSync(launcher, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'started');`);
-    writePreset("incapable-runner.yaml", `format: 1\nname: incapable-runner\ncommand: node ${launcher}\nmaintainer: Example\nrunner: true\nlaunch_result: true\n${capability}`);
+    writePreset("incapable-runner.yaml", `format: 1\nname: incapable-runner\ncommand: node ${shellQuote(launcher)}\nmaintainer: Example\nrunner: true\nlaunch_result: true\n${capability}`);
     const wrapper = recordingWrapper("incapable");
     const up = await rig(["up", specFor("incapable-runner-rig", "incapable-runner", wrapper.argv), "--cwd", rigRoot, "--json", "--yes"], 120_000);
     expect(up.code, JSON.stringify(up)).not.toBe(0);
@@ -148,7 +149,7 @@ exec "$@"
   });
 
   it("hands the composed first turn to a real launcher without typing it into its pane", async () => {
-    writePreset("synth-first.yaml", `format: 1\nname: synth-first\ncommand: node ${appScript}\nmaintainer: Example\nfirst_input: true\n`);
+    writePreset("synth-first.yaml", `format: 1\nname: synth-first\ncommand: node ${shellQuote(appScript)}\nmaintainer: Example\nfirst_input: true\n`);
     const up = await rig(["up", specFor("first-input-rig", "synth-first"), "--cwd", rigRoot, "--json", "--yes"], 120_000);
     expect(up.code, JSON.stringify(up)).toBe(0);
     const inputDir = join(scaffold.env.OPENRIG_HOME!, "state", "first-input", "work-worker%40first-input-rig");
@@ -322,7 +323,7 @@ exec "$@"
       expect(seat).not.toHaveProperty("communityHarness");
     };
     await check();
-    writePreset("free-harness.yaml", ["format: 1", "name: free-harness", `command: node ${appScript}`, "maintainer: Example Maintainer", ""].join("\n"));
+    writePreset("free-harness.yaml", ["format: 1", "name: free-harness", `command: node ${shellQuote(appScript)}`, "maintainer: Example Maintainer", ""].join("\n"));
     await sleep(4_000);
     await check();
     // A relaunch doesn't start the same-named app in its place.
