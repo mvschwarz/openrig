@@ -254,9 +254,10 @@ describe("queue create scope advisories preserve admission and output", () => {
     return { app, observation };
   }
 
-  function recoveredClient(app: Hono, target: Fixture, typedLoss: boolean) {
+  function recoveredClient(app: Hono, target: Fixture, typedLoss: boolean, readHealth?: (observation: number) => string | null) {
     const calls = { posts: [] as string[], readbacks: [] as Array<{ base: string; url: string }>, postStatuses: [] as number[],
-      postBodies: [] as unknown[], committedBeforeLoss: [] as unknown[], healthReads: 0 };
+      postBodies: [] as unknown[], committedBeforeLoss: [] as unknown[], healthReads: 0,
+      healthResults: [] as Array<string | null> };
     const factory: QueueDeps["clientFactory"] = (base: string) => ({
       senderIdentity: async () => ({ session: "writer@scope", originUnknown: false }),
       post: async (url: string, body: unknown) => {
@@ -276,7 +277,14 @@ describe("queue create scope advisories preserve admission and output", () => {
       get: async (url: string) => {
         if (url === "/healthz") {
           calls.healthReads++;
-          return { status: 200, data: { selfHostId: source.hostId } };
+          try {
+            const selfHostId = readHealth ? readHealth(calls.healthReads) : source.hostId;
+            calls.healthResults.push(selfHostId);
+            return { status: 200, data: { selfHostId } };
+          } catch (error) {
+            calls.healthResults.push("unreadable");
+            throw error;
+          }
         }
         calls.readbacks.push({ base, url });
         const row = target.daemon.deps.queueRepo.getById(decodeURIComponent(url.slice("/api/queue/".length)));
@@ -376,7 +384,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     } else expect(scopeLines()).toBe("");
   });
 
-  it.each(["--host", "qualified destination"] as const)("keeps recovered own-host %s advice local after a committed response is lost", async form => {
+  async function recoverOwnHost(form: "--host" | "qualified destination", readHealth?: (observation: number) => string | null) {
     expect(source.hostId).toEqual(expect.any(String));
     expect(source.hostId).not.toBe("local");
     expect(getSelfHostId()).toBe(source.hostId);
@@ -384,7 +392,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(health.status).toBe(200);
     expect(await health.json()).toMatchObject({ selfHostId: source.hostId });
     const unchanged = preserveAuthored(source);
-    const { factory, calls } = recoveredClient(source.app, source, true);
+    const { factory, calls } = recoveredClient(source.app, source, true, readHealth);
     const args = ["--mission", "missing-mission", "--tags", "project:alpha"];
     if (form === "--host") args.push("--host", source.hostId!);
     const destination = form === "qualified destination" ? "worker@scope@" + source.hostId : "worker@scope";
@@ -405,6 +413,11 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(calls.readbacks.map(call => call.url)).toEqual(["/api/queue/qitem-create-contract"]);
     expect(stderr.join("\n")).toContain("committed after all: row qitem-create-contract");
     unchanged();
+    return calls;
+  }
+
+  it.each(["--host", "qualified destination"] as const)("keeps recovered own-host %s advice local after a committed response is lost", async form => {
+    await recoverOwnHost(form);
     expect.soft(scopeLines()).toContain("mission:missing-mission");
     expect.soft(scopeLines()).toMatch(/\bunavailable\b/i);
     expect.soft(scopeLines()).toMatch(/\boutcome\b|\bresult\b/i);
@@ -412,12 +425,67 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect.soft(scopeLines()).not.toMatch(/\bskipped\b|cross-host|\bforwarded\b/i);
   });
 
-  it("reconciles a forwarded indeterminate commit with SKIPPED and destination provenance", async () => {
+  function healthAfterMatchedRecovery(later: "different" | "null" | "unreadable") {
+    return (observation: number): string | null => {
+      // The target and source checks see the real host. Only the later advice read changes.
+      if (observation <= 2) return source.hostId;
+      if (later === "unreadable") throw new Error("fixture health became unreadable after matching recovery");
+      return later === "null" ? null : "replacement-fixture";
+    };
+  }
+
+  it.each((["--host", "qualified destination"] as const).flatMap(form =>
+    (["different", "null", "unreadable"] as const).map(later => ({ form, later }))))(
+    "keeps matched own-host $form recovery local when later health is $later", async ({ form, later }) => {
+      const calls = await recoverOwnHost(form, healthAfterMatchedRecovery(later));
+      const evidence = "observed health sequence: " + JSON.stringify(calls.healthResults);
+      expect.soft(scopeLines(), evidence).toContain("mission:missing-mission");
+      expect.soft(scopeLines(), evidence).toMatch(/\bunavailable\b/i);
+      expect.soft(scopeLines(), evidence).toMatch(/\boutcome\b|\bresult\b/i);
+      expect.soft(scopeLines(), evidence).toMatch(/response recovery/i);
+      expect.soft(scopeLines(), evidence).not.toMatch(/\bskipped\b|cross-host|\bforwarded\b/i);
+    },
+  );
+
+  it.each(["--host", "qualified destination"] as const)(
+    "keeps own-host %s outcome unknown when health becomes unreadable before source matching", async form => {
+      expect(source.hostId).toEqual(expect.any(String));
+      expect(getSelfHostId()).toBe(source.hostId);
+      const unchanged = preserveAuthored(source);
+      const { factory, calls } = recoveredClient(source.app, source, true, observation => {
+        if (observation === 1) return source.hostId;
+        throw new Error("fixture health unreadable while matching the stored source");
+      });
+      const args = ["--mission", "missing-mission", "--tags", "project:alpha"];
+      if (form === "--host") args.push("--host", source.hostId!);
+      const destination = form === "qualified destination" ? "worker@scope@" + source.hostId : "worker@scope";
+      await expect(create(source.app, args, true, "qitem-create-contract", factory, destination))
+        .rejects.toMatchObject({ name: "DaemonResponseError", status: 201 });
+      const stored = source.daemon.deps.queueRepo.getById("qitem-create-contract");
+      expect(stored).toMatchObject({ qitemId: "qitem-create-contract", sourceSession: "writer@scope",
+        destinationSession: "worker@scope", body: "scope contract body", summary: "scope contract", state: "pending",
+        tags: ["mission:missing-mission", "project:alpha"] });
+      expect(source.daemon.db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE body = ?")
+        .get("scope contract body")).toEqual({ n: 1 });
+      expect(calls.committedBeforeLoss).toEqual([stored]);
+      expect(calls.posts).toEqual(["/api/queue/create"]);
+      expect(calls.postStatuses).toEqual([201]);
+      expect(calls.readbacks.map(call => call.url)).toEqual(["/api/queue/qitem-create-contract"]);
+      expect(stdout).toEqual([]);
+      expect(stderr.join("\n")).toContain("couldn't read this daemon's host id to tell whether its source is this create's");
+      expect(stderr.join("\n")).toContain("outcome is still unknown");
+      expect(stderr.join("\n")).not.toContain("committed after all");
+      expect(scopeLines()).not.toMatch(/scope check|\bforwarded\b/i);
+      unchanged();
+    },
+  );
+
+  async function recoverForwardedCommit(readHealth?: (observation: number) => string | null) {
     const receiver = await fixture("receiver");
     const sourceUnchanged = preserveAuthored(source);
     const receiverUnchanged = preserveAuthored(receiver);
     const { app, observation } = forwardingApp(receiver, true);
-    const { factory, calls } = recoveredClient(app, receiver, false);
+    const { factory, calls } = recoveredClient(app, receiver, false, readHealth);
     const home = path.join(scratch, "cli-home");
     fs.mkdirSync(home);
     fs.writeFileSync(path.join(home, "hosts.yaml"), "hosts:\n  - id: remote-fixture\n    transport: http\n    url: http://remote-fixture.invalid:39001\n");
@@ -442,7 +510,17 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect.soft(scopeLines()).toContain("mission:release");
     expect.soft(scopeLines()).toContain("slice:SLICE.ONE");
     expect.soft(scopeLines()).not.toMatch(/unavailable|unresolved|resolves to 0/i);
+  }
+
+  it("reconciles a forwarded indeterminate commit with SKIPPED and destination provenance", async () => {
+    await recoverForwardedCommit();
   });
+
+  it.each(["null", "unreadable"] as const)(
+    "keeps confirmed remote recovery SKIPPED when later health is %s", async later => {
+      await recoverForwardedCommit(healthAfterMatchedRecovery(later));
+    },
+  );
 
   it.each([
     { level: "mission", tags: ["mission:release", "mission:MISSION.ONE", "slice:SLICE.ONE", "project:alpha"] },
