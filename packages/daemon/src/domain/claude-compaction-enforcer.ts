@@ -434,6 +434,8 @@ export interface RestoreDeliveryAttempt {
   errorClass?: string;
   failures: number;
   noticeErrorClass?: string;
+  /** Consecutive polls of this owed stage whose readiness could not be determined. */
+  unknownReadinessPolls?: number;
   /** Legacy unreadable-poll count from records written before restore input followed ordinary delivery defaults. */
   unreadable?: number;
   /** What the input box read: on a hold, the reading held on; on a delivery over a box OpenRig couldn't read (#2575),
@@ -443,6 +445,7 @@ export interface RestoreDeliveryAttempt {
 
 /** Legacy #2575 threshold for old diagnostics. Managed input now follows ordinary draft-delivery defaults. */
 export const UNREADABLE_POLLS_BEFORE_DELIVERY = 2;
+const UNKNOWN_READINESS_POLLS_BEFORE_DELIVERY = 2;
 export interface RestoreDeliveryFailure {
   sessionName: string;
   attemptId: string;
@@ -861,11 +864,13 @@ export class ClaudeCompactionEnforcer {
     const steps = { turn_boundary: "post-compaction turn boundary", restore_prompt: "restore request", compliance_prompt: "post-restore audit" };
     const failure = !lastDelivery ? "" : lastDelivery.reason === "delivered_over_unreadable_input_box"
       ? ` The ${steps[lastDelivery.stage]} went in at ${lastDelivery.at} over an input box OpenRig couldn't read (it read ${lastDelivery.inputBox ?? "unknown"}); a draft there, if any, may hold its text.`
+      : lastDelivery.reason === "delivered_over_unreadable_pane"
+        ? ` The ${steps[lastDelivery.stage]} went in at ${lastDelivery.at} over a pane OpenRig couldn't read; its activity remained unknown.`
       : ` ${failed ? "Last delivery" : "waiting: seat busy"} at ${lastDelivery.at}: ${[lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass, lastDelivery.noticeErrorClass && `owner notice failed (${lastDelivery.noticeErrorClass})`].filter(Boolean).join("; ")}. OpenRig will retry on its existing polls.${lastDelivery.unreadable
         ? " The operator’s draft-protection settings still apply." : ""}`;
     const step = steps[stage];
     if (!this.afterUncertainCompact.has(sessionName)) {
-      return { stage, held: failed, ...last, detail: `OpenRig owes this seat its ${step} next, sent on a poll once the pane is idle.${failure}` };
+      return { stage, held: failed, ...last, detail: `OpenRig owes this seat its ${step} next, sent once the pane is idle or after two consecutive polls cannot determine its activity.${failure}` };
     }
     const inputBox = lastDelivery?.inputBox ?? this.lastInputBox.get(sessionName) ?? "not_checked";
     const held = failed || (inputBox !== "not_checked" && inputBox !== "empty" && inputBox !== "likely-suggestion");
@@ -988,9 +993,12 @@ export class ClaudeCompactionEnforcer {
     } finally {
       // The awaited lifecycle has settled: notice work must not inherit its active lease.
       const lastDelivery = record?.record.lastDelivery;
-      if (record && lastDelivery && lastDelivery !== previous && lastDelivery.failures >= 2 && this.onRestoreDeliveryFailure) {
+      const deliveredUnreadable = lastDelivery?.reason === "delivered_over_unreadable_pane";
+      if (record && lastDelivery && lastDelivery !== previous && (lastDelivery.failures >= 2 || deliveredUnreadable) && this.onRestoreDeliveryFailure) {
         void Promise.resolve().then(() => {
-          if (this.records.get(input.sessionName) !== record || record.record.lastDelivery !== lastDelivery || this.pendingPostCompactRestore.get(input.sessionName) !== stage) return;
+          const current = this.records.get(input.sessionName);
+          if ((current !== record && !(deliveredUnreadable && !current && !this.pendingPostCompactRestore.has(input.sessionName)))
+            || record.record.lastDelivery !== lastDelivery || (!deliveredUnreadable && this.pendingPostCompactRestore.get(input.sessionName) !== stage)) return;
           return this.onRestoreDeliveryFailure!({ sessionName: input.sessionName, attemptId: record.record.attemptId, mapPath: record.record.mapPath,
             markerPath: path.join(this.openrigHome, "compaction", "restore-pending", `${sanitizeSessionKey(input.sessionName)}.json`), lastDelivery });
         }).catch(error => {
@@ -1012,8 +1020,9 @@ export class ClaudeCompactionEnforcer {
     const prior = record.record.lastDelivery;
     // Active work is the expected wait between restore steps, not an undeliverable stage.
     const waiting = result.reason === "wait_for_idle_timeout" && result.activity?.state === "running";
-    // The idle wait passed and the box read neither empty nor typed. A recognised draft, a hold with no reading, or any
-    // other result breaks the run.
+    const unknownReadinessPolls = !result.ok && result.reason === "target_activity_unknown"
+      ? (prior?.stage === stage ? prior.unknownReadinessPolls ?? 0 : 0) + 1 : 0;
+    // Retain the earlier input-box diagnostic separately from unknown pane readiness.
     const held = result.heldInputBox;
     const unreadable = !result.ok && result.reason === "draft_input_unknown" && held && held !== "typed" && held !== "typed-with-suggestion"
       ? (prior && prior.stage === stage ? prior.unreadable ?? 0 : 0) + 1 : 0;
@@ -1023,6 +1032,7 @@ export class ClaudeCompactionEnforcer {
       ...(result.activity ? { activity: { state: result.activity.state, reason: result.activity.reason, evidenceSource: result.activity.evidenceSource } } : {}),
       ...(errorClass ? { errorClass } : {}), failures: waiting ? 0 : (prior?.failures ?? 0) + 1,
       ...(held ? { inputBox: held } : {}), ...(unreadable ? { unreadable } : {}),
+      ...(unknownReadinessPolls ? { unknownReadinessPolls } : {}),
     };
     this.persist(session, record.record.attemptId, { lastDelivery });
   }
@@ -1043,7 +1053,7 @@ export class ClaudeCompactionEnforcer {
     policy: ClaudeCompactionPolicy,
   ): Promise<EnforcerOutcome | null> {
     // A missing or still-high sample need not show that /compact has finished. The newest idle
-    // hook can predate it, so these drains require a live pane read to establish idle.
+    // hook can predate it: require live readiness, then admit only unknown after two consecutive owed-stage polls.
     const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
     const attempt = this.pendingPreCompactPrep.get(input.sessionName);
     const isCurrent = () => this.pendingPostCompactRestore.get(input.sessionName) === pendingStage
@@ -1052,6 +1062,8 @@ export class ClaudeCompactionEnforcer {
     const sendOpts = {
       openrigNotice: true as const,
       allowDraftWhileIdle: true as const,
+      ...((this.records.get(input.sessionName)?.record.lastDelivery?.unknownReadinessPolls ?? 0) >= UNKNOWN_READINESS_POLLS_BEFORE_DELIVERY
+        ? { allowUnknownWhileIdle: true as const } : {}),
       ...(pendingStage === "turn_boundary" && this.afterUncertainCompact.has(input.sessionName) ? { preserveInput: true as const } : {}),
       beforeWrite: () => {
         if (!isCurrent()) throw new DeliveryGuardError("compaction_cancelled", "Managed compaction was cancelled or replaced; no further input is authorized.");
@@ -1814,8 +1826,10 @@ export class ClaudeCompactionEnforcer {
     if (current) this.persist(sessionName, current.record.attemptId, { phase, ...(reason !== undefined ? { reason } : {}), lastDelivery });
   }
 
-  /** A step that went in over a box OpenRig couldn't read stays on the record as that (#2575); any other advance clears it. */
+  /** An unreadable pane or input box stays explicit on the delivered step; any other advance clears it. */
   private overUnreadableDelivery(stage: PendingPostCompactStage, result: SendResult): RestoreDeliveryAttempt | undefined {
+    if (result.activity?.state === "unknown") return { stage, at: new Date(this.now()).toISOString(), ok: true,
+      reason: "delivered_over_unreadable_pane", activity: { state: "unknown", reason: result.activity.reason, evidenceSource: result.activity.evidenceSource }, failures: 0 };
     return result.pastedOverInputBox ? { stage, at: new Date(this.now()).toISOString(), ok: true,
       reason: "delivered_over_unreadable_input_box", inputBox: result.pastedOverInputBox, failures: 0 } : undefined;
   }

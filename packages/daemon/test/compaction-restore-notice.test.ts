@@ -37,7 +37,10 @@ it.each(["target_activity_unknown", "input_box_not_empty"])("notifies the seat's
     expect(body).toContain("Restore input follows ordinary delivery defaults");
     expect(body).toContain("transport.draft_delivery=refuse");
     const possibleWriteHold = "This step waits because this attempt's /compact may be waiting unsubmitted in the input box, where Enter could submit it; inspect the pane and clear or submit that text so the next poll can retry this restore step.";
-    if (reason === "input_box_not_empty") expect(body).toContain(possibleWriteHold);
+    if (reason === "input_box_not_empty") {
+      expect(body).toContain(possibleWriteHold);
+      expect(body).toContain("If the box can't be read, cancel and restore by hand using the route below.");
+    }
     else expect(body).not.toContain(possibleWriteHold);
     expect(body).toContain("first run rig compact 'writer@restore-notice' --cancel, so OpenRig stops owing the remaining steps (a step it is already pasting at that moment can still land)");
     expect(body).toContain("naming the restore map, its restore-pending marker /openrig/compaction/restore-pending/writer.json and the packet the marker names.");
@@ -49,6 +52,14 @@ it.each(["target_activity_unknown", "input_box_not_empty"])("notifies the seat's
     await reportRestoreDeliveryFailure(db, restarted, failure);
     expect(restarted.getById(id)?.summary).toContain("typing_guard_enabled");
     expect(restarted.listTransitions(id).filter(t => t.transitionNote?.includes("summary updated"))).toHaveLength(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    failure.lastDelivery.reason = "input_box_not_empty";
+    await reportRestoreDeliveryFailure(db, restarted, failure);
+    expect(restarted.listTransitions(id).at(-1)?.transitionNote).toContain(possibleWriteHold);
+    expect(restarted.listTransitions(id).at(-1)?.transitionNote).toContain("If the box can't be read, cancel and restore by hand using the route below.");
+    failure.lastDelivery = { ...failure.lastDelivery, ok: true, reason: "delivered_over_unreadable_pane", failures: 0 };
+    await reportRestoreDeliveryFailure(db, restarted, failure);
+    expect(restarted.getById(id)?.summary).toContain("delivered over an unreadable pane");
     expect(send).toHaveBeenCalledTimes(1);
     restarted.update({ qitemId: id, actorSession: "owner@restore-notice", state: "done", closureReason: "no-follow-on" });
     failure.lastDelivery.reason = "target_needs_input";
