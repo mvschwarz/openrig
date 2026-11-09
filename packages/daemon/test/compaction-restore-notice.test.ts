@@ -11,7 +11,7 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { reportPreparationFailure, reportRestoreDeliveryFailure } from "../src/domain/compaction-restore-notice.js";
 import type { PreparationFailure, RestoreDeliveryFailure } from "../src/domain/claude-compaction-enforcer.js";
 
-it("notifies the seat's owner once, updates a changed refusal without another wake, and honors the owner's closure", async () => {
+it.each(["target_activity_unknown", "input_box_not_empty"])("notifies the seat's owner once for %s, updates a changed refusal without another wake, and honors the owner's closure", async (reason) => {
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
   try {
@@ -27,7 +27,7 @@ it("notifies the seat's owner once, updates a changed refusal without another wa
     const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true, transport: { send } });
     const failure: RestoreDeliveryFailure = { sessionName: "writer@restore-notice", attemptId: "attempt-one", mapPath: "/maps/attempt-one/RESTORE-MAP.md",
       markerPath: "/openrig/compaction/restore-pending/writer.json",
-      lastDelivery: { stage: "turn_boundary", at: "2026-01-01T00:00:00Z", ok: false, reason: "target_activity_unknown", failures: 2 } };
+      lastDelivery: { stage: "turn_boundary", at: "2026-01-01T00:00:00Z", ok: false, reason, failures: 2 } };
     await reportRestoreDeliveryFailure(db, queue, failure);
     await Promise.all([reportRestoreDeliveryFailure(db, queue, failure), reportRestoreDeliveryFailure(db, queue, failure)]);
     const id = "qitem-compaction-restore-attempt-one";
@@ -36,6 +36,9 @@ it("notifies the seat's owner once, updates a changed refusal without another wa
     const body = queue.getById(id)?.body ?? "";
     expect(body).toContain("Restore input follows ordinary delivery defaults");
     expect(body).toContain("transport.draft_delivery=refuse");
+    const possibleWriteHold = "This step waits because this attempt's /compact may be waiting unsubmitted in the input box, where Enter could submit it; inspect the pane and clear or submit that text so the next poll can retry this restore step.";
+    if (reason === "input_box_not_empty") expect(body).toContain(possibleWriteHold);
+    else expect(body).not.toContain(possibleWriteHold);
     expect(body).toContain("first run rig compact 'writer@restore-notice' --cancel, so OpenRig stops owing the remaining steps (a step it is already pasting at that moment can still land)");
     expect(body).toContain("naming the restore map, its restore-pending marker /openrig/compaction/restore-pending/writer.json and the packet the marker names.");
     expect(send).toHaveBeenCalledTimes(1);
