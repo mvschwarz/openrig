@@ -22,9 +22,10 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
   let bus: EventBus;
   let repo: QueueRepository;
 
-  function makeRepo(opts: { hostedWake?: (d: string) => RosterWake | null; resolveSessionAddresses?: (n: string) => string[] } = {}): QueueRepository {
+  function makeRepo(opts: { hostedWake?: (d: string) => RosterWake | null; resolveSessionAddresses?: (n: string) => string[];
+    validateRig?: (d: string) => boolean } = {}): QueueRepository {
     return new QueueRepository(db, bus, {
-      validateRig: () => true,
+      validateRig: opts.validateRig ?? (() => true),
       loadHumanRegistry: () => ({ ok: true, entities: [] }),
       isHostedMember: (d) => d === MEMBER,
       hostedWake: opts.hostedWake ?? (() => null),
@@ -294,6 +295,36 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     await sweep(noPerson);
     expect(notices().filter((n) => n.state === "pending").map((n) => n.qitemId)).toEqual([open[0]!.qitemId]);
     expect(repo.getById(open[0]!.qitemId)!.body).toContain(third.qitemId);
+    expect(perRow()).toEqual([]);
+  });
+
+  it("a re-file whose new notice can't be created leaves the old notice as it was, so no row loses its notice", async () => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    let refuseOperator = false;
+    repo = makeRepo({ validateRig: (d) => !(refuseOperator && d === "operator@hub") });
+    const noPerson = { resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" };
+    const first = await work(MEMBER, { ageMinutes: 61 });
+    await sweep(noPerson);
+    const [toLead] = notices();
+    expect(toLead!.destinationSession).toBe("lead@hub");
+
+    // The re-file's create fails: the old notice stays open and isn't rewritten, so it never lists the other row.
+    const other = await work(MEMBER, { from: "orch@hub", ageMinutes: 70 });
+    refuseOperator = true;
+    const failed = await sweep(noPerson);
+    expect(failed.outcome).toBe("failed");
+    expect(repo.getById(toLead!.qitemId)!.body).toBe(toLead!.body);
+
+    // The other creator's row is claimed before the next passes: the first row is still on exactly one open notice.
+    repo.claim({ qitemId: other.qitemId, destinationSession: MEMBER });
+    refuseOperator = false;
+    await sweep(noPerson);
+    await sweep(noPerson);
+    const open = notices().filter((n) => n.state === "pending" && n.body.includes(first.qitemId));
+    expect(open.map((n) => n.qitemId)).toEqual([toLead!.qitemId]);
+    expect(repo.getById(toLead!.qitemId)!.state).toBe("pending");
+    expect(notices().every((n) => n.destinationSession !== "lead@hub" || !n.body.includes(other.qitemId))).toBe(true);
     expect(perRow()).toEqual([]);
   });
 });

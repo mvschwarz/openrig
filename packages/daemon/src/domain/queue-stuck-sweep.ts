@@ -1428,7 +1428,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         const distinct = [...new Set(creators)];
         return noWakeRecipient(seat, distinct.length === 1 ? distinct[0]! : null).seat ?? seat;
       };
-      const fileNotice = async (text: { summary: string; body: string }, recipient: string): Promise<void> => {
+      /** Files a notice and wakes its recipient; false when the create failed (reported in failedCreates). */
+      const fileNotice = async (text: { summary: string; body: string }, recipient: string): Promise<boolean> => {
         try {
           const created = await deps.queueRepo.create({
             // A notice about a seat's own rows comes from that seat, as a restore notice does; OpenRig wakes its recipient.
@@ -1442,11 +1443,13 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           });
           othersMayHaveRun();
           findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: created.qitemId, action: "created" });
+          return true;
         } catch (err) {
           const message = `unclaimed-backlog notice for ${seat} not created: ${err instanceof Error ? err.message : String(err)}`;
           othersMayHaveRun();
           log(`[stuck-sweep] ${message}`);
           failedCreates.push(message);
+          return false;
         }
       };
       const last = deps.db
@@ -1491,21 +1494,23 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           continue;
         }
         // A notice that went to one of its rows' creators (no person reachable) shows that creator only rows it sent. When a
-        // row from anyone else would join it, it closes, and one notice for every row it stands for goes where a new notice
-        // would go now, which wakes that recipient. A person, the operator agent and the member see any of the rows.
+        // row from anyone else would join it, one notice for every row it stands for goes where a new notice would go now,
+        // which wakes that recipient, and only then does this one close: a notice the sweep closed holds its rows back, so a
+        // failed create leaves it open as it was (not rewritten), and the next pass tries again. A person, the operator
+        // agent and the member see any of the rows.
         if (polled && last.destination_session !== seat && !seesAnyRow(last.destination_session)
           && standsFor.some((r) => r.from !== last.destination_session)) {
           const recipient = recipientFor(standsFor.map((r) => r.from));
+          if (!(await fileNotice(backlogText(standsFor), recipient))) continue;
           await deps.queueRepo.update({
             qitemId: last.qitem_id,
             actorSession: "stuck-sweep@system",
             state: "done",
             closureReason: "no-follow-on",
-            transitionNote: `stuck-sweep re-filed: unclaimed-backlog on ${seat}: a row it stands for didn't come from ${last.destination_session}, the creator it went to; one notice for every row goes to ${recipient}`,
+            transitionNote: `stuck-sweep re-filed: unclaimed-backlog on ${seat}: a row it stands for didn't come from ${last.destination_session}, the creator it went to; one notice for every row went to ${recipient}`,
           });
           othersMayHaveRun();
           findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: last.qitem_id, action: "closed" });
-          await fileNotice(backlogText(standsFor), recipient);
           continue;
         }
         const text = backlogText(standsFor);
