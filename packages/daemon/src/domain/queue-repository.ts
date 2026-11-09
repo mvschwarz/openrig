@@ -1055,6 +1055,7 @@ export class QueueRepository {
   // a new positive refusal/attention episode, so a returning prompt cannot spin retries.
   private readonly promptRecoveryState = new Map<string, boolean>();
   private readonly promptClearRetries = new Map<string, number>();
+  private readonly unroutableRetries = new Set<string>();
   private resolveOccupantGeneration?: (sessionName: string) => string | null;
   private readonly resolveSessionAddresses: (name: string) => string[];
   private readonly hasPendingPostCompactStage?: (sessionName: string) => boolean;
@@ -1910,6 +1911,31 @@ export class QueueRepository {
         const remaining = this.promptClearRetries.get(row.qitem_id)! - 1;
         if (remaining) this.promptClearRetries.set(row.qitem_id, remaining);
         else this.promptClearRetries.delete(row.qitem_id);
+      }
+    }
+  }
+
+  /** A wake recorded unroutable because its seat wasn't bound yet, as just after a restart (#2789), is re-sent as soon
+   *  as the seat is seen running or idle, rather than at the stuck sweep's next tick; the sweep remains the backstop.
+   *  Only this seat's own pending, unclaimed rows, once it classifies pane-bound, and never one held for quiet hours.
+   *  Rows on a handoff's retry ladder are left to the ladder. */
+  async retryUnroutableWakesOnReachable(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
+    if (state !== "running" && state !== "idle") return;
+    const addresses = this.resolveSessionAddresses(sessionName);
+    if (!addresses.length) return;
+    const rows = this.db.prepare(`SELECT qitem_id, destination_session, source_session FROM queue_items
+      WHERE destination_session IN (${addresses.map(() => "?").join(",")}) AND state = 'pending' AND claimed_at IS NULL
+        AND handed_off_from IS NULL AND last_nudge_result LIKE 'unroutable:%'`)
+      .all(...addresses) as Array<{ qitem_id: string; destination_session: string; source_session: string }>;
+    for (const row of rows) {
+      if (this.unroutableRetries.has(row.qitem_id)) continue; // a retry for it is already in flight
+      if (this.classifyDestinationOf(row.destination_session).class !== "pane-bound") continue;
+      if (["held", "released"].includes(quietHoldCustody(this.db, row.qitem_id)?.state ?? "")) continue;
+      this.unroutableRetries.add(row.qitem_id);
+      try {
+        await this.deliverWakeForSuccessor(row.qitem_id, row.destination_session, true, row.source_session);
+      } finally {
+        this.unroutableRetries.delete(row.qitem_id);
       }
     }
   }

@@ -630,6 +630,28 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     return { sent, outbox, row };
   }
 
+  // #2789: the seat needn't wait for the sweep's next tick. Seen running or idle once bound, it gets the wake at once,
+  // through the same intent, and the sweep after it has nothing left to send or report.
+  it("re-sends a wake recorded unroutable as soon as its bound seat is seen idle, leaving the sweep nothing to do", async () => {
+    const { sent, outbox, row } = await lateSeatWithOutbox();
+    await repo.retryUnroutableWakesOnReachable("late@r", "idle");
+    expect(sent).toEqual(["late@r"]);
+    expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("delivered");
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).not.toMatch(/^unroutable:/);
+    await runSweep();
+    await repo.drainPendingWakeIntents();
+    expect(sent).toEqual(["late@r"]);
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it("doesn't re-send an unroutable wake while the seat waits at a prompt, or for another seat's activity", async () => {
+    const { sent, row } = await lateSeatWithOutbox();
+    await repo.retryUnroutableWakesOnReachable("late@r", "needs_input");
+    await repo.retryUnroutableWakesOnReachable("sender@r", "idle");
+    expect(sent).toEqual([]);
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).toMatch(/^unroutable:/);
+  });
+
   it("re-sends through the row's wake intent: the intent reads delivered, and a later drain sends nothing", async () => {
     const { sent, outbox, row } = await lateSeatWithOutbox();
     await runSweep();
