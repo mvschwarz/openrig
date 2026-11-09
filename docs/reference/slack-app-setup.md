@@ -457,7 +457,8 @@ Each pass admits at most four history calls, 100 entries and 15 seconds of work,
 five-second request ceiling. Channels and threads take turns within that one budget. Each tracked
 thread is scanned once after each start and after each Socket Mode reconnect that followed a gap
 (not a refresh Slack overlaps with the old connection), which catches replies sent while no
-connection was up; replies while connected arrive live. Those scans go in need order: a thread
+connection was up; replies while connected arrive live. A thread the pass at the connect itself
+reaches is scanned once more, since that pass stops five seconds short of the connect. Those scans go in need order: a thread
 leaving the seven-day window within six hours first, since once it leaves a missed reply is never
 recovered; then threads whose ask still waits on the person (its queue row is pending, in progress
 or blocked) before the rest, each newest first. The order comes from the saved checkpoints, so a

@@ -39,8 +39,10 @@ export class ThreadRecovery implements RecoverySource {
   lastScanAt: string | undefined;
   accepted = 0;
   deadLettered = 0;
-  /** When this process last asked Slack for the thread's replies (ms), whatever the answer. Orders retries fairly. */
-  lastCallAt: number | undefined;
+  /** When a call for the thread's replies last got nowhere (ms): an error, a page that couldn't be trusted, or a landing
+   *  that couldn't finish. Orders retries fairly. A call that made progress, or stopped short at the settle margin or the
+   *  pass budget, never sets it, so that thread keeps its first-attempt priority. In memory only. */
+  lastStalledAt: number | undefined;
   private coverage: ThreadCoverage;
 
   constructor(private readonly opts: ThreadRecoveryOptions) {
@@ -77,7 +79,7 @@ export class ThreadRecovery implements RecoverySource {
     try {
       return await this.page(budget, backoff);
     } catch {
-      if (!this.opts.stopped()) { this.state = "incomplete"; this.reason = "storage-or-routing-failed"; }
+      if (!this.opts.stopped()) { this.state = "incomplete"; this.reason = "storage-or-routing-failed"; this.lastStalledAt = this.opts.now(); }
       return "done";
     }
   }
@@ -109,13 +111,13 @@ export class ThreadRecovery implements RecoverySource {
     const upper = slackMicros(c.pending!.upper)!;
     const limit = Math.min(PAGE, 100 - budget.entries);
     budget.calls++;
-    this.lastCallAt = now;
     const r = await callWebApi(REPLIES, this.opts.token, {
       channel: this.opts.channel, ts: this.opts.threadTs, oldest: slackTimestamp(lower > 0n ? lower - 1n : 0n),
       latest: c.pending!.upper, inclusive: false, limit,
     }, this.opts.fetchImpl, Math.min(5000, budget.deadline - this.opts.now()), "get-query");
     if (this.opts.stopped()) return "done";
     if (!r.ok) {
+      this.lastStalledAt = now;
       const known = ["missing_scope", "not_in_channel", "channel_not_found", "thread_not_found", "invalid_auth", "token_revoked"];
       if (r.error === "thread_not_found") {
         this.save({ ...c, notFoundAt: this.opts.now() });
@@ -136,11 +138,11 @@ export class ThreadRecovery implements RecoverySource {
         (cursor !== undefined && typeof cursor !== "string") || replies.length > limit ||
         replies.some(m => !m || typeof m !== "object" || m.thread_ts !== this.opts.threadTs || slackMicros(m.ts) === null ||
           slackMicros(m.ts)! < lower || slackMicros(m.ts)! >= upper)) {
-      this.state = "incomplete"; this.reason = "invalid-replies-page"; return "done";
+      this.state = "incomplete"; this.reason = "invalid-replies-page"; this.lastStalledAt = now; return "done";
     }
     const ordered = [...replies].sort((a, b) => slackMicros(a.ts)! < slackMicros(b.ts)! ? -1 : 1);
     const more = r.json.has_more === true || (typeof cursor === "string" && cursor.length > 0);
-    if (more && !ordered.length) { this.state = "incomplete"; this.reason = "replies-page-no-progress"; return "done"; }
+    if (more && !ordered.length) { this.state = "incomplete"; this.reason = "replies-page-no-progress"; this.lastStalledAt = now; return "done"; }
     for (const message of ordered) {
       if (this.opts.stopped()) return "done";
       if (this.opts.now() >= budget.deadline || budget.entries >= 100) { this.state = "incomplete"; this.reason = "pass-budget"; return "done"; }
@@ -153,7 +155,7 @@ export class ThreadRecovery implements RecoverySource {
       const landed = await this.opts.router.route(ev, 0, () => !this.opts.stopped());
       if (this.opts.stopped()) return "done";
       if (landed.reason === "inflight" || landed.reason === "inactive") {
-        this.state = "incomplete"; this.reason = "landing-in-progress"; return "done";
+        this.state = "incomplete"; this.reason = "landing-in-progress"; this.lastStalledAt = now; return "done";
       }
       if (landed.disposition === "accepted") this.accepted++;
       if (landed.disposition === "dead-lettered") this.deadLettered++;

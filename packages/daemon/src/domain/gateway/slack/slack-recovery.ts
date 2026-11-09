@@ -207,7 +207,7 @@ export class SlackRecovery {
       if (prior && prior.mapping === mapping) { next.set(key, { ...prior, waiting, expiresAt }); continue; }
       const source = new ThreadRecovery({ channel: t.channel, threadTs: t.threadTs, token: this.opts.token, store: this.threadStore,
         stored: stored[key], router: this.opts.router, fetchImpl: this.opts.fetchImpl, now: this.now, stopped: () => this.stopped });
-      source.lastCallAt = prior?.source.lastCallAt;
+      source.lastStalledAt = prior?.source.lastStalledAt;
       next.set(key, { mapping, waiting, expiresAt, source });
     }
     this.threads = next;
@@ -247,7 +247,7 @@ export class SlackRecovery {
         "coverage means scanned available history; dead letters are custody, not delivery",
         "five-second settle margin; larger clock skew or history visibility lag remains unverified",
         "four calls / 100 entries / 15 seconds per pass, taken in turn by channels and threads; no global chronological ordering",
-        "each thread is scanned once after boot or a reconnect from a gap: any leaving the seven-day window within six hours first, then those whose ask waits on the person, then the rest, newest first; "
+        "each thread is scanned once after boot or a reconnect from a gap (twice if the pass at the connect itself reached it, since that pass stops at the settle margin): any leaving the seven-day window within six hours first, then those whose ask waits on the person, then the rest, newest first; "
           + `after that hourly while its ask waits, otherwise ${this.opts.relayed ? "every three hours (relayed: no gap is visible here)" : "daily"}`,
       ],
       channels: others.map(({ limits: _limits, ...rest }) => rest),
@@ -270,20 +270,20 @@ export class SlackRecovery {
 /** The order a pass takes the due threads in, derived from saved coverage so a restart keeps it. First every thread not
  *  yet scanned since live events last began: any about to leave the window, soonest first; then those whose ask waits on
  *  the person, then the rest, each newest root first. Then the backstop rescans, least recently scanned first. So a boot
- *  reaches the newest open ask first, after only the few threads that would otherwise never be scanned. That priority
- *  holds for a thread's first call since then; a thread already asked (one that failed, or ran out of budget partway)
- *  waits behind every thread not yet asked, least recently asked first, so a thread that keeps failing can't hold the
- *  same turn pass after pass. */
+ *  reaches the newest open ask first, after only the few threads that would otherwise never be scanned. A thread whose
+ *  call got nowhere since then (an error, or a page that couldn't be trusted) waits behind every other unscanned thread,
+ *  least recently stalled first, so a thread that keeps failing can't hold the same turn pass after pass. A thread that
+ *  made progress but stopped short, at the settle margin or partway through a long backlog, keeps its place. */
 function threadOrder(threads: TrackedSource[], listeningSince: number, now: number): ThreadRecovery[] {
   const floor = BigInt(listeningSince) * 1000n;
   const scannedAt = (t: ThreadRecovery) => { const through = slackMicros(t.coveredThrough)!; return through >= floor ? through : -1n; };
-  const askedAt = (t: ThreadRecovery) => (t.lastCallAt !== undefined && t.lastCallAt >= listeningSince ? t.lastCallAt : -1);
+  const stalledAt = (t: ThreadRecovery) => (t.lastStalledAt !== undefined && t.lastStalledAt >= listeningSince ? t.lastStalledAt : -1);
   const root = (t: ThreadRecovery) => slackMicros(t.threadTs)!;
   return threads.sort((a, b) => {
     const sa = scannedAt(a.source), sb = scannedAt(b.source);
     if (sa !== sb) return sa < sb ? -1 : 1;
     if (sa === -1n) {
-      const qa = askedAt(a.source), qb = askedAt(b.source);
+      const qa = stalledAt(a.source), qb = stalledAt(b.source);
       if (qa !== qb) return qa - qb;
       const ea = a.expiresAt - now < EXPIRING_SOON_MS, eb = b.expiresAt - now < EXPIRING_SOON_MS;
       if (ea !== eb) return ea ? -1 : 1;

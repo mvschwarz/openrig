@@ -600,6 +600,53 @@ it("threads that keep failing ahead of a reachable waiting ask can't take its tu
   expect(f.rows().filter(row => row.destinationSession === "reachable@test")).toHaveLength(1);
 });
 
+it("a reply on the newest waiting ask just before a reconnect is recovered on the next pass, though the connect's own pass stopped short", async () => {
+  const f = fixture();
+  // Ten waiting asks, more than a pass's four thread calls.
+  for (let i = 1; i <= 10; i++) f.ask(ts(i), "pending", `open${i}@test`);
+  const r = f.recovery();
+  f.advance(5000);
+  for (let pass = 0; pass < 3; pass++) { await r.run(); f.advance(300_000); }
+  expect(new Set(f.calls("conversations.replies").map(u => u.searchParams.get("ts"))).size).toBe(10);
+
+  // A reply three seconds before live delivery resumes, and a pass at the connect itself, which stops short of it.
+  f.replies[`C1:${ts(10)}`] = [f.reply(1997, ts(10), { text: "just before" })];
+  f.time(at(2000)); r.connected();
+  const before = f.calls("conversations.replies").length;
+  await r.run();
+  const atConnect = f.calls("conversations.replies").slice(before).map(u => u.searchParams.get("ts"));
+  expect(atConnect[0]).toBe(ts(10));
+  expect(atConnect.length).toBeLessThan(10);
+  expect(f.rows().filter(row => row.destinationSession === "open10@test")).toHaveLength(0);
+
+  // Its call made progress, so it keeps its place ahead of the six threads not yet asked since the connect.
+  f.time(at(2300));
+  const next = f.calls("conversations.replies").length;
+  await r.run();
+  expect(f.calls("conversations.replies")[next]!.searchParams.get("ts")).toBe(ts(10));
+  expect(f.rows().filter(row => row.destinationSession === "open10@test")).toHaveLength(1);
+});
+
+it("a waiting ask whose backlog needs a second page keeps its place ahead of threads not yet asked", async () => {
+  const f = fixture();
+  for (let i = 1; i <= 10; i++) f.ask(ts(i), "pending", `open${i}@test`);
+  // The newest ask has twenty missed replies: more than a page.
+  f.replies[`C1:${ts(10)}`] = Array.from({ length: 20 }, (_, i) => f.reply(11 + i, ts(10)));
+  const r = f.recovery();
+  f.advance(5000);
+
+  await r.run();
+  const first = f.calls("conversations.replies").map(u => u.searchParams.get("ts"));
+  expect(first[0]).toBe(ts(10));
+  expect(first.length).toBeLessThan(10);
+  expect(f.rows().filter(row => row.destinationSession === "open10@test").length).toBeLessThan(20);
+
+  f.advance(300_000);
+  await r.run();
+  expect(f.calls("conversations.replies")[first.length]!.searchParams.get("ts")).toBe(ts(10));
+  expect(f.rows().filter(row => row.destinationSession === "open10@test")).toHaveLength(20);
+});
+
 it("on a machine the hub relays to, which can't see a gap in relayed events, a settled thread's backstop is three hours", async () => {
   const f = fixture();
   f.ask(ts(1), "done", "settled@test");
