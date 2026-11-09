@@ -869,7 +869,7 @@ export function setHumanField(
             `cannot unset ${field} (role "primary") while ${remaining.length} other binding(s) remain (${otherSlots}): ` +
             `exactly one connectorBinding must have role "primary" (found 0), and no replacement is chosen silently. ` +
             `To replace the primary, set ${field} to the new primary spec: rig gateway human set ${entityId} ${field} "<kind:connectorRef:secretsRef:primary[:handle=<id>]>". ` +
-            `To promote one of the other bindings (${otherSlots}), first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show ${entityId} --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show ${entityId} --json, since unsetting a lower slot shifts the primary down) and set it to the saved spec with role primary. ` +
+            `To promote one of the other bindings (${otherSlots}), first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show ${entityId} --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show ${entityId} --json, since unsetting a lower slot shifts the primary down) and set it to the saved spec with role primary (promotion replaces the former primary binding; its connector reference and inbound handle are not retained as a secondary). ` +
             `To remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show ${entityId}, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).`,
         };
       }
