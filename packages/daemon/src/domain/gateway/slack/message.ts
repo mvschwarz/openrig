@@ -83,9 +83,12 @@ export interface OutboundMessageOpts {
   /** A retry that couldn't confirm whether an earlier attempt landed says so in one context line, left out when it
    *  doesn't fit. */
   possibleRepeat?: boolean;
+  /** A post whose ask OpenRig couldn't check is still open says so in the same line, left out the same way. */
+  stateUnconfirmed?: boolean;
 }
 
 const POSSIBLE_REPEAT_NOTE = "Delivery may repeat after an earlier unconfirmed attempt.";
+const STATE_UNCONFIRMED_NOTE = "OpenRig couldn't check that this ask is still open.";
 
 /** A1.2 — the four attribution fields. */
 export interface SeatAttribution {
@@ -608,8 +611,9 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
     const instanceLine = buildGateContextLine(q.tags ?? [], true);
     shownContext = fallback(instanceLine).length <= SLACK_TEXT_CAP ? instanceLine : null;
   }
-  // The repeat note is supplementary too: left out rather than refusing a message it would push over a limit.
-  const shownRepeat = opts.possibleRepeat && fallback(shownContext, POSSIBLE_REPEAT_NOTE).length <= SLACK_TEXT_CAP ? POSSIBLE_REPEAT_NOTE : null;
+  // The repeat and state notes are supplementary too: left out rather than refusing a message they would push over a limit.
+  const notes = [opts.possibleRepeat ? POSSIBLE_REPEAT_NOTE : null, opts.stateUnconfirmed ? STATE_UNCONFIRMED_NOTE : null].filter(Boolean).join(" ");
+  const shownRepeat = notes && fallback(shownContext, notes).length <= SLACK_TEXT_CAP ? notes : null;
   const text = bounded(fallback(shownContext, shownRepeat), SLACK_TEXT_CAP, "complete fallback");
   const blocks: unknown[] = [{ type: "context", elements: [{ type: "mrkdwn", text: attr }] }, { type: "section", text: { type: "mrkdwn", text: headline } }];
   const repeatBlock = shownRepeat ? { type: "context", elements: [{ type: "mrkdwn", text: shownRepeat }] } : null;

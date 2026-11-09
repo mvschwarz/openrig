@@ -493,12 +493,14 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(tmux.startServer).not.toHaveBeenCalled();
   });
 
-  it("preserves the adopted seat name and manual cleanup guidance in plans and execution", async () => {
+  it("preserves the adopted seat name and names the release and rig down routes in plans and execution", async () => {
     const seat = seedSeat({ adopted: true });
     const expected = {
       code: "claimed_session",
       message: `Seat "${seat.sessionName}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
-      guidance: "Stop the adopted process yourself, then run rig seat clean before launching fresh.",
+      // B5: rig unclaim releases it (the process keeps running); rig down ends it with its rig.
+      guidance: "Release it with rig unclaim 'dev-impl@fresh-rig' (its process keeps running), end that process yourself, then launch fresh. "
+        + "Or end it with rig down 'fresh-rig' (this rig has one seat, so it stops only this session; rig up 'fresh-rig' --existing brings the rig back).",
     };
     const before = db.serialize();
     expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true, stop: true }))

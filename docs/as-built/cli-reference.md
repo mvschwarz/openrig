@@ -9,23 +9,23 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: 34fdcb80543903b054a982cc48bb302ae6871682
-last-updated: 2026-10-26
+last-verified-against-source: b29a70f14fc11797d46cbd9f12d4e61a523c3d06
+last-updated: 2026-11-09
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `34fdcb80543903b054a982cc48bb302ae6871682`.
+Verified against source commit `e1dedbf531b6db9961b4c77c0a74564e58274a50`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
-There are **90 top-level registrations**, **410 registered command objects**
+There are **92 top-level registrations**, **440 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,304 explicitly registered option objects**, including the root version
+**1,460 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
-These are counts for that source snapshot, not a claim about a deployed release. The provider-switch and set-runtime rows include the later account-home options; those additions are not included in the snapshot counts. The `environment` section and the `host edit`, `host remove` and `terminal attach` rows were added later from source at `522d635c`, and aren't in the snapshot counts either. With `environment`, main registers 91 top-level commands.
+These are counts for that source snapshot, not a claim about a deployed release. Every registered family is inside the snapshot: the `exec` and `environment` families, the `roster` and `telemetry` rows, and the `host edit`, `host remove` and `terminal attach` rows that earlier snapshots listed as later additions are all counted here, as are the herdr-app provider's `terminal close` row and its `--app-home` options.
 
 ## Reading this reference
 
@@ -406,7 +406,7 @@ do not establish connectivity to a live peer.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig mcp` | — | — |
-| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>` |
+| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>`<br>`--front-door`<br>`--task-destination <seat>` |
 | `rig mcp token` | — | — |
 | `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
 | `rig mcp token list` | — | `--json` |
@@ -569,7 +569,7 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--app-home <dir>`<br>`--expected-plan <id>`<br>`--json` |
+| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--app-home <dir>`<br>`--expected-plan <id>`<br>`--follow`<br>`--no-follow`<br>`--max-tiles <count>`<br>`--pin <seats...>`<br>`--unpin <seats...>`<br>`--suppress <seats...>`<br>`--unsuppress <seats...>`<br>`--suppression-ms <ms>`<br>`--grace-ms <ms>`<br>`--focus-retention-ms <ms>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
 | `rig terminal close <view>` | — | `--app-home <dir>`<br>`--json` |
 | `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--app-home <dir>`<br>`--json` |
@@ -677,6 +677,9 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig context` | — | — |
+| `rig context reconstruction` | — | — |
+| `rig context reconstruction inspect` | — | `--store <absolute-path>`<br>`--store-map <file>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--cwd <path>`<br>`--item <id>`<br>`--category <name>`<br>`--tag <name>`<br>`--check-sources`<br>`--max-bytes <bytes>`<br>`--json` |
+| `rig context reconstruction view` | — | `--store <absolute-path>`<br>`--store-map <file>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--cwd <path>`<br>`--item <id>`<br>`--category <name>`<br>`--tag <name>`<br>`--check-sources`<br>`--max-bytes <bytes>`<br>`--json` |
 | `rig context work-install` | — | `--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--deliver`<br>`--runtime <runtime>`<br>`--cwd <path>`<br>`--topology <ids>`<br>`--apply-skills`<br>`--json` |
 | `rig context trace` | — | `--rig <rig>` **required**<br>`--pod <pod>`<br>`--seat <seat>`<br>`--name <file>` **required**<br>`--json` |
 | `rig context compose` | — | `--out <ref>` **required**<br>`--from <files...>` **required** |
