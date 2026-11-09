@@ -102,7 +102,8 @@ describe("S03 production managed capability selection", () => {
     [{ SSH_AUTH_SOCK: "/fixture/agent.sock" }, {}],
     [{}, { SSH_AUTH_SOCK: "/pane-only/agent.sock" }],
     [{ SSH_AUTH_SOCK: "" }, { SSH_AUTH_SOCK: "/pane-only/agent.sock" }],
-  ] as [Record<string, string>, Record<string, string>][])("forwards only supplied daemon user names and agent socket through the actual startup channel: daemon %j, pane %j", async (names, pane) => {
+    [{ USER: "auth-enabled-user" }, {}, { terminal: "synthetic-terminal-bearer", auth: "synthetic-auth-bearer" }],
+  ] as [Record<string, string>, Record<string, string>, { terminal?: string | null; auth?: string }?][])("forwards only supplied daemon user names, agent socket and resolved bearers through the actual startup channel: daemon %j, pane %j", async (names, pane, bearers = {}) => {
     const f = fixture();
     // Execute the actual initializer, without starting a daemon or reading its env.
     const source = readFileSync(new URL("../src/startup.ts", import.meta.url), "utf8");
@@ -113,11 +114,12 @@ describe("S03 production managed capability selection", () => {
       process: { env: { PATH: f.env.PATH, ...names, UNRELATED_VALUE: "not-forwarded" } },
       OPENRIG_HOME: f.env.OPENRIG_HOME, openRigPort: "1", openRigHost: "127.0.0.1",
       resolvedActivityHookUrl: "http://127.0.0.1:1", resolvedActivityHookToken: "synthetic-only",
+      terminalBearerToken: bearers.terminal ?? null, opts: bearers.auth === undefined ? undefined : { bearerToken: bearers.auth },
       providerAuthEnv: {}, daemonHome: f.env.HOME, codexHome: path.join(f.root, "codex"), seatDbPath: path.join(f.root, "instance.sqlite"),
     });
     for (const key of Object.keys(f.env)) delete f.env[key];
     Object.assign(f.env, sessionEnv);
-    writeFileSync(f.executable, `#!${process.execPath}\nif (process.argv.includes('--help')) console.log(${JSON.stringify(help)}); else console.log(JSON.stringify(Object.fromEntries(['USER','LOGNAME','SSH_AUTH_SOCK','UNRELATED_VALUE'].filter(k => process.env[k] !== undefined).map(k => [k,process.env[k]]))));\n`);
+    writeFileSync(f.executable, `#!${process.execPath}\nif (process.argv.includes('--help')) console.log(${JSON.stringify(help)}); else console.log(JSON.stringify(Object.fromEntries(['USER','LOGNAME','SSH_AUTH_SOCK','UNRELATED_VALUE','OPENRIG_TERMINAL_BEARER_TOKEN','OPENRIG_AUTH_BEARER_TOKEN'].filter(k => process.env[k] !== undefined).map(k => [k,process.env[k]]))));\n`);
     const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
     vi.mocked(execFile).mockImplementation(native.execFile);
     const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
@@ -126,7 +128,10 @@ describe("S03 production managed capability selection", () => {
       env: { ...sessionEnv, UNRELATED_VALUE: "not-forwarded", ...pane },
     });
     // An empty daemon value counts as unset.
-    expect(JSON.parse(child)).toEqual(Object.fromEntries(Object.entries(names).filter(([, value]) => value !== "")));
+    expect(JSON.parse(child)).toEqual({ ...Object.fromEntries(Object.entries(names).filter(([, value]) => value !== "")),
+      ...(bearers.terminal ? { OPENRIG_TERMINAL_BEARER_TOKEN: bearers.terminal } : {}),
+      ...(bearers.auth ? { OPENRIG_AUTH_BEARER_TOKEN: bearers.auth } : {}),
+    });
   });
   it.each([
     ["unset", undefined, "present"], ["relative", "./config", "present"],
