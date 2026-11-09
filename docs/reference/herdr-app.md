@@ -52,17 +52,16 @@ falls back to a desktop window or an SSH recipe.
 What an open does, in order:
 
 1. Each viewer is recorded first (`$OPENRIG_HOME/private/herdr-app/clients/`), then started by herdr-core outside
-   every tab (`hc run --bg --no-parent`, labelled `openrig.*`). An interactive local viewer attaches read-only and
-   becomes writable when the view is revealed (read-only panes stay read-only); a seat on another host opens as its own
-   ssh attachment, writable or read-only as that view composes it, and OpenRig doesn't hand over a keyboard for it. If
-   the seat's session ends, the viewer says so and waits; it never leaves a shell in the cell.
+   every tab (`hc run --bg --no-parent`, labelled `openrig.*`). A local viewer runs the view's own tile for its seat,
+   as in [terminal sessions](terminal-sessions.md): it shows the seat, and in an interactive cell the first thing you
+   type attaches it (a read-only cell only shows). A seat on another host opens as its own ssh attachment, writable or
+   read-only as that view composes it. If the seat's session ends, the viewer says so and waits; it never leaves a
+   shell in the cell.
 2. One atomic write of `layouts/rig.json`: your current layout, with OpenRig's stack beside your tab block. Your own
    layout file is never written. A `rig.json` OpenRig didn't write is never overwritten.
 3. The Rig layout is shown, the view is selected once herdr-app confirms it shows the new file, and the keyboard
-   goes to the first live cell. Only then do local interactive seats' viewers become writable. A local viewer in a view
-   herdr-app hasn't confirmed stays read-only until herdr-app shows it (OpenRig keeps watching for up to 10 minutes);
-   then it becomes writable, and the view isn't selected for you. The open reports such a view's seats as unconfirmed,
-   not opened; its viewers keep running and it stays in the Rig layout.
+   goes to the first live cell. The open reports a view herdr-app hasn't confirmed as unconfirmed, not opened; its
+   viewers keep running and it stays in the Rig layout.
 
 Other layouts and other herdr-app windows don't show Rig views. Each window (app home) has its own.
 
@@ -74,8 +73,9 @@ Other layouts and other herdr-app windows don't show Rig views. Each window (app
 - **Your tabs** gives the keyboard back to your own pane.
 - OpenRig's own rewrites (another view opening or closing, a cell ending) never move the keyboard, whether you are in
   a view or in your tabs.
-- A writable viewer stays writable when its seat's session is replaced (a handover, a fresh launch, a restart): the
-  viewer attaches to the new session, and OpenRig hands that viewer's own tmux client the keyboard again.
+- Typing in an interactive cell attaches its tile to the seat; after 30 seconds without a key it goes back to showing
+  it. When the seat's session is replaced (a handover, a fresh launch, a restart), the tile follows the same seat to
+  its new session, as every OpenRig tile does.
 
 ## What OpenRig keeps in the app home
 

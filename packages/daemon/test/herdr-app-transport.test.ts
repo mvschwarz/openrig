@@ -55,7 +55,7 @@ describe("the Rig layout's assumptions, against the captured window", () => {
     const missing = named("layout-switch-missing");
     expect(classifyAppReply(missing.reply.line!)).toMatchObject({ kind: "ok" });
     expect(missing.effect?.status?.layout).not.toBe("rig");
-    // So the provider selects and hands over the keyboard only after the strip acknowledges the written revision.
+    // So the provider selects the view only after the strip acknowledges the written revision.
   });
 
   it("a stack selection is not written back into rig.json: the file keeps `active` on the person's tab block", () => {

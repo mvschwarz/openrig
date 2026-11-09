@@ -22,12 +22,9 @@ export interface ViewerRecord {
   nonce: string;
   /** The exact argv the viewer was started with (verified before it is ever ended). */
   argv: string[];
-  /** Interactive local panes become writable at an explicit reveal; read-only panes never do. */
+  /** As the view composed the pane: a read-only tile only shows its seat; an interactive one takes typed keys. */
   readOnly: boolean;
-  /** Interactive local panes only. pending: not shown yet, so still read-only; granted: the person has seen it, so its own
-   *  tmux client gets the keyboard, again whenever that client is replaced (a handover or restart of the same agent). */
-  writable?: "pending" | "granted";
-  /** Local seats attach via openrig-tile and hand over the keyboard on reveal; remote seats run their own ssh command. */
+  /** Local seats run the view's own tile for the seat (openrig-tile); remote seats run their own ssh command. */
   attach: "local" | "remote";
   terminal: string | null;
   /** planned: journalled, not confirmed started; start-unknown: hc run outcome unknown; live: its terminal is known; ended: written as an ended cell. */

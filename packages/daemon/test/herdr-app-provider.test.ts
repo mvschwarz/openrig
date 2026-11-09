@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HerdrAppProvider, UNKNOWN_START_TTL_MS } from "../src/domain/terminal/herdr-app-provider.js";
+import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 import { HerdrAppClientFiles } from "../src/domain/terminal/herdr-app-state.js";
 import { describeModInstall, installRigMods } from "../src/domain/terminal/herdr-app-install.js";
 import { referencedTerminals, type LayoutNode } from "../src/domain/terminal/herdr-app-layout.js";
@@ -17,13 +18,14 @@ const BASE: LayoutNode = { id: "root", type: "row", children: [
 const pane = (seat: string, readOnly = false): ComposedPane => ({
   seat, label: `${seat.split("@")[0]} · S1`, runtime: "claude-code", readOnly,
   paneCommand: `tmux attach -t '${seat}'`,
-  attachArgv: ["/bin/sh", "-c", "script", "openrig-tile", seat, "/usr/bin/tmux", "-L", "openrig"],
+  // The view's own tile for the seat, as the composer makes it.
+  attachArgv: tileAttachArgv("/usr/bin/tmux", ["-L", "openrig"], seat, readOnly),
 });
 const composed = (panes: ComposedPane[]): ComposedView => ({
   id: "rig:demo", opened: panes, absent: [], degraded: [], pages: [panes], viewDescriptor: { kind: "fixed", name: "demo" },
 });
 
-/** A simulated herdr-app window, herdr-core and tmux, with one event log for ordering. */
+/** A simulated herdr-app window and herdr-core, with one event log for ordering. */
 class World {
   log: string[] = [];
   layout = "main";
@@ -39,12 +41,6 @@ class World {
   runs = 0;
   clock = new Date("2026-11-07T00:00:00.000Z");
   ack: { revision: string; terminals: string[] } | null = null;
-  tmuxCalls: string[][] = [];
-  /** The process tree: the tmux client 4242 runs beneath the viewer's process 4000. */
-  parents: Record<number, number> = { 4242: 4100, 4100: 4000 };
-  clientSession: string | null = null;
-  /** The tmux client list, when a test replaces the client (a new attach after a handover). */
-  clientLine: string | null = null;
   /** Terminals the strip keeps listing even after a write removed them (an acknowledgement that must be rejected). */
   stillShown: string[] = [];
   /** Core can't be asked: `hc get` times out (exit -1), as in a core hiccup during an event burst. */
@@ -128,7 +124,7 @@ let world: World;
 let files: HerdrAppClientFiles;
 let provider: HerdrAppProvider;
 
-function makeProvider(opts: { ackTimeoutMs?: number; lateAckMs?: number; latePollMs?: number; hostname?: string; regrantDelaysMs?: number[]; core?: { session: string; socket?: string }; ensureMods?: () => Promise<{ ok: true; notes?: string[] } | { ok: false; error: string }> } = {}) {
+function makeProvider(opts: { ackTimeoutMs?: number; hostname?: string; core?: { session: string; socket?: string }; ensureMods?: () => Promise<{ ok: true; notes?: string[] } | { ok: false; error: string }> } = {}) {
   files = new HerdrAppClientFiles(join(home, "app"), join(home, "journal"));
   const realWrite = files.writeRig.bind(files);
   files.writeRig = async (tree) => {
@@ -147,18 +143,7 @@ function makeProvider(opts: { ackTimeoutMs?: number; lateAckMs?: number; latePol
   provider = new HerdrAppProvider({
     files, app: world.app(files) as never, hc, daemonInstance: "inst1", viewerCwd: join(home, "viewers"),
     ensureMods: opts.ensureMods ?? (async () => ({ ok: true })), ackTimeoutMs: opts.ackTimeoutMs ?? 300, nonce: () => `n${++n}`, now: () => world.clock,
-    latePollMs: opts.latePollMs ?? 20, ...(opts.lateAckMs !== undefined ? { lateAckMs: opts.lateAckMs } : {}),
-    ...(opts.regrantDelaysMs ? { regrantDelaysMs: opts.regrantDelaysMs } : {}),
     ...(opts.hostname ? { hostname: () => opts.hostname! } : {}),
-    runTmux: async (argv) => {
-      world.tmuxCalls.push(argv);
-      world.log.push(`tmux:${argv.slice(3).join(" ")}`);
-      // The client is on the session it was listed for, unless the test moved it.
-      const listed = argv.indexOf("list-clients");
-      if (listed < 0) return "";
-      return world.clientLine ?? `4242 /dev/pts/9 1 ${world.clientSession ?? argv[listed + 2]!.slice(1)}\n`;
-    },
-    parentPid: async (pid) => world.parents[pid] ?? null,
   });
 }
 
@@ -169,11 +154,13 @@ beforeEach(() => {
   world = new World(home);
   makeProvider();
 });
-afterEach(() => { provider?.stop(); rmSync(home, { recursive: true, force: true }); });
+afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 
 describe("HerdrAppProvider.openView", () => {
-  it("journals first, starts read-only waiting viewers with labels and no --keep, writes once, then reveals and hands over the keyboard", async () => {
-    const result = await provider.openView(composed([pane("dev.build@demo"), pane("dev.qa@demo", true)]));
+  it("journals first, starts each viewer as the view's own tile (writable or read-only) with labels and no --keep, writes once, then reveals", async () => {
+    const build = pane("dev.build@demo");
+    const qa = pane("dev.qa@demo", true);
+    const result = await provider.openView(composed([build, qa]));
     expect(result).toMatchObject({ ok: true, provider: "herdr-app", opened: ["dev.build@demo", "dev.qa@demo"], pages: 1, space: { label: "demo" } });
     const firstRun = world.log.findIndex((e) => e.startsWith("run:"));
     expect(world.log.slice(0, firstRun)).toContain("journal");
@@ -181,45 +168,22 @@ describe("HerdrAppProvider.openView", () => {
     const t = world.terminals.get("t10")!;
     expect(t.labels).toMatchObject({ "openrig.daemon": "inst1", "openrig.role": "viewer", "openrig.op": "n2", "openrig.seat": "dev.build@demo" });
     expect(t.argv.slice(0, 5)).toEqual(["/bin/sh", "-c", expect.stringContaining("exec tail -f /dev/null"), "openrig-viewer", "n2"]);
-    expect(t.argv.join(" ")).toContain("attach -r"); // read-only during construction
-    // Reveal order: switch to the Rig layout, select the view once the app shows the write, then the keyboard.
+    // Each viewer runs the tile the view composed, unchanged: the interactive seat's writable tile (it attaches only
+    // while someone types in it), the read-only seat's tile that only shows.
+    expect(t.argv.slice(5)).toEqual(build.attachArgv);
+    expect(world.terminals.get("t11")!.argv.slice(5)).toEqual(qa.attachArgv);
+    expect(build.attachArgv).not.toEqual(qa.attachArgv);
+    // Reveal order: switch to the Rig layout, then select the view once the app shows the write. Nothing else.
     const sw = world.log.findIndex((e) => e.startsWith("do:layout.switch"));
     const sel = world.log.findIndex((e) => e.startsWith(`do:layout.select:{"stack":"rig-work","child":"${result.space!.id}"}`));
-    const rw = world.log.findIndex((e) => e.startsWith("tmux:switch-client"));
     expect(sw).toBeGreaterThan(world.log.indexOf("write:t10,t11"));
     expect(sel).toBeGreaterThan(sw);
-    expect(rw).toBeGreaterThan(sel);
-    // Only the interactive viewer becomes writable.
-    // `-t` names the viewer's own session: without it tmux also moves the client to its current session (seen live).
-    const session = world.tmuxCalls.find((c) => c.includes("list-clients"))![5]!.slice(1);
-    expect(world.tmuxCalls.filter((c) => c.includes("switch-client"))).toEqual([["/usr/bin/tmux", "-L", "openrig", "switch-client", "-c", "/dev/pts/9", "-t", `=${session}`, "-r"]]);
+    expect(result.notes ?? []).toEqual([]);
+    // The journal records the read-only intent as the view composed it; there is no grant to record.
+    expect((await files.load()).views[0]!.viewers.map((v) => [v.seat, v.readOnly])).toEqual([["dev.build@demo", false], ["dev.qa@demo", true]]);
   });
 
-  it("hands the keyboard to interactive seats on every page of a multi-page view, not only the first", async () => {
-    const view: ComposedView = { ...composed([]), opened: [pane("dev.build@demo"), pane("dev.qa@demo")], pages: [[pane("dev.build@demo")], [pane("dev.qa@demo")]] };
-    const result = await provider.openView(view);
-    expect(result).toMatchObject({ ok: true, pages: 2 });
-    const writable = world.tmuxCalls.filter((c) => c.includes("switch-client")).map((c) => c[c.indexOf("-t") + 1]);
-    expect(writable.sort()).toEqual(["=dev.build@demo", "=dev.qa@demo"]);
-  });
-
-  it("never hands the keyboard over while the viewer's tmux client shows another seat's session", async () => {
-    world.clientSession = "someone-else@demo";
-    const result = await provider.openView(composed([pane("dev.build@demo")]));
-    expect(result.ok).toBe(true);
-    expect(world.tmuxCalls.some((c) => c.includes("switch-client"))).toBe(false);
-    expect(result.notes?.join(" ")).toContain("stays read-only (its tmux client shows someone-else@demo");
-  });
-
-  it("never hands the keyboard to a tmux client that isn't the viewer's own (another process attached to the seat)", async () => {
-    world.parents = { 4242: 1 };
-    const result = await provider.openView(composed([pane("dev.build@demo")]));
-    expect(result.ok).toBe(true);
-    expect(world.tmuxCalls.some((c) => c.includes("switch-client"))).toBe(false);
-    expect(result.notes?.join(" ")).toContain("dev.build · S1: stays read-only");
-  });
-
-  it("skips local tmux keyboard handoff for remote ssh viewers (interactive or read-only) with no false read-only note, and migrates journals without attach", async () => {
+  it("runs remote ssh viewers (interactive or read-only) as composed, with no read-only note, and migrates journals without attach", async () => {
     const remoteRw: ComposedPane = {
       seat: "dev.remote@demo", label: "dev.remote · S1", runtime: "claude-code", readOnly: false,
       paneCommand: "ssh -t box2 'tmux attach -t =dev.remote@demo'",
@@ -230,8 +194,7 @@ describe("HerdrAppProvider.openView", () => {
     };
     const result = await provider.openView(composed([remoteRw, remoteRo]));
     expect(result.ok).toBe(true);
-    expect(world.tmuxCalls).toEqual([]);
-    expect((result.notes ?? []).join(" ")).not.toContain("stays read-only");
+    expect((result.notes ?? []).join(" ")).not.toContain("read-only");
     const saved = await files.load();
     expect(saved.views[0]!.viewers.map((v) => v.attach)).toEqual(["remote", "remote"]);
     expect(saved.views[0]!.viewers[0]!.argv.slice(4)).toEqual(["n2", "/bin/sh", "-c", remoteRw.paneCommand]);
@@ -253,7 +216,7 @@ describe("HerdrAppProvider.openView", () => {
     ]);
   });
 
-  it("when the app never confirms the write, the open says so: nothing opened, every seat unconfirmed, viewers and journal kept, read-only", async () => {
+  it("when the app never confirms the write, the open says so: nothing opened, every seat unconfirmed, viewers and journal kept", async () => {
     world.applies = false;
     const result = await provider.openView(composed([pane("dev.build@demo"), pane("dev.qa@demo")]));
     expect(result).toMatchObject({ ok: false, opened: [], pages: 1 });
@@ -261,99 +224,18 @@ describe("HerdrAppProvider.openView", () => {
       { seat: "dev.build@demo", host: "herdr-app", code: "pane_unconfirmed", reason: expect.stringContaining("has not confirmed showing this view") },
       { seat: "dev.qa@demo", host: "herdr-app", code: "pane_unconfirmed", reason: expect.stringContaining("has not confirmed showing this view") },
     ]);
-    expect(result.notes?.join(" ")).toContain("stay read-only until it does");
+    expect(result.notes?.join(" ")).toContain("the window may not be showing it");
     expect(result.notes?.join(" ")).not.toContain("appears there");
     // No retry and no rollback: the viewers run and the journal keeps them.
     expect(world.log.some((e) => e.startsWith("kill:"))).toBe(false);
     expect(world.runs).toBe(2);
     expect((await files.load()).views.flatMap((v) => v.viewers).map((v) => [v.seat, v.state])).toEqual([["dev.build@demo", "live"], ["dev.qa@demo", "live"]]);
     expect(world.log.some((e) => e.startsWith("do:layout.select"))).toBe(false);
-    expect(world.tmuxCalls).toEqual([]);
   });
 
   it("a confirmed open lists every seat as opened and none as unconfirmed", async () => {
     const result = await provider.openView(composed([pane("dev.build@demo")]));
     expect(result).toMatchObject({ ok: true, opened: ["dev.build@demo"], degraded: [] });
-  });
-
-  describe("writable intent survives a late acknowledgement and a replaced tmux client", () => {
-    const switches = () => world.tmuxCalls.filter((c) => c.includes("switch-client"));
-    const viewers = async () => (await files.load()).views.flatMap((v) => v.viewers);
-    const until = async (check: () => boolean) => { for (let i = 0; i < 100 && !check(); i++) await new Promise((r) => setTimeout(r, 10)); };
-
-    it("a view the app shows only after the open's wait becomes writable then, without selecting it", async () => {
-      world.applies = false;
-      const result = await provider.openView(composed([pane("dev.build@demo"), pane("dev.qa@demo", true)]));
-      expect(switches()).toEqual([]);
-      expect((await viewers()).map((v) => v.writable)).toEqual(["pending", undefined]);
-      // The app catches up after the 8 s wait.
-      world.applies = true;
-      world.render(files);
-      await until(() => switches().length > 0);
-      expect(switches()).toEqual([["/usr/bin/tmux", "-L", "openrig", "switch-client", "-c", "/dev/pts/9", "-t", "=dev.build@demo", "-r"]]);
-      // The grant is journalled right after the handover.
-      for (let i = 0; i < 100 && (await viewers())[0]!.writable !== "granted"; i++) await new Promise((r) => setTimeout(r, 10));
-      expect((await viewers()).map((v) => v.writable)).toEqual(["granted", undefined]); // the read-only pane never is
-      expect(world.log.some((e) => e.startsWith("do:layout.select"))).toBe(false);
-      void result;
-    });
-
-    it("stops waiting for a late acknowledgement at its deadline", async () => {
-      makeProvider({ lateAckMs: 50 });
-      world.applies = false;
-      await provider.openView(composed([pane("dev.build@demo")]));
-      await new Promise((r) => setTimeout(r, 150));
-      world.applies = true;
-      world.render(files);
-      await new Promise((r) => setTimeout(r, 100));
-      expect(switches()).toEqual([]);
-      expect((await viewers())[0]!.writable).toBe("pending");
-    });
-
-    it("a new tmux client for the same agent (after a handover or restart) gets the keyboard back", async () => {
-      await provider.openView(composed([pane("dev.build@demo")]));
-      expect((await viewers())[0]!.writable).toBe("granted");
-      world.tmuxCalls = [];
-      // The tile attached again: a new read-only client beneath the same viewer.
-      world.parents[4343] = 4100;
-      world.clientLine = "4343 /dev/pts/11 1 dev.build@demo\n";
-      expect(await provider.regrant()).toEqual([]);
-      expect(switches()).toEqual([["/usr/bin/tmux", "-L", "openrig", "switch-client", "-c", "/dev/pts/11", "-t", "=dev.build@demo", "-r"]]);
-      // Already writable: nothing is toggled back.
-      world.tmuxCalls = [];
-      world.clientLine = "4343 /dev/pts/11 0 dev.build@demo\n";
-      await provider.regrant();
-      expect(switches()).toEqual([]);
-    });
-
-    it("never hands the keyboard to a read-only pane, another agent's client, or a client outside the viewer", async () => {
-      await provider.openView(composed([pane("dev.build@demo"), pane("dev.qa@demo", true)]));
-      world.tmuxCalls = [];
-      world.clientSession = "someone-else@demo"; // the client shows another agent
-      const notes = await provider.regrant();
-      expect(switches()).toEqual([]);
-      expect(notes.join(" ")).toContain("stays read-only (its tmux client shows someone-else@demo");
-      world.clientSession = null;
-      world.parents = { 4242: 1 }; // not beneath this viewer
-      expect((await provider.regrant()).join(" ")).toContain("dev.build · S1: stays read-only");
-      expect(switches()).toEqual([]);
-    });
-
-    it("a replacement schedules regrants, and stop() cancels them", async () => {
-      makeProvider({ regrantDelaysMs: [20] });
-      await provider.openView(composed([pane("dev.build@demo")]));
-      world.tmuxCalls = [];
-      world.parents[4343] = 4100;
-      world.clientLine = "4343 /dev/pts/11 1 dev.build@demo\n";
-      provider.regrantSoon();
-      await until(() => switches().length > 0);
-      expect(switches()).toHaveLength(1);
-      world.tmuxCalls = [];
-      provider.regrantSoon();
-      provider.stop();
-      await new Promise((r) => setTimeout(r, 60));
-      expect(switches()).toEqual([]);
-    });
   });
 
   it("opens nothing when herdr-app isn't answering, and gives no attach-by-hand recipe", async () => {
@@ -876,7 +758,7 @@ describe("startup wiring (createHerdrAppProviders): passive lookups, views recov
     await journal.save({ appHome, base: "main", revision: null, writtenSha: null, pendingEnds: [], views: [{
       id: "rv-1", name: "demo", source: { view: "rig:demo", page: 0 }, createdAt: "2026-11-07T00:00:00.000Z",
       viewers: [{ cellId: "c-1", seat: "dev.build@demo", label: "dev.build · S1", nonce: "n1", argv: ["/bin/sh"], readOnly: false,
-        attach: "local", writable: "granted", terminal: "t5", state: "live" }],
+        attach: "local", terminal: "t5", state: "live" }],
     }] });
     const herdrApp = await create();
     await herdrApp.recovered;

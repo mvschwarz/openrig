@@ -3,20 +3,18 @@
 //
 // A view opens as:
 //   1. journal (each viewer with its op nonce, before anything starts);
-//   2. viewers started by herdr-core, outside every tab (`hc run --bg --no-parent`, openrig.* labels), each
-//      read-only, each waiting after its attach ends instead of exiting (an exiting viewer makes herdr collapse
-//      the layout), and never `--keep` (that would leave a shell behind in the cell);
+//   2. viewers started by herdr-core, outside every tab (`hc run --bg --no-parent`, openrig.* labels), each the
+//      view's own tile for its seat (an interactive one mirrors the seat and attaches only while someone types in
+//      it; a read-only one only shows it), each waiting after its tile ends instead of exiting (an exiting viewer
+//      makes herdr collapse the layout), and never `--keep` (that would leave a shell behind in the cell);
 //   3. ONE atomic write of layouts/rig.json: the person's layout with OpenRig's stack beside their tabs, each view an
 //      equal, padded grid with a title row per cell;
 //   4. for an explicit open: show the Rig layout, wait for the app to acknowledge the write, select the view (the
-//      strip then focuses its first live cell), and only then make interactive viewers writable.
+//      strip then focuses its first live cell).
 // Removing viewers (close, rollback, a viewer that ended) rewrites the file FIRST and ends a viewer only after the
 // app has acknowledged a revision that no longer shows it, and only when the viewer is verifiably OpenRig's
 // (journal + labels + exact argv). Anything uncertain is left running and reported.
-import { execFile } from "node:child_process";
 import { hostname } from "node:os";
-import { promisify } from "node:util";
-import { tileAttachArgv } from "./tile-attach.js";
 import { cellFor, deriveRigLayout, RIG_LAYOUT, RIG_STACK, type RigView } from "./herdr-app-layout.js";
 import { awaitApplied, newNonce, type ClientState, type HerdrAppClientFiles, type PendingEnd, type ViewerRecord, type ViewRecord } from "./herdr-app-state.js";
 import { describeCore, type AppReply, type HcRunner, type HerdrAppClient } from "./herdr-app-transport.js";
@@ -44,11 +42,10 @@ const DEFINITE_HC_ERROR_KINDS = new Set(["invalid_params", "not_found", "conflic
 const VIEWER_WRAPPER = 'shift; if ! (command -v infocmp >/dev/null 2>&1 && infocmp "$TERM" 2>/dev/null | grep -q "clear="); then TERM=xterm-256color; export TERM; fi; "$@"; status=$?; printf "\\r\\n%s\\r\\n" "The seat session ended here (exit $status). OpenRig will update this view; nothing else runs in this cell."; exec tail -f /dev/null';
 
 export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand">, nonce: string): string[] {
-  // A remote pane (no attachArgv) runs its ssh paneCommand as composed: the remote command's own readOnly decides,
-  // and OpenRig doesn't rewrite an ssh command.
-  const attach = pane.attachArgv
-    ? tileAttachArgv(pane.attachArgv[5]!, pane.attachArgv.slice(6), pane.attachArgv[4]!, true)
-    : ["/bin/sh", "-c", pane.paneCommand];
+  // The pane's own tile, as the view composed it (writable or read-only), or a remote pane's ssh command: OpenRig
+  // rewrites neither. A writable tile isn't a client of the seat until someone types in its cell, and checks the
+  // seat's server and identity before it attaches.
+  const attach = pane.attachArgv ?? ["/bin/sh", "-c", pane.paneCommand];
   return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, ...attach];
 }
 
@@ -66,16 +63,7 @@ export interface HerdrAppProviderDeps {
   /** Called when this provider starts owned-view work (an open about to start viewers, a close): prepares what only
    *  that work needs (the viewers folder, the hc events watcher). A status, preview or listing never calls it. */
   ownWork?(): void;
-  /** Runs tmux (the viewer's own tmux and server args come first in argv). */
-  runTmux?(argv: string[]): Promise<string>;
-  /** A process's parent pid, or null (finds the tmux client a viewer runs). */
-  parentPid?(pid: number): Promise<number | null>;
   ackTimeoutMs?: number;
-  /** How long a view not confirmed by the open keeps waiting for the app to show it, to make it writable then. */
-  lateAckMs?: number;
-  latePollMs?: number;
-  /** When to look for a viewer's new tmux client after its agent's session was replaced. */
-  regrantDelaysMs?: number[];
   nonce?(): string;
   /** This daemon's machine, named when no window answers here (default: os.hostname()). */
   hostname?(): string;
@@ -106,27 +94,8 @@ export class HerdrAppProvider implements TerminalProvider {
   readonly name = HERDR_APP_PROVIDER;
   readonly panesPerPage = 16;
   private queue: Promise<unknown> = Promise.resolve();
-  private stopped = false;
-  /** OpenRig's own timers (late acknowledgement, regrant): each wakes its sleeper early on stop. */
-  private readonly timers = new Map<ReturnType<typeof setTimeout>, () => void>();
 
   constructor(private readonly deps: HerdrAppProviderDeps) {}
-
-  /** Ends this provider's own waits and timers (daemon shutdown). Viewers and files are left as they are. */
-  stop(): void {
-    this.stopped = true;
-    for (const [timer, wake] of this.timers) { clearTimeout(timer); wake(); }
-    this.timers.clear();
-  }
-
-  private sleep(ms: number): Promise<void> {
-    if (this.stopped) return Promise.resolve();
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => { this.timers.delete(timer); resolve(); }, ms);
-      timer.unref?.();
-      this.timers.set(timer, resolve);
-    });
-  }
 
   get appHome(): string { return this.deps.files.appHome; }
 
@@ -296,7 +265,6 @@ export class HerdrAppProvider implements TerminalProvider {
           const cell = cellFor(id, pane, nonce, null);
           return { cellId: cell.id, seat: pane.seat, label: pane.label, ...(pane.runtime ? { runtime: pane.runtime } : {}),
             nonce, argv: viewerArgv(pane, nonce), readOnly: pane.readOnly, attach: pane.attachArgv ? "local" as const : "remote" as const,
-            ...(pane.attachArgv && !pane.readOnly ? { writable: "pending" as const } : {}),
             terminal: null, state: "planned" as const };
         }),
       };
@@ -394,8 +362,7 @@ export class HerdrAppProvider implements TerminalProvider {
     return { ok: true, revision };
   }
 
-  /** Shows the first page of this open; every page's interactive viewers get the keyboard, since the strip switches
-   *  between pages without coming back to the daemon. */
+  /** Shows the first page of this open: the Rig layout, then the view once the app shows the write. */
   private async reveal(pages: ViewRecord[], revision: string): Promise<{ notes: string[]; confirmed: boolean }> {
     const view = pages[0]!;
     const notes: string[] = [];
@@ -406,115 +373,12 @@ export class HerdrAppProvider implements TerminalProvider {
       if (switched.kind !== "ok") notes.push(`Showing OpenRig's Rig layout: ${describe(switched)}.`);
     }
     if (!await awaitApplied(this.deps.files, revision, [], { timeoutMs: this.deps.ackTimeoutMs ?? 8_000 })) {
-      // It may still be shown later: its interactive viewers become writable then.
-      this.watchLateAck(pages.flatMap((page) => page.viewers).filter((v) => v.writable === "pending").map((v) => v.cellId));
-      notes.push(`herdr-app has not confirmed showing this view. It is written to the Rig layout file, but the window may not be showing it; its viewers stay read-only until it does, and become writable then. If this window is attached to a different herdr-core than the daemon's (${describeCore(this.deps.hc)}), the viewers never appear here; start the daemon with that core's HC_SESSION/HC_SOCKET.`);
+      notes.push(`herdr-app has not confirmed showing this view. It is written to the Rig layout file, but the window may not be showing it. If this window is attached to a different herdr-core than the daemon's (${describeCore(this.deps.hc)}), the viewers never appear here; start the daemon with that core's HC_SESSION/HC_SOCKET.`);
       return { notes, confirmed: false };
     }
     const selected = await app.do("layout.select", { stack: RIG_STACK, child: view.id });
-    if (selected.kind !== "ok") {
-      notes.push(`Selecting the view: ${describe(selected)}. It is in the Rig strip; its viewers stay read-only.`);
-      return { notes, confirmed: true };
-    }
-    for (const viewer of pages.flatMap((page) => page.viewers)) {
-      if (viewer.attach === "remote" || viewer.readOnly || viewer.state !== "live" || !viewer.terminal) continue;
-      const writable = await this.makeWritable(viewer);
-      if (writable) notes.push(writable);
-      else viewer.writable = "granted";
-    }
+    if (selected.kind !== "ok") notes.push(`Selecting the view: ${describe(selected)}. It is in the Rig strip.`);
     return { notes, confirmed: true };
-  }
-
-  /** After an open that the app didn't confirm in time: when the app shows these cells' viewers (an acknowledgement of
-   *  that write or a later one lists their terminals), they become writable. No select: the person may be elsewhere. */
-  private watchLateAck(cells: string[]): void {
-    if (!cells.length) return;
-    let waiting = cells;
-    const deadline = Date.now() + (this.deps.lateAckMs ?? 10 * 60 * 1000);
-    void (async () => {
-      while (!this.stopped && waiting.length) {
-        const ack = await this.deps.files.readAck().catch(() => null);
-        if (ack) waiting = await this.serial(() => this.grantShown(waiting, ack.terminals));
-        if (!waiting.length || Date.now() >= deadline) return;
-        await this.sleep(this.deps.latePollMs ?? 500);
-      }
-    })().catch(() => {});
-  }
-
-  /** Grants the keyboard to pending viewers in `cells` the app now shows. Returns the cells still waiting. */
-  private async grantShown(cells: readonly string[], shown: readonly string[]): Promise<string[]> {
-    if (this.stopped) return [];
-    const state = await this.deps.files.load();
-    const viewers = state.views.flatMap((v) => v.viewers).filter((v) => cells.includes(v.cellId) && v.writable === "pending");
-    const waiting: string[] = [];
-    let changed = false;
-    for (const viewer of viewers) {
-      if (viewer.state !== "live" || !viewer.terminal) continue;
-      if (!shown.includes(viewer.terminal)) { waiting.push(viewer.cellId); continue; }
-      if (!await this.makeWritable(viewer)) { viewer.writable = "granted"; changed = true; }
-    }
-    if (changed) await this.deps.files.save(state);
-    return waiting;
-  }
-
-  /** A seat's tmux session was replaced (handover, restart): the viewer's tile attaches again with a new, read-only
-   *  client. Look for it a few times and hand it the keyboard again, if the person had it. */
-  regrantSoon(): void {
-    for (const delay of this.deps.regrantDelaysMs ?? [2_000, 6_000, 15_000]) {
-      void this.sleep(delay).then(() => (this.stopped ? [] : this.regrant())).catch(() => {});
-    }
-  }
-
-  /** Hands the keyboard back to every granted viewer's current tmux client (only its own, identified client). */
-  regrant(): Promise<string[]> {
-    return this.serial(async () => {
-      if (this.stopped) return [];
-      const state = await this.deps.files.load();
-      const notes: string[] = [];
-      for (const viewer of state.views.flatMap((v) => v.viewers)) {
-        if (viewer.writable !== "granted" || viewer.attach !== "local" || viewer.readOnly || viewer.state !== "live" || !viewer.terminal) continue;
-        const note = await this.makeWritable(viewer);
-        if (note) notes.push(note);
-      }
-      return notes;
-    });
-  }
-
-  /** The explicit reveal hands this viewer's tmux client the keyboard (`switch-client -r` toggles read-only). */
-  private async makeWritable(viewer: ViewerRecord): Promise<string | null> {
-    const tile = viewer.argv.indexOf("openrig-tile");
-    if (tile < 0 || !this.deps.runTmux) return `${viewer.label}: stays read-only (this daemon cannot reach its tmux server to hand over the keyboard).`;
-    const session = viewer.argv[tile + 1]!;
-    const tmux = viewer.argv.slice(tile + 2);
-    const got = await this.deps.hc(["get", "--json", viewer.terminal!]);
-    // core reports the viewer's own process (the wrapper); its tmux client runs beneath it.
-    const viewerPid = (got.json as { pid?: unknown } | null)?.pid;
-    const parentPid = this.deps.parentPid ?? processParent;
-    const beneath = async (pid: number) => {
-      for (let p: number | null = pid, hops = 0; p && p > 1 && hops < 16; p = await parentPid(p), hops++) if (p === viewerPid) return true;
-      return false;
-    };
-    try {
-      // The viewer's client may still be attaching; look a few times.
-      for (let attempt = 0; attempt < 10; attempt++) {
-        const listed = await this.deps.runTmux([...tmux, "list-clients", "-t", `=${session}`, "-F", "#{client_pid} #{client_tty} #{client_readonly} #{session_name}"]);
-        let client: string[] | undefined;
-        for (const line of listed.split("\n")) {
-          const fields = line.trim().split(" ");
-          if (typeof viewerPid === "number" && await beneath(Number(fields[0]))) { client = fields; break; }
-        }
-        if (client) {
-          if (client[3] !== session) return `${viewer.label}: stays read-only (its tmux client shows ${client[3]}, not ${session}).`;
-          // `-r` toggles read-only. `-t` is required: without it tmux also moves the client to its current session.
-          if (client[2] === "1") await this.deps.runTmux([...tmux, "switch-client", "-c", client[1]!, "-t", `=${session}`, "-r"]);
-          return null;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 200));
-      }
-    } catch (error) {
-      return `${viewer.label}: stays read-only (${(error as Error).message}).`;
-    }
-    return `${viewer.label}: stays read-only (its tmux client could not be identified).`;
   }
 
   /**
@@ -631,18 +495,3 @@ export class HerdrAppProvider implements TerminalProvider {
     return killed.exit === 0 ? { kept: false } : { kept: true, note: `Viewer ${terminal} could not be ended yet: ${killed.error?.message ?? `hc exited ${killed.exit}`}.` };
   }
 }
-
-/** The parent of `pid` (Linux /proc, else `ps`), or null. */
-export async function processParent(pid: number): Promise<number | null> {
-  try {
-    const { readFile } = await import("node:fs/promises");
-    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
-    return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]) || null;
-  } catch {
-    try {
-      return Number((await promisify(execFile)("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" })).stdout.trim()) || null;
-    } catch { return null; }
-  }
-}
-
-export const execTmux = async (argv: string[]): Promise<string> => (await promisify(execFile)(argv[0]!, argv.slice(1), { encoding: "utf8", timeout: 5_000 })).stdout;

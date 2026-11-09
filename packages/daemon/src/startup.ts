@@ -2200,7 +2200,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       hcEnv: herdrAppHcEnv,
       hc: createHcRunner({ env: herdrAppHcEnv }),
       defaultAppHome: () => resolveHerdrAppHome(process.env),
-      subscribe: (listener) => eventBus.subscribe(listener),
     });
     const resolveHerdrAppProvider = herdrApp.resolve;
     const stopHerdrApp = herdrApp.stop;
@@ -2864,14 +2863,13 @@ export async function createHerdrAppProviders(opts: {
   hcEnv: NodeJS.ProcessEnv;
   hc: import("./domain/terminal/herdr-app-transport.js").HcRunner;
   defaultAppHome: () => string;
-  subscribe?: (listener: (event: { type: string }) => void) => () => void;
   spawnFn?: typeof spawn;
 }): Promise<{
   resolve: (target: { appHome?: string }) => import("./domain/terminal/herdr-app-provider.js").HerdrAppProvider | null;
   recovered: Promise<void>;
   stop: () => void;
 }> {
-  const { HerdrAppProvider, execTmux } = await import("./domain/terminal/herdr-app-provider.js");
+  const { HerdrAppProvider } = await import("./domain/terminal/herdr-app-provider.js");
   const { HerdrAppClientFiles } = await import("./domain/terminal/herdr-app-state.js");
   const { HerdrAppClient, createAppSocketExchange, herdrAppSocketPath } = await import("./domain/terminal/herdr-app-transport.js");
   const { installRigMods, describeModInstall } = await import("./domain/terminal/herdr-app-install.js");
@@ -2884,12 +2882,6 @@ export async function createHerdrAppProviders(opts: {
     reconcileAll: () => {
       for (const provider of providers.values()) void provider.reconcile().catch(() => {});
     },
-  });
-  // A seat's tmux session replaced (handover, fresh launch, restart): a viewer of it attaches again with a new tmux
-  // client, which gets the keyboard back if the person had it.
-  const unsubscribe = opts.subscribe?.((event) => {
-    if (event.type !== "seat.handover_completed" && event.type !== "seat.fresh_launched" && event.type !== "node.startup_ready") return;
-    for (const provider of providers.values()) provider.regrantSoon();
   });
   const ownWork = () => {
     if (stopped) return;
@@ -2914,7 +2906,6 @@ export async function createHerdrAppProviders(opts: {
           // A folder the person changed stays theirs and the view opens with it; the open says so.
           return { ok: true, ...(installed.refused.length || installed.error ? { notes: [describeModInstall(installed)] } : {}) };
         },
-        runTmux: execTmux,
         ownWork,
       });
       providers.set(key, provider);
@@ -2941,9 +2932,7 @@ export async function createHerdrAppProviders(opts: {
   })();
   const stop = () => {
     stopped = true;
-    unsubscribe?.();
     watch.stop();
-    for (const provider of providers.values()) provider.stop();
   };
   return { resolve, recovered, stop };
 }
