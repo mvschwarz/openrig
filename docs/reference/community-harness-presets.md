@@ -53,6 +53,7 @@ startup_assisted: true           # optional: startup submission needs a person's
 first_input: true                # optional: launcher takes the first turn from OPENRIG_FIRST_INPUT (below)
 # runner: true                  # optional, needs launch_result: the launcher reports the seat's activity (below)
 # passes_model: true            # optional: the launcher takes the seat's declared model from OPENRIG_MODEL (below)
+# launch_wrapper: true          # optional: a runner applies OPENRIG_LAUNCH_WRAPPER to its native child (below)
 ```
 
 - **`command`** is a single program and its arguments. Shell syntax such as `|`, `&&`, `;`, redirections or `$(…)`
@@ -164,6 +165,10 @@ and reports what it's doing, as OpenRig's own Pi runner does. The seat's activit
   unavailable.
 - **Input is as for any seat.** A send pastes the text and presses Enter, so a runner should submit everything up to that
   Enter as one prompt.
+- **`launch_wrapper: true` declares wrapper support and requires `runner: true`.** A member with a wrapper and a runner preset without this flag is refused at preflight and launch (not schema validation):
+  `launch_wrapper unsupported: the community preset "<runtime>" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.` See the
+  [harness and runner contract](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch)
+  for the environment handoff, native-child execution and refusal requirements.
 
 **What the runner posts.** The runner posts each event to `POST /api/activity/hooks` with the local activity hook token,
 one at a time and in order, without making the agent wait. It finds the address and token in `OPENRIG_URL` (or

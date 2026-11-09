@@ -408,6 +408,17 @@ exports:
     expect(result.errors.some((e) => e.includes("MCP export source must not contain path traversal"))).toBe(true);
   });
 
+  // Test 22b: A leading-slash, drive-prefixed or UNC source is not a traversal and stays
+  // inside the package once joined (join keeps the base); the plan reads it there and fails
+  // as missing instead of being refused.
+  it("absolute, drive and UNC sources are accepted (they join under the package)", () => {
+    for (const source of ["/etc", "C:\\Users\\victim\\secrets", "\\\\server\\share\\x"]) {
+      const yaml = VALID_YAML.replace("source: skills/deep-pr-review", `source: ${source}`);
+      const result = validateManifest(parseManifest(yaml));
+      expect(result.valid, `${source} should validate`).toBe(true);
+    }
+  });
+
   // Test 23: Duplicate agent names rejected
   it("duplicate agent names rejected", () => {
     const yaml = `

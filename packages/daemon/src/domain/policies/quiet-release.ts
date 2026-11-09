@@ -101,7 +101,7 @@ export function armQuietRelease(input: { jobsRepo: WatchdogJobsRepository; windo
   return { jobId: job.jobId };
 }
 
-export type ReleaseDisposition = "row-not-active" | "superseded" | "recipient-changed" | "below-posting-threshold";
+export type ReleaseDisposition = "row-not-active" | "superseded" | "recipient-changed" | "below-posting-threshold" | "no-connector";
 export type ReleaseVerdict =
   /** `quietUnreadable`: the person's quiet hours couldn't be read, and the caller asked to go on past that. */
   | { kind: "post"; alert: QueueItem; quietUnreadable?: string }
@@ -164,11 +164,27 @@ export async function currentAskVerdict(input: {
   // Not a current alert for this person any more: say why, from the row as it is now.
   const row = input.queueRepo.getById(input.qitemId);
   const latest = row ? input.queueRepo.transitionLog.latestOwnerNotificationForQitem(input.qitemId) : null;
-  const reason: ReleaseDisposition = !row || !isBlockerLive(row.state) ? "row-not-active"
+  const reason: ReleaseDisposition | "unread" = !row || !isBlockerLive(row.state) ? "row-not-active"
     : latest && `${input.qitemId}:${latest.transitionId}` !== input.notificationKey ? "superseded"
       : alert ? "recipient-changed"
-        : "below-posting-threshold";
+        : connectorReason(input);
+  if (reason === "unread") return { kind: "unavailable", detail: "the person's connector bindings couldn't be read" };
   return { kind: "disposition", reason };
+}
+
+/** Why a person's ask isn't among the alerts when its row is still current: the alert list leaves out a person with no
+ *  connector binding (reached in the Feed and Steering only), which isn't the posting threshold. Bindings that can't be
+ *  read are unknown, never "below threshold". */
+function connectorReason(input: { home: string; registry: RunQuietReleaseInput["registry"]; entityId: string }): "no-connector" | "below-posting-threshold" | "unread" {
+  let reg: ReturnType<RunQuietReleaseInput["registry"]["loadHumanRegistry"]>;
+  try {
+    reg = input.registry.loadHumanRegistry(input.home);
+  } catch {
+    return "unread";
+  }
+  if (!reg.ok) return "unread";
+  const person = reg.entities?.find((e) => e.entityId === input.entityId);
+  return person && (person.connectorBindings?.length ?? 0) === 0 ? "no-connector" : "below-posting-threshold";
 }
 
 /** The current human alerts, or null when the registry can't be loaded: "unknown", never "none". */
@@ -220,7 +236,7 @@ export interface RunQuietReleaseInput {
   queueRepo: QueueRepository;
   jobsRepo: WatchdogJobsRepository;
   home: string;
-  registry: { loadHumanRegistry: (home: string) => { ok: boolean; entities?: Array<{ entityId: string }> } };
+  registry: { loadHumanRegistry: (home: string) => { ok: boolean; entities?: Array<{ entityId: string; connectorBindings?: readonly unknown[] }> } };
   dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => { ok: boolean; error?: string };
   jobId: string;
   now?: Date;

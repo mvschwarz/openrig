@@ -6,12 +6,12 @@
 //   - a small local endpoint stands in for OpenRig's activity route, and records what your runner posts;
 //   - input arrives the way `rig send` delivers it: one bracketed paste with raw newlines, then Enter.
 //
-//   node check-runner.mjs --runner '<command>' [--name <preset name>] [--resume] [--first-input]
+//   node check-runner.mjs --runner '<command>' [--name <preset name>] [--resume] [--first-input] [--launch-wrapper]
 //                         [--cases 1,2,4] [--wait-ms 8000] [--pass-env NAME] [--json] [--keep]
 //
 // `{agent}` in the command is replaced with the fake agent's path, an executable that takes any arguments your runner
 // adds. For example: --runner 'my-runner --agent-command {agent}'. --resume and --first-input say your preset declares
-// `resume: true` and `first_input: true`; without them those cases are skipped, since OpenRig wouldn't pass that input.
+// `resume: true` and `first_input: true`; --launch-wrapper declares `launch_wrapper: true`. Without a declaration, its case is skipped.
 // The runner gets a clean environment: PATH, HOME, USER, SHELL, LANG and TMPDIR, the OpenRig variables, and any
 // --pass-env names. Exit status: 0 when nothing fails, 1 when a case fails, 2 for a usage or setup problem.
 //
@@ -27,10 +27,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const usage = "usage: node check-runner.mjs --runner '<command with {agent}>' [--name <preset>] [--resume] [--first-input] [--cases 1,2] [--wait-ms 8000] [--pass-env NAME] [--json] [--keep]";
+const usage = "usage: node check-runner.mjs --runner '<command with {agent}>' [--name <preset>] [--resume] [--first-input] [--launch-wrapper] [--cases 1,2] [--wait-ms 8000] [--pass-env NAME] [--json] [--keep]";
 
 function parseArgs(argv) {
-  const opts = { name: "runner", cases: undefined, passEnv: [], resume: false, firstInput: false, json: false, keep: false, waitMs: 8000 };
+  const opts = { name: "runner", cases: undefined, passEnv: [], resume: false, firstInput: false, launchWrapper: false, json: false, keep: false, waitMs: 8000 };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     const value = () => { if (i + 1 >= argv.length) throw new Error(`${flag} needs a value`); return argv[++i]; };
@@ -41,6 +41,7 @@ function parseArgs(argv) {
     else if (flag === "--wait-ms") opts.waitMs = Number(value());
     else if (flag === "--resume") opts.resume = true;
     else if (flag === "--first-input") opts.firstInput = true;
+    else if (flag === "--launch-wrapper") opts.launchWrapper = true;
     else if (flag === "--json") opts.json = true;
     else if (flag === "--keep") opts.keep = true;
     else throw new Error(`unknown option ${flag}`);
@@ -178,7 +179,7 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 
 const launches = [];
-async function launch(label, { scenario = {}, env = {}, asks } = {}) {
+async function launch(label, { scenario = {}, env = {}, asks, launchWrapper = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), `runner-check-${label}-`));
   const cwd = join(dir, "work");
   mkdirSync(cwd);
@@ -196,6 +197,13 @@ async function launch(label, { scenario = {}, env = {}, asks } = {}) {
   const agent = join(dir, "agent");
   writeFileSync(agent, `#!/bin/sh\nexec ${sh(process.execPath)} ${sh(join(here, "fake-acp-agent.mjs"))} --scenario ${sh(join(dir, "scenario.json"))} --log ${sh(h.agentLog)} "$@"\n`);
   chmodSync(agent, 0o755);
+  h.agent = agent;
+  if (launchWrapper) {
+    h.wrapperLog = join(dir, "wrapper.json");
+    const wrapper = join(dir, "wrapper.sh");
+    writeFileSync(wrapper, `#!/bin/sh\nrecord=$1\ntag=$2\nseparator=$3\nshift 3\n${sh(process.execPath)} -e 'const [file, tag, separator, ...argv] = process.argv.slice(1); require("node:fs").writeFileSync(file, JSON.stringify({tag, separator, argv, launchWrapper: process.env.OPENRIG_LAUNCH_WRAPPER ?? null}));' "$record" "$tag" "$separator" "$@"\nexec "$@"\n`);
+    env = { ...env, OPENRIG_LAUNCH_WRAPPER: JSON.stringify(["/bin/sh", wrapper, h.wrapperLog, "literal ' $ ; space", "--"]) };
+  }
   const vars = {
     PATH: process.env.PATH, HOME: process.env.HOME, USER: process.env.USER, SHELL: process.env.SHELL, LANG: process.env.LANG,
     TMPDIR: process.env.TMPDIR, TERM: "xterm-256color",
@@ -781,9 +789,22 @@ const cases = {
     if (!opts.keep) rmSync(dir, { recursive: true, force: true });
     return r;
   },
+  async "10"() {
+    const r = result("10", "Launch wrapper: the runner wraps its native child and scrubs the handoff environment");
+    if (!opts.launchWrapper) return r.skip("the preset doesn't declare launch_wrapper (--launch-wrapper): OpenRig passes no OPENRIG_LAUNCH_WRAPPER");
+    const h = await launch("10", { launchWrapper: true });
+    r.check("the wrapped child opens its conversation", await ready(h), "no launch record");
+    const seen = existsSync(h.wrapperLog) ? JSON.parse(readFileSync(h.wrapperLog, "utf8")) : undefined;
+    r.check("the wrapper receives literal arguments and the native child command", seen?.tag === "literal ' $ ; space" && seen?.separator === "--"
+      && seen?.argv?.[0] === h.agent, JSON.stringify(seen ?? null));
+    r.check("OPENRIG_LAUNCH_WRAPPER is absent from the wrapper and child environment", seen?.launchWrapper === null
+      && h.events("started")[0]?.launchWrapper === null, "wrapper handoff leaked to native child");
+    return r;
+  },
+
 };
 
-const order = ["1", "1b", "2", "3", "3b", "4", "4b", "4c", "5", "6", "7", "7b", "7c", "8", "9"];
+const order = ["1", "1b", "2", "3", "3b", "4", "4b", "4c", "5", "6", "7", "7b", "7c", "8", "9", "10"];
 const selected = opts.cases ?? order;
 const unknown = selected.filter((id) => !order.includes(id));
 if (unknown.length) { console.error(`unknown case ${unknown.join(", ")}; cases are ${order.join(", ")}`); process.exit(2); }

@@ -329,6 +329,43 @@ function makeRigYaml(overrides?: Partial<PodRigSpec>): string {
 const RIG_ROOT = "/project/rigs/my-rig";
 
 describe("Rebooted rig preflight", () => {
+  it.each([
+    { label: "runner without capability", declarations: "runner: true\nlaunch_result: true\n", wrapper: ["/bin/sh", "-c"], ready: false },
+    { label: "runner with capability false", declarations: "runner: true\nlaunch_result: true\nlaunch_wrapper: false\n", wrapper: ["/bin/sh", "-c"], ready: false },
+    { label: "runner with capability", declarations: "runner: true\nlaunch_result: true\nlaunch_wrapper: true\n", wrapper: ["/bin/sh", "-c"], ready: true },
+    { label: "runner with no wrapper", declarations: "runner: true\nlaunch_result: true\n", wrapper: undefined, ready: true },
+    { label: "runner with wrapper cleared", declarations: "runner: true\nlaunch_result: true\n", wrapper: [], ready: true },
+    { label: "omitted runner", declarations: "", wrapper: ["/bin/sh", "-c"], ready: true },
+    { label: "runner false", declarations: "runner: false\n", wrapper: ["/bin/sh", "-c"], ready: true },
+  ])("checks community launch_wrapper support during preflight: $label", async ({ declarations, wrapper, ready }) => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-preflight-community-wrapper-"));
+    const previousHome = process.env.OPENRIG_HOME;
+    try {
+      process.env.OPENRIG_HOME = root;
+      const presets = nodePath.join(root, "community-harnesses");
+      fs.mkdirSync(presets);
+      fs.writeFileSync(nodePath.join(presets, "synth.yaml"),
+        "format: 1\nname: synth\ncommand: synth-runner\nmaintainer: Test\n" + declarations);
+      const result = await rigPreflight({
+        rigSpecYaml: makeRigYaml({ pods: [{ id: "dev", label: "Dev", members: [{
+          id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "synth", cwd: ".",
+          ...(wrapper !== undefined ? { launchWrapper: wrapper } : {}),
+        }], edges: [] }] }),
+        rigRoot: RIG_ROOT,
+        fsOps: mockFs({ [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl") }),
+        materializeOnly: true,
+      });
+      expect(result.ready, JSON.stringify(result.errors)).toBe(ready);
+      if (ready) expect(result.errors).toEqual([]);
+      else expect(result.errors).toContain('dev.impl: launch_wrapper unsupported: the community preset "synth" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.');
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENRIG_HOME;
+      else process.env.OPENRIG_HOME = previousHome;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+
   it("resolves a selector-only profile from the configured managed skill catalog", async () => {
     const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-preflight-skill-catalog-"));
     try {

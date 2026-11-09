@@ -19,7 +19,7 @@ afterEach(() => { vi.restoreAllMocks(); for (const h of homes.splice(0)) rmSync(
 function fixture(compactInstruction = '') {
   const policyRef = {compactInstruction};
   const home = mkdtempSync(join(tmpdir(), 'compaction-command-')); homes.push(home);
-  let clock = 10_000, activity = 'idle';
+  let clock = 10_000, activity = 'idle', body = '';
   // What a runtime hook says, when it differs from the pane (null: the hook agrees with the pane).
   let hookActivity: string | null = null;
   let onSleep: (() => void) | undefined;
@@ -40,8 +40,8 @@ function fixture(compactInstruction = '') {
     probeSession: vi.fn(async () => ({state: 'present'})),
     isPaneInMode: vi.fn(async () => paneInMode),
     cancelPaneMode: vi.fn(async () => undefined),
-    sendText: vi.fn(async (_: string, text: string, _before?: unknown, options?: {bracketed?: boolean}) => { events.push({kind: 'text', text, bracketed: options?.bracketed !== false}); return onText?.(text) ?? {ok: true}; }),
-    sendKeys: vi.fn(async (_: string, keys: string[]) => { const receipt = onKeys?.(keys); events.push({kind: 'keys', keys}); return receipt ?? {ok: true}; }),
+    sendText: vi.fn(async (_: string, text: string, _before?: unknown, options?: {bracketed?: boolean}) => { events.push({kind: 'text', text, bracketed: options?.bracketed !== false}); body += text; return onText?.(text) ?? {ok: true}; }),
+    sendKeys: vi.fn(async (_: string, keys: string[]) => { const receipt = onKeys?.(keys); events.push({kind: 'keys', keys}); if (keys.includes('Enter') && receipt?.ok !== false) body = ''; return receipt ?? {ok: true}; }),
   };
   Object.assign(tmux, {deliveryGuard: new SeatDeliveryGuard(db, () => ({nodeId: 'node-one', session: seat, pane: '%1', occupant: generation}))});
   // The enforcer and transport share one clock, including the transport's Date.now idle deadline.
@@ -53,6 +53,7 @@ function fixture(compactInstruction = '') {
   // A send that asks for pane-only readiness reads the pane; any other send may be decided by the hook.
   (transport as any).classifySendReadiness = async (q: {readinessFromPaneOnly?: boolean}) => ({state: !q.readinessFromPaneOnly && hookActivity !== null ? hookActivity : activity, reason: 'fixture', evidenceSource: 'fixture'});
   (transport as any).diagnoseProducerLink = async () => 'fixture';
+  (transport as any).capture = async () => ({ok: true, sessionName: seat, content: body, inputBox: {status: body ? 'typed' : 'empty'}});
   const e = new ClaudeCompactionEnforcer({resolveClaudeCompactionPolicy: () => policy} as any, transport, {openrigHome: home, manualPrepWaitMs: 1000, compactSendIdleWaitMs: 20, now: () => clock, sleep: async (ms) => { clock += ms; onSleep?.(); }, resolveOccupantGeneration: () => generation});
   const stageMap = () => {
     const a = e.getPreparationState(seat)!; mkdirSync(dirname(a.mapPath), {recursive: true});
@@ -61,7 +62,7 @@ function fixture(compactInstruction = '') {
   const compactIndex = () => events.findIndex((ev) => ev.kind === 'text' && ev.text.startsWith('/compact'));
   const texts = () => events.filter((ev): ev is {kind: 'text'; text: string; bracketed: boolean} => ev.kind === 'text').map((ev) => ev.text);
   const compactText = () => (events[compactIndex()] as {text?: string} | undefined)?.text;
-  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, onText: (fn: (text: string) => {ok: boolean; code?: string; message?: string} | void) => { onText = fn; }, onKeys: (fn: ((keys: string[]) => {ok: boolean; code?: string; message?: string} | void) | undefined) => { onKeys = fn; }, metaThrows: (v: boolean) => { metaThrows = v; }, paneInMode: (v: boolean) => { paneInMode = v; }, advance2: (ms: number) => { clock += ms; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
+  return {e, transport, tmux, events, body: () => body, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, onText: (fn: (text: string) => {ok: boolean; code?: string; message?: string} | void) => { onText = fn; }, onKeys: (fn: ((keys: string[]) => {ok: boolean; code?: string; message?: string} | void) | undefined) => { onKeys = fn; }, metaThrows: (v: boolean) => { metaThrows = v; }, paneInMode: (v: boolean) => { paneInMode = v; }, advance2: (ms: number) => { clock += ms; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
 }
 
 const LONGEST_PATH = '/' + 'p'.repeat(4095); // PATH_MAX on Linux
@@ -489,7 +490,10 @@ it('an issued write that throws (the adapter rejects after the paste was handed 
   f.onText((text) => { if (text.startsWith('/compact')) throw new Error('paste-buffer: connection reset'); });
   await f.e.maybeAutoCompact(input);
   expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'uncertain'});
+  const written = f.body(); expect(written).toMatch(/^\/compact /);
   await noSecondWrite(f);
+  expect(f.body()).toBe(written);
+  expect(f.e.getOwedRestore(seat)).toMatchObject({stage: 'turn_boundary', held: true});
   expect(compactWrites(f)).toBe(1);
   expect(entersAfterCompact(f)).toBe(0);
 });

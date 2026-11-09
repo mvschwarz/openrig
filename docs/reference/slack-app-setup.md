@@ -384,8 +384,8 @@ Quiet hours hold a person's routine asks while they're on, and post them once th
   wake-ladder alerts. These reach the person exactly as they would outside quiet. An ask below the posting level is only
   logged, as at any time.
 - **When quiet ends,** each held ask that never started posts once, on its own, with no mention. One that no longer applies
-  isn't posted, and its row says why: it closed, a newer notification replaced it, its recipient changed, or it's now below
-  the posting level.
+  isn't posted, and its row says why: it closed, a newer notification replaced it, its recipient changed, its person has no
+  connector any more (it stays on Steering and the Feed), or it's now below the posting level.
 - **A post that may already be in Slack**, confirmed or only partly sent, isn't held: it finishes as itself, in its own
   thread.
 - **If quiet hours can't be read,** that isn't a quiet window. An ask that would post goes to its usual destination with

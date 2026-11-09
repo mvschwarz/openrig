@@ -9,23 +9,23 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: 34fdcb80543903b054a982cc48bb302ae6871682
-last-updated: 2026-10-26
+last-verified-against-source: b29a70f14fc11797d46cbd9f12d4e61a523c3d06
+last-updated: 2026-11-09
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `34fdcb80543903b054a982cc48bb302ae6871682`.
+Verified against source commit `e1dedbf531b6db9961b4c77c0a74564e58274a50`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
-There are **90 top-level registrations**, **410 registered command objects**
+There are **92 top-level registrations**, **439 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,304 explicitly registered option objects**, including the root version
+**1,456 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
-These are counts for that source snapshot, not a claim about a deployed release. The provider-switch and set-runtime rows include the later account-home options; those additions are not included in the snapshot counts. The `environment` section and the `host edit`, `host remove` and `terminal attach` rows were added later from source at `522d635c`, and aren't in the snapshot counts either. With `environment`, main registers 91 top-level commands.
+These are counts for that source snapshot, not a claim about a deployed release. Every registered family is inside the snapshot: the `exec` and `environment` families, the `roster` and `telemetry` rows, and the `host edit`, `host remove` and `terminal attach` rows that earlier snapshots listed as later additions are all counted here.
 
 ## Reading this reference
 
@@ -226,6 +226,7 @@ the sections that were not read are `null`.
   `groups`, `warnings` and `participantFile`. `default` with no argument prints the current default and its source
   (`chosen` or `only-person`), or `null` with the reason. See `docs/reference/gateway-participants.md`.
 - `human set <entityId> slack-subscription <value>` — sets the person's Slack subscription: `every-ask` (the default) posts every ask to them to Slack; `urgent-only` posts only asks created with `--alert`, and other asks wait on Steering and the TUI; `unset` removes the authored subscription so the default applies. `human show` prints the value with its origin, `authored` or `default` (`slack-subscription: every-ask (default)`); `--json` carries it as `record.slackSubscription` `{ value, source }`.
+- `human set <entityId> binding.<n> <spec|unset>` — replaces `binding.<n>` with a full `kind:connectorRef:secretsRef:role[:handle=<id>]` spec, or removes that slot when `<value>` is `unset`. Removing a binding keeps the person, their preferences, their other bindings and their open questions, and prints `remainingBindings` (with their shifted `binding.<n>` slot indexes; the primary's slot shifts down too when a lower-index secondary is removed) plus `note`. No replacement `primary` is chosen silently: unsetting a `primary` while secondary bindings remain is refused, teaching how to replace the primary slot in place, promote an existing secondary binding (first save that binding's full spec from `rig gateway human show <entityId> --json`, then unset that secondary slot, then find the primary's current slot in `remainingBindings` or `rig gateway human show <entityId> --json` and set it to the saved spec with role `primary` — promotion replaces the former primary binding, and its connector reference and inbound handle are not retained as a secondary), or unset the secondary slots first using their current slot indexes from `remainingBindings` or `rig gateway human show <entityId>` and finish at `binding.0` when removing every binding. Removing the last binding makes the current delivery episode inactive so new missing-post findings stop (an already-open recovery item for an undelivered notice may remain, and the current delivery-outcome display may disappear while historical receipt notes remain); it does not answer, close or cancel open questions, cancel or reroute already-prepared deliveries, or retract anything a bridge has already accepted.
 
 ### parked
 
@@ -406,7 +407,7 @@ do not establish connectivity to a live peer.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig mcp` | — | — |
-| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>` |
+| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>`<br>`--front-door`<br>`--task-destination <seat>` |
 | `rig mcp token` | — | — |
 | `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
 | `rig mcp token list` | — | `--json` |
@@ -569,7 +570,7 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
+| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--follow`<br>`--no-follow`<br>`--max-tiles <count>`<br>`--pin <seats...>`<br>`--unpin <seats...>`<br>`--suppress <seats...>`<br>`--unsuppress <seats...>`<br>`--suppression-ms <ms>`<br>`--grace-ms <ms>`<br>`--focus-retention-ms <ms>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
 | `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--json` |
 | `rig terminal attach <session>` | — | `--read-only` |
@@ -674,6 +675,9 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig context` | — | — |
+| `rig context reconstruction` | — | — |
+| `rig context reconstruction inspect` | — | `--store <absolute-path>`<br>`--store-map <file>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--cwd <path>`<br>`--item <id>`<br>`--category <name>`<br>`--tag <name>`<br>`--check-sources`<br>`--max-bytes <bytes>`<br>`--json` |
+| `rig context reconstruction view` | — | `--store <absolute-path>`<br>`--store-map <file>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--cwd <path>`<br>`--item <id>`<br>`--category <name>`<br>`--tag <name>`<br>`--check-sources`<br>`--max-bytes <bytes>`<br>`--json` |
 | `rig context work-install` | — | `--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--deliver`<br>`--runtime <runtime>`<br>`--cwd <path>`<br>`--topology <ids>`<br>`--apply-skills`<br>`--json` |
 | `rig context trace` | — | `--rig <rig>` **required**<br>`--pod <pod>`<br>`--seat <seat>`<br>`--name <file>` **required**<br>`--json` |
 | `rig context compose` | — | `--out <ref>` **required**<br>`--from <files...>` **required** |

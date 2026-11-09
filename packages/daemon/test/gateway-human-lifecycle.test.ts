@@ -253,6 +253,238 @@ describe("gateway human lifecycle (S12, amended A1: single-human surface): list 
     expect(loaded.ok).toBe(true); // registry still coherent
   });
 
+  it("set binding.<n> unset removes a secondary binding, shifts remaining slot indexes, and reports remainingBindings + note", () => {
+    const seeded = addHumanFragment(
+      {
+        entityId: "dana",
+        class: "human",
+        displayName: "Dana",
+        address: "dana@external",
+        connectorBindings: [
+          { kind: "slack", connectorRef: "secondary-first", secretsRef: "vault://slack/dana-s1", role: "secondary" },
+          { kind: "slack", connectorRef: "main", secretsRef: "vault://slack/dana-main", role: "primary", handle: "U0DANA" },
+          { kind: "relay", connectorRef: "bridge", secretsRef: "file:/etc/openrig/relay.env", role: "secondary" },
+        ],
+        prefs: { deliveryClass: "A", away: true },
+      },
+      home,
+    );
+    expect(seeded.ok).toBe(true);
+    const res = setHumanField("dana", "binding.0", "unset", home);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.remainingBindings).toEqual([
+      { slot: "binding.0", kind: "slack", connectorRef: "main", role: "primary", handle: "U0DANA", inboundResolvable: true },
+      { slot: "binding.1", kind: "relay", connectorRef: "bridge", role: "secondary", inboundResolvable: false },
+    ]);
+    expect(JSON.stringify(res.remainingBindings)).not.toContain("vault://");
+    expect(res.note).toContain("Removed binding.0 (slack:secondary-first role=secondary)");
+    expect(res.note).toContain("Remaining binding(s): binding.0: slack:main role=primary handle=U0DANA, binding.1: relay:bridge role=secondary [outbound-only]");
+    expect(res.note).toContain("Binding slot indexes shift after removal, so do not blindly retry binding.0 unset");
+    const shown = showHuman("dana", home);
+    expect(shown.ok).toBe(true);
+    if (shown.ok) {
+      expect(shown.record.prefs.deliveryClass.value).toBe("A");
+      expect(shown.record.prefs.away).toEqual({ value: true, source: "authored" });
+      expect(shown.record.connectorBindings.map((b) => [b.kind, b.connectorRef, b.role])).toEqual([
+        ["slack", "main", "primary"],
+        ["relay", "bridge", "secondary"],
+      ]);
+    }
+    const fresh = projectHumans(home);
+    expect(fresh.ok).toBe(true);
+    if (fresh.ok) expect(readFileSync(projectionPath(home), "utf8")).toBe(fresh.body);
+  });
+
+  it("set binding.<n> unset on a sole primary binding leaves connectorBindings empty and explains inactive delivery episode semantics", () => {
+    const res = setHumanField("mike", "binding.0", "unset", home);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.fragment.connectorBindings).toEqual([]);
+    expect(res.remainingBindings).toEqual([]);
+    expect(res.note).toContain("Remaining bindings: none (this person now has no connector binding and is reached in the Feed and Steering only)");
+    expect(res.note).toContain("Removing the last binding makes the current delivery episode inactive, so new missing-post findings stop (an already-open recovery item for an undelivered notice may remain)");
+    expect(res.note).toContain("the current delivery-outcome display may disappear too, while historical receipt notes remain");
+    expect(res.note).toContain("It does not answer, close or cancel open questions, cancel or reroute already-prepared deliveries, or retract anything a bridge has already accepted");
+    const loaded = loadHumanRegistry(home);
+    expect(loaded.ok).toBe(true);
+    if (loaded.ok) {
+      const mike = loaded.entities.find((e) => e.entityId === "mike")!;
+      expect(mike.connectorBindings).toEqual([]);
+      expect(mike.prefs.deliveryClass).toBe("B");
+    }
+  });
+
+  it("set binding.<n> unset refuses removing primary while secondary bindings remain, naming the settings-preserving replace/promote/remove paths", () => {
+    seedAna(home);
+    const fragBefore = sha(join(humansDir(home), "ana.yaml"));
+    const projBefore = sha(projectionPath(home));
+    const res = setHumanField("ana", "binding.0", "unset", home);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error).toContain('cannot unset binding.0 (role "primary") while 1 other binding(s) remain (binding.1)');
+      expect(res.error).toContain("no replacement is chosen silently");
+      expect(res.error).toContain('To replace the primary, set binding.0 to the new primary spec: rig gateway human set ana binding.0 "<kind:connectorRef:secretsRef:primary[:handle=<id>]>"');
+      expect(res.error).toContain("To promote one of the other bindings (binding.1), first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show ana --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show ana --json, since unsetting a lower slot shifts the primary down) and set it to the saved spec with role primary (promotion replaces the former primary binding; its connector reference and inbound handle are not retained as a secondary).");
+      expect(res.error).toContain("To remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show ana, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).");
+      expect(res.error).not.toContain("--replace");
+    }
+    expect(sha(join(humansDir(home), "ana.yaml"))).toBe(fragBefore);
+    expect(sha(projectionPath(home))).toBe(projBefore);
+  });
+
+  it("primary at nonzero slot (binding.1): refusal names current slots, promote route saves spec from show --json before unsetting and shifts primary to binding.0, and remove-all route finishes at binding.0", () => {
+    expect(
+      addHumanFragment(
+        {
+          entityId: "kai",
+          class: "human",
+          displayName: "Kai",
+          address: "kai@external",
+          connectorBindings: [
+            { kind: "relay", connectorRef: "bridge-a", secretsRef: "file:/etc/a.env", role: "secondary", handle: "kai-a" },
+            { kind: "slack", connectorRef: "main", secretsRef: "file:/etc/s.env", role: "primary", handle: "U0KAI" },
+            { kind: "relay", connectorRef: "bridge-b", secretsRef: "file:/etc/b.env", role: "secondary", handle: "kai-b" },
+          ],
+          prefs: { deliveryClass: "A", availability: "focus" },
+          subscriptions: [{ destination: { connector: "slack" }, filter: { preset: "urgent-only" } }],
+        },
+        home,
+      ).ok,
+    ).toBe(true);
+
+    // 1. Refuse unsetting primary at binding.1 while secondaries at binding.0 and binding.2 remain
+    const refused = setHumanField("kai", "binding.1", "unset", home);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.error).toContain('cannot unset binding.1 (role "primary") while 2 other binding(s) remain (binding.0, binding.2)');
+      expect(refused.error).toContain('To replace the primary, set binding.1 to the new primary spec: rig gateway human set kai binding.1 "<kind:connectorRef:secretsRef:primary[:handle=<id>]>"');
+      expect(refused.error).toContain("To promote one of the other bindings (binding.0, binding.2), first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show kai --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show kai --json, since unsetting a lower slot shifts the primary down) and set it to the saved spec with role primary (promotion replaces the former primary binding; its connector reference and inbound handle are not retained as a secondary).");
+      expect(refused.error).toContain("To remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show kai, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).");
+    }
+
+    // 2. Promote route from binding.0 when primary started at binding.1:
+    //    Step 1: save binding.0's full spec (including secretsRef) from showHuman (rig gateway human show kai --json)
+    const beforePromote = showHuman("kai", home);
+    expect(beforePromote.ok).toBe(true);
+    if (!beforePromote.ok) return;
+    const savedSecondary = beforePromote.record.connectorBindings[0]!;
+    expect(savedSecondary.secretsRef).toBe("file:/etc/a.env");
+    const promotedSpec = `${savedSecondary.kind}:${savedSecondary.connectorRef}:${savedSecondary.secretsRef}:primary${savedSecondary.handle ? `:handle=${savedSecondary.handle}` : ""}`;
+
+    //    Step 2: unset secondary binding.0 -> primary shifts down from binding.1 to binding.0
+    const promoteUnset = setHumanField("kai", "binding.0", "unset", home);
+    expect(promoteUnset.ok).toBe(true);
+    if (!promoteUnset.ok) return;
+    expect(promoteUnset.remainingBindings?.map((b) => [b.slot, b.connectorRef, b.role])).toEqual([
+      ["binding.0", "main", "primary"],
+      ["binding.1", "bridge-b", "secondary"],
+    ]);
+    const currentPrimarySlot = promoteUnset.remainingBindings!.find((b) => b.role === "primary")!.slot;
+    expect(currentPrimarySlot).toBe("binding.0");
+
+    //    Step 3: set primary's current slot (binding.0, NOT old binding.1) to the saved spec with role primary
+    const promoteSet = setHumanField("kai", currentPrimarySlot, promotedSpec, home);
+    expect(promoteSet.ok).toBe(true);
+    const afterPromote = showHuman("kai", home);
+    expect(afterPromote.ok).toBe(true);
+    if (afterPromote.ok) {
+      expect(afterPromote.record.connectorBindings.map((b) => [b.kind, b.connectorRef, b.secretsRef, b.role, b.handle])).toEqual([
+        ["relay", "bridge-a", "file:/etc/a.env", "primary", "kai-a"],
+        ["relay", "bridge-b", "file:/etc/b.env", "secondary", "kai-b"],
+      ]);
+      expect(afterPromote.record.slackSubscription).toEqual({ value: "urgent-only", source: "authored" });
+      expect(afterPromote.record.prefs.deliveryClass).toEqual({ value: "A", source: "authored" });
+    }
+    const loadedAfterPromote = loadHumanRegistry(home);
+    expect(loadedAfterPromote.ok).toBe(true);
+    if (loadedAfterPromote.ok) {
+      expect(loadedAfterPromote.entities.find((e) => e.entityId === "kai")?.prefs.availability).toBe("focus");
+    }
+
+    // 3. Remove-all route when primary is at a nonzero slot ([secondary binding.0, primary binding.1, secondary binding.2]):
+    expect(
+      addHumanFragment(
+        {
+          entityId: "kai",
+          class: "human",
+          displayName: "Kai",
+          address: "kai@external",
+          connectorBindings: [
+            { kind: "relay", connectorRef: "bridge-a", secretsRef: "file:/etc/a.env", role: "secondary", handle: "kai-a" },
+            { kind: "slack", connectorRef: "main", secretsRef: "file:/etc/s.env", role: "primary", handle: "U0KAI" },
+            { kind: "relay", connectorRef: "bridge-b", secretsRef: "file:/etc/b.env", role: "secondary", handle: "kai-b" },
+          ],
+          prefs: { deliveryClass: "A", availability: "focus" },
+        },
+        home,
+        { replace: true },
+      ).ok,
+    ).toBe(true);
+    const rem1 = setHumanField("kai", "binding.0", "unset", home);
+    expect(rem1.ok).toBe(true);
+    if (rem1.ok) {
+      expect(rem1.remainingBindings?.map((b) => [b.slot, b.role])).toEqual([
+        ["binding.0", "primary"],
+        ["binding.1", "secondary"],
+      ]);
+    }
+    const rem2 = setHumanField("kai", "binding.1", "unset", home);
+    expect(rem2.ok).toBe(true);
+    if (rem2.ok) {
+      expect(rem2.remainingBindings?.map((b) => [b.slot, b.role])).toEqual([["binding.0", "primary"]]);
+    }
+    const rem3 = setHumanField("kai", "binding.0", "unset", home);
+    expect(rem3.ok).toBe(true);
+    if (rem3.ok) {
+      expect(rem3.remainingBindings).toEqual([]);
+      expect(rem3.fragment.connectorBindings).toEqual([]);
+    }
+  });
+
+  it("two-step promotion (unset secondary binding.<k> first, then set primary slot to its spec with role primary) keeps subscription, deliveryClass, and availability intact", () => {
+    expect(
+      addHumanFragment(
+        {
+          entityId: "ana",
+          class: "human",
+          displayName: "Ana",
+          address: "ana@external",
+          connectorBindings: [
+            { kind: "slack", connectorRef: "main", secretsRef: "file:/etc/s.env", role: "primary", handle: "U0ANA" },
+            { kind: "relay", connectorRef: "bridge", secretsRef: "file:/etc/r.env", role: "secondary", handle: "ana-ops" },
+            { kind: "relay", connectorRef: "other", secretsRef: "file:/etc/o.env", role: "secondary", handle: "ana-2" },
+          ],
+          prefs: { deliveryClass: "A", availability: "focus" },
+          subscriptions: [{ destination: { connector: "slack" }, filter: { preset: "urgent-only" } }],
+        },
+        home,
+      ).ok,
+    ).toBe(true);
+
+    const s1 = setHumanField("ana", "binding.1", "unset", home);
+    expect(s1.ok).toBe(true);
+    const s2 = setHumanField("ana", "binding.0", "relay:bridge:file:/etc/r.env:primary:handle=ana-ops", home);
+    expect(s2.ok).toBe(true);
+
+    const shown = showHuman("ana", home);
+    expect(shown.ok).toBe(true);
+    if (shown.ok) {
+      expect(shown.record.connectorBindings.map((b) => [b.kind, b.connectorRef, b.role, b.handle])).toEqual([
+        ["relay", "bridge", "primary", "ana-ops"],
+        ["relay", "other", "secondary", "ana-2"],
+      ]);
+      expect(shown.record.slackSubscription).toEqual({ value: "urgent-only", source: "authored" });
+      expect(shown.record.prefs.deliveryClass).toEqual({ value: "A", source: "authored" });
+    }
+    const loaded = loadHumanRegistry(home);
+    expect(loaded.ok).toBe(true);
+    if (loaded.ok) {
+      const ana = loaded.entities.find((e) => e.entityId === "ana")!;
+      expect(ana.prefs.availability).toBe("focus");
+    }
+  });
+
   // ── remove ──
   it("remove with NO in-flight items archives the fragment (never deletes bytes) and re-projects", () => {
     const fragBytes = readFileSync(join(humansDir(home), "mike.yaml"), "utf8");

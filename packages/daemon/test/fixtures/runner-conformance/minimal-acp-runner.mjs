@@ -89,7 +89,16 @@ function api(method, path, payload) {
 }
 
 // The agent, over stdio JSON-RPC.
-const agent = spawn("/bin/sh", ["-c", `exec ${agentCommand} acp`], { stdio: ["pipe", "pipe", "ignore"] });
+const wrapper = env.OPENRIG_LAUNCH_WRAPPER === undefined ? [] : JSON.parse(env.OPENRIG_LAUNCH_WRAPPER);
+if (!Array.isArray(wrapper) || (env.OPENRIG_LAUNCH_WRAPPER !== undefined && wrapper.length === 0)
+  || wrapper.some((arg) => typeof arg !== "string" || /[\0\r\n]/.test(arg)) || (wrapper.length && !wrapper[0].trim())) {
+  throw new Error("launch_wrapper unavailable; no agent started.");
+}
+const quote = (arg) => `'${arg.replace(/'/g, `'"'"'`)}'`;
+const prefix = wrapper.length && !breaks.has("ignore-wrapper") ? wrapper.map(quote).join(" ") + " " : "";
+const childEnv = { ...env };
+if (!breaks.has("leak-wrapper")) delete childEnv.OPENRIG_LAUNCH_WRAPPER;
+const agent = spawn("/bin/sh", ["-c", `exec ${prefix}${agentCommand} acp`], { stdio: ["pipe", "pipe", "ignore"], env: childEnv });
 agent.stdin.on("error", () => { /* the agent has gone; its exit is reported below */ });
 let nextId = 1;
 const pending = new Map();

@@ -41,9 +41,9 @@ describe("a community harness from a data preset", () => {
   }
   const presetDir = () => join(scaffold.env.OPENRIG_HOME!, "community-harnesses");
   const writePreset = (file: string, body: string) => { mkdirSync(presetDir(), { recursive: true }); writeFileSync(join(presetDir(), file), body); };
-  const specFor = (name: string, runtime: string) => {
+  const specFor = (name: string, runtime: string, launchWrapper?: string[]) => {
     const path = join(rigRoot, `${name}.yaml`);
-    writeFileSync(path, `version: "0.2"\nname: ${name}\npods:\n  - id: work\n    label: Work\n    members:\n      - {id: worker, agent_ref: "local:agents/worker", profile: default, runtime: ${runtime}, cwd: .}\n    edges: []\n`);
+    writeFileSync(path, `version: "0.2"\nname: ${name}\npods:\n  - id: work\n    label: Work\n    members:\n      - {id: worker, agent_ref: "local:agents/worker", profile: default, runtime: ${runtime}, cwd: .${launchWrapper ? `, launch_wrapper: ${JSON.stringify(launchWrapper)}` : ""}}\n    edges: []\n`);
     return path;
   };
 
@@ -64,9 +64,63 @@ describe("a community harness from a data preset", () => {
   }, 120_000);
 
   afterAll(async () => {
-    try { if (daemon) for (const r of ["community-harness-rig", "free-rig", "first-input-rig"]) await rig(["down", r, "--json", "--force"]); }
+    try { if (daemon) for (const r of ["community-harness-rig", "free-rig", "first-input-rig", "wrapped-plain-rig", "wrapped-runner-rig"]) await rig(["down", r, "--json", "--force"]); }
     finally { await daemon?.stop(); }
   }, 60_000);
+
+  function recordingWrapper(name: string) {
+    const script = join(rigRoot, `${name}-wrapper.sh`);
+    const record = join(rigRoot, `${name}-wrapper.json`);
+    writeFileSync(script, `#!/bin/sh
+set -e
+record=$1
+tag=$2
+separator=$3
+shift 3
+/usr/bin/env node -e 'const [file, tag, separator, ...argv] = process.argv.slice(1); require("node:fs").writeFileSync(file, JSON.stringify({ argv, tag, separator, wrapper: process.env.OPENRIG_LAUNCH_WRAPPER ?? null }));' "$record" "$tag" "$separator" "$@"
+exec "$@"
+`);
+    return { record, argv: ["/bin/sh", script, record, "literal ' $ ; space", "--"] };
+  }
+
+  it("prefixes a runner-less preset with resolved literal wrapper argv", async () => {
+    writePreset("wrapped-plain.yaml", `format: 1\nname: wrapped-plain\ncommand: node ${appScript}\nmaintainer: Example\n`);
+    const wrapper = recordingWrapper("plain");
+    const up = await rig(["up", specFor("wrapped-plain-rig", "wrapped-plain", wrapper.argv), "--cwd", rigRoot, "--json", "--yes"], 120_000);
+    expect(up.code, JSON.stringify(up)).toBe(0);
+    const text = await until(async () => { try { return readFileSync(wrapper.record, "utf8"); } catch { return ""; } }, Boolean);
+    expect(JSON.parse(text)).toEqual({ argv: ["node", appScript], tag: "literal ' $ ; space", separator: "--", wrapper: null });
+  }, 150_000);
+
+  it("keeps a capable runner outside the wrapper and wraps its real native child", async () => {
+    const runner = resolve(here, "fixtures/runner-conformance/minimal-acp-runner.mjs");
+    const agent = resolve(here, "../../../docs/reference/runner-conformance/fake-acp-agent.mjs");
+    writePreset("wrapped-runner.yaml", `format: 1\nname: wrapped-runner\ncommand: node ${runner} --agent 'node ${agent}'\nmaintainer: Example\nrunner: true\nlaunch_result: true\nlaunch_wrapper: true\n`);
+    const wrapper = recordingWrapper("runner");
+    const up = await rig(["up", specFor("wrapped-runner-rig", "wrapped-runner", wrapper.argv), "--cwd", rigRoot, "--json", "--yes"], 120_000);
+    expect(up.code, JSON.stringify(up)).toBe(0);
+    const text = await until(async () => { try { return readFileSync(wrapper.record, "utf8"); } catch { return ""; } }, Boolean);
+    const seen = JSON.parse(text);
+    expect(seen).toMatchObject({ argv: ["node", agent, "acp"], tag: "literal ' $ ; space", separator: "--" });
+    expect(seen.wrapper).toBeNull();
+    expect(seen.argv).not.toContain(runner);
+    const nodes = await json(["ps", "--nodes", "--rig", "wrapped-runner-rig", "--full", "--json"]);
+    expect(nodes[0]).toMatchObject({ runtime: "wrapped-runner", communityHarness: { identity: "reported by its launcher, not observed" } });
+  }, 150_000);
+
+  it.each(["", "launch_wrapper: false\n"])("refuses an incapable runner at preflight before either process starts (%s)", async capability => {
+    const marker = join(rigRoot, "incapable-started");
+    const launcher = join(rigRoot, "incapable.mjs");
+    writeFileSync(launcher, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'started');`);
+    writePreset("incapable-runner.yaml", `format: 1\nname: incapable-runner\ncommand: node ${launcher}\nmaintainer: Example\nrunner: true\nlaunch_result: true\n${capability}`);
+    const wrapper = recordingWrapper("incapable");
+    const up = await rig(["up", specFor("incapable-runner-rig", "incapable-runner", wrapper.argv), "--cwd", rigRoot, "--json", "--yes"], 120_000);
+    expect(up.code, JSON.stringify(up)).not.toBe(0);
+    expect(JSON.parse(up.stdout)).toMatchObject({ code: "preflight_failed", errors: expect.arrayContaining([
+      expect.stringContaining('launch_wrapper unsupported: the community preset "incapable-runner" runs a runner without launch_wrapper: true; no agent started. Add launch_wrapper: true to the preset if its runner applies OPENRIG_LAUNCH_WRAPPER, or remove launch_wrapper from this member.')]) });
+    expect(() => readFileSync(marker)).toThrow();
+    expect(() => readFileSync(wrapper.record)).toThrow();
+  }, 150_000);
 
   it("serves the renamed route and JSON keys without exposing the removed public route", async () => {
     const response = await fetch(`${daemon.baseUrl}/api/community-harnesses`);

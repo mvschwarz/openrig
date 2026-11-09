@@ -339,10 +339,11 @@ describe("after QA: changed circumstances and a second person", () => {
   let historyIncomplete = false; // the reconciler's history scan stops early (more pages, no cursor): "maybe"
   let failFromPost = 0; // when set, the Nth post and every one after it fail before posting
   let registryOk = true;
+  const unbound = new Set<string>(); // people whose last connector binding was removed
   const person = (id: string) => ({
     entityId: id, class: "human" as const, displayName: id, address: `${id}@external`,
     prefs: id === "person" ? { deliveryClass: "C", availability: "available" } : { deliveryClass: "B", availability: "available" },
-    connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: id === "person" ? "UPERSON" : "UOTHER" }],
+    connectorBindings: unbound.has(id) ? [] : [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: id === "person" ? "UPERSON" : "UOTHER" }],
   });
   const registry = () => registryOk ? { ok: true as const, entities: order.map(person) } : { ok: false as const, error: "registry unavailable (test)" };
 
@@ -359,6 +360,7 @@ describe("after QA: changed circumstances and a second person", () => {
     historyIncomplete = false;
     failFromPost = 0;
     registryOk = true;
+    unbound.clear();
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
@@ -981,6 +983,23 @@ describe("after QA: changed circumstances and a second person", () => {
       await settle();
     } finally { read.mockRestore(); }
     finishedAsContinuation(row);
+  });
+
+  it("a held ask whose person has no connector when quiet ends closes with no-connector, not below the posting threshold", async () => {
+    const row = await ask({ destinationSession: "other@external" });
+    quietOnFor("other");
+    const w = wire();
+    w.dispatcher.dispatch(OUTBOUND_OP, "other@external", toPayload(await alertFor(row)));
+    await settle();
+    expect(notes(row).some((n) => n.startsWith("delivery-decision: quiet-hold "))).toBe(true);
+    const state = repo.getById(row.qitemId)!.state;
+    unbound.add("other"); // their last binding removed (rig gateway human add --replace without --binding)
+    quiet.end("other", { endedBy: "t", now: new Date() });
+    await release();
+    expect(posts).toHaveLength(0);
+    expect(notes(row).find((n) => n.startsWith("quiet-release-disposition "))).toMatch(/ reason=no-connector$/);
+    expect(notes(row).some((n) => n.includes("reason=below-posting-threshold"))).toBe(false);
+    expect(repo.getById(row.qitemId)!.state, "the ask stays open on Steering").toBe(state);
   });
 
   it("review 5: outside quiet, a partly posted ask replayed after a restart finishes as before", async () => {

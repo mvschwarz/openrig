@@ -581,9 +581,25 @@ export type ShowHumanResult =
   | { ok: true; record: EffectiveHumanRecord }
   | { ok: false; error: string };
 
+export interface RemainingHumanBindingSummary {
+  slot: string;
+  kind: HumanConnectorKind;
+  connectorRef: string;
+  role: "primary" | "secondary";
+  handle?: string;
+  inboundResolvable: boolean;
+}
+
 export type SetHumanFieldResult =
   /** changeId: the availability change record this write left, when it left one. */
-  | { ok: true; path: string; fragment: HumanFragment; changeId?: string }
+  | {
+      ok: true;
+      path: string;
+      fragment: HumanFragment;
+      changeId?: string;
+      remainingBindings?: RemainingHumanBindingSummary[];
+      note?: string;
+    }
   /** changeId: set when the fragment and its change record were written but something after them failed. */
   | { ok: false; error: string; changeId?: string };
 
@@ -705,7 +721,31 @@ export function showHuman(entityId: string, home: string = getOpenRigHome()): Sh
 }
 
 const SETTABLE_FIELDS_TEACHING =
-  "settable fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-subscription (every-ask|urgent-only, or unset for every-ask), binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec)";
+  "settable fields: display-name, delivery-class, away, availability (available|focus|away|off, or unset), slack-subscription (every-ask|urgent-only, or unset for every-ask), binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec, or unset to remove that binding)";
+
+function formatRemainingBindingSlot(b: RemainingHumanBindingSummary): string {
+  return `${b.slot}: ${b.kind}:${b.connectorRef} role=${b.role}${b.handle ? ` handle=${b.handle}` : " [outbound-only]"}`;
+}
+
+export function describeBindingUnsetNote(
+  entityId: string,
+  removedSlot: string,
+  removed: HumanConnectorBinding | undefined,
+  remainingBindings: RemainingHumanBindingSummary[],
+): string {
+  const removedLabel = removed ? `${removedSlot} (${removed.kind}:${removed.connectorRef} role=${removed.role})` : removedSlot;
+  const remainingText =
+    remainingBindings.length > 0
+      ? `Remaining binding(s): ${remainingBindings.map(formatRemainingBindingSlot).join(", ")}.`
+      : "Remaining bindings: none (this person now has no connector binding and is reached in the Feed and Steering only).";
+  return (
+    `Removed ${removedLabel}. ${remainingText} ` +
+    `Binding slot indexes shift after removal, so do not blindly retry ${removedSlot} unset; check remainingBindings, the operation receipt, or rig gateway human show ${entityId} before retrying. ` +
+    `Removing a binding keeps the person, their preferences, their other bindings and their open questions. ` +
+    `Removing the last binding makes the current delivery episode inactive, so new missing-post findings stop (an already-open recovery item for an undelivered notice may remain); the current delivery-outcome display may disappear too, while historical receipt notes remain. ` +
+    `It does not answer, close or cancel open questions, cancel or reroute already-prepared deliveries, or retract anything a bridge has already accepted.`
+  );
+}
 
 /** Cross-fragment handle-uniqueness: the same pre-write check add runs (one platform id =
  *  one human), extracted so set enforces it identically. */
@@ -780,6 +820,7 @@ export function setHumanField(
   const raw = f.raw;
   const rawPrefs = isObj(raw.prefs) ? (raw.prefs as Record<string, unknown>) : {};
 
+  const priorBindings = f.fragment.connectorBindings;
   if (field === "display-name") {
     if (value.length === 0) return { ok: false, error: "display-name must be a non-empty string" };
     raw.displayName = value;
@@ -809,15 +850,36 @@ export function setHumanField(
   } else if (field.startsWith("binding.")) {
     const idxRaw = field.slice("binding.".length);
     const idx = /^\d+$/.test(idxRaw) ? Number.parseInt(idxRaw, 10) : NaN;
-    const bindings = Array.isArray(raw.connectorBindings) ? (raw.connectorBindings as unknown[]) : [];
+    const bindings = Array.isArray(raw.connectorBindings) ? [...(raw.connectorBindings as unknown[])] : [];
     if (!Number.isInteger(idx) || idx < 0 || idx >= bindings.length) {
       const valid = bindings.map((_, i) => `binding.${i}`).join(", ");
       return { ok: false, error: `"${field}" is out of range — this human has ${bindings.length} binding(s): ${valid || "(none)"}` };
     }
-    const parsed = parseBindingSpec(value);
-    if (!parsed.ok) return parsed;
-    bindings[idx] = parsed.binding;
-    raw.connectorBindings = bindings;
+    if (value === "unset") {
+      const remaining = bindings.filter((_, i) => i !== idx);
+      if (remaining.length > 0 && !remaining.some((b) => isObj(b) && b.role === "primary")) {
+        const otherSlots = bindings
+          .map((_, i) => i)
+          .filter((i) => i !== idx)
+          .map((i) => `binding.${i}`)
+          .join(", ");
+        return {
+          ok: false,
+          error:
+            `cannot unset ${field} (role "primary") while ${remaining.length} other binding(s) remain (${otherSlots}): ` +
+            `exactly one connectorBinding must have role "primary" (found 0), and no replacement is chosen silently. ` +
+            `To replace the primary, set ${field} to the new primary spec: rig gateway human set ${entityId} ${field} "<kind:connectorRef:secretsRef:primary[:handle=<id>]>". ` +
+            `To promote one of the other bindings (${otherSlots}), first save that binding's full spec (kind:connectorRef:secretsRef:role[:handle=<id>]) from rig gateway human show ${entityId} --json, then unset that secondary slot, then find the primary's current slot in remainingBindings (or rig gateway human show ${entityId} --json, since unsetting a lower slot shifts the primary down) and set it to the saved spec with role primary (promotion replaces the former primary binding; its connector reference and inbound handle are not retained as a secondary). ` +
+            `To remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show ${entityId}, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).`,
+        };
+      }
+      raw.connectorBindings = remaining;
+    } else {
+      const parsed = parseBindingSpec(value);
+      if (!parsed.ok) return parsed;
+      bindings[idx] = parsed.binding;
+      raw.connectorBindings = bindings;
+    }
   } else {
     return { ok: false, error: `unknown field "${field}" — ${SETTABLE_FIELDS_TEACHING}` };
   }
@@ -845,6 +907,26 @@ export function setHumanField(
   }
   const proj = writeProjection(home);
   if (!proj.ok) return { ok: false, error: `fragment written but re-projection failed: ${proj.error}`, ...(changeId ? { changeId } : {}) };
+  if (field.startsWith("binding.") && value === "unset") {
+    const removedIdx = Number.parseInt(field.slice("binding.".length), 10);
+    const remainingBindings: RemainingHumanBindingSummary[] = v.fragment.connectorBindings.map((b, i) => ({
+      slot: `binding.${i}`,
+      kind: b.kind,
+      connectorRef: b.connectorRef,
+      role: b.role,
+      ...(b.handle !== undefined ? { handle: b.handle } : {}),
+      inboundResolvable: b.handle !== undefined,
+    }));
+    const note = describeBindingUnsetNote(entityId, field, priorBindings[removedIdx], remainingBindings);
+    return {
+      ok: true,
+      path: f.path,
+      fragment: v.fragment,
+      ...(changeId ? { changeId } : {}),
+      remainingBindings,
+      note,
+    };
+  }
   return { ok: true, path: f.path, fragment: v.fragment, ...(changeId ? { changeId } : {}) };
 }
 

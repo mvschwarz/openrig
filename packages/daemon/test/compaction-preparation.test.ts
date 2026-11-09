@@ -98,8 +98,8 @@ for(const budget of [40_000,9_000])it(`manual skip-map final send keeps its orig
  expect(f.clock()-start).toBeLessThanOrEqual(budget);
  expect(f.e.getPreparationState(seat)?.deadlineAt).toBe(start+budget);
 });
-for(const pane of ['running','permission','typed','unknown'] as const)it(`an aged preparation hook still cannot compact a ${pane} pane`,async()=>{
- const f=await tinyPane(pane==='typed'?'typed':pane==='unknown'?'unknown':'empty');
+for(const pane of ['running','permission','unknown'] as const)it(`an aged preparation hook still cannot compact a ${pane} pane`,async()=>{
+ const f=await tinyPane(pane==='unknown'?'unknown':'empty');
  if(pane==='running'||pane==='permission'){
   const screen=pane==='running'
    ?readFileSync(join(import.meta.dirname,'fixtures/input-box/claude-code-2.1.296/after-enter-0.4s.J.txt'),'utf8')
@@ -124,14 +124,14 @@ it.each(['live-pane','final-composer'])('submits managed /compact from an 11x20 
  await f.e.maybeAutoCompact(input);
  expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
  expect(compacts(f)).toHaveLength(1);
- expect(f.tmux.sendText).toHaveBeenCalledWith(seat,expect.stringMatching(/^\/compact/),expect.any(Function),expect.objectContaining({beforePaste:expect.any(Function)}));
+ expect(f.tmux.sendText).toHaveBeenCalledWith(seat,expect.stringMatching(/^\/compact/),expect.any(Function));
 });
-it.each(['unknown','typed'] as const)('keeps a readable %s composer from authorizing /compact and gives its window back',async kind=>{
+it.each(['unknown','typed'] as const)('a readable %s pane follows ordinary draft defaults and gives its window back',async kind=>{
  const f=await tinyPane(kind);
  const box=(await f.transport.capture(seat,{inputBox:true,readable:{width:120,height:40}})).inputBox;
  expect(box?.status).toBe(kind==='typed'?'typed':'no-input-box');
  await f.e.maybeAutoCompact(input);
- expect(compacts(f)).toHaveLength(0);
+ expect(compacts(f)).toHaveLength(kind==='typed'?1:0);
  expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
 });
 it('submits managed /compact when readable redraw settling exceeds the ordinary one-second idle wait',async()=>{
