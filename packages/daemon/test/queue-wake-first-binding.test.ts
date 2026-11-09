@@ -66,14 +66,15 @@ describe("a wake committed before its seat had a pane (#2789)", () => {
     f.relaunch();
 
     await f.repo.retryUnroutableWakesOnReachable("worker@test", "idle");
-    const sent = f.sendsFor(item.qitemId);
-    expect(sent).toBeGreaterThan(0);
+    expect(f.sendsFor(item.qitemId)).toBe(1);
+    expect(f.intentOf(item.qitemId).deliveryState).toBe("delivered");
     expect(f.intentOf(item.qitemId).guardBinding).toEqual({ nodeId: "a", session: "worker@test", occupant: "occupant-2", pane: "%1" });
     expect(f.repo.getById(item.qitemId)!.lastNudgeResult).not.toMatch(/identity changed|^unroutable:/);
 
     await f.repo.retryUnroutableWakesOnReachable("worker@test", "idle");
     await f.repo.drainPendingWakeIntents();
-    expect(f.sendsFor(item.qitemId)).toBe(sent);
+    expect(f.sendsFor(item.qitemId)).toBe(1);
+    expect(f.intentOf(item.qitemId).deliveryState).toBe("delivered");
   });
 
   it("control: a wake bound to an earlier occupant's pane is still refused when the seat is relaunched", async () => {
