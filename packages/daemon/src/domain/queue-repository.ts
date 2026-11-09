@@ -5825,14 +5825,17 @@ function isOutboundOwnerNotice(t: QueueTransition): boolean {
 }
 
 /** The `<connectorRef>\n<notificationKey>` pairs GET /api/gateway/relay/outbox would list now: staged in the
- *  DispatchBuffer and the attempted store, under a connector whose listing isn't refused for an invalid envelope. */
+ *  DispatchBuffer and the attempted store, under a connector whose listing isn't refused for an invalid envelope. A store
+ *  the outbox can't read (so it answers 503) lists nothing. */
 function listablePullOutboxKeys(): Set<string> {
   let pending: ReturnType<DispatchBuffer["pendingStrict"]>;
   let attempted: Map<string, string>;
   try {
     const home = getOpenRigHome();
     pending = new DispatchBuffer(home).pendingStrict();
-    attempted = new SeenStore(relayStatePaths(home).attemptedPath).statuses();
+    const { attemptedPath, deliveredPath } = relayStatePaths(home);
+    attempted = new SeenStore(attemptedPath).statuses();
+    new SeenStore(deliveredPath).statuses();
   } catch {
     return new Set();
   }

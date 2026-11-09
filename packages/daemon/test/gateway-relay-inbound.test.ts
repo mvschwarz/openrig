@@ -3128,6 +3128,26 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     expect(f.daemon.queueRepo.findUndelivered({ qitemId: staged.qitemId })).toHaveLength(0);
   });
 
+  it("a staged pull notice surfaces at 120s when the outbox can't list it because the delivered store is unreadable", async () => {
+    const f = await createRelayFixture({
+      mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
+    });
+    const staged = await createAskWithAcceptedRelayRef(f, { summary: "Staged, delivered store unreadable", recordViaPendingBufferOnly: true });
+    f.db.prepare("UPDATE queue_transitions SET ts = datetime('now', '-10 minutes') WHERE qitem_id = ?").run(staged.qitemId);
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)).toBeNull();
+
+    const deliveredPath = relayStatePaths(f.home).deliveredPath;
+    rmSync(deliveredPath, { recursive: true, force: true });
+    mkdirSync(deliveredPath, { recursive: true });
+    const listRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(listRes.status).toBe(503);
+    expect(await listRes.json()).toMatchObject({ error: "seen_store_unavailable" });
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)?.outcome).toBe("never-posted");
+    expect(f.daemon.queueRepo.findUndelivered({ qitemId: staged.qitemId })).toHaveLength(1);
+  });
+
   it("loads relay profiles once per listing, not once per pull-routed item", async () => {
     const f = await createRelayFixture({
       mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
