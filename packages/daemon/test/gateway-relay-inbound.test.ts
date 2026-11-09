@@ -3069,6 +3069,65 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     ).toEqual([sharedDigestId]);
   });
 
+  it("pull notices: never staged or staging failed surfaces at 120s; staged and unpulled stays quiet, then surfaces after 24h; acknowledged reads accepted", async () => {
+    const f = await createRelayFixture({
+      mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
+    });
+    // Never staged: dispatch failed before the DispatchBuffer.
+    const neverStaged = await f.daemon.queueRepo.create({
+      sourceSession: "architect@rig",
+      destinationSession: "founder@external",
+      summary: "Never staged ask",
+      body: "Dispatch failed before the buffer",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+    // Staging failed: in the DispatchBuffer, but the transport never marked it attempted, so the outbox doesn't list it.
+    const stagingFailed = await createAskWithAcceptedRelayRef(f, {
+      summary: "Staging failed",
+      recordViaPendingBufferOnly: true,
+      markAttempted: false,
+    });
+    // Staged and unpulled: listed by the outbox, never acknowledged.
+    const staged = await createAskWithAcceptedRelayRef(f, { summary: "Staged, waiting for a pull", recordViaPendingBufferOnly: true });
+    const backdate = (qitemId: string, modifier: string) =>
+      f.db.prepare("UPDATE queue_transitions SET ts = datetime('now', ?) WHERE qitem_id = ?").run(modifier, qitemId);
+    for (const id of [neverStaged.qitemId, stagingFailed.qitemId, staged.qitemId]) backdate(id, "-10 minutes");
+
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(neverStaged.qitemId)?.outcome).toBe("never-posted");
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(stagingFailed.qitemId)?.outcome).toBe("never-posted");
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)).toBeNull();
+    expect(f.daemon.queueRepo.findUndelivered({ qitemId: staged.qitemId })).toHaveLength(0);
+
+    // A listing works out the outbox's listable set once, not per item.
+    const bufferSpy = vi.spyOn(DispatchBuffer.prototype, "pendingStrict");
+    try {
+      const outcomes = new Map(f.daemon.queueRepo.list({ limit: 100 }).map((it) => [it.qitemId, it.deliveryOutcome]));
+      expect(outcomes.get(neverStaged.qitemId)).toBe("never-posted");
+      expect(outcomes.get(stagingFailed.qitemId)).toBe("never-posted");
+      expect(outcomes.get(staged.qitemId)).toBeNull();
+      expect(bufferSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      bufferSpy.mockRestore();
+    }
+
+    backdate(staged.qitemId, "-23 hours");
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)).toBeNull();
+    backdate(staged.qitemId, "-25 hours");
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)?.outcome).toBe("never-posted");
+    expect(f.daemon.queueRepo.findUndelivered({ qitemId: staged.qitemId })).toHaveLength(1);
+
+    const ackRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ deliveryId: staged.payload.decisionId }),
+    });
+    expect(ackRes.status).toBe(200);
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(staged.qitemId)?.outcome).toBe("accepted");
+    expect(f.daemon.queueRepo.findUndelivered({ qitemId: staged.qitemId })).toHaveLength(0);
+  });
+
   it("loads relay profiles once per listing, not once per pull-routed item", async () => {
     const f = await createRelayFixture({
       mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },

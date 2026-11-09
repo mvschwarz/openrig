@@ -5,7 +5,11 @@ import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
 import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, slackSubscriptionFor, withHumanAlertTag, type HumanFragment, type LoadResult } from "./gateway/human-registry.js";
+import { DispatchBuffer } from "./gateway/dispatch-buffer.js";
 import { loadRelayProfiles, type LoadRelayProfilesResult } from "./gateway/relay-config.js";
+import { relayStatePaths, validateRelayOutboundEnvelope, type RelayPayloadCarry } from "./gateway/relay-outbound.js";
+import { SeenStore } from "./gateway/slack/state-store.js";
+import { getOpenRigHome } from "../openrig-compat.js";
 import { sharedChannelAddresses } from "./gateway/participants.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
@@ -5121,6 +5125,7 @@ export class QueueRepository {
     owners: QueueTransition[],
     loadRegistry: () => LoadResult,
     loadProfiles: (entities: readonly HumanFragment[]) => LoadRelayProfilesResult,
+    loadPullOutboxKeys: () => Set<string>,
   ): { notificationKey: string; startedAt: string; quiet?: true } | "inactive" | null {
     let transition = owners[0];
     if (!transition) return null;
@@ -5150,18 +5155,23 @@ export class QueueRepository {
     const entity = humanAddress ? registry.entities.find((entry) => entry.address === humanAddress) : undefined;
     // A person with no connector is reached in the Feed and Steering only: nothing is posted to them, so nothing is owed.
     if (entity?.connectorBindings.length === 0) return "inactive";
-    // A ready pull-mode relay has no required polling cadence (#2742): waiting to be pulled is not a missing post.
+    const notificationKey = `${item.qitemId}:${transition.transitionId}`;
+    // A ready pull-mode relay has no required polling cadence (#2742): while the outbox lists the staged envelope, waiting
+    // to be pulled is not a missing post for PULL_OUTBOX_NEVER_POSTED_WINDOW_MS. A notice it doesn't list (never staged,
+    // or staging failed) gets the usual NEVER_POSTED_WINDOW_MS.
     const primary = entity?.connectorBindings.find((b) => b.role === "primary") ?? entity?.connectorBindings[0];
-    const pullRelay = primary?.kind === "relay"
+    const awaitingPull = primary?.kind === "relay"
       && (() => {
         const p = loadProfiles(registry.entities).get(primary.connectorRef);
-        return p?.ready === true && p.mode === "pull";
-      })();
+        return p?.ready === true && p.mode === "pull" && loadPullOutboxKeys().has(`${primary.connectorRef}\n${notificationKey}`);
+      })()
+      && Date.now() - new Date(transition.ts.includes("T") ? transition.ts : transition.ts + "Z").getTime()
+        <= QueueRepository.PULL_OUTBOX_NEVER_POSTED_WINDOW_MS;
     // An ask placed on Steering without an alert (RECORD) owes no post: its ledger reports a real receipt (a posting
     // dial set to RECORD posts it) and never a missing one.
     return humanAddress
-      ? { notificationKey: `${item.qitemId}:${transition.transitionId}`, startedAt: transition.ts,
-          ...(transition.ownerNotificationLevel === "RECORD" || pullRelay ? { quiet: true as const } : {}) }
+      ? { notificationKey, startedAt: transition.ts,
+          ...(transition.ownerNotificationLevel === "RECORD" || awaitingPull ? { quiet: true as const } : {}) }
       : "inactive";
   }
 
@@ -5263,9 +5273,11 @@ export class QueueRepository {
     const loadRegistry = () => (registry ??= this.loadHumanRegistryFn());
     let relayProfiles: LoadRelayProfilesResult | undefined;
     const loadProfiles = (entities: readonly HumanFragment[]) => (relayProfiles ??= loadRelayProfiles(undefined, { entities }));
+    let pullOutboxKeys: Set<string> | undefined;
+    const loadPullOutboxKeys = () => (pullOutboxKeys ??= listablePullOutboxKeys());
     const episodes = rows.map((row) => {
       const item = ledgerItem(row);
-      return { item, episode: this.currentDeliveryEpisode(item, owners.get(row.qitem_id) ?? [], loadRegistry, loadProfiles) };
+      return { item, episode: this.currentDeliveryEpisode(item, owners.get(row.qitem_id) ?? [], loadRegistry, loadProfiles, loadPullOutboxKeys) };
     });
     notes ??= this.receiptNotesFor(qitemIds);
     for (const { item, episode } of episodes) {
@@ -5326,6 +5338,10 @@ export class QueueRepository {
   /** The grace window before a receiptless gateway-routed row honestly reads
    *  never-posted (the connector sweep cadence bounds normal posting latency). */
   static readonly NEVER_POSTED_WINDOW_MS = 120_000;
+
+  /** How long a notice staged in the relay pull outbox may wait for the connector's ack before it reads never-posted
+   *  (#2742). */
+  static readonly PULL_OUTBOX_NEVER_POSTED_WINDOW_MS = 24 * 60 * 60 * 1000;
 
   /** Record one wake attempt. */
   recordNudgeAttempt(qitemId: string, result: string): void {
@@ -5806,6 +5822,36 @@ function ledgerItem(row: LedgerRow): LedgerItem {
 /** A notice sent to the owner, as opposed to the resolution notice a human's own answer writes. */
 function isOutboundOwnerNotice(t: QueueTransition): boolean {
   return t.ownerNotificationLevel != null && t.ownerNotificationKind != null && t.ownerNotificationKind !== "human-decision-resolved";
+}
+
+/** The `<connectorRef>\n<notificationKey>` pairs GET /api/gateway/relay/outbox would list now: staged in the
+ *  DispatchBuffer and the attempted store, under a connector whose listing isn't refused for an invalid envelope. */
+function listablePullOutboxKeys(): Set<string> {
+  let pending: ReturnType<DispatchBuffer["pendingStrict"]>;
+  let attempted: Map<string, string>;
+  try {
+    const home = getOpenRigHome();
+    pending = new DispatchBuffer(home).pendingStrict();
+    attempted = new SeenStore(relayStatePaths(home).attemptedPath).statuses();
+  } catch {
+    return new Set();
+  }
+  const listed: Array<[string, string]> = [];
+  const refused = new Set<string>();
+  for (const decision of pending) {
+    const p = decision.payload && typeof decision.payload === "object" ? (decision.payload as RelayPayloadCarry) : null;
+    const ref = p?.relayConnectorRef;
+    if (!p || typeof ref !== "string" || !ref || !attempted.has(decision.decisionId)) continue;
+    if (!p.relayEnvelope || !validateRelayOutboundEnvelope(p.relayEnvelope).ok) {
+      refused.add(ref);
+      continue;
+    }
+    const keys = p.deliveryDigestPost && Array.isArray(p.memberReceipts) && p.memberReceipts.length > 0
+      ? p.memberReceipts.map((m) => m?.notificationKey)
+      : [p.notificationKey || p.qitemId];
+    for (const key of keys) if (typeof key === "string" && key) listed.push([ref, key]);
+  }
+  return new Set(listed.filter(([ref]) => !refused.has(ref)).map(([ref, key]) => `${ref}\n${key}`));
 }
 
 function isQueueState(value: unknown): value is QueueState {
