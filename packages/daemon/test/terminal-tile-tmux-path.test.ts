@@ -34,6 +34,7 @@ case $1 in
 display-message) case $5 in "#{pid} #{window_activity}") [ -e "$OPR_SEEN" ] && exit 0; : > "$OPR_SEEN"; printf "7 %s\\n" "$(date +%s)"; shift 6; printf "%s\\n" "$@" > "$OPR_ARGS"; printf "SCREEN\\n";; *) target=$4; target=\${target#=}; printf "7 session-id:%s\\n" "\${target%:}";; esac;;
 show-environment) exit 1;;
 capture-pane) printf "%s\\n" "$@" > "$OPR_ARGS"; printf "SCREEN\\n";;
+-V) printf "tmux 3.6a\\n";;
 *) printf "%s\\n" "$@" >> "$OPR_OTHER";;
 esac
 `, { mode: 0o700 });
