@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Hono } from "hono";
-import type Database from "better-sqlite3";
+import Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
@@ -9,7 +9,7 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { InboxHandler } from "../src/domain/inbox-handler.js";
 import { QueueRepository, QueueRepositoryError } from "../src/domain/queue-repository.js";
 import { QueueTransitionLog } from "../src/domain/queue-transition-log.js";
-import { eraseQueue } from "../src/domain/queue-erasure.js";
+import { EraseRefusal, eraseQueue } from "../src/domain/queue-erasure.js";
 import { runQueueRetentionSweep } from "../src/domain/queue-retention.js";
 import { queueRoutes } from "../src/routes/queue.js";
 
@@ -22,12 +22,16 @@ const OUT = "x-other@n-else";
 let db: Database.Database;
 let repo: QueueRepository;
 let log: QueueTransitionLog;
-beforeEach(() => {
-  db = createDb();
-  migrate(db, ALL_MIGRATIONS);
+function open(handle: Database.Database) {
+  db = handle;
   repo = new QueueRepository(db, new EventBus(db));
   repo.attachOutbox(new OutboxHandler(db));
   log = new QueueTransitionLog(db);
+}
+beforeEach(() => {
+  const handle = createDb();
+  migrate(handle, ALL_MIGRATIONS);
+  open(handle);
 });
 afterEach(() => db.close());
 
@@ -59,6 +63,8 @@ function everything(): string {
   return tables.map((table) => JSON.stringify(db.prepare(`SELECT * FROM "${table}"`).all())).join("\n");
 }
 const exists = (id: string) => db.prepare("SELECT 1 FROM queue_items WHERE qitem_id = ?").get(id) !== undefined;
+/** Event payloads as stored (everything() escapes their quotes, so match payload text here). */
+const payloads = () => (db.prepare("SELECT payload FROM events").all() as Array<{ payload: string }>).map((e) => e.payload).join("\n");
 const marker = (id: string) => db.prepare("SELECT * FROM queue_erased_ids WHERE qitem_id = ?").get(id) as Record<string, unknown> | undefined;
 
 describe("account deletion (members scope)", () => {
@@ -186,11 +192,11 @@ describe("routine closed-work retention", () => {
 describe("ids scope: reapplying a ledger after a restore", () => {
   it("deletes restored rows again and writes back every id marker, including ids already gone", async () => {
     await row("i-one", A, B, [{ state: "done", daysAgo: 3 }]);
-    await eraseQueue(db, { scope: { kind: "ids", ids: ["i-one"], action: "delete" }, apply: true, nowIso: NOW });
+    await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "i-one", action: "delete" }] }, apply: true, nowIso: NOW });
     // A restore from a backup taken before the erase brings the row back and loses the marker.
     db.prepare("DELETE FROM queue_erased_ids").run();
     await row("i-one", A, B, [{ state: "done", daysAgo: 3 }]);
-    const reapplied = await eraseQueue(db, { scope: { kind: "ids", ids: ["i-one", "i-gone"], action: "delete" }, apply: true, nowIso: NOW });
+    const reapplied = await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "i-one", action: "delete" }, { qitemId: "i-gone", action: "delete" }] }, apply: true, nowIso: NOW });
     expect(reapplied.qitems.map((q) => q.qitemId)).toEqual(["i-one"]);
     expect(reapplied.alreadyAbsent).toEqual(["i-gone"]);
     expect(exists("i-one")).toBe(false);
@@ -200,7 +206,7 @@ describe("ids scope: reapplying a ledger after a restore", () => {
   });
 
   it("a scrub of an unknown id is reported, not invented", async () => {
-    const report = await eraseQueue(db, { scope: { kind: "ids", ids: ["nope"], action: "scrub" }, apply: true, nowIso: NOW });
+    const report = await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "nope", action: "scrub" }] }, apply: true, nowIso: NOW });
     expect(report.gaps).toEqual([{ code: "not-found", qitemId: "nope" }]);
     expect(marker("nope")).toBeUndefined();
   });
@@ -238,6 +244,8 @@ describe("POST /api/queue/erase", () => {
     expect(await codes({ members: [" a-one@n-acct"] })).toEqual([400, "erase_members_invalid"]);
     expect(await codes({ ids: ["x"], action: "shred" })).toEqual([400, "erase_action_invalid"]);
     expect(await codes({ routine: true })).toEqual([400, "erase_routine_off"]);
+    expect(await codes({ ids: ["x"], rig: "rig-id" })).toEqual([400, "erase_rig_invalid"]);
+    expect(await codes({ ids: [{ qitemId: "x", action: "shred" }] })).toEqual([400, "erase_action_invalid"]);
   });
 
   it("runs a dry run by default and erases only with apply", async () => {
@@ -256,5 +264,99 @@ describe("POST /api/queue/erase", () => {
     await row("p-old", A, B, [{ state: "done", daysAgo: 40 }]);
     const res = await post(app({ "retention.closed_content_days": 30 }), { routine: true, apply: true });
     expect(await res.json()).toMatchObject({ routine: { contentDays: 30, metadataDays: 0 }, qitems: [{ qitemId: "p-old", action: "scrub" }] });
+  });
+});
+
+describe("account deletion with the account's rig", () => {
+  const RIG = "rig-acct-id";
+  beforeEach(async () => {
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, 'n-acct'), ('rig-else-id', 'n-else')").run(RIG);
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-a', ?, 'a.one'), ('node-x', 'rig-else-id', 'x.other')").run(RIG);
+    const bus = new EventBus(db);
+    bus.emit({ type: "rig.imported", rigId: RIG, specName: "secret-rig-spec", specVersion: "1" } as never);
+    bus.emit({ type: "node.launched", rigId: RIG, nodeId: "node-a", logicalId: "a.one", sessionName: A } as never);
+    bus.emit({ type: "node.launched", rigId: "rig-else-id", nodeId: "node-x", logicalId: "x.other", sessionName: OUT } as never);
+    db.prepare("INSERT INTO snapshots (id, rig_id, kind, data) VALUES ('snap-a', ?, 'periodic', '{\"seat\":\"secret-snapshot\"}')").run(RIG);
+    db.prepare("INSERT INTO seat_identity_verdicts (node_id, session_name, verdict, observed_at) VALUES ('node-a', ?, 'verified', ?)").run(A, NOW);
+    db.prepare(`INSERT INTO watchdog_jobs (job_id, policy, spec_yaml, target_session, interval_seconds, registered_by_session, registered_at)
+      VALUES ('wd-a', 'periodic-reminder', 'secret-watchdog', ?, 60, ?, ?), ('wd-cross', 'periodic-reminder', 'x', ?, 60, ?, ?)`)
+      .run(A, B, NOW, OUT, A, NOW);
+    db.prepare("INSERT INTO watchdog_history (job_id, evaluated_at, outcome) VALUES ('wd-a', ?, 'fired')").run(NOW);
+    await row("g-done", A, B, [{ state: "done", daysAgo: 2 }]);
+    db.prepare(`INSERT INTO inbox_entries (inbox_id, destination_session, sender_session, body, ts_dropped)
+      VALUES ('i-loose', ?, ?, 'secret-loose-inbox', ?)`).run(B, A, NOW);
+  });
+
+  it("erases the rig's own records, leaves another rig's, and counts a member's job aimed outside", async () => {
+    const report = await eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: RIG }, apply: true, nowIso: NOW });
+    expect(report.rig).toMatchObject({ id: RIG, found: true, erased: { snapshots: 1, seat_identity_verdicts: 1, watchdog_jobs: 1, watchdog_history: 1 },
+      left: { watchdog_jobs: 1 } });
+    expect(report.rig!.erased.events).toBeGreaterThanOrEqual(2);
+    expect(report.clean).toBe(false); // the member's job aimed outside the account is left, so not clean
+    const all = everything();
+    for (const secret of ["secret-rig-spec", "secret-snapshot", "secret-watchdog", "secret-loose-inbox", "secret-g-done"]) {
+      expect(all).not.toContain(secret);
+    }
+    expect(payloads()).not.toContain(`"sessionName":"${A}"`);
+    expect(payloads()).toContain(`"sessionName":"${OUT}"`);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
+  });
+
+  it("refuses a rig the members don't belong to, and erases nothing", async () => {
+    const before = everything();
+    await expect(eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: "rig-else-id" }, apply: true, nowIso: NOW }))
+      .rejects.toThrowError(EraseRefusal);
+    await expect(eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: "rig-else-id" }, apply: true, nowIso: NOW }))
+      .rejects.toMatchObject({ code: "erase_rig_mismatch" });
+    expect(everything()).toBe(before);
+  });
+
+  it("after the rig is removed, a rerun erases what its removal wrote, by the rig's id", async () => {
+    await eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: RIG }, apply: true, nowIso: NOW });
+    db.prepare("DELETE FROM watchdog_jobs WHERE job_id = 'wd-cross'").run();
+    db.prepare("DELETE FROM nodes WHERE rig_id = ?").run(RIG);
+    db.prepare("DELETE FROM rigs WHERE id = ?").run(RIG);
+    new EventBus(db).emit({ type: "session.detached", rigId: RIG, nodeId: "node-a", sessionName: A } as never);
+    const rerun = await eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: RIG }, apply: true, nowIso: NOW });
+    expect(rerun.rig).toMatchObject({ found: false, erased: { events: 1 } });
+    expect(rerun.clean).toBe(true);
+    expect(payloads()).not.toContain(`"sessionName":"${A}"`);
+    expect(payloads()).toContain(`"sessionName":"${OUT}"`);
+  });
+
+  it("restore control: after restoring a backup taken before the erase, the documented replay leaves no account content", async () => {
+    await row("g-scrub", A, OUT, [{ state: "done", daysAgo: 40 }]); // another account's row, scrubbed by routine retention
+    const backup = db.serialize();
+    await eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: RIG }, apply: true, nowIso: NOW });
+    const routine = await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW });
+    const ledger = routine.qitems; // what a ledger keeps: ids with their actions
+    // The restore: the database comes back as it was before both runs.
+    db.close();
+    open(new Database(backup));
+    expect(everything()).toContain("secret-g-done body");
+    // The documented replay: the retained membership and rig, then the ledger with its actions, then routine.
+    const replay = await eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: RIG }, apply: true, nowIso: NOW });
+    await eraseQueue(db, { scope: { kind: "ids", entries: ledger }, apply: true, nowIso: NOW });
+    await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW });
+    expect(replay.complete).toBe(true);
+    const all = everything();
+    for (const secret of ["secret-g-done", "secret-loose-inbox", "secret-rig-spec", "secret-snapshot", "secret-watchdog", "secret-g-scrub"]) {
+      expect(all).not.toContain(secret);
+    }
+    expect(marker("g-done")).toMatchObject({ reason: "account-deletion" });
+    // The scrubbed row was scrubbed again, not promoted to a deletion.
+    expect(exists("g-scrub")).toBe(true);
+    expect(marker("g-scrub")).toBeUndefined();
+  });
+});
+
+describe("clean", () => {
+  it("is true only when the run finished and left nothing", async () => {
+    await row("c-one", A, B, [{ state: "done", daysAgo: 2 }]);
+    expect((await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: false, nowIso: NOW })).clean).toBe(true);
+    await row("c-mixed", A, OUT, [{ state: "done", daysAgo: 2 }]);
+    expect((await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: false, nowIso: NOW })).clean).toBe(false);
+    const partial = await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "c-one", action: "delete" }] }, apply: false, nowIso: NOW, batchSize: 1, maxBatches: 0 });
+    expect([partial.complete, partial.clean]).toEqual([false, false]);
   });
 });

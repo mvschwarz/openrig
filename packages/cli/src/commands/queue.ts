@@ -2003,7 +2003,8 @@ Examples:
     .command("erase")
     .description("Erase queue rows in one exact scope: an account's rows, a list of ids, or the closed-work retention windows; a dry run unless --apply")
     .option("--members <file>", "Account deletion: the account's recorded session names (exact, departed seats included), one per line or a JSON array")
-    .option("--ids <file>", "These qitem ids, one per line or a JSON array, for example a ledger's ids reapplied after a restore")
+    .option("--rig <id>", "With --members: the account rig's id. Also erases the rig's own records that outlive it (events, snapshots, node and seat records); refused unless every member is a session of it")
+    .option("--ids <file>", "These qitem ids, one per line or a JSON array; a JSON array of a report's qitems entries keeps each one's action")
     .option("--action <action>", "With --ids: delete (default) removes each row and keeps only its id; scrub removes its content and keeps the row", enumArg(["delete", "scrub"]))
     .option("--routine", "Run this daemon's closed-work windows now (retention.closed_content_days, retention.closed_metadata_days)")
     .option("--apply", "Erase. Without it the command reports what would be erased and changes nothing")
@@ -2015,16 +2016,18 @@ Examples:
       "  --members  every row whose source and destination are both members, in any state, deleted with its transitions,",
       "             outbox and inbox copies, stream actions, events and audit rows; then member-to-member outbox and inbox",
       "             entries no row owns, and the members' stream items. A row with one member endpoint is reported under",
-      "             mixed and left untouched.",
-      "  --ids      the listed rows, deleted or scrubbed; a deleted id that's already gone keeps (or regains) its id marker.",
+      "             mixed and left untouched. With --rig, also the rig's own events, snapshots and node and seat records.",
+      "  --ids      the listed rows, deleted or scrubbed (a report's qitems entries keep their action); a deleted id",
+      "             that's already gone keeps (or regains) its id marker.",
       "  --routine  closed rows (done, canceled, denied, handed-off) past the windows, aged from when they closed.",
       "A deleted row keeps only its id, and a create that reuses that id is refused (qitem_erased). A row a workflow still",
-      "references is reported under gaps and left. Output is JSON: qitems, mixed, gaps, alreadyAbsent, linked counts and",
-      "complete. Refusals: erase_scope_required, erase_scope_conflict, erase_members_invalid, erase_ids_invalid,",
-      "erase_action_invalid, erase_routine_off. Reference: docs/reference/queue-erasure.md",
+      "references is reported under gaps and left. Output is JSON: clean (true only when nothing was left), complete,",
+      "qitems, mixed, gaps, alreadyAbsent, linked, unlinked and rig. Refusals: erase_scope_required, erase_scope_conflict,",
+      "erase_members_invalid, erase_rig_invalid, erase_rig_mismatch, erase_ids_invalid, erase_action_invalid,",
+      "erase_routine_off. Reference: docs/reference/queue-erasure.md",
     ].join("\n"))
-    .action(async (opts: { members?: string; ids?: string; action?: string; routine?: boolean; apply?: boolean; actor?: string; json?: boolean }) => {
-      const list = (flag: string, path: string): string[] | undefined => {
+    .action(async (opts: { members?: string; rig?: string; ids?: string; action?: string; routine?: boolean; apply?: boolean; actor?: string; json?: boolean }) => {
+      const list = (flag: string, path: string): unknown[] | undefined => {
         let text: string;
         try {
           text = fs.readFileSync(path, "utf8");
@@ -2036,9 +2039,9 @@ Examples:
         if (text.trimStart().startsWith("[")) {
           try {
             const parsed: unknown = JSON.parse(text);
-            if (Array.isArray(parsed)) return parsed as string[];
+            if (Array.isArray(parsed)) return parsed;
           } catch { /* reported below */ }
-          console.error(`--${flag} ${path}: not a JSON array of strings. Nothing was erased.`);
+          console.error(`--${flag} ${path}: not a JSON array. Nothing was erased.`);
           process.exitCode = 1;
           return undefined;
         }
@@ -2050,6 +2053,8 @@ Examples:
         if (!members) return;
         body.members = members;
       }
+      // Sent as given: the daemon refuses a rig without members (erase_rig_invalid), never drops it.
+      if (opts.rig !== undefined) body.rig = opts.rig;
       if (opts.ids !== undefined) {
         const ids = list("ids", opts.ids);
         if (!ids) return;

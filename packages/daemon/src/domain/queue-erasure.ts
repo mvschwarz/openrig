@@ -13,7 +13,8 @@ import type Database from "better-sqlite3";
  *
  * Scope is exact. Account deletion takes the account's recorded membership (exact session names): a row whose two
  * endpoints are both members is deleted, whatever its state; a row with one member endpoint is reported as mixed and
- * left untouched. Routine retention touches only closed rows (done, canceled, denied, handed-off; never failed or
+ * left untouched. Named with the account's rig, it also removes the rig's own records that outlive the rig: its events,
+ * snapshots and node and seat records. Routine retention touches only closed rows (done, canceled, denied, handed-off; never failed or
  * open work), aged from the start of their final closed state. A row a workflow still references is reported, never
  * erased. Each batch is one transaction, so a run that stops leaves whole rows done; a rerun picks up the rest.
  */
@@ -23,9 +24,16 @@ export const CLOSED_QUEUE_STATES = ["done", "canceled", "denied", "handed-off"] 
 
 export type EraseAction = "scrub" | "delete";
 export type EraseScope =
-  | { kind: "members"; members: readonly string[] }
-  | { kind: "ids"; ids: readonly string[]; action: EraseAction }
+  | { kind: "members"; members: readonly string[]; rig?: string }
+  | { kind: "ids"; entries: ReadonlyArray<{ qitemId: string; action: EraseAction }> }
   | { kind: "routine"; contentDays: number; metadataDays: number };
+
+/** A scope that can't be erased exactly; nothing was written. */
+export class EraseRefusal extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+  }
+}
 
 export interface EraseOptions {
   scope: EraseScope;
@@ -43,6 +51,8 @@ export interface EraseReport {
   scope: EraseScope["kind"];
   /** false when the run stopped at maxBatches; rerun to continue */
   complete: boolean;
+  /** complete, and nothing was left: no mixed rows, gaps, or left-over entries or rig records */
+  clean: boolean;
   /** rows erased (applied) or that would be (dry run) */
   qitems: Array<{ qitemId: string; action: EraseAction; state: string }>;
   /** members scope: rows with exactly one member endpoint, left untouched */
@@ -55,6 +65,8 @@ export interface EraseReport {
   linked: { transitions: number; archivedTransitions: number; outbox: number; inbox: number; events: number; streamActions: number; missionControl: number };
   /** members scope: entries between members that no queue row owns; mixed ones are counted and left */
   unlinked?: { outbox: number; inbox: number; streamItems: number; mixedEntries: number; referencedStreamItems: number };
+  /** members scope with rig: the rig's records erased per table, and the ones left (another seat's, or a workflow's) */
+  rig?: { id: string; found: boolean; erased: Record<string, number>; left: Record<string, number> };
   routine?: { contentDays: number; metadataDays: number };
 }
 
@@ -189,28 +201,40 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
   const batchSize = opts.batchSize ?? DEFAULT_BATCH;
   const maxBatches = opts.maxBatches ?? DEFAULT_MAX_BATCHES;
   const { scope } = opts;
+  // A rig named with the members must be theirs: every member session belongs to it. A rig already removed can't be
+  // checked; its id is exact, so its leftover records are erased by id (found: false).
+  let rigName: string | null = null;
+  if (scope.kind === "members" && scope.rig !== undefined) {
+    rigName = (db.prepare("SELECT name FROM rigs WHERE id = ?").get(scope.rig) as { name: string } | undefined)?.name ?? null;
+    const outside = rigName === null ? [] : scope.members.filter((member) => member.split("@")[1] !== rigName);
+    if (outside.length > 0) {
+      throw new EraseRefusal("erase_rig_mismatch", `These members aren't sessions of rig ${rigName}: ${outside.join(", ")}.`);
+    }
+  }
   const report: EraseReport = {
-    ok: true, applied: opts.apply, scope: scope.kind, complete: true, qitems: [], mixed: [], gaps: [], alreadyAbsent: [],
+    ok: true, applied: opts.apply, scope: scope.kind, complete: true, clean: false, qitems: [], mixed: [], gaps: [], alreadyAbsent: [],
     linked: { transitions: 0, archivedTransitions: 0, outbox: 0, inbox: 0, events: 0, streamActions: 0, missionControl: 0 },
   };
   if (scope.kind === "routine") report.routine = { contentDays: scope.contentDays, metadataDays: scope.metadataDays };
   const reason = scope.kind === "members" ? "account-deletion" : scope.kind === "routine" ? "retention-metadata" : "erase-by-id";
   const members = scope.kind === "members" ? JSON.stringify([...new Set(scope.members)]) : "[]";
-  const ids = scope.kind === "ids" ? [...new Set(scope.ids)].sort() : [];
+  const entries = scope.kind === "ids"
+    ? [...new Map(scope.entries.map((entry) => [entry.qitemId, entry.action])).entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    : [];
   const contentCutoff = scope.kind === "routine" && scope.contentDays > 0 ? cutoffIso(opts.nowIso, scope.contentDays) : null;
   const metadataCutoff = scope.kind === "routine" && scope.metadataDays > 0 ? cutoffIso(opts.nowIso, scope.metadataDays) : null;
 
   // One page of candidate rows, keyed on qitem_id so a dry run (which changes nothing) still moves forward.
   const page = (after: string, offset: number): { rows: Candidate[]; last: string | null; seen: number } => {
     if (scope.kind === "ids") {
-      const slice = ids.slice(offset, offset + batchSize);
+      const slice = entries.slice(offset, offset + batchSize);
       const found = new Map((st.get(`SELECT qitem_id AS qitemId, state FROM queue_items WHERE qitem_id IN ${IDS}`)
-        .all({ ids: JSON.stringify(slice) }) as Array<{ qitemId: string; state: string }>).map((row) => [row.qitemId, row.state]));
+        .all({ ids: JSON.stringify(slice.map(([id]) => id)) }) as Array<{ qitemId: string; state: string }>).map((row) => [row.qitemId, row.state]));
       const rows: Candidate[] = [];
-      for (const id of slice) {
+      for (const [id, action] of slice) {
         const state = found.get(id);
-        if (state !== undefined) rows.push({ qitemId: id, state, action: scope.action });
-        else if (scope.action === "delete") report.alreadyAbsent.push(id);
+        if (state !== undefined) rows.push({ qitemId: id, state, action });
+        else if (action === "delete") report.alreadyAbsent.push(id);
         else report.gaps.push({ code: "not-found", qitemId: id });
       }
       return { rows, last: null, seen: slice.length };
@@ -277,8 +301,66 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
     await yieldToLoop();
   }
 
-  if (scope.kind === "members" && report.complete) report.unlinked = eraseUnlinked(db, st, members, opts.apply);
+  if (scope.kind === "members" && report.complete) {
+    report.unlinked = eraseUnlinked(db, st, members, opts.apply);
+    if (scope.rig !== undefined) report.rig = eraseRigRecords(db, st, scope.rig, rigName, members, opts.apply);
+  }
+  const unlinkedLeft = report.unlinked ? report.unlinked.mixedEntries + report.unlinked.referencedStreamItems : 0;
+  const rigLeft = report.rig ? Object.values(report.rig.left).reduce((sum, n) => sum + n, 0) : 0;
+  report.clean = report.complete && report.mixed.length === 0 && report.gaps.length === 0 && unlinkedLeft === 0 && rigLeft === 0;
   return report;
+}
+
+// The account rig's own records that outlive the rig (no cascading key to it), in delete order: dependents first.
+// NODES: the rig's nodes, while it still has them. MEMBERS: the account's sessions.
+const NODES = "(SELECT id FROM nodes WHERE rig_id = @rig)";
+const RIG_RECORDS: Array<[table: string, where: string]> = [
+  ["events", `rig_id = @rig OR node_id IN ${NODES}`],
+  ["snapshots", "rig_id = @rig"],
+  ["operation_correlations", "rig_id = @rig"],
+  ["bootstrap_actions", "bootstrap_id IN (SELECT id FROM bootstrap_runs WHERE rig_id = @rig)"],
+  ["bootstrap_runs", "rig_id = @rig"],
+  ["seat_identity_verdicts", `node_id IN ${NODES} OR session_name IN ${MEMBERS}`],
+  ["seat_delivery_guard_changes", `node_id IN ${NODES}`],
+  ["environment_operations", `binding_id IN (SELECT binding_id FROM environment_bindings WHERE node_id IN ${NODES} OR seat IN ${MEMBERS})`],
+  ["environment_bindings", `node_id IN ${NODES} OR seat IN ${MEMBERS}`],
+  ["usage_samples", `node_id IN ${NODES} OR seat_session IN ${MEMBERS}`],
+  ["pi_usage_entries", `node_id IN ${NODES} OR seat_session IN ${MEMBERS}`],
+  ["pi_usage_charges", `seat_session IN ${MEMBERS}`],
+  ["watchdog_history", `delivery_target_session IN ${MEMBERS} OR job_id IN (SELECT job_id FROM watchdog_jobs WHERE target_session IN ${MEMBERS})`],
+  ["watchdog_jobs", `target_session IN ${MEMBERS}`],
+  ["stream_subscriptions", `reader_session IN ${MEMBERS}`],
+  ["thread_seat_map", `seat IN ${MEMBERS}`],
+  ["thread_part_map", `seat IN ${MEMBERS}`],
+];
+// Records that name the account but also belong to someone or something else: counted and left.
+const RIG_RECORDS_LEFT: Array<[table: string, where: string]> = [
+  ["watchdog_jobs", `registered_by_session IN ${MEMBERS} AND target_session NOT IN ${MEMBERS}`],
+  ["workflow_instances", `created_by_session IN ${MEMBERS} OR bound_rig = @rigName`],
+  ["workflow_specs", "target_rig = @rigName"],
+  ["classifier_leases", `classifier_session IN ${MEMBERS} OR reclaimed_by_session IN ${MEMBERS}`],
+  ["views_custom", `registered_by_session IN ${MEMBERS}`],
+];
+
+function eraseRigRecords(db: Database.Database, st: Statements, rig: string, rigName: string | null, members: string,
+  apply: boolean): NonNullable<EraseReport["rig"]> {
+  const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>)
+    .map((row) => row.name));
+  const params = { rig, rigName: rigName ?? "", members };
+  const erased: Record<string, number> = {};
+  const left: Record<string, number> = {};
+  const present = (list: Array<[string, string]>) => list.filter(([table]) => tables.has(table));
+  for (const [table, where] of present(RIG_RECORDS)) erased[table] = st.count(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, params);
+  for (const [table, where] of present(RIG_RECORDS_LEFT)) {
+    // Without the rig's name (already removed), name-matched records can't be counted; @rigName '' matches nothing.
+    left[table] = (left[table] ?? 0) + st.count(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, params);
+  }
+  if (apply) {
+    db.transaction(() => {
+      for (const [table, where] of present(RIG_RECORDS)) st.get(`DELETE FROM ${table} WHERE ${where}`).run(params);
+    })();
+  }
+  return { id: rig, found: rigName !== null, erased, left };
 }
 
 /** Account deletion's second pass: outbox and inbox entries between two members that no queue row owns, and the

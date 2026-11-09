@@ -31,7 +31,7 @@ import { listProjects, projectCatalogPaths } from "../domain/workspace/project-r
 import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
-import { eraseQueue, type EraseScope } from "../domain/queue-erasure.js";
+import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope } from "../domain/queue-erasure.js";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
@@ -661,7 +661,7 @@ export function queueRoutes(): Hono {
   // explicit ids (a ledger's reapply after a restore), or the routine closed-work windows from this daemon's settings,
   // run now. A dry run unless apply is true. domain/queue-erasure.ts; docs/reference/queue-erasure.md.
   app.post("/erase", async (c) => {
-    const body = await c.req.json<{ members?: unknown; ids?: unknown; action?: unknown; routine?: unknown; apply?: unknown; actorSession?: string }>()
+    const body = await c.req.json<{ members?: unknown; rig?: unknown; ids?: unknown; action?: unknown; routine?: unknown; apply?: unknown; actorSession?: string }>()
       .catch(() => ({} as never));
     const identity = requireSenderIdentity(c, { verb: "queue erase", bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
@@ -673,16 +673,28 @@ export function queueRoutes(): Hono {
       Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === "string" && entry.length > 0 && entry.trim() === entry)
         ? value as string[] : null;
     let scope: EraseScope;
+    if (body.rig !== undefined && (body.members === undefined || typeof body.rig !== "string" || body.rig.length === 0 || body.rig.trim() !== body.rig)) {
+      return refuse("erase_rig_invalid", "rig is the account rig's id, given with members.");
+    }
     if (body.members !== undefined) {
       const members = exactList(body.members);
       if (!members) return refuse("erase_members_invalid", "members must be a non-empty list of exact session names.");
-      scope = { kind: "members", members };
+      scope = { kind: "members", members, ...(typeof body.rig === "string" ? { rig: body.rig } : {}) };
     } else if (body.ids !== undefined) {
-      const ids = exactList(body.ids);
-      if (!ids) return refuse("erase_ids_invalid", "ids must be a non-empty list of qitem ids.");
-      const action = body.action ?? "delete";
-      if (action !== "delete" && action !== "scrub") return refuse("erase_action_invalid", "action must be delete or scrub.");
-      scope = { kind: "ids", ids, action };
+      // Plain ids take the request's action (delete by default); a report's qitems entries keep their own.
+      const fallback = body.action ?? "delete";
+      const isAction = (value: unknown): value is EraseAction => value === "delete" || value === "scrub";
+      if (!isAction(fallback)) return refuse("erase_action_invalid", "action must be delete or scrub.");
+      const raw = Array.isArray(body.ids) ? body.ids : [];
+      const entries = raw.map((entry) => typeof entry === "string" ? { qitemId: entry, action: fallback as EraseAction }
+        : entry && typeof entry === "object" ? { qitemId: (entry as { qitemId?: unknown }).qitemId, action: (entry as { action?: unknown }).action ?? fallback }
+        : null);
+      if (raw.length === 0 || entries.some((entry) => !entry || typeof entry.qitemId !== "string" || entry.qitemId.length === 0
+        || entry.qitemId.trim() !== entry.qitemId)) {
+        return refuse("erase_ids_invalid", "ids must be a non-empty list of qitem ids, or of {qitemId, action} entries.");
+      }
+      if (entries.some((entry) => !isAction(entry!.action))) return refuse("erase_action_invalid", "action must be delete or scrub.");
+      scope = { kind: "ids", entries: entries as Array<{ qitemId: string; action: EraseAction }> };
     } else {
       const settings = c.get("settingsStore" as never) as { resolveOne(key: string): { value: unknown } } | undefined;
       const days = (key: string): number => {
@@ -702,6 +714,7 @@ export function queueRoutes(): Hono {
         + `${report.qitems.length} rows, ${report.mixed.length} mixed, ${report.gaps.length} gaps, complete=${report.complete}`);
       return c.json(report);
     } catch (err) {
+      if (err instanceof EraseRefusal) return refuse(err.code, err.message);
       return c.json({ error: "erase_failed", message: err instanceof Error ? err.message : String(err) }, 500);
     }
   });

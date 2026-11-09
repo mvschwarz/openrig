@@ -511,7 +511,7 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue inbox-pending <destinationSession>` | — | `--json` |
 | `rig queue outbox-record` | — | `--sender <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <outboxId>`<br>`--json` |
 | `rig queue outbox-list <senderSession>` | — | `--limit <n>`<br>`--json` |
-| `rig queue erase` | — | `--members <file>`<br>`--ids <file>`<br>`--action <action>` (`delete`, `scrub`)<br>`--routine`<br>`--apply`<br>`--actor <session>`<br>`--json` |
+| `rig queue erase` | — | `--members <file>`<br>`--rig <id>`<br>`--ids <file>`<br>`--action <action>` (`delete`, `scrub`)<br>`--routine`<br>`--apply`<br>`--actor <session>`<br>`--json` |
 
 ### slack
 

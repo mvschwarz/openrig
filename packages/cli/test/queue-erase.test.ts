@@ -63,6 +63,21 @@ describe("rig queue erase", () => {
     expect(posts).toEqual([{ path: "/api/queue/erase", body: { apply: true, ids: ["qitem-1", "qitem-2"], action: "scrub" } }]);
   });
 
+  it("passes the account rig with the members, and a ledger of report entries as given", async () => {
+    const members = path.join(dir, "members.json");
+    fs.writeFileSync(members, JSON.stringify(["a-one@n-acct"]));
+    const ledger = path.join(dir, "ledger.json");
+    const entries = [{ qitemId: "qitem-1", action: "scrub", state: "done" }, "qitem-2"];
+    fs.writeFileSync(ledger, JSON.stringify(entries));
+    const { deps, posts } = makeDeps();
+    await run(deps, "--members", members, "--rig", "rig-acct-id", "--apply");
+    await run(deps, "--ids", ledger, "--apply");
+    expect(posts).toEqual([
+      { path: "/api/queue/erase", body: { apply: true, members: ["a-one@n-acct"], rig: "rig-acct-id" } },
+      { path: "/api/queue/erase", body: { apply: true, ids: entries } },
+    ]);
+  });
+
   it("sends nothing when its file can't be read, or when there's no one to record as erasing", async () => {
     const { deps, posts } = makeDeps();
     await run(deps, "--members", path.join(dir, "missing.txt"));
