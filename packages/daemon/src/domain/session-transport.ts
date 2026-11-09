@@ -1389,24 +1389,29 @@ export function hasExpectedStagedText(pane: string | null, expected: string, run
 /** An interaction may consume its answer immediately. Only add Enter when the
  * complete answer is still visible in a bounded current text input, never a
  * numbered choice or a partial prefix. Unknown rendering is not consumption. */
-function promptAnswerStaged(pane: string | null, answer: string, runtime: string | null): boolean {
-  if (!pane || !answer.trim() || /[\r\n\x1b]/.test(answer)) return false;
-  // Fail closed for an unknown runtime: with no scoped glyph set there is no way to
-  // say which prompt line is the live input (the pre-shared-matcher check did the same).
-  if (runtime !== "codex" && runtime !== "claude-code") return false;
+/** Whether an override's answer sits alone in the live input: `staged`; `not_staged`, when the screen was
+ *  read and doesn't show it there (or no Enter is added by contract); or `unobservable`, when no screen
+ *  could be read at all. A readable screen with no recognized input is evidence, not uncertainty: an
+ *  Enter there acts on whatever is focused. */
+function promptAnswerStaged(pane: string | null, answer: string, runtime: string | null): "staged" | "not_staged" | "unobservable" {
+  // The caller's own keys (CR, LF, Esc) or an empty answer never get an added Enter.
+  if (!answer.trim() || /[\r\n\x1b]/.test(answer)) return "not_staged";
+  // A runtime with no scoped glyph set has no known input line; there the caller puts CR in the payload.
+  if (runtime !== "codex" && runtime !== "claude-code") return "not_staged";
+  if (!pane) return "unobservable";
   const promptClass = composerPromptClassForRuntime(runtime);
   const lines = pane.split("\n");
   // Only the LAST prompt line of this runtime's glyph set can be the current input;
   // everything above it is transcript history, and another harness's glyph is not ours.
   const inputIndex = findComposerInputLineIndex(lines, promptClass);
-  if (inputIndex < 0) return false;
+  if (inputIndex < 0) return "not_staged";
   const input = lines[inputIndex]!.trimStart();
   // A numbered choice (`.` or `)`), e.g. `» 1)` or `❯ 1.`, is a menu selection, never the answer.
-  if (composerNumberedChoicePattern(promptClass).test(input)) return false;
+  if (composerNumberedChoicePattern(promptClass).test(input)) return "not_staged";
   // Where the input ends: Codex closes the composer on a blank line, Claude Code on a rule line.
   const end = lines.findIndex((line, index) => index > inputIndex && (runtime === "codex"
     ? line.trim() === "" : /^[─═-]{10,}$/.test(line.trim())));
-  return end > inputIndex && lines.slice(inputIndex, end).join("\n").trimStart().slice(1).trim() === answer.trim();
+  return end > inputIndex && lines.slice(inputIndex, end).join("\n").trimStart().slice(1).trim() === answer.trim() ? "staged" : "not_staged";
 }
 
 // Codex 0.160 input box: the last prompt line plus indented continuation rows, one blank row, then a footer
@@ -3374,6 +3379,8 @@ export class SessionTransport {
     let draftAdvised = false;
     // Broadcast can carry wait + override: after waiting, it still uses the same deliberate-input boundary.
     const promptOverride = Boolean(opts?.dangerouslyInteract);
+    // Positive evidence of an interactive prompt: there an Enter after a consumed answer lands in the next prompt.
+    let overrideAtPrompt = false;
     if (waitForIdleMs === undefined || promptOverride) {
       const readiness = await this.classifySendReadiness({
         sessionName,
@@ -3385,6 +3392,7 @@ export class SessionTransport {
       // Explicit interaction selects key input even when readiness cannot recognize the prompt.
       // Only bypassing a positive picker requires a successful audit; other states already sent.
       if (opts?.dangerouslyInteract) {
+        overrideAtPrompt = readiness.state === "needs_input";
         if (readiness.state === "needs_input" && (!opts.reason || opts.reason.trim().length === 0)) {
           return {
             ok: false,
@@ -3622,11 +3630,16 @@ export class SessionTransport {
         const pane = await this.runStage("session_transport.prompt_override_pre_submit_capture",
           () => this.tmuxAdapter.capturePaneContent(readTarget, 50)).catch(() => null);
         if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
-        if (!promptAnswerStaged(pane, text, runtime)) {
+        const staged = promptAnswerStaged(pane, text, runtime);
+        // A screen that couldn't be read at all is not evidence the answer was consumed or joined: outside a
+        // recognized prompt, submit it and say so. Visible evidence, or a recognized prompt, still withholds Enter.
+        if (staged === "not_staged" || (staged === "unobservable" && overrideAtPrompt)) {
           return observe({ ok: true, sessionName, sent: true, verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified",
             warning: [sendAdvisory, "prompt-override: answer sent as unbracketed input; submission unverified. No trailing Enter: the complete answer is not visibly staged (it may have been consumed, the prompt changed, or observation is unavailable)."].filter(Boolean).join(" ") });
         }
-        sendAdvisory = [sendAdvisory, "prompt-override: answer sent as unbracketed input; Enter submitted the complete still-staged answer."].filter(Boolean).join(" ");
+        sendAdvisory = [sendAdvisory, staged === "staged"
+          ? "prompt-override: answer sent as unbracketed input; Enter submitted the complete still-staged answer."
+          : "prompt-override: answer sent as unbracketed input; the screen couldn't be read, so Enter was sent without confirming the staged answer."].filter(Boolean).join(" ");
       }
 
       // 5. Submit (Enter)

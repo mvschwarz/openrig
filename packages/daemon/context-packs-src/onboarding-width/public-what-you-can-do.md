@@ -138,8 +138,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   the interactive-prompt guard still applies. To deliberately drive an interactive prompt,
   **`--dangerously-interact --reason "<why>"`** is the explicit override and implies raw text.
   Inspect the prompt and establish authority for its effect before using that override. It types
-  exactly the bytes and keys you give it: Enter is added only for a complete answer
-  staged in a recognised Claude Code or Codex input box, so anywhere else put CR in the payload.
+  exactly the bytes and keys you give it: Enter is added for a complete answer staged in a
+  recognised Claude Code or Codex input box and, away from a recognised prompt, when the screen
+  can't be read at all (the result says so). Anywhere else, put CR in the payload.
   **On a managed seat it stops before typing into an input box that already holds typed or pasted
   text**, and shows you that text, apart from a recognised dim suggestion; it types nothing. Clear
   the box and retry, or add `--type-without-checking`, which reads and clears nothing and may join

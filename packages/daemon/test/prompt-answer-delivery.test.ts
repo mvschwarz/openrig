@@ -151,6 +151,16 @@ describe("explicit prompt answer delivery", () => {
     expect(f.state.commands.some(a => a[1] === "send-keys")).toBe(false);
   });
 
+  it("submits outside a recognized prompt when the screen can't be read, and says so", async () => {
+    const f = fixture("ordinary");
+    f.tmux.capturePaneContent = async () => { throw new Error("capture unavailable"); };
+    const result = await f.transport.send(f.name, "green", { dangerouslyInteract: true, reason: "answer an ordinary input" });
+    expect(result).toMatchObject({ ok: true, promptInteraction: "enter-sent" });
+    expect(result.warning).toContain("the screen couldn't be read, so Enter was sent without confirming the staged answer.");
+    expect(f.state.submitted).toEqual(["green"]);
+    expect(f.state.commands.filter(a => a[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", f.name, "Enter"]]);
+  });
+
   it("keeps ordinary bracketed delivery and its Enter unchanged", async () => {
     const f = fixture("ordinary");
     const result = await f.transport.send(f.name, "ordinary message");
