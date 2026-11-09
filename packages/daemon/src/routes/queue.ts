@@ -687,15 +687,24 @@ export function queueRoutes(): Hono {
       const isAction = (value: unknown): value is EraseAction => value === "delete" || value === "scrub";
       if (!isAction(fallback)) return refuse("erase_action_invalid", "action must be delete or scrub.");
       const raw = Array.isArray(body.ids) ? body.ids : [];
-      const entries = raw.map((entry) => typeof entry === "string" ? { qitemId: entry, action: fallback as EraseAction }
-        : entry && typeof entry === "object" ? { qitemId: (entry as { qitemId?: unknown }).qitemId, action: (entry as { action?: unknown }).action ?? fallback }
+      // An erasure ledger's commit and abort lines ({batch, committed}) say which of its batches committed.
+      type Mark = { batch: string; committed: boolean };
+      const isMark = (entry: unknown): entry is Mark => !!entry && typeof entry === "object"
+        && (entry as { qitemId?: unknown }).qitemId === undefined && typeof (entry as { batch?: unknown }).batch === "string"
+        && typeof (entry as { committed?: unknown }).committed === "boolean";
+      const commits = raw.filter(isMark).map(({ batch, committed }) => ({ batch, committed }));
+      const listed = raw.filter((entry) => !isMark(entry));
+      const entries = listed.map((entry) => typeof entry === "string" ? { qitemId: entry, action: fallback as EraseAction }
+        : entry && typeof entry === "object" ? { qitemId: (entry as { qitemId?: unknown }).qitemId, action: (entry as { action?: unknown }).action ?? fallback,
+          batch: (entry as { batch?: unknown }).batch }
         : null);
-      if (raw.length === 0 || entries.some((entry) => !entry || typeof entry.qitemId !== "string" || entry.qitemId.length === 0
-        || entry.qitemId.trim() !== entry.qitemId)) {
+      if (listed.length === 0 || entries.some((entry) => !entry || typeof entry.qitemId !== "string" || entry.qitemId.length === 0
+        || entry.qitemId.trim() !== entry.qitemId || (entry.batch !== undefined && typeof entry.batch !== "string"))) {
         return refuse("erase_ids_invalid", "ids must be a non-empty list of qitem ids, or of {qitemId, action} entries.");
       }
       if (entries.some((entry) => !isAction(entry!.action))) return refuse("erase_action_invalid", "action must be delete or scrub.");
-      scope = { kind: "ids", entries: entries as Array<{ qitemId: string; action: EraseAction }> };
+      scope = { kind: "ids", entries: entries.map((entry) => ({ qitemId: entry!.qitemId as string, action: entry!.action as EraseAction,
+        ...(typeof entry!.batch === "string" ? { batch: entry!.batch } : {}) })), ...(commits.length > 0 ? { commits } : {}) };
     } else {
       const days = (key: string): number => {
         const value = settings?.resolveOne(key).value;
