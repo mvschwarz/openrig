@@ -100,6 +100,9 @@ describe.each([false, true])("post-compact drain readiness (guarded=%s)", (guard
     sessionRegistry.updateStatus(session.id, "running");
     sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
     clock = Date.now();
+    // Keep the enforcer, transport and idle deadline on the same simulated clock.
+    // Host scheduling pauses must not consume this fixture's 40 ms idle budget.
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
     pane = COMPACTING_PANE;
     deliver = false;
     preparation = [];
