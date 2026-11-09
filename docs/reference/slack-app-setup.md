@@ -456,9 +456,18 @@ not covered by that margin. A corrupt or unreadable checkpoint leaves recovery u
 and preserves the existing file; live inbound continues.
 
 Each pass admits at most four history calls, 100 entries and 15 seconds of work, with a
-five-second request ceiling. Channels and threads take turns within that one budget, so with many
-tracked threads each thread is scanned every few passes; `rig slack status` shows how far behind
-the oldest waiting thread is. Work already started on a message, such as
+five-second request ceiling. Channels and threads take turns within that one budget. Each tracked
+thread is scanned once after each start and after each Socket Mode reconnect that followed a gap
+(not a refresh Slack overlaps with the old connection), which catches replies sent while no
+connection was up; replies while connected arrive live. A thread the pass at the connect itself
+reaches is scanned once more, since that pass stops five seconds short of the connect. Those scans go in need order: a thread
+leaving the seven-day window within six hours first, since once it leaves a missed reply is never
+recovered; then threads whose ask still waits on the person (its queue row is pending, in progress
+or blocked) before the rest, each newest first. The order comes from the saved checkpoints, so a
+restart starts with the newest open ask, not the oldest thread. After that a thread is scanned again
+only as a backstop, hourly while its ask waits on the person and daily otherwise. A machine the hub
+relays to can't see a gap in relayed events, so there a settled thread's backstop is three hours. `rig slack status` shows how far behind the oldest waiting thread is and how
+many threads are settled. Work already started on a message, such as
 an attachment transfer, is not cancelled by these limits or by a stop, and a new
 pass waits for it to finish. Rate limits retain Slack's Retry-After across restart, and hold back
 only the method Slack limited (channel history or thread replies).
@@ -467,8 +476,8 @@ When Slack reports a plan history limit, recovery still lands the available page
 and advances normally, retaining an older-history limitation in status across restarts.
 Missing bot credentials, history scope, membership, retention limits and API
 failures appear as recovery limitations. A tracked thread Slack can't find stays incomplete in
-status, with no further call, until its thread mapping changes or the daemon restarts or rewires
-the connector; that isn't proof the thread was deleted. No additional scope is required to keep
+status and is asked again at most once a day, across restarts; that isn't proof the thread was
+deleted. No additional scope is required to keep
 live delivery working. Threads nobody tracks, older open threads, threads closed more than seven
 days ago and other channels remain outside this recovery scope; global chronological order is
 not promised. This change does not replay intervals already checkpointed before broadcast-reply
