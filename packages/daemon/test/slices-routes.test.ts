@@ -11,7 +11,7 @@
 //   - Route-order discipline: literal `/` not shadowed by `/:name`
 //   - 503 on slices_root_not_configured (graceful when env unset)
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import { getRequestListener } from "@hono/node-server";
 import { once } from "node:events";
@@ -32,6 +32,10 @@ import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../src/domain/slices/slice-detail-projector.js";
 import { slicesRoutes } from "../src/routes/slices.js";
 import { browserBoundary } from "../src/middleware/browser-boundary.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
 function buildApp(opts: { indexer: SliceIndexer; projector: SliceDetailProjector; workspaceRoot?: string; guardBrowser?: boolean }): Hono {
   const app = new Hono();
@@ -670,5 +674,268 @@ describe("qitem-render-driver #3 — GET /api/slices qitemCount does not leak mi
     // Sibling semantics preserved: typed membership still counted, and the
     // mission-scope rows do not inflate it either.
     expect(byName.get("01-typed-sibling"), "typed sibling keeps exactly its typed membership").toBe(1);
+  });
+});
+
+describe("GET /api/slices observed queue counts", () => {
+  const ZERO = { pending: 0, "in-progress": 0, done: 0, blocked: 0, failed: 0, denied: 0, canceled: 0, "handed-off": 0 };
+  type Counts = typeof ZERO;
+  type Entry = { name: string; missionId: string | null; slicePath: string; status: string; rawStatus: string | null; qitemCount: number; queueCounts?: Counts | null };
+  let db: Database.Database;
+  let root: string;
+  let docs: Map<string, string>;
+  let settings: SettingsStore;
+
+  function write(file: string, bytes: string): void {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, bytes);
+    docs.set(file, bytes);
+  }
+
+  function catalog(projects = [{ id: "alpha", root: "alpha" }, { id: "beta", root: "beta" }]): void {
+    write(path.join(root, "workspace.yaml"), JSON.stringify({ projects }));
+  }
+
+  function addSlice(project: string, mission: string, name: string, status = "active", id = name): string {
+    const missionRoot = path.join(root, project, "missions", mission);
+    write(path.join(missionRoot, "SPEC.md"), `---\nid: M.${mission.toUpperCase()}\nstatus: active\n---\n# Mission\n`);
+    const dir = path.join(missionRoot, "slices", name);
+    write(path.join(dir, "SPEC.md"), `---\nid: ${id}\nstatus: ${status}\n---\n# Slice\n`);
+    return dir;
+  }
+
+  function row(id: string, state: string, tags: string[] | null, body = "work"): void {
+    db.prepare(`INSERT INTO queue_items
+      (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body, tags)
+      VALUES (?, '2026-11-09T00:00:00.000Z', '2026-11-09T00:00:00.000Z', 'writer@fixture', 'worker@fixture', ?, 'routine', ?, ?)`)
+      .run(id, state, body, tags === null ? null : JSON.stringify(tags));
+  }
+
+  function route(project = "alpha", explicit = false, slicesRoot = path.join(root, project, "missions")) {
+    // Startup supplies roots/db without projectId. Keep that ordinary construction covered.
+    const indexer = new SliceIndexer({ db, slicesRoot, additionalSliceRoots: [],
+      dogfoodEvidenceRoot: null, ...(explicit ? { projectId: project } : {}) });
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("sliceIndexer" as never, indexer);
+      c.set("sliceDetailProjector" as never, new SliceDetailProjector({ db, indexer }));
+      c.set("settingsStore" as never, settings);
+      await next();
+    });
+    app.route("/api/slices", slicesRoutes());
+    return { app, indexer };
+  }
+
+  async function list(app: Hono, query = ""): Promise<Entry[]> {
+    const response = await app.request("/api/slices" + query);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { slices: Entry[]; totalCount: number; filter: string };
+    expect(body.totalCount).toBe(body.slices.length);
+    expect(body.filter).toBe(new URL("http://fixture.invalid/" + query).searchParams.get("filter") ?? "all");
+    return body.slices;
+  }
+
+  function authoredUnchanged(): void {
+    for (const [file, bytes] of docs) expect(fs.readFileSync(file, "utf8"), file).toBe(bytes);
+  }
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "slice-counts-"));
+    docs = new Map();
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    catalog();
+    for (const project of ["alpha", "beta"]) {
+      write(path.join(root, project, "SPEC.md"), `---\nid: ${project}\n---\n# Project\n`);
+      write(path.join(root, project, "project.yaml"), `id: ${project}\nmissions:\n  root: missions\n`);
+      fs.mkdirSync(path.join(root, project, "missions"), { recursive: true });
+    }
+    const config = path.join(root, "settings.json");
+    write(config, JSON.stringify({ workspace: { root, catalogPath: path.join(root, "workspace.yaml"),
+      slicesRoot: path.join(root, "alpha", "missions") } }));
+    settings = new SettingsStore(config);
+  });
+
+  afterEach(() => {
+    try { authoredUnchanged(); }
+    finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("preserves authored status, rawStatus, filters and legacy display membership", async () => {
+    addSlice("alpha", "shipping", "live", "ratified");
+    addSlice("alpha", "shipping", "finished", "shipped");
+    addSlice("alpha", "shipping", "held", "parked-with-evidence");
+    addSlice("alpha", "shipping", "idea", "placeholder");
+    row("legacy-display", "blocked", null, "live work");
+    const { app } = route();
+    const all = await list(app);
+    expect(all.map(s => [s.name, s.status, s.rawStatus, s.qitemCount]).sort()).toEqual([
+      ["finished", "done", "shipped", 0], ["held", "blocked", "parked-with-evidence", 0],
+      ["idea", "draft", "placeholder", 0], ["live", "active", "ratified", 1],
+    ]);
+    for (const [filter, expected] of [["active", "live"], ["done", "finished"], ["blocked", "held"]]) {
+      expect((await list(app, "?filter=" + filter)).map(s => s.name)).toEqual([expected]);
+    }
+    const invalid = await app.request("/api/slices?filter=unknown");
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({ error: "filter_invalid" });
+  });
+
+  it.each([false, true])("counts all eight states only in the exact project/mission (explicit projectId=%s)", async explicit => {
+    const dir = addSlice("alpha", "shipping", "shared", "shipped");
+    addSlice("beta", "shipping", "shared");
+    const states = ["pending", "in-progress", "done", "blocked", "failed", "denied", "canceled", "handed-off"];
+    for (const state of states) row("selected-" + state, state, ["project:alpha", "mission:shipping", "slice:shared"]);
+    row("other-project", "failed", ["project:beta", "mission:shipping", "slice:shared"]);
+    row("other-mission-1", "done", ["project:alpha", "mission:support", "slice:shared"]);
+    row("other-mission-2", "done", ["project:alpha", "mission:support", "slice:shared"]);
+    const entries = await list(route("alpha", explicit).app);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", slicePath: dir,
+      status: "done", rawStatus: "shipped", qitemCount: explicit ? 10 : 11 });
+    expect(entries[0]!.queueCounts).toEqual({
+      pending: 1, "in-progress": 1, done: 1, blocked: 1, failed: 1, denied: 1, canceled: 1, "handed-off": 1,
+    });
+  });
+
+  // Discovery deduplicates names before mission filtering. Each accessible root is tested separately.
+  it.each([
+    { mission: "shipping", expected: { ...ZERO, pending: 1, done: 2 } },
+    { mission: "support", expected: { ...ZERO, blocked: 3, failed: 1 } },
+  ])("keeps same-name rows in the other mission out of $mission counts", async ({ mission, expected }) => {
+    addSlice("alpha", mission, "shared");
+    row("ship-pending", "pending", ["project:alpha", "mission:shipping", "slice:shared"]);
+    for (let i = 0; i < 2; i++) row("ship-done-" + i, "done", ["project:alpha", "mission:shipping", "slice:shared"]);
+    for (let i = 0; i < 3; i++) row("support-block-" + i, "blocked", ["project:alpha", "mission:support", "slice:shared"]);
+    row("support-failed", "failed", ["project:alpha", "mission:support", "slice:shared"]);
+    const entries = await list(route().app);
+    expect(entries[0]).toMatchObject({ name: "shared", missionId: mission, qitemCount: 7 });
+    expect(entries[0]!.queueCounts).toEqual(expected);
+  });
+
+  it("reports eight zeros for known empty and legacy-display-only scopes", async () => {
+    addSlice("alpha", "shipping", "empty", "placeholder");
+    addSlice("alpha", "shipping", "legacy-only", "parked-with-evidence");
+    row("display-only", "blocked", null, "legacy-only notes");
+    const entries = await list(route().app);
+    expect(entries.map(s => [s.name, s.qitemCount]).sort()).toEqual([["empty", 0], ["legacy-only", 1]]);
+    for (const entry of entries) expect.soft(entry.queueCounts, entry.name).toEqual(ZERO);
+  });
+
+  it("uses exact comma-aware tokens and counts duplicate tag spellings once per row", async () => {
+    addSlice("alpha", "shipping", "shared");
+    row("duplicates", "pending", ["project:alpha", "project:alpha", "mission:shipping", "mission:shipping", "slice:shared", "slice:shared"]);
+    row("comma-tokens", "done", [" project:alpha , mission:shipping , slice:shared "]);
+    for (const [id, tags] of [
+      ["slice-suffix", ["project:alpha", "mission:shipping", "slice:shared-extra"]],
+      ["mission-suffix", ["project:alpha", "mission:shipping-extra", "slice:shared"]],
+      ["project-suffix", ["project:alpha-extra", "mission:shipping", "slice:shared"]],
+      ["slice-space", ["project:alpha", "mission:shipping", "slice: shared"]],
+      ["slice-case", ["project:alpha", "mission:shipping", "slice:SHARED"]],
+      ["project-missing", ["mission:shipping", "slice:shared"]],
+      ["mission-missing", ["project:alpha", "slice:shared"]],
+    ] as const) row(id, "failed", [...tags]);
+    row("substring-body", "failed", null, "shared shipping project:alpha");
+    const entries = await list(route().app);
+    expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping" });
+    expect(entries[0]!.queueCounts).toEqual({ ...ZERO, pending: 1, done: 1 });
+  });
+
+  it("resolves unique directory and authored-id forms to one scope without multiplying rows", async () => {
+    addSlice("alpha", "shipping", "shared", "active", "SLICE.SHARED");
+    row("directory-form", "pending", ["project:alpha", "mission:shipping", "slice:shared"]);
+    row("id-form", "done", ["project:alpha", "mission:shipping", "slice:SLICE.SHARED"]);
+    row("mission-id-compat", "blocked", ["project:alpha", "mission:M.SHIPPING", "slice:SLICE.SHARED", "slice:SLICE.SHARED"]);
+    const entries = await list(route().app);
+    expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", qitemCount: 3 });
+    expect(entries[0]!.queueCounts).toEqual({ ...ZERO, pending: 1, done: 1, blocked: 1 });
+  });
+
+  it("counts beyond the existing 500-row display bucket without changing qitemCount", async () => {
+    addSlice("alpha", "shipping", "busy");
+    db.transaction(() => {
+      for (let i = 0; i < 501; i++) row("bulk-" + i, "pending", ["project:alpha", "mission:shipping", "slice:busy"]);
+    })();
+    const entries = await list(route().app);
+    expect(entries[0]).toMatchObject({ name: "busy", qitemCount: 500 });
+    expect(entries[0]!.queueCounts).toEqual({ ...ZERO, pending: 501 });
+  });
+
+  it("reads real pending-to-claimed-to-done transitions through the same cached route without file edits", async () => {
+    addSlice("alpha", "shipping", "changing", "shipped");
+    const repo = new QueueRepository(db, new EventBus(db));
+    const created = await repo.create({ qitemId: "qitem-count-transition", sourceSession: "writer@fixture",
+      destinationSession: "worker@fixture", body: "work", tags: ["project:alpha", "mission:shipping", "slice:changing"], nudge: false });
+    const { app } = route();
+    const before = await list(app);
+    expect(repo.claim({ qitemId: created.qitemId, destinationSession: "worker@fixture" }).state).toBe("in-progress");
+    const claimed = await list(app);
+    expect(repo.update({ qitemId: created.qitemId, actorSession: "worker@fixture", state: "done", closureReason: "no-follow-on" }).state).toBe("done");
+    const done = await list(app);
+    expect(repo.transitionLog.listForQitem(created.qitemId).map(t => t.state)).toEqual(["pending", "in-progress", "done"]);
+    for (const entries of [before, claimed, done]) {
+      expect(entries[0]).toMatchObject({ name: "changing", status: "done", rawStatus: "shipped", qitemCount: 1 });
+    }
+    authoredUnchanged();
+    expect.soft(before[0]!.queueCounts, "initial pending").toEqual({ ...ZERO, pending: 1 });
+    expect.soft(claimed[0]!.queueCounts, "same route after real claim").toEqual({ ...ZERO, "in-progress": 1 });
+    expect.soft(done[0]!.queueCounts, "same route after real completion").toEqual({ ...ZERO, done: 1 });
+  });
+
+  it.each(["unidentified root", "ambiguous project root"])("reports null rather than observed zero for %s", async reason => {
+    let slicesRoot: string;
+    if (reason === "unidentified root") {
+      slicesRoot = path.join(root, "legacy");
+      write(path.join(slicesRoot, "loose", "SPEC.md"), "---\nstatus: active\n---\n# Legacy\n");
+    } else {
+      addSlice("alpha", "shipping", "shared");
+      catalog([{ id: "alpha", root: "alpha" }, { id: "shadow", root: "alpha" }]);
+      slicesRoot = path.join(root, "alpha", "missions");
+    }
+    const entries = await list(route("alpha", false, slicesRoot).app);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.qitemCount).toBe(0);
+    expect(entries[0]!.queueCounts).toBeNull();
+  });
+
+  it("uses bounded batched queue scans for both one slice and many slices", async () => {
+    addSlice("alpha", "shipping", "batch-00");
+    row("batch-row-00", "pending", ["project:alpha", "mission:shipping", "slice:batch-00"]);
+    let scans = 0;
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      const stmt = prepare(sql);
+      const scan = /\bfrom\s+queue_items\b/i.test(sql) && !/\bwhere\s+qitem_id\s*(?:in\b|=)/i.test(sql);
+      if (!scan) return stmt;
+      return new Proxy(stmt, { get(target, key) {
+        const value = Reflect.get(target, key);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (key === "all" || key === "iterate" || key === "get") scans++;
+          return value.apply(target, args);
+        };
+      } });
+    }) as typeof db.prepare);
+    try {
+      const small = await list(route().app);
+      const smallScans = scans;
+      for (let i = 1; i < 24; i++) {
+        const name = "batch-" + String(i).padStart(2, "0");
+        addSlice("alpha", "shipping", name);
+        row("batch-row-" + i, "pending", ["project:alpha", "mission:shipping", "slice:" + name]);
+      }
+      scans = 0;
+      const many = await list(route().app);
+      const manyScans = scans;
+      expect(small).toHaveLength(1);
+      expect(many).toHaveLength(24);
+      expect(smallScans).toBeGreaterThan(0);
+      expect(smallScans).toBeLessThanOrEqual(4);
+      expect(manyScans).toBeGreaterThan(0);
+      expect(manyScans).toBeLessThanOrEqual(4);
+      expect(manyScans).toBeLessThanOrEqual(smallScans + 1);
+      expect(small.map(s => s.queueCounts)).toEqual([{ ...ZERO, pending: 1 }]);
+      expect(many.map(s => s.queueCounts)).toEqual(Array.from({ length: 24 }, () => ({ ...ZERO, pending: 1 })));
+    } finally { spy.mockRestore(); }
   });
 });
