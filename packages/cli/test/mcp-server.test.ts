@@ -354,6 +354,29 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
+  it("rig_artifact_read: an external grant's root_unknown names only its own shared roots, or none when the daemon's list can't be read", async () => {
+    let listed = true;
+    const getFn = vi.fn(async (p: string) => {
+      if (p === "/api/queue/q-ext") return { status: 200, data: { qitemId: "q-ext", sourceSession: "cus-a1-caller@team", destinationSession: "lead@team", evidenceRef: "report.md" } };
+      if (p === "/api/files/roots") return { status: 200, data: { roots: [{ name: "proof", path: "/shared/proof" }, { name: "acct-b", path: "/shared/acct-b" }] } };
+      if (p.startsWith("/api/files/read?root=stale&")) return { status: 400, data: { error: "root_unknown",
+        message: "allowlist root 'stale' is not configured. Allowlist configured roots: proof, acct-b.", rootName: "stale", ...(listed ? { configuredRoots: ["proof", "acct-b"] } : {}) } };
+      return { status: 404, data: {} };
+    });
+    await setup({ get: getFn }, { seat: "cus-a1-caller@team",
+      access: { principal: "cus_A1", owner: false, rigs: ["team"], roots: ["proof", "stale"], workspace: false, external: { objects: { artifact: ["read"] } } } });
+    const named = await mcpClient.callTool({ name: "rig_artifact_read", arguments: { qitemId: "q-ext", root: "stale" } });
+    expect(named.structuredContent).toMatchObject({ ok: false, code: "root_unknown",
+      message: "Shared root 'stale' is not configured on this daemon. Shared roots this connection may read: proof." });
+    expect(JSON.stringify(named.content)).not.toContain("acct-b");
+    listed = false;
+    const unlisted = await mcpClient.callTool({ name: "rig_artifact_read", arguments: { qitemId: "q-ext", root: "stale" } });
+    expect(unlisted.structuredContent).toMatchObject({ code: "root_unknown",
+      message: "Shared root 'stale' is not configured on this daemon. Shared roots this connection may read: (none)." });
+    expect(JSON.stringify(unlisted.content)).not.toContain("acct-b");
+    await cleanup();
+  });
+
   it("a front door gets front-door instructions, not the member workflow, and its declared seat with no session reads as itself", async () => {
     try {
       vi.stubEnv("OPENRIG_SESSION_NAME", "claude-app@my-rig");
