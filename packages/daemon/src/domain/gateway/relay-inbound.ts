@@ -12,13 +12,13 @@ import {
   loadRelayProfiles,
 } from "./relay-config.js";
 import {
-  RELAY_DELIVERED_DECISIONS_FILE,
   RELAY_PROTOCOL_VERSION,
   buildRelayExpectedReceipts,
   decodeRelayReplyRef,
   encodeRelayReplyRef,
   findPendingRelayReplyRef,
   hashRelayConnectorRef,
+  relayStatePaths,
   validateRelayOutboundEnvelope,
   type RelayOutboundEnvelope,
   type RelayPayloadCarry,
@@ -542,9 +542,11 @@ function strictRelayStateFs(base: StateFsOps = nodeStateFs): StateFsOps {
 
 export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayInboundHandler {
   const rawStateFs = deps.stateFs ?? nodeStateFs;
+  const { attemptedPath, deliveredPath } = relayStatePaths(deps.home);
   const seenPath = join(deps.home, "state", RELAY_INBOUND_SEEN_FILE);
   const seenStore = new SeenStore(seenPath, strictRelayStateFs(rawStateFs));
-  const deliveredStore = new SeenStore(join(deps.home, "state", RELAY_DELIVERED_DECISIONS_FILE), rawStateFs);
+  const attemptedStore = new SeenStore(attemptedPath, rawStateFs);
+  const deliveredStore = new SeenStore(deliveredPath, rawStateFs);
   const outboundSeenStore = new SeenStore(join(deps.home, "state", "slack-outbound-seen.jsonl"), rawStateFs);
   const inFlightByKey = new Map<string, Promise<RelayInboundResponse>>();
 
@@ -588,7 +590,7 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
         response: errResponse(
           503,
           "human_registry_unavailable",
-          `Relay ${surfaceLabel} authentication is unavailable because human registry cannot be read`,
+          `${surfaceLabel.charAt(0).toUpperCase()}${surfaceLabel.slice(1)} authentication is unavailable because human registry cannot be read`,
         ),
       };
     }
@@ -959,7 +961,9 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
         return errResponse(503, "dispatch_buffer_unavailable", "Relay outbound dispatch buffer is unreadable");
       }
 
+      let attemptedMap: Map<string, string>;
       try {
+        attemptedMap = attemptedStore.statuses();
         deliveredStore.statuses();
       } catch {
         return errResponse(503, "seen_store_unavailable", "Relay outbound seen store is unreadable");
@@ -973,6 +977,7 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
             ? (decision.payload as RelayPayloadCarry)
             : null;
         if (!p || p.relayConnectorRef !== authenticatedConnectorRef) continue;
+        if (!attemptedMap.has(decision.decisionId)) continue;
         if (!p.relayEnvelope) {
           return errResponse(
             503,
@@ -1047,9 +1052,11 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
           return errResponse(503, "dispatch_buffer_unavailable", "Relay outbound dispatch buffer is unreadable");
         }
 
+        let attemptedMap: Map<string, string>;
         let deliveredMap: Map<string, string>;
         let outboundSeenMap: Map<string, string>;
         try {
+          attemptedMap = attemptedStore.statuses();
           deliveredMap = deliveredStore.statuses();
           outboundSeenMap = outboundSeenStore.statuses();
         } catch {
@@ -1078,7 +1085,7 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
           return d.decisionId === deliveryId && p?.relayConnectorRef === authenticatedConnectorRef;
         });
 
-        if (decision) {
+        if (decision && attemptedMap.has(decision.decisionId)) {
           const p = decision.payload as RelayPayloadCarry;
           if (!p.relayEnvelope) {
             return errResponse(404, "unknown_delivery", "deliveryId does not match a relay outbound delivery");

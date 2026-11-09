@@ -734,7 +734,7 @@ export interface RelayOutboundTransportOpts {
   outboundSeen: SeenStore;
   resolveProfile: (connectorRef: string) => ResolvedRelayOutboundProfile;
   onAccepted: (info: RelayAcceptedReceiptInfo) => void;
-  hasAcceptedReceipt?: (info: { qitemId: string; notificationKey: string }) => boolean;
+  hasAcceptedReceipt?: (info: { qitemId: string; notificationKey: string; deliveryId?: string }) => boolean;
   onTransportFailed?: (payload: OutboundPostPayload, failureClass: string, detail: string) => void;
   release?: (notificationKey: string) => void;
   fetchImpl?: FetchImpl;
@@ -866,7 +866,13 @@ export function createRelayOutboundTransport(opts: RelayOutboundTransportOpts): 
     const anyReceipted =
       expectedReceipts.length > 0 &&
       opts.hasAcceptedReceipt !== undefined &&
-      expectedReceipts.some((r) => opts.hasAcceptedReceipt!({ qitemId: r.qitemId, notificationKey: r.notificationKey }));
+      expectedReceipts.some((r) =>
+        opts.hasAcceptedReceipt!({
+          qitemId: r.qitemId,
+          notificationKey: r.notificationKey,
+          deliveryId: r.deliveryId,
+        }),
+      );
 
     if (deliveredMap.has(decision.decisionId) || alreadyReceipted || anyReceipted) {
       log(`relay delivery: decision ${decision.decisionId} already accepted — reconciling local guards without repost`);

@@ -881,7 +881,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     expect(releasedKeys).toEqual(["q-seen-1:1"]);
   });
 
-  it("retains pull-mode decisions in DispatchBuffer without HTTP POST or transport-failed notes, and finishes partial digest receipts on replay", async () => {
+  it("retains pull-mode decisions in DispatchBuffer without HTTP POST or transport-failed notes, ignores receipts from other deliveries of a shared digest member on replay, and finishes partial digest receipts tied to this deliveryId", async () => {
     const fsx = memFs();
     const attempted = new SeenStore("/state/relay-attempted-decisions.jsonl", fsx);
     const delivered = new SeenStore("/state/relay-delivered-decisions.jsonl", fsx);
@@ -890,7 +890,7 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     const receipts: RelayAcceptedReceiptInfo[] = [];
     const releasedKeys: string[] = [];
     const failedNotes: Array<{ failureClass: string; detail: string }> = [];
-    const acceptedInDb = new Set<string>();
+    const acceptedInDb = new Map<string, string>();
 
     const transport = createRelayOutboundTransport({
       attempted,
@@ -904,10 +904,14 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
         url: null,
         outboundToken: null,
       }),
-      hasAcceptedReceipt: ({ qitemId, notificationKey }) => acceptedInDb.has(`${qitemId}:${notificationKey}`),
+      hasAcceptedReceipt: ({ qitemId, notificationKey, deliveryId }) => {
+        const recordedDeliveryId = acceptedInDb.get(`${qitemId}:${notificationKey}`);
+        if (recordedDeliveryId === undefined) return false;
+        return deliveryId === undefined || recordedDeliveryId === deliveryId;
+      },
       onAccepted: (info) => {
         receipts.push(info);
-        acceptedInDb.add(`${info.qitemId}:${info.notificationKey}`);
+        acceptedInDb.set(`${info.qitemId}:${info.notificationKey}`, info.deliveryId);
       },
       onTransportFailed: (_p, failureClass, detail) => failedNotes.push({ failureClass, detail }),
       release: (key) => releasedKeys.push(key),
@@ -975,16 +979,30 @@ describe("Capability 3 — relay-outbound protocol v1, replyRef, and pure transp
     expect(delivered.load().has("dec-pull-dig-1")).toBe(false);
     expect(new DispatchBuffer(home).pending()).toHaveLength(1);
 
-    // Simulate partial receipt from a prior interrupted ack (first digest item receipted, second not yet)
-    acceptedInDb.add("q-pull-1:q-pull-1:1");
+    // 1. A retained single decision for shared member q-pull-1 is acknowledged under a different deliveryId:
+    //    replay must NOT treat that foreign receipt as partial completion of dec-pull-dig-1 or drain q-pull-2 unacknowledged.
+    acceptedInDb.set("q-pull-1:q-pull-1:1", "dec-retained-single-1");
+    wire.startServices?.();
+    await tick();
+
+    expect(bridge.callCount()).toBe(0);
+    expect(failedNotes).toEqual([]);
+    expect(receipts).toHaveLength(0);
+    expect(acceptedInDb.has("q-pull-2:q-pull-2:1")).toBe(false);
+    expect(delivered.load().has("dec-pull-dig-1")).toBe(false);
+    expect(new DispatchBuffer(home).pending().map((d) => d.decisionId)).toEqual(["dec-pull-dig-1"]);
+
+    // 2. Simulate partial receipt from a prior interrupted ack of THIS digest (deliveryId === "dec-pull-dig-1"):
+    //    replay finishes the remaining member receipt and drains dec-pull-dig-1.
+    acceptedInDb.set("q-pull-1:q-pull-1:1", "dec-pull-dig-1");
     wire.startServices?.();
     await tick();
 
     expect(bridge.callCount()).toBe(0);
     expect(failedNotes).toEqual([]);
     expect(receipts.map((r) => `${r.qitemId}:${r.notificationKey}`)).toEqual(["q-pull-2:q-pull-2:1"]);
-    expect(acceptedInDb.has("q-pull-1:q-pull-1:1")).toBe(true);
-    expect(acceptedInDb.has("q-pull-2:q-pull-2:1")).toBe(true);
+    expect(acceptedInDb.get("q-pull-1:q-pull-1:1")).toBe("dec-pull-dig-1");
+    expect(acceptedInDb.get("q-pull-2:q-pull-2:1")).toBe("dec-pull-dig-1");
     expect(delivered.load().has("dec-pull-dig-1")).toBe(true);
     expect(new DispatchBuffer(home).pending()).toHaveLength(0);
   });

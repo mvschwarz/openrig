@@ -663,8 +663,8 @@ export class QueueTransitionLog {
     );
   }
 
-  hasRelayOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
-    return this.getRelayOwnerNotificationReceipt(qitemId, notificationKey) !== null;
+  hasRelayOwnerNotificationReceipt(qitemId: string, notificationKey?: string, deliveryId?: string): boolean {
+    return this.getRelayOwnerNotificationReceipt(qitemId, notificationKey, deliveryId) !== null;
   }
 
 /** The latest owner-notification episode per ACTIVE queue row, in queue order. One query
@@ -756,11 +756,19 @@ export class QueueTransitionLog {
     return receipts;
   }
 
-  getRelayOwnerNotificationReceipt(qitemId: string, notificationKey?: string): RelayOwnerNotificationReceipt | null {
+  getRelayOwnerNotificationReceipt(
+    qitemId: string,
+    notificationKey?: string,
+    deliveryId?: string,
+  ): RelayOwnerNotificationReceipt | null {
     for (const parsed of this.listRelayOwnerNotificationReceipts(qitemId)) {
-      if (notificationKey === undefined || parsed.notificationKey === notificationKey) {
-        return parsed;
+      if (notificationKey !== undefined && parsed.notificationKey !== notificationKey) {
+        continue;
       }
+      if (deliveryId !== undefined && parsed.deliveryId !== deliveryId) {
+        continue;
+      }
+      return parsed;
     }
     return null;
   }

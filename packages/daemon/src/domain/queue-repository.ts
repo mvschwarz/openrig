@@ -4324,12 +4324,20 @@ export class QueueRepository {
     return this.transitionLog.listRelayOwnerNotificationReceipts(qitemId);
   }
 
-  getRelayOwnerNotificationReceipt(qitemId: string, notificationKey?: string): RelayOwnerNotificationReceipt | null {
-    return this.transitionLog.getRelayOwnerNotificationReceipt(qitemId, notificationKey);
+  getRelayOwnerNotificationReceipt(
+    qitemId: string,
+    notificationKey?: string,
+    deliveryId?: string,
+  ): RelayOwnerNotificationReceipt | null {
+    return this.transitionLog.getRelayOwnerNotificationReceipt(qitemId, notificationKey, deliveryId);
   }
 
-  hasRelayOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
-    return this.transitionLog.hasRelayOwnerNotificationReceipt(qitemId, notificationKey);
+  hasRelayOwnerNotificationReceipt(
+    qitemId: string,
+    notificationKey?: string,
+    deliveryId?: string,
+  ): boolean {
+    return this.transitionLog.hasRelayOwnerNotificationReceipt(qitemId, notificationKey, deliveryId);
   }
 
   findRelayOwnerNotificationReceiptByReplyRef(

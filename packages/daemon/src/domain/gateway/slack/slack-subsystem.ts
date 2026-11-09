@@ -814,8 +814,8 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         outboundToken: profile.credentials.outboundToken,
       };
     },
-    hasAcceptedReceipt: ({ qitemId, notificationKey }) =>
-      opts.queueRepo.hasRelayOwnerNotificationReceipt(qitemId, notificationKey),
+    hasAcceptedReceipt: ({ qitemId, notificationKey, deliveryId }) =>
+      opts.queueRepo.hasRelayOwnerNotificationReceipt(qitemId, notificationKey, deliveryId),
     onAccepted: (info) => {
       opts.queueRepo.recordRelayOwnerNotificationAccepted({
         qitemId: info.qitemId,
