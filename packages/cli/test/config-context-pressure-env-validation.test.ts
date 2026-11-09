@@ -116,4 +116,68 @@ describe("issue #2529: context-pressure inverted environment pair reporting", ()
     expect(output).toBe("health.context_pressure.critical_percent reset to default (99).");
     expect(output).not.toContain("inverted");
   });
+
+  it("handles rejected partial environment override without false inversion warning", async () => {
+    // Warning env is partial/malformed '98junk', setting critical to 97 on an empty file.
+    // The resolver discards '98junk' (falls back to default 95), so pair is 95/97 (valid).
+    // The write saves 97, effective is 97 from file, and no inversion/fallback is reported.
+    process.env["OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT"] = "98junk";
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const cmd = configCommand(configPath);
+    await cmd.parseAsync(["node", "rig", "set", "health.context_pressure.critical_percent", "97"]);
+
+    const fileContent = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(fileContent.health?.contextPressure?.criticalPercent).toBe(97);
+
+    const output = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toBe("health.context_pressure.critical_percent = 97");
+    expect(output).not.toContain("inverted");
+    stderr.mockRestore();
+  });
+
+  it("handles rejected out-of-range environment override without false inversion warning", async () => {
+    // Warning env is out-of-range '101', setting critical to 97 on an empty file.
+    // The resolver discards '101' (falls back to default 95), so pair is 95/97 (valid).
+    // The write saves 97, effective is 97 from file, and no inversion/fallback is reported.
+    process.env["OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT"] = "101";
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const cmd = configCommand(configPath);
+    await cmd.parseAsync(["node", "rig", "set", "health.context_pressure.critical_percent", "97"]);
+
+    const fileContent = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(fileContent.health?.contextPressure?.criticalPercent).toBe(97);
+
+    const output = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toBe("health.context_pressure.critical_percent = 97");
+    expect(output).not.toContain("inverted");
+    stderr.mockRestore();
+  });
+
+  it("correctly explains fallback when an invalid file value is discarded and causes inversion", async () => {
+    // File has invalid warningPercent: 0, critical env is 90.
+    // Writing critical 100 to file saves critical 100.
+    // The resolver discards file warningPercent 0, uses default 95.
+    // With critical env 90, warning 95 >= critical 90 causes inversion and fallback to 95/99.
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ health: { contextPressure: { warningPercent: 0 } } }, null, 2) + "\n",
+    );
+    process.env["OPENRIG_HEALTH_CONTEXT_PRESSURE_CRITICAL_PERCENT"] = "90";
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const cmd = configCommand(configPath);
+    await cmd.parseAsync(["node", "rig", "set", "health.context_pressure.critical_percent", "100"]);
+
+    const fileContent = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(fileContent.health?.contextPressure?.criticalPercent).toBe(100);
+
+    const output = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toContain(
+      "health.context_pressure.critical_percent file override saved; effective value 99 (source: default; inverted pair 95/90 from OPENRIG_HEALTH_CONTEXT_PRESSURE_CRITICAL_PERCENT=90 falls back to 95/99 defaults in this shell)",
+    );
+    stderr.mockRestore();
+  });
 });

@@ -1194,6 +1194,12 @@ export interface ResolvedSetting {
   defaultValue: string | number | boolean;
 }
 
+export interface ContextPressurePolicyState {
+  warning: ResolvedSetting;
+  critical: ResolvedSetting;
+  rejectedPair: { warning: number; critical: number } | null;
+}
+
 export class ConfigStore {
   readonly configPath: string;
 
@@ -1447,6 +1453,24 @@ export class ConfigStore {
       out[key] = this.resolveOne(key, fileConfig, workspaceRoot);
     }
     return out;
+  }
+
+  /** Inspect resolved context-pressure policy and whether an inverted pair was rejected. */
+  resolveContextPressurePolicyState(): ContextPressurePolicyState {
+    const fileConfig = this.readConfigFile();
+    const workspaceRoot = this.resolveOne("workspace.root", fileConfig, DEFAULT_WORKSPACE_ROOT).value as string;
+    const warningKey = "health.context_pressure.warning_percent" as const;
+    const criticalKey = "health.context_pressure.critical_percent" as const;
+    const warning = this.resolveOneUnpaired(warningKey, fileConfig, workspaceRoot);
+    const critical = this.resolveOneUnpaired(criticalKey, fileConfig, workspaceRoot);
+    if ((warning.value as number) < (critical.value as number)) {
+      return { warning, critical, rejectedPair: null };
+    }
+    return {
+      warning,
+      critical,
+      rejectedPair: { warning: warning.value as number, critical: critical.value as number },
+    };
   }
 
   private resolveOne(key: ValidKey, fileConfig: Record<string, unknown>, workspaceRoot: string): ResolvedSetting {

@@ -19,45 +19,22 @@ function getContextPressureFallbackExplanation(store: ConfigStore, key: string):
   if (key !== "health.context_pressure.warning_percent" && key !== "health.context_pressure.critical_percent") {
     return null;
   }
+  const state = store.resolveContextPressurePolicyState();
+  if (!state.rejectedPair) {
+    return null;
+  }
+
   const warnKey = "health.context_pressure.warning_percent" as const;
   const critKey = "health.context_pressure.critical_percent" as const;
-  const warnEnvName = ENV_MAP[warnKey].primary;
-  const critEnvName = ENV_MAP[critKey].primary;
-  const warnEnv = process.env[warnEnvName];
-  const critEnv = process.env[critEnvName];
-
-  // Inspect the raw candidates to see if an inversion actually occurred.
-  // Warning candidate: env override if valid number, else file value or default 95.
-  // Critical candidate: env override if valid number, else file value or default 99.
-  const warnEnvNum = warnEnv !== undefined && warnEnv !== "" ? parseInt(warnEnv, 10) : NaN;
-  const critEnvNum = critEnv !== undefined && critEnv !== "" ? parseInt(critEnv, 10) : NaN;
-
-  let fileWarn: number | undefined;
-  let fileCrit: number | undefined;
-  try {
-    const raw = (store as unknown as { readConfigFile?: () => Record<string, unknown> }).readConfigFile?.();
-    if (raw && typeof raw === "object") {
-      const health = raw["health"] as Record<string, unknown> | undefined;
-      const cp = health?.["contextPressure"] as Record<string, unknown> | undefined;
-      if (typeof cp?.["warningPercent"] === "number") fileWarn = cp["warningPercent"];
-      if (typeof cp?.["criticalPercent"] === "number") fileCrit = cp["criticalPercent"];
-    }
-  } catch {
-    // If config file cannot be read, candidates will fall back to defaults
+  const envSources: string[] = [];
+  if (state.warning.source === "env") {
+    envSources.push(`${ENV_MAP[warnKey].primary}=${state.warning.value}`);
   }
-
-  const warnCand = !isNaN(warnEnvNum) ? warnEnvNum : (fileWarn ?? 95);
-  const critCand = !isNaN(critEnvNum) ? critEnvNum : (fileCrit ?? 99);
-
-  if (warnCand >= critCand) {
-    const envSources: string[] = [];
-    if (warnEnv && !isNaN(warnEnvNum)) envSources.push(`${warnEnvName}=${warnEnv}`);
-    if (critEnv && !isNaN(critEnvNum)) envSources.push(`${critEnvName}=${critEnv}`);
-    const envDetails = envSources.length > 0 ? ` from ${envSources.join(", ")}` : "";
-    return `; inverted pair ${warnCand}/${critCand}${envDetails} falls back to 95/99 defaults in this shell`;
+  if (state.critical.source === "env") {
+    envSources.push(`${ENV_MAP[critKey].primary}=${state.critical.value}`);
   }
-
-  return null;
+  const envDetails = envSources.length > 0 ? ` from ${envSources.join(", ")}` : "";
+  return `; inverted pair ${state.rejectedPair.warning}/${state.rejectedPair.critical}${envDetails} falls back to 95/99 defaults in this shell`;
 }
 
 // These settings remain boot-only; capture interval/line settings reload live.
