@@ -766,7 +766,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   it.each([
     ["exact tags on a done row", exact, "done", false],
     ["exact tags on a canceled row", exact, "canceled", false],
-    ["exact tags on a handed-off row", exact, "handed-off", true],
+    ["exact tags on a handed-off row without a local tagged successor", exact, "handed-off", false],
     ["exact tags on a failed row", exact, "failed", false],
     ["exact tags on a denied row", exact, "denied", false],
     ["fully escaped tags", (k: string) => escaped(["wake-prompt-refusal", `prompt-episode:${k}`]), "done", false],
@@ -801,7 +801,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     let lookups = -1;
     try {
       await tick(engine([], false));
-      lookups = prepare.mock.calls.filter(([sql]) => String(sql).includes("WITH closed AS MATERIALIZED")).length;
+      lookups = prepare.mock.calls.filter(([sql]) => String(sql).includes("WITH alerts AS MATERIALIZED")).length;
     } finally { prepare.mockRestore(); }
     expect(lookups).toBe(1); // one per tick; the per-episode lookup ran once per open episode (3 here)
     expect(alerts()).toHaveLength(1);
@@ -1120,6 +1120,67 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     await tick(port);
     expect(repo.getById(created.qitemId)?.state).toBe("done");
     expect(notes(created.qitemId)).toContain("prompt escalation retired: the seat's prompt read clear; not a delivery receipt");
+  });
+
+  it("a held clear then owner close cannot suppress the same watchdog's later prompt", async () => {
+    const epoch = Date.parse("2030-01-01T00:00:00Z");
+    const at = (seconds: number) => new Date(epoch + seconds * 1000);
+    vi.useFakeTimers({ toFake: ["Date"], now: at(0) });
+    try {
+      const { jobId, record } = reminder([]);
+      const port = engine([], false);
+      record("refused", "selection_prompt", at(0).toISOString());
+      vi.setSystemTime(at(60));
+      await tick(port, { now: at(60) });
+      const original = alerts()[0]!;
+      const { created: held } = await repo.handoff({ qitemId: original.qitemId,
+        fromSession: original.destinationSession, toSession: "desk@fixture", nudge: false });
+      repo.claim({ qitemId: held.qitemId, destinationSession: held.destinationSession });
+      repo.update({ qitemId: held.qitemId, actorSession: held.destinationSession, state: "blocked",
+        blockedOn: "external:owner-decision", wakeAfterSeconds: 21_600 });
+      const wake = db.prepare("SELECT * FROM queue_transition_wakes WHERE qitem_id = ?").all(held.qitemId);
+      vi.setSystemTime(at(90)); state = "clear";
+      await tick(port, { now: at(90) });
+      vi.setSystemTime(at(91));
+      await tick(port, { now: at(91) });
+      expect(repo.getById(held.qitemId)?.state).toBe("blocked");
+      expect(db.prepare("SELECT * FROM queue_transition_wakes WHERE qitem_id = ?").all(held.qitemId)).toEqual(wake);
+      vi.setSystemTime(at(95));
+      repo.update({ qitemId: held.qitemId, actorSession: held.destinationSession, state: "done",
+        closureReason: "no-follow-on", transitionNote: "owner finished the held decision" });
+      vi.setSystemTime(at(100)); state = "unknown";
+      record("refused", "selection_prompt", at(100).toISOString()); // No intervening delivered reminder.
+      vi.setSystemTime(at(160));
+      await tick(port, { now: at(160) });
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]!.qitemId).not.toBe(held.qitemId);
+      expect(alerts()[0]!.tags).toContain(`prompt-episode:${seat}|watchdog:${jobId}|after:alert:${held.qitemId}`);
+      expect(repo.getById(held.qitemId)?.state).toBe("done");
+      expect(notes(held.qitemId).filter(note => note === "prompt escalation: the seat's prompt read clear")).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("a handoff with replaced tags and a manually closed successor stays final", async () => {
+    reminder(["refused"]);
+    const port = engine([], false);
+    await tick(port);
+    const original = alerts()[0]!;
+    const { created } = await repo.handoff({ qitemId: original.qitemId,
+      fromSession: original.destinationSession, toSession: "desk@fixture", tags: ["owner-decision"], nudge: false });
+    repo.update({ qitemId: created.qitemId, actorSession: created.destinationSession,
+      state: "done", closureReason: "no-follow-on" });
+    await tick(port);
+    expect(alerts()).toEqual([]);
+  });
+
+  it("a handed-off alert with no local successor does not re-alert locally", async () => {
+    reminder(["refused"]);
+    const port = engine([], false);
+    await tick(port);
+    const original = alerts()[0]!;
+    db.prepare("UPDATE queue_items SET state = 'handed-off' WHERE qitem_id = ?").run(original.qitemId);
+    await tick(port);
+    expect(alerts()).toEqual([]);
   });
 
   it.each(["blocked", "unknown"] as const)("an ended watchdog episode retains its notice when prompt state is %s", async observed => {
