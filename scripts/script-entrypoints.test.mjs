@@ -52,14 +52,16 @@ test("mirror check reports missing generated inputs instead of silently succeedi
 });
 
 for (const file of entrypoints) {
-  test(`${file} can be imported without an entrypoint argument`, (t) => {
-    const { root } = fixture(t);
-    const url = pathToFileURL(join(root, "scripts", file)).href;
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(url)})`], {
-      cwd: root, encoding: "utf8",
+  for (const args of [[], ["missing-entrypoint.mjs"]]) {
+    test(`${file} can be imported with ${args.length ? "a nonexistent" : "no"} entrypoint argument`, (t) => {
+      const { root } = fixture(t);
+      const url = pathToFileURL(join(root, "scripts", file)).href;
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(url)})`, ...args], {
+        cwd: root, encoding: "utf8",
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "");
+      assert.equal(result.stderr, "");
     });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "");
-    assert.equal(result.stderr, "");
-  });
+  }
 }
