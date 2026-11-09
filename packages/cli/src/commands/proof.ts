@@ -168,7 +168,7 @@ checkboxes do not accept an item under the selected proof policy.
   const escapeHint = (project: boolean) => project
     ? "\nThe scope is outside that project's missions root; name a mission/slice path inside it."
     : "\nThe scope is outside the selected daemon workspace. For a catalog project, pass --project <id> or prefix the scope with <project>:."
-      + " rig scope verbs select another workspace with the parent option: rig scope --workspace <project root> slice <verb> ...";
+      + " To use another daemon's workspace, select that daemon with OPENRIG_URL.";
   const response = async (r: { status: number; data: unknown }, project = false): Promise<Record<string, any>> => {
     const data = r.data as Record<string, any>;
     if (r.status >= 400) {

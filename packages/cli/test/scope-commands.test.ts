@@ -1383,7 +1383,8 @@ describe("slice and mission verb help names the parent --workspace option", () =
       for (const verb of tier.commands) {
         const help = helpOf(verb);
         expect(help, `${tierName} ${verb.name()}`).toContain(`rig scope --workspace <project root> ${tierName} ${verb.name()} ...`);
-        expect(help, `${tierName} ${verb.name()}`).toContain("~/.openrig/workspace/projects/<project>");
+        expect(help, `${tierName} ${verb.name()}`).toContain("$(rig config get workspace.projects_root)/<project>");
+        expect(help, `${tierName} ${verb.name()}`).not.toContain("~/.openrig");
       }
     }
   });

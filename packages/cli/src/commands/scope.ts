@@ -2193,8 +2193,8 @@ Workspace: the parent option --workspace selects the missions root this command 
   rig scope --workspace <project root> ${tier} ${verb ?? "<verb>"} ...
 A project root uses its project.yaml missions.root, else its missions/ folder; a
 folder named missions is used as is. Use it for a catalog project, for example
-~/.openrig/workspace/projects/<project>. Without --workspace, OPENRIG_WORK_ROOT
-applies, then the configured workspace.slices_root.`;
+$(rig config get workspace.projects_root)/<project>. Without --workspace,
+OPENRIG_WORK_ROOT applies, then the configured workspace.slices_root.`;
 }
 
 export function scopeCommand(): Command {

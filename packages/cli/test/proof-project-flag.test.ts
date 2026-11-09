@@ -65,11 +65,12 @@ describe("O2: a path_escape scope names the routes to another workspace", () => 
     return errors.join("\n");
   };
 
-  it("without a project, names --project, the <project>: prefix and rig scope --workspace", async () => {
+  it("without a project, names --project, the <project>: prefix and OPENRIG_URL, not rig scope", async () => {
     const text = await shown(["show", "/other/projects/alpha/missions/m1/slices/01-x"]);
     expect(text).toContain("path_escape: Path escapes /w/missions");
     expect(text).toContain("For a catalog project, pass --project <id> or prefix the scope with <project>:.");
-    expect(text).toContain("rig scope --workspace <project root> slice <verb> ...");
+    expect(text).toContain("To use another daemon's workspace, select that daemon with OPENRIG_URL.");
+    expect(text).not.toContain("rig scope");
   });
 
   it("with --project or a <project>: prefix, says the scope is outside that project's tree", async () => {
