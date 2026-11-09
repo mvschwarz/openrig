@@ -1034,13 +1034,9 @@ export function createRelayInboundHandler(deps: RelayInboundHandlerDeps): RelayI
       }
 
       const rawDeliveryId = bodyObj.deliveryId;
-      if (
-        typeof rawDeliveryId !== "string" ||
-        rawDeliveryId.length === 0 ||
-        rawDeliveryId.length > 512 ||
-        /\s|\0/.test(rawDeliveryId)
-      ) {
-        return errResponse(400, "invalid_envelope", "deliveryId must be a non-empty string without whitespace");
+      // Same rule as validateRelayOutboundEnvelope: every id the outbox can list is acknowledgeable (#2742).
+      if (typeof rawDeliveryId !== "string" || rawDeliveryId.trim().length === 0) {
+        return errResponse(400, "invalid_envelope", "deliveryId must be a non-empty string");
       }
       const deliveryId = rawDeliveryId;
 

@@ -19,7 +19,11 @@ import { MissionControlActionLog } from "../src/domain/mission-control/mission-c
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { GatewaySubsystem } from "../src/domain/gateway/gateway-subsystem.js";
 import { buildSlackGatewayWire, makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
-import { addHumanFragment, loadHumanRegistry } from "../src/domain/gateway/human-registry.js";
+import { addHumanFragment, loadHumanRegistry, resolveSlackHandle, setHumanField } from "../src/domain/gateway/human-registry.js";
+import { HumanQuietStore } from "../src/domain/gateway/human-quiet-windows.js";
+import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
+import { QUIET_RELEASE_POLICY, runQuietRelease } from "../src/domain/policies/quiet-release.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { OUTBOUND_OP } from "../src/domain/gateway/slack/outbound-driver.js";
 import {
   encodeRelayReplyRef,
@@ -3052,5 +3056,74 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
         (d) => d.deliveryId,
       ),
     ).toEqual([sharedDigestId]);
+  });
+
+  it("acknowledges a listed deliveryId over 512 characters: a quiet-release of an ask with a long supplied queue id round-trips", async () => {
+    const f = await createRelayFixture({
+      mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
+    });
+    const loadRegistry = () => loadHumanRegistry(f.home);
+    expect(setHumanField("founder", "delivery-class", "B", f.home).ok).toBe(true);
+    const quiet = new HumanQuietStore(f.db);
+    const now = new Date();
+    quiet.setUntil("founder", { until: new Date(now.getTime() + 3_600_000), timezone: "UTC", setBy: "test", now });
+
+    const ask = await f.daemon.queueRepo.create({
+      qitemId: `qitem-long-${"a".repeat(560)}`,
+      sourceSession: "architect@rig",
+      destinationSession: "founder@external",
+      summary: "Long queue id ask",
+      body: "Held for quiet hours, then released",
+      humanIntent: "decision",
+      humanAlert: true,
+      nudge: false,
+    });
+    const ports = makeQueuePorts(f.daemon.queueRepo, { loadHumanRegistry: loadRegistry } as never);
+    const alert = (await ports.listHumanAlerts({ minimumLevel: "NOTICE" })).find((a) => a.qitemId === ask.qitemId)!;
+    expect(f.daemon.gatewaySubsystem.dispatch(OUTBOUND_OP, alert.destinationSession!, alert).ok).toBe(true);
+    f.daemon.gatewaySubsystem.startServices();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(
+      f.daemon.queueRepo.listTransitions(ask.qitemId).some((t) => (t.transitionNote ?? "").startsWith("delivery-decision: quiet-hold ")),
+    ).toBe(true);
+
+    // Quiet ends: the release job produces the delivery id quiet-release:<notification key>.
+    quiet.end("founder", { endedBy: "test", now: new Date() });
+    const jobsRepo = new WatchdogJobsRepository(f.db);
+    const job = jobsRepo.listActive().find((j) => j.policy === QUIET_RELEASE_POLICY)!;
+    const rel = await runQuietRelease({
+      queueRepo: f.daemon.queueRepo,
+      jobsRepo,
+      home: f.home,
+      jobId: job.jobId,
+      now: new Date(),
+      registry: { loadHumanRegistry: loadRegistry, resolveSlackHandle },
+      dispatch: (op, ref, payload, opts) => f.daemon.gatewaySubsystem.dispatch(op, ref, payload, opts),
+    });
+    expect(rel).toMatchObject({ released: 1 });
+    await new Promise((r) => setTimeout(r, 30));
+
+    const listRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(listRes.status).toBe(200);
+    const listed = ((await listRes.json()) as { deliveries: Array<{ deliveryId: string }> }).deliveries.map((d) => d.deliveryId);
+    expect(listed).toEqual([`quiet-release:${alert.notificationKey}`]);
+    expect(listed[0]!.length).toBeGreaterThan(512);
+
+    const ackRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox/ack`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ deliveryId: listed[0] }),
+    });
+    expect(ackRes.status).toBe(200);
+    expect(await ackRes.json()).toEqual({ ok: true, deliveryId: listed[0], connectorRef: "relay-main", alreadyAccepted: false });
+    expect(f.daemon.queueRepo.hasRelayOwnerNotificationReceipt(ask.qitemId, alert.notificationKey!)).toBe(true);
+    expect(f.daemon.queueRepo.deliveryOutcomeFor(ask.qitemId)?.outcome).toBe("accepted");
+
+    const relistRes = await fetch(`${f.baseUrl}/api/gateway/relay/outbox`, {
+      headers: { Authorization: `Bearer ${f.inboundTokenMain}` },
+    });
+    expect(((await relistRes.json()) as { deliveries: unknown[] }).deliveries).toEqual([]);
   });
 });
