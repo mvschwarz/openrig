@@ -252,8 +252,9 @@ interface TransitionNoteRow {
  *  ladder live again. Unrelated transitions do not change the latest marker. */
 /** Durable custody-verification disposition: a transition note on the CLOSED source row,
  *  written by whoever performed the registered-host read (never by this detector),
- *  `custody-verified: <exact-target> <free-form how/where>`. Prefix-anchored parse; the
- *  target is the first whitespace-delimited token after the prefix, matched exactly.
+ *  `custody-verified: <exact-target> <free-form how/where>`. Prefix-anchored parse; a target
+ *  is any whitespace-delimited word after the prefix (or a comma member of one), matched
+ *  exactly, so a note whose prose names the successor later still verifies it (#2841).
  *  Read from the ACTIVE table AND the retention archive: the daily archiver MOVES every
  *  transition of an aged terminal qitem into `queue_transitions_archive` (the exact class
  *  custody rows belong to) while the row itself keeps participating in this sweep, so an
@@ -273,8 +274,8 @@ function custodyVerifiedTargets(db: Database.Database, qitemId: string): Set<str
   const verified = new Set<string>();
   for (const { transition_note: note } of notes) {
     if (!note) continue;
-    const token = note.slice(CUSTODY_VERIFIED_PREFIX.length).trim().split(/\s+/)[0];
-    if (token) {
+    for (const token of note.slice(CUSTODY_VERIFIED_PREFIX.length).trim().split(/\s+/)) {
+      if (!token) continue;
       verified.add(token);
       for (const t of token.split(",")) {
         if (t.trim()) verified.add(t.trim());
@@ -523,7 +524,8 @@ export function custodyHeadline(rowId: string, targets: string[], ageMinutes: nu
 function evidenceBody(db: Database.Database, c: Candidate): string {
   if (c.verificationTargets?.length) {
     const checks = c.verificationTargets
-      .map((target) => `- ${target}\n  ${verificationCommand(target)}`)
+      .map((target) => `- ${target}\n  ${verificationCommand(target)}\n` +
+        `  rig queue update ${c.row.qitemId} --note "custody-verified: ${target} <how verified>"`)
       .join("\n");
     return (
       `STUCK SWEEP FINDING (successor-verification-required)\n` +
@@ -532,10 +534,10 @@ function evidenceBody(db: Database.Database, c: Candidate): string {
       `age: ${c.ageMinutes} min\n` +
       `last transition: ${lastTransitionLine(db, c.row.qitemId)}\n` +
       `why: ${c.why}\n` +
-      `verification targets (indeterminate until checked on the registered host):\n${checks}\n` +
-      `After a registered-host read confirms a target, record it durably on the closed row so the sweep stops asking:\n` +
-      `  rig queue update ${c.row.qitemId} --note "custody-verified: <target> <how verified>"\n` +
-      `Do not rewrite historical custody from this local observation; record the verification result separately.`
+      `verification targets (indeterminate until checked on the registered host), each with its check and its note:\n${checks}\n` +
+      `After a registered-host read confirms a target, record its note on the closed row so the sweep stops asking. ` +
+      `The note starts with "custody-verified:" and names the target exactly, as a word of its own, anywhere in the note.\n` +
+      `Do not rewrite historical custody from this local observation; the note is the separate record of the verification.`
     );
   }
   return (
