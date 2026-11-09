@@ -1,4 +1,4 @@
-import { sessionCommunityRunnerSelect } from "./session-registry.js";
+import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { physicalSessionName } from "./session-registry.js";
 import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
@@ -796,7 +796,7 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
-    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: row.session_community_runner === 1 }) } : {}),
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: recordedRunner(row.session_community_runner) }) } : {}),
     ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,

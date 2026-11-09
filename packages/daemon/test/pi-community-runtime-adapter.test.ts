@@ -309,6 +309,20 @@ describe("PiCommunityRuntimeAdapter", () => {
     }
   });
 
+  it("passes the Pi adapter's guidance-block records and state roots to the fork (#2461)", () => {
+    const f = makeFixture();
+    try {
+      const records = { read: vi.fn(), write: vi.fn() };
+      const stateRootForSession = (session: string) => join(f.stateRoot, "by-session", session);
+      const pi = new PiRuntimeAdapter({ ...f.piAdapter.getCommunityDeps(), managedBlockRecords: records as never, stateRootForSession });
+      const deps = pi.getCommunityDeps();
+      expect(deps.managedBlockRecords).toBe(records);
+      expect(deps.stateRootForSession?.("omo-seat@rig")).toBe(join(f.stateRoot, "by-session", "omo-seat@rig"));
+    } finally {
+      f.cleanup();
+    }
+  });
+
   it("declares runner() as true so launch records community_runner", () => {
     const f = makeFixture();
     try {
@@ -426,7 +440,7 @@ describe("PiCommunityRuntimeAdapter", () => {
         CREATE TABLE occupant_tenures (id TEXT, node_id TEXT, generation_ordinal INTEGER,
           generation_uuid TEXT, kind TEXT, native_session_id_at_boot TEXT, boot_at TEXT);
         INSERT INTO nodes VALUES ('omo-node', 'rig', 'omo');
-        INSERT INTO sessions (id, node_id, session_name, agent_app, agent_runner) VALUES (1, 'omo-node', 'worker@omo-test', 'omo', 1);
+        INSERT INTO sessions (id, node_id, session_name, agent_app, agent_runner) VALUES (1, 'omo-node', 'worker@omo-test', 'omo', 2);
         INSERT INTO occupant_tenures VALUES ('current', 'omo-node', 1, 'omo-gen-1', 'initial', NULL, '2026-10-31');
       `);
 
@@ -595,13 +609,13 @@ describe("PiCommunityRuntimeAdapter", () => {
       const body = await res.json();
       expect(body).toMatchObject({ ok: true, tokenPersisted: true, provenance: "rpc" });
 
-      // Then launch result confirms
-      registry.recordCommunityHarnessSelection("1", "omo", true);
+      // Then the launch records its protocol (agent_runner 2, OpenRig's hosted Pi-protocol runner)
+      registry.recordCommunityHarnessSelection("1", "omo", "pi-rpc");
 
       const sessionRow = db.prepare("SELECT * FROM sessions WHERE id = 1").get() as any;
       expect(sessionRow.resume_type).toBe("community:omo");
       expect(sessionRow.resume_token).toBe(sessionFile);
-      expect(sessionRow.agent_runner).toBe(1);
+      expect(sessionRow.agent_runner).toBe(2);
     } finally {
       if (originalOpenRigHome !== undefined) {
         process.env.OPENRIG_HOME = originalOpenRigHome;

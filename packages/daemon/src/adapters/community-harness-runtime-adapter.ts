@@ -20,12 +20,10 @@ import { communityHarnessOf } from "../domain/built-in-runtimes.js";
 import { launchResultRoot, newLaunchAttempt, waitForLaunchResult, type LaunchAttempt } from "../domain/community-harness-launch-result.js";
 import { writeFirstInput, type FirstInputPassed } from "../domain/community-harness-first-input.js";
 import type { CommunityHarnessPreset } from "../domain/community-harness-presets.js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { shellQuote } from "./shell-quote.js";
-import { getDefaultOpenRigPath } from "../openrig-compat.js";
-import { PiRuntimeAdapter, type PiAdapterFsOps } from "./pi-runtime-adapter.js";
+import { PiRuntimeAdapter } from "./pi-runtime-adapter.js";
 import { PiCommunityRuntimeAdapter } from "./pi-community-runtime-adapter.js";
 
 export interface CommunityHarnessAdapterDeps {
@@ -37,10 +35,8 @@ export interface CommunityHarnessAdapterDeps {
   launchResultRoot?: () => string;
   /** How long to wait for a launcher's record (tests). */
   launchResultWait?: { timeoutMs?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void> };
+  /** The Pi adapter a `protocol: pi-rpc` preset runs through (its deps, with this preset's command). */
   piAdapter?: PiRuntimeAdapter;
-  piRunnerEntryPath?: string;
-  fsOps?: PiAdapterFsOps;
-  stateRoot?: string;
 }
 
 /**

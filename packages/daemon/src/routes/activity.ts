@@ -1,5 +1,5 @@
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
-import { SessionRegistry, physicalSessionName, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
+import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -97,7 +97,7 @@ export function restoredRunnerHookEvidence(
   if (!latest || latest.evidenceSource !== "runtime_hook" || latest.generationProvenance !== "resolved") return null;
   const state = !latest.stale ? latest.state
     : latest.reason === "stale_runtime_hook"
-      ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime, latest.communityRunner === true) : "unknown";
+      ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime, latest.communityRunner === true, latest.piRpc === true) : "unknown";
   // A working beat keeps the lifetime it was admitted with, as when it was posted.
   return evidenceFromHookActivity({ seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime,
     ...(isWorkingLivenessBeat(latest.rawEvent, latest.rawSubtype)
@@ -416,17 +416,20 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
     }
 
+/** The seat speaks Pi's RPC protocol through OpenRig's hosted runner: its launch recorded the protocol (agent_runner 2),
+ *  or, before that record lands (an identity post can arrive first), its installed preset declares `protocol: pi-rpc`.
+ *  A preset's own runner (`runner: true`, agent_runner 1) never qualifies, so its launcher-reported conversation stays. */
 function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string, runtime: string): boolean {
   if (runtime === "pi" || runtime === "omp" || runtime === "claude-code" || runtime === "codex" || runtime === "terminal") {
     return false;
   }
-  const found = loadCommunityHarnessPreset(runtime);
-  if (found.ok && found.preset.protocol === "pi-rpc") return true;
   if (sessionCommunityRunnerSelect(db) !== "NULL") {
-    const row = db.prepare(`SELECT agent_app, ${sessionCommunityRunnerSelect(db, "s")} AS runner FROM sessions s WHERE s.id = ?`).get(sessionId) as { agent_app?: string; runner?: number } | undefined;
-    if (row?.runner === 1) return true;
+    const row = db.prepare(`SELECT ${sessionCommunityRunnerSelect(db, "s")} AS runner FROM sessions s WHERE s.id = ?`).get(sessionId) as { runner?: number | null } | undefined;
+    if (row?.runner === AGENT_RUNNER_HOSTED_PI_RPC) return true;
+    if (recordedRunner(row?.runner)) return false;
   }
-  return false;
+  const found = loadCommunityHarnessPreset(runtime);
+  return found.ok && found.preset.protocol === "pi-rpc";
 }
 
     // OPR.0.4.6.PI1 FR-5 — Pi session identity arrives from the pi-runner's
@@ -758,7 +761,7 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
       oracle.declareRungInventory(
         { seatNodeId: emitted.nodeId, sessionName: emitted.sessionName },
         // The same recorded launch facts the reconcile pass reads, so a community seat's first hook gets its own inventory.
-        runtimeRungInventory(runtime, currentSession?.community_harness ?? null, currentSession?.community_runner === 1),
+        runtimeRungInventory(runtime, currentSession?.community_harness ?? null, recordedRunner(currentSession?.community_runner)),
       );
     }
     if (beat) {

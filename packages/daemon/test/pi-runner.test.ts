@@ -209,7 +209,7 @@ describe("idle heartbeat", () => {
 // ── Streaming heartbeat: the runner contract's working beat (section 4), `active` / `liveness` ──
 
 describe("streaming heartbeat", () => {
-  function clocked(runtime?: "pi" | "omp") {
+  function clocked(runtime?: string) {
     const f = fakeIo();
     let t = Date.parse("2026-07-06T10:00:00Z");
     f.io.now = () => new Date(t).toISOString();
@@ -232,6 +232,18 @@ describe("streaming heartbeat", () => {
       turnId: "1", livenessSeconds: 30 })]);
     c.advance(10_000); c.core.heartbeat();
     expect(c.beats()).toHaveLength(2);
+  });
+
+  // A protocol: pi-rpc fork speaks Pi's protocol, so a silent turn keeps reading working, as an accepted turn.
+  it("gives a pi-rpc fork the same accepted turn and working beat as Pi", () => {
+    const c = clocked("omo");
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    expect(c.f.activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({ hookEvent: "UserPromptSubmit", subtype: "accepted", turnId: "1", runtime: "omo" })]));
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([expect.objectContaining({ hookEvent: "active", subtype: "liveness", runtime: "omo",
+      turnId: "1", livenessSeconds: 30 })]);
   });
 
   // CodeRabbit 2336 — some turn paths omit agent_start; turn_start alone opens the turn.

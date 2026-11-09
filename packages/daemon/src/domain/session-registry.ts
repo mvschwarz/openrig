@@ -526,11 +526,13 @@ export class SessionRegistry {
   // ignore it; the adoption-capture path uses it so its audit event never
   // falsely claims a captured write when the provenance guard refused it.
   /** Record that this session was launched for a community harness, selected through its preset. With `runner`, also
-   *  record what that launch's preset declared (`runner: true` or not), so activity reads the launched occupant's
-   *  declaration, never a later preset edit. Without it (a restore carrying only the selection) the field is left as is. */
-  recordCommunityHarnessSelection(sessionId: string, app: string, runner?: boolean): void {
+   *  record what that launch's preset declared: `runner: true` (1), OpenRig's hosted Pi-protocol runner for
+   *  `protocol: pi-rpc` ("pi-rpc", 2), or neither (0), so activity reads the launched occupant's declaration, never a
+   *  later preset edit. Without it (a restore carrying only the selection) the field is left as is. */
+  recordCommunityHarnessSelection(sessionId: string, app: string, runner?: boolean | "pi-rpc"): void {
     if (runner !== undefined && sessionCommunityRunnerSelect(this.db, "sessions") !== "NULL") {
-      this.db.prepare("UPDATE sessions SET agent_app = ?, agent_runner = ? WHERE id = ?").run(app, runner ? 1 : 0, sessionId);
+      this.db.prepare("UPDATE sessions SET agent_app = ?, agent_runner = ? WHERE id = ?")
+        .run(app, runner === "pi-rpc" ? AGENT_RUNNER_HOSTED_PI_RPC : runner ? AGENT_RUNNER_PRESET : 0, sessionId);
       return;
     }
     this.db.prepare("UPDATE sessions SET agent_app = ? WHERE id = ?").run(app, sessionId);
@@ -965,6 +967,15 @@ const sessionsHaveCommunityRunner = new WeakMap<Database.Database, boolean>();
 
 /** The SQL that reads whether a session's community app was launched as a runner: 1, 0, or NULL. NULL also on a schema
  *  without the column, so a legacy database reads every seat as before (never a runner opt-in). */
+/** `sessions.agent_runner`: 1, a preset's own runner (`runner: true`); 2, OpenRig's hosted Pi-protocol runner for a
+ *  `protocol: pi-rpc` preset. Both are runners; only the second speaks Pi's RPC protocol. */
+export const AGENT_RUNNER_PRESET = 1;
+export const AGENT_RUNNER_HOSTED_PI_RPC = 2;
+/** The session was launched for a runner of either kind. */
+export function recordedRunner(value: number | null | undefined): boolean {
+  return value === AGENT_RUNNER_PRESET || value === AGENT_RUNNER_HOSTED_PI_RPC;
+}
+
 export function sessionCommunityRunnerSelect(db: Database.Database, alias = "s"): string {
   let has = sessionsHaveCommunityRunner.get(db);
   if (has === undefined) {

@@ -474,7 +474,9 @@ export class RunnerCore {
     private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string },
     private opts: { catchUpSince?: string; runtime?: RunnerRuntime | string; usageFacts?: boolean; openRouterCharge?: boolean;
       /** K4: the credential observation taken before Pi was spawned. */
-      launchCredentialEvidence?: PiCredentialEvidence } = {},
+      launchCredentialEvidence?: PiCredentialEvidence;
+      /** The session file this launch resumes (--session). */
+      requestedSessionFile?: string } = {},
   ) {
     // The durable cursor seeds from the carried-over value (FR-5) so this
     // instance's own sidecar writes never regress it to undefined before a
@@ -667,6 +669,11 @@ export class RunnerCore {
         return;
       }
       this.writeSidecar({});
+      if (this.resumedElsewhere()) {
+        // The sidecar names the reported file, so the launch refuses it at once; the identity isn't posted (below).
+        this.io.mirrorLine(`[${this.runtime}-runner] ERROR resume: get_state reports ${this.sessionFile}, not the requested ${this.opts.requestedSessionFile}; its identity isn't reported`);
+        return;
+      }
       if (!wasReady) {
         // Only the initial transition to ready announces READY in the pane.
         // Subsequent get_state evaluations confirm liveness silently to avoid
@@ -946,7 +953,14 @@ export class RunnerCore {
     if (this.runtime === "omp" && this.ready) this.postSessionIdentity();
   }
 
+  /** A resume that came up on another session file started a different session: the requested one stays the seat's. */
+  private resumedElsewhere(): boolean {
+    return !!this.opts.requestedSessionFile && !!this.sessionFile && this.sessionFile !== this.opts.requestedSessionFile;
+  }
+
   private postSessionIdentity(): void {
+    // Never the identity of a session other than the one this launch resumes: it would replace the seat's resume token.
+    if (this.resumedElsewhere()) return;
     if (this.runtime === "omp" && (!this.sessionFile || !this.io.sessionFileExists?.(this.sessionFile))) return;
     if (this.runtime === "omp" && (this.identityPersisted || this.identityInFlight)) return;
     const result = this.io.postActivity({
@@ -1497,7 +1511,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId,
     // Carry the emitting tenure; never infer it from a later daemon read or Pi event.
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
-  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence });
+  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence,
+    requestedSessionFile: args.sessionFile });
 
   let transportUp = runtime !== "omp";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {

@@ -28,6 +28,7 @@ import { SettingsStore } from "./user-settings/settings-store.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { observeClaudeResumeLaunch, type ClaudeLaunchedProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import { CommunityHarnessRuntimeAdapter } from "../adapters/community-harness-runtime-adapter.js";
+import { PiCommunityRuntimeAdapter } from "../adapters/pi-community-runtime-adapter.js";
 import { join } from "node:path";
 import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
@@ -615,10 +616,11 @@ export class StartupOrchestrator {
     // later reads (identity, activity, labels, restore), not launch success or identity proof. Whether this launch's
     // preset declares a runner is recorded with it, so activity follows the occupant as launched, not a later edit:
     // only a harness launch samples it, and a continuation that launches nothing keeps what was recorded.
-    if (input.adapter instanceof CommunityHarnessRuntimeAdapter || ("communityHarness" in input.adapter && input.adapter.communityHarness)) {
-      const harnessName = ((input.adapter as unknown as { communityHarness?: string }).communityHarness) ?? input.adapter.runtime;
-      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, harnessName,
-        input.skipHarnessLaunch ? undefined : (typeof (input.adapter as unknown as { runner?: () => boolean }).runner === "function" ? (input.adapter as unknown as { runner: () => boolean }).runner() : false)); }
+    // A protocol: pi-rpc preset runs under OpenRig's hosted Pi-protocol runner, and its launch records that protocol.
+    if (input.adapter instanceof CommunityHarnessRuntimeAdapter || input.adapter instanceof PiCommunityRuntimeAdapter) {
+      const runner = input.adapter instanceof PiCommunityRuntimeAdapter ? "pi-rpc" as const : input.adapter.runner();
+      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, input.adapter.runtime,
+        input.skipHarnessLaunch ? undefined : runner); }
       catch (err) { errors.push(`Couldn't record the community harness selection: ${(err as Error).message}`); return this.fail(input, "failed", errors); }
     }
 
