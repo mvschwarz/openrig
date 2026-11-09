@@ -711,9 +711,9 @@ describe("GET /api/slices observed queue counts", () => {
       .run(id, state, body, tags === null ? null : JSON.stringify(tags));
   }
 
-  function route(project = "alpha", explicit = false, slicesRoot = path.join(root, project, "missions")) {
+  function route(project = "alpha", explicit = false, slicesRoot = path.join(root, project, "missions"), additionalSliceRoots: string[] = []) {
     // Startup supplies roots/db without projectId. Keep that ordinary construction covered.
-    const indexer = new SliceIndexer({ db, slicesRoot, additionalSliceRoots: [],
+    const indexer = new SliceIndexer({ db, slicesRoot, additionalSliceRoots,
       dogfoodEvidenceRoot: null, ...(explicit ? { projectId: project } : {}) });
     const app = new Hono();
     app.use("*", async (c, next) => {
@@ -849,6 +849,49 @@ describe("GET /api/slices observed queue counts", () => {
     const entries = await list(route().app);
     expect(entries[0]).toMatchObject({ name: "shared", missionId: "shipping", qitemCount: 3 });
     expect(entries[0]!.queueCounts).toEqual({ ...ZERO, pending: 1, done: 1, blocked: 1 });
+  });
+
+  it.each([
+    { first: "alpha", second: "beta" },
+    { first: "beta", second: "alpha" },
+  ] as const)("keeps authored mission aliases local to two visible roots ($first then $second)", async ({ first, second }) => {
+    const alphaPath = addSlice("alpha", "shipping", "alpha-work");
+    const betaPath = addSlice("beta", "shipping", "beta-work");
+    const missionRoots = {
+      alpha: path.join(root, "alpha", "missions"),
+      beta: path.join(root, "beta", "missions"),
+    };
+    write(path.join(missionRoots.alpha, "shipping", "SPEC.md"), "---\nid: M.A\nstatus: active\n---\n# Alpha mission\n");
+    write(path.join(missionRoots.beta, "shipping", "SPEC.md"), "---\nid: M.B\nstatus: active\n---\n# Beta mission\n");
+
+    row("alpha-own-id", "pending", ["project:alpha", "mission:M.A", "slice:alpha-work"]);
+    row("alpha-directory", "done", ["project:alpha", "mission:shipping", "slice:alpha-work"]);
+    row("beta-own-id-a", "in-progress", ["project:beta", "mission:M.B", "slice:beta-work"]);
+    row("beta-own-id-b", "in-progress", ["project:beta", "mission:M.B", "slice:beta-work"]);
+    row("beta-directory", "blocked", ["project:beta", "mission:shipping", "slice:beta-work"]);
+    for (let i = 0; i < 2; i++) {
+      row("alpha-other-id-" + i, "failed", ["project:alpha", "mission:M.B", "slice:alpha-work"]);
+    }
+    for (let i = 0; i < 3; i++) {
+      row("beta-other-id-" + i, "denied", ["project:beta", "mission:M.A", "slice:beta-work"]);
+    }
+
+    const { app, indexer } = route(first, false, missionRoots[first], [missionRoots[second]]);
+    expect(indexer.projectId).toBeUndefined();
+    const entries = await list(app);
+    expect(entries.map(s => [s.name, s.missionId, s.slicePath]).sort()).toEqual([
+      ["alpha-work", "shipping", alphaPath],
+      ["beta-work", "shipping", betaPath],
+    ]);
+    authoredUnchanged();
+    const alpha = entries.find(s => s.slicePath === alphaPath)!;
+    const beta = entries.find(s => s.slicePath === betaPath)!;
+    expect.soft(alpha.queueCounts, "alpha: own M.A plus directory form, never M.B").toEqual({
+      pending: 1, "in-progress": 0, done: 1, blocked: 0, failed: 0, denied: 0, canceled: 0, "handed-off": 0,
+    });
+    expect.soft(beta.queueCounts, "beta: own M.B plus directory form, never M.A").toEqual({
+      pending: 0, "in-progress": 2, done: 0, blocked: 1, failed: 0, denied: 0, canceled: 0, "handed-off": 0,
+    });
   });
 
   it("counts beyond the existing 500-row display bucket without changing qitemCount", async () => {
