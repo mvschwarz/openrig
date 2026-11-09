@@ -12,6 +12,13 @@ import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 // server, so it follows what the viewer launches.
 const run = promisify(execFile);
 const tmuxBin = (() => { try { return execFileSync("sh", ["-c", "command -v tmux"], { encoding: "utf8" }).trim(); } catch { return ""; } })();
+// #2757's tile sends a typed first key with `send-keys -K`: tmux 3.3 rejects it and 3.4 drops the keys, 3.5 delivers
+// them (#2816). A version tmux prints without numbers (master, next-*) is taken as new enough.
+const typedKeysWork = (() => {
+  if (!tmuxBin) return false;
+  const version = execFileSync(tmuxBin, ["-V"], { encoding: "utf8" }).match(/(\d+)\.(\d+)/);
+  return !version || Number(version[1]) > 3 || (Number(version[1]) === 3 && Number(version[2]) >= 5);
+})();
 
 describe.skipIf(!tmuxBin)("the generated herdr-app viewer (real tmux): nothing reaches the seat before its gate opens", () => {
   let dir: string;
@@ -92,5 +99,23 @@ describe.skipIf(!tmuxBin)("the generated herdr-app viewer (real tmux): nothing r
     expect(await shown()).not.toMatch(/LATE-PASTE/);
     expect(await clients()).toEqual([]);
     expect(await cell()).toContain("reopen it with rig terminal open rig:demo");
+  }, 30_000);
+
+  // The path people use: keys typed in the cell. Needs tmux 3.5 or later (see typedKeysWork).
+  it.skipIf(!typedKeysWork)("typed keys reach the seat after the gate, and keys typed before it never do (tmux 3.5+)", async () => {
+    const gate = join(dir, "n6.shown");
+    await start(viewerArgv(pane(false), "n6", gateAt(gate)));
+    await tmux(view, "send-keys", "-t", "v1", "-l", "TYPED-BEFORE");
+    await tmux(view, "send-keys", "-t", "v1", "Enter");
+    await new Promise((r) => setTimeout(r, 1_500));
+    expect(await shown()).not.toMatch(/TYPED-BEFORE/);
+    expect(await clients()).toEqual([]);
+    writeFileSync(gate, "");
+    await new Promise((r) => setTimeout(r, 1_500));
+    await tmux(view, "send-keys", "-t", "v1", "-l", "TYPED-AFTER");
+    await tmux(view, "send-keys", "-t", "v1", "Enter");
+    expect(await until(async () => (await shown()).includes("TYPED-AFTER"))).toBe(true);
+    expect(await shown()).not.toMatch(/TYPED-BEFORE/);
+    expect(await clients()).toHaveLength(1);
   }, 30_000);
 });
