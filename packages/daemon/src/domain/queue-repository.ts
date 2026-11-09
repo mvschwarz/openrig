@@ -5126,7 +5126,7 @@ export class QueueRepository {
     loadRegistry: () => LoadResult,
     loadProfiles: (entities: readonly HumanFragment[]) => LoadRelayProfilesResult,
     loadPullOutboxKeys: () => Set<string>,
-  ): { notificationKey: string; startedAt: string; quiet?: true } | "inactive" | null {
+  ): DeliveryEpisode | "inactive" | null {
     let transition = owners[0];
     if (!transition) return null;
     // A human-decision-resolved notice written BY the transition that closed the row (a human's direct reply closing
@@ -5157,21 +5157,20 @@ export class QueueRepository {
     if (entity?.connectorBindings.length === 0) return "inactive";
     const notificationKey = `${item.qitemId}:${transition.transitionId}`;
     // A ready pull-mode relay has no required polling cadence (#2742): while the outbox lists the staged envelope, waiting
-    // to be pulled is not a missing post for PULL_OUTBOX_NEVER_POSTED_WINDOW_MS. A notice it doesn't list (never staged,
-    // or staging failed) gets the usual NEVER_POSTED_WINDOW_MS.
+    // to be pulled is not a missing post for PULL_OUTBOX_NEVER_POSTED_WINDOW_MS. ledgerOf asks only when nothing else
+    // decides the outcome; a notice the outbox doesn't list gets the usual NEVER_POSTED_WINDOW_MS.
     const primary = entity?.connectorBindings.find((b) => b.role === "primary") ?? entity?.connectorBindings[0];
     const awaitingPull = primary?.kind === "relay"
-      && (() => {
+      ? () => {
         const p = loadProfiles(registry.entities).get(primary.connectorRef);
         return p?.ready === true && p.mode === "pull" && loadPullOutboxKeys().has(`${primary.connectorRef}\n${notificationKey}`);
-      })()
-      && Date.now() - new Date(transition.ts.includes("T") ? transition.ts : transition.ts + "Z").getTime()
-        <= QueueRepository.PULL_OUTBOX_NEVER_POSTED_WINDOW_MS;
+      }
+      : undefined;
     // An ask placed on Steering without an alert (RECORD) owes no post: its ledger reports a real receipt (a posting
     // dial set to RECORD posts it) and never a missing one.
     return humanAddress
       ? { notificationKey, startedAt: transition.ts,
-          ...(transition.ownerNotificationLevel === "RECORD" || awaitingPull ? { quiet: true as const } : {}) }
+          ...(transition.ownerNotificationLevel === "RECORD" ? { quiet: true as const } : awaitingPull ? { awaitingPull } : {}) }
       : "inactive";
   }
 
@@ -5308,7 +5307,7 @@ export class QueueRepository {
   }
 
   /** The ledger of one row's current episode, from its receipt notes (newest first). */
-  private ledgerOf(item: LedgerItem, episode: { notificationKey: string; startedAt: string; quiet?: true } | null, notes: string[]): DeliveryLedger | null {
+  private ledgerOf(item: LedgerItem, episode: DeliveryEpisode | null, notes: string[]): DeliveryLedger | null {
     const currentNotes = episode
       ? notes.filter((note) => note.split(/\s+/).includes(`notification_key=${episode.notificationKey}`))
       : notes;
@@ -5327,7 +5326,8 @@ export class QueueRepository {
     const gatewayRouted = episode !== null || item.lastNudgeResult?.startsWith("gateway-owned") === true;
     if (gatewayRouted) {
       const ageMs = Date.now() - new Date(startedAt.includes("T") ? startedAt : startedAt + "Z").getTime();
-      if (ageMs > QueueRepository.NEVER_POSTED_WINDOW_MS) {
+      if (ageMs > QueueRepository.NEVER_POSTED_WINDOW_MS
+        && !(ageMs <= QueueRepository.PULL_OUTBOX_NEVER_POSTED_WINDOW_MS && episode?.awaitingPull?.())) {
         const key = episode ? ` for notification_key=${episode.notificationKey}` : "";
         return { outcome: "never-posted", detail: `gateway-routed row with no delivery receipt${key} past the post window`, episode };
       }
@@ -5797,6 +5797,10 @@ export class QueueRepository {
 
 /** The row fields a delivery ledger reads, as rowToItem presents them. */
 type LedgerItem = Pick<QueueItem, "qitemId" | "state" | "blockedOn" | "destinationSession" | "tsCreated" | "lastNudgeResult">;
+
+/** A row's current delivery episode. quiet: no post is owed. awaitingPull: whether the relay pull outbox lists it now,
+ *  asked only once the post window has passed without a receipt. */
+type DeliveryEpisode = { notificationKey: string; startedAt: string; quiet?: true; awaitingPull?: () => boolean };
 
 type DeliveryLedger = { outcome: "posted" | "accepted" | "transport-failed" | "never-posted"; detail: string; episode: { notificationKey: string; startedAt: string } | null };
 

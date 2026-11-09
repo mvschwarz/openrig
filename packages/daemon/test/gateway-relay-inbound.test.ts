@@ -3148,6 +3148,32 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     expect(f.daemon.queueRepo.findUndelivered({ qitemId: staged.qitemId })).toHaveLength(1);
   });
 
+  it("asks the pull outbox only once a notice is past the post window without a receipt", async () => {
+    const f = await createRelayFixture({
+      mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
+    });
+    const recent = await createAskWithAcceptedRelayRef(f, { summary: "Recent pull ask", recordViaPendingBufferOnly: true });
+    const receipted = await createAskWithAcceptedRelayRef(f, { summary: "Accepted pull ask" });
+    const aged = await createAskWithAcceptedRelayRef(f, { summary: "Aged pull ask", recordViaPendingBufferOnly: true });
+    for (const id of [receipted.qitemId, aged.qitemId]) {
+      f.db.prepare("UPDATE queue_transitions SET ts = datetime('now', '-10 minutes') WHERE qitem_id = ?").run(id);
+    }
+    const secretSpy = vi.spyOn(nodeSecretFs, "readFileSync");
+    const bufferSpy = vi.spyOn(DispatchBuffer.prototype, "pendingStrict");
+    try {
+      expect(f.daemon.queueRepo.deliveryOutcomeFor(recent.qitemId)).toBeNull();
+      expect(f.daemon.queueRepo.deliveryOutcomeFor(receipted.qitemId)?.outcome).toBe("accepted");
+      expect(secretSpy).not.toHaveBeenCalled();
+      expect(bufferSpy).not.toHaveBeenCalled();
+      expect(f.daemon.queueRepo.deliveryOutcomeFor(aged.qitemId)).toBeNull();
+      expect(secretSpy).toHaveBeenCalledTimes(1);
+      expect(bufferSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      secretSpy.mockRestore();
+      bufferSpy.mockRestore();
+    }
+  });
+
   it("loads relay profiles once per listing, not once per pull-routed item", async () => {
     const f = await createRelayFixture({
       mainVars: { OPENRIG_RELAY_MODE: "pull", OPENRIG_RELAY_INBOUND_TOKEN: "relay-in-secret-main-token-001" },
@@ -3155,6 +3181,10 @@ describe("POST /api/gateway/relay/inbound — boundary, auth, semantics, durabil
     const asks = [];
     for (const n of [1, 2, 3]) {
       asks.push(await createAskWithAcceptedRelayRef(f, { summary: `Pull ask ${n}`, recordViaPendingBufferOnly: true }));
+    }
+    // Past the post window, so each one's outcome depends on the relay profile.
+    for (const ask of asks) {
+      f.db.prepare("UPDATE queue_transitions SET ts = datetime('now', '-10 minutes') WHERE qitem_id = ?").run(ask.qitemId);
     }
     const secretSpy = vi.spyOn(nodeSecretFs, "readFileSync");
     try {
