@@ -1949,6 +1949,8 @@ export interface SendOpts {
   preserveInput?: true | "typed";
   /** A managed idle wait follows the ordinary draft-delivery setting; menus and running work still wait/refuse. */
   allowDraftWhileIdle?: true;
+  /** Internal owed-restore fallback after bounded unknown polls; running work and prompts still wait/refuse. */
+  allowUnknownWhileIdle?: true;
   /** The caller's request. Aborted while the send still waits, before any input starts, the send ends with
    *  `caller_cancelled` and never writes, then or later. Once input may have started it is ignored: the result stays
    *  attempted or written. Queue wakes and committed outbox deliveries have no caller and ignore it. */
@@ -2981,6 +2983,7 @@ export class SessionTransport {
       readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
       postCompactTurnBoundary: opts.postCompactTurnBoundary === true,
       allowDraft: opts.allowDraftWhileIdle === true,
+      allowUnknown: opts.allowUnknownWhileIdle === true,
       signal: callerSignal(opts), cancelledBy: "caller",
     });
     if (!preWait.ok) {
@@ -3266,6 +3269,7 @@ export class SessionTransport {
         readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
         postCompactTurnBoundary: opts?.postCompactTurnBoundary === true,
         allowDraft: opts?.allowDraftWhileIdle === true,
+        allowUnknown: opts?.allowUnknownWhileIdle === true,
         signal: callerSignal(opts), cancelledBy: "caller",
       });
       waitEvidence = {
@@ -3327,6 +3331,7 @@ export class SessionTransport {
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
           postCompactTurnBoundary: opts.postCompactTurnBoundary === true,
           allowDraft: opts.allowDraftWhileIdle === true,
+          allowUnknown: opts.allowUnknownWhileIdle === true,
           signal: callerSignal(opts), cancelledBy: "caller",
         });
         waitEvidence = {
@@ -3354,7 +3359,7 @@ export class SessionTransport {
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
           postCompactTurnBoundary: opts.postCompactTurnBoundary === true,
         }, opts.dangerouslyInteract === true);
-        if (recheck.state !== "idle" && !(opts.allowDraftWhileIdle && this.deliversOverDraft(recheck))) {
+        if (recheck.state !== "idle" && !(opts.allowUnknownWhileIdle && recheck.state === "unknown") && !(opts.allowDraftWhileIdle && this.deliversOverDraft(recheck))) {
           const late: { reason: string; error: string } =
             recheck.state === "needs_input"
               ? {
@@ -3831,6 +3836,7 @@ export class SessionTransport {
     readinessFromPaneOnly?: boolean;
     postCompactTurnBoundary?: boolean;
     allowDraft?: boolean;
+    allowUnknown?: boolean;
     /** One observation only: a reading that isn't idle ends the wait at once. */
     singleObservation?: boolean;
     // Optional display value for timeout messages. The deadline always comes
@@ -3841,7 +3847,7 @@ export class SessionTransport {
     | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
     | { ok: false; reason: string; error: string; activity: AgentActivity; waitedMs: number; attempts: number }
   > {
-    // ONE deadline. UNKNOWN is retried like busy and never authorizes the send. No observation
+    // ONE deadline. UNKNOWN is retried like busy unless an owed restore explicitly admits it after bounded polls. No observation
     // starts after the deadline (one starting exactly at it races a 0 ms timer), each one is raced
     // against the time left, and one that completes after the deadline is discarded, so a late idle
     // can never lead to input. At expiry the result names the last observation that completed in
@@ -3856,6 +3862,7 @@ export class SessionTransport {
         state: "unknown", reason: "no_observation_in_time", evidenceSource: "pane_heuristic",
         sampledAt: this.now().toISOString(), evidence: null,
       };
+      if (input.allowUnknown && activity.state === "unknown") return { ok: true as const, activity, waitedMs: input.timeoutMs, attempts };
       return activity.state === "unknown"
         ? {
           ok: false as const,
@@ -3896,11 +3903,15 @@ export class SessionTransport {
       // Managed preparation's wait keeps its own behaviour: it doesn't race the read against its signal.
       const activity = await this.observeReadinessWithin(input, deadline - Date.now(), input.cancelledBy === "caller" ? input.signal : undefined);
       if (input.signal?.aborted) return cancelled();
-      if (activity === null || Date.now() > deadline) return expire();
+      if (activity === null || Date.now() > deadline) {
+        // A late positive observation still vetoes the explicit unknown-only restore fallback.
+        if (input.allowUnknown && activity) last = activity;
+        return expire();
+      }
       last = activity;
       const waitedMs = input.timeoutMs - (deadline - Date.now());
 
-      if (activity.state === "idle" || (input.allowDraft && this.deliversOverDraft(activity))) {
+      if (activity.state === "idle" || (input.allowUnknown && activity.state === "unknown") || (input.allowDraft && this.deliversOverDraft(activity))) {
         return { ok: true, activity, waitedMs, attempts };
       }
 

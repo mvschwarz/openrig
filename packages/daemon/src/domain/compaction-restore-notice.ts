@@ -11,18 +11,20 @@ export async function reportRestoreDeliveryFailure(db: Database.Database, queue:
   const { sessionName, attemptId, lastDelivery } = failure;
   const qitemId = `qitem-compaction-restore-${attemptId}`;
   const reason = [lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass].filter(Boolean).join("; ");
-  const summary = `Managed restore for ${sessionName}: ${lastDelivery.stage} undeliverable (${reason})`;
+  const summary = `Managed restore for ${sessionName}: ${lastDelivery.stage} ${lastDelivery.ok ? "delivered over an unreadable pane" : `undeliverable (${reason})`}`;
   const possibleWriteHold = lastDelivery.reason === "input_box_not_empty"
-    ? "This step waits because this attempt's /compact may be waiting unsubmitted in the input box, where Enter could submit it; inspect the pane and clear or submit that text so the next poll can retry this restore step. "
+    ? "This step waits because this attempt's /compact may be waiting unsubmitted in the input box, where Enter could submit it; inspect the pane and clear or submit that text so the next poll can retry this restore step. If the box can't be read, cancel and restore by hand using the route below. "
     : "";
   const existing = queue.getById(qitemId);
   if (existing) {
     // An owner's closed disposition stands. Changed evidence updates the same row without another wake.
     if (["pending", "in-progress", "blocked"].includes(existing.state) && existing.summary !== summary) {
-      queue.update({ qitemId, actorSession: "system:compaction", summary, transitionNote: summary });
+      queue.update({ qitemId, actorSession: "system:compaction", summary, transitionNote: `${summary}. ${possibleWriteHold}`.trim() });
     }
     return;
   }
+  // A successful fallback updates an existing diagnostic; it never starts a new owner wake.
+  if (lastDelivery.ok) return;
   await queue.create({
     qitemId, sourceSession: sessionName,
     destinationSession: defaultResolveOrchestrator(db, sessionName) ?? workflowHumanDestination(),
