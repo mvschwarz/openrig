@@ -2,7 +2,7 @@ import { physicalSessionName } from "./session-registry.js";
 import Database from "better-sqlite3";
 import { join } from "node:path";
 import os from "node:os";
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, readSync, statSync, unlinkSync } from "node:fs";
 import { resolveCodexDbPaths } from "./codex-thread-id.js";
 import { declaredRuntimeHomes } from "./seat-runtime-home.js";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
@@ -95,6 +95,9 @@ export class ContextUsageStore {
   private stateDir: string;
   private codexHomeDir: string | null;
   private codexHome?: string;
+  private stmtSessionNodeId?: Database.Statement;
+  private stmtCurrentTenureGen?: Database.Statement;
+  private stmtContinuedByAdoption?: Database.Statement;
 
   private readonly resolveOccupantBootAt?: (nodeId: string) => string | null;
   constructor(db: Database.Database, opts: ContextUsageStoreOpts) {
@@ -159,10 +162,22 @@ export class ContextUsageStore {
   private readSidecarAt(filePath: string): { ok: true; data: SidecarRaw } | { ok: false; reason: "missing_sidecar" | "parse_error" } {
     try {
       if (!existsSync(filePath)) return { ok: false, reason: "missing_sidecar" };
-      const content = readFileSync(filePath, "utf-8");
-      const parsed = JSON.parse(content) as SidecarRaw;
-      return { ok: true, data: parsed };
-    } catch {
+      const fd = openSync(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      try {
+        const st = fstatSync(fd);
+        if (!st.isFile() || st.size > 65536) {
+          return { ok: false, reason: "parse_error" };
+        }
+        const content = readFileSync(fd, "utf-8");
+        const parsed = JSON.parse(content) as SidecarRaw;
+        return { ok: true, data: parsed };
+      } finally {
+        closeSync(fd);
+      }
+    } catch (err: unknown) {
+      if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "ENOENT") {
+        return { ok: false, reason: "missing_sidecar" };
+      }
       return { ok: false, reason: "parse_error" };
     }
   }
@@ -171,7 +186,7 @@ export class ContextUsageStore {
   readAndNormalize(sessionName: string): ContextUsage {
     const result = this.readSidecar(sessionName);
     if (!result.ok) return this.unknownUsage(result.reason);
-    return this.normalizeSample(sessionName, result.data);
+    return this.normalizeSample(result.data, sessionName);
   }
 
   /** Read the latest Codex token_count event for a thread and normalize it. */
@@ -199,32 +214,64 @@ export class ContextUsageStore {
   }
 
   private isMismatchedOccupantGeneration(sessionName: string, reportedGeneration: string): boolean {
+    if (!sessionName || !reportedGeneration) return false;
     try {
       const physical = physicalSessionName(this.db, sessionName);
-      const row = this.db.prepare(
-        `SELECT ot.generation_uuid FROM sessions s
-         JOIN occupant_tenures ot ON ot.node_id = s.node_id
-         WHERE s.session_name = ? AND s.status = 'running'
-         ORDER BY ot.generation_ordinal DESC LIMIT 1`
-      ).get(physical) as { generation_uuid: string | null } | undefined;
-      return !!row && row.generation_uuid !== null && row.generation_uuid !== reportedGeneration;
+      if (!this.stmtSessionNodeId) {
+        this.stmtSessionNodeId = this.db.prepare(
+          "SELECT node_id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1",
+        );
+      }
+      const sessionRow = this.stmtSessionNodeId.get(physical) as { node_id: string } | undefined;
+      if (!sessionRow?.node_id) return false;
+
+      const nodeId = sessionRow.node_id;
+      if (!this.stmtCurrentTenureGen) {
+        this.stmtCurrentTenureGen = this.db.prepare(
+          "SELECT generation_uuid FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal DESC LIMIT 1",
+        );
+      }
+      const tenureRow = this.stmtCurrentTenureGen.get(nodeId) as { generation_uuid: string | null } | undefined;
+      if (!tenureRow?.generation_uuid) {
+        // No tenure row: keep unmanaged / legacy seats inert (false = not mismatched)
+        return false;
+      }
+      if (tenureRow.generation_uuid === reportedGeneration) {
+        return false;
+      }
+
+      // Generation is not the latest ordinal. Check if it was continued by adoption:
+      if (!this.stmtContinuedByAdoption) {
+        this.stmtContinuedByAdoption = this.db.prepare(
+          `SELECT 1 FROM occupant_tenures e WHERE e.node_id = ? AND e.generation_uuid = ? AND NOT EXISTS (
+             SELECT 1 FROM occupant_tenures l WHERE l.node_id = e.node_id AND l.generation_ordinal > e.generation_ordinal
+               AND l.kind <> 'adopt'
+           ) LIMIT 1`,
+        );
+      }
+      const continued = this.stmtContinuedByAdoption.get(nodeId, reportedGeneration);
+      if (continued) {
+        return false;
+      }
+
+      return true;
     } catch {
       return false;
     }
   }
 
   /** Normalize raw sidecar data into a ContextUsage record. */
-  normalizeSample(raw: SidecarRaw | null): ContextUsage;
+  normalizeSample(raw: SidecarRaw | null, sessionName?: string): ContextUsage;
   normalizeSample(sessionName: string, raw: SidecarRaw | null): ContextUsage;
-  normalizeSample(arg1: string | SidecarRaw | null, arg2?: SidecarRaw | null): ContextUsage {
+  normalizeSample(arg1: string | SidecarRaw | null, arg2?: string | SidecarRaw | null): ContextUsage {
     let sessionName = "";
-    let raw: SidecarRaw | null;
+    let raw: SidecarRaw | null = null;
     if (typeof arg1 === "string") {
       sessionName = arg1;
-      raw = arg2 ?? null;
+      raw = (arg2 as SidecarRaw | null) ?? null;
     } else {
-      raw = arg1;
-      sessionName = raw?.session_name ?? "";
+      raw = arg1 ?? null;
+      if (typeof arg2 === "string") sessionName = arg2;
     }
 
     if (!raw) {
@@ -232,25 +279,35 @@ export class ContextUsageStore {
     }
 
     const sessionId = typeof raw.session_id === "string" ? raw.session_id : null;
-    const sessionNameResolved = sessionId !== null && typeof raw.session_name === "string" ? raw.session_name : (sessionName || null);
-    const resolvedSource = typeof raw.source === "string" && raw.source.trim().length > 0 ? raw.source.trim() : "claude_statusline_json";
+    const sessionNameResolved = typeof raw.session_name === "string" ? raw.session_name : null;
+    const rawSource = typeof raw.source === "string" ? raw.source.trim() : "";
+    const resolvedSource: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_sidecar" =
+      rawSource === "runner_sidecar" || rawSource === "runner-sidecar"
+        ? "runner_sidecar"
+        : rawSource === "codex_token_count_jsonl"
+          ? "codex_token_count_jsonl"
+          : "claude_statusline_json";
 
-    if (typeof raw.occupant_generation === "string" && raw.occupant_generation.trim().length > 0) {
-      if (this.isMismatchedOccupantGeneration(sessionName || raw.session_name || "", raw.occupant_generation.trim())) {
+    if (sessionName && typeof raw.occupant_generation === "string" && raw.occupant_generation.trim().length > 0) {
+      if (this.isMismatchedOccupantGeneration(sessionName, raw.occupant_generation.trim())) {
         return this.unknownUsage("stale_generation", { sessionId, sessionName: sessionNameResolved });
       }
     }
 
     const cw = raw.context_window;
     if (!cw) {
-      return this.unknownUsage("parse_error", { sessionId, sessionName: sessionNameResolved });
+      return {
+        ...this.unknownUsage("parse_error"),
+        sessionId,
+        sessionName: sessionId !== null ? sessionNameResolved : null,
+      };
     }
 
     if (typeof cw.used_percentage !== "number") {
       const hasTokenMetrics = typeof cw.total_input_tokens === "number" || typeof cw.total_output_tokens === "number" || cw.current_usage !== undefined;
       if (hasTokenMetrics) {
-        const sampledAt = raw.sampled_at ?? new Date().toISOString();
-        const fresh = this.isFresh(sampledAt);
+        const sampledAt = typeof raw.sampled_at === "string" ? raw.sampled_at : null;
+        const fresh = sampledAt ? this.isFresh(sampledAt) : false;
         return {
           availability: "unknown",
           reason: "window_capacity_unknown",
@@ -269,10 +326,14 @@ export class ContextUsageStore {
           clientCostEstimateUsd: typeof raw.cost?.total_cost_usd === "number" && Number.isFinite(raw.cost.total_cost_usd) ? raw.cost.total_cost_usd : null,
         };
       }
-      return this.unknownUsage("parse_error", { sessionId, sessionName: sessionNameResolved });
+      return {
+        ...this.unknownUsage("parse_error"),
+        sessionId,
+        sessionName: sessionId !== null ? sessionNameResolved : null,
+      };
     }
 
-    const sampledAt = raw.sampled_at ?? null;
+    const sampledAt = typeof raw.sampled_at === "string" ? raw.sampled_at : null;
     const fresh = sampledAt ? this.isFresh(sampledAt) : false;
 
     return {

@@ -339,7 +339,7 @@ export class SeatIdentityReconciler {
     }
 
     const command = batched ? batched.command : await this.tmux.getPaneCommand(seat.tmux_pane);
-    if (command === null && seat.runtime === "claude-code") {
+    if (command === null && (seat.runtime === "claude-code" || communityHarnessOf(seat.community_harness, seat.runtime))) {
       return this.tmuxUnavailableVerdict(seat, observedAt);
     }
     if (seat.runtime === "codex" || (seat.runtime === "claude-code" && (seat.resume_token != null || native !== null)
@@ -373,7 +373,8 @@ export class SeatIdentityReconciler {
     // A community harness's process doesn't prove which session it is: the pane is live, its identity unconfirmed.
     if (communityHarnessOf(seat.community_harness, seat.runtime)) {
       if (seat.resume_provenance === "hook" && seat.resume_token) {
-        if (command && (isShellForeground(command) || SHELL_COMMANDS.has(command.trim().toLowerCase()))) {
+        const cmd = command ? command.trim().toLowerCase() : "";
+        if (cmd && (isShellForeground(cmd) || SHELL_COMMANDS.has(cmd))) {
           return {
             ...base,
             verdict: "mismatch",
@@ -386,7 +387,7 @@ export class SeatIdentityReconciler {
           ...base,
           verdict: "verified",
           evidenceSource: "pane_process",
-          reason: "process_identity_verified" as unknown as null,
+          reason: null,
           evidence: { registeredPane: seat.tmux_pane, observedPid: pid, observedCommand: command, matchedLayer: 1 },
         };
       }

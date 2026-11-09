@@ -456,7 +456,7 @@ describe("ContextUsageStore", () => {
         ...VALID_SIDECAR,
         source: "runner-sidecar",
       });
-      expect(custom.source).toBe("runner-sidecar");
+      expect(custom.source).toBe("runner_sidecar");
 
       const def = store.normalizeSample(VALID_SIDECAR);
       expect(def.source).toBe("claude_statusline_json");
@@ -476,6 +476,24 @@ describe("ContextUsageStore", () => {
       });
       expect(result.availability).toBe("unknown");
       expect(result.reason).toBe("stale_generation");
+    });
+
+    it("adopted generation is continued and not marked stale (M1)", () => {
+      const { node } = seedNode();
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('s2', ?, 'dev-adopt@test-rig', 'running')").run(node.id);
+      db.prepare("INSERT INTO occupant_tenures (node_id, generation_uuid, generation_ordinal, kind, boot_at) VALUES (?, 'gen-orig', 1, 'initial', datetime('now'))")
+        .run(node.id);
+      db.prepare("INSERT INTO occupant_tenures (node_id, generation_uuid, generation_ordinal, kind, boot_at) VALUES (?, 'gen-adopt', 2, 'adopt', datetime('now'))")
+        .run(node.id);
+
+      const store = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
+      const result = store.normalizeSample("dev-adopt@test-rig", {
+        ...VALID_SIDECAR,
+        session_name: "dev-adopt@test-rig",
+        occupant_generation: "gen-orig",
+      });
+      expect(result.availability).toBe("known");
+      expect(result.reason).toBeNull();
     });
 
     it("returns window_capacity_unknown when used_percentage is missing but token metrics exist", () => {
@@ -498,7 +516,7 @@ describe("ContextUsageStore", () => {
       const result = store.normalizeSample(raw);
       expect(result.availability).toBe("unknown");
       expect(result.reason).toBe("window_capacity_unknown");
-      expect(result.source).toBe("runner-sidecar");
+      expect(result.source).toBe("runner_sidecar");
       expect(result.usedPercentage).toBeNull();
       expect(result.remainingPercentage).toBeNull();
       expect(result.contextWindowSize).toBe(128000);
@@ -506,6 +524,39 @@ describe("ContextUsageStore", () => {
       expect(result.totalOutputTokens).toBe(1200);
       expect(result.transcriptPath).toBe("/path/to/transcript");
       expect(result.clientCostEstimateUsd).toBe(0.15);
+    });
+
+    it("window_capacity_unknown without sampled_at sets sampledAt null and fresh false (H4)", () => {
+      const store = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
+      const raw = {
+        session_id: "sess-1",
+        session_name: "worker@rig",
+        source: "runner_sidecar",
+        context_window: {
+          context_window_size: 128000,
+          total_input_tokens: 45000,
+        },
+      };
+
+      const result = store.normalizeSample(raw);
+      expect(result.availability).toBe("unknown");
+      expect(result.reason).toBe("window_capacity_unknown");
+      expect(result.sampledAt).toBeNull();
+      expect(result.fresh).toBe(false);
+    });
+
+    it("sidecar without session_name keeps sessionName null (M2)", () => {
+      const store = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
+      const raw = {
+        session_id: "sess-1",
+        context_window: {
+          context_window_size: 128000,
+          used_percentage: 50,
+        },
+      };
+
+      const result = store.normalizeSample(raw, "requested-name@rig");
+      expect(result.sessionName).toBeNull();
     });
 
     it("returns parse_error when neither used_percentage nor token metrics exist", () => {

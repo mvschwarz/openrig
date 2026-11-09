@@ -119,7 +119,8 @@ export function validateCommunityResumeToken(
 ): ResumeTokenValidationOk | ResumeTokenValidationErr {
   const normalizedHarness = typeof harness === "string" ? harness.trim() : "";
   if (!normalizedHarness || !COMMUNITY_HARNESS_NAME_RE.test(normalizedHarness)) {
-    return { ok: false, error: `Invalid community harness name "${harness ?? "unknown"}".` };
+    const harnessDisplay = String(harness ?? "unknown").slice(0, 64);
+    return { ok: false, error: `Invalid community harness name "${harnessDisplay}".` };
   }
   if (typeof rawToken !== "string") {
     return { ok: false, error: "Resume token is missing or not a string." };

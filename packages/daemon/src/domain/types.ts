@@ -1636,7 +1636,7 @@ export type ContextUnknownReason =
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: string | null;
+  source: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_sidecar" | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;

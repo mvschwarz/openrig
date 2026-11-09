@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync, appendFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { ProcessCensus } from "../src/domain/process-census.js";
+import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import { CurrentModelReader, type CurrentModelObservationTarget } from "../src/domain/model-divergence/current-model-reader.js";
 import { parseSqliteUtcMs } from "../src/domain/sqlite-time.js";
 import * as recordReaders from "../src/domain/model-divergence/effective-model-readers.js";
@@ -381,10 +382,10 @@ describe("community harness current model observation", () => {
   function communityFixture() {
     const f = fixture("custom-runner");
     const stateDir = f.dir;
-    const contextUsageDir = join(stateDir, "context-usage");
-    mkdirSync(contextUsageDir, { recursive: true });
+    const contextStore = new ContextUsageStore(f.db, { stateDir });
+    const sidecarPath = contextStore.getSidecarPath("editor@studio");
+    mkdirSync(dirname(sidecarPath), { recursive: true });
     f.sessions.recordCommunityHarnessSelection(f.session.id, "custom-runner", true);
-    const sidecarPath = join(contextUsageDir, "editor@studio.json");
     const validSidecar = {
       session_id: f.id,
       session_name: "editor@studio",
@@ -401,14 +402,13 @@ describe("community harness current model observation", () => {
     const reader = new CurrentModelReader({
       sessions: f.sessions,
       identities: f.identities,
-      context: { readSidecar: () => ({ ok: false, reason: "missing_sidecar" }) } as never,
+      context: contextStore,
       codexRollout: () => f.path,
       piRunner: () => ({} as never),
       readAllPaneProcesses: f.readAllPaneProcesses,
       census: f.reader.processCensus,
       now: () => f.boot + 60_000,
       native: { getPanePid: f.getPanePid, listProcesses: () => f.census.list(), readThreadIdByPid: f.thread },
-      stateDir,
     });
 
     const input: CurrentModelObservationTarget = {
@@ -420,7 +420,7 @@ describe("community harness current model observation", () => {
       resumeToken: f.id,
     };
 
-    return { ...f, stateDir, contextUsageDir, sidecarPath, validSidecar, reader, input };
+    return { ...f, stateDir, contextStore, sidecarPath, validSidecar, reader, input };
   }
 
   it("observes valid model and source for a community runner seat", async () => {
@@ -511,5 +511,58 @@ describe("community harness current model observation", () => {
       model: { id: "gpt-4o", source: "provider-response" },
     }));
     expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "invalid-source" });
+  });
+
+  it("returns occupant-changed-during-read when handover occurs during observe", async () => {
+    const f = communityFixture();
+    f.getPanePid.mockImplementation(async () => {
+      f.sessions.mintOccupantTenure(f.node.id, "handover", "gen-2");
+      return 10;
+    });
+    const result = await f.reader.observe(f.input);
+    expect(result).toMatchObject({ status: "unknown", reason: "occupant-changed-during-read" });
+  });
+
+  it("returns occupant-changed-during-read when handover occurs during observeInventory", async () => {
+    const f = communityFixture();
+    f.readAllPaneProcesses.mockClear();
+    f.readAllPaneProcesses.mockImplementation(async () => {
+      if (f.readAllPaneProcesses.mock.calls.length === 2) {
+        f.sessions.mintOccupantTenure(f.node.id, "handover", "gen-2");
+      }
+      return new Map([
+        ["%1", { pid: 10, command: "node runner.js", dead: false } as any],
+      ]);
+    });
+    const results = await f.reader.observeInventory([f.input]);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ status: "unknown", reason: "occupant-changed-during-read" });
+  });
+
+  it("reads sanitized sidecar when session name contains special characters", async () => {
+    const f = communityFixture();
+    const specialName = "editor/nested@studio";
+    const sanitizedPath = f.contextStore.getSidecarPath(specialName);
+    writeFileSync(sanitizedPath, JSON.stringify({
+      ...f.validSidecar,
+      session_name: specialName,
+    }));
+    f.sessions.updateBinding(f.node.id, { tmuxSession: specialName, tmuxPane: "%1" });
+    f.db.prepare("UPDATE sessions SET session_name = ? WHERE id = ?").run(specialName, f.session.id);
+    const input = { ...f.input, canonicalSessionName: specialName };
+    const result = await f.reader.observe(input);
+    expect(result).toMatchObject({ status: "observed", model: "gpt-4o" });
+  });
+
+  it("observeInventory makes exactly 2 readAllPaneProcesses calls for community seats", async () => {
+    const f = communityFixture();
+    f.readAllPaneProcesses.mockClear();
+    f.readAllPaneProcesses.mockResolvedValue(new Map([
+      ["%1", { pid: 10, command: "node runner.js", dead: false } as any],
+    ]));
+    const results = await f.reader.observeInventory([f.input]);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ status: "observed", model: "gpt-4o" });
+    expect(f.readAllPaneProcesses).toHaveBeenCalledTimes(2);
   });
 });

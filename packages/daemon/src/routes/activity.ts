@@ -19,7 +19,7 @@ import * as parkedQuery from "../domain/parked-query.js";
 import { nodeExecutorConfirmedStopped } from "../domain/node-inventory.js";
 import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
 import { validateResumeToken, validateCommunityResumeToken } from "../domain/resume-token-validation.js";
-import { communityHarnessOf, isCommunityHarnessRuntime } from "../domain/built-in-runtimes.js";
+import { communityHarnessOf } from "../domain/built-in-runtimes.js";
 import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import {
@@ -465,13 +465,11 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       `SELECT ${sessionCommunityHarnessSelect(store.db, "sessions")} AS community_harness FROM sessions WHERE id = ?`
     ).get(resolved.sessionId) as { community_harness: string | null } | undefined;
     const nodeRow = store.db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(resolved.nodeId) as { runtime: string | null } | undefined;
-    const effectiveRuntime = resolved.runtime ?? nodeRow?.runtime ?? runtime;
+    const effectiveRuntime = resolved.runtime ?? nodeRow?.runtime ?? null;
     const rawHarness = sessionCommunity?.community_harness;
-    const communityHarness = communityHarnessOf(rawHarness, effectiveRuntime)
-      ?? communityHarnessOf(rawHarness, runtime);
+    const communityHarness = communityHarnessOf(rawHarness, effectiveRuntime);
 
-    const seatIsNative = (resolved.runtime !== null && ["claude-code", "codex", "pi", "omp"].includes(resolved.runtime))
-      || (runtime !== null && ["claude-code", "codex", "pi", "omp"].includes(runtime));
+    const seatIsNative = effectiveRuntime !== null && ["claude-code", "codex", "pi", "omp"].includes(effectiveRuntime);
 
     if (communityHarness && !seatIsNative) {
       const generation = stringOrNull(body.generation);
@@ -515,7 +513,7 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
         rigId: resolved.rigId,
         nodeId: resolved.nodeId,
         sessionName: resolved.sessionName,
-        runtime: runtime ?? effectiveRuntime ?? communityHarness,
+        runtime: effectiveRuntime ?? communityHarness,
         sessionId: validation.ok ? validation.token : sessionId,
         provenance: "hook",
       });

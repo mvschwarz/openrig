@@ -193,6 +193,17 @@ describe("validateCommunityResumeToken", () => {
     expect(validateCommunityResumeToken("Invalid_Harness!", "tok-123").ok).toBe(false);
   });
 
+  it("truncates over-long harness name in error message (L6)", () => {
+    const hugeHarness = "a".repeat(100);
+    const r = validateCommunityResumeToken(hugeHarness, "tok-123");
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain("Invalid community harness name");
+      expect(r.error).toContain("a".repeat(64));
+      expect(r.error).not.toContain("a".repeat(65));
+    }
+  });
+
   it("rejects an empty or non-string token", () => {
     expect(validateCommunityResumeToken("my-runner", "").ok).toBe(false);
     expect(validateCommunityResumeToken("my-runner", "   ").ok).toBe(false);
