@@ -453,6 +453,27 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(methods).not.toContain("chat.update");
   });
 
+  it("retries an edit refused as cant_update_message after a restart, once the token can edit it", async () => {
+    const item = await postAsk();
+    apiHook = (method) => method === "chat.update" ? response({ ok: false, error: "cant_update_message" }) : undefined;
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on" });
+    await vi.waitFor(() => expect(logs.join("\n")).toContain("cant_update_message"));
+    const edits = () => methods.filter((m) => m === "chat.update").length;
+    expect(edits()).toBe(1);
+    expect(repo.listTransitions(item.qitemId).some((t) => t.transitionNote?.startsWith("slack-ask-settle-unavailable "))).toBe(false);
+
+    // Skipped until restart: another queue change doesn't try the edit again.
+    repo.update({ qitemId: item.qitemId, actorSession: "author@rig", transitionNote: "Follow-up note." });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(edits()).toBe(1);
+
+    // The token is corrected and the daemon restarts: the same message is edited.
+    wire.stop(); apiHook = undefined; start();
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]!.ts).toBe("1.000001");
+    expect(repo.listTransitions(item.qitemId).some((t) => t.transitionNote?.startsWith("slack-ask-settled "))).toBe(true);
+  });
+
   it("keeps retrying after a restart when the failure isn't about the message itself", async () => {
     const item = await postAsk();
     apiHook = (method) => method === "conversations.history" ? response({ ok: false, error: "not_in_channel" }) : undefined;

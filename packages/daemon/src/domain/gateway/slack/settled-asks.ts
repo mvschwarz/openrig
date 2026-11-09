@@ -14,7 +14,8 @@ const EDITED = "slack-ask-settled";
 const RATE_LIMIT = "slack-ask-edit-rate-limit";
 /** The posted message itself is gone or can never be edited by us: recorded, so a restart doesn't ask Slack again. */
 const UNAVAILABLE = "slack-ask-settle-unavailable";
-const goneErrors = new Set(["message_not_found", "thread_not_found", "cant_update_message", "original message unavailable"]);
+// cant_update_message means our token didn't author the message, which a token change can repair, so it isn't here.
+const goneErrors = new Set(["message_not_found", "thread_not_found", "original message unavailable"]);
 const STATUS_BLOCK = "or-settled";
 const permanentErrors = new Set(["missing_scope", "not_in_channel", "channel_not_found", "is_archived",
   "cant_update_message", "invalid_blocks", "message_not_found", "thread_not_found", "original message unavailable"]);
@@ -138,7 +139,7 @@ export class SlackAskSettlement {
     this.opts.log(`slack ask settlement retained: ${this.lastFailure}`);
     if (permanentErrors.has(result.error ?? "")) {
       this.unavailable.add(key);
-      // Scope, membership or a rendering fault can be fixed, so those are asked again after a restart; a gone message can't.
+      // Scope, membership, the token or a rendering fault can be fixed, so those are asked again after a restart; a gone message can't.
       if (goneErrors.has(result.error ?? "")) {
         try {
           this.opts.queue.update({ qitemId: id, actorSession: "daemon@kernel",
