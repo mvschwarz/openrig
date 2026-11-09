@@ -1,4 +1,4 @@
-import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
+import type { SlowOperationInstrumentation, SlowOperationStage } from "./slow-op-recorder.js";
 
 let recorder: SlowOperationInstrumentation | undefined;
 
@@ -20,4 +20,10 @@ export function runSyncSite<T>(site: string, fn: () => T): T {
  */
 export async function runAsyncSite<T>(site: string, fn: () => Promise<T>): Promise<T> {
   return recorder?.runStage ? recorder.runStage(site, fn) : fn();
+}
+
+/** A span over an operation that awaits or yields, through the configured recorder's `beginStage` (undefined when no
+ *  recorder is configured). */
+export function beginAsyncSite(site: string): SlowOperationStage | undefined {
+  return recorder?.beginStage?.(site);
 }

@@ -769,40 +769,81 @@ export function hasLinkedSuccessor(
 /** The linked-successor index lent to hasLinkedSuccessor by createLinkedSuccessorLookup's run(), for one synchronous call. */
 let successorScope: { db: Database.Database; covers: (source: string) => boolean; has: (source: string, target: string) => boolean } | null = null;
 
-/** hasLinkedSuccessor for a whole set of sources in one read, for a pass that asks it once per row (the stuck sweep's
- *  custody loop, and the handoff advisory of each row it reads). The read keeps the per-row query's own predicates: a
- *  successor is a row whose handed_off_from is the source, or whose chain_of_record is valid JSON with the source among
- *  its json_each values (compared as `value IN (...)` compares, like `value = ?`: a number or a nested value never
- *  equals a text id); has() then checks qitem_id or destination_session against the target and that the successor is
- *  not the source itself. A snapshot from its first has() until invalidate(): the caller invalidates it whenever other
- *  code could have run. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn
- *  for a covered source; any other source keeps the per-row query. */
-export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemIds: readonly string[]): {
+/** The statements of createLinkedSuccessorLookup's read; exported for the test that checks their plans. byHandoff: the
+ *  successors by handed_off_from (idx_queue_items_handed_off_from). pageEnd: the last qitem_id of the next page of rows
+ *  with a chain_of_record (idx_queue_items_chain_of_record). page: the successors by chain_of_record among that page's
+ *  rows, with the per-row query's own predicates. */
+export const LINKED_SUCCESSOR_BUILD_SQL = {
+  byHandoff: `SELECT s.qitem_id, s.destination_session, s.handed_off_from AS source FROM queue_items s
+    WHERE s.handed_off_from IN (SELECT value FROM json_each(?))`,
+  pageEnd: `SELECT max(qitem_id) AS last FROM (SELECT qitem_id FROM queue_items
+    WHERE chain_of_record IS NOT NULL AND qitem_id > ? ORDER BY qitem_id LIMIT ?)`,
+  page: `SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
+    WHERE s.chain_of_record IS NOT NULL AND s.qitem_id > ? AND s.qitem_id <= ? AND json_valid(s.chain_of_record)
+      AND j.value IN (SELECT value FROM json_each(?))`,
+} as const;
+/** Open rows judged per page of QueueRepository.undeliveredCandidateIdPages(). */
+export const UNDELIVERED_CANDIDATE_PAGE_ROWS = 200;
+/** Rows with a chain_of_record per page of createLinkedSuccessorLookup's load(). */
+export const LINKED_SUCCESSOR_PAGE_ROWS = 500;
+
+/** hasLinkedSuccessor for a whole set of sources, for a pass that asks it once per row (the stuck sweep's custody loop,
+ *  and the handoff advisory of each row it reads). The read keeps the per-row query's own predicates: a successor is a
+ *  row whose handed_off_from is the source, or whose chain_of_record is valid JSON with the source among its json_each
+ *  values (compared as `value IN (...)` compares, like `value = ?`: a number or a nested value never equals a text id);
+ *  has() then checks qitem_id or destination_session against the target and that the successor is not the source
+ *  itself. The handed_off_from half is one indexed search; the chain_of_record half walks the rows that have a chain in
+ *  qitem_id pages of `pageRows`. load(between) reads it with `between` awaited after each page, so a caller can yield
+ *  the loop; a has() before load() reads it all at once. A snapshot from that read until invalidate(): rows written
+ *  after the page that would hold them are not in it, so the caller re-checks live what it acts on. run(fn) lends it,
+ *  for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn for a covered source; any other source
+ *  keeps the per-row query. */
+export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemIds: readonly string[],
+  options: { pageRows?: number } = {}): {
   has: (sourceQitemId: string, target: string) => boolean;
   run: <T>(fn: () => T) => T;
+  load: (between: () => Promise<void> | void) => Promise<void>;
   invalidate: () => void;
 } {
   const sources = new Set(sourceQitemIds);
+  const pageRows = Math.max(1, options.pageRows ?? LINKED_SUCCESSOR_PAGE_ROWS);
   let bySource: Map<string, Array<{ qitemId: string; destination: string | null }>> | null = null;
-  const build = () => {
-    const map = new Map<string, Array<{ qitemId: string; destination: string | null }>>();
-    const ids = JSON.stringify([...sources]);
-    const rows = db.prepare(
-      `SELECT s.qitem_id, s.destination_session, s.handed_off_from AS source FROM queue_items s
-        WHERE s.handed_off_from IN (SELECT value FROM json_each(?))
-       UNION
-       SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
-        WHERE s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
-          AND j.value IN (SELECT value FROM json_each(?))`,
-    ).all(ids, ids) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
+  type SuccessorRow = { qitem_id: string; destination_session: string | null; source: string };
+  const put = (map: Map<string, Array<{ qitemId: string; destination: string | null }>>, rows: SuccessorRow[]) => {
     for (const r of rows) {
       const list = map.get(r.source);
       const entry = { qitemId: r.qitem_id, destination: r.destination_session };
       if (list) list.push(entry); else map.set(r.source, [entry]);
     }
-    return map;
   };
-  const has = (sourceQitemId: string, target: string): boolean => (bySource ??= build()).get(sourceQitemId)?.some(
+  /** Reads into a new map; `between` (when given) is awaited after each chain page. */
+  function read(between: () => Promise<void> | void): Promise<Map<string, Array<{ qitemId: string; destination: string | null }>>>;
+  function read(): Map<string, Array<{ qitemId: string; destination: string | null }>>;
+  function read(between?: () => Promise<void> | void) {
+    const map = new Map<string, Array<{ qitemId: string; destination: string | null }>>();
+    const ids = JSON.stringify([...sources]);
+    const pageEnd = db.prepare(LINKED_SUCCESSOR_BUILD_SQL.pageEnd);
+    const page = db.prepare(LINKED_SUCCESSOR_BUILD_SQL.page);
+    put(map, db.prepare(LINKED_SUCCESSOR_BUILD_SQL.byHandoff).all(ids) as SuccessorRow[]);
+    /** One chain page after `after`: false when there is none. */
+    let after = "";
+    const nextPage = (): boolean => {
+      const last = (pageEnd.get(after, pageRows) as { last: string | null }).last;
+      if (last === null) return false;
+      put(map, page.all(after, last, ids) as SuccessorRow[]);
+      after = last;
+      return true;
+    };
+    if (!between) {
+      while (nextPage()) { /* all pages at once */ }
+      return map;
+    }
+    return (async () => {
+      while (nextPage()) await between();
+      return map;
+    })();
+  }
+  const has = (sourceQitemId: string, target: string): boolean => (bySource ??= read()).get(sourceQitemId)?.some(
     (s) => s.qitemId !== sourceQitemId && (s.qitemId === target || s.destination === target)) ?? false;
   const own = { db, covers: (source: string) => sources.has(source), has };
   return {
@@ -813,6 +854,7 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
       successorScope = own;
       try { return fn(); } finally { successorScope = previous; }
     },
+    load: async (between) => { bySource = await read(between); },
     invalidate: () => { bySource = null; },
   };
 }
@@ -846,6 +888,9 @@ function detectTable(db: Database.Database, tableName: string): boolean {
  * Phase A wires no-op; Phase B can plug in the rig registry to reject
  * phantom-rig destinations. POC compatibility: `qitem_id` shape preserved.
  */
+/** findOverdue's own predicate (one parameter: the cutoff). */
+const OVERDUE_CONDITIONS = ["state = 'in-progress'", "closure_required_at IS NOT NULL", "closure_required_at <= ?"] as const;
+
 // Reduced column set for compact rows. `list`, `findOverdue` and `findUndelivered` all select it
 // (plus summary, through QueueRepository.compactColumns) and pass each row through compactRow, so
 // the compact projection is one thing: present text is shown, and what isn't selected is left out
@@ -4771,7 +4816,7 @@ export class QueueRepository {
   findOverdue(opts?: FindOverdueOptions): Array<QueueItem | CompactQueueItem>;
   findOverdue(opts?: FindOverdueOptions): Array<QueueItem | CompactQueueItem> {
     const cutoff = opts?.now ?? new Date().toISOString();
-    const conditions = ["state = 'in-progress'", "closure_required_at IS NOT NULL", "closure_required_at <= ?"];
+    const conditions: string[] = [...OVERDUE_CONDITIONS];
     const params: unknown[] = [cutoff];
     if (opts?.qitemId !== undefined) {
       conditions.push("qitem_id = ?");
@@ -4791,6 +4836,13 @@ export class QueueRepository {
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
     const items = rows.map((r) => this.rowToItem(r, !opts?.compact));
     return opts?.compact ? items.map(compactRow) : items;
+  }
+
+  /** The ids findOverdue({ now }) would return, in its order, without reading the rows: for a caller that reads each
+   *  row by id (findOverdue({ now, qitemId })) and yields the event loop between them. */
+  findOverdueIds(opts: { now: string }): string[] {
+    return (this.db.prepare(`SELECT qitem_id FROM queue_items WHERE ${OVERDUE_CONDITIONS.join(" AND ")} ORDER BY closure_required_at ASC`)
+      .all(opts.now) as Array<{ qitem_id: string }>).map((r) => r.qitem_id);
   }
 
   /**
@@ -4862,24 +4914,7 @@ export class QueueRepository {
     // carry a current episode or a legacy nudge/receipt, then derive/filter in
     // JS. LIMIT is applied after that filtering so historical POSTED episodes
     // cannot consume the window and hide a later failure.
-    const ownerEpisodeCandidate = this.hasOwnerNotificationColumns
-      ? `EXISTS (SELECT 1 FROM queue_transitions owner_episode
-                   WHERE owner_episode.qitem_id = queue_items.qitem_id
-                     AND owner_episode.owner_notification_level IS NOT NULL)`
-      : "0";
-    const conditions = [
-      "state IN ('pending', 'in-progress', 'blocked')",
-      `((state = 'pending' AND (last_nudge_result LIKE 'failed:%'
-                             OR last_nudge_result LIKE 'unroutable:%'
-                             OR last_nudge_result LIKE 'gateway-owned%'))
-         OR ${ownerEpisodeCandidate}
-         OR EXISTS (SELECT 1 FROM queue_transitions receipt
-                      WHERE receipt.qitem_id = queue_items.qitem_id
-                        AND (receipt.transition_note LIKE 'slack-owner-notification-posted %'
-                          OR receipt.transition_note LIKE 'relay-owner-notification-accepted %'
-                          OR receipt.transition_note LIKE 'slack-owner-notification-transport-failed %'
-                          OR receipt.transition_note LIKE 'relay-owner-notification-transport-failed %')))`,
-    ];
+    const conditions = this.undeliveredCandidateConditions();
     const params: unknown[] = [];
     if (opts?.qitemId !== undefined) {
       conditions.push("qitem_id = ?");
@@ -4924,6 +4959,52 @@ export class QueueRepository {
       if (opts?.limit !== undefined && out.length >= opts.limit) break;
     }
     return opts?.compact ? out.map(compactRow) : out;
+  }
+
+  /** The SQL half of findUndelivered: the active rows that can carry a current human-notification episode or a legacy
+   *  nudge/receipt. findUndelivered derives and filters each one in JS. */
+  private undeliveredCandidateConditions(): string[] {
+    const ownerEpisodeCandidate = this.hasOwnerNotificationColumns
+      ? `EXISTS (SELECT 1 FROM queue_transitions owner_episode
+                   WHERE owner_episode.qitem_id = queue_items.qitem_id
+                     AND owner_episode.owner_notification_level IS NOT NULL)`
+      : "0";
+    return [
+      "state IN ('pending', 'in-progress', 'blocked')",
+      `((state = 'pending' AND (last_nudge_result LIKE 'failed:%'
+                             OR last_nudge_result LIKE 'unroutable:%'
+                             OR last_nudge_result LIKE 'gateway-owned%'))
+         OR ${ownerEpisodeCandidate}
+         OR EXISTS (SELECT 1 FROM queue_transitions receipt
+                      WHERE receipt.qitem_id = queue_items.qitem_id
+                        AND (receipt.transition_note LIKE 'slack-owner-notification-posted %'
+                          OR receipt.transition_note LIKE 'relay-owner-notification-accepted %'
+                          OR receipt.transition_note LIKE 'slack-owner-notification-transport-failed %'
+                          OR receipt.transition_note LIKE 'relay-owner-notification-transport-failed %')))`,
+    ];
+  }
+
+  /** The ids of the rows findUndelivered() judges, in its order, without reading or judging them: a superset of what it
+   *  returns, for a caller that judges each one with findUndelivered({ qitemId }) and yields the event loop between them. */
+  findUndeliveredCandidateIds(): string[] {
+    return [...this.undeliveredCandidateIdPages(Number.MAX_SAFE_INTEGER)].flat();
+  }
+
+  /** findUndeliveredCandidateIds in pages, read lazily: the open rows' ids are listed first (no per-row subquery), and
+   *  the candidate conditions, whose receipt and owner-episode subqueries cost per transition, run on `pageRows` of them
+   *  at a time when the page is asked for, so a caller iterating it can yield between pages. Open rows in ts_created
+   *  order (qitem_id breaks ties); the open list is read once, when the first page is asked for. */
+  *undeliveredCandidateIdPages(pageRows = UNDELIVERED_CANDIDATE_PAGE_ROWS): Generator<string[]> {
+    const open = (this.db.prepare(`SELECT qitem_id FROM queue_items WHERE state IN ('pending', 'in-progress', 'blocked')
+      ORDER BY ts_created ASC, qitem_id ASC`).all() as Array<{ qitem_id: string }>).map((r) => r.qitem_id);
+    const judge = this.db.prepare(`SELECT qitem_id FROM queue_items
+      WHERE qitem_id IN (SELECT value FROM json_each(?)) AND ${this.undeliveredCandidateConditions().join(" AND ")}`);
+    const size = Math.max(1, pageRows);
+    for (let at = 0; at < open.length; at += size) {
+      const page = open.slice(at, at + size);
+      const hits = new Set((judge.all(JSON.stringify(page)) as Array<{ qitem_id: string }>).map((r) => r.qitem_id));
+      yield page.filter((id) => hits.has(id));
+    }
   }
 
   /** Read the same address-admission predicate used by queue writes before choosing

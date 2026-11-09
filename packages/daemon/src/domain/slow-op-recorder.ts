@@ -49,6 +49,10 @@ export interface SlowOperationInstrumentation {
     classify?: (value: T) => "ok" | "failed",
   ): Promise<T>;
   recordRequest?(site: string, durationMs: number): void;
+  /** A stage that awaits or yields (it does not hold the loop for its whole length). Only end() writes, one end record
+   *  with its durationMs and any extra fields, at any duration: the async-stage shape runStage writes, so the stage is
+   *  never read as a span that held the loop. slice() records a synchronous stretch of the stage that has just ended. */
+  beginStage?(site: string): SlowOperationStage;
   /** Bounded nonblocking diagnostic append; false means observation was dropped. */
   recordDiagnostic?(record: Record<string, unknown>): boolean;
   snapshot?(): SlowOperationSnapshot;
@@ -82,6 +86,14 @@ export function createSlowOpRequestMiddleware(
       }
     }
   };
+}
+
+export interface SlowOperationStage {
+  end(outcome: "ok" | "failed", fields?: Record<string, number | string>): void;
+  /** A synchronous stretch of the stage that held the loop for `durationMs` and has just ended: a closed begin/end
+   *  pair under `site`, the begin dated at the stretch's start, so the interval is exactly that stretch's. Written
+   *  after the fact without the sync barrier (the stretch is over). */
+  slice?(site: string, durationMs: number, fields?: Record<string, number | string>): void;
 }
 
 interface SlowOpRecorderOptions {
@@ -282,6 +294,36 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
       durationMs: Math.max(0, durationMs),
       outcome,
     });
+  }
+
+  beginStage(site: string): SlowOperationStage {
+    const startedAt = performance.now();
+    let ended = false;
+    return {
+      end: (outcome, fields) => {
+        if (ended) return;
+        ended = true;
+        // The record's own keys win over a field of the same name.
+        this.appendAsync({
+          ...fields,
+          v: 1,
+          ts: new Date().toISOString(),
+          spanId: randomUUID(),
+          phase: "end",
+          site,
+          durationMs: Math.max(0, performance.now() - startedAt),
+          outcome,
+        });
+      },
+      slice: (sliceSite, durationMs, fields) => {
+        const ms = Math.max(0, durationMs);
+        const endedAt = Date.now();
+        const spanId = randomUUID();
+        this.appendAsync({ v: 1, ts: new Date(endedAt - ms).toISOString(), spanId, phase: "begin", site: sliceSite });
+        this.appendAsync({ ...fields, v: 1, ts: new Date(endedAt).toISOString(), spanId, phase: "end", site: sliceSite,
+          durationMs: ms, outcome: "ok" });
+      },
+    };
   }
 
   recordRequest(site: string, durationMs: number): void {

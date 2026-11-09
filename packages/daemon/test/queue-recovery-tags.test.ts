@@ -1,12 +1,13 @@
 // queue_recovery_tags (migration 156): the exact-tag lookup of findQueueRecovery and of the stuck sweep's dedup, kept
 // equal to queue_items by triggers whoever writes, so a lookup by tag can be a search and not a parse of every tagged row.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { recoveryTag } from "../src/domain/queue-recovery.js";
+import { findQueueRecovery, recoveryLiveSql, recoveryTag } from "../src/domain/queue-recovery.js";
+import { runStuckSweep, STUCK_SWEEP_DEDUP_SQL } from "../src/domain/queue-stuck-sweep.js";
 import { migrationsForFullTestDb } from "./helpers/test-app.js";
 
 let db: Database.Database;
@@ -17,7 +18,7 @@ beforeEach(() => {
   db = new Database(":memory:"); migrate(db, ALL_MIGRATIONS);
   repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }) });
 });
-afterEach(() => { db.close(); });
+afterEach(() => { vi.restoreAllMocks(); db.close(); });
 
 function insert(target: Database.Database, id: string, o: Record<string, string | null>) {
   const cols = { ts_created: iso(3 * 60 * MIN), ts_updated: iso(MIN), source_session: "sender@r", destination_session: "worker@r",
@@ -111,5 +112,80 @@ describe("queue_recovery_tags", () => {
     expect(byTag.some((d) => /^SEARCH queue_recovery_tags USING (PRIMARY KEY|COVERING INDEX)/.test(d)), byTag.join("\n")).toBe(true);
     const byRow = plan("DELETE FROM queue_recovery_tags WHERE qitem_id = ?", "q");
     expect(byRow.some((d) => /^SEARCH queue_recovery_tags USING (COVERING )?INDEX idx_queue_recovery_tags_qitem/.test(d)), byRow.join("\n")).toBe(true);
+  });
+});
+
+/** findQueueRecovery's live read before the table, for the comparison. */
+const LEGACY = (exclude: boolean) => `SELECT qitem_id, state, ts_updated FROM queue_items
+  WHERE (tags LIKE '%"recovery-for:%' OR tags LIKE '%\\%') AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
+  ${exclude ? "AND NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)" : ""}
+  ORDER BY CASE WHEN state IN ('pending','in-progress','blocked') THEN 0 ELSE 1 END, ts_updated DESC, qitem_id DESC LIMIT 1`;
+const legacy = (id: string, exclude?: string) => (db.prepare(LEGACY(!!exclude)).get(...(exclude ? [recoveryTag(id), exclude] : [recoveryTag(id)])) as
+  { qitem_id: string } | undefined)?.qitem_id ?? null;
+const live = (id: string, exclude?: string) => (db.prepare(recoveryLiveSql(!!exclude)).get(...(exclude ? [recoveryTag(id), exclude] : [recoveryTag(id)])) as
+  { qitem_id: string } | undefined)?.qitem_id ?? null;
+
+describe("the readers of queue_recovery_tags", () => {
+  it("findQueueRecovery's live read answers as the json_each read did, with and without excludeTag", async () => {
+    await writes();
+    for (const id of ["qitem-a", "qitem-b", "qitem-c", "qitem-d", "qitem-e", "qitem-none"]) {
+      for (const exclude of [undefined, "x", "slack-undeliverable", "prompt-alert", recoveryTag(id), "stuck-sweep:overdue-claim:qitem-a"]) {
+        expect(live(id, exclude), `${id} without ${exclude}`).toBe(legacy(id, exclude));
+      }
+    }
+    const prepare = db.prepare.bind(db); const used: string[] = [];
+    vi.spyOn(db, "prepare").mockImplementation((sql: string) => { used.push(sql); return prepare(sql); });
+    expect(findQueueRecovery(db, "qitem-a")?.qitemId ?? null).toBe(legacy("qitem-a"));
+    findQueueRecovery(db, "qitem-a", "x");
+    expect(used).toEqual(expect.arrayContaining([recoveryLiveSql(false), recoveryLiveSql(true)]));
+    expect(live("qitem-b")).toBe("rec-escaped");
+  });
+
+  it("the live recovery read and the sweep's dedup read search the table: neither scans queue_items or its tag index", () => {
+    const plans = [[recoveryLiveSql(false), ["recovery-for:q"]], [recoveryLiveSql(true), ["recovery-for:q", "x"]],
+      [STUCK_SWEEP_DEDUP_SQL, ["stuck-sweep:overdue-claim:q"]]] as const;
+    for (const [sql, params] of plans) {
+      const plan = (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as Array<{ detail: string }>).map((r) => r.detail);
+      expect(plan.some((d) => /^SEARCH t USING (PRIMARY KEY|COVERING INDEX)/.test(d)), plan.join("\n")).toBe(true);
+      expect(plan.filter((d) => /^SCAN (q|queue_items|t)\b/.test(d)), plan.join("\n")).toEqual([]);
+    }
+  });
+
+  it("the sweep looks up an existing finding by its dedup tag through the table, and still refreshes it", async () => {
+    insert(db, "qitem-u1", { ts_updated: iso(3 * 60 * MIN), ts_created: iso(3 * 60 * MIN) }); // unclaimed
+    const first = await runStuckSweep({ db, queueRepo: repo, log: () => {}, resolveOrchestrator: () => null });
+    expect(first.findings.map((f) => f.action)).toEqual(["created"]);
+    const prepare = db.prepare.bind(db); let dedupReads = 0;
+    vi.spyOn(db, "prepare").mockImplementation((sql: string) => { if (sql === STUCK_SWEEP_DEDUP_SQL) dedupReads++; return prepare(sql); });
+    // the finding's own recovery tag holds the row: its custody is shared, so drop it to reach the dedup read
+    db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
+      .run(JSON.stringify(["stuck-sweep-finding", "stuck-sweep:unclaimed-obligation:qitem-u1"]), first.findings[0]!.findingQitemId);
+    const second = await runStuckSweep({ db, queueRepo: repo, log: () => {}, resolveOrchestrator: () => null });
+    expect(second.findings).toEqual([expect.objectContaining({ action: "refreshed", findingQitemId: first.findings[0]!.findingQitemId })]);
+    expect(dedupReads).toBe(1);
+  });
+});
+
+describe("the sweep's dedup read with and without queue_recovery_tags", () => {
+  /** A stuck row whose id has a LIKE wildcard, and an open finding for another row that the wildcard (and case) match. */
+  async function dedupOf(target: Database.Database): Promise<Array<[string, string]>> {
+    const queue = new QueueRepository(target, new EventBus(target), { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }) });
+    insert(target, "qitem_u1", { ts_updated: iso(3 * 60 * MIN), ts_created: iso(3 * 60 * MIN) }); // unclaimed
+    insert(target, "rec-other", { ts_created: iso(MIN), ts_updated: iso(MIN), destination_session: "lead@r",
+      tags: JSON.stringify(["stuck-sweep-finding", "stuck-sweep:unclaimed-obligation:QITEMxU1"]) });
+    const result = await runStuckSweep({ db: target, queueRepo: queue, log: () => {}, resolveOrchestrator: () => null });
+    return result.findings.filter((f) => f.qitemId === "qitem_u1").map((f) => [f.action, f.findingQitemId === "rec-other" ? "rec-other" : "new"]);
+  }
+
+  it("with the table, the dedup tag matches exactly; without it, the LIKE read also matched `_` as a wildcard and other case", async () => {
+    // the table: only the finding whose tag is exactly the stuck row's dedup tag counts, so the row gets its own
+    expect(await dedupOf(db)).toEqual([["created", "new"]]);
+    // a database without the table keeps the LIKE read, where `_` is any character and ASCII case is ignored: it takes
+    // another row's finding as this row's. The sweep's ids (qitem-<time>-<hex>) have neither, so the two agree on them.
+    const old = new Database(":memory:");
+    try {
+      migrate(old, ALL_MIGRATIONS.filter((m) => m.name !== "156_queue_recovery_tags.sql"));
+      expect(await dedupOf(old)).toEqual([["refreshed", "rec-other"]]);
+    } finally { old.close(); }
   });
 });

@@ -1,5 +1,6 @@
-// Migration 099: the recovery and dedup lookups read idx_queue_items_recovery_tags instead of scanning
-// and parsing every queue row, and still choose exactly the row the unindexed queries chose.
+// Migration 099, then 156: the recovery and dedup lookups read an index instead of scanning and parsing every queue
+// row (099: the partial tag index; 156: queue_recovery_tags, searched by the exact tag value), and still choose exactly
+// the row the unindexed queries chose.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";
@@ -7,15 +8,16 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { findQueueRecovery, recoveryTag } from "../src/domain/queue-recovery.js";
-import { createStuckSweepStatus, runStuckSweep } from "../src/domain/queue-stuck-sweep.js";
+import { createStuckSweepStatus, runStuckSweep, STUCK_SWEEP_DEDUP_SQL } from "../src/domain/queue-stuck-sweep.js";
 
-const INDEX = "idx_queue_items_recovery_tags";
+/** The search of queue_recovery_tags (migration 156) by the exact tag value. */
+const INDEX = /SEARCH t USING PRIMARY KEY \(tag=\?\)/;
 // The pre-099 statement, kept here as the reference the new one must agree with.
 const UNINDEXED = `SELECT qitem_id, state, ts_updated FROM queue_items
   WHERE json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
   ORDER BY CASE WHEN state IN ('pending','in-progress','blocked') THEN 0 ELSE 1 END, ts_updated DESC, qitem_id DESC LIMIT 1`;
 
-describe("recovery and dedup lookups use the partial tag index (migration 099)", () => {
+describe("recovery and dedup lookups search queue_recovery_tags (migrations 099, 156)", () => {
   let db: Database.Database, repo: QueueRepository;
   const at = "2026-10-09T10:00:00.000Z";
   function row(id: string, state = "done", tags: string | null = "[]", updated = at) {
@@ -31,7 +33,8 @@ describe("recovery and dedup lookups use the partial tag index (migration 099)",
   }
   const plan = (sql: string, ...args: unknown[]) =>
     (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args) as Array<{ detail: string }>).map((r) => r.detail).join(" | ");
-  const isRecoveryLookup = (sql: string) => sql.includes("json_each(tags) WHERE value = ?") && sql.includes("qitem_id DESC LIMIT 1");
+  const isRecoveryLookup = (sql: string) => (sql.includes("json_each(tags) WHERE value = ?") || sql.includes("FROM queue_recovery_tags t"))
+    && sql.includes("qitem_id DESC LIMIT 1") && !sql.includes("source_session");
 
   beforeEach(() => {
     db = new Database(":memory:"); migrate(db, ALL_MIGRATIONS);
@@ -43,27 +46,28 @@ describe("recovery and dedup lookups use the partial tag index (migration 099)",
     row("source", "pending");
     const [sql] = preparedDuring(isRecoveryLookup, () => findQueueRecovery(db, "source"));
     expect(sql).toBeDefined();
-    expect(plan(sql!, recoveryTag("source"))).toContain(INDEX);
-    expect(plan(sql!, recoveryTag("source"))).not.toMatch(/SCAN queue_items(?! USING)/);
+    expect(plan(sql!, recoveryTag("source"))).toMatch(INDEX);
+    expect(plan(sql!, recoveryTag("source"))).not.toMatch(/SCAN (queue_items|q)\b/);
   });
 
   it("the projection path (getById of a pending row, and so list and whoami) reads the index", () => {
     row("source", "pending");
     const seen = preparedDuring(isRecoveryLookup, () => repo.getById("source"));
     expect(seen.length).toBeGreaterThan(0);
-    for (const sql of seen) expect(plan(sql, recoveryTag("source"))).toContain(INDEX);
+    for (const sql of seen) expect(plan(sql, recoveryTag("source"))).toMatch(INDEX);
   });
 
   it("the stuck sweep's dedup lookup reads the index", async () => {
     row("stuck", "pending");
     db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = 'stuck'").run(new Date(Date.now() - 3 * 3_600_000).toISOString());
     const prepare = db.prepare.bind(db); const seen: string[] = [];
-    vi.spyOn(db, "prepare").mockImplementation((sql: string) => { if (sql.includes("tags LIKE ?") && sql.includes("ts_created DESC")) seen.push(sql); return prepare(sql); });
+    vi.spyOn(db, "prepare").mockImplementation((sql: string) => { if (sql === STUCK_SWEEP_DEDUP_SQL) seen.push(sql); return prepare(sql); });
     await runStuckSweep({ db, queueRepo: repo, status: createStuckSweepStatus(), resolveOrchestrator: () => null,
       isRegisteredHost: () => false, unclaimedAgeMinutes: 60, log: () => {} });
     vi.restoreAllMocks();
     expect(seen.length).toBeGreaterThan(0);
-    expect(plan(seen[0]!, `%"stuck-sweep:unclaimed-obligation:stuck"%`)).toContain(INDEX);
+    expect(plan(seen[0]!, "stuck-sweep:unclaimed-obligation:stuck")).toMatch(INDEX);
+    expect(plan(seen[0]!, "stuck-sweep:unclaimed-obligation:stuck")).not.toMatch(/SCAN (queue_items|q)\b/);
   });
 
   it("finds a recovery tag the wake ladder appends to an existing row", () => {

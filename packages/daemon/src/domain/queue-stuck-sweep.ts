@@ -1,6 +1,9 @@
 import { currentParkedOwnerNoInputFailure } from "./policies/parked-owner-consumer.js";
 import { resolveEscalationOwner, ESCALATION_HOP_TAG, hasConsumedEscalationHop } from "./escalation-owner.js";
-import { createRecoveryLookup, recoveryId, recoveryTag } from "./queue-recovery.js";
+import { performance } from "node:perf_hooks";
+import { createRecoveryLookup, findQueueRecovery, hasRecoveryTagTable, recoveryId, recoveryTag } from "./queue-recovery.js";
+import { beginAsyncSite } from "./sync-site-wrap.js";
+import type { SlowOperationStage } from "./slow-op-recorder.js";
 import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { queueWaitNotice } from "./queue-wait-backoff.js";
 import { lastMeaningfulTransition, pendingSince } from "./queue-waiting.js";
@@ -226,6 +229,9 @@ export interface StuckSweepDeps {
    *  or two of the owning ladder's own retry intervals, whichever is longer. Injectable for
    *  tests; the default reads the ladder's existing setting. */
   ladderSuppressionMinutes?: number;
+  /** Where the pass's slow-op span goes (site STUCK_SWEEP_PASS_SITE). Default: the daemon's configured slow-op
+   *  recorder, none when it has none. Injectable for tests. */
+  slowOps?: { beginStage?(site: string): SlowOperationStage | undefined };
 }
 
 export interface StuckSweepFindingAction {
@@ -434,8 +440,9 @@ function deliveryResolutionEvidence(
   kind: "undelivered-wake" | "undelivered-human-notice" | "unclaimed-obligation",
   qitemId: string,
   now: Date,
+  read: (qitemId: string) => QueueItem | null = (id) => deps.queueRepo.getById(id),
 ): string | null {
-  const row = deps.queueRepo.getById(qitemId);
+  const row = read(qitemId);
   if (!row) return null;
   if (["done", "failed", "denied", "canceled", "handed-off"].includes(row.state)) {
     return `source closed (${row.state})`;
@@ -498,6 +505,44 @@ function evidenceIsNewer(evidenceAt: string, closedAt: string): boolean {
   const evidence = Date.parse(evidenceAt);
   const closed = Date.parse(closedAt);
   return !Number.isNaN(evidence) && !Number.isNaN(closed) && evidence > closed;
+}
+
+/** The fields of a closed row that its custody check reads before asking for a successor. */
+export interface CustodyRowFields {
+  qitemId: string;
+  state: string;
+  handedOffTo: string | null;
+  closureTarget: string | null;
+  closureReason: string | null;
+}
+
+/** A handoff whose current closure target is the one it recorded (or that target's derived remote key): its custody
+ *  check stops here, without reading its targets or any successor. */
+export function custodySkipsRecordedHandoff(row: CustodyRowFields): boolean {
+  return row.state === "handed-off" && matchesRecordedHandoffTarget(row.qitemId, row.handedOffTo, row.closureTarget);
+}
+
+/** The targets a closed row's custody check verifies: the closure target (else the handoff target) split on commas,
+ *  or "(unspecified)" when there is none and the row was closed as handed_off_to. */
+export function custodyClosureTargets(row: CustodyRowFields): string[] {
+  const targets = (row.closureTarget ?? row.handedOffTo ?? "")
+    .split(",")
+    .map((target) => target.trim())
+    .filter(Boolean);
+  if (targets.length === 0 && row.closureReason === "handed_off_to") targets.push("(unspecified)");
+  return targets;
+}
+
+/** Whether the custody check asks the linked-successor read for a target: any target that is not a qitem id
+ *  ("(unspecified)" included). A qitem id is checked by reading that row (or, with @host, by its derived key). */
+export function targetAsksSuccessor(target: string): boolean {
+  return !target.startsWith("qitem-");
+}
+
+/** Whether a closed row's custody check may ask the linked-successor read. A superset of the rows the check asks for:
+ *  it does not drop the custody-verified targets, and it judges the fields given, not the row read again. */
+export function custodyRowAsksSuccessor(row: CustodyRowFields): boolean {
+  return !custodySkipsRecordedHandoff(row) && custodyClosureTargets(row).some(targetAsksSuccessor);
 }
 
 export function verificationCommand(target: string): string {
@@ -606,32 +651,157 @@ function backlogRowsOf(body: string): Set<string> | null {
  *  for its whole length (seconds on a queue of tens of thousands of rows, with healthz and every request waiting);
  *  every this many rows it now lets timers and requests run. */
 export const STUCK_SWEEP_YIELD_EVERY_ROWS = 50;
+/** ...or after this much synchronous time, whichever comes first: a row can cost a few milliseconds (a live re-check,
+ *  a create), so a row count alone does not bound how long the loop is held. */
+export const STUCK_SWEEP_SLICE_BUDGET_MS = 25;
+/** The slow-op site of one whole pass: one end record with its duration and counts (no begin: the pass yields, so it is
+ *  not a span that holds the loop). */
+export const STUCK_SWEEP_PASS_SITE = "stuck_sweep.pass";
+/** The slow-op site of one synchronous slice of a pass that held the loop for STUCK_SWEEP_SLICE_RECORD_MS or more: a
+ *  closed begin/end pair over exactly that slice, with the phase it started in (fromPhase), ended in (phase) and every
+ *  phase it ran through (phases, comma-separated). */
+export const STUCK_SWEEP_SLICE_SITE = "stuck_sweep.slice";
+export const STUCK_SWEEP_SLICE_RECORD_MS = 50;
+
+/** What a pass measured about itself, recorded on the end of its slow-op span. */
+export interface StuckSweepPassStats {
+  rowsScanned: number;
+  findingsCreated: number;
+  findingsRefreshed: number;
+  findingsClosed: number;
+  yields: number;
+  /** The longest stretch the pass held the event loop between two of its yields (start and end included). */
+  maxSliceMs: number;
+  /** The part of the pass that stretch was in. */
+  maxSlicePhase: string;
+  recoveryIndexBuilds: number;
+}
+
+const DEDUP_ORDER = `ORDER BY CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END,
+           ts_updated DESC, ts_created DESC, qitem_id DESC
+  LIMIT 1`;
+/** The finding a row already has for a kind, by its dedup tag (`stuck-sweep:<kind>:<id>`), open first: a search of
+ *  queue_recovery_tags (migration 156) by the exact tag value, which the sweep writes as is. */
+export const STUCK_SWEEP_DEDUP_SQL = `SELECT q.qitem_id, q.source_session, q.state, q.ts_updated
+  FROM queue_recovery_tags t JOIN queue_items q ON q.qitem_id = t.qitem_id WHERE t.tag = ?
+  ${DEDUP_ORDER.replace(/\b(state|ts_updated|ts_created|qitem_id)\b/g, "q.$1")}`;
+/** The same for a database without queue_recovery_tags (a test fixture with fewer migrations). The first term is
+ *  implied by the second (its pattern starts with that literal); it lets the planner use idx_queue_items_recovery_tags
+ *  (migration 099) instead of a full scan. */
+const STUCK_SWEEP_DEDUP_SQL_UNINDEXED = `SELECT qitem_id, source_session, state, ts_updated FROM queue_items
+  WHERE (tags LIKE '%"stuck-sweep:%') AND tags LIKE ?
+  ${DEDUP_ORDER}`;
+
+/** A pass's routing notes: the escalation note recorded for a row's route (the finding's "escalation route:" line)
+ *  and whether that route used the escalation hop. `unchanged` runs a rule again and puts back what it changed: each
+ *  key is recorded before its first change in the run, so the cost is the keys changed, not the notes held. A run may
+ *  change a row other than the one judged (a wait's rule routes the row its job is bound to), and that key comes back
+ *  too. Exported for its test. */
+export function createPassRoutes() {
+  const notes = new Map<string, string>();
+  const hops = new Set<string>();
+  let undo: Map<string, { note: string | undefined; hop: boolean }> | null = null;
+  const touch = (id: string) => {
+    if (undo && !undo.has(id)) undo.set(id, { note: notes.get(id), hop: hops.has(id) });
+  };
+  return {
+    note: (id: string) => notes.get(id),
+    usedHop: (id: string) => hops.has(id),
+    setNote: (id: string, note: string) => { touch(id); notes.set(id, note); },
+    markHop: (id: string) => { touch(id); hops.add(id); },
+    forget: (id: string) => { touch(id); notes.delete(id); hops.delete(id); },
+    unchanged<T>(run: () => T): T {
+      const outer = undo;
+      const mine = new Map<string, { note: string | undefined; hop: boolean }>();
+      undo = mine;
+      try {
+        return run();
+      } finally {
+        undo = outer;
+        for (const [id, was] of mine) {
+          if (was.note === undefined) notes.delete(id); else notes.set(id, was.note);
+          if (was.hop) hops.add(id); else hops.delete(id);
+        }
+      }
+    },
+  };
+}
 
 export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepResult> {
+  const span = (deps.slowOps ?? { beginStage: beginAsyncSite }).beginStage?.(STUCK_SWEEP_PASS_SITE);
+  const stats: StuckSweepPassStats = { rowsScanned: 0, findingsCreated: 0, findingsRefreshed: 0, findingsClosed: 0,
+    yields: 0, maxSliceMs: 0, maxSlicePhase: "start", recoveryIndexBuilds: 0 };
+  const result = await sweepPass(deps, stats, span);
+  for (const f of result.findings) {
+    if (f.action === "created") stats.findingsCreated++;
+    else if (f.action === "refreshed") stats.findingsRefreshed++;
+    else stats.findingsClosed++;
+  }
+  try {
+    span?.end(result.outcome === "failed" ? "failed" : "ok", { ...stats, maxSliceMs: Math.round(stats.maxSliceMs * 10) / 10 });
+  } catch { /* measurement never fails the pass */ }
+  return result;
+}
+
+async function sweepPass(deps: StuckSweepDeps, stats: StuckSweepPassStats, span: SlowOperationStage | undefined): Promise<StuckSweepResult> {
   const log = deps.log ?? ((line: string) => console.error(line));
   const status = deps.status;
+  // The pass's synchronous stretches, which is what a slice measures: one ends at each yield, at each awaited send
+  // (awaited(): a wake retry's delivery, or a create's wake, waits on a terminal, and that wait is not the loop held by
+  // the sweep, whoever runs meanwhile), and at the end of the pass; the next starts when the loop comes back.
+  // queueRepo.update is synchronous: its `await` releases nothing and stays inside the slice. An awaited send is not
+  // counted as a yield (stats.yields, the row budget): it may resolve without releasing the loop.
+  let sliceStart = performance.now();
+  let phase = "start";
+  // The phases the current slice ran through, in order (the one it started in first).
+  let slicePhases = [phase];
+  const setPhase = (next: string): void => { phase = next; if (slicePhases[slicePhases.length - 1] !== next) slicePhases.push(next); };
+  const endSlice = (): void => {
+    const ms = performance.now() - sliceStart;
+    if (ms > stats.maxSliceMs) { stats.maxSliceMs = ms; stats.maxSlicePhase = phase; }
+    if (ms >= STUCK_SWEEP_SLICE_RECORD_MS) {
+      try { span?.slice?.(STUCK_SWEEP_SLICE_SITE, ms, { fromPhase: slicePhases[0]!, phase, phases: slicePhases.join(",") }); }
+      catch { /* measurement never fails the pass */ }
+    }
+  };
+  let recoveries: ReturnType<typeof createRecoveryLookup> | null = null;
   try {
     const now = deps.now ?? new Date();
-    // One recovery index and one linked-successor read per stretch of the pass, instead of one json_each scan per
-    // candidate and per custody row. Each is a snapshot that is only valid while no other code runs, so both are
-    // dropped (and rebuilt on the next lookup) after every yield and every awaited write.
-    const recoveries = createRecoveryLookup(deps.db);
+    // One recovery index and one linked-successor read per pass, instead of one json_each scan per candidate and per
+    // custody row. Each is a snapshot: the pass's own writes that change one (a finding created or closed changes the
+    // recovery index; no write of the pass changes a successor) are put into it, and other code's writes during the
+    // pass's yields are not in it. So nothing the pass writes rests on the snapshot alone: before a finding is created
+    // its rule runs again live and the recovery holding the row is read live; before a finding is closed by its rule,
+    // the rule runs again live, and a delivery finding closes on its source's live evidence; a shared finding's reason
+    // is rewritten only if the new reason holds live. A row the snapshot misjudges in a listing loop is judged right
+    // by those re-checks or by the next pass, which builds its own snapshot.
+    recoveries = createRecoveryLookup(deps.db);
+    const recoveryLookup = recoveries;
     let successors: ReturnType<typeof createLinkedSuccessorLookup> | null = null;
-    // Every yield and every awaited write lets other code run: indexes read before it are dropped, and `othersRan`
-    // tells a list read before it that its rows need a fresh read.
-    let othersRan = 0;
-    const othersMayHaveRun = (): void => { othersRan++; recoveries.invalidate(); successors?.invalidate(); };
     // A synchronous read with both indexes lent to what it calls deep inside (a getById's waiting view and handoff
     // advisory ask the same questions per row). Never spans an await: the lend ends when fn returns.
-    const indexed = <T>(fn: () => T): T => recoveries.run(() => (successors ? successors.run(fn) : fn()));
-    // `if (dueToYield()) await yieldLoop();` and never a bare await per row: even an await that does not yield lets
-    // queued microtasks (other requests' continuations) run and write between two rows the snapshot still covers.
+    const indexed = <T>(fn: () => T): T => recoveryLookup.run(() => (successors ? successors.run(fn) : fn()));
+    // `if (dueToYield()) await yieldLoop();` and never a bare await per row: an await that does not yield still lets
+    // queued microtasks run, and buys nothing for the loop.
     let rowsSinceYield = 0;
-    const dueToYield = (): boolean => ++rowsSinceYield >= STUCK_SWEEP_YIELD_EVERY_ROWS;
+    const dueToYield = (): boolean => ++rowsSinceYield >= STUCK_SWEEP_YIELD_EVERY_ROWS
+      || performance.now() - sliceStart >= STUCK_SWEEP_SLICE_BUDGET_MS;
+    /** dueToYield for a row a listing loop looks at: counted as scanned. */
+    const scan = (): boolean => { stats.rowsScanned++; return dueToYield(); };
     const yieldLoop = async (): Promise<void> => {
       rowsSinceYield = 0;
+      endSlice();
+      stats.yields++;
       await new Promise<void>((resolve) => setImmediate(resolve));
-      othersMayHaveRun();
+      sliceStart = performance.now();
+      slicePhases = [phase];
+    };
+    /** Awaits a write the pass makes outside its slices: the slice ends when the write's synchronous part has run, and the
+     *  next starts when it resolves. Not a yield: the row budget keeps counting. Never around yieldLoop, nor around a
+     *  call that yields through it (lookup.load), which would end the same slice twice. */
+    const awaited = async <T>(p: Promise<T>): Promise<T> => {
+      endSlice();
+      try { return await p; } finally { sliceStart = performance.now(); slicePhases = [phase]; }
     };
     const suppressionMinutes = deps.ladderSuppressionMinutes ?? resolveLadderSuppressionMinutes();
     /** The dedup tags of the candidates the LADDER suppressed in this pass, and only those:
@@ -640,17 +810,16 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
      *  Other delivery/pickup findings still need source evidence before closure. */
     const suppressedTags = new Set<string>();
     const ageMinutes = deps.unclaimedAgeMinutes ?? resolveStuckSweepUnclaimedAgeMinutes();
-    const routeNotes = new Map<string, string>();
-    const routed = new Set<string>();
+    const routes = createPassRoutes();
     const resolveOrch = (session: string, row: QueueItem): string | null => {
       if (hasConsumedEscalationHop(deps.db, row.qitemId)) {
-        routeNotes.set(row.qitemId, "escalates_to one-hop delivery already used; existing fallback retained");
+        routes.setNote(row.qitemId, "escalates_to one-hop delivery already used; existing fallback retained");
         return null;
       }
       if (deps.resolveOrchestrator) return deps.resolveOrchestrator(session);
       const route = resolveEscalationOwner(deps.db, session, target => deps.queueRepo.acceptsDestination(target));
-      if (route.outcome !== "none" && route.outcome !== "parent") routeNotes.set(row.qitemId, route.reason);
-      if (route.outcome === "routed") routed.add(row.qitemId);
+      if (route.outcome !== "none" && route.outcome !== "parent") routes.setNote(row.qitemId, route.reason);
+      if (route.outcome === "routed") routes.markHop(row.qitemId);
       return route.owner;
     };
     const isRegisteredHost = deps.isRegisteredHost ?? defaultIsRegisteredHost(log);
@@ -901,18 +1070,13 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!closed || !(startsWithCI(row.closureTarget, "qitem-") || row.closureReason === "handed_off_to")) return null;
       // Local recorded targets were filtered in SQL; remote keys use the same
       // derivation as the cross-host close, without reading successor history.
-      if (row.state === "handed-off" && matchesRecordedHandoffTarget(row.qitemId, row.handedOffTo, row.closureTarget)) return null;
-      const targets = (row.closureTarget ?? row.handedOffTo ?? "")
-        .split(",")
-        .map((target) => target.trim())
-        .filter(Boolean);
-      if (targets.length === 0 && row.closureReason === "handed_off_to") {
-        targets.push("(unspecified)");
-      }
+      // The same helpers decide which rows the pass's successor read loads (custodyRowAsksSuccessor below).
+      if (custodySkipsRecordedHandoff(row)) return null;
+      const targets = custodyClosureTargets(row);
       const verified = custodyVerifiedTargets(deps.db, row.qitemId);
       const verificationTargets = targets.filter((target) => {
         if (verified.has(target)) return false;
-        if (target.startsWith("qitem-")) {
+        if (!targetAsksSuccessor(target)) {
           const at = target.indexOf("@");
           if (at !== -1) {
             const hostId = target.slice(at + 1);
@@ -983,29 +1147,20 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         default: return null;
       }
     };
-    /** Whether a kind's rule still holds now, leaving the routing notes (routeNotes, routed) as they were. */
-    const ruleHolds = (kind: StuckFindingKind, id: string, jobId?: string): boolean => {
-      const notes = new Map(routeNotes);
-      const wasRouted = new Set(routed);
-      try {
-        return !!freshCandidate(kind, id, jobId);
-      } finally {
-        routeNotes.clear();
-        for (const [k, v] of notes) routeNotes.set(k, v);
-        routed.clear();
-        for (const k of wasRouted) routed.add(k);
-      }
-    };
+    /** Whether a kind's rule still holds now, leaving the pass's routing notes as they were (resolveOrch, their only
+     *  writer in a rule, may route a row other than `id`: see createPassRoutes). */
+    const ruleHolds = (kind: StuckFindingKind, id: string, jobId?: string): boolean =>
+      routes.unchanged(() => !!freshCandidate(kind, id, jobId));
     const stillStuck = (c: Candidate): boolean => ruleHolds(c.kind, c.row.qitemId, c.jobId);
     /** The kinds the resolution closes on "no longer detected" alone (the others need source evidence). */
     const resolvedByRule = new Set<string>(["overdue-claim", "stalled-after-claim", "unconsumed-wait", "parked-owner-no-input", "dangling-closure"]);
 
-    // The rows each rule looks at. The id lists are judged on a fresh getById per row; the two finders return whole
-    // rows, which are read again by id once other code may have run since the list was read.
-    let listedAt = othersRan;
-    for (const listed of indexed(() => deps.queueRepo.findOverdue({ now: nowIso }))) {
-      if (dueToYield()) await yieldLoop();
-      const row = listedAt !== othersRan ? indexed(() => deps.queueRepo.findOverdue({ now: nowIso, qitemId: listed.qitemId }))[0] : listed;
+    // The rows each rule looks at: a list of ids, and each row judged on its own fresh read by id (the two finders'
+    // rows too: findOverdue and findUndelivered by qitemId), so no single read of the whole queue holds the loop.
+    setPhase("overdue");
+    for (const id of deps.queueRepo.findOverdueIds({ now: nowIso })) {
+      if (scan()) await yieldLoop();
+      const row = indexed(() => deps.queueRepo.findOverdue({ now: nowIso, qitemId: id }))[0];
       const c = row ? overdueCandidate(row) : null;
       if (!c) continue;
       candidates.push(c);
@@ -1017,44 +1172,53 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
     }
 
+    setPhase("stalled");
     for (const { qitem_id } of deps.db
       .prepare("SELECT qitem_id FROM queue_items WHERE state IN ('pending', 'in-progress') AND claimed_at IS NOT NULL")
       .all() as Array<{ qitem_id: string }>) {
-      if (dueToYield()) await yieldLoop();
+      if (scan()) await yieldLoop();
       const c = stalledCandidate(qitem_id);
       if (c) candidates.push(c);
     }
 
+    setPhase("wait");
     for (const { job_id } of deps.db.prepare("SELECT job_id FROM watchdog_jobs WHERE state = 'active' AND policy = 'periodic-reminder'")
       .all() as Array<{ job_id: string }>) {
-      if (dueToYield()) await yieldLoop();
+      if (scan()) await yieldLoop();
       const c = waitCandidate(job_id);
       if (c) candidates.push(c);
     }
 
+    setPhase("parked");
     for (const { qitem_id } of deps.db.prepare("SELECT qitem_id FROM queue_items WHERE state='blocked' AND last_nudge_result LIKE 'failed:%'")
       .all() as Array<{ qitem_id: string }>) {
-      if (dueToYield()) await yieldLoop();
+      if (scan()) await yieldLoop();
       const c = parkedCandidate(qitem_id);
       if (c) candidates.push(c);
     }
 
-    listedAt = othersRan;
-    for (const listed of indexed(() => deps.queueRepo.findUndelivered())) {
-      if (dueToYield()) await yieldLoop();
-      let row = listedAt !== othersRan ? undeliveredNow(listed.qitemId) : listed;
-      if (!row || isFindingRow(row)) continue;
-      if (wakeRetryEligible(row) && wakeToRetry(row, isHumanNotice(row))) {
-        await deps.queueRepo.deliverWakeForSuccessor(row.qitemId, row.destinationSession, true, row.sourceSession);
-        othersMayHaveRun();
-        // judged again on the row as the send (and anyone else during it) left it
-        row = undeliveredNow(row.qitemId);
-        if (!row?.lastNudgeResult?.startsWith("unroutable:")) continue;
+    setPhase("undelivered");
+    // In pages: each page's candidate conditions (a receipt subquery per transition) are judged when the loop asks for
+    // it, and the loop may yield after every page, so pages with no candidate on them are cut too. The open rows' ids
+    // are read once, when the first page is asked for: rows created during the pass's yields are the next pass's.
+    for (const page of deps.queueRepo.undeliveredCandidateIdPages()) {
+      for (const id of page) {
+        if (scan()) await yieldLoop();
+        let row = undeliveredNow(id);
+        if (!row || isFindingRow(row)) continue;
+        if (wakeRetryEligible(row) && wakeToRetry(row, isHumanNotice(row))) {
+          await awaited(deps.queueRepo.deliverWakeForSuccessor(row.qitemId, row.destinationSession, true, row.sourceSession));
+          // judged again on the row as the send (and anyone else during it) left it
+          row = undeliveredNow(row.qitemId);
+          if (!row?.lastNudgeResult?.startsWith("unroutable:")) continue;
+        }
+        const c = undeliveredCandidate(row, true);
+        if (c) candidates.push(c);
       }
-      const c = undeliveredCandidate(row, true);
-      if (c) candidates.push(c);
+      if (dueToYield()) await yieldLoop();
     }
 
+    setPhase("unclaimed");
     for (const { qitem_id } of deps.db
       .prepare(
         `SELECT qitem_id FROM queue_items
@@ -1065,11 +1229,12 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             AND (last_nudge_result IS NULL OR last_nudge_result NOT LIKE 'failed:%')`,
       )
       .all(cutoff) as Array<{ qitem_id: string }>) {
-      if (dueToYield()) await yieldLoop();
+      if (scan()) await yieldLoop();
       const c = unclaimedCandidate(qitem_id, true);
       if (c) candidates.push(c);
     }
 
+    setPhase("custody");
     const custodyHours = deps.custodyWindowHours ?? STUCK_SWEEP_CUSTODY_WINDOW_HOURS;
     const custodyCutoff = new Date(now.getTime() - custodyHours * 3_600_000).toISOString();
     const openDanglingIds: string[] = [];
@@ -1098,17 +1263,29 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
            SELECT qitem_id, state, handed_off_to, closure_target, closure_reason
              FROM queue_items WHERE qitem_id IN (SELECT value FROM json_each(?))
          )
-         SELECT q.qitem_id FROM custody_candidates q
+         SELECT q.qitem_id, q.state, q.handed_off_to, q.closure_target, q.closure_reason FROM custody_candidates q
           WHERE (q.state IN ('done', 'canceled') OR (q.state = 'handed-off'
             AND (q.handed_off_to IS NULL OR q.closure_target IS NOT q.handed_off_to)))
             AND (q.closure_target LIKE 'qitem-%' OR q.closure_reason = 'handed_off_to')`,
       )
-      .all(custodyCutoff, JSON.stringify(openDanglingIds)) as Array<{ qitem_id: string }>;
-    successors = createLinkedSuccessorLookup(deps.db, custodyRows.map((r) => r.qitem_id));
-    const lookup = successors;
+      .all(custodyCutoff, JSON.stringify(openDanglingIds)) as Array<{ qitem_id: string; state: string;
+        handed_off_to: string | null; closure_target: string | null; closure_reason: string | null }>;
+    // The successor read serves only the rows whose custody check will ask it, read in pages of the rows that have a
+    // chain_of_record, yielding between pages when the slice is due (the read grows with the queue's history); with
+    // none, nothing is read. custodyRowAsksSuccessor uses custodyCandidate's own target helpers and is a superset of
+    // what it asks (no custody-verified targets, no re-read of the row); a row that changed since this listing and asks
+    // anyway gets the per-row query (hasLinkedSuccessor), as before the lookup existed.
+    const asksSuccessors = (r: (typeof custodyRows)[number]): boolean => custodyRowAsksSuccessor({ qitemId: r.qitem_id,
+      state: r.state, handedOffTo: r.handed_off_to, closureTarget: r.closure_target, closureReason: r.closure_reason });
+    const successorSources = custodyRows.filter(asksSuccessors).map((r) => r.qitem_id);
+    const loaded = new Set(successorSources);
+    const lookup = createLinkedSuccessorLookup(deps.db, successorSources);
+    if (successorSources.length > 0) await lookup.load(async () => { if (dueToYield()) await yieldLoop(); });
+    successors = lookup;
     for (const { qitem_id } of custodyRows) {
-      if (dueToYield()) await yieldLoop();
-      const c = custodyCandidate(qitem_id, (source, target) => lookup.has(source, target));
+      if (scan()) await yieldLoop();
+      const c = custodyCandidate(qitem_id, (source, target) => (loaded.has(source)
+        ? lookup.has(source, target) : hasLinkedSuccessor(deps.db, source, target)));
       if (c) candidates.push(c);
     }
 
@@ -1175,6 +1352,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     };
     /** The two re-routes, in order, for one candidate. */
     const routeCandidate = (c: Candidate): void => { routeAroundMissing(c); routeAroundNoWake(c); };
+    setPhase("route");
     for (const c of candidates) {
       if (dueToYield()) await yieldLoop();
       routeAroundMissing(c);
@@ -1186,6 +1364,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
 
     // Route: idempotent per (row, kind). An existing open finding refreshes its age; a
     // new one is created durable + waking (the create path's default nudge).
+    setPhase("findings");
     const findings: StuckSweepFindingAction[] = [];
     const liveDedupTags = new Set<string>();
     const candidateIds = new Set(candidates.map((c) => c.row.qitemId));
@@ -1219,105 +1398,136 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       return agent;
     };
     const selfRoutedUnclaimed = (c: Candidate): boolean => c.kind === "unclaimed-obligation"
-      && c.route === c.row.destinationSession && !routeNotes.has(c.row.qitemId) && agentSeatNode(c.route) !== null;
+      && c.route === c.row.destinationSession && routes.note(c.row.qitemId) === undefined && agentSeatNode(c.route) !== null;
     const unclaimedBacklog = new Map<string, Candidate[]>();
-    for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
-      if (dueToYield()) await yieldLoop();
-      const dedupTag = findingDedupTag(c.kind, c.row.qitemId);
-      const shared = recoveries.find(c.row.qitemId);
-      if (!shared && selfRoutedUnclaimed(c)) {
-        const rows = unclaimedBacklog.get(c.route);
-        if (rows) rows.push(c); else unclaimedBacklog.set(c.route, [c]);
-        continue;
-      }
+    const isOpen = (state: string | undefined): boolean => state === "pending" || state === "in-progress" || state === "blocked";
+    /** The recovery that holds a row's custody, and whether a renewed deadline makes fresh evidence anyway. `live`
+     *  reads it without the pass's snapshot; the snapshot's answer is read live again when its row is not in the state
+     *  the snapshot holds or no longer carries this row's recovery tag (other code moved or untagged it during the
+     *  pass). */
+    type Custody = { shared: { qitemId: string; state: string } | null; sharedRow: QueueItem | null; renewed: boolean };
+    const custodyFor = (row: QueueItem, live: boolean): Custody => {
+      const shared = live ? findQueueRecovery(deps.db, row.qitemId) : recoveryLookup.find(row.qitemId);
       const sharedRow = shared ? indexed(() => deps.queueRepo.getById(shared.qitemId)) : null;
+      // The snapshot's holder is trusted only while it still holds the row as the snapshot saw it: the same state AND
+      // still tagged for this row (a bare tags write takes a recovery off a row without moving its state).
+      if (!live && shared && (sharedRow?.state !== shared.state || !sharedRow?.tags?.includes(recoveryTag(row.qitemId)))) {
+        return custodyFor(row, true);
+      }
       // A later accepted deadline can expire after the previous finding closed.
       // Its newer time is fresh evidence even when the pickup candidate wins this row.
       // An OPEN recovery still owns custody.
-      const renewedDeadline = c.row.state === "in-progress" && sharedRow
-        && Date.parse(c.row.closureRequiredAt ?? "") <= now.getTime()
-        && !["pending", "in-progress", "blocked"].includes(sharedRow.state)
-        && evidenceIsNewer(c.row.closureRequiredAt ?? "", sharedRow.tsUpdated);
-      if (shared && !renewedDeadline) {
-        const existingTags = sharedRow?.tags ?? [];
-        for (const tag of existingTags) if (tag.startsWith("stuck-sweep:")) liveDedupTags.add(tag);
-        // Keep the original evidence as history, but do not leave it presented as
-        // the current reason when a different condition now owns this recovery.
-        // Only the sweep's own findings are mutable here; other recovery rows
-        // can share custody and must retain their author's text.
-        if (sharedRow && isFindingRow(sharedRow) && sharedRow.summary?.startsWith("Stuck sweep: ")) {
-          const currentKind = sharedRow.summary.match(/^Stuck sweep: ([a-z-]+) on /)?.[1];
-          const pickupOrDeadline = (kind: string) => kind === "stalled-after-claim" || kind === "overdue-claim";
-          const humanUpdateNotice = currentKind === "unclaimed-obligation"
-            && c.kind === "undelivered-human-notice"
-            && deps.queueRepo.isRegisteredHumanUpdate(c.row);
-          if (currentKind && currentKind !== c.kind && ((pickupOrDeadline(currentKind) && pickupOrDeadline(c.kind)) || humanUpdateNotice)
-            && stillStuck(c)) { // the new reason must still hold on the row as it is now
-            const marker = "\n\n--- Original finding (historical) ---\n";
-            const original = sharedRow.body.includes(marker) ? sharedRow.body.split(marker, 2)[1]! : sharedRow.body;
-            const body = evidenceBody(deps.db, c) + marker + original;
-            const summary = `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`;
-            deps.db.prepare("UPDATE queue_items SET body = ?, summary = ? WHERE qitem_id = ? AND body = ? AND summary = ? AND state IN ('pending', 'in-progress', 'blocked')")
-              .run(body, summary, shared.qitemId, sharedRow.body, sharedRow.summary);
-          }
+      const renewed = row.state === "in-progress" && !!sharedRow
+        && Date.parse(row.closureRequiredAt ?? "") <= now.getTime()
+        && !isOpen(sharedRow.state)
+        && evidenceIsNewer(row.closureRequiredAt ?? "", sharedRow.tsUpdated);
+      return { shared, sharedRow, renewed };
+    };
+    /** A row whose custody another recovery holds: no new finding; its own open finding is refreshed. */
+    const holdShared = (c: Candidate, { shared, sharedRow }: Custody): void => {
+      const existingTags = sharedRow?.tags ?? [];
+      for (const tag of existingTags) if (tag.startsWith("stuck-sweep:")) liveDedupTags.add(tag);
+      // Keep the original evidence as history, but do not leave it presented as
+      // the current reason when a different condition now owns this recovery.
+      // Only the sweep's own findings are mutable here; other recovery rows
+      // can share custody and must retain their author's text.
+      if (sharedRow && isFindingRow(sharedRow) && sharedRow.summary?.startsWith("Stuck sweep: ")) {
+        const currentKind = sharedRow.summary.match(/^Stuck sweep: ([a-z-]+) on /)?.[1];
+        const pickupOrDeadline = (kind: string) => kind === "stalled-after-claim" || kind === "overdue-claim";
+        const humanUpdateNotice = currentKind === "unclaimed-obligation"
+          && c.kind === "undelivered-human-notice"
+          && deps.queueRepo.isRegisteredHumanUpdate(c.row);
+        if (currentKind && currentKind !== c.kind && ((pickupOrDeadline(currentKind) && pickupOrDeadline(c.kind)) || humanUpdateNotice)
+          && stillStuck(c)) { // the new reason must still hold on the row as it is now
+          const marker = "\n\n--- Original finding (historical) ---\n";
+          const original = sharedRow.body.includes(marker) ? sharedRow.body.split(marker, 2)[1]! : sharedRow.body;
+          const body = evidenceBody(deps.db, c) + marker + original;
+          const summary = `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`;
+          // Body and summary only: no tag, state or ts_updated the recovery snapshot holds changes.
+          deps.db.prepare("UPDATE queue_items SET body = ?, summary = ? WHERE qitem_id = ? AND body = ? AND summary = ? AND state IN ('pending', 'in-progress', 'blocked')")
+            .run(body, summary, shared!.qitemId, sharedRow.body, sharedRow.summary);
         }
-        if (["pending", "in-progress", "blocked"].includes(shared.state)) findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: shared.qitemId, action: "refreshed" });
+      }
+      if (isOpen(shared!.state)) findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: shared!.qitemId, action: "refreshed" });
+    };
+    // One entry per row, in the order rows were first found; its candidates newest first: the row's last candidate is
+    // routed, as before, and an earlier one is tried only when the last one's rule no longer holds when its finding
+    // would be made (the row moved during the pass's yields, so a listing made now would not list that kind).
+    const byRow = new Map<string, Candidate[]>();
+    for (const c of candidates) {
+      const list = byRow.get(c.row.qitemId);
+      if (list) list.unshift(c); else byRow.set(c.row.qitemId, [c]);
+    }
+    for (const rowCandidates of byRow.values()) {
+      if (dueToYield()) await yieldLoop();
+      const first = rowCandidates[0]!;
+      // The row as it is now (a deadline renewed since the listing is the one that counts), read once: nothing below
+      // awaits before the create.
+      const rowNow = indexed(() => deps.queueRepo.getById(first.row.qitemId)) ?? first.row;
+      const snapshot = custodyFor(rowNow, false);
+      // Nothing is created on the snapshot's word: a row it leaves without custody is read again live (a recovery
+      // another author made during the pass is not in the snapshot).
+      const custody = snapshot.shared && !snapshot.renewed ? snapshot : custodyFor(rowNow, true);
+      if (custody.shared && !custody.renewed) { holdShared(first, custody); continue; }
+      if (!custody.shared && selfRoutedUnclaimed(first)) {
+        const rows = unclaimedBacklog.get(first.route);
+        if (rows) rows.push(first); else unclaimedBacklog.set(first.route, [first]);
         continue;
       }
-      liveDedupTags.add(dedupTag);
-      const existing = deps.db
-        .prepare(
-          // The first term is implied by the second (its pattern starts with that literal); it lets
-          // the planner use idx_queue_items_recovery_tags (migration 099) instead of a full scan.
-          `SELECT qitem_id, source_session, state, ts_updated FROM queue_items
-            WHERE (tags LIKE '%"stuck-sweep:%') AND tags LIKE ?
-            ORDER BY CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END,
-                     ts_updated DESC, ts_created DESC, qitem_id DESC
-            LIMIT 1`,
-        )
-        .get(`%"${dedupTag}"%`) as
-        | { qitem_id: string; source_session: string; state: string; ts_updated: string }
-        | undefined;
-      const existingIsOpen = existing && ["pending", "in-progress", "blocked"].includes(existing.state);
-      if (existing && existingIsOpen) {
-        // Age is derived at read time; an unchanged scan is not a transition.
-        findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: existing.qitem_id, action: "refreshed" });
-      } else if (renewedDeadline || !existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated)) {
+      for (const c of rowCandidates) {
+        const dedupTag = findingDedupTag(c.kind, c.row.qitemId);
+        liveDedupTags.add(dedupTag);
+        const existing = deps.db
+          .prepare(hasRecoveryTagTable(deps.db) ? STUCK_SWEEP_DEDUP_SQL : STUCK_SWEEP_DEDUP_SQL_UNINDEXED)
+          .get(hasRecoveryTagTable(deps.db) ? dedupTag : `%"${dedupTag}"%`) as
+          | { qitem_id: string; source_session: string; state: string; ts_updated: string }
+          | undefined;
+        if (existing && isOpen(existing.state)) {
+          // Age is derived at read time; an unchanged scan is not a transition.
+          findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: existing.qitem_id, action: "refreshed" });
+          break;
+        }
         // The row was found stuck before the pass's later yields and awaited writes: its rule runs again on the row as
-        // it is now, and a row that no longer qualifies gets no new finding (its dedup tag stays live this pass).
+        // it is now, and a row that no longer qualifies gets no new finding of this kind (its dedup tag stays live this
+        // pass); the row's earlier candidate, if any, is tried next.
         // the escalation note and hop recorded at listing belong to that route; keep only what this run records
-        routeNotes.delete(c.row.qitemId);
-        routed.delete(c.row.qitemId);
+        routes.forget(c.row.qitemId);
         const now_ = freshCandidate(c.kind, c.row.qitemId, c.jobId);
         if (!now_) continue;
+        // A closed finding suppresses only evidence at or below its close: the evidence as it is now (a deadline renewed
+        // during the pass is newer than the listing's).
+        if (!(custody.renewed || !existing || evidenceIsNewer(now_.evidenceAt, existing.ts_updated))) break;
         routeCandidate(now_); // its destination, reason and targets as they are now
         const input = {
-          qitemId: recoveryId(deps.db, c.row.qitemId, renewedDeadline ? c.row.closureRequiredAt! : undefined),
+          qitemId: recoveryId(deps.db, c.row.qitemId, custody.renewed ? rowNow.closureRequiredAt! : undefined),
           // The detector is machinery, not a seat: the obligation's own creator is the
           // finding's source (the workflow-exception precedent).
           sourceSession: c.row.sourceSession,
           destinationSession: now_.route,
-          body: evidenceBody(deps.db, now_) + (routeNotes.has(c.row.qitemId) ? `\nescalation route: ${routeNotes.get(c.row.qitemId)}` : ""),
+          body: evidenceBody(deps.db, now_) + (routes.note(c.row.qitemId) !== undefined ? `\nescalation route: ${routes.note(c.row.qitemId)}` : ""),
           summary: now_.verificationTargets
             ? custodyHeadline(c.row.qitemId, now_.verificationTargets, now_.ageMinutes)
             : `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${now_.ageMinutes} min)`,
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId),
-            ...(routed.has(c.row.qitemId) || now_.row.tags?.includes(ESCALATION_HOP_TAG) ? [ESCALATION_HOP_TAG] : []),
+            ...(routes.usedHop(c.row.qitemId) || now_.row.tags?.includes(ESCALATION_HOP_TAG) ? [ESCALATION_HOP_TAG] : []),
             ...(now_.row.tags ?? []).filter((tag) => /^(project|mission|slice):/.test(tag))],
           // OpenRig's own finding, whoever created the stuck row.
           wakeTrigger: "openrig" as const,
         };
         try {
-          const created = await deps.queueRepo.create(input);
-          othersMayHaveRun();
+          const created = await awaited(deps.queueRepo.create(input));
+          // The pass's own write: the new finding holds this row's custody from now on.
+          recoveryLookup.note({ qitemId: created.qitemId, state: created.state, tsUpdated: created.tsUpdated, tags: created.tags });
           findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });
         } catch (err) {
           const message = `${c.kind} finding for ${c.row.qitemId} to ${now_.route} not created: ${err instanceof Error ? err.message : String(err)}`;
-          othersMayHaveRun();
+          // A create that failed part way may still have written its row.
+          recoveryLookup.invalidate();
           log(`[stuck-sweep] ${message}`);
           failedCreates.push(message);
         }
+        break;
       }
     }
 
@@ -1361,7 +1571,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           const row = indexed(() => deps.queueRepo.getById(id));
           // Gone, someone else's now, resolved at its source, or held by a finding or recovery of its own: one actually
           // written, so a create that failed this pass leaves the row here.
-          if (!row || row.destinationSession !== seat || recoveries.find(id)
+          if (!row || row.destinationSession !== seat || findQueueRecovery(deps.db, id)
             || deliveryResolutionEvidence(deps, "unclaimed-obligation", id, now)) return [];
           return [{ qitemId: id, since: pendingSince(deps.db, id) ?? row.tsCreated, from: row.sourceSession, summary: row.summary }];
         });
@@ -1379,7 +1589,6 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             closureReason: "no-follow-on",
             transitionNote: `stuck-sweep resolved: unclaimed-backlog on ${seat}: every row it stood for is claimed, parked, closed or has its own finding`,
           });
-          othersMayHaveRun();
           findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: last.qitem_id, action: "closed" });
           continue;
         }
@@ -1394,11 +1603,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (rows.length === 0) continue;
       // Each row's rule again, on the row as it is now, as a finding per row is checked right before it's created.
       const current = rows.flatMap((c) => {
-        routeNotes.delete(c.row.qitemId);
-        routed.delete(c.row.qitemId);
+        routes.forget(c.row.qitemId);
         const now_ = freshCandidate(c.kind, c.row.qitemId);
         if (now_) routeCandidate(now_);
-        return now_ && selfRoutedUnclaimed(now_) && now_.route === seat && !recoveries.find(now_.row.qitemId) ? [now_] : [];
+        return now_ && selfRoutedUnclaimed(now_) && now_.route === seat && !findQueueRecovery(deps.db, now_.row.qitemId) ? [now_] : [];
       });
       if (current.length === 0) continue;
       // A closed notice whose list is unreadable holds back every row, each until it has newer evidence than the close.
@@ -1406,7 +1614,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (last && !current.some((c) => (covered !== null && !covered.has(c.row.qitemId)) || evidenceIsNewer(c.evidenceAt, last.ts_updated))) continue;
       const text = unclaimedBacklogText(seat, current.map(backlogRow), ageMinutes, node);
       try {
-        const created = await deps.queueRepo.create({
+        const created = await awaited(deps.queueRepo.create({
           // A notice to a seat about its own rows comes from that seat, as a restore notice does; OpenRig wakes it.
           sourceSession: seat,
           destinationSession: seat,
@@ -1415,12 +1623,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           evidenceRef: `rig queue list --destination ${seat} --state pending`,
           tags: [STUCK_SWEEP_FINDING_TAG, tag],
           wakeTrigger: "openrig" as const,
-        });
-        othersMayHaveRun();
+        }));
         findings.push({ kind: "unclaimed-backlog", qitemId: seat, findingQitemId: created.qitemId, action: "created" });
       } catch (err) {
         const message = `unclaimed-backlog notice for ${seat} not created: ${err instanceof Error ? err.message : String(err)}`;
-        othersMayHaveRun();
         log(`[stuck-sweep] ${message}`);
         failedCreates.push(message);
       }
@@ -1428,6 +1634,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
 
     // Resolution: an open finding whose underlying condition is no longer detected closes
     // with its reason — the sweep cleans up after itself, no human unwind.
+    setPhase("resolve");
     const openFindings = deps.db
       .prepare(
         `SELECT qitem_id, tags FROM queue_items
@@ -1455,20 +1662,21 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (kind === "stalled-after-claim" && stuckId && deps.queueRepo.getById(stuckId)?.pickup?.grace) continue;
       let resolution = "no longer detected";
       if (stuckId && (kind === "undelivered-wake" || kind === "undelivered-human-notice" || kind === "unclaimed-obligation")) {
-        const evidence = deliveryResolutionEvidence(deps, kind, stuckId, now);
+        // The source is read live; the snapshot is lent only to its waiting view, which the evidence does not read.
+        const evidence = deliveryResolutionEvidence(deps, kind, stuckId, now, (id) => indexed(() => deps.queueRepo.getById(id)));
         if (!evidence) continue;
         resolution = evidence;
       }
       // The list was read before this loop's yields: the finding's owner may have closed it since (done -> done is
       // refused, and would fail the whole pass).
       const current = deps.db.prepare("SELECT state FROM queue_items WHERE qitem_id = ?").get(f.qitem_id) as { state: string } | undefined;
-      if (!current || !["pending", "in-progress", "blocked"].includes(current.state)) continue;
+      if (!current || !isOpen(current.state)) continue;
       // "No longer detected" rests on lists read before this loop's yields: a row that came back (blocked, then
       // in-progress past its deadline) during the pass still holds, so its rule runs again on the row as it is now.
       // (A row this pass did find, whose finding isn't live because another recovery now holds its custody, closes as
       // the base closed it.)
       if (kind && stuckId && resolvedByRule.has(kind) && !candidateIds.has(stuckId) && ruleHolds(kind as StuckFindingKind, stuckId)) continue;
-      await deps.queueRepo.update({
+      const closed = await deps.queueRepo.update({
         qitemId: f.qitem_id,
         // The sweep performed this transition; ownership stays on the existing row.
         actorSession: "stuck-sweep@system",
@@ -1476,7 +1684,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         closureReason: "no-follow-on",
         transitionNote: `stuck-sweep resolved: ${kind ?? "finding"} on ${stuckId ?? "row"} ${resolution}`,
       });
-      othersMayHaveRun();
+      // The pass's own write: the finding no longer holds custody as an open recovery.
+      recoveryLookup.note({ qitemId: closed.qitemId, state: closed.state, tsUpdated: closed.tsUpdated, tags: closed.tags });
       if (kind && stuckId) {
         findings.push({
           kind: kind as StuckFindingKind,
@@ -1487,6 +1696,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
     }
 
+    setPhase("end");
+    endSlice();
+    stats.recoveryIndexBuilds = recoveryLookup.builds;
     if (failedCreates.length > 0) {
       // Not a clean or complete pass: say so, while keeping the findings that were made.
       const error = failedCreates.join("; ");
@@ -1497,6 +1709,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     status?.record(outcome, { findings: findings.filter((f) => f.action !== "closed").length });
     return { outcome, findings };
   } catch (err) {
+    endSlice();
+    stats.recoveryIndexBuilds = recoveries?.builds ?? 0;
     const message = err instanceof Error ? err.message : String(err);
     // Loud, never silent: the failure lands on the log AND the status surface (healthz).
     log(`[stuck-sweep] SWEEP FAILED (skipping this tick loudly): ${message}`);

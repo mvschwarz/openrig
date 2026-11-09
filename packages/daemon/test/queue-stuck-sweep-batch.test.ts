@@ -8,7 +8,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository, createLinkedSuccessorLookup, hasLinkedSuccessor } from "../src/domain/queue-repository.js";
 import { createRecoveryLookup, findQueueRecovery, recoveryTag } from "../src/domain/queue-recovery.js";
-import { runStuckSweep, STUCK_SWEEP_YIELD_EVERY_ROWS } from "../src/domain/queue-stuck-sweep.js";
+import { runStuckSweep } from "../src/domain/queue-stuck-sweep.js";
 
 let db: Database.Database;
 let repo: QueueRepository;
@@ -29,7 +29,9 @@ async function countPrepared(match: (sql: string) => boolean, run: () => unknown
   try { await run(); } finally { spy.mockRestore(); }
   return n;
 }
-const perRowRecovery = (sql: string) => sql.includes("json_each(tags) WHERE value = ?") && sql.includes("qitem_id DESC LIMIT 1");
+// findQueueRecovery's live read: the json_each read, or its search of queue_recovery_tags since migration 156
+const perRowRecovery = (sql: string) => (sql.includes("json_each(tags) WHERE value = ?") || sql.includes("FROM queue_recovery_tags t"))
+  && /qitem_id DESC\s+LIMIT 1/.test(sql) && !sql.includes("source_session");
 const perRowSuccessor = (sql: string) => sql.includes("s.qitem_id = ? OR s.destination_session = ?");
 
 beforeEach(() => {
@@ -248,8 +250,8 @@ describe("runStuckSweep: batched reads and a yielding loop", () => {
     let result: Awaited<ReturnType<typeof runStuckSweep>> | undefined;
     const builds = await countPrepared(buildSql, async () => { result = await runStuckSweep({ db, queueRepo: repo, log: () => {} }); });
     expect(result!.findings.filter((f) => f.action === "created")).toHaveLength(60);
-    // one build for the custody loop and one after each of its yields; none per finding created
-    expect(builds).toBeLessThanOrEqual(1 + Math.ceil(60 / STUCK_SWEEP_YIELD_EVERY_ROWS));
+    // one build for the pass; none per yield or finding created
+    expect(builds).toBe(1);
   });
 
   it("does not fail the pass when a finding's owner closes it while the resolution loop yields", async () => {
@@ -277,18 +279,23 @@ describe("runStuckSweep: batched reads and a yielding loop", () => {
     expect(closed).toBeLessThan(60);
   });
 
-  it("drops its indexes at every yield, and creates nothing for a source whose successor landed during the pass", async () => {
+  it("keeps its successor index for the whole pass, and creates nothing for a source whose successor landed during it", async () => {
     custodyRows(120);
     setImmediate(() => {
       for (let i = 0; i < 120; i++) row(`s-${i}`, { handedOffFrom: `qitem-c${String(i).padStart(4, "0")}`, destination: `seat-${i % 7}@r` });
     });
     let result: Awaited<ReturnType<typeof runStuckSweep>> | undefined;
-    // the rows read after the first yield see the new successors in the rebuilt index and are never candidates; the
-    // ones read before it are candidates, and their rule, run again before the create, now finds the successor
-    const recheckedLive = await countPrepared(perRowSuccessor, async () => { result = await runStuckSweep({ db, queueRepo: repo, log: () => {} }); });
+    const buildSql = (sql: string) => sql.includes("s.handed_off_from IN (SELECT value FROM json_each(?))");
+    let builds = 0;
+    // the index is read once, before the successors land: every row is a candidate, and its rule, run again live before
+    // the create, finds the successor
+    const recheckedLive = await countPrepared(perRowSuccessor, async () => {
+      builds = await countPrepared(buildSql, async () => { result = await runStuckSweep({ db, queueRepo: repo, log: () => {} }); });
+    });
     expect(result!.findings.filter((f) => f.action === "created")).toEqual([]);
+    expect(builds).toBe(1);
     expect(recheckedLive).toBeGreaterThan(0);
-    expect(recheckedLive).toBeLessThanOrEqual(2 * STUCK_SWEEP_YIELD_EVERY_ROWS); // two point queries per re-check
+    expect(recheckedLive).toBeLessThanOrEqual(2 * 120); // at most two point queries per candidate, once each
   });
 
   function failedWakeRows(n: number, ageMs: number): string[] {

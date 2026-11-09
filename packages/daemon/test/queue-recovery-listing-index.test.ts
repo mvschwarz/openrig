@@ -25,7 +25,8 @@ describe("withRecoveryIndex: one recovery index per listing", () => {
     const prepare = db.prepare.bind(db); let n = 0;
     const spy = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
       // the per-row recovery lookup (findQueueRecovery's query), not the cheap per-qitem tag checks
-      if (sql.includes("json_each(tags) WHERE value = ?") && sql.includes("qitem_id DESC LIMIT 1")) n++;
+      // (the json_each read, or its search of queue_recovery_tags since migration 156)
+      if ((sql.includes("json_each(tags) WHERE value = ?") || sql.includes("FROM queue_recovery_tags t")) && /qitem_id DESC\s+LIMIT 1/.test(sql)) n++;
       return prepare(sql);
     });
     try { run(); } finally { spy.mockRestore(); }

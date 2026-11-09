@@ -28,7 +28,7 @@ describe("recovery lookup work and fresh disposition", () => {
     const expected = repo.getById("source"); legacy.mockRestore();
     const prepare = db.prepare.bind(db); const calls: unknown[] = [];
     vi.spyOn(db, "prepare").mockImplementation((sql) => {
-      if (sql.includes("json_each(tags)") && sql.includes("ts_updated DESC, qitem_id DESC LIMIT 1")) calls.push(sql);
+      if ((sql.includes("json_each(tags)") || sql.includes("FROM queue_recovery_tags t")) && /ts_updated DESC, (q\.)?qitem_id DESC\s+LIMIT 1/.test(sql)) calls.push(sql);
       return prepare(sql);
     });
     expect(repo.getById("source")).toEqual(expected);
@@ -89,7 +89,7 @@ describe("recovery lookup work and fresh disposition", () => {
     const prepare = db.prepare.bind(db);
     vi.spyOn(db, "prepare").mockImplementation(sql => {
       // the per-row lookup, or the listing's one-pass recovery index (withRecoveryIndex) that replaces it in a list
-      if ((sql.includes("json_each(tags)") && sql.includes("ts_updated DESC, qitem_id DESC LIMIT 1"))
+      if (((sql.includes("json_each(tags)") || sql.includes("FROM queue_recovery_tags t")) && /ts_updated DESC, (q\.)?qitem_id DESC\s+LIMIT 1/.test(sql))
         || sql === RECOVERY_INDEX_SQL) throw new Error("fixture lookup unavailable");
       return prepare(sql);
     });
