@@ -1367,6 +1367,29 @@ describe("--help is present on every command (HG-12)", () => {
   });
 });
 
+describe("slice and mission verb help names the parent --workspace option", () => {
+  const helpOf = (cmd: Command): string => {
+    let out = "";
+    cmd.configureOutput({ writeOut: (text) => { out += text; } });
+    cmd.outputHelp();
+    return out;
+  };
+
+  it("every slice and mission verb, and each tier, shows the rig scope --workspace route", () => {
+    const cmd = scopeCommand();
+    for (const tierName of ["slice", "mission"] as const) {
+      const tier = cmd.commands.find((c) => c.name() === tierName)!;
+      expect(helpOf(tier)).toContain(`rig scope --workspace <project root> ${tierName} <verb> ...`);
+      for (const verb of tier.commands) {
+        const help = helpOf(verb);
+        expect(help, `${tierName} ${verb.name()}`).toContain(`rig scope --workspace <project root> ${tierName} ${verb.name()} ...`);
+        expect(help, `${tierName} ${verb.name()}`).toContain("$(rig config get workspace.projects_root)/<project>");
+        expect(help, `${tierName} ${verb.name()}`).not.toContain("~/.openrig");
+      }
+    }
+  });
+});
+
 describe("rig scope audit ordinal naming", () => {
   let root: string;
   let mission: string;
