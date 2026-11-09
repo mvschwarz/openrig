@@ -247,8 +247,8 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     const refusal = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(refusal).toContain("no replacement is chosen silently");
     expect(refusal).toContain('To replace the primary, set binding.0 to the new primary spec: rig gateway human set ana binding.0 "<kind:connectorRef:secretsRef:primary[:handle=<id>]>"');
-    expect(refusal).toContain("To promote one of the other bindings (binding.1), unset that secondary slot first, then find the primary slot again in remainingBindings (or rig gateway human show ana --json) and set it to the spec with role primary.");
-    expect(refusal).toContain("To remove every binding, unset the secondary bindings first (checking remainingBindings or rig gateway human show ana after each unset because slot indexes shift), then unset the remaining primary slot.");
+    expect(refusal).toContain("To promote one of the other bindings (binding.1), unset that secondary slot first, then find the primary's current slot in remainingBindings (or rig gateway human show ana --json, since unsetting a lower slot shifts the primary down) and set it to the spec with role primary.");
+    expect(refusal).toContain("To remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show ana, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).");
     expect(refusal).not.toContain("--replace");
 
     // 2. Unset secondary binding.1 -> succeeds, prints remainingBindings[0] = binding.0 and note without secrets
@@ -292,7 +292,7 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     expect(out2.ok).toBe(true);
     expect(out2.remainingBindings).toEqual([]);
     expect(out2.note).toContain("Remaining bindings: none");
-    expect(out2.note).toContain("Removing the last binding makes the current delivery episode inactive, so missing-post findings stop");
+    expect(out2.note).toContain("Removing the last binding makes the current delivery episode inactive, so new missing-post findings stop (an already-open recovery item for an undelivered notice may remain)");
     expect(out2.note).toContain("It does not answer, close or cancel open questions, cancel or reroute already-prepared deliveries, or retract anything a bridge has already accepted");
 
     const loaded = loadHumanRegistry(home);

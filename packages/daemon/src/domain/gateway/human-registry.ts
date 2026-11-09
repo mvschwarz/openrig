@@ -742,7 +742,7 @@ export function describeBindingUnsetNote(
     `Removed ${removedLabel}. ${remainingText} ` +
     `Binding slot indexes shift after removal, so do not blindly retry ${removedSlot} unset; check remainingBindings, the operation receipt, or rig gateway human show ${entityId} before retrying. ` +
     `Removing a binding keeps the person, their preferences, their other bindings and their open questions. ` +
-    `Removing the last binding makes the current delivery episode inactive, so missing-post findings stop; the current delivery-outcome display may disappear too, while historical receipt notes remain. ` +
+    `Removing the last binding makes the current delivery episode inactive, so new missing-post findings stop (an already-open recovery item for an undelivered notice may remain); the current delivery-outcome display may disappear too, while historical receipt notes remain. ` +
     `It does not answer, close or cancel open questions, cancel or reroute already-prepared deliveries, or retract anything a bridge has already accepted.`
   );
 }
@@ -869,8 +869,8 @@ export function setHumanField(
             `cannot unset ${field} (role "primary") while ${remaining.length} other binding(s) remain (${otherSlots}): ` +
             `exactly one connectorBinding must have role "primary" (found 0), and no replacement is chosen silently. ` +
             `To replace the primary, set ${field} to the new primary spec: rig gateway human set ${entityId} ${field} "<kind:connectorRef:secretsRef:primary[:handle=<id>]>". ` +
-            `To promote one of the other bindings (${otherSlots}), unset that secondary slot first, then find the primary slot again in remainingBindings (or rig gateway human show ${entityId} --json) and set it to the spec with role primary. ` +
-            `To remove every binding, unset the secondary bindings first (checking remainingBindings or rig gateway human show ${entityId} after each unset because slot indexes shift), then unset the remaining primary slot.`,
+            `To promote one of the other bindings (${otherSlots}), unset that secondary slot first, then find the primary's current slot in remainingBindings (or rig gateway human show ${entityId} --json, since unsetting a lower slot shifts the primary down) and set it to the spec with role primary. ` +
+            `To remove every binding, unset the secondary bindings first using their current slot indexes from remainingBindings or rig gateway human show ${entityId}, then finish at binding.0 (once all secondaries are gone, the primary is at binding.0).`,
         };
       }
       raw.connectorBindings = remaining;
