@@ -498,26 +498,30 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       const still = bindToGrant(c, store, grant, body);
       if ("refused" in still) return still.refused;
     }
-    // #1524 (a), Codex only, synchronous with the write below (no await between them):
-    // - a known earlier occupant's hook (its generation is registered for this node and isn't the current one)
-    //   neither writes nor publishes. An absent or unregistered generation, no current tenure, or an unreadable
-    //   ledger keep today's write.
-    // - Codex sends an explicit transcript_path null for a thread it never persists (an internal thread), and also
-    //   when it can't read a persisted conversation's rollout. Either way the saved pointer is kept, so an internal
-    //   thread can't replace it. An absent key, an empty string or a malformed value keep today's write.
-    if (runtime === "codex") {
+    // #1524 (a) for Codex, #2768 for Claude, synchronous with the write below (no await between them): a known earlier
+    // occupant's hook (its generation is registered for this node and isn't the current one) neither writes nor
+    // publishes. An absent or unregistered generation, no current tenure, or an unreadable ledger keep today's write.
+    // A no-launch adoption (reconcile, bind, self-attach) registers the live process again without replacing it, so
+    // an occupant followed only by adoptions is still current; a launch after it is what makes it earlier.
+    if (runtime === "codex" || runtime === "claude-code") {
       let generationMismatch = false;
       try {
         const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
         generationMismatch = !!generation && !!current && current.generationUuid !== generation
-          && sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation);
+          && sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)
+          && !sessionRegistry.isOccupantContinuedByAdoption(resolved.nodeId, generation);
       } catch { /* an unreadable ledger is no evidence of a mismatch */ }
       if (generationMismatch) {
         return c.json({
           ok: false, code: "generation_mismatch", tokenPersisted: false,
-          error: "Codex session identity ignored: emitter is an earlier occupant of this seat.",
+          error: `${runtime === "codex" ? "Codex" : "Claude"} session identity ignored: emitter is an earlier occupant of this seat.`,
         }, 409);
       }
+    }
+    // Codex sends an explicit transcript_path null for a thread it never persists (an internal thread), and also when it
+    // can't read a persisted conversation's rollout. Either way the saved pointer is kept, so an internal thread can't
+    // replace it. An absent key, an empty string or a malformed value keep today's write.
+    if (runtime === "codex") {
       if (body.transcriptPathPresent === true && body.transcriptPath === null) {
         return c.json({
           ok: true, sessionId, provenance: "hook", tokenPersisted: false, code: "transcript_absent",
