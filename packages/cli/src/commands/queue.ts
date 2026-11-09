@@ -1241,15 +1241,27 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           }
           if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
           const safeTag = (value: unknown): value is string =>
+            typeof value === "string" && /^(?:mission|slice):[^\x00-\x1f\x7f]{0,160}$/.test(value);
+          const nonEmptySafeTag = (value: unknown): value is string =>
             typeof value === "string" && /^(?:mission|slice):[^\x00-\x1f\x7f]{1,160}$/.test(value);
-          const record = parsed as { status?: unknown; tag?: unknown; count?: unknown; tags?: unknown };
-          if (record.status === "unresolved" && safeTag(record.tag)) {
+          const record = parsed as { status?: unknown; tag?: unknown; count?: unknown; tags?: unknown; reason?: unknown };
+          if (record.status === "unresolved" && nonEmptySafeTag(record.tag)) {
             console.error(`Warning: queue create scope check: ${record.tag} is unresolved (resolves to 0 directories); row was created.`);
+            return;
+          }
+          if (record.status === "empty" && (record.tag === "mission:" || record.tag === "slice:")) {
+            console.error(`Warning: queue create scope check: ${record.tag} has an empty value; row was created.`);
+            return;
+          }
+          if (record.status === "conflict" && Array.isArray(record.tags) && record.tags.length >= 2 && record.tags.length <= 8) {
+            const validTags = record.tags.filter(nonEmptySafeTag);
+            if (validTags.length !== record.tags.length) return;
+            console.error(`Warning: queue create scope check: conflicting scope tags (${validTags.join(", ")}); row was created.`);
             return;
           }
           if (
             record.status === "ambiguous" &&
-            safeTag(record.tag) &&
+            nonEmptySafeTag(record.tag) &&
             typeof record.count === "number" &&
             Number.isInteger(record.count) &&
             record.count >= 2 &&
@@ -1262,15 +1274,39 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const validTags = record.tags.filter(safeTag);
             if (validTags.length !== record.tags.length) return;
             if (record.status === "unavailable") {
-              console.error(`Warning: queue create scope check unavailable (${validTags.join(", ")}): could not run scope check on this host; row was created.`);
+              if (record.reason === "missing-mission") {
+                console.error(`Warning: queue create scope check unavailable (${validTags.join(", ")}) without mission context: mission tag is missing; row was created.`);
+              } else if (record.reason === undefined) {
+                console.error(`Warning: queue create scope check unavailable (${validTags.join(", ")}): could not run scope check on this host; row was created.`);
+              }
             } else {
               console.error(`Note: queue create scope check skipped for cross-host write (${validTags.join(", ")}); row was forwarded.`);
             }
           }
         };
+        const emitRecoveredScopeAdvisory = () => {
+          const recoveredTags: string[] = [];
+          for (const raw of tags ?? []) {
+            if (recoveredTags.length >= 8) break;
+            if (!raw.startsWith("mission:") && !raw.startsWith("slice:")) continue;
+            const prefix = raw.startsWith("mission:") ? "mission:" : "slice:";
+            const body = raw.slice(prefix.length).replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 120);
+            const sanitized = body ? `${prefix}${body}` : prefix;
+            if (!recoveredTags.includes(sanitized)) recoveredTags.push(sanitized);
+          }
+          if (recoveredTags.length === 0) return;
+          if (sent.remoteHost !== undefined) {
+            console.error(`Note: queue create scope check skipped for cross-host write (${recoveredTags.join(", ")}); row was forwarded.`);
+          } else {
+            console.error(`Warning: queue create scope check outcome unavailable after response recovery (${recoveredTags.join(", ")}): original scope check result was lost with the create response; row was created.`);
+          }
+        };
         // Every create that's answered with a row ends here: its warning, --verify's delivery, and the output.
-        const finish = async (created: Record<string, unknown>, status: number, headers?: Headers) => {
-          if (status < 400) emitScopeAdvisory(headers);
+        const finish = async (created: Record<string, unknown>, status: number, headers?: Headers, recovered = false) => {
+          if (status < 400) {
+            if (recovered) emitRecoveredScopeAdvisory();
+            else emitScopeAdvisory(headers);
+          }
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
           if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
             console.error(`Warning: ${createWarning.message}`);
@@ -1300,7 +1336,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
             console.error(late.note);
             if (late.row) {
-              await finish(late.row, 200);
+              await finish(late.row, 200, undefined, true);
               return;
             }
           }
@@ -1317,7 +1353,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
           if (late.row) {
-            await finish(late.row, 200);
+            await finish(late.row, 200, undefined, true);
             return;
           }
           // Preserve that failure and expose the same recovery ID.
