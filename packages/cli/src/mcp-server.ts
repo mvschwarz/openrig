@@ -391,6 +391,18 @@ function externalScope(access: McpAccess, seatOf: () => string | undefined): Sco
   };
 }
 
+/** The daemon's root_unknown names every shared root it has. A scoped caller learns only the ones it may read: the
+ *  daemon's roots its grant names, or none when that list can't be read. Every other answer passes as it is. */
+function scopedRootUnknown(res: DaemonResponse<unknown>, scope: Scope): DaemonResponse<unknown> {
+  const data = (res.data ?? {}) as Record<string, unknown>;
+  if (data.error !== "root_unknown") return res;
+  const roots = Array.isArray(data.configuredRoots)
+    ? data.configuredRoots.filter((name): name is string => typeof name === "string" && scope.root(name)) : [];
+  const named = typeof data.rootName === "string" ? ` '${data.rootName}'` : "";
+  return { status: res.status, data: { error: "root_unknown", ...(named ? { rootName: data.rootName } : {}), configuredRoots: roots,
+    message: `Shared root${named} is not configured on this daemon. Shared roots this connection may read: ${roots.join(", ") || "(none)"}.` } };
+}
+
 /** A target outside an authenticated caller's scope. It names the kind of target only, never the record. */
 function outOfScope(what: string, hint?: string): TextResult {
   const message = `${what} is outside what this connection may reach.${hint ? ` ${hint}` : ""}`;
@@ -1839,7 +1851,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const read = async (source: string, rootName: string, inside: string): Promise<TextResult> => {
           const res = await client.get(`/api/files/read?${new URLSearchParams({ root: rootName, path: inside }).toString()}`);
-          if (res.status >= 400) return mapResult(res);
+          if (res.status >= 400) return mapResult(scope ? scopedRootUnknown(res, scope) : res);
           return mapResult({ status: 200, data: artifactView(source, (res.data ?? {}) as FileRead, offset ?? 0) }, undefined, { structured: true });
         };
         if (scope && root && !scope.root(root)) return outOfScope(`Root ${root}`);

@@ -36,7 +36,7 @@ const SEEDED_AT_ENABLE = "seeded-at-enable";
 
 export type OpenAskOutcome =
   | "posted" | "already-posted" | "queued" | "held" | "below-floor"
-  | "no-longer-active" | "superseded" | "recipient-changed"
+  | "no-longer-active" | "superseded" | "recipient-changed" | "no-connector"
   | "state-unavailable" | "transport-failed" | "uncertain";
 
 export interface OpenAskResult {
@@ -117,6 +117,7 @@ const DISPOSITION_OUTCOME: Record<ReleaseDisposition, { outcome: OpenAskOutcome;
   superseded: { outcome: "superseded", detail: "the row has a newer ask since" },
   "recipient-changed": { outcome: "recipient-changed" },
   "below-posting-threshold": { outcome: "below-floor", detail: "the posting floor was raised before it posted" },
+  "no-connector": { outcome: "no-connector", detail: "the person has no connector now: it stays on Steering and the Feed" },
 };
 
 /** The latest delivery fact a row records for this episode, oldest notes first. A posted receipt wins whenever it is. */

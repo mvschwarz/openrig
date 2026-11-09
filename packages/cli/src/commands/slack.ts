@@ -122,7 +122,7 @@ const CHANNEL_MAP_APPLY =
 const POST_OPEN_ASKS = "`rig slack post-open-asks`";
 
 type OpenAskOutcome = "posted" | "already-posted" | "queued" | "held" | "below-floor" | "no-longer-active" | "superseded"
-  | "recipient-changed" | "state-unavailable" | "transport-failed" | "uncertain";
+  | "recipient-changed" | "no-connector" | "state-unavailable" | "transport-failed" | "uncertain";
 interface OpenAsk { qitemId: string; recipient: string; summary: string | null; outcome: OpenAskOutcome; detail?: string }
 interface PostOpenAsksResponse { ok: boolean; asks: OpenAsk[] }
 
@@ -135,6 +135,7 @@ const OUTCOME_LABEL: Record<OpenAskOutcome, string> = {
   "no-longer-active": "no longer active",
   superseded: "superseded",
   "recipient-changed": "recipient changed",
+  "no-connector": "no connector (Steering and the Feed only)",
   "state-unavailable": "state unavailable",
   "transport-failed": "transport failed",
   uncertain: "uncertain",

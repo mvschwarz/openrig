@@ -134,3 +134,29 @@ describe("a rule and a mode-bar line inside the prompt text", () => {
     expect(inspectStartupStagedText(frame, text)).toBe("unverified");
   });
 });
+
+describe("Claude's startup composer with a person's own statusLine between the closing rule and the footer (#2798)", () => {
+  const STATUS = "  gpt-6.1-sol-fast · ctx 171.1k/872k (19.6%) · orchestrator";
+  const framed = (body: string, rows: string[], footer = "⏵⏵ bypass permissions on (shift+tab to cycle)") =>
+    `────────────────────\n❯ ${body}\n────────────────────\n${rows.join("\n")}\n  ${footer}\n`;
+
+  it("reads the staged prompt and the cleared box as without the statusLine", () => {
+    expect(inspectStartupStagedText(framed(expected, [STATUS]), expected, "claude-code")).toBe("staged");
+    expect(inspectStartupStagedText(framed("", [STATUS], "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"), expected, "claude-code")).toBe("clear");
+    expect(inspectStartupStagedText(framed(expected, []), expected, "claude-code")).toBe("staged");
+  });
+
+  it.each([
+    ["a selected choice behind a side border", ["│ ❯ 1. Yes │"]],
+    ["a numbered choice", ["  1. Yes"]],
+    ["a box corner", ["╭──────────────╮"]],
+    ["a blank row above a statusLine row", ["", STATUS]],
+  ])("keeps the composer unverified with %s where the statusLine goes", (_name, rows) => {
+    expect(inspectStartupStagedText(framed(expected, rows), expected, "claude-code")).toBe("unverified");
+  });
+
+  it("leaves other runtimes as they were: a row under the closing rule that is not a footer stays unverified", () => {
+    expect(inspectStartupStagedText(framed(expected, [STATUS]), expected)).toBe("unverified");
+    expect(inspectStartupStagedText(framed(expected, [STATUS]), expected, "codex")).toBe("unverified");
+  });
+});
