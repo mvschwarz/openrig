@@ -72,6 +72,7 @@ describe("queue create scope advisories preserve admission and output", () => {
   let source: Fixture;
   let stdout: string[];
   let stderr: string[];
+  let responseHeaders: Headers[];
   let savedHost: string | null;
   let savedExit: typeof process.exitCode;
 
@@ -128,6 +129,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "0");
     stdout = [];
     stderr = [];
+    responseHeaders = [];
     vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { stdout.push(args.join(" ")); });
     vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { stderr.push(args.join(" ")); });
     vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => { stderr.push(String(chunk)); return true; });
@@ -159,6 +161,7 @@ describe("queue create scope advisories preserve admission and output", () => {
           const response = await app.request(url, { method: "POST",
             headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
             body: JSON.stringify(body) });
+          responseHeaders.push(response.headers);
           return { status: response.status, data: await response.json(), headers: response.headers };
         },
       }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
@@ -227,7 +230,54 @@ describe("queue create scope advisories preserve admission and output", () => {
     },
   );
 
-  it.each(["valid", "missing"])("remote create is SKIPPED even when sender scope is %s", async senderState => {
+  const longScopeTags = () => [
+    ...Array.from({ length: 7 }, (_, i) => "mission:" + ("ordinary_mission_" + i + "_").padEnd(150, "x")),
+    ...Array.from({ length: 2 }, (_, i) => "slice:" + ("ordinary_slice_" + i + "_").padEnd(150, "x")),
+  ];
+
+  it.each([
+    { level: "mission", code: "EACCES", mission: "MISSION.ONE", slice: "SLICE.ONE" },
+    { level: "slice", code: "EIO", mission: "release", slice: "SLICE.ONE" },
+  ])("reports unavailable when existing $level SPEC lookup fails with $code", async row => {
+    const file = row.level === "mission"
+      ? path.join(source.missions, "release", "SPEC.md")
+      : path.join(source.missions, "release", "slices", "build", "SPEC.md");
+    expect(fs.statSync(file).isFile()).toBe(true);
+    const read = fs.readFileSync.bind(fs);
+    let faults = 0;
+    vi.spyOn(fs, "readFileSync").mockImplementation(((...args: unknown[]) => {
+      if (String(args[0]) === file) {
+        faults++;
+        throw Object.assign(new Error("fixture SPEC read failed"), { code: row.code });
+      }
+      return (read as (...input: unknown[]) => unknown)(...args);
+    }) as typeof fs.readFileSync);
+    await create(source.app, ["--mission", row.mission, "--slice", row.slice, "--tags", "project:alpha"], true);
+    committed(source, "qitem-create-contract", [`mission:${row.mission}`, `slice:${row.slice}`, "project:alpha"]);
+    expect(faults).toBeGreaterThan(0);
+    expect(scopeLines()).toMatch(/unavailable|could not (?:run|check)|unable to (?:run|check)/i);
+    expect(scopeLines()).not.toMatch(/resolves to 0|checked.*unresolved/i);
+  });
+
+  it("keeps absent unrelated metadata distinct from an unreadable existing SPEC", async () => {
+    fs.unlinkSync(path.join(source.missions, "duplicate-a", "SPEC.md"));
+    await create(source.app, ["--mission", "MISSION.ONE", "--slice", "SLICE.ONE", "--tags", "project:alpha"], true);
+    committed(source, "qitem-create-contract", ["mission:MISSION.ONE", "slice:SLICE.ONE", "project:alpha"]);
+    expect(scopeLines()).toBe("");
+  });
+
+  it("keeps the unavailable notice for ordinary long scope tags without changing the committed result", async () => {
+    fs.writeFileSync(path.join(source.root, "workspace.yaml"), "projects: invalid\n");
+    const tags = ["project:alpha", ...longScopeTags()];
+    await create(source.app, ["--tags", tags.join(",")], true);
+    committed(source, "qitem-create-contract", tags);
+    expect(JSON.stringify(tags).length).toBeGreaterThan(1024);
+    const length = responseHeaders[0]?.get("X-OpenRig-Scope-Advisory")?.length;
+    expect(scopeLines(), `actual advisory metadata characters: ${length}`).toMatch(/unavailable|could not (?:run|check)|unable to (?:run|check)/i);
+    expect(scopeLines()).not.toMatch(/resolves to 0|checked.*unresolved/i);
+  });
+
+  it.each(["valid", "missing", "long tags"])("remote create is SKIPPED even when sender scope is %s", async senderState => {
     const receiver = await fixture("receiver");
     fs.rmSync(receiver.missions, { recursive: true });
     fs.mkdirSync(receiver.missions);
@@ -271,7 +321,8 @@ describe("queue create scope advisories preserve admission and output", () => {
     });
     app.route("/api/queue", queueRoutes());
     setSelfHostId(source.hostId);
-    await create(app, ["--host", "remote-fixture", "--mission", "release", "--slice", "SLICE.ONE", "--tags", "project:alpha"], true);
+    const extraTags = senderState === "long tags" ? longScopeTags() : [];
+    await create(app, ["--host", "remote-fixture", "--mission", "release", "--slice", "SLICE.ONE", "--tags", ["project:alpha", ...extraTags].join(",")], true);
     expect(forwarded).toBe(1);
     expect(source.daemon.deps.queueRepo.getById("qitem-create-contract")).toBeNull();
     const stored = receiver.daemon.deps.queueRepo.getById("qitem-create-contract");
@@ -282,7 +333,12 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(stdout).toHaveLength(1);
     expect(JSON.parse(stdout[0]!)).toEqual(JSON.parse(JSON.stringify(stored)));
     expect(senderReads).toEqual([]);
-    expect(scopeLines()).toMatch(/\bskipped\b/i);
+    if (senderState === "long tags") {
+      expect(stored?.tags).toEqual(["mission:release", "slice:SLICE.ONE", "project:alpha", ...extraTags, "cross-host", `from-host:${os.hostname()}`]);
+      expect(JSON.stringify(extraTags).length).toBeGreaterThan(1024);
+    }
+    const length = responseHeaders[0]?.get("X-OpenRig-Scope-Advisory")?.length;
+    expect(scopeLines(), senderState === "long tags" ? `actual advisory metadata characters: ${length}` : undefined).toMatch(/\bskipped\b/i);
     expect(scopeLines()).not.toMatch(/unresolved|ambiguous|unavailable/i);
   });
 });
