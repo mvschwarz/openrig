@@ -459,6 +459,7 @@ it("asks still waiting on the person go first, newest first, then the rest; noth
   for (let i = 1; i <= 5; i++) f.ask(ts(i), "pending", `open${i}@test`);
   f.ask(ts(10), "done", "settled@test");
   const r = f.recovery();
+  f.advance(5000); // past the settle margin, so a scan covers through boot (the boundary has its own test)
   const order = async () => { const before = f.calls("conversations.replies").length; await r.run(); f.advance(10_000);
     return f.calls("conversations.replies").slice(before).map(u => u.searchParams.get("ts")); };
 
@@ -474,6 +475,7 @@ it("a waiting ask scanned since boot is scanned again within the hour, a settled
   f.ask(ts(1), "pending", "open@test");
   f.ask(ts(2), "done", "settled@test");
   const r = f.recovery();
+  f.advance(5000); // past the settle margin, so a scan covers through boot (the boundary has its own test)
   await r.run();
   const scanned = () => f.calls("conversations.replies").map(u => u.searchParams.get("ts"));
   expect(scanned()).toEqual([ts(1), ts(2)]);
@@ -490,6 +492,7 @@ it("a settled thread is due again after the socket reconnects from a gap, not a 
   const f = fixture();
   f.ask(ts(1), "done", "settled@test");
   const r = f.recovery();
+  f.advance(5000); // past the settle margin, so a scan covers through boot (the boundary has its own test)
   await r.run();
   f.time(at(400)); await r.run();
   expect(f.calls("conversations.replies")).toHaveLength(1);
@@ -497,7 +500,7 @@ it("a settled thread is due again after the socket reconnects from a gap, not a 
   // The socket drops for longer than Slack retries; a reply lands in the settled thread meanwhile.
   f.replies[`C1:${ts(1)}`] = [f.reply(500, ts(1), { text: "one more thing" })];
   f.time(at(1200)); r.connected();
-  await r.run();
+  f.advance(5000); await r.run();
 
   expect(f.calls("conversations.replies")).toHaveLength(2);
   expect(f.rows().filter(row => row.destinationSession === "settled@test")).toHaveLength(1);
@@ -510,6 +513,7 @@ it("a settled thread is scanned once after each boot and then daily, not every p
   const done = f.ask(ts(1), "pending", "settled@test");
   f.ask(ts(2), "pending", "open@test");
   const r = f.recovery();
+  f.advance(5000); // past the settle margin, so a scan covers through boot (the boundary has its own test)
   await r.run();
   done.settle();
   const settledCalls = () => f.calls("conversations.replies").filter(u => u.searchParams.get("ts") === ts(1)).length;
@@ -518,14 +522,14 @@ it("a settled thread is scanned once after each boot and then daily, not every p
   f.time(at(400)); await r.run();
   f.time(at(700)); await r.run();
   expect(settledCalls()).toBe(1); // caught up while this process listened live: nothing to recover
-  expect(r.status().threads).toMatchObject({ tracked: 2, settled: 1 });
+  expect(r.status().threads).toMatchObject({ tracked: 2, settled: 1, settledRescanHours: 24 });
   r.stop();
 
   // Off for a while; a reply arrives in the settled thread meanwhile.
   f.replies[`C1:${ts(1)}`] = [f.reply(800, ts(1), { text: "one more thing" })];
   f.time(at(1000));
   const restarted = f.recovery();
-  await restarted.run();
+  f.advance(5000); await restarted.run();
   expect(settledCalls()).toBe(2);
   expect(f.rows().filter(row => row.destinationSession === "settled@test")).toHaveLength(1);
 
@@ -552,17 +556,63 @@ it("a thread about to leave the seven-day window is scanned first after boot, so
   expect(f.calls("conversations.replies").slice(1).map(u => u.searchParams.get("ts"))).toEqual([ts(5), ts(4), ts(3)]);
 });
 
+it("a reply in the last five seconds before a reconnect is recovered on the next pass, not left for the daily backstop", async () => {
+  const f = fixture();
+  f.ask(ts(1), "done", "settled@test");
+  const r = f.recovery();
+  f.time(at(400)); await r.run();
+  f.time(at(700)); await r.run();
+  expect(f.calls("conversations.replies")).toHaveLength(1);
+
+  // A reply three seconds before live delivery resumes: a scan at the connect stops at the settle margin, before it.
+  f.replies[`C1:${ts(1)}`] = [f.reply(1197, ts(1), { text: "just before" })];
+  f.time(at(1200)); r.connected();
+  await r.run();
+  expect(f.calls("conversations.replies").at(-1)!.searchParams.get("latest")).toBe(`${BASE + 1195}.000000`);
+  expect(f.rows().filter(row => row.destinationSession === "settled@test")).toHaveLength(0);
+
+  f.time(at(1210)); await r.run();
+  expect(f.rows().filter(row => row.destinationSession === "settled@test")).toHaveLength(1);
+  const calls = f.calls("conversations.replies").length;
+  f.time(at(1500)); await r.run();
+  expect(f.calls("conversations.replies")).toHaveLength(calls);
+});
+
+it("threads that keep failing ahead of a reachable waiting ask can't take its turn pass after pass", async () => {
+  const f = fixture();
+  // Four newer waiting asks Slack refuses every time, enough to fill a pass's thread calls, and an older one it answers.
+  const failing = [ts(11), ts(12), ts(13), ts(14)];
+  failing.forEach((root, i) => f.ask(root, "pending", `failing${i}@test`));
+  f.ask(ts(1), "pending", "reachable@test");
+  f.replies[`C1:${ts(1)}`] = [f.reply(50, ts(1), { text: "the answer" })];
+  f.respond(u => u.pathname.endsWith("conversations.replies") && failing.includes(u.searchParams.get("ts")!)
+    ? Response.json({ ok: false, error: "not_in_channel" }) : undefined);
+  const r = f.recovery();
+
+  await r.run();
+  expect(f.calls("conversations.replies").map(u => u.searchParams.get("ts"))).toEqual([ts(14), ts(13), ts(12), ts(11)]);
+  expect(f.rows().filter(row => row.destinationSession === "reachable@test")).toHaveLength(0);
+
+  // Every failing thread's 300-second retry is due again at the next pass; the reachable one still goes first.
+  f.time(at(100 + 301)); await r.run();
+  const second = f.calls("conversations.replies").slice(4).map(u => u.searchParams.get("ts"));
+  expect(second[0]).toBe(ts(1));
+  expect(f.rows().filter(row => row.destinationSession === "reachable@test")).toHaveLength(1);
+});
+
 it("on a machine the hub relays to, which can't see a gap in relayed events, a settled thread's backstop is three hours", async () => {
   const f = fixture();
   f.ask(ts(1), "done", "settled@test");
   const r = f.recovery({ channels: [{ channel: "C1", seed: "adoption" }], relayed: true });
   r.adoptRelayed("C1", at(100));
+  f.advance(5000); // past the settle margin, so a scan covers through boot (the boundary has its own test)
   await r.run();
   const scans = () => f.calls("conversations.replies").length;
   expect(scans()).toBe(1);
 
   f.time(at(100 + 2 * 3600)); await r.run();
   expect(scans()).toBe(1);
+  expect(r.status().threads).toMatchObject({ settled: 1, settledRescanHours: 3 });
   f.time(at(100 + 3 * 3600 + 60)); await r.run();
   expect(scans()).toBe(2);
 });

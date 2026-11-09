@@ -39,6 +39,8 @@ export class ThreadRecovery implements RecoverySource {
   lastScanAt: string | undefined;
   accepted = 0;
   deadLettered = 0;
+  /** When this process last asked Slack for the thread's replies (ms), whatever the answer. Orders retries fairly. */
+  lastCallAt: number | undefined;
   private coverage: ThreadCoverage;
 
   constructor(private readonly opts: ThreadRecoveryOptions) {
@@ -52,14 +54,15 @@ export class ThreadRecovery implements RecoverySource {
   /** Whether this thread has anything for a pass to do. Partway through an interval: always. Slack couldn't find it: once
    *  a day (not proof of deletion, and never set by a transient error). Scanned through `listeningSince` (ms, when live
    *  events last began arriving without a gap): nothing, since replies after that arrive live, until a backstop rescan
-   *  an hour on for an ask still waiting on the person, a day on for any other thread. */
+   *  an hour on for an ask still waiting on the person, a day on for any other thread. Coverage must reach
+   *  `listeningSince` itself: a scan in the first seconds after connecting stops at the settle margin, short of it. */
   due(now: number, waiting: boolean, listeningSince: number, quietRescanMs = QUIET_RESCAN_MS): boolean {
     if (this.coverage.notFoundAt !== undefined && now - this.coverage.notFoundAt < QUIET_RESCAN_MS) {
       this.state = "incomplete"; this.reason = "thread_not_found"; return false;
     }
     if (this.coverage.pending) return true;
     const through = Number(slackMicros(this.coverage.coveredThrough)! / 1000n);
-    if (through >= listeningSince - 5000 && now - through < (waiting ? Math.min(WAITING_RESCAN_MS, quietRescanMs) : quietRescanMs)) {
+    if (through >= listeningSince && now - through < (waiting ? Math.min(WAITING_RESCAN_MS, quietRescanMs) : quietRescanMs)) {
       // A waiting ask stays "scanned" in status; only a thread nobody waits on counts as settled.
       if (!waiting && (this.state === "pending" || this.state === "scanned")) { this.state = "settled"; this.reason = undefined; }
       if (waiting && this.state === "settled") this.state = "scanned"; // its ask was reopened
@@ -106,6 +109,7 @@ export class ThreadRecovery implements RecoverySource {
     const upper = slackMicros(c.pending!.upper)!;
     const limit = Math.min(PAGE, 100 - budget.entries);
     budget.calls++;
+    this.lastCallAt = now;
     const r = await callWebApi(REPLIES, this.opts.token, {
       channel: this.opts.channel, ts: this.opts.threadTs, oldest: slackTimestamp(lower > 0n ? lower - 1n : 0n),
       latest: c.pending!.upper, inclusive: false, limit,
