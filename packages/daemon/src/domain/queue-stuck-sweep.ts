@@ -849,9 +849,24 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         evidenceAt: actionableAt,
         why: quiet?.state === "orphaned"
           ? `held for quiet hours (window ${quiet.windowId}) for ${minutesSince(actionableAt, now)} min, but no release job is live for that window: nothing will release it`
-          : `actionable with a destination and unclaimed for ${minutesSince(actionableAt, now)} min (threshold ${ageMinutes})`,
+          : `actionable with a destination and unclaimed for ${minutesSince(actionableAt, now)} min (threshold ${ageMinutes})${
+            unreadableOwner(row.destinationSession) ? "; owner activity unknown (can't read the seat)" : ""}`,
       };
     };
+
+    /** The seat's activity can't be read (no reading, or one that reads unknown): said in the finding, so an unreadable
+     *  seat isn't taken for one ignoring its work. The stalled finding says the same (`queue-pickup.ts`). A person has no
+     *  seat to read, so their row never says so; nor does a row whose destination can't be classified, since it may be a
+     *  person's. A classification fault never stops the sweep. */
+    function unreadableOwner(session: string): boolean {
+      try {
+        if (deps.queueRepo.isHumanDestination(session)) return false;
+      } catch {
+        return false;
+      }
+      const activity = deps.queueRepo.ownerActivity(session)?.activity;
+      return !activity || activity === "unknown";
+    }
 
     // The custody class — a terminal row whose closure names one or more successor
     // qitems or seat-address targets (closure_reason = 'handed_off_to'). A local miss is

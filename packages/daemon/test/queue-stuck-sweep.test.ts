@@ -2290,6 +2290,30 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
+  it("an unclaimed finding says when the seat can't be read, and doesn't when it can", async () => {
+    const unread = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "work" });
+    age(unread.qitemId);
+    await sweep();
+    expect((await findingsFor(unread.qitemId))[0]!.body).toContain("; owner activity unknown (can't read the seat)");
+
+    repo.attachActivityReader(() => ({ activity: "idle", needsInput: { count: 0, reason: null } } as never));
+    const read = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "more work" });
+    age(read.qitemId);
+    await sweep();
+    const [finding] = await findingsFor(read.qitemId);
+    expect(finding!.body).toContain("actionable with a destination and unclaimed for");
+    expect(finding!.body).not.toContain("can't read the seat");
+  });
+
+  it("a person's unposted ask gets its unclaimed finding without the seat clause: a person has no seat to read", async () => {
+    const row = await ask();
+    age(row.qitemId);
+    await sweep();
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.body).toContain("actionable with a destination and unclaimed for");
+    expect(finding!.body).not.toContain("can't read the seat");
+  });
+
   it.each(["never-posted", "transport-failed"] as const)("a %s human ask keeps its existing finding", async (outcome) => {
     const row = await ask();
     if (outcome === "transport-failed") receipt(row.qitemId, "transport-failed");
