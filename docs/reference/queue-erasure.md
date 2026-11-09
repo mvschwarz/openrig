@@ -1,6 +1,6 @@
 # Queue erasure: closed-work retention and account deletion
 
-A daemon that serves several accounts sometimes needs to remove queue content for good: closed work after its retention window, or everything that belongs to an account when the account is deleted. `rig queue erase` and two retention settings do that.
+A daemon that serves several accounts sometimes needs to remove queue content for good: closed work after its retention window, or everything that belongs to an account when the account is deleted. `rig queue erase` and three retention settings do that.
 
 Erasure can't be undone. Run every scope as a dry run first, without `--apply`. The dry run prints exactly what `--apply` would erase and changes nothing.
 
@@ -8,18 +8,25 @@ Erasure can't be undone. Run every scope as a dry run first, without `--apply`. 
 
 A queue row is erased in one of two ways:
 
-- **Scrub.** The row's content is removed: body, summary, resolution, tags, blocker text, chain of record, evidence reference, human detail, questions and answers, and delegated decision. The row itself stays, with its id, endpoints, state and times, marked `contentErasedAt`. A retried create with the same id still finds the row, so it makes no new work.
+- **Scrub.** The row's content is removed, and the row itself stays, marked `contentErasedAt`. A retried create with the same id still finds the row, so it makes no new work. If anything writes to the row after its scrub (a note, a summary, a reopen and close), the next run erases that content too.
 - **Delete.** The row and everything linked to it are removed. Only its id is kept, in an erased-id record with no endpoints and no content. A later create that reuses the id is refused with `qitem_erased` (409), so a retried or forwarded create can't bring the work back.
 
-Either way, the row's copies go with it:
-- its transitions, live and archived (their notes and recorded principals);
-- the outbox entries that point at it or wake for it;
-- the inbox entry it was absorbed from;
-- stream dispositions and reader actions that name it;
+| A scrub clears | A scrub keeps |
+|---|---|
+| body, summary, resolution, tags, blocker text, chain of record, evidence reference, human detail, questions and answers, delegated decision, the input-box reading | id, source and destination, state, priority, tier, times, closure reason, handoff links |
+| a closure's target when it's a reason or note (`denied`, `canceled` and every reason but the two below), in the row, both transition tables and events | a closure's target when it names a successor (`handed_off_to`, `superseded`) |
+| transition notes and recorded principals, live and archived | each transition's state, actor and time |
+| events' `summary`, `reason` and `error` (the event keeps its type and ids, marked `contentErased`) | |
+| mission-control audit text and snapshots | |
+
+**The row's own copies go with it:**
+- its transitions;
 - events whose payload names it;
 - its mission-control audit rows.
 
-A scrubbed event keeps its type and row id, and loses its summary, reason and error text.
+**Copies held with someone else go only when they're the owner's.** These are outbox and inbox entries that point at the row or wake for it, and stream reader actions and dispositions that name it (including `duplicate_of`). For account deletion, the owner is the account: both of a copy's sessions must be members. Otherwise the owner is the row's own source and destination. Any other copy is kept and listed under `keptCopies`:
+- `mixed`: one of its sessions is the owner's;
+- `foreign`: none of them are.
 
 **A row a workflow still references is never erased.** That covers a step trail, a frontier binding, a failure record, or a live instance's frontier. It's reported under `gaps` with the code `workflow-reference`.
 
@@ -30,13 +37,13 @@ Name exactly one.
 | Scope | Erases | Action |
 |---|---|---|
 | `--members <file>` | Account deletion. Every row whose source and destination are both in the file, in any state, open work included. Add `--rig <id>` for the account rig's own records | delete |
-| `--ids <file>` | Exactly the listed rows. A JSON array of a report's `qitems` entries keeps each entry's action | `--action delete` (default for plain ids) or `--action scrub` |
+| `--ids <file>` | Exactly the listed rows. A report's `qitems` entries, or a ledger's lines, keep each entry's own action | `--action delete` (default for plain ids) or `--action scrub` |
 | `--routine` | Closed rows past this daemon's retention windows (below) | scrub, then delete |
 
-A file is one entry per line (blank lines and `#` comments are skipped) or a JSON array.
+A file is one entry per line (blank lines and `#` comments are skipped; a line starting with `{` is a JSON entry) or a JSON array.
 
 **Account deletion is exact.**
-- The members file is the account's recorded membership: the exact session names of its seats, including departed ones. Names are compared as given, never by pattern.
+- The members file is the account's recorded membership: the exact session names of its seats, including departed ones. List every address form the account used, such as a host-suffixed form. Names are compared as given, never by pattern, so a row addressed through an unlisted form is neither erased nor reported.
 - **Mixed rows:** a row with exactly one member endpoint is reported under `mixed` (with which endpoint is the member) and left untouched. Deciding who owns it is a separate decision.
 - **After the rows:** account deletion also removes outbox and inbox entries between two members that no row owns, and the members' stream items. An entry with one member endpoint, or a stream item something still references, is counted and left.
 
@@ -48,8 +55,10 @@ A file is one entry per line (blank lines and `#` comments are skipped) or a JSO
 - stream subscriptions and thread maps of member sessions.
 
 Records that name the account but also belong elsewhere are counted under `rig.left` and kept. These are a member's watchdog job aimed outside the account, a workflow instance or spec bound to the rig, classifier leases and custom views.
-- **While the rig exists,** every member must be one of its sessions, or the run is refused (`erase_rig_mismatch`).
-- **Once the rig is removed,** the same command erases what's left under the rig's id (`rig.found: false`). This includes the events the removal itself wrote.
+- **While the rig exists,** its sessions and the members must match both ways, or the run is refused (`erase_rig_mismatch`). Every member must be one of its sessions, and every session of it must be a member, so the rig holds no one else's seat.
+- **On that verified run,** the rig's id and name are recorded with a digest of the membership.
+- **Once the rig is removed,** the same command, with the same membership, uses that record to erase what's left under the rig's id. This includes the events the removal wrote, and the record still lets it count records bound to the rig's name. The record is dropped when nothing of the rig is left.
+- **A removed rig's id that was never verified** with this membership erases nothing keyed by it. Those records are counted under `rig.left`, the name-bound tables are listed under `rig.unknown`, and the run isn't clean.
 
 **Retention windows** (`rig config set …`, read at the daily sweep and at daemon start):
 
@@ -57,10 +66,12 @@ Records that name the account but also belong elsewhere are counted under `rig.l
 |---|---|---|
 | `retention.closed_content_days` | `0` (off) | Scrub closed rows this many days after they closed |
 | `retention.closed_metadata_days` | `0` (off) | Delete closed rows, keeping only their ids, this many days after they closed |
+| `retention.erasure_ledger` | empty (none) | An absolute file path. Every applied erasure, by the sweep or the command, appends each row's id and action there, one JSON line each, before it commits |
 
 - **Closed** means `done`, `canceled`, `denied` or `handed-off`. `failed` and open work are never touched by the windows.
 - **Age:** a row's age counts from when it entered its final closed state. A note on a closed row doesn't restart it, and a row reopened and closed again counts from its latest close.
 - **Running them now:** `rig queue erase --routine --apply` runs the windows immediately. `retention.enabled false` turns off the whole sweep, these windows included.
+- **When the sweep's erasure stops on an error,** that's logged, and the sweep's other passes still run.
 
 ## Account deletion, in order
 
@@ -69,7 +80,7 @@ Records that name the account but also belong elsewhere are counted under `rig.l
 3. Run `rig queue erase --members <file> --rig <id>` as a dry run, then with `--apply`. Rerun until `complete` is true.
 4. Remove the rig.
 5. Rerun the same command with `--apply`, to erase the records the removal wrote.
-6. The account is deleted only when the report's `clean` is true. Otherwise its `mixed`, `gaps`, `unlinked` and `rig.left` entries need a decision. Rerunning won't resolve them.
+6. The account is deleted only when the report's `clean` is true. Otherwise its `mixed`, `gaps`, `keptCopies`, `unlinked` and `rig.left` or `rig.unknown` entries need a decision. Rerunning won't resolve them.
 
 ## Output
 
@@ -78,17 +89,19 @@ The command prints one JSON report (`--json` makes it a single line):
 | Field | Meaning |
 |---|---|
 | `applied` | `false` for a dry run |
-| `complete` | the scan finished. `false` when the run stopped at its batch limit; rerun the same command to continue |
-| `clean` | `complete`, and nothing was left: no `mixed` rows, `gaps`, or left-over entries or rig records. Only a clean report means the scope is fully erased |
+| `complete` | the run finished. `false` when it stopped at its batch limit or on an error; rerun the same command to continue |
+| `clean` | `complete`, and nothing was left: no `mixed` rows, mixed `keptCopies`, `gaps`, left-over entries, or rig records left or unknown. Only a clean report means the scope is fully erased |
+| `error` | why the run stopped (`stage` and `message`). Everything listed in `qitems` was committed before it; the command exits 2 |
 | `qitems` | each row erased (or that would be), with its `action` and `state` |
 | `mixed` | members scope: rows with one member endpoint, left untouched |
+| `keptCopies` | copies of erased rows held with someone else, kept: `table`, `id`, `qitemId`, `ownership` (`mixed` or `foreign`) |
 | `gaps` | rows not erased and why: `workflow-reference`, or `not-found` for an id to scrub that doesn't exist |
 | `alreadyAbsent` | ids scope with delete: ids with no row; their erased-id record is written (again) |
 | `linked` | counts of the copies erased with the rows |
 | `unlinked` | members scope: entries and stream items erased that no row owned, plus those left (`mixedEntries`, `referencedStreamItems`) |
-| `rig` | members scope with `--rig`: `found`, records erased per table (`erased`), records left per table (`left`) |
+| `rig` | members scope with `--rig`: `found`, `verified`, records erased per table (`erased`), records left (`left`), tables that can't be counted (`unknown`) |
 
-Each batch of rows is one transaction, so a run that stops leaves whole rows done. A rerun picks up the rest, and erasing a row a second time changes nothing.
+A run selects everything first, then reads the events table once in small windows, then erases rows in batches. Each batch is one transaction, and the daemon is never held for long. A run that stops leaves whole batches done. A rerun picks up the rest, and erasing a row a second time changes nothing.
 
 **Refusals**, with nothing erased:
 
@@ -98,7 +111,7 @@ Each batch of rows is one transaction, so a run that stops leaves whole rows don
 | `erase_scope_conflict` | more than one scope |
 | `erase_members_invalid` | an empty list, or names with surrounding spaces |
 | `erase_rig_invalid` | a rig without `--members`, or an empty rig id |
-| `erase_rig_mismatch` | the rig exists and some members aren't its sessions |
+| `erase_rig_mismatch` | the rig exists, and its sessions and the members don't match both ways |
 | `erase_ids_invalid` | an empty ids list, or ids with surrounding spaces |
 | `erase_action_invalid` | an action other than `delete` or `scrub` |
 | `erase_routine_off` | both windows are `0` |
@@ -107,11 +120,12 @@ The command records who ran it from `OPENRIG_SESSION_NAME`, or from `--actor <se
 
 ## Restores and backups
 
-A restored database can bring erased content back: rows, unlinked entries, rig records and the erased-id records themselves. Before a restored daemon serves anyone, replay what was erased after the backup was taken:
+A restored database can bring erased content back: rows, copies, rig records and the erased-id records themselves. It can even bring back a row that was still open when the backup was taken and was closed and erased later. Before a restored daemon serves anyone, replay what was erased after the backup was taken:
 
-1. **Account deletions:** rerun `rig queue erase --members <file> --rig <id> --apply` for each account deleted since the backup. This needs the membership list and rig id. Keep them, outside the backed-up data, until every backup taken before the deletion has expired; after that no restore can bring the account back, so they can be dropped.
-2. **Explicit id runs:** keep each applied report's `qitems` entries, which are ids with their action and no content, outside the backed-up data. Replay them with `rig queue erase --ids <ledger.json> --apply`. Each entry keeps its own action, so a scrub is replayed as a scrub, never promoted to a deletion. Ids under `alreadyAbsent` replay as plain deletes.
-3. **Routine windows:** run `rig queue erase --routine --apply`. The windows are recomputed from each row's age, so routine erasures need no ledger.
+1. **Keep a ledger.** Set `retention.erasure_ledger` to a file outside the backed-up data. Every applied erasure appends its ids and actions there before committing. That covers the daily windows, `--routine`, `--ids` and account deletion's rows.
+2. **Replay the ledger:** `rig queue erase --ids <ledger> --apply`. Each line keeps its own action, so a scrub is replayed as a scrub, never promoted to a deletion. A row that was open in the backup is erased by its id, and other open work isn't touched.
+3. **Replay account deletions:** rerun `rig queue erase --members <file> --rig <id> --apply` for each account deleted since the backup, from its membership list and rig id. Keep those outside the backed-up data until every backup taken before the deletion has expired. This also covers the copies and rig records the ledger doesn't list.
+4. **Rerun the windows:** `rig queue erase --routine --apply`.
 
 Backup expiry is the deployment's own schedule. Content erased from the live database stays in backups until they expire.
 

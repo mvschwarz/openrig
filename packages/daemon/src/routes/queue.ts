@@ -666,6 +666,7 @@ export function queueRoutes(): Hono {
     const identity = requireSenderIdentity(c, { verb: "queue erase", bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
     const refuse = (error: string, message: string) => c.json({ error, message }, 400);
+    const settings = c.get("settingsStore" as never) as { resolveOne(key: string): { value: unknown } } | undefined;
     const named = [body.members !== undefined, body.ids !== undefined, body.routine !== undefined].filter(Boolean).length;
     if (named === 0) return refuse("erase_scope_required", "Name one scope: members (account deletion), ids, or routine.");
     if (named > 1) return refuse("erase_scope_conflict", "Name exactly one scope: members, ids, or routine.");
@@ -696,7 +697,6 @@ export function queueRoutes(): Hono {
       if (entries.some((entry) => !isAction(entry!.action))) return refuse("erase_action_invalid", "action must be delete or scrub.");
       scope = { kind: "ids", entries: entries as Array<{ qitemId: string; action: EraseAction }> };
     } else {
-      const settings = c.get("settingsStore" as never) as { resolveOne(key: string): { value: unknown } } | undefined;
       const days = (key: string): number => {
         const value = settings?.resolveOne(key).value;
         return typeof value === "number" ? value : 0;
@@ -709,10 +709,16 @@ export function queueRoutes(): Hono {
       scope = { kind: "routine", contentDays, metadataDays };
     }
     try {
-      const report = await eraseQueue(c.get("db" as never) as Database.Database, { scope, apply: body.apply === true, nowIso: new Date().toISOString() });
+      const ledger = settings?.resolveOne("retention.erasure_ledger").value;
+      const report = await eraseQueue(c.get("db" as never) as Database.Database, {
+        scope, apply: body.apply === true, nowIso: new Date().toISOString(),
+        ...(typeof ledger === "string" && ledger.length > 0 ? { ledgerPath: ledger } : {}),
+      });
       console.log(`[queue-erase] ${identity.session} ${scope.kind} ${report.applied ? "applied" : "dry run"}: `
-        + `${report.qitems.length} rows, ${report.mixed.length} mixed, ${report.gaps.length} gaps, complete=${report.complete}`);
-      return c.json(report);
+        + `${report.qitems.length} rows, ${report.mixed.length} mixed, ${report.gaps.length} gaps, complete=${report.complete}, `
+        + `clean=${report.clean}${report.error ? `, stopped at ${report.error.stage}: ${report.error.message}` : ""}`);
+      // A run that stopped on an error still returns what it committed, so its ids reach the caller's ledger.
+      return c.json(report, report.error ? 500 : 200);
     } catch (err) {
       if (err instanceof EraseRefusal) return refuse(err.code, err.message);
       return c.json({ error: "erase_failed", message: err instanceof Error ? err.message : String(err) }, 500);

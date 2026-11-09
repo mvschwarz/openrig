@@ -112,6 +112,9 @@ Keys:
   retention.closed_metadata_days  delete closed queue rows N days after they closed, keeping only their ids so a retry
                          can't recreate them. 0 keeps them (default). Both read at the next sweep; "rig queue erase
                          --routine --apply" runs them now
+  retention.erasure_ledger  an absolute file where queue erasure appends each erased id and its action, one JSON
+                         line each, before it commits them; keep it outside backups and replay it with "rig queue
+                         erase --ids <file> --apply" after a restore. Empty keeps no ledger (default)
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
   launch.codex_login_shell  defer to Codex's own login-shell setting in managed Codex seats (default off)
                          Off adds allow_login_shell=false: tool commands inherit the seat's environment, so plain rig

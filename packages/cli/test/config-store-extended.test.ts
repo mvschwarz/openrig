@@ -218,6 +218,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "retention.events_days", // the history-only event types of events
       "retention.closed_content_days", // closed-work erasure: content
       "retention.closed_metadata_days", // closed-work erasure: the row, keeping its id
+      "retention.erasure_ledger", // queue erasure's replay ledger file
       "stream.intake",
       "retention.batch_size",
       "queue.pickup_stall_threshold_minutes",

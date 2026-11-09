@@ -136,6 +136,10 @@ export function startQueueRetentionScheduler(deps: {
     const v = store ? store.resolveOne(key).value : fallback;
     return typeof v === "number" ? v : fallback;
   };
+  const ledger = (): string | undefined => {
+    const v = store ? store.resolveOne("retention.erasure_ledger").value : undefined;
+    return typeof v === "string" && v.length > 0 ? v : undefined;
+  };
   const runOnce = (): void => {
     void runQueueRetentionSweep(db, {
       nowIso: new Date().toISOString(),
@@ -149,6 +153,7 @@ export function startQueueRetentionScheduler(deps: {
       eventsRetentionDays: num("retention.events_days", RETENTION_DEFAULTS.eventsRetentionDays),
       closedContentDays: num("retention.closed_content_days", RETENTION_DEFAULTS.closedContentDays),
       closedMetadataDays: num("retention.closed_metadata_days", RETENTION_DEFAULTS.closedMetadataDays),
+      ...(ledger() ? { erasureLedgerPath: ledger() } : {}),
     }).catch((err: unknown) => {
       console.error(`[queue-retention] sweep error: ${err instanceof Error ? err.message : String(err)}`);
     });

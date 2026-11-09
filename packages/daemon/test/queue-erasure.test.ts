@@ -12,6 +12,10 @@ import { QueueTransitionLog } from "../src/domain/queue-transition-log.js";
 import { EraseRefusal, eraseQueue } from "../src/domain/queue-erasure.js";
 import { runQueueRetentionSweep } from "../src/domain/queue-retention.js";
 import { queueRoutes } from "../src/routes/queue.js";
+import { recordReaderAction } from "../src/domain/stream-reader-actions.js";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const NOW = "2026-11-09T12:00:00.000Z";
 const ago = (days: number) => new Date(Date.parse(NOW) - days * 86_400_000).toISOString();
@@ -260,6 +264,15 @@ describe("POST /api/queue/erase", () => {
     expect(exists("p-one")).toBe(false);
   });
 
+  it("a run that stops on an error answers 500 with what it committed", async () => {
+    await row("p-a", A, B, [{ state: "done", daysAgo: 2 }]);
+    await row("p-b", A, B, [{ state: "done", daysAgo: 2 }]);
+    db.exec("CREATE TEMP TRIGGER fail_pb BEFORE DELETE ON queue_items WHEN old.qitem_id = 'p-b' BEGIN SELECT RAISE(ABORT, 'disk full (test)'); END;");
+    const res = await post(app(), { members: [A, B], apply: true });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ complete: false, error: { stage: "rows" } });
+  });
+
   it("routine reads this daemon's own windows", async () => {
     await row("p-old", A, B, [{ state: "done", daysAgo: 40 }]);
     const res = await post(app({ "retention.closed_content_days": 30 }), { routine: true, apply: true });
@@ -289,6 +302,7 @@ describe("account deletion with the account's rig", () => {
 
   it("erases the rig's own records, leaves another rig's, and counts a member's job aimed outside", async () => {
     const report = await eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: RIG }, apply: true, nowIso: NOW });
+    expect(report.error).toBeUndefined();
     expect(report.rig).toMatchObject({ id: RIG, found: true, erased: { snapshots: 1, seat_identity_verdicts: 1, watchdog_jobs: 1, watchdog_history: 1 },
       left: { watchdog_jobs: 1 } });
     expect(report.rig!.erased.events).toBeGreaterThanOrEqual(2);
@@ -358,5 +372,146 @@ describe("clean", () => {
     expect((await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: false, nowIso: NOW })).clean).toBe(false);
     const partial = await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "c-one", action: "delete" }] }, apply: false, nowIso: NOW, batchSize: 1, maxBatches: 0 });
     expect([partial.complete, partial.clean]).toEqual([false, false]);
+  });
+});
+
+describe("round 1 controls", () => {
+  it("J1: the events walk finds the same events whatever its window", async () => {
+    await row("w-one", A, B, [{ state: "done", daysAgo: 40 }]);
+    await row("w-two", A, B, [{ state: "done", daysAgo: 40 }]);
+    const wide = await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: false, nowIso: NOW });
+    const narrow = await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW, eventsWindow: 1 });
+    expect(narrow.linked.events).toBe(wide.linked.events);
+    expect(narrow.linked.events).toBeGreaterThanOrEqual(2);
+    expect(payloads()).not.toContain("secret-w-");
+  });
+
+  it("J2: a linked copy held with someone outside the account is kept and reported, and the run isn't clean", async () => {
+    await row("o-own", A, B, [{ state: "done", daysAgo: 2 }]);
+    db.prepare(`INSERT INTO outbox_entries (outbox_id, sender_session, destination_session, body, ts_dispatched, audit_pointer)
+      VALUES ('o-mixed', ?, ?, 'secret-mixed-copy', ?, 'o-own'), ('o-foreign', ?, ?, 'secret-foreign-copy', ?, 'o-own')`).run(A, OUT, NOW, OUT, OUT, NOW);
+    const report = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW });
+    expect(report.keptCopies).toEqual(expect.arrayContaining([
+      { table: "outbox_entries", id: "o-mixed", qitemId: "o-own", ownership: "mixed" },
+      { table: "outbox_entries", id: "o-foreign", qitemId: "o-own", ownership: "foreign" },
+    ]));
+    expect(report.clean).toBe(false);
+    const all = everything();
+    expect(all).toContain("secret-mixed-copy");
+    expect(all).toContain("secret-foreign-copy");
+    expect(all).not.toContain("secret-o-own");
+  });
+
+  it("J3: a scrub clears closure notes in every copy and a duplicate reader action's reason, and keeps a successor id", async () => {
+    await row("c-canceled", A, B);
+    repo.update({ qitemId: "c-canceled", actorSession: B, state: "done", closureReason: "canceled", closureTarget: "secret-closure-note" });
+    await row("c-handed", A, B);
+    repo.update({ qitemId: "c-handed", actorSession: B, state: "done", closureReason: "handed_off_to", closureTarget: "successor-id" });
+    db.prepare("INSERT INTO stream_items (stream_item_id, ts_emitted, stream_sort_key, source_session, body) VALUES ('s-dup', ?, 'k', ?, 'x')").run(NOW, A);
+    recordReaderAction(db, { streamItemId: "s-dup", readerSession: A, action: "duplicate", duplicateOf: "c-canceled", reason: "secret-dup-reason" }, NOW);
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id IN ('c-canceled', 'c-handed')").run(ago(40));
+    await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW });
+    const all = everything();
+    expect(all).not.toContain("secret-closure-note");
+    expect(all).not.toContain("secret-dup-reason");
+    expect(db.prepare("SELECT closure_target AS t FROM queue_items WHERE qitem_id = 'c-handed'").get()).toEqual({ t: "successor-id" });
+  });
+
+  it("J4: content written to a scrubbed row after its scrub is erased by the next run, and a reclose counts from the new close", async () => {
+    await row("n-row", A, B, [{ state: "done", daysAgo: 40 }]);
+    await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW });
+    repo.update({ qitemId: "n-row", actorSession: B, transitionNote: "secret-later-note" });
+    const again = await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW });
+    expect(again.qitems.map((q) => q.qitemId)).toEqual(["n-row"]);
+    expect(everything()).not.toContain("secret-later-note");
+    repo.update({ qitemId: "n-row", actorSession: B, state: "pending", reopen: true, transitionNote: "secret-reopened" });
+    repo.update({ qitemId: "n-row", actorSession: B, state: "done", closureReason: "no-follow-on" });
+    const soon = await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW });
+    expect(soon.qitems).toEqual([]); // closed again just now: inside the window
+    const later = new Date(Date.now() + 31 * 86_400_000).toISOString();
+    const aged = await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: later });
+    expect(aged.qitems.map((q) => q.qitemId)).toEqual(["n-row"]);
+    expect(everything()).not.toContain("secret-reopened");
+  });
+
+  it("J5: a dry run and an apply agree when deleting a row frees a member's stream item", async () => {
+    await row("s-row", A, B, [{ state: "done", daysAgo: 2 }]);
+    db.prepare("INSERT INTO stream_items (stream_item_id, ts_emitted, stream_sort_key, source_session, body) VALUES ('s-act', ?, 'k', ?, 'secret-stream')").run(NOW, A);
+    recordReaderAction(db, { streamItemId: "s-act", readerSession: B, action: "act", workQitemId: "s-row" }, NOW);
+    const dry = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: false, nowIso: NOW });
+    const applied = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW });
+    expect({ ...applied, applied: false }).toEqual(dry);
+    expect(dry.unlinked).toMatchObject({ streamItems: 1, referencedStreamItems: 0 });
+    expect(everything()).not.toContain("secret-stream");
+  });
+
+  it("J8: a failure after a committed batch returns only what committed, and the sweep's other passes still run", async () => {
+    await row("f-1", A, B, [{ state: "done", daysAgo: 2 }]);
+    await row("f-2", A, B, [{ state: "done", daysAgo: 2 }]);
+    db.exec("CREATE TEMP TRIGGER fail_f2 BEFORE DELETE ON queue_items WHEN old.qitem_id = 'f-2' BEGIN SELECT RAISE(ABORT, 'disk I/O error (test)'); END;");
+    const report = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW, batchSize: 1 });
+    expect(report).toMatchObject({ complete: false, clean: false, error: { stage: "rows", message: "disk I/O error (test)" } });
+    expect(report.qitems.map((q) => q.qitemId)).toEqual(["f-1"]);
+    expect([exists("f-1"), exists("f-2")]).toEqual([false, true]);
+    db.exec("CREATE TEMP TRIGGER fail_scrub BEFORE UPDATE OF content_erased_at ON queue_items BEGIN SELECT RAISE(ABORT, 'disk I/O error (test)'); END;");
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = 'f-2'").run(ago(40));
+    const swept = await runQueueRetentionSweep(db, { nowIso: NOW, closedContentDays: 30, transitionsRetentionDays: 1 });
+    expect(swept.closedError).toMatch(/disk I\/O error/);
+    expect(swept.archivedQitems).toBeGreaterThan(0); // the transition archive still ran
+  });
+});
+
+describe("round 1 controls: the account rig after removal, and a restore across a close", () => {
+  const RIG = "rig-r1-id";
+  beforeEach(() => {
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, 'n-acct')").run(RIG);
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-r1', ?, 'a.one')").run(RIG);
+    new EventBus(db).emit({ type: "rig.imported", rigId: RIG, specName: "secret-r1-spec", specVersion: "1" } as never);
+  });
+
+  it("N2: refuses a rig with a session the members don't list", async () => {
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('sess-x', 'node-r1', ?)").run(OUT);
+    await expect(eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: RIG }, apply: false, nowIso: NOW }))
+      .rejects.toMatchObject({ code: "erase_rig_mismatch" });
+  });
+
+  it("J6: after removal a name-bound workflow record is counted as left, and an unverified id erases nothing", async () => {
+    db.pragma("foreign_keys = OFF");
+    db.prepare(`INSERT INTO workflow_specs (spec_id, name, version, purpose, target_rig, roles_json, steps_json, coordination_terminal_turn_rule,
+      source_path, source_hash, cached_at) VALUES ('spec-1', 's', '1', 'p', 'n-acct', '[]', '[]', 'hot_potato', '/x', 'h', ?)`).run(NOW);
+    db.pragma("foreign_keys = ON");
+    await eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: RIG }, apply: true, nowIso: NOW });
+    db.prepare("DELETE FROM nodes WHERE rig_id = ?").run(RIG);
+    db.prepare("DELETE FROM rigs WHERE id = ?").run(RIG);
+    new EventBus(db).emit({ type: "rig.deleted", rigId: RIG } as never);
+    const rerun = await eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: RIG }, apply: true, nowIso: NOW });
+    expect(rerun.rig).toMatchObject({ found: false, verified: true, left: { workflow_specs: 1 }, unknown: [] });
+    expect(rerun.clean).toBe(false);
+    // Another removed rig's id, never verified with this membership: nothing keyed by it is erased.
+    new EventBus(db).emit({ type: "rig.deleted", rigId: "rig-someone-else" } as never);
+    const unverified = await eraseQueue(db, { scope: { kind: "members", members: [A, B], rig: "rig-someone-else" }, apply: true, nowIso: NOW });
+    expect(unverified.rig).toMatchObject({ found: false, verified: false, left: { events: 1 }, unknown: ["workflow_instances", "workflow_specs"] });
+    expect(unverified.clean).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE rig_id = 'rig-someone-else'").get()).toEqual({ n: 1 });
+  });
+
+  it("J7: a backup taken before a row closed is replayed from the ledger, and restored open work stays", async () => {
+    const ledgerPath = join(mkdtempSync(join(tmpdir(), "erase-ledger-")), "ledger.jsonl");
+    await row("l-row", A, B); // open when the backup is taken
+    await row("l-open", A, B); // still open later
+    const backup = db.serialize();
+    repo.update({ qitemId: "l-row", actorSession: B, state: "done", closureReason: "no-follow-on" });
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = 'l-row'").run(ago(40));
+    await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW, ledgerPath });
+    const lines = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { qitemId: string; action: "scrub" });
+    expect(lines).toEqual([{ qitemId: "l-row", action: "scrub", reason: "retention-metadata", erasedAt: NOW }]);
+    db.close();
+    open(new Database(backup));
+    expect(everything()).toContain("secret-l-row body");
+    await eraseQueue(db, { scope: { kind: "ids", entries: lines }, apply: true, nowIso: NOW });
+    await eraseQueue(db, { scope: { kind: "routine", contentDays: 30, metadataDays: 0 }, apply: true, nowIso: NOW });
+    const all = everything();
+    expect(all).not.toContain("secret-l-row");
+    expect(all).toContain("secret-l-open body");
   });
 });

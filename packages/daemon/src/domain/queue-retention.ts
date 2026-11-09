@@ -135,6 +135,8 @@ export interface RetentionOptions {
   eventsPauseMs?: number;
   closedContentDays?: number;
   closedMetadataDays?: number;
+  /** where closed-work erasure appends the ids and actions it erases (retention.erasure_ledger); unset keeps none */
+  erasureLedgerPath?: string;
   /** the events pass's yield between windows; injectable so a test can count it */
   eventsYield?: () => Promise<void>;
   /** called once per events statement with its seq bounds (lo, hi]; for tests and measurement */
@@ -539,6 +541,8 @@ export interface RetentionSweepSummary {
   closedScrubbed: number;
   closedDeleted: number;
   closedKept: number;
+  /** why closed-work erasure stopped, when it did; the other passes still ran */
+  closedError: string | null;
 }
 
 /**
@@ -568,19 +572,28 @@ export async function runQueueRetentionSweep(
     closedScrubbed: 0,
     closedDeleted: 0,
     closedKept: 0,
+    closedError: null,
   };
 
   // Closed-work retention, opt-in: content first, then the row itself, each from when the row closed.
   const closedContentDays = opts.closedContentDays ?? RETENTION_DEFAULTS.closedContentDays;
   const closedMetadataDays = opts.closedMetadataDays ?? RETENTION_DEFAULTS.closedMetadataDays;
   if (closedContentDays > 0 || closedMetadataDays > 0) {
-    const closed = await eraseQueue(db, {
-      scope: { kind: "routine", contentDays: closedContentDays, metadataDays: closedMetadataDays },
-      apply: true, nowIso: opts.nowIso, batchSize: opts.batchSize ?? RETENTION_DEFAULTS.batchSize, maxBatches,
-    });
-    summary.closedScrubbed = closed.qitems.filter((row) => row.action === "scrub").length;
-    summary.closedDeleted = closed.qitems.filter((row) => row.action === "delete").length;
-    summary.closedKept = closed.gaps.length;
+    // Reported, never fatal: an erasure that stops leaves the other passes to run (it returns what it committed).
+    try {
+      const closed = await eraseQueue(db, {
+        scope: { kind: "routine", contentDays: closedContentDays, metadataDays: closedMetadataDays },
+        apply: true, nowIso: opts.nowIso, batchSize: opts.batchSize ?? RETENTION_DEFAULTS.batchSize, maxBatches,
+        ...(opts.erasureLedgerPath ? { ledgerPath: opts.erasureLedgerPath } : {}),
+      });
+      summary.closedScrubbed = closed.qitems.filter((row) => row.action === "scrub").length;
+      summary.closedDeleted = closed.qitems.filter((row) => row.action === "delete").length;
+      summary.closedKept = closed.gaps.length;
+      summary.closedError = closed.error ? `${closed.error.stage}: ${closed.error.message}` : null;
+    } catch (err) {
+      summary.closedError = err instanceof Error ? err.message : String(err);
+    }
+    if (summary.closedError) console.error(`[queue-retention] closed-work erasure stopped: ${summary.closedError}`);
   }
 
   for (let i = 0; i < maxBatches; i++) {

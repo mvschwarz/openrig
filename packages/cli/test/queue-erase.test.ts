@@ -78,6 +78,21 @@ describe("rig queue erase", () => {
     ]);
   });
 
+  it("reads an erasure ledger's JSON lines as entries that keep their action", async () => {
+    const ledger = path.join(dir, "ledger.jsonl");
+    fs.writeFileSync(ledger, '{"qitemId":"qitem-1","action":"scrub","reason":"retention-metadata","erasedAt":"t"}\n# a comment\n{"qitemId":"qitem-2","action":"delete"}\n');
+    const { deps, posts } = makeDeps();
+    await run(deps, "--ids", ledger, "--apply");
+    expect(posts).toEqual([{ path: "/api/queue/erase", body: { apply: true, ids: [
+      { qitemId: "qitem-1", action: "scrub", reason: "retention-metadata", erasedAt: "t" }, { qitemId: "qitem-2", action: "delete" },
+    ] } }]);
+    fs.writeFileSync(ledger, '{"qitemId": broken\n');
+    process.exitCode = undefined;
+    await run(deps, "--ids", ledger, "--apply");
+    expect(process.exitCode).toBe(1);
+    expect(posts).toHaveLength(1);
+  });
+
   it("sends nothing when its file can't be read, or when there's no one to record as erasing", async () => {
     const { deps, posts } = makeDeps();
     await run(deps, "--members", path.join(dir, "missing.txt"));

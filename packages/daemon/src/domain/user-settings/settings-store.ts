@@ -233,6 +233,8 @@ export const SETTINGS_VALID_KEYS = [
   // only its id (queue-erasure). 0 (default) keeps them.
   "retention.closed_content_days",
   "retention.closed_metadata_days",
+  // Where queue erasure appends each erased id and action (JSON lines), for replaying after a restore; empty keeps none.
+  "retention.erasure_ledger",
   "retention.watchdog_keep_per_job",
   // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
   "retention.stream_days",
@@ -361,6 +363,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "retention.events_days": { primary: "OPENRIG_RETENTION_EVENTS_DAYS" },
   "retention.closed_content_days": { primary: "OPENRIG_RETENTION_CLOSED_CONTENT_DAYS" },
   "retention.closed_metadata_days": { primary: "OPENRIG_RETENTION_CLOSED_METADATA_DAYS" },
+  "retention.erasure_ledger": { primary: "OPENRIG_RETENTION_ERASURE_LEDGER" },
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.stream_days": { primary: "OPENRIG_RETENTION_STREAM_DAYS" },
   "retention.stream_max_items": { primary: "OPENRIG_RETENTION_STREAM_MAX_ITEMS" },
@@ -467,6 +470,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "retention.events_days": ["retention", "eventsDays"],
   "retention.closed_content_days": ["retention", "closedContentDays"],
   "retention.closed_metadata_days": ["retention", "closedMetadataDays"],
+  "retention.erasure_ledger": ["retention", "erasureLedger"],
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.stream_days": ["retention", "streamDays"],
   "retention.stream_max_items": ["retention", "streamMaxItems"],
@@ -791,6 +795,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "retention.events_days": return 0; // 0 = keep; pruning is opt-in
     case "retention.closed_content_days": return 0; // 0 = keep; closed-work erasure is opt-in
     case "retention.closed_metadata_days": return 0;
+    case "retention.erasure_ledger": return ""; // empty = keep no ledger
     case "retention.watchdog_keep_per_job": return 50;
     case "retention.stream_days": return 30;
     case "retention.stream_max_items": return 20000;
@@ -1026,6 +1031,13 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "retention.closed_metadata_days": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
       throw new Error(`Invalid value for retention.closed_metadata_days: must be an integer >= 0 (0 keeps the rows), got "${raw}"`);
+    }
+  },
+  // Empty (the default) keeps no erasure ledger; otherwise an absolute file path, kept outside the backed-up data.
+  "retention.erasure_ledger": (raw) => {
+    const value = (raw ?? "").trim();
+    if (value !== "" && !value.startsWith("/")) {
+      throw new Error(`Invalid value for retention.erasure_ledger: must be empty or an absolute file path, got "${raw}"`);
     }
   },
   "retention.watchdog_keep_per_job": (raw, coerced) => {

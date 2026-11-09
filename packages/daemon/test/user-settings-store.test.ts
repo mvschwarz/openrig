@@ -198,6 +198,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "retention.events_days", // the history-only event types of events
       "retention.closed_content_days", // closed-work erasure: content
       "retention.closed_metadata_days", // closed-work erasure: the row, keeping its id
+      "retention.erasure_ledger", // queue erasure's replay ledger file
       "retention.watchdog_keep_per_job",
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",

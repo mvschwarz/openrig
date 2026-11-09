@@ -223,6 +223,7 @@ export interface RiggedConfig {
     eventsDays: number;
     closedContentDays: number;
     closedMetadataDays: number;
+    erasureLedger: string;
     batchSize: number;
   };
   // S04 (OPR.0.5.5.4) — pickup-receipt stall threshold (twin of the daemon settings-store).
@@ -419,6 +420,7 @@ const DEFAULTS = {
     eventsDays: 0,
     closedContentDays: 0,
     closedMetadataDays: 0,
+    erasureLedger: "",
     batchSize: 500,
   },
   // S04 — pickup-receipt stall threshold default (twin of daemon getDefaultValue).
@@ -573,6 +575,8 @@ export const VALID_KEYS = [
   // lockstep with the daemon twin.
   "retention.closed_content_days",
   "retention.closed_metadata_days",
+  // Queue erasure's ledger file (JSON lines of erased ids and actions); empty keeps none; lockstep with the daemon twin.
+  "retention.erasure_ledger",
   "stream.intake",
   "retention.batch_size",
   // S04 — pickup-receipt stall threshold; lockstep with the daemon settings-store twin.
@@ -697,6 +701,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "retention.events_days": { primary: "OPENRIG_RETENTION_EVENTS_DAYS" },
   "retention.closed_content_days": { primary: "OPENRIG_RETENTION_CLOSED_CONTENT_DAYS" },
   "retention.closed_metadata_days": { primary: "OPENRIG_RETENTION_CLOSED_METADATA_DAYS" },
+  "retention.erasure_ledger": { primary: "OPENRIG_RETENTION_ERASURE_LEDGER" },
   "stream.intake": { primary: "OPENRIG_STREAM_INTAKE" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
   "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
@@ -804,6 +809,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "retention.events_days": ["retention", "eventsDays"],
   "retention.closed_content_days": ["retention", "closedContentDays"],
   "retention.closed_metadata_days": ["retention", "closedMetadataDays"],
+  "retention.erasure_ledger": ["retention", "erasureLedger"],
   "stream.intake": ["stream", "intake"],
   "retention.batch_size": ["retention", "batchSize"],
   "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
@@ -1201,6 +1207,13 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for retention.closed_metadata_days: must be an integer >= 0 (0 keeps the rows), got "${raw}"`);
     }
   },
+  // Empty (the default) keeps no erasure ledger; otherwise an absolute file path, kept outside the backed-up data.
+  "retention.erasure_ledger": (raw) => {
+    const value = (raw ?? "").trim();
+    if (value !== "" && !value.startsWith("/")) {
+      throw new Error(`Invalid value for retention.erasure_ledger: must be empty or an absolute file path, got "${raw}"`);
+    }
+  },
   "retention.batch_size": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.batch_size: must be an integer >= 1, got "${raw}"`);
@@ -1474,6 +1487,7 @@ export class ConfigStore {
         eventsDays: v("retention.events_days") as number,
         closedContentDays: v("retention.closed_content_days") as number,
         closedMetadataDays: v("retention.closed_metadata_days") as number,
+        erasureLedger: v("retention.erasure_ledger") as string,
         batchSize: v("retention.batch_size") as number,
       },
       queue: {
