@@ -60,7 +60,7 @@ function toExchange(obj: unknown): JsonlExchange | null {
  * Honest-degraded: missing/unreadable file → []; unparseable/metadata/text-less lines are skipped.
  */
 export function parseJsonlExchanges(path: string, n: number): JsonlExchange[] {
-  if (!existsSync(path)) return [];
+  if (n <= 0 || !existsSync(path)) return [];
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
@@ -68,7 +68,12 @@ export function parseJsonlExchanges(path: string, n: number): JsonlExchange[] {
     return [];
   }
   const exchanges: JsonlExchange[] = [];
-  for (const line of raw.split("\n")) {
+  // Only decode the tail needed for the recap, not every exchange in a long session.
+  let end = raw.length;
+  while (end > 0) {
+    const start = raw.lastIndexOf("\n", end - 1) + 1;
+    const line = raw.slice(start, end);
+    end = start - 1;
     if (line.trim().length === 0) continue;
     let obj: unknown;
     try {
@@ -77,7 +82,7 @@ export function parseJsonlExchanges(path: string, n: number): JsonlExchange[] {
       continue; // corrupt line — skip, never throw
     }
     const ex = toExchange(obj);
-    if (ex) exchanges.push(ex);
+    if (ex && exchanges.push(ex) >= n) break;
   }
-  return n >= exchanges.length ? exchanges : exchanges.slice(exchanges.length - n);
+  return exchanges.reverse();
 }
