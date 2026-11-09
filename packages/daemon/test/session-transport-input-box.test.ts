@@ -755,6 +755,41 @@ describe("SessionTransport with transport.verify_input_box", () => {
     });
   });
 
+  describe("a person's own statusLine between the closing rule and the footer (#2798)", () => {
+    const STATUS = "  gpt-6.1-sol-fast · ctx 171.1k/872k (19.6%) · orchestrator";
+    // Edit: rows a statusLine prints, drawn right above the last footer row of a real frame (every phase keeps them).
+    const withStatusLine = (frame: string, rows: string[]) => {
+      const lines = frame.split("\n");
+      let at = lines.length - 1;
+      while (at >= 0 && !/^ {2}[⏵⏸]/.test(lines[at]!)) at--;
+      lines.splice(at, 0, ...rows);
+      return lines.join("\n");
+    };
+    const frames = (rows: string[]) => ({
+      prePaste: withStatusLine(claude("after-enter-15s.J"), rows),
+      afterPaste: withStatusLine(claude("submit-staged.J"), rows),
+      afterEnter: withStatusLine(claude("after-enter-0.4s.J"), rows),
+    });
+
+    it("T1 with a statusLine row in every frame: verified, as without it", async () => {
+      seedCanonicalRig("claude-code");
+      const { result, log } = await run({ frames: frames([STATUS]) }, texts.submit, true);
+      expectOnePasteOneEnter(result, log);
+      expect(result).toMatchObject({ verified: true, outcome: "delivered" });
+    });
+
+    it.each([
+      ["a dialog's selected choice behind a side border", ["│ ❯ 1. Yes │"]],
+      ["numbered choices selected by colour only", ["  1. Yes", "  2. No"]],
+      ["a box corner", ["╭──────────────────────╮"]],
+    ])("T1 with %s where the statusLine goes: unconfirmed", async (_name, rows) => {
+      seedCanonicalRig("claude-code");
+      const { result, log } = await run({ frames: frames(rows) }, texts.submit, true);
+      expectOnePasteOneEnter(result, log);
+      expect(result).toMatchObject({ verified: false, outcome: "rendered-unconfirmed" });
+    });
+  });
+
   describe("uncertainty from the capture: never a refusal, never a retry", () => {
     const frames = { prePaste: idle, afterPaste: claude("submit-staged.J"), afterEnter: claude("after-enter-0.4s.J") };
 
