@@ -571,6 +571,81 @@ describe("readSeatBeforePaste: verified needs a seat proven idle before the past
     });
   });
 
+  describe("the input box with a person's own statusLine between the closing rule and the footer (#2798, the send)", () => {
+    // The box reader (composerRegion) closes the box on the last rule only when the first row under it is a footer, so
+    // a statusLine row there left the box unrecognized before and after Enter, and a send to an idle seat with one
+    // still read unconfirmed. It now reads the statusLine rows by position, with the idle check's rule.
+    const STATUS = "  gpt-6.1-sol-fast · ctx 171.1k/872k (19.6%) · orchestrator";
+    // Edit: rows a statusLine prints, drawn right above the last footer row of a real frame.
+    const withStatusLine = (frame: string, rows: string[]) => {
+      const lines = frame.split("\n");
+      let at = lines.length - 1;
+      while (at >= 0 && !/^ {2}[⏵⏸]/.test(lines[at]!)) at--;
+      expect(lines[at - 1]!.trimEnd()).toMatch(/^─{10,}$/);
+      lines.splice(at, 0, ...rows);
+      return lines.join("\n");
+    };
+    // The bottom rows of a real Claude Code 2.1.319 idle seat with a one-row statusLine, captured in tmux with
+    // CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1: the box (its opening rule carries the session name), the statusLine row
+    // with Claude's own effort indicator drawn at its right (it sits on the footer row without a statusLine), and the
+    // footer. Local identifiers replaced at the same length. They replace the box and footer of after-enter-15s.J, whose
+    // rows above stay 2.1.296's: only the rows below the opening rule are this capture's.
+    const REAL_2_1_319 = [
+      `${"─".repeat(148)} ultracode ─`,
+      "❯\u00a0",
+      "─".repeat(160),
+      `  claude-opus-5-5 · ctx 171.1k/872k (19.6%) · worker1${" ".repeat(77)}● high · ultracode · /effort`,
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+    ];
+    const real2_1_319 = (box = "❯\u00a0") => {
+      const lines = claude("after-enter-15s.J").split("\n").map((line) => line.trimEnd());
+      let footer = lines.length - 1;
+      while (!lines[footer]!.trim()) footer--;
+      lines.splice(footer - 3, 4, ...REAL_2_1_319.map((row, i) => (i === 1 ? box : row)));
+      return lines.join("\n");
+    };
+
+    it("staged then sent with a statusLine row: exact before Enter, empty after it", () => {
+      const staged = withStatusLine(claude("staged-short.raw"), [STATUS]);
+      expect(readInputBox(staged, "claude-code", texts.short)).toBe("exact");
+      expect(readInputBox(withStatusLine(claude("after-enter-15s.J"), [STATUS]), "claude-code", texts.short, staged)).toBe("empty");
+      expect(readInputBox(withStatusLine(claude("submit-staged.J"), [STATUS]), "claude-code", texts.submit)).toBe("exact");
+    });
+
+    it("several statusLine rows, and Claude's indicator at the right of the row: read as without them", () => {
+      const rows = [STATUS, `${STATUS}${" ".repeat(40)}● high · /effort`, "  ~/work · main · 2 files changed"];
+      expect(readInputBox(withStatusLine(claude("staged-short.raw"), rows), "claude-code", texts.short)).toBe("exact");
+      expect(readInputBox(withStatusLine(claude("after-enter-15s.J"), rows), "claude-code", texts.short)).toBe("empty");
+      expect(readSeatBeforePaste(withStatusLine(claude("after-enter-15s.J"), rows), "claude-code")).toBe("idle");
+    });
+
+    it("a running turn after Enter with a statusLine row: queued, as without it", () => {
+      const running = withStatusLine(claude("after-enter-0.4s.J"), [STATUS]);
+      expect(readInputBox(running, "claude-code", texts.short, editLine(running, claudeBoxRow, `❯\u00a0${texts.short}`))).toBe("queued");
+    });
+
+    it("the bottom rows of a real 2.1.319 seat with a statusLine: idle for its seat, empty, and exact with our text", () => {
+      expect(readSeatBeforePaste(real2_1_319(), "claude-code", "ultracode")).toBe("idle");
+      expect(readInputBox(real2_1_319(), "claude-code", texts.short)).toBe("empty");
+      expect(readInputBox(real2_1_319(`❯\u00a0${texts.short}`), "claude-code", texts.short)).toBe("exact");
+    });
+
+    it.each([
+      ["a dialog in a box with a selected choice", ["╭──────────────────────╮", "│ ❯ 1. Yes │", "│   2. No │", "╰──────────────────────╯"]],
+      ["a dialog's row framed by side borders", ["│ Do you want to proceed? │"]],
+      ["a heavy side border", ["┃ Do you want to proceed? ┃"]],
+      ["a square box corner", ["┌──────────────┐"]],
+      ["a choice behind the tool-output gutter, without a glyph", ["  ⎿ 1. Yes"]],
+      ["a choice behind a heavy border", ["┃ 2) No"]],
+      ["a row starting with ❯", ["❯ resume the last session"]],
+      ["numbered choices selected by colour only", ["  1. Yes", "  2. No"]],
+    ])("unrecognized: %s between the closing rule and the footer", (_name, rows) => {
+      expect(readInputBox(withStatusLine(claude("staged-short.raw"), rows), "claude-code", texts.short)).toBe("unrecognized");
+      expect(readInputBox(withStatusLine(claude("after-enter-15s.J"), rows), "claude-code", texts.short)).toBe("unrecognized");
+      expect(readSeatBeforePaste(withStatusLine(claude("after-enter-15s.J"), rows), "claude-code")).toBe("unknown");
+    });
+  });
+
   describe("Claude's completion row in the status slot (ADV5-1): idle OpenRig-launched seats after their first turn", () => {
     // Real frames of idle seats OpenRig launched (Claude Code 2.1.296, classic renderer, named box, OpenRig's
     // statusLine collector, 80 columns; see fixtures/input-box/README.md). The box follows the transcript, so the

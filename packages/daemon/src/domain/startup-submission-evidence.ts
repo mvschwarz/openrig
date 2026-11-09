@@ -20,6 +20,13 @@ export const isComposerFooter = (line: string): boolean => {
   return (bar === "" && line !== "") || /(?:shift\+tab to cycle|\? for shortcuts)/i.test(bar) || MODE_BAR_START.test(bar)
     || PASTE_HINT.test(bar);
 };
+// A row between Claude's closing rule and its footer that a person's statusLine does not print, or that a menu, picker
+// or dialog could be drawing (#2798): a blank row (a fullscreen renderer reserves one for a statusLine that prints
+// nothing), `❯`, `›` or `»` anywhere in the row (so a statusLine that uses one as a separator reads as not one), a row
+// that starts with a numbered choice (`1. `, `2) `) with or without a border or gutter before it, a box corner, or a row
+// framed by side borders. Anything else there is read by position as a statusLine row, including the indicator Claude
+// draws at the right of the first one (`● high · /effort`, which sits on the footer row when no statusLine prints).
+export const CLAUDE_NOT_STATUS_LINE_ROW = /^\s*$|[❯›»╭╮╰╯┌┐└┘]|^[\s│┃⎿]*\d+[.)]\s|^\s*[│┃].*[│┃]\s*$/;
 // This placeholder occupies an empty composer while submitted text is queued.
 export const QUEUED_PLACEHOLDER = normalize("Press up to edit queued messages");
 
@@ -33,10 +40,14 @@ export function composerRegion(pane: string | null, runtime: string | null = nul
     // Prompt text can itself contain rules (the startup challenge does), and a rule in the prompt can be followed by a
     // line that looks like a mode bar. The composer's closing rule is the last rule on the screen: only the footer
     // lines come after it. An unrecognized footer under it leaves the region unverified rather than falling back to
-    // a rule inside the prompt.
+    // a rule inside the prompt. On Claude, a person's statusLine draws its rows between that rule and the footer; they
+    // are read by position, as claudeSeatIdle reads them, and none may be a row a statusLine does not print (#2798).
     for (let i = lines.length - 1; i > inputAt; i--) {
       if (!/^[─═-]{10,}$/.test(lines[i]!.trim())) continue;
-      if (isComposerFooter((lines.slice(i + 1).find((next) => next.trim()) ?? "").trim())) end = i;
+      const below = lines.slice(i + 1).map((next) => next.trim()).filter((next) => next);
+      const footer = below.findIndex((row) => isComposerFooter(row));
+      if (footer === 0 || (footer > 0 && runtime === "claude-code"
+        && !below.slice(0, footer).some((row) => CLAUDE_NOT_STATUS_LINE_ROW.test(row)))) end = i;
       break;
     }
   }
