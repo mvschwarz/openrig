@@ -342,6 +342,47 @@ describe("queue routes", () => {
     expect(job).toMatchObject({ target_session: "b@r", interval_seconds: 45, state: "active" });
   });
 
+  describe("#2739: a park on an outside condition", () => {
+    const post = (qitemId: string, body: Record<string, unknown>) => app.request(`/api/queue/${qitemId}/update`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" }, body: JSON.stringify(body),
+    });
+    const show = async (qitemId: string) => (await app.request(`/api/queue/${qitemId}`)).json() as Promise<Record<string, any>>;
+    async function claimed() {
+      const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "park-without-wake repro", nudge: false });
+      queueRepo.claim({ qitemId: row.qitemId, destinationSession: "b@r" });
+      return row.qitemId;
+    }
+
+    it("a later wake on the same blocker arms a timer, and the row shows it", async () => {
+      // The reporter's two calls: parked on an external gate with no wake, then the same blocker with --wake-after 10m.
+      const id = await claimed();
+      expect((await post(id, { state: "blocked", blockedOn: "external:some-gate", transitionNote: "parked without a wake" })).status).toBe(200);
+      expect((await show(id)).waiting.nextBackstop).toMatchObject({ mechanism: "UNVERIFIED: no timed backstop", dueAt: null });
+      expect((await post(id, { state: "blocked", blockedOn: "external:some-gate", wakeAfterSeconds: 600, transitionNote: "adding a wake later" })).status).toBe(200);
+      const wake = db.prepare("SELECT wake_ref FROM queue_transition_wakes WHERE qitem_id = ? AND phase = 'armed' ORDER BY transition_id DESC")
+        .get(id) as { wake_ref: string } | undefined;
+      expect(db.prepare("SELECT interval_seconds, state FROM watchdog_jobs WHERE job_id = ?").get(wake?.wake_ref)).toMatchObject({ interval_seconds: 600, state: "active" });
+      expect((await show(id)).waiting.nextBackstop).toMatchObject({ mechanism: `watchdog:${wake?.wake_ref}`, intervalSeconds: 600 });
+    });
+
+    it("with no wake, the park lands and its reply says no wake is set; with any wake, it says nothing", async () => {
+      const id = await claimed();
+      const parked = await post(id, { state: "blocked", blockedOn: "external:some-gate", transitionNote: "parked without a wake" });
+      expect(parked.status).toBe(200);
+      const parkedBody = await parked.json() as Record<string, any>;
+      expect(parkedBody).toMatchObject({ state: "blocked", blockedOn: "external:some-gate" });
+      expect(parkedBody.advisories).toEqual([expect.objectContaining({ code: "park_without_wake", blockedOn: "external:some-gate",
+        message: expect.stringContaining("No wake is set for this park") })]);
+
+      // A wake added later, a re-park that keeps that live timer, and a park on a live qitem get no advisory.
+      const advisoriesOf = async (qitemId: string, body: Record<string, unknown>) => (await (await post(qitemId, body)).json() as Record<string, any>).advisories;
+      expect(await advisoriesOf(id, { state: "blocked", blockedOn: "external:some-gate", wakeAfterSeconds: 600, transitionNote: "adding a wake later" })).toBeUndefined();
+      expect(await advisoriesOf(id, { state: "blocked", blockedOn: "external:some-gate", transitionNote: "still waiting" })).toBeUndefined();
+      const upstream = await queueRepo.create({ sourceSession: "a@r", destinationSession: "c@r", body: "upstream", nudge: false });
+      expect(await advisoriesOf(await claimed(), { state: "blocked", blockedOn: upstream.qitemId, transitionNote: "waits on upstream" })).toBeUndefined();
+    });
+  });
+
   describe("update resolution", () => {
     type Start = "pending" | "in-progress" | "blocked" | "done" | "canceled" | "handed-off" | "failed" | "denied";
     const post = (qitemId: string, body: Record<string, unknown>, session = "b@r") => app.request(`/api/queue/${qitemId}/update`, {

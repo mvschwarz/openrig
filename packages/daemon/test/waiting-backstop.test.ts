@@ -196,4 +196,21 @@ describe("waiting face names the next action the existing ladder can actually ta
     jobs.updateSchedule(job.jobId, job.specYaml, 600, new Date(0).toISOString());
     expect(view(row.qitemId).nextBackstop.dueAt).toBe("2026-09-08T00:00:00.000Z");
   });
+
+  it("#2739: a claimed row parked with no wake reads as having no timed backstop, and a later wake on the same blocker arms one it shows", async () => {
+    const row = await queue.create({ sourceSession: "owner@rig", destinationSession: "worker@rig", body: "park-without-wake repro", nudge: false });
+    await queue.claim({ qitemId: row.qitemId, destinationSession: "worker@rig" });
+    await queue.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: "external:some-gate",
+      transitionNote: "parked without a wake" } as never);
+    expect(view(row.qitemId).nextBackstop).toMatchObject({ mechanism: "UNVERIFIED: no timed backstop", dueAt: null });
+    expect(queue.getParkWakeStatus(row.qitemId)).toBeNull();
+
+    // The reporter's second call: the same blocker, now with a wake.
+    await queue.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: "external:some-gate",
+      wakeAfterSeconds: 600, transitionNote: "adding a wake later" } as never);
+    const wake = queue.getParkWakeStatus(row.qitemId);
+    expect(wake).toMatchObject({ kind: "timer" });
+    expect(new WatchdogJobsRepository(db).getById(wake!.ref)).toMatchObject({ state: "active", intervalSeconds: 600 });
+    expect(view(row.qitemId).nextBackstop).toMatchObject({ mechanism: `watchdog:${wake!.ref}`, intervalSeconds: 600, dueAt: "2026-09-08T00:10:00.000Z" });
+  });
 });

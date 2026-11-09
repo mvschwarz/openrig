@@ -8,6 +8,9 @@ import type { WatchdogJob } from "./watchdog-jobs-repository.js";
 
 export type WaitingActivityReader = (session: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "decidedBy" | "backgroundWork"> | null;
 
+/** A blocked row's backstop when no live timer or watchdog is armed and its blocker isn't a row that can finish. */
+export const NO_TIMED_BACKSTOP = "UNVERIFIED: no timed backstop";
+
 /** A read of the existing transition log, not another progress receipt. Machine
  * actors and typed wake receipts are bookkeeping, never task progress. Historical
  * untyped author notes remain author testimony; their text is not classified.
@@ -109,7 +112,7 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
     view.nextBackstop = timer ? {
       owner: row.destination_session, mechanism: `watchdog:${timer.job_id}`, intervalSeconds: timer.interval_seconds,
       dueAt: new Date(timerDue ?? Date.now()).toISOString(),
-    } :{ owner: blocker?.destination_session ?? row.destination_session, mechanism: blocker ? "blocker-transition / queue-stuck-sweep" : "UNVERIFIED: no timed backstop", dueAt: null, intervalSeconds: blocker ? sweepInterval : null };
+    } :{ owner: blocker?.destination_session ?? row.destination_session, mechanism: blocker ? "blocker-transition / queue-stuck-sweep" : NO_TIMED_BACKSTOP, dueAt: null, intervalSeconds: blocker ? sweepInterval : null };
     if (timer) {
       let notice: { at: string; deliveryStatus: string } | undefined;
       try {
