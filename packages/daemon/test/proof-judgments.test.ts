@@ -81,6 +81,18 @@ describe("attributed proof judgments and derived readiness", () => {
     expect(files.map(p => fs.readFileSync(p, "utf8"))).toEqual(before);
     expect(fs.readFileSync(join(f.alpha, "proof/judgments/00000001.md"), "utf8")).toContain(a.judgment.id);
   });
+  it("retains judgment identity and correction history after CRLF conversion", () => {
+    const f = fixture(), accepted = f.judge();
+    const receipt = join(f.alpha, "proof/judgments/00000001.md");
+    f.write(receipt, fs.readFileSync(receipt, "utf8").replace(/\n/g, "\r\n"));
+    const current = readSliceReadiness(f.alpha);
+    expect(current).toEqual(accepted.readiness);
+    const correction = f.judge(f.input(undefined, "reject"));
+    expect(correction.judgment.previous).toBe(accepted.judgment.id);
+    expect(correction.readiness.items[0]!.state).toBe("rejected");
+    f.write(receipt, fs.readFileSync(receipt, "utf8").replace("verdict: accept", "verdict: reject"));
+    expect(readSliceReadiness(f.alpha).issues.join()).toContain("changed judgment");
+  });
   it("rejects unauthorized actors, wrong revisions and missing evidence without a receipt", () => {
     const f = fixture();
     expect(() => f.judge(f.input(), "other@trial")).toThrow("not a judge");
