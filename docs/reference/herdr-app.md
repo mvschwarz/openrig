@@ -61,9 +61,11 @@ What an open does, in order:
 2. One atomic write of `layouts/rig.json`: your current layout, with OpenRig's stack beside your tab block. Your own
    layout file is never written. A `rig.json` OpenRig didn't write is never overwritten.
 3. The Rig layout is shown, the view is selected once herdr-app confirms it shows the new file, and the keyboard
-   goes to the first live cell. The interactive cells take input from then on: OpenRig writes each one's gate file in
-   its private folder, and the cell switches within a fraction of a second. Anything that reached a cell before that,
-   typed or written to its terminal (`hc send`), is dropped, not delivered late. The open reports a view herdr-app
+   goes to the first live cell. Once herdr-app has acknowledged the layout with the view, OpenRig writes the gate file
+   of each of the view's interactive cells, on every page (including pages the strip hasn't shown yet, since the strip
+   moves between pages on its own), and each cell takes input a fraction of a second later (it checks every 0.2 s).
+   Anything that reached a cell before that, typed or written to its terminal (`hc send`), is dropped, not delivered
+   late. The open reports a view herdr-app
    hasn't confirmed as unconfirmed, not opened; its viewers keep running and it stays in the Rig layout, and its cells
    take input once herdr-app shows it. OpenRig keeps watching for 10 minutes, across a daemon restart; if herdr-app
    hasn't shown it by then, each interactive cell says so, takes no input, and names the command that opens the view
