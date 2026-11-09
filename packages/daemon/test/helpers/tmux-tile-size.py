@@ -15,6 +15,28 @@ import time
 
 shell, writable, readonly = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3])
 tmux = shutil.which("tmux")
+
+
+def version_at_least(version, wanted):
+    """Whether tmux -V's version is at least wanted, (major, minor). next-* and master count as the newest."""
+    v = version[len("tmux "):] if version.startswith("tmux ") else version
+    if v.startswith("next-") or v == "master":
+        return True
+    major, _, rest = v.partition(".")
+    minor = ""
+    for ch in rest:
+        if not ch.isdigit():
+            break
+        minor += ch
+    return major.isdigit() and minor != "" and (int(major), int(minor)) >= wanted
+
+
+TMUX_VERSION = subprocess.run([tmux, "-V"], capture_output=True, text=True).stdout.strip()
+# From tmux 3.5 a tile sends its first keys through the attaching client, so tmux's prefix applies to them. Below 3.5 they
+# go to the pane, as tile-attach decides from tmux -V.
+THROUGH_CLIENT = version_at_least(TMUX_VERSION, (3, 5))
+# Before 3.4, tmux's own client start writes paste framing off, so the tile's framing before the attach can't be told apart.
+FRAMING_GAP_SEEN = version_at_least(TMUX_VERSION, (3, 4))
 # Wider than any tile below, so a tile that attached would show only the start of it.
 LINE = "START " + " ".join(str(i) for i in range(1, 45)) + " END"
 # A rule as wide as the seat's window, as Claude Code draws them.
@@ -216,12 +238,20 @@ def writable_first_input(server):
     server.wait_for(lambda: received(server) == expected, "a NUL first key reaches the seat")
     server.wait_for(lambda: server.client_ttys() == [tile[3]], "a NUL first key attaches the tile")
     server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
-    # tmux's prefix works as in an attached tile: Ctrl-b d detaches at once, and nothing reaches the seat.
-    os.write(tile[1], b"\x02d")
-    server.wait_for(lambda: "[detached" in server.seen(tile).rpartition("\x1b[?2004h")[0][-400:] or
-                    server.seen(tile).count("[detached") >= 3, "Ctrl-b d detaches the tile")
-    time.sleep(0.5)
-    assert received(server) == expected, "the prefix and its key must not reach the seat: " + repr(received(server)[len(expected):])
+    if THROUGH_CLIENT:
+        # tmux's prefix works as in an attached tile: Ctrl-b d detaches at once, and nothing reaches the seat.
+        os.write(tile[1], b"\x02d")
+        server.wait_for(lambda: "[detached" in server.seen(tile).rpartition("\x1b[?2004h")[0][-400:] or
+                        server.seen(tile).count("[detached") >= 3, "Ctrl-b d detaches the tile")
+        time.sleep(0.5)
+        assert received(server) == expected, "the prefix and its key must not reach the seat: " + repr(received(server)[len(expected):])
+    else:
+        # Below tmux 3.5 the first keys go to the pane before the tile attaches, so a prefix typed first reaches the seat.
+        os.write(tile[1], b"\x02d")
+        expected += b"\x02d"
+        server.wait_for(lambda: received(server) == expected, "below tmux 3.5, a prefix typed first reaches the seat")
+        server.wait_for(lambda: server.client_ttys() == [tile[3]], "below tmux 3.5, the first keys attach the tile")
+        server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
     # A paste while showing: the tile's terminal frames it only if the tile asked for that, as a terminal does.
     server.wait_for(lambda: server.seen(tile).rfind("\x1b[?2004h") > server.seen(tile).rfind("[detached"), "the tile shows again")
     framed = server.seen(tile).rfind("\x1b[?2004h") > server.seen(tile).rfind("\x1b[?2004l")
@@ -249,7 +279,7 @@ def writable_first_input(server):
     # From the first key until tmux takes the terminal, its paste framing stays on: a paste in that gap stays one paste.
     server.wait_for(lambda: "\x1b[?2004h" in server.seen(tile)[mark:], "tmux takes the tile's terminal")
     gap = server.seen(tile)[mark:].split("\x1b[?2004h", 1)[0]
-    assert "\x1b[?2004l" not in gap, "the tile turned paste framing off before tmux attached: " + repr(gap[-80:])
+    assert not FRAMING_GAP_SEEN or "\x1b[?2004l" not in gap, "the tile turned paste framing off before tmux attached: " + repr(gap[-80:])
     server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
     # A run of text that ends in ; keeps it, through the client and before a paste alike.
     os.write(tile[1], b"ls;\r")
@@ -266,6 +296,9 @@ def writable_first_input(server):
     expected += b"\x1b[A"
     server.wait_for(lambda: received(server) == expected, "Up as the first key reaches the seat as Up")
     server.wait_for(lambda: server.client_ttys() == [], "an idle tile detaches", 8)
+    if not THROUGH_CLIENT:
+        # Below tmux 3.5 the prefix typed first reaches the seat (above), so the prefix-then-PgUp case applies from 3.5 on.
+        return {"bytes": len(received(server))}
     # The prefix, then PgUp as a person types them: tmux scrolls back, and nothing reaches the seat.
     os.write(tile[1], b"\x02")
     server.wait_for(lambda: server.client_ttys() == [tile[3]], "the prefix attaches the tile")
