@@ -94,36 +94,43 @@ export function referencedTerminals(node: unknown): string[] {
 
 export type DeriveResult = { ok: true; tree: LayoutNode } | { ok: false; code: "base_has_no_tab_block" | "base_is_rig_layout"; error: string };
 
-function frameOf(tabBlock: LayoutNode): { gap: number; paint: Record<string, unknown> } {
+/** The person's pane frame, for the view's cells: its paint (radius, background, border) and its focused border, a line.
+ *  A layout node's own `focus` is a look (`{ border, background }`), not a line, so the line is never copied as is. */
+function frameOf(tabBlock: LayoutNode): { gap: number; paint: Record<string, unknown>; focus?: unknown } {
   const frame = (tabBlock.content?.pane ?? {}) as Record<string, unknown>;
-  const paint = Object.fromEntries(["radius", "background", "border", "focus"].filter(k => k in frame).map(k => [k, frame[k]]));
-  return { gap: typeof frame.gap === "number" ? frame.gap : 6, paint };
+  const paint = Object.fromEntries(["radius", "background", "border"].filter(k => k in frame).map(k => [k, frame[k]]));
+  return { gap: typeof frame.gap === "number" ? frame.gap : 6, paint, ...("focus" in frame ? { focus: frame.focus } : {}) };
 }
 
-function cellNode(cell: RigCell | null, padId: string, paint: Record<string, unknown>): LayoutNode {
+function cellNode(cell: RigCell | null, padId: string, paint: Record<string, unknown>, focus?: unknown): LayoutNode {
   if (!cell) return { id: padId, type: "block", size: { weight: 1 }, content: { mod: "rig-pad" }, ...paint };
   if (cell.terminal === null) {
     return { id: cell.id, type: "block", size: { weight: 1 }, content: { mod: "rig-ended", props: { title: cell.title } }, ...paint };
   }
+  // The border, and the focused border, go on the terminal block: herdr-app draws a node's focus look only on the
+  // focused terminal block itself (a chrome terminal's ancestors aren't on its focus path). The unfocused border keeps
+  // the same width, so focusing a cell never resizes its terminal.
+  const { border, ...card } = paint;
   return {
-    id: cell.id, type: "column", size: { weight: 1 }, ...paint,
+    id: cell.id, type: "column", size: { weight: 1 }, ...card,
     children: [
       { id: `${cell.id}-h`, type: "block", size: { px: HEADER_HEIGHT },
         content: { mod: "rig-cell-header", props: { title: cell.title, detail: cell.detail ?? "", seat: cell.seat } } },
-      { id: `${cell.id}-x`, type: "block", content: { terminal: cell.terminal } },
+      { id: `${cell.id}-x`, type: "block", content: { terminal: cell.terminal },
+        ...(border ? { border } : {}), ...(focus ? { focus: { border: focus } } : {}) },
     ],
   };
 }
 
 /** One view as an equal, padded grid. */
-export function viewGrid(view: RigView, gap: number, paint: Record<string, unknown> = {}): LayoutNode {
+export function viewGrid(view: RigView, gap: number, paint: Record<string, unknown> = {}, focus?: unknown): LayoutNode {
   const { cols, rows } = gridShape(view.cells.length, view.columns);
   const cells: (RigCell | null)[] = [...view.cells, ...Array<null>(rows * cols - view.cells.length).fill(null)];
   return {
     id: view.id, type: "column", gap, padding: gap,
     children: Array.from({ length: rows }, (_, r) => ({
       id: `${view.id}-r${r}`, type: "row", gap, size: { weight: 1 },
-      children: Array.from({ length: cols }, (_, c) => cellNode(cells[r * cols + c] ?? null, `${view.id}-pad${r * cols + c}`, paint)),
+      children: Array.from({ length: cols }, (_, c) => cellNode(cells[r * cols + c] ?? null, `${view.id}-pad${r * cols + c}`, paint, focus)),
     })),
   };
 }
@@ -153,7 +160,7 @@ export function deriveRigLayout(base: LayoutNode, views: readonly RigView[], opt
   const hit = isTabBlock(tree) ? null : findParent(tree, isTabBlock);
   if (!hit) return { ok: false, code: "base_has_no_tab_block", error: "The base layout has no {\"tab\":\"active\"} block for OpenRig's views to sit beside." };
   const tabBlock = hit.parent.children![hit.index]!;
-  const { gap, paint } = frameOf(tabBlock);
+  const { gap, paint, focus } = frameOf(tabBlock);
   // The person's tab block keeps its own id (their clicks on it stay theirs); `main` only when it has none.
   const mainId = typeof tabBlock.id === "string" && tabBlock.id ? tabBlock.id : RIG_MAIN;
   const main: LayoutNode = { ...tabBlock, id: mainId };
@@ -164,7 +171,7 @@ export function deriveRigLayout(base: LayoutNode, views: readonly RigView[], opt
   const stack: LayoutNode = {
     id: RIG_STACK, type: "stack", active: mainId,
     header: { content: { mod: "rig-strip", props: strip }, height: STRIP_HEIGHT },
-    children: [main, ...views.map(v => viewGrid(v, gap, paint))],
+    children: [main, ...views.map(v => viewGrid(v, gap, paint, focus))],
   };
   for (const key of ["size", "min", "max"] as const) {
     if (key in main) { stack[key] = main[key]; delete main[key]; }

@@ -71,6 +71,27 @@ describe("deriveRigLayout", () => {
     ] });
   });
 
+  it("frames each live cell's terminal block with the pane border and herdr's focus look, so a focused cell shows its ring", () => {
+    // herdr's shipped frame: `focus` is a line here, but on a layout node it is a look ({ border, background }).
+    const framed = structuredClone(BASE);
+    const tabs = (framed.children![1]!.children![1]!.content as { pane: Record<string, unknown> }).pane;
+    tabs.focus = { width: 1, color: "accent" };
+    const derived = deriveRigLayout(framed, [view("rv-a", 3)], { revision: "r-1" });
+    if (!derived.ok) throw new Error(derived.error);
+    const cells = stackOf(derived.tree).children![1]!.children!.flatMap((row) => row.children!);
+    const [header, terminal] = cells[0]!.children!;
+    // herdr-app draws a node's focus look only on the focused chrome terminal block itself.
+    expect(terminal).toMatchObject({ content: { terminal: "t10" }, border: { width: 1, color: "border" }, focus: { border: { width: 1, color: "accent" } } });
+    // The same border width unfocused, so focusing never resizes the terminal; the card keeps radius, not a second border.
+    expect(cells[0]).toMatchObject({ type: "column", radius: 8 });
+    expect(cells[0]!.border).toBeUndefined();
+    expect(cells[0]!.focus).toBeUndefined();
+    expect(header!.focus).toBeUndefined();
+    // A pad cell is framed like a pane, and never gets the line where a look belongs.
+    expect(cells[3]).toMatchObject({ content: { mod: "rig-pad" }, border: { width: 1, color: "border" } });
+    expect(cells[3]!.focus).toBeUndefined();
+  });
+
   it("writes an ended viewer as a rig-ended cell, never a reference to its dead terminal", () => {
     const v = view("rv-a", 2);
     v.cells[1]!.terminal = null;
