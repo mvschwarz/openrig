@@ -31,6 +31,7 @@ import { listProjects, projectCatalogPaths } from "../domain/workspace/project-r
 import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
+import { eraseQueue, type EraseScope } from "../domain/queue-erasure.js";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
@@ -227,6 +228,8 @@ export function queueRoutes(): Hono {
         // caller id-reuse (a bug, not an idempotent retry) — surface as a
         // conflict, never overwrite.
         : err.code === "qitem_id_reuse" ? 409
+        // Queue erasure deleted this id's row; it isn't created again.
+        : err.code === "qitem_erased" ? 409
         // OPR.0.4.6.MH3 FR-4 (C2): a cross-host source-close re-drive naming a
         // DIFFERENT closure_target than the recorded one — someone else closed
         // the source meanwhile; surfaced, never overwritten.
@@ -651,6 +654,55 @@ export function queueRoutes(): Hono {
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
+    }
+  });
+
+  // POST /erase — queue erasure in one exact scope: account deletion (members, the account's recorded sessions),
+  // explicit ids (a ledger's reapply after a restore), or the routine closed-work windows from this daemon's settings,
+  // run now. A dry run unless apply is true. domain/queue-erasure.ts; docs/reference/queue-erasure.md.
+  app.post("/erase", async (c) => {
+    const body = await c.req.json<{ members?: unknown; ids?: unknown; action?: unknown; routine?: unknown; apply?: unknown; actorSession?: string }>()
+      .catch(() => ({} as never));
+    const identity = requireSenderIdentity(c, { verb: "queue erase", bodyClaim: body.actorSession });
+    if (!identity.ok) return identity.response;
+    const refuse = (error: string, message: string) => c.json({ error, message }, 400);
+    const named = [body.members !== undefined, body.ids !== undefined, body.routine !== undefined].filter(Boolean).length;
+    if (named === 0) return refuse("erase_scope_required", "Name one scope: members (account deletion), ids, or routine.");
+    if (named > 1) return refuse("erase_scope_conflict", "Name exactly one scope: members, ids, or routine.");
+    const exactList = (value: unknown): string[] | null =>
+      Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === "string" && entry.length > 0 && entry.trim() === entry)
+        ? value as string[] : null;
+    let scope: EraseScope;
+    if (body.members !== undefined) {
+      const members = exactList(body.members);
+      if (!members) return refuse("erase_members_invalid", "members must be a non-empty list of exact session names.");
+      scope = { kind: "members", members };
+    } else if (body.ids !== undefined) {
+      const ids = exactList(body.ids);
+      if (!ids) return refuse("erase_ids_invalid", "ids must be a non-empty list of qitem ids.");
+      const action = body.action ?? "delete";
+      if (action !== "delete" && action !== "scrub") return refuse("erase_action_invalid", "action must be delete or scrub.");
+      scope = { kind: "ids", ids, action };
+    } else {
+      const settings = c.get("settingsStore" as never) as { resolveOne(key: string): { value: unknown } } | undefined;
+      const days = (key: string): number => {
+        const value = settings?.resolveOne(key).value;
+        return typeof value === "number" ? value : 0;
+      };
+      const contentDays = days("retention.closed_content_days");
+      const metadataDays = days("retention.closed_metadata_days");
+      if (contentDays === 0 && metadataDays === 0) {
+        return refuse("erase_routine_off", "retention.closed_content_days and retention.closed_metadata_days are both 0 (off).");
+      }
+      scope = { kind: "routine", contentDays, metadataDays };
+    }
+    try {
+      const report = await eraseQueue(c.get("db" as never) as Database.Database, { scope, apply: body.apply === true, nowIso: new Date().toISOString() });
+      console.log(`[queue-erase] ${identity.session} ${scope.kind} ${report.applied ? "applied" : "dry run"}: `
+        + `${report.qitems.length} rows, ${report.mixed.length} mixed, ${report.gaps.length} gaps, complete=${report.complete}`);
+      return c.json(report);
+    } catch (err) {
+      return c.json({ error: "erase_failed", message: err instanceof Error ? err.message : String(err) }, 500);
     }
   });
 
