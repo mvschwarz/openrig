@@ -66,7 +66,10 @@ not fill in; if so, follow the form.
     asked at RECORD stays on Steering and the Feed without a post. Running it again reuses each ask's
     one decision rather than making another, so an ask whose post is confirmed isn't posted again. As
     with any Slack post, one whose earlier attempt Slack couldn't confirm may post once more, marked as
-    a possible repeat. `--wait <seconds>` (default 10) is how long it waits for Slack receipts.
+    a possible repeat. That includes an ask whose attempt record can't be read, or whose state can't be
+    checked while an earlier attempt may be in Slack: it posts once per gateway run, marked, and the
+    command then reports it as already posted, with the earlier attempt unconfirmed. An ask that is
+    no longer open isn't posted. `--wait <seconds>` (default 10) is how long it waits for Slack receipts.
 
 ## What the app asks for
 

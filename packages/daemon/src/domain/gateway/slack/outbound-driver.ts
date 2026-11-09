@@ -46,6 +46,9 @@ export interface OutboundPostPayload {
   /** #1013 — the row's state, so the renderer can tell a gate PARKED on a human
    *  (state=blocked) from the same row while an agent seat owns it. */
   state?: string | null;
+  /** Set by the gateway when it posts once although it can't tell whether an earlier attempt landed: the post says it
+   *  may repeat, and an attempt record that can't be written doesn't stop it. Never part of a buffered decision. */
+  possibleRepeat?: boolean;
 }
 
 export interface OutboundDriverDeps {

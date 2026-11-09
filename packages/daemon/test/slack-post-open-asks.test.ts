@@ -48,6 +48,7 @@ describe("rig slack post-open-asks through the gateway", () => {
   let failPosts: boolean;
   let historyFails: boolean;
   let historyReads: number;
+  let postAttempts: number;
   const posts: Array<Record<string, unknown>> = [];
   const stops: Array<() => void> = [];
 
@@ -61,6 +62,7 @@ describe("rig slack post-open-asks through the gateway", () => {
     failPosts = false;
     historyFails = false;
     historyReads = 0;
+    postAttempts = 0;
   });
   afterEach(() => { for (const stop of stops.splice(0)) stop(); db.close(); rmSync(home, { recursive: true, force: true }); });
 
@@ -72,6 +74,7 @@ describe("rig slack post-open-asks through the gateway", () => {
       home, queueRepo: repo, registry: { loadHumanRegistry: () => registry, resolveSlackHandle }, outboundIntervalMs: 60_000,
       fetchImpl: async (url, init) => {
         if (String(url).includes("chat.postMessage")) {
+          postAttempts += 1;
           if (failPosts) throw new TypeError("fetch failed");
           posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
           return new Response(JSON.stringify({ ok: true, ts: `1724.9${posts.length}` }), { status: 200, headers: { "content-type": "application/json" } });
@@ -265,7 +268,7 @@ describe("rig slack post-open-asks through the gateway", () => {
     expect(new DispatchBuffer(home).pending().map((d) => d.decisionId)).toEqual(["earlier-2"]);
   });
 
-  it("X-F2: an attempted re-shown ask whose Slack outcome can't be confirmed, and whose state can't be read, stays uncertain and kept", async () => {
+  it("X-F2: an attempted re-shown ask whose Slack outcome can't be confirmed, and whose state can't be read, posts once, marked as a possible repeat", async () => {
     const row = await park();
     await enable();
     const [open] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listOpenAsks({ minimumLevel: "NOTICE" });
@@ -278,19 +281,20 @@ describe("rig slack post-open-asks through the gateway", () => {
     registry = { ok: false, error: "the human registry couldn't be read" } as never; // and the current state can't be read
     const w = wire();
     w.startServices?.(); // replays the kept decision
-    await vi.waitFor(() => expect(historyReads).toBeGreaterThan(0));
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(posts, "never forced past the check").toHaveLength(0);
-    expect(new DispatchBuffer(home).pending().map((d) => d.decisionId), "kept for its next replay").toEqual([decisionId]);
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts[0]), "the post says it may repeat").toContain("Delivery may repeat after an earlier unconfirmed attempt.");
+    await vi.waitFor(() => expect(new DispatchBuffer(home).pending()).toHaveLength(0));
     expect(notes(row).some((n) => n.startsWith("slack-re-present-state-unavailable ") || n.startsWith("slack-re-present-disposition ")),
       "no not-posted record for an ask that may be in Slack").toBe(false);
+    expect(notes(row).some((n) => n.startsWith("slack-re-present-unconfirmed "))).toBe(true);
 
     registry = readable;
     const result = await run(w, 0);
-    expect(resultFor(result, row)).toMatchObject({ outcome: "uncertain", reshown: false });
+    expect(resultFor(result, row)).toMatchObject({ outcome: "already-posted", reshown: false,
+      detail: "posted once, marked as possibly repeating an earlier attempt that couldn't be confirmed" });
   });
 
-  it("X-F3: on replay, an attempt log that can't be read stays unknown: nothing posts, the decision is kept, no not-posted record", async () => {
+  it("X-F3: on replay, an attempt log that can't be read posts the ask once, marked, and never records it as not posted", async () => {
     const row = await park();
     await enable();
     const [open] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listOpenAsks({ minimumLevel: "NOTICE" });
@@ -301,15 +305,42 @@ describe("rig slack post-open-asks through the gateway", () => {
     registry = { ok: false, error: "the human registry couldn't be read" } as never; // and the current state can't be read
     const w = wire();
     w.startServices?.(); // replays the kept decision
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(posts).toHaveLength(0);
-    expect(new DispatchBuffer(home).pending().map((d) => d.decisionId), "kept for its next replay").toEqual([decisionId]);
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts[0]), "the post says it may repeat").toContain("Delivery may repeat after an earlier unconfirmed attempt.");
+    await vi.waitFor(() => expect(new DispatchBuffer(home).pending()).toHaveLength(0));
     expect(notes(row).some((n) => n.startsWith("slack-re-present-state-unavailable ") || n.startsWith("slack-re-present-disposition ")),
       "no not-posted record while whether it was attempted is unknown").toBe(false);
+    expect(notes(row).find((n) => n.startsWith("slack-re-present-unconfirmed "))).toMatch(/attempt log couldn't be read/);
 
     registry = readable;
     const result = await run(w, 0);
-    expect(resultFor(result, row)).toMatchObject({ outcome: "uncertain", reshown: false, detail: expect.stringMatching(/whether it reached Slack can't be read/) });
+    expect(resultFor(result, row)).toMatchObject({ outcome: "already-posted", reshown: false,
+      detail: "posted once, marked as possibly repeating an earlier attempt that couldn't be confirmed" });
+  });
+
+  it("with the attempt log unreadable, a re-shown ask makes one attempt per gateway run: a failed post waits for the next run", async () => {
+    const row = await park();
+    await enable();
+    const [open] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listOpenAsks({ minimumLevel: "NOTICE" });
+    const decisionId = rePresentDecisionId(keyOf(row));
+    new DispatchBuffer(home).enqueue({ kind: "outbound_decision", decisionId, op: OUTBOUND_OP, entityBindingRef: `${HUMAN}@external`, payload: toPayload(open!.item) });
+    mkdirSync(join(home, "state", "slack-attempted-decisions.jsonl"), { recursive: true });
+    failPosts = true;
+    const w = wire();
+    w.startServices?.();
+    await vi.waitFor(() => expect(postAttempts).toBe(1));
+    // A second start of the same run, or the same decision offered again, doesn't post it again in this run.
+    w.startServices?.();
+    w.dispatcher.dispatch(OUTBOUND_OP, `${HUMAN}@external`, toPayload(open!.item), { decisionId });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(postAttempts).toBe(1);
+    expect(new DispatchBuffer(home).pending().map((d) => d.decisionId)).toEqual([decisionId]);
+    // The next run posts it once.
+    failPosts = false;
+    wire().startServices?.();
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(postAttempts).toBe(2);
+    await vi.waitFor(() => expect(new DispatchBuffer(home).pending()).toHaveLength(0));
   });
 
   it("at post time, a re-shown ask that's no longer current posts nothing and its row says why", async () => {

@@ -250,8 +250,11 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
       try {
         opts.attempted.mark(`${decision.decisionId}${CHANNEL_DECIDED_PREFIX}${channel}`, "channel-decided");
       } catch (e) {
-        log(`channel record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained, nothing posted`);
-        return { ok: false, class: "channel-unrecorded", detail: (e as Error).message };
+        if (!q.possibleRepeat) {
+          log(`channel record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained, nothing posted`);
+          return { ok: false, class: "channel-unrecorded", detail: (e as Error).message };
+        }
+        log(`channel record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — posting once, marked as a possible repeat`);
       }
     }
     const threadTs = opts.resolveThreadTs?.(q, channel);
@@ -361,7 +364,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // decisionId in a delimited form). Producer and scanner call the same function: one
     // identity, same bytes, both sides.
     const marker = reconcileToken(decision.decisionId);
-    let possibleRepeat = false;
+    let possibleRepeat = q.possibleRepeat === true;
     if (attempted.has(decision.decisionId)) {
       const scan = await fetchRecentMessageTexts(opts.botToken, channel, threadTs, opts.fetchImpl, undefined, undefined, marker);
       const matched = scan.messages.find((m) => m.text.includes(marker));
@@ -411,7 +414,13 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
 
     const input = postInput(possibleRepeat);
     // Marked ATTEMPTED durably BEFORE the post: from here any outcome is ambiguous until 2xx.
-    opts.attempted.mark(decision.decisionId, "attempted");
+    try {
+      opts.attempted.mark(decision.decisionId, "attempted");
+    } catch (e) {
+      // Only a post the gateway already marked as a possible repeat goes on without its attempt record.
+      if (!q.possibleRepeat) throw e;
+      log(`attempt record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — posting once, marked as a possible repeat`);
+    }
     if (hasRejection) {
       // Unique ids preserve attempt order in the store's Set, including retries
       // of the same correction. Ordinary posts need no extra record.
@@ -758,7 +767,11 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     const { planned } = chosen;
     if (!recorded || replanned) {
       try { opts.attempted.mark(`${decision.decisionId}${DELIVERY_PLAN}${Buffer.from(JSON.stringify(chosen.plan)).toString("base64url")}`, "delivery-plan"); }
-      catch (error) { return { ok: false, class: "receipt-failed", detail: `delivery plan not kept: ${(error as Error).message}` }; }
+      catch (error) {
+        // A post the gateway already marked as a possible repeat keeps its plan in memory for this one attempt.
+        if (!q.possibleRepeat) return { ok: false, class: "receipt-failed", detail: `delivery plan not kept: ${(error as Error).message}` };
+        (opts.log ?? (() => {}))(`delivery plan record FAILED for ${q.qitemId ?? decision.decisionId}: ${(error as Error).message} — posting once, marked as a possible repeat`);
+      }
     }
     const partId = (index: number) => partIdFor(decision.decisionId, parts.length, index);
     if (parts.length === 1) return deliverSinglePart(planned)(decision);

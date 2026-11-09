@@ -31,6 +31,7 @@ export const RE_PRESENT_DECISION_PREFIX = "re-present:";
 const REQUESTED = "slack-re-present-requested";
 const DISPOSITION = "slack-re-present-disposition";
 const UNAVAILABLE = "slack-re-present-state-unavailable";
+const UNCONFIRMED = "slack-re-present-unconfirmed";
 const SEEDED_AT_ENABLE = "seeded-at-enable";
 
 export type OpenAskOutcome =
@@ -67,6 +68,15 @@ export function noteRePresentNotPosted(queueRepo: QueueRepository, qitemId: stri
   queueRepo.update({ qitemId, actorSession: "daemon@kernel", transitionNote: note });
 }
 
+/** The gateway's record that it posted a re-shown ask once although whether an earlier attempt reached Slack couldn't be
+ *  told (the post says it may repeat). Written before the post; what became of the post is its own receipt. */
+export function noteRePresentUnconfirmed(queueRepo: QueueRepository, qitemId: string, notificationKey: string, why: string): void {
+  queueRepo.update({ qitemId, actorSession: "daemon@kernel",
+    transitionNote: `${UNCONFIRMED} notification_key=${notificationKey} detail=${why.replace(/\s+/g, " ").trim()}` });
+}
+
+const POSTED_UNCONFIRMED = "posted once, marked as possibly repeating an earlier attempt that couldn't be confirmed";
+
 const DISPOSITION_OUTCOME: Record<ReleaseDisposition, { outcome: OpenAskOutcome; detail?: string }> = {
   "row-not-active": { outcome: "no-longer-active" },
   superseded: { outcome: "superseded", detail: "the row has a newer ask since" },
@@ -76,7 +86,9 @@ const DISPOSITION_OUTCOME: Record<ReleaseDisposition, { outcome: OpenAskOutcome;
 
 /** The latest delivery fact a row records for this episode, oldest notes first. A posted receipt wins whenever it is. */
 function deliveryFact(notes: string[], key: string): { outcome: OpenAskOutcome; detail?: string } | null {
-  if (notes.some((n) => hasToken(n, "slack-owner-notification-posted", key))) return { outcome: "posted" };
+  if (notes.some((n) => hasToken(n, "slack-owner-notification-posted", key))) {
+    return notes.some((n) => hasToken(n, UNCONFIRMED, key)) ? { outcome: "posted", detail: POSTED_UNCONFIRMED } : { outcome: "posted" };
+  }
   for (const note of [...notes].reverse()) {
     if (hasToken(note, "slack-owner-notification-transport-failed", key)) {
       return { outcome: "transport-failed", detail: /\bclass=(\S+)/.exec(note)?.[1] };
@@ -173,7 +185,11 @@ export async function postOpenAsks(input: PostOpenAsksInput): Promise<PostOpenAs
     const result: OpenAskResult = { qitemId: item.qitemId, notificationKey: key, recipient: item.destinationSession ?? "",
       summary: item.summary ?? null, outcome: "uncertain", reshown: false };
     results.push(result);
-    if (posted) { Object.assign(result, { outcome: "already-posted" }); continue; }
+    if (posted) {
+      Object.assign(result, { outcome: "already-posted",
+        ...(notesOf(item.qitemId).some((n) => hasToken(n, UNCONFIRMED, key)) ? { detail: POSTED_UNCONFIRMED } : {}) });
+      continue;
+    }
     if (!eligible) {
       Object.assign(result, { outcome: "below-floor", detail: item.ownerNotificationLevel === "RECORD"
         ? "asked at RECORD: it waits on Steering and the Feed without a Slack post"
