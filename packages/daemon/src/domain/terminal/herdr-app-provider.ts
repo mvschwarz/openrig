@@ -47,31 +47,38 @@ const VIEWER_ENDED = 'status=$?; printf "\\r\\n%s\\r\\n" "The seat session ended
 const VIEWER_WRAPPER = `shift; ${TERM_GUARD} "$@"; ${VIEWER_ENDED}`;
 /** An interactive local viewer until the app has shown it: the read-only tile (it shows the seat and takes no input)
  *  runs until OpenRig writes this viewer's gate file, then the view's writable tile runs in its place. Input that came
- *  before (typed in the cell, or written to the terminal with hc send) is dropped, never delivered late. Arguments:
- *  the gate file, the read-only tile's script, then the writable tile's argv. */
+ *  before (typed in the cell, or written to the terminal with hc send) is dropped, never delivered late. If the gate's
+ *  window ends first, the cell says so and stays closed. Arguments: the gate file, the window's end (epoch seconds),
+ *  the line shown when it ends, the read-only tile's script, then the writable tile's argv. */
 const GATED_WRAPPER = [
   "shift;", TERM_GUARD,
-  "g=$1; ro=$2; shift 2; a=$1; b=$2; c=$3; shift 3;",
+  "g=$1; u=$2; m=$3; ro=$4; shift 4; a=$1; b=$2; c=$3; shift 3;",
   // The read-only tile keeps the terminal as its input, so its stty applies (no echo). A background job's stdin is
   // /dev/null before any redirection, so the terminal is kept on fd 3 first.
   'exec 3<&0; "$a" "$b" "$ro" "$@" <&3 3<&- & v=$!; exec 3<&-;',
-  'while [ ! -e "$g" ] && kill -0 "$v" 2>/dev/null; do sleep 0.2 2>/dev/null || sleep 1; done;',
+  'while [ ! -e "$g" ] && kill -0 "$v" 2>/dev/null && [ "$(date +%s)" -lt "$u" ]; do sleep 0.2 2>/dev/null || sleep 1; done;',
   'if [ -e "$g" ] && kill -0 "$v" 2>/dev/null; then kill "$v" 2>/dev/null; wait "$v" 2>/dev/null;',
   // Non-blocking reads until one comes back empty: whatever was waiting on the terminal is gone.
   'if [ -t 0 ]; then stty -icanon min 0 time 0 2>/dev/null; while [ "$(dd bs=65536 count=1 2>/dev/null | wc -c)" -gt 0 ]; do :; done; stty sane 2>/dev/null; fi;',
-  '"$a" "$b" "$c" "$@"; else wait "$v"; fi;',
+  '"$a" "$b" "$c" "$@";',
+  // The window ended with the gate still closed: no tile at all from here, and the cell says why.
+  'elif kill -0 "$v" 2>/dev/null; then kill "$v" 2>/dev/null; wait "$v" 2>/dev/null; printf "\\033[H\\033[2J\\r\\n%s\\r\\n" "$m"; exec tail -f /dev/null;',
+  'else wait "$v"; fi;',
   VIEWER_ENDED,
 ].join(" ");
 
+/** An interactive viewer's gate: its file, when its window ends (epoch seconds), and the line its cell shows then. */
+export interface ViewerGate { path: string; until: number; expired: string }
+
 /** A viewer's argv. A remote pane runs its ssh paneCommand as composed, and a read-only local pane its read-only tile;
- *  OpenRig rewrites neither. An interactive local pane, given its gate file, shows the read-only tile until the gate
- *  opens and the view's writable tile after (`GATED_WRAPPER`). */
-export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand" | "readOnly">, nonce: string, gate?: string): string[] {
+ *  OpenRig rewrites neither. An interactive local pane, given its gate, shows the read-only tile until the gate opens
+ *  and the view's writable tile after (`GATED_WRAPPER`). */
+export function viewerArgv(pane: Pick<ComposedPane, "attachArgv" | "paneCommand" | "readOnly">, nonce: string, gate?: ViewerGate): string[] {
   if (!pane.attachArgv) return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, "/bin/sh", "-c", pane.paneCommand];
   if (pane.readOnly || !gate) return ["/bin/sh", "-c", VIEWER_WRAPPER, "openrig-viewer", nonce, ...pane.attachArgv];
   // The composed tile is `sh -c <script> openrig-tile <session> <tmux> <server args...>`; the same seat's read-only tile.
   const readOnly = tileAttachArgv(pane.attachArgv[5]!, pane.attachArgv.slice(6), pane.attachArgv[4]!, true);
-  return ["/bin/sh", "-c", GATED_WRAPPER, "openrig-viewer", nonce, gate, readOnly[2]!, ...pane.attachArgv];
+  return ["/bin/sh", "-c", GATED_WRAPPER, "openrig-viewer", nonce, gate.path, String(gate.until), gate.expired, readOnly[2]!, ...pane.attachArgv];
 }
 
 export interface HerdrAppProviderDeps {
@@ -151,7 +158,16 @@ export class HerdrAppProvider implements TerminalProvider {
   /** The file whose existence lets this viewer take input (in OpenRig's own viewers folder). */
   private gatePath(nonce: string): string { return join(this.deps.viewerCwd, `${nonce}.shown`); }
   /** A pending gate's deadline: wall clock, so it holds across a restart. */
-  private gateDeadline(): string { return new Date(Date.now() + (this.deps.gateWindowMs ?? 10 * 60 * 1000)).toISOString(); }
+  private gateDeadline(): string { return new Date(Date.now() + this.gateWindow()).toISOString(); }
+  private gateWindow(): number { return this.deps.gateWindowMs ?? 10 * 60 * 1000; }
+  /** What an interactive cell says when its gate's window ends before herdr-app showed the view. */
+  private gateExpired(view: string): string {
+    return `herdr-app did not show this view within ${this.windowText()} of its open, so this cell takes no input. Reopen it with: rig terminal open ${view}`;
+  }
+  private windowText(): string {
+    const minutes = Math.round(this.gateWindow() / 60_000);
+    return minutes >= 1 ? `${minutes} minute${minutes === 1 ? "" : "s"}` : `${Math.round(this.gateWindow() / 1000)} seconds`;
+  }
 
   get appHome(): string { return this.deps.files.appHome; }
 
@@ -321,10 +337,12 @@ export class HerdrAppProvider implements TerminalProvider {
           const nonce = this.nonce();
           const cell = cellFor(id, pane, nonce, null);
           const gated = !!pane.attachArgv && !pane.readOnly;
+          const gateUntil = this.gateDeadline();
+          const gate = gated ? { path: this.gatePath(nonce), until: Math.floor(Date.parse(gateUntil) / 1000), expired: this.gateExpired(view.id) } : undefined;
           return { cellId: cell.id, seat: pane.seat, label: pane.label, ...(pane.runtime ? { runtime: pane.runtime } : {}),
-            nonce, argv: viewerArgv(pane, nonce, gated ? this.gatePath(nonce) : undefined), readOnly: pane.readOnly,
+            nonce, argv: viewerArgv(pane, nonce, gate), readOnly: pane.readOnly,
             attach: pane.attachArgv ? "local" as const : "remote" as const,
-            ...(gated ? { gate: "pending" as const, gateUntil: this.gateDeadline() } : {}),
+            ...(gated ? { gate: "pending" as const, gateUntil } : {}),
             terminal: null, state: "planned" as const };
         }),
       };
@@ -436,7 +454,7 @@ export class HerdrAppProvider implements TerminalProvider {
     if (!await awaitApplied(this.deps.files, revision, [], { timeoutMs: this.deps.ackTimeoutMs ?? 8_000 })) {
       // It may still be shown later: its interactive viewers' gates open then, within their window.
       this.watchPending(pages.flatMap((page) => page.viewers).filter((v) => v.gate === "pending").map((v) => v.cellId));
-      notes.push(`herdr-app has not confirmed showing this view. It is written to the Rig layout file, but the window may not be showing it; its interactive cells take no input until it does. If this window is attached to a different herdr-core than the daemon's (${describeCore(this.deps.hc)}), the viewers never appear here; start the daemon with that core's HC_SESSION/HC_SOCKET.`);
+      notes.push(`herdr-app has not confirmed showing this view. It is written to the Rig layout file, but the window may not be showing it; its interactive cells take no input until it does (OpenRig waits ${this.windowText()}; after that each cell says so, and the view has to be opened again). If this window is attached to a different herdr-core than the daemon's (${describeCore(this.deps.hc)}), the viewers never appear here; start the daemon with that core's HC_SESSION/HC_SOCKET.`);
       return { notes, confirmed: false };
     }
     const selected = await app.do("layout.select", { stack: RIG_STACK, child: view.id });

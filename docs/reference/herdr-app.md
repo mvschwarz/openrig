@@ -65,7 +65,9 @@ What an open does, in order:
    its private folder, and the cell switches within a fraction of a second. Anything that reached a cell before that,
    typed or written to its terminal (`hc send`), is dropped, not delivered late. The open reports a view herdr-app
    hasn't confirmed as unconfirmed, not opened; its viewers keep running and it stays in the Rig layout, and its cells
-   take input once herdr-app shows it (OpenRig keeps watching for 10 minutes, across a daemon restart).
+   take input once herdr-app shows it. OpenRig keeps watching for 10 minutes, across a daemon restart; if herdr-app
+   hasn't shown it by then, each interactive cell says so, takes no input, and names the command that opens the view
+   again (`rig terminal open <view>`).
 
 Other layouts and other herdr-app windows don't show Rig views. Each window (app home) has its own.
 

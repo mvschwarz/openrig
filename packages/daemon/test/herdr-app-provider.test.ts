@@ -172,9 +172,11 @@ describe("HerdrAppProvider.openView", () => {
     expect(t.labels).toMatchObject({ "openrig.daemon": "inst1", "openrig.role": "viewer", "openrig.op": "n2", "openrig.seat": "dev.build@demo" });
     // The interactive viewer: its gate file, the same seat's read-only tile, then the view's writable tile, unchanged.
     const gate = join(home, "viewers", "n2.shown");
-    expect(t.argv.slice(0, 7)).toEqual(["/bin/sh", "-c", expect.stringContaining("exec tail -f /dev/null"), "openrig-viewer", "n2", gate,
+    expect(t.argv.slice(0, 9)).toEqual(["/bin/sh", "-c", expect.stringContaining("exec tail -f /dev/null"), "openrig-viewer", "n2", gate,
+      expect.stringMatching(/^\d+$/), "herdr-app did not show this view within 10 minutes of its open, so this cell takes no input. Reopen it with: rig terminal open rig:demo",
       tileAttachArgv("/usr/bin/tmux", ["-L", "openrig"], "dev.build@demo", true)[2]]);
-    expect(t.argv.slice(7)).toEqual(build.attachArgv);
+    expect(Number(t.argv[6])).toBeGreaterThan(Math.floor(Date.now() / 1000) + 9 * 60);
+    expect(t.argv.slice(9)).toEqual(build.attachArgv);
     // The read-only viewer runs its read-only tile as composed, with no gate.
     expect(world.terminals.get("t11")!.argv.slice(3, 5)).toEqual(["openrig-viewer", "n3"]);
     expect(world.terminals.get("t11")!.argv.slice(5)).toEqual(qa.attachArgv);
@@ -203,6 +205,9 @@ describe("HerdrAppProvider.openView", () => {
       await new Promise((r) => setTimeout(r, 100));
       expect(existsSync(gateOf("n2"))).toBe(false); // not shown yet: closed
       expect((await viewers()).map((v) => v.gate)).toEqual(["pending", undefined]);
+      // The cell's own deadline is the journal's, so the cell and the daemon give up together.
+      expect(Number(world.terminals.get("t10")!.argv[6])).toBe(Math.floor(Date.parse((await viewers())[0]!.gateUntil!) / 1000));
+      expect(result.notes?.join(" ")).toContain("OpenRig waits 10 minutes; after that each cell says so, and the view has to be opened again");
       world.applies = true;
       world.render(files);
       await waitFor(() => existsSync(gateOf("n2")));

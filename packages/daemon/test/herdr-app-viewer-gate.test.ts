@@ -23,6 +23,7 @@ describe.skipIf(!tmuxBin)("the generated herdr-app viewer (real tmux): nothing r
   const clients = async () => (await tmux(seat, "list-clients", "-F", "#{client_tty}")).stdout.split("\n").filter(Boolean);
   const paste = async (text: string) => { await tmux(view, "set-buffer", "-b", "p", text); await tmux(view, "paste-buffer", "-p", "-b", "p", "-t", "v1"); };
   const until = async (check: () => Promise<boolean>, ms = 8_000) => { for (const end = Date.now() + ms; Date.now() < end;) { if (await check()) return true; await new Promise((r) => setTimeout(r, 100)); } return false; };
+  const gateAt = (path: string, seconds = 3_600) => ({ path, until: Math.floor(Date.now() / 1000) + seconds, expired: "WINDOW-PASSED: reopen it with rig terminal open rig:demo" });
   const start = async (argv: string[]) => { await tmux(view, "-f", "/dev/null", "new-session", "-d", "-s", "v1", "-x", "80", "-y", "20", ...argv); await new Promise((r) => setTimeout(r, 1_500)); };
 
   beforeEach(async () => {
@@ -41,7 +42,7 @@ describe.skipIf(!tmuxBin)("the generated herdr-app viewer (real tmux): nothing r
 
   it("an interactive viewer takes no input before its gate, drops what came before, and takes input after", async () => {
     const gate = join(dir, "n1.shown");
-    await start(viewerArgv(pane(false), "n1", gate));
+    await start(viewerArgv(pane(false), "n1", gateAt(gate)));
     await paste("BEFORE-PASTE");
     await tmux(view, "send-keys", "-t", "v1", "-l", "BEFOREKEYS");
     await tmux(view, "send-keys", "-t", "v1", "Enter"); // a complete line, readable by whatever reads next
@@ -72,12 +73,24 @@ describe.skipIf(!tmuxBin)("the generated herdr-app viewer (real tmux): nothing r
   }, 30_000);
 
   it("one viewer's gate never opens another's", async () => {
-    await start(viewerArgv(pane(false), "n3", join(dir, "n3.shown")));
+    await start(viewerArgv(pane(false), "n3", gateAt(join(dir, "n3.shown"))));
     writeFileSync(join(dir, "n4.shown"), "");
     await new Promise((r) => setTimeout(r, 1_500));
     await paste("OTHER-GATE");
     await new Promise((r) => setTimeout(r, 2_000));
     expect(await shown()).not.toMatch(/OTHER-GATE/);
     expect(await clients()).toEqual([]);
+  }, 30_000);
+
+  it("when its window ends with the gate closed, the cell says so and still takes no input", async () => {
+    await start(viewerArgv(pane(false), "n5", gateAt(join(dir, "n5.shown"), 2)));
+    const cell = async () => (await tmux(view, "capture-pane", "-p", "-t", "v1")).stdout;
+    expect(await until(async () => (await cell()).includes("WINDOW-PASSED"))).toBe(true);
+    writeFileSync(join(dir, "n5.shown"), ""); // a gate that comes too late opens nothing
+    await paste("LATE-PASTE");
+    await new Promise((r) => setTimeout(r, 2_000));
+    expect(await shown()).not.toMatch(/LATE-PASTE/);
+    expect(await clients()).toEqual([]);
+    expect(await cell()).toContain("reopen it with rig terminal open rig:demo");
   }, 30_000);
 });
