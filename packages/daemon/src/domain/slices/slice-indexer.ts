@@ -573,8 +573,8 @@ export class SliceIndexer {
     return id ? [name, id] : [name];
   }
 
-  /** The `mission:` tag values that name this mission: its directory name and, when
-   *  its node file declares one that no other mission in that root shares, its frontmatter id. */
+  /** The `mission:` tag values for this location: its directory name and its own
+   *  authored ID, unless a differently named mission in any configured root claims that ID. */
   missionTagKeys(missionId: string, slicePath?: string): string[] {
     const aliases = this.missionIdAliases();
     const missionPath = slicePath ? this.missionPathOfSlice(missionId, slicePath) : null;
