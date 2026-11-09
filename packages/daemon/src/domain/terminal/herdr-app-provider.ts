@@ -57,7 +57,8 @@ const GATED_WRAPPER = [
   'exec 3<&0; "$a" "$b" "$ro" "$@" <&3 3<&- & v=$!; exec 3<&-;',
   'while [ ! -e "$g" ] && kill -0 "$v" 2>/dev/null; do sleep 0.2 2>/dev/null || sleep 1; done;',
   'if [ -e "$g" ] && kill -0 "$v" 2>/dev/null; then kill "$v" 2>/dev/null; wait "$v" 2>/dev/null;',
-  'if [ -t 0 ]; then stty -icanon min 0 time 0 2>/dev/null; i=0; while [ "$i" -lt 64 ]; do dd bs=4096 count=1 of=/dev/null 2>/dev/null; i=$((i + 1)); done; stty sane 2>/dev/null; fi;',
+  // Non-blocking reads until one comes back empty: whatever was waiting on the terminal is gone.
+  'if [ -t 0 ]; then stty -icanon min 0 time 0 2>/dev/null; while [ "$(dd bs=65536 count=1 2>/dev/null | wc -c)" -gt 0 ]; do :; done; stty sane 2>/dev/null; fi;',
   '"$a" "$b" "$c" "$@"; else wait "$v"; fi;',
   VIEWER_ENDED,
 ].join(" ");
