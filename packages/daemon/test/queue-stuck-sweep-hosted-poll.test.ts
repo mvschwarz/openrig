@@ -156,9 +156,23 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     ["a read of only what the member sent", `as=${MEMBER}&sourceSession=${MEMBER}`, MEMBER, false],
     ["the member's own rows from one sender", `as=${MEMBER}&sourceSession=lead@hub`, MEMBER, true],
     ["its own inbox filtered to rows it sent itself", `destinationSession=${MEMBER}&sourceSession=${MEMBER}`, MEMBER, true],
+    ["a follow-through read that returns nothing", `as=${MEMBER}&handedOffFrom=qitem-none`, MEMBER, false],
+    ["its own inbox filtered to one row's successors", `destinationSession=${MEMBER}&handedOffFrom=qitem-none`, MEMBER, true],
   ] as const)("check-in from %s: %s", async (_label, query, sender, counts) => {
     await poll(repo, query, sender);
     expect(repo.lastInboxCheckIn(MEMBER).state).toBe(counts ? "seen" : "never");
+  });
+
+  it("a follow-through read counts only when it returns a pending row handed to the member, not one it handed on", async () => {
+    const handedOn = await repo.create({ sourceSession: "lead@hub", destinationSession: MEMBER, body: "x", nudge: false });
+    await repo.handoff({ qitemId: handedOn.qitemId, fromSession: MEMBER, toSession: "lead@hub", nudge: false });
+    await poll(repo, `as=${MEMBER}&handedOffFrom=${handedOn.qitemId}`);
+    expect(repo.lastInboxCheckIn(MEMBER).state).toBe("never");
+
+    const handedIn = await repo.create({ sourceSession: "orch@hub", destinationSession: "lead@hub", body: "y", nudge: false });
+    await repo.handoff({ qitemId: handedIn.qitemId, fromSession: "lead@hub", toSession: MEMBER, nudge: false });
+    await poll(repo, `as=${MEMBER}&handedOffFrom=${handedIn.qitemId}`);
+    expect(repo.lastInboxCheckIn(MEMBER).state).toBe("seen");
   });
 
   it("a check-in that can't be written never fails the read, is logged once, and the notice says it's unknown", async () => {
