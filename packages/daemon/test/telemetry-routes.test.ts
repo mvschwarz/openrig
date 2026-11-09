@@ -77,6 +77,7 @@ describe("telemetry routes", () => {
     ["since=garbage", [], ['since "garbage"']],
     ["until=garbage", [T10, T10, T12, T12], ['until "garbage"']],
     ["since=2026-13-45", [], ['since "2026-13-45"']],
+    ["since=2026-08-07T11%2B25:00", [T12, T12], ['since "2026-08-07T11+25:00"']],
     ["since=garbage&until=garbage", [], ['since "garbage"', 'until "garbage"']],
     ["since=2026-08-07T11", [T12, T12], []],
     ["until=2026-08-07T11", [T10, T10], []],

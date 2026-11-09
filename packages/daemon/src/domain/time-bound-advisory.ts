@@ -4,15 +4,15 @@
 
 // An ISO date or time, or a leading part of one: 2026, 2026-10, 2026-10-14, 2026-10-14T09,
 // 2026-10-14T09:30, 2026-10-14T09:30:00.123Z, with an optional zone once there is an hour.
-const ISO_DATE_OR_TIME = /^(\d{4})(?:-(\d{2})(?:-(\d{2})(?:T(\d{2})(?::(\d{2})(?::(\d{2})(?:\.\d+)?)?)?(?:Z|[+-]\d{2}:\d{2})?)?)?)?$/;
+const ISO_DATE_OR_TIME = /^(\d{4})(?:-(\d{2})(?:-(\d{2})(?:T(\d{2})(?::(\d{2})(?::(\d{2})(?:\.\d+)?)?)?(?:Z|[+-](\d{2}):(\d{2}))?)?)?)?$/;
 
 /** Whether a bound reads as an ISO date or time (or a leading part of one) with in-range fields. */
 export function isRecognisedDateOrTime(value: string): boolean {
   const match = ISO_DATE_OR_TIME.exec(value);
   if (!match) return false;
-  const [year, month = 1, day = 1, hour = 0, minute = 0, second = 0] =
-    match.slice(1, 7).map((part) => (part === undefined ? undefined : Number(part)));
-  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
+  const [year, month = 1, day = 1, hour = 0, minute = 0, second = 0, zoneHour = 0, zoneMinute = 0] =
+    match.slice(1).map((part) => (part === undefined ? undefined : Number(part)));
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59 || zoneHour > 23 || zoneMinute > 59) return false;
   const lastDay = new Date(0);
   lastDay.setUTCFullYear(year!, month, 0);
   return day >= 1 && day <= lastDay.getUTCDate();
