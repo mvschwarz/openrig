@@ -95,7 +95,7 @@ These facts stay separate on the row:
 - **Result:** the closing transition and its resolution, or the handoff.
 - **Notification:** where a person asked, Slack's posted receipt. A posted notice isn't the person's acknowledgment.
 
-**On the team:** `rig_team` lists the rig's hosted members (roster entries marked hosted that aren't one of its nodes), with their capabilities and caveat, no pane, and activity `unknown`.
+**On the team:** `rig_team` lists the rig's hosted members (roster entries marked hosted that aren't one of its nodes), with their capabilities and caveat, no pane, and activity `unknown`. With an external grant offering `team/list`, call it without `rigId` to discover the connected team. It selects the grant's sole rig, or returns only its granted names when a choice is needed.
 OpenRig doesn't observe a hosted member between its calls, so it never reads idle. `rig roster find` shows it the same way.
 - **Presence:** each entry carries `presence`, which says what OpenRig last saw of the member. It isn't pickup, and `null` means unknown:
   - `lastCallAt`: its last authenticated call to this host's `rig mcp serve --http`, recorded at most once a minute in
