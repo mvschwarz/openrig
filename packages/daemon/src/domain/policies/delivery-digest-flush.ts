@@ -96,11 +96,18 @@ export async function runDeliveryDigestFlush(input: RunDeliveryDigestFlushInput)
   });
   // Quiet hours re-checked at flush time, per ask, for its actual recipient: an ask put in the digest before its
   // recipient's quiet began is held under that recipient's window, not posted. Everything else flushes as before.
+  // Quiet hours that can't be read aren't a quiet window: the ask flushes, and the digest post, which reads them again,
+  // says so if they still can't be read.
   const now = input.now ?? new Date();
   let jobsRepo: WatchdogJobsRepository | undefined;
   const selected = candidates.filter((item) => {
     const recipient = (item.destinationSession ?? "").split("@")[0] ?? "";
-    const quiet = recipient ? quietHoldFor(input.queueRepo.db, recipient, now) : null;
+    let quiet: ReturnType<typeof quietHoldFor>;
+    try {
+      quiet = recipient ? quietHoldFor(input.queueRepo.db, recipient, now) : null;
+    } catch {
+      return true;
+    }
     if (!quiet) return true;
     jobsRepo ??= new WatchdogJobsRepository(input.queueRepo.db);
     holdForQuiet({ queueRepo: input.queueRepo, jobsRepo, qitemId: item.qitemId, entityId: recipient,
