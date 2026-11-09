@@ -1,4 +1,5 @@
 import { getOpenRigHome } from "../openrig-compat.js";
+import { substrateFence } from "./terminal-substrate.js";
 import { piAccountStateRoot, piAccountSwitchStateRoot } from "./pi-account-state.js";
 import { piSeatPaths } from "../adapters/pi-runner-protocol.js";
 import { readSeatEffort } from "./seat-effort.js";
@@ -234,6 +235,8 @@ export class SeatRuntimeSwitchService {
     if (!status.ok) return status;
     const node = rigRepo.getRig(status.status.rig_id)?.nodes.find((candidate) => candidate.logicalId === status.status.logical_id);
     if (!node) return refuse("seat_not_found", `No seat ${input.seatRef}.`);
+    const fence = substrateFence(this.deps.db, node.id, "A runtime switch");
+    if (fence) return refuse(fence.code, fence.message, fence.guidance);
     const guard = tmux.deliveryGuard;
     if (!input.dryRun && guard && !guard.ownsLifecycle(node.id)) {
       try { return await guard.lifecycle([node.id], () => this.setRuntime(input)); }

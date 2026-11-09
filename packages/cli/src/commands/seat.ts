@@ -747,7 +747,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-terminal-policy" | "set-model" | "set-cwd" | "set-effort" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-terminal-policy" | "set-model" | "set-cwd" | "set-substrate" | "set-effort" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -1210,6 +1210,39 @@ A seat can switch itself (its CLI may end when it retires; the daemon finishes).
       }
       for (const warning of (data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
       if (data["recoveryPending"] === true) process.exitCode = 1;
+    });
+
+  cmd
+    .command("set-substrate")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .argument("<substrate>", "tmux or herdr")
+    .requiredOption("--reason <text>", "Audit reason recorded on the node.terminal_substrate_changed event")
+    .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
+    .option("--json", "JSON output for agents")
+    .description("Move a stopped seat to another terminal substrate (tmux or herdr) for its next launch")
+    .addHelpText("after", `
+A seat's terminal substrate is fixed while it runs: OpenRig sends its input and
+reads its screen on the substrate it is stored on. So only a seat with no live
+session can move, and a running one is refused (session_live). Nothing is
+launched; the seat's identity, address, queue, edges and session history are kept.
+To move a running rig and resume its conversations in the new substrate:
+  rig down <rig>
+  rig seat set-substrate <member>@<rig> herdr --reason <text>   (each seat)
+  rig up <rig> --existing
+Don't stop single seats first (rig seat stop): resume the whole rig as one unit.
+Examples:
+  rig seat set-substrate dev-impl@my-rig herdr --reason "move to Herdr"
+  rig seat set-substrate dev.impl tmux --reason "move back" --json`)
+    .action(async (seat: string, substrate: string, opts: { reason: string; operator?: string; json?: boolean }) => {
+      await runLifecycleVerb("set-substrate", seat, { substrate, reason: opts.reason, operator: opts.operator }, opts, (data) => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        if (data["changed"] !== true) {
+          console.log(`Seat ${s?.logicalId}@${s?.rigName} is already on ${String(data["to"])}; nothing changed.`);
+          return;
+        }
+        console.log(`Seat ${s?.logicalId}@${s?.rigName}: terminal substrate ${String(data["from"])} -> ${String(data["to"])} (next launch).`);
+        console.log(`Resume it there with: ${String(data["next"])}`);
+      });
     });
 
   cmd

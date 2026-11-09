@@ -559,6 +559,8 @@ rigsRoutes.post("/:id/attach-self", async (c) => {
     case "invalid_member_name":
     case "runtime_mismatch":
     case "tmux_server_mismatch":
+    case "herdr_unsupported":
+    case "substrate_unknown":
       return c.json(result, 409);
     default:
       return c.json(result, 500);

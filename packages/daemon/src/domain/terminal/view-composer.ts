@@ -79,6 +79,9 @@ export interface ComposeContext {
   /** Effective mode of the viewing instance. Inherit keeps plain remote tmux;
    *  isolated opts SSH tiles into remote instance-aware attachment. */
   localTmuxServerMode?: "inherit" | "isolated";
+  /** The terminal substrate of a LOCAL seat ("tmux" when unknown to the caller). A seat on another substrate never
+   *  gets a tmux attach pane: it could attach to an unrelated same-name tmux session. */
+  substrateOf?: (seat: string) => string;
 }
 
 /** POSIX single-quote a string so session names / targets are shell-inert in the composed command. */
@@ -122,6 +125,17 @@ export function composeView(
 
   for (const m of members) {
     const attachFlag = m.readOnly ? "-r " : "";
+    const substrate = m.host === null ? ctx.substrateOf?.(m.seat) ?? "tmux" : "tmux";
+    if (substrate !== "tmux") {
+      absent.push({
+        seat: m.seat,
+        host: null,
+        reason: substrate === "herdr"
+          ? `runs in Herdr workspace "${m.seat}"; select it in Herdr (it has no tmux session to tile)`
+          : `runs on terminal substrate "${substrate}", which this daemon does not know; not tiled`,
+      });
+      continue;
+    }
 
     if (m.host !== null) {
       // Remote member: classify by the registry entry's transport.

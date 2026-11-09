@@ -127,6 +127,8 @@ discoveryRoutes.post("/:id/bind", async (c) => {
     case "not_active":
     case "already_bound":
     case "runtime_mismatch":
+    case "herdr_unsupported":
+    case "substrate_unknown":
     case "duplicate_logical_id":
     case "invalid_member_name":
     case "invalid_pod_namespace":
@@ -171,6 +173,8 @@ discoveryRoutes.post("/:id/adopt", async (c) => {
       case "not_active":
       case "already_bound":
       case "runtime_mismatch":
+      case "herdr_unsupported":
+      case "substrate_unknown":
         return c.json(result, 409);
       default:
         return c.json(result, 500);

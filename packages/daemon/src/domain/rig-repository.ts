@@ -1,4 +1,5 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
+import { isTerminalSubstrate, type TerminalSubstrate } from "./terminal-substrate.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { validateClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper, validateLaunchWrapper } from "./launch-wrapper.js";
@@ -334,6 +335,8 @@ interface NodeOptions {
   claudeTokenRef?: ClaudeSeatTokenRef;
   claudeMcp?: ClaudeMcp;
   launchWrapper?: readonly string[] | null;
+  /** The resolved terminal substrate (member > rig > host setting > tmux), stored once at creation. */
+  terminalSubstrate?: TerminalSubstrate;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** The member's declared launch environment (spec `env:`); not merged with the rig's. */
   env?: SeatEnv;
@@ -802,6 +805,9 @@ export class RigRepository {
     if (opts?.launchWrapper !== undefined && opts.launchWrapper !== null && opts.launchWrapper.length > 0) {
       this.setNodeLaunchWrapper(id, opts.launchWrapper);
     }
+    if (opts?.terminalSubstrate !== undefined && opts.terminalSubstrate !== "tmux") {
+      this.setNodeTerminalSubstrate(id, opts.terminalSubstrate);
+    }
 
     if (opts?.env && this.hasNodeColumn("env_json")) {
       this.db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?")
@@ -905,6 +911,17 @@ export class RigRepository {
       return false;
     }
     return this.db.prepare("UPDATE nodes SET claude_mcp = ? WHERE id = ?").run(value, nodeId).changes > 0;
+  }
+
+  /** Persist a seat's terminal substrate. tmux is stored as NULL, as every seat before migration 155. */
+  setNodeTerminalSubstrate(nodeId: string, value: TerminalSubstrate): boolean {
+    if (!isTerminalSubstrate(value)) throw new Error(`Unknown terminal substrate "${String(value)}"`);
+    const stored = value === "tmux" ? null : value;
+    if (!this.hasNodeColumn("terminal_substrate")) {
+      if (stored !== null) throw new Error("Cannot persist terminal_substrate: database migration is required");
+      return false;
+    }
+    return this.db.prepare("UPDATE nodes SET terminal_substrate = ? WHERE id = ?").run(stored, nodeId).changes > 0;
   }
 
   /** Persist or clear (null or []) a seat's launch_wrapper argv prefix. */
@@ -1187,6 +1204,7 @@ export class RigRepository {
       advisor: row.advisor ?? null,
       claudeMcp: row.claude_mcp ?? null,
       ...(launchWrapper ? { launchWrapper } : {}),
+      ...(row.terminal_substrate ? { terminalSubstrate: row.terminal_substrate } : {}),
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       claudeTokenRef: parseClaudeSeatTokenRef(row.claude_token_ref),
@@ -1284,6 +1302,7 @@ interface NodeRow {
   advisor?: string | null;
   claude_mcp?: ClaudeMcp | null;
   launch_wrapper?: string | null;
+  terminal_substrate?: string | null;
   effort_choice?: string | null;
   codex_config_profile?: string | null;
   claude_token_ref?: string | null;

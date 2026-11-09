@@ -1,4 +1,6 @@
 import { readClaudePermissionRules } from "./claude-permission-rules.js";
+import { readStoredSubstrate } from "./terminal-substrate.js";
+import { hostDefaultTerminalSubstrate } from "./terminal-substrate-host.js";
 import { readCodexMemberPermissions } from "./codex-member-permissions.js";
 import { isLaunchWrapperRuntime } from "./launch-wrapper.js";
 import type { RigRepository } from "./rig-repository.js";
@@ -235,6 +237,12 @@ export class RigSpecExporter {
         if (node.advisor) member.advisor = node.advisor;
         if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
         if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) member.launchWrapper = node.launchWrapper;
+        // The stored substrate is the seat's own choice. A Herdr seat is always pinned. A tmux seat is pinned only when
+        // this host's default isn't tmux, so a re-import here can't move it, while specs from tmux-default hosts stay as
+        // before. An unknown stored value is not exported.
+        const stored = readStoredSubstrate(node.terminalSubstrate);
+        if (stored.kind === "herdr") member.terminalSubstrate = "herdr";
+        else if (stored.kind === "tmux" && (hostDefaultTerminalSubstrate() ?? "tmux") !== "tmux") member.terminalSubstrate = "tmux";
         // #2044: unlike the copied files, a seat's plugin channels are names the record keeps as the spec gave them, so
         // an export carries the ones its launch passes.
         const channels = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.rigRepo.db, node.id).additions?.pluginChannels : undefined;

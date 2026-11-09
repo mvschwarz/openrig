@@ -249,6 +249,10 @@ function classifyWriteError(err: unknown): TmuxResult {
   if (!(err instanceof Error)) {
     return { ok: false, code: "unknown", message: String(err) };
   }
+  // A substrate that states its own result code (e.g. herdr_unsupported) keeps it: message matching below would
+  // otherwise read a refusal as absence.
+  const stated = (err as { resultCode?: unknown }).resultCode;
+  if (typeof stated === "string") return { ok: false, code: stated, message: err.message };
   if (err.message.includes("duplicate session")) {
     return { ok: false, code: "duplicate_session", message: err.message };
   }
@@ -492,7 +496,7 @@ export class TmuxAdapter {
     });
   }
   private readonly freshProbes = new Map<string, string>();
-  private readonly freshManaged = new Map<string, {nodeId: string; pane: string}>();
+  protected readonly freshManaged = new Map<string, {nodeId: string; pane: string}>();
 
   /** Only the private metadata probe uses this door. Success proves allocation,
    * never authority over a pre-existing or registry-managed target. */
@@ -1088,7 +1092,7 @@ export class TmuxAdapter {
     }, false, "text");
   }
 
-  private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void, bracketed = true,
+  protected async sendTextUnchecked(target: string, text: string, beforeWrite: () => void, bracketed = true,
     policy?: { beforePaste: () => Promise<void>; afterPaste: () => Promise<void> }): Promise<TmuxResult> {
     const path = this.fileOps.tmpName();
     const buffer = this.fileOps.bufferName();
@@ -1226,7 +1230,7 @@ export class TmuxAdapter {
     }, false, "keys");
   }
 
-  private async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {
+  protected async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {
     try {
       await this.run(["tmux", "send-keys", "-t", target, ...keys],
         `tmux send-keys -t ${shellQuote(target)} ${keys.map(shellQuote).join(" ")}`);

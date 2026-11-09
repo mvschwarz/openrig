@@ -462,6 +462,19 @@ seatRoutes.post("/set-cwd/:seatRef", async (c) => {
   return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
 });
 
+// Move a stopped seat to another terminal substrate for its next launch (tmux | herdr).
+seatRoutes.post("/set-substrate/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const result = await seatLifecycleService(c).setTerminalSubstrate({
+    seatRef: c.req.param("seatRef")!,
+    substrate: typeof body["substrate"] === "string" ? body["substrate"] : "",
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
+  });
+  return c.json(result, result.ok ? 200 : result.code === "invalid_terminal_substrate" ? 400
+    : result.code === "substrate_persistence_failed" ? 500 : seatLifecycleStatus(result.code));
+});
+
 // OPR.0.7.0.7 — save (or, with clear: true, remove) one seat's effort choice for its next
 // managed continuation. A distinct route fails closed against daemons without it.
 const setEffortHandler = async (c: Context) => {

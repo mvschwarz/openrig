@@ -65,6 +65,15 @@ export function resolveHerdrSocketPath(env: NodeJS.ProcessEnv = process.env, sel
   return session && session !== "default" ? path.join(base, "sessions", session, "herdr.sock") : path.join(base, "herdr.sock");
 }
 
+/** An error Herdr itself answered with (as opposed to an unreachable socket or a timeout). `code` is Herdr's error
+ *  code when it gave one, e.g. `pane_not_found`, so a caller can tell positive absence from transport failure. */
+export class HerdrRpcError extends Error {
+  constructor(message: string, readonly code: string | null) {
+    super(message);
+    this.name = "HerdrRpcError";
+  }
+}
+
 /** Extract a version token (e.g. from a ping result's `version`, or `herdr --version`). */
 export function parseHerdrVersion(out: unknown): string | null {
   if (typeof out !== "string") return null;
@@ -83,7 +92,8 @@ export function unwrapHerdrResponse(raw: unknown): HerdrResult {
     const obj = raw as Record<string, unknown>;
     if (obj["error"] != null) {
       const e = obj["error"];
-      throw new Error(`herdr error: ${typeof e === "string" ? e : JSON.stringify(e)}`);
+      const code = e && typeof e === "object" && typeof (e as { code?: unknown }).code === "string" ? (e as { code: string }).code : null;
+      throw new HerdrRpcError(`herdr error: ${typeof e === "string" ? e : JSON.stringify(e)}`, code);
     }
     const result = obj["result"];
     if (result && typeof result === "object") return result as HerdrResult;

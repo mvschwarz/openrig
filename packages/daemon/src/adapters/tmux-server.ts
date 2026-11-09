@@ -84,7 +84,33 @@ function tmuxOnDaemonServer(): string {
   return `tmux${server ? ` ${server}` : ""}`;
 }
 
-/** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
+/** The daemon's lookup of a seat's terminal substrate, recorded once at startup (absent: every seat is tmux). */
+let daemonSubstrateOf: ((session: string) => string) | null = null;
+
+/** Record (or clear, with null) the daemon's seat-substrate lookup that the attach helpers consult. */
+export function setDaemonSubstrateLookup(lookup: ((session: string) => string) | null): void {
+  daemonSubstrateOf = lookup;
+}
+
+/** The recorded lookup's answer; "tmux" when none is recorded or it can't answer (e.g. its daemon's DB is closed). */
+function substrateOf(session: string): string {
+  try { return daemonSubstrateOf?.(session) ?? "tmux"; } catch { return "tmux"; }
+}
+
+/** The attach COMMAND for a caller that runs or types it (cmux surfaces, layouts): null for a seat that isn't on tmux,
+ *  so no prose hint ever reaches a shell (S3). Display callers use tmuxAttachCommand. */
+export function tmuxAttachExecCommand(session: string): string | null {
+  const bare = session.replace(/^'(.*)'$/, "$1");
+  if (substrateOf(bare) !== "tmux") return null;
+  return `${tmuxOnDaemonServer()} attach -t ${session}`;
+}
+
+/** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. A seat on another
+ *  terminal substrate gets where to find it instead: a tmux attach by its name could reach an unrelated session. */
 export function tmuxAttachCommand(session: string): string {
+  const bare = session.replace(/^'(.*)'$/, "$1");
+  const substrate = substrateOf(bare);
+  if (substrate === "herdr") return `(Herdr seat: open Herdr and select the workspace "${bare}")`;
+  if (substrate !== "tmux") return `(seat on terminal substrate "${substrate}": not attachable with tmux)`;
   return `${tmuxOnDaemonServer()} attach -t ${session}`;
 }

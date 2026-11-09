@@ -128,6 +128,7 @@ export class RigInstantiator {
             claudeMcp: specNode.claudeMcp,
             codexPermissions: specNode.codexPermissions,
             launchWrapper: specNode.launchWrapper,
+            terminalSubstrate: seatTerminalSubstrate(undefined, undefined),
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -327,6 +328,7 @@ import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, f
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
+import { seatTerminalSubstrate } from "./terminal-substrate-host.js";
 import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, SkillResource, StartupAction, StartupFile } from "./types.js";
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime-adapter.js";
 import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
@@ -1697,6 +1699,7 @@ export class PodRigInstantiator {
             claudeMcp: member.claudeMcp,
             codexPermissions: member.codexPermissions,
             launchWrapper: member.launchWrapper,
+            terminalSubstrate: seatTerminalSubstrate(member, rigSpec),
             env: member.env,
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
@@ -1993,6 +1996,7 @@ export class PodRigInstantiator {
           model: member.model,
           effort: member.effort,
           advisor: member.advisor,
+          terminalSubstrate: seatTerminalSubstrate(member, rigSpec),
           env: member.env,
           cwd: effectiveCwd,
           restorePolicy: "checkpoint_only",
@@ -2092,6 +2096,7 @@ export class PodRigInstantiator {
       claudeMcp: input.member.claudeMcp,
       codexPermissions: input.member.codexPermissions,
       launchWrapper: input.member.launchWrapper,
+      terminalSubstrate: seatTerminalSubstrate(input.member, input.rigSpec),
       env: input.member.env,
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,

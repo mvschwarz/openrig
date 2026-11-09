@@ -1,4 +1,5 @@
 import { shellQuote } from "../adapters/shell-quote.js";
+import { substrateFence } from "./terminal-substrate.js";
 import { resumeTypeForRuntime, validateResumeToken } from "./resume-token-validation.js";
 import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
@@ -351,6 +352,9 @@ export class ClaimService {
   }
 
   async bind(opts: BindOptions): Promise<ClaimResult> {
+    const fenceNode = this.db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(opts.rigId, opts.logicalId) as { id: string } | undefined;
+    const fence = fenceNode ? substrateFence(this.db, fenceNode.id, "Claiming a tmux session into this seat") : null;
+    if (fence) return { ok: false, code: fence.code, error: fence.message };
     const discovered = this.discoveryRepo.getDiscoveredSession(opts.discoveredId);
     if (!discovered) {
       return { ok: false, code: "not_found", error: "Discovery record not found" };
@@ -491,6 +495,11 @@ export class ClaimService {
     if (!sessionName) {
       return { ok: false, code: "session_not_found", message: "sessionName is required." };
     }
+    const fenceNode = (opts.rigId && opts.logicalId
+      ? this.db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(opts.rigId, opts.logicalId)
+      : this.db.prepare("SELECT node_id AS id FROM sessions WHERE session_name = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(sessionName)) as { id: string } | undefined;
+    const fence = fenceNode ? substrateFence(this.db, fenceNode.id, "Session reconcile") : null;
+    if (fence) return { ok: false, code: fence.code, message: fence.message };
     if (opts.repairMissingPane) return this.repairMissingPane({ ...opts, sessionName });
 
     // 1. Resolve the persisted node for this canonical session name. The

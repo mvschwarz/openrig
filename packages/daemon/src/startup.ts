@@ -41,6 +41,9 @@ import { loadHumanRegistry } from "./domain/gateway/human-registry.js";
 import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
+import { defaultHerdrSeatSocket, HerdrSeatAdapter } from "./adapters/herdr-seat.js";
+import { createTerminalRouter, SubstrateResolver } from "./adapters/terminal-router.js";
+import { setDaemonSubstrateLookup } from "./adapters/tmux-server.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
 import { setDaemonTmuxControl, setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
 import { selectTmuxServer, type TmuxServerMode } from "./domain/tmux-server-selection.js";
@@ -561,7 +564,25 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const argvExec = controlExec ?? spawnedArgvExec;
   // What `rig doctor` reads of it (GET /api/adapters/tmux/control): asked for, and what the server allows.
   setDaemonTmuxControl({ requested: process.env.OPENRIG_TMUX_CONTROL === "1", ...(controlExec ? { status: controlExec.status } : {}) });
-  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? (process.platform === "win32" ? execCommand : execTmuxCommand), undefined, argvExec, tmuxSelection?.executionArgs);
+  // Every consumer takes this one adapter. The router sends each call to the target seat's terminal substrate; with
+  // no seat on another substrate, every call reaches this TmuxAdapter unchanged (terminal-router.ts).
+  const substrateResolver = new SubstrateResolver(db);
+  // Constructed always, connected only when a Herdr seat is used. Its endpoint for new seats is the
+  // terminal.herdr_socket setting, never an inherited HERDR_SOCKET_PATH; existing seats use their stored one.
+  const herdrSeatAdapter = new HerdrSeatAdapter({
+    db,
+    socketForNewSeats: () => (new ContextPackSettingsStore().resolveOne("terminal.herdr_socket").value as string) || defaultHerdrSeatSocket(),
+  });
+  // Process-wide (one daemon per process in production). A lookup whose DB has closed answers tmux, the behaviour
+  // before substrates, so a later daemon in the same process (tests) never reads a closed database.
+  setDaemonSubstrateLookup((session) => (db.open ? substrateResolver.forTarget(session).kind : "tmux"));
+  const tmuxAdapter = createTerminalRouter(
+    new TmuxAdapter(opts?.tmuxExec ?? (process.platform === "win32" ? execCommand : execTmuxCommand), undefined, argvExec, tmuxSelection?.executionArgs),
+    {
+      resolver: substrateResolver,
+      herdr: herdrSeatAdapter,
+    },
+  );
   // Inherit keeps the native execution environment; attachment metadata still names
   // its server for a new terminal. Isolated execution and attachment share a fixed socket.
   setDaemonTmuxServer(tmuxSelection?.serverArgs ?? (opts?.tmuxExec ? [] : tmuxServerArgs(process.env)), tmuxSelection);
@@ -2192,6 +2213,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       () => deps.proofSourceWatch?.observation().state === "watching") : null;
     deps.terminalService = new TerminalService({
       eventBus,
+      substrateOf: (seat) => substrateResolver.forTarget(seat).kind,
       resolveProvider: (name) => providerMap[name] ?? null,
       resolveSessionProvider: (name, session) => name === "herdr" ? herdrSessionProvider(session) : null,
       viewsStore: new TerminalViewsStore(),

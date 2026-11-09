@@ -1,4 +1,5 @@
 import { sessionCommunityRunnerSelect } from "./session-registry.js";
+import { herdrAttachHint, readStoredSubstrate } from "./terminal-substrate.js";
 import { physicalSessionName } from "./session-registry.js";
 import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
@@ -52,6 +53,7 @@ interface InventoryRow {
   codex_config_profile: string | null;
   claude_mcp: ClaudeMcp | null;
   launch_wrapper: string | null;
+  terminal_substrate: string | null;
   agent_ref: string | null;
   profile: string | null;
   cwd: string | null;
@@ -657,6 +659,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${codexConfigProfileSelect} as codex_config_profile,
       ${nodeColumnOrNull("claude_mcp")} as claude_mcp,
       ${nodeColumnOrNull("launch_wrapper")} as launch_wrapper,
+      ${nodeColumnOrNull("terminal_substrate")} as terminal_substrate,
       n.agent_ref,
       n.profile,
       n.cwd,
@@ -745,6 +748,7 @@ function buildInventoryEntry(
 ): NodeInventoryEntry {
   const { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts } = ctx;
   const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.node_id} launch_wrapper`);
+  const storedSubstrate = readStoredSubstrate(row.terminal_substrate);
   if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
     throw new Error(`Seat ${row.node_id} launch_wrapper: only valid when runtime is "pi", "codex" or "claude-code"`);
   }
@@ -798,6 +802,7 @@ function buildInventoryEntry(
     runtime: row.runtime,
     ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: row.session_community_runner === 1 }) } : {}),
     ...(launchWrapper ? { launchWrapper } : {}),
+    terminalSubstrate: storedSubstrate.kind,
     sessionStatus,
     storedSessionStatus: row.session_status,
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
@@ -818,7 +823,9 @@ function buildInventoryEntry(
     handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
-    tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
+    // A Herdr (or unknown-substrate) seat never gets a tmux attach string: it could attach to a same-name tmux session.
+    tmuxAttachCommand: row.binding_attachment_type === "tmux" && storedSubstrate.kind === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
+    ...(storedSubstrate.kind === "herdr" && row.session_name ? { herdrAttachHint: herdrAttachHint(row.session_name) } : {}),
     ...(row.binding_attachment_type === "tmux" && row.session_name && daemonTmuxServerArgs().length
       ? { tmuxServerArgs: [...daemonTmuxServerArgs()] } : {}),
     ...(row.binding_attachment_type === "tmux" && row.session_name && daemonTmuxServerInfo()

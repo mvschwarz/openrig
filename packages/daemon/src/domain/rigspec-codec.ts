@@ -103,6 +103,7 @@ export class RigSpecCodec {
     // OPR.0.4.8.3 Seam B: rig-level permission_policy ref round-trips through serialization.
     if (spec.permissionPolicy) doc["permission_policy"] = spec.permissionPolicy;
     if (spec.nonInterruptive !== undefined) doc["non_interruptive"] = spec.nonInterruptive;
+    if (spec.terminalSubstrate !== undefined) doc["terminal_substrate"] = spec.terminalSubstrate;
     if (spec.env) doc["env"] = { ...spec.env };
     if (spec.managedBlocks) doc["managed_blocks"] = { ...spec.managedBlocks };
     if (spec.docs && spec.docs.length > 0) doc["docs"] = spec.docs.map((d) => ({ path: d.path }));
@@ -170,6 +171,7 @@ export class RigSpecCodec {
         if (m.claudeMcp !== undefined) member["claude_mcp"] = m.claudeMcp;
         if (m.codexPermissions !== undefined) member["codex_permissions"] = m.codexPermissions;
         if (m.launchWrapper !== undefined) member["launch_wrapper"] = [...m.launchWrapper];
+        if (m.terminalSubstrate !== undefined) member["terminal_substrate"] = m.terminalSubstrate;
         if (m.agentFile) member["agent_file"] = m.agentFile;
         if (m.appendSystemPromptFile) member["append_system_prompt_file"] = m.appendSystemPromptFile;
         if (m.pluginDirs?.length) member["plugin_dirs"] = m.pluginDirs;

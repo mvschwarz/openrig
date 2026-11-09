@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { substrateFence } from "./terminal-substrate.js";
 import fs from "node:fs";
 import nodePath from "node:path";
 import Database from "better-sqlite3";
@@ -106,7 +107,8 @@ export interface InPlaceRestartTarget {
 
 export type InPlaceRestartRefusalCode =
   | "pane_unverified" | "pane_shape_unknown" | "resume_binding_unverified" | "settings_unverified"
-  | "settings_drift" | "restart_in_progress" | "relaunch_unavailable" | "tmux_probe_failed";
+  | "settings_drift" | "restart_in_progress" | "relaunch_unavailable" | "tmux_probe_failed"
+  | "herdr_unsupported" | "substrate_unknown";
 
 export interface InPlaceRestartRefusal { ok: false; code: InPlaceRestartRefusalCode; message: string; guidance?: string; detail?: unknown }
 
@@ -235,12 +237,16 @@ export class CodexInPlaceRestart {
 
   /** Every gate, read-only. Returns the report a restart would start from, or the refusal it would give. */
   async plan(target: InPlaceRestartTarget): Promise<InPlaceRestartReport | InPlaceRestartRefusal> {
+    const fence = substrateFence(this.deps.db, target.seat.nodeId, "Restart in place");
+    if (fence) return fence;
     const observed = await this.observe(target, null);
     if (!observed.ok) return observed;
     return { ...observed.report, message: "Preview only: nothing was stopped or restarted." };
   }
 
   async execute(target: InPlaceRestartTarget, input: { reason: string; operator: string | null; seenStartedSeq: number }): Promise<InPlaceRestartReport | InPlaceRestartRefusal> {
+    const fence = substrateFence(this.deps.db, target.seat.nodeId, "Restart in place");
+    if (fence) return fence;
     const observed = await this.observe(target, input.seenStartedSeq);
     if (!observed.ok) return observed;
     const { report } = observed;

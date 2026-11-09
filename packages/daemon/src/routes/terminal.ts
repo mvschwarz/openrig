@@ -139,7 +139,11 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
     const provider = c.req.query("provider");
     const session = c.req.query("session");
     const result = session === undefined ? await svc.status(provider) : await svc.status(provider, session);
-    return c.json(result, result.code ? statusForOpen(false, result.code) : 200);
+    // `seat` (not `session`, which names a Herdr view session) asks for a seat's terminal substrate, so a client
+    // about to run `tmux attach` can refuse a seat that isn't on tmux.
+    const seat = c.req.query("seat");
+    const body = seat === undefined ? result : { ...result, seatSubstrate: svc.substrateOf(seat) };
+    return c.json(body, result.code ? statusForOpen(false, result.code) : 200);
   });
 
   return app;

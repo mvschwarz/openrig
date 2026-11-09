@@ -1,4 +1,5 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
+import { isTerminalSubstrate, terminalSubstrateError } from "./terminal-substrate.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { specClaudeTokenRef } from "./claude-seat-token.js";
 import { validateClaudeMcp } from "./claude-mcp.js";
@@ -63,14 +64,14 @@ const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string
 
 const RIG_KEYS = new Set([
   "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
-  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "env",
+  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "env", "terminal_substrate",
 ]);
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
   "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
-  "agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels",
+  "agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels", "terminal_substrate",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
 
@@ -135,6 +136,9 @@ export class RigSpecSchema {
     // Required fields
     if (!obj["name"] || typeof obj["name"] !== "string") errors.push("name: required non-empty string");
     if (!obj["version"] || typeof obj["version"] !== "string") errors.push("version: required non-empty string");
+
+    const rigSubstrateError = terminalSubstrateError(obj["terminal_substrate"], "terminal_substrate");
+    if (rigSubstrateError) errors.push(rigSubstrateError);
 
     // culture_file path safety
     if (obj["culture_file"] !== undefined && obj["culture_file"] !== null) {
@@ -278,6 +282,7 @@ export class RigSpecSchema {
       cultureFile: raw["culture_file"] as string | undefined,
       permissionPolicy: raw["permission_policy"] as string | undefined,
       nonInterruptive: raw["non_interruptive"] as boolean | undefined,
+      ...(isTerminalSubstrate(raw["terminal_substrate"]) ? { terminalSubstrate: raw["terminal_substrate"] } : {}),
       env: normalizeSeatEnv(raw["env"]),
       managedBlocks: raw["managed_blocks"] as RigSpec["managedBlocks"],
       docs,
@@ -552,6 +557,8 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     try { validateCodexMemberPermissions(member["codex_permissions"], `${prefix}.codex_permissions`); }
     catch (error) { errors.push((error as Error).message); }
   }
+  const memberSubstrateError = terminalSubstrateError(member["terminal_substrate"], `${prefix}.terminal_substrate`);
+  if (memberSubstrateError) errors.push(memberSubstrateError);
   if (member["launch_wrapper"] !== undefined) {
     if (!isLaunchWrapperRuntime(member["runtime"])) {
       errors.push(`${prefix}.launch_wrapper: only valid when runtime is "pi", "codex" or "claude-code"`);
@@ -1322,6 +1329,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     ...(m["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(m["claude_mcp"]) }),
     ...(m["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(m["codex_permissions"]) }),
     ...(m["launch_wrapper"] === undefined ? {} : { launchWrapper: validateLaunchWrapper(m["launch_wrapper"]) }),
+    ...(isTerminalSubstrate(m["terminal_substrate"]) ? { terminalSubstrate: m["terminal_substrate"] } : {}),
     env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,

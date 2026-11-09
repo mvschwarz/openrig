@@ -235,8 +235,16 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           if (client.baseUrl && !isLocalTmuxHost(client.baseUrl)) {
             throw new Error("Terminal attachment uses local tmux; run this command on the selected daemon's machine.");
           }
-          const response = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status");
+          const response = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown }; seatSubstrate?: string }>(
+            `/api/terminal/status?seat=${encodeURIComponent(session)}`);
           if (response.status >= 400) throw new Error(`Cannot read the tmux server (HTTP ${response.status}).`);
+          // A seat on another substrate has no tmux session; attaching by name could reach an unrelated one.
+          if (response.data.seatSubstrate === "herdr") {
+            throw new Error(`${session} runs in a Herdr workspace, not tmux. Open Herdr and select the workspace "${session}".`);
+          }
+          if (response.data.seatSubstrate !== undefined && response.data.seatSubstrate !== "tmux") {
+            throw new Error(`${session} runs on terminal substrate "${response.data.seatSubstrate}", which this CLI can't attach to.`);
+          }
           if (response.data.tmux?.serverArgs === undefined) {
             throw new Error("This daemon cannot report its tmux server. Update and restart it before using terminal attach.");
           }

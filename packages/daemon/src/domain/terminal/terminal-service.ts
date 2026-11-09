@@ -124,6 +124,8 @@ export interface TerminalStatusResult {
 
 export interface TerminalServiceDeps {
   eventBus?: Pick<EventBus, "subscribe">;
+  /** A local seat's terminal substrate, so a non-tmux seat never gets a tmux attach pane. */
+  substrateOf?: (seat: string) => string;
   followingStatePath?: string;
   /** Resolve a provider name to its adapter, or null for an unknown name. */
   resolveProvider(name: string): TerminalProvider | null;
@@ -189,6 +191,11 @@ export class TerminalService {
   private following?: TerminalFollowing;
 
   private unsubscribeScope?: () => void;
+  /** A local seat's terminal substrate ("tmux" when not known to this service). */
+  substrateOf(seat: string): string {
+    return this.deps.substrateOf?.(seat) ?? "tmux";
+  }
+
   constructor(private readonly deps: TerminalServiceDeps) {
     if (deps.invalidateScopeView) this.unsubscribeScope = deps.eventBus?.subscribe(event => {
       if (event.type === "scope.sources_changed") deps.invalidateScopeView?.();
@@ -339,7 +346,7 @@ export class TerminalService {
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
-    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode });
+    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode, substrateOf: this.deps.substrateOf });
     const saved = view.startsWith("saved:") ? this.deps.viewsStore.get(view.slice(6))
       : !/^(qitem|mission|slice|pod|seat|rig):/.test(view) ? this.deps.viewsStore.get(view) : null;
     composed.viewDescriptor = { kind: saved && saved.id === resolved.id ? "fixed" : "following",
@@ -446,7 +453,7 @@ export class TerminalService {
       const inventory = await this.deps.listRigSeatsBatch?.(result.rigs);
       for (const entry of entries) {
         const rows = entry.kind === "derived" ? inventory?.get(entry.name) : undefined;
-        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode })
+        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode, substrateOf: this.deps.substrateOf })
           : await this.resolveComposed(entry.view, this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage);
         if ("code" in plan) continue;
         result.catalog.push({ ...entry, members: [...plan.opened, ...plan.absent, ...plan.degraded].map((m) => m.seat), ready: plan.opened.length, absent: plan.absent.length, degraded: plan.degraded.length, pages: plan.pages.length });
