@@ -14,6 +14,7 @@
 // app has acknowledged a revision that no longer shows it, and only when the viewer is verifiably OpenRig's
 // (journal + labels + exact argv). Anything uncertain is left running and reported.
 import { execFile } from "node:child_process";
+import { hostname } from "node:os";
 import { promisify } from "node:util";
 import { tileAttachArgv } from "./tile-attach.js";
 import { cellFor, deriveRigLayout, RIG_LAYOUT, RIG_STACK, type RigView } from "./herdr-app-layout.js";
@@ -76,6 +77,8 @@ export interface HerdrAppProviderDeps {
   /** When to look for a viewer's new tmux client after its agent's session was replaced. */
   regrantDelaysMs?: number[];
   nonce?(): string;
+  /** This daemon's machine, named when no window answers here (default: os.hostname()). */
+  hostname?(): string;
   now?(): Date;
 }
 
@@ -256,7 +259,10 @@ export class HerdrAppProvider implements TerminalProvider {
     const files = this.deps.files;
     const status = await this.deps.app.status(1_000);
     if (status.kind !== "ok") {
-      return fail("herdr_app_unavailable", `herdr-app is not answering at ${files.appHome} (${describe(status)}). Nothing was started. Viewers start in ${describeCore(this.deps.hc)}; a window attached to a different core would not show them.`,
+      // No window at all here: the app may be running on another machine, which this provider can't reach.
+      const where = status.kind === "unavailable"
+        ? ` This daemon looked on its own machine (${this.deps.hostname?.() ?? hostname()}); herdr-app has to run on the machine the daemon runs on.` : "";
+      return fail("herdr_app_unavailable", `herdr-app is not answering at ${files.appHome} (${describe(status)}).${where} Nothing was started. Viewers start in ${describeCore(this.deps.hc)}; a window attached to a different core would not show them.`,
         { absent: view.absent, degraded: view.degraded });
     }
     const mods = await this.deps.ensureMods();

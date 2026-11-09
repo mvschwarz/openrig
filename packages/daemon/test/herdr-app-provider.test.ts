@@ -128,7 +128,7 @@ let world: World;
 let files: HerdrAppClientFiles;
 let provider: HerdrAppProvider;
 
-function makeProvider(opts: { ackTimeoutMs?: number; lateAckMs?: number; latePollMs?: number; regrantDelaysMs?: number[]; core?: { session: string; socket?: string }; ensureMods?: () => Promise<{ ok: true; notes?: string[] } | { ok: false; error: string }> } = {}) {
+function makeProvider(opts: { ackTimeoutMs?: number; lateAckMs?: number; latePollMs?: number; hostname?: string; regrantDelaysMs?: number[]; core?: { session: string; socket?: string }; ensureMods?: () => Promise<{ ok: true; notes?: string[] } | { ok: false; error: string }> } = {}) {
   files = new HerdrAppClientFiles(join(home, "app"), join(home, "journal"));
   const realWrite = files.writeRig.bind(files);
   files.writeRig = async (tree) => {
@@ -149,6 +149,7 @@ function makeProvider(opts: { ackTimeoutMs?: number; lateAckMs?: number; latePol
     ensureMods: opts.ensureMods ?? (async () => ({ ok: true })), ackTimeoutMs: opts.ackTimeoutMs ?? 300, nonce: () => `n${++n}`, now: () => world.clock,
     latePollMs: opts.latePollMs ?? 20, ...(opts.lateAckMs !== undefined ? { lateAckMs: opts.lateAckMs } : {}),
     ...(opts.regrantDelaysMs ? { regrantDelaysMs: opts.regrantDelaysMs } : {}),
+    ...(opts.hostname ? { hostname: () => opts.hostname! } : {}),
     runTmux: async (argv) => {
       world.tmuxCalls.push(argv);
       world.log.push(`tmux:${argv.slice(3).join(" ")}`);
@@ -361,6 +362,18 @@ describe("HerdrAppProvider.openView", () => {
     expect(result).toMatchObject({ ok: false, code: "herdr_app_unavailable" });
     expect(world.runs).toBe(0);
     expect(JSON.stringify(result)).not.toMatch(/ssh|tmux attach/);
+  });
+
+  it("with no window at the app home, says it looked on the daemon's own machine; a window that is there but doesn't answer isn't told that", async () => {
+    makeProvider({ hostname: "daemon-host" });
+    world.statusKind = "unavailable";
+    const missing = await provider.openView(composed([pane("dev.build@demo")]));
+    expect(missing.error).toContain("This daemon looked on its own machine (daemon-host); herdr-app has to run on the machine the daemon runs on.");
+    world.statusKind = "unknown";
+    const silent = await provider.openView(composed([pane("dev.build@demo")]));
+    expect(silent).toMatchObject({ ok: false, code: "herdr_app_unavailable" });
+    expect(silent.error).not.toContain("own machine");
+    expect(world.runs).toBe(0);
   });
 
   it("refuses to overwrite a rig.json someone else wrote, before starting anything", async () => {

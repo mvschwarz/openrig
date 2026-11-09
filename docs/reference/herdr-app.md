@@ -6,6 +6,9 @@ full grid. Rig views live in OpenRig's own herdr-app layout, **Rig** (`layouts/r
 above them switches between **Your tabs** and each view.
 
 Nothing here needs a desktop display or SSH: the view opens in the herdr-app window the request came from.
+herdr-app has to run on the same machine as the OpenRig daemon: OpenRig reaches it through its control socket
+(`<app home>/herdr-app.sock`) and writes its mods and layout into that app home. An app on another machine, connected
+to this machine's herdr-core over SSH, isn't supported.
 
 ## Set up
 
